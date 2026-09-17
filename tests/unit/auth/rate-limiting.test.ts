@@ -24,6 +24,17 @@ describe('Auth service rate limiting', () => {
     expect(authAppSource).toMatch(/\/auth\/request-password-reset/);
   });
 
+  // BS#2547 (M5 re-decision, parent epic #2534): the three OTP-based
+  // password-reset endpoints newly moved to FLAT_MOUNTS' public partition
+  // (apps/auth/audit-coverage.ts) with the email-lookup subject strategy,
+  // which performs an auth_user read — load-bearing, not optional, per the
+  // docs/authentication.md DoS argument the token-flow twins already rely on.
+  it('applies rate limiting to the newly-audited OTP password-reset endpoints', () => {
+    expect(authAppSource).toMatch(/\/auth\/email-otp\/request-password-reset/);
+    expect(authAppSource).toMatch(/\/auth\/email-otp\/reset-password/);
+    expect(authAppSource).toMatch(/\/auth\/forget-password\/email-otp/);
+  });
+
   it('disables rate limiting in test environments', () => {
     expect(authAppSource).toMatch(/isTestEnv/);
     expect(authAppSource).toMatch(/NODE_ENV.*test|USE_MOCK_SERVICES/);

@@ -62,6 +62,12 @@ const forgetPasswordMount = mustFindMount('forget-password');
 const updateUserMount = mustFindMount('update-user');
 const orgCreateMount = mustFindMount('organization.create');
 const deleteUserMount = mustFindMount('delete-user');
+// BS#2547 (M5 re-decision, parent epic #2534): the three OTP-based
+// password-reset arms, newly moved from ALLOWLIST to FLAT_MOUNTS' public
+// partition — reuse the existing email-lookup machinery unchanged.
+const emailOtpRequestPasswordResetMount = mustFindMount('email-otp.request-password-reset');
+const emailOtpResetPasswordMount = mustFindMount('email-otp.reset-password');
+const forgetPasswordEmailOtpMount = mustFindMount('forget-password.email-otp');
 
 /**
  * Captures the ONE middleware function a `mountPublicAccountAudit`/
@@ -287,6 +293,43 @@ describe('subject extraction', () => {
     await settle(res);
     expectAudited({ actorUserId: 'self-1', subjectUserId: 'self-1' });
   });
+
+  // BS#2547 (M5 re-decision, parent epic #2534): the three OTP-based
+  // password-reset arms reuse email-lookup unchanged — one mount-level test
+  // per entry is sufficient since the strategy itself is already exercised
+  // above via forget-password. Each asserts the recorded action slug, a
+  // resolved subject from the DB lookup, and that the submitted email never
+  // reaches any recorded field (AC#3).
+  it.each([
+    ['email-otp/request-password-reset', () => emailOtpRequestPasswordResetMount],
+    ['email-otp/reset-password', () => emailOtpResetPasswordMount],
+    ['forget-password/email-otp', () => forgetPasswordEmailOtpMount],
+  ])('resolves %s subject from email via DB, and never persists the email', async (_label, getMount) => {
+    const mount = getMount();
+    db._chain.limit.mockResolvedValueOnce([{ id: 'resolved-user-1' }]);
+    const { res } = await start(dispatchPublic, mockReq({ path: mount.path, body: { email: 'dj@wxyc.org' } }));
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe(mount.action);
+    expect(call.subjectUserId).toBe('resolved-user-1');
+    expect(JSON.stringify(call)).not.toContain('dj@wxyc.org');
+  });
+
+  it.each([
+    ['email-otp/request-password-reset', () => emailOtpRequestPasswordResetMount],
+    ['email-otp/reset-password', () => emailOtpResetPasswordMount],
+    ['forget-password/email-otp', () => forgetPasswordEmailOtpMount],
+  ])(
+    'does not resolve %s subject on a non-2xx outcome (429-visibility DoS-amplifier guard)',
+    async (_label, getMount) => {
+      const mount = getMount();
+      const { res } = await start(dispatchPublic, mockReq({ path: mount.path, body: { email: 'dj@wxyc.org' } }));
+      res.statusCode = 429;
+      await settle(res);
+      expect(db._chain.limit).not.toHaveBeenCalled();
+      expectAudited({ action: mount.action, subjectUserId: null, outcome: 429 });
+    }
+  );
 });
 
 describe('error_code capture (≥400 JSON bodies only) — manual driving (interleaved statusCode/body writes)', () => {
