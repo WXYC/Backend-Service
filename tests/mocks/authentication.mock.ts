@@ -36,3 +36,10 @@ export {
 // tests against behavior the production parser doesn't have.
 export { parseBearerToken } from '../../shared/authentication/src/auth.middleware';
 export type { CorsModeRequest, ResolvedCorsOrigin } from '../../shared/authentication/src/cors-origin';
+
+// Real implementation, same BS#1107 convention: `deriveStationSignupIpHash`
+// is pure (env + crypto only, no DB import — that's the whole point of its
+// extraction to signup-ip-hash.ts in BS#2537), and the account-audit
+// middleware's fail-closed-to-NULL behavior on a missing/invalid key is
+// production behavior the unit suite must exercise, not a stub's guess at it.
+export { deriveStationSignupIpHash } from '../../shared/authentication/src/signup-ip-hash';

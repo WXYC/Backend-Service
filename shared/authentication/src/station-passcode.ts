@@ -115,15 +115,14 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
-  createHmac,
   randomBytes,
   randomInt,
   randomUUID,
   timingSafeEqual,
 } from 'crypto';
-import { isIP } from 'net';
 import { and, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, lte, or, sql } from 'drizzle-orm';
 import { db, station_passcode, station_signup_attempt } from '@wxyc/database';
+import { deriveStationSignupIpHash } from './signup-ip-hash.js';
 
 // ---------------------------------------------------------------------------
 // Outcome vocabulary (settled in the issue's pinned comment). A TypeScript
@@ -766,60 +765,10 @@ function recentlyInactivePasscodePredicate(now: Date, since: Date) {
 
 // ---------------------------------------------------------------------------
 // ip_hash derivation (BS#2359 per the schema.ts column comment — read that
-// comment for the full specification; this is the implementation, not a
-// second copy of the spec).
+// comment for the full specification). Moved to ./signup-ip-hash.ts (BS#2537,
+// parent epic #2534 decision 8) — pure move, behavior unchanged. That leaf
+// also now backs `account_audit_event.ip_hash` with the same shared key.
 // ---------------------------------------------------------------------------
-
-let warnedMissingIpHmacKey = false;
-
-function resolveSignupIpHmacKey(): Buffer | null {
-  const raw = process.env.STATION_SIGNUP_IP_HMAC_KEY;
-  if (!raw) return null;
-  const key = Buffer.from(raw, 'hex');
-  if (key.length !== 32) return null;
-  return key;
-}
-
-/** Trim, lowercase, and collapse an IPv4-mapped IPv6 address to its dotted quad. */
-export function canonicalizeStationSignupClientIp(rawClientIp: string | undefined): string | null {
-  if (!rawClientIp) return null;
-  let value = rawClientIp.trim().toLowerCase();
-  const v4MappedPrefix = '::ffff:';
-  if (value.startsWith(v4MappedPrefix)) value = value.slice(v4MappedPrefix.length);
-  if (!value || isIP(value) === 0) return null;
-  return value;
-}
-
-/**
- * KEYED hash of the canonical client IP for the audit-only `ip_hash` column.
- * See the column comment in shared/database/src/schema.ts for the full
- * specification (which header, canonicalization, key encoding).
- *
- * The DERIVATION fails closed (never an unkeyed digest — see the schema
- * comment on why that would be worthless). The REQUEST does not: a missing
- * key, absent header, or invalid IP returns null and the signup proceeds —
- * refusing a walk-in DJ over an audit-only column is exactly the outage
- * #2365 forbids. A misconfigured key is logged once per process (not once
- * per request) so a production misconfiguration is discoverable without
- * flooding the logs.
- */
-export function deriveStationSignupIpHash(rawClientIp: string | undefined): string | null {
-  const key = resolveSignupIpHmacKey();
-  if (!key) {
-    if (!warnedMissingIpHmacKey) {
-      warnedMissingIpHmacKey = true;
-      console.error(
-        '[station-passcode] STATION_SIGNUP_IP_HMAC_KEY is missing or not 64 hex characters; ip_hash will be ' +
-          'recorded as NULL on every signup attempt until it is set. The signup gate itself is unaffected — see ' +
-          'the ip_hash column comment in shared/database/src/schema.ts.'
-      );
-    }
-    return null;
-  }
-  const canonical = canonicalizeStationSignupClientIp(rawClientIp);
-  if (!canonical) return null;
-  return createHmac('sha256', key).update(canonical, 'utf8').digest('hex').slice(0, 16);
-}
 
 // ---------------------------------------------------------------------------
 // Attempt log
