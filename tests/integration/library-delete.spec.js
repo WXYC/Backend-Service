@@ -61,13 +61,17 @@
  *     (which claimed cascade all along).
  *   - 404 on an unknown id.
  *   - BS#2560 (F1): the delete writes a `catalog_delete_snapshot` row in the
- *     same transaction, capturing the nine irreplaceable children
+ *     same transaction, capturing the eight irreplaceable children
  *     (`compilation_track_artist`, `library_urls`, `reviews`,
- *     `album_critic_reviews`, `album_review_submissions`, `bins`, `rotation`,
+ *     `album_critic_reviews`, `bins`, `rotation`,
  *     `rotation_urls` — a depth-2 child of `rotation`, not of `library`
  *     directly — and `artist_library_crossreference`) as JSON, and a
  *     snapshot write that fails rolls the whole delete back — no listener,
  *     no swallow.
+ *   - and that `album_review_submissions` is NOT among them: the row survives
+ *     the delete unlinked, and its `reviewer_raw` / `social_consent_raw` are
+ *     ADR-0011 PII that must never be copied into the permanently-retained
+ *     `captured` column.
  *
  * TEARDOWN: this spec shares a database with the rest of the integration
  * suite, and its 409 cases deliberately create rows the endpoint under test
@@ -644,7 +648,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * BS#2560 (F1). Captures the nine irreplaceable children as JSON, keyed by
+   * BS#2560 (F1). Captures the eight irreplaceable children as JSON, keyed by
    * table name, in the same `catalog_delete_snapshot` row — one row per
    * insert into `bins`/`rotation`/`reviews`/etc, populated for every table
    * this delete can reach. `rotation_urls` is the depth-2 case (finding 1):
@@ -656,7 +660,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
    * data, re-obtained on restore rather than stored forever — see the
    * schema.ts docstring).
    */
-  test('writes a catalog_delete_snapshot row capturing the nine irreplaceable children', async () => {
+  test('writes a catalog_delete_snapshot row capturing the eight irreplaceable children', async () => {
     const album = await createAlbum(`BS#2560 Snapshot ${uniq}`);
     const submissionSourceKey = `bs2560-snapshot-probe-${album.id}`;
     createdSubmissionKeys.push(submissionSourceKey);
@@ -683,9 +687,11 @@ describe('DELETE /library/:id (BS#2112)', () => {
        VALUES ($1, 'Probe Zine', 'https://example.com/snapshot-probe', 'a snapshot probe snippet')`,
       [album.id]
     );
+    // `reviewer_raw` carries a distinctive probe value so the assertions below
+    // can prove the PII neither reaches the snapshot as a KEY nor as a VALUE.
     await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".album_review_submissions (source, source_key, norm_artist, norm_album, album_id)
-       VALUES ('google_form', $1, 'snapshot probe artist', 'snapshot probe album', $2)`,
+      `INSERT INTO "${SCHEMA}".album_review_submissions (source, source_key, norm_artist, norm_album, album_id, reviewer_raw)
+       VALUES ('google_form', $1, 'snapshot probe artist', 'snapshot probe album', $2, 'BS2560-PII-PROBE-REVIEWER')`,
       [submissionSourceKey, album.id]
     );
     await sql.unsafe(
@@ -722,24 +728,30 @@ describe('DELETE /library/:id (BS#2112)', () => {
     expect(captured.reviews).toHaveLength(1);
     expect(captured.reviews[0].review).toBe('snapshot probe review');
     expect(captured.album_critic_reviews).toHaveLength(1);
-    expect(captured.album_review_submissions).toHaveLength(1);
-    expect(captured.album_review_submissions[0].source_key).toBe(submissionSourceKey);
     expect(captured.compilation_track_artist).toHaveLength(1);
     expect(captured.library_urls).toHaveLength(1);
     expect(captured.artist_library_crossreference).toHaveLength(1);
-    // Round-trip proof for both new children (finding 1 + finding 2b): the
-    // rows are gone from their live tables (rotation_urls cascade-destroyed,
-    // album_review_submissions unlinked-but-surviving) but recoverable from
-    // the snapshot alone.
+    // Round-trip proof for the depth-2 child (finding 1): the rows are gone
+    // from `rotation_urls` (cascade-destroyed) but recoverable from the
+    // snapshot alone.
     const rotationUrlsLive = await sql.unsafe(`SELECT 1 FROM "${SCHEMA}".rotation_urls WHERE rotation_id = $1`, [
       rotationRow.id,
     ]);
     expect(rotationUrlsLive).toHaveLength(0);
+    // `album_review_submissions` is the reverse case, and the reason it is
+    // NOT captured (BS#2560 review, SECURITY): the row is still in the live
+    // table, merely unlinked, so there is nothing to restore — and capturing
+    // it would copy `reviewer_raw`/`social_consent_raw` into this
+    // permanently-retained column, the ADR-0011 second reader.
     const submissionLive = await sql.unsafe(
       `SELECT album_id FROM "${SCHEMA}".album_review_submissions WHERE source_key = $1`,
       [submissionSourceKey]
     );
+    expect(submissionLive).toHaveLength(1);
     expect(submissionLive[0].album_id).toBeNull();
+    expect(captured.album_review_submissions).toBeUndefined();
+    expect(JSON.stringify(captured)).not.toContain('reviewer_raw');
+    expect(JSON.stringify(captured)).not.toContain('BS2560-PII-PROBE-REVIEWER');
     // The four derived children never appear in the captured JSON at all.
     expect(captured.album_metadata).toBeUndefined();
     expect(captured.library_identity).toBeUndefined();

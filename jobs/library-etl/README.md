@@ -129,7 +129,22 @@ Then, in principle, **one** of:
 
   **Both clauses, not just the `=`.** The secondary imports carry their own `library-etl:*` watermark rows ([Delta bounds and watermarks](#delta-bounds-and-watermarks)). Deleting only the exact `library-etl` row leaves those in place, so the cross-reference and compilation-track imports stay bounded and the operator gets a release-only pass while believing they forced a full one. The predicate is written `= 'library-etl' OR LIKE 'library-etl:%'` rather than the looser `LIKE 'library-etl%'` so that a future job named `library-etl-something` is not swept up by an operator running this recipe — `:` is the namespace separator, and no job name elsewhere in `jobs/` contains one.
 
-Either way the release returns under a **fresh `library.id`**, without the dependents that cascade-destroyed against the old one — none of those are recoverable from tubafrenzy, and this job does not import them. As of BS#2560 the primary restore source for them is `catalog_delete_snapshot`, not a database backup: the delete's own transaction wrote one row there (`entity_kind = 'library'`, `entity_id = <old id>`) holding every `compilation_track_artist`, `library_urls`, `reviews`, `album_critic_reviews`, `album_review_submissions`, `bins`, `rotation`, `rotation_urls` and `artist_library_crossreference` row that referenced it — `SELECT captured FROM wxyc_schema.catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = <old id>;` — and each needs re-inserting by hand under the release's new id, since nothing does that automatically. `album_metadata`, `library_identity`, `library_identity_source` and `uncovered_release_search_markers` are deliberately absent from that snapshot (see the `catalog_delete_snapshot` docstring in `schema.ts`) because they are re-derived rather than hand-entered — `album_metadata` re-enriches from LML on its own, `library_identity`/`library_identity_source` re-resolve, and the search marker is a flag, not data — so a database backup is now the fallback only for those four, and only if an operator needs them restored sooner than the normal re-derivation path would produce them.
+Either way the release returns under a **fresh `library.id`**, without the dependents that cascade-destroyed against the old one — none of those are recoverable from tubafrenzy, and this job does not import them. As of BS#2560 the primary restore source for them is `catalog_delete_snapshot`, not a database backup: the delete's own transaction wrote one row there (`entity_kind = 'library'`, `entity_id = <old id>`) holding every `compilation_track_artist`, `library_urls`, `reviews`, `album_critic_reviews`, `bins`, `rotation`, `rotation_urls` and `artist_library_crossreference` row that referenced it — `SELECT captured FROM wxyc_schema.catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = <old id>;` — and each needs re-inserting by hand under the release's new id, since nothing does that automatically.
+
+Two groups are deliberately absent from that snapshot (see the `catalog_delete_snapshot` docstring in `schema.ts`), for different reasons:
+
+- `album_metadata`, `library_identity`, `library_identity_source` and `uncovered_release_search_markers` are re-derived rather than hand-entered — `album_metadata` re-enriches from LML on its own, `library_identity`/`library_identity_source` re-resolve, and the search marker is a flag, not data — so a database backup is the fallback only for those four, and only if an operator needs them restored sooner than the normal re-derivation path would produce them.
+- **`album_review_submissions` needs no restoring at all — do not re-INSERT it.** Its `album_id` is `ON DELETE SET NULL`, so the row survived the delete with a NULL `album_id`; a re-INSERT would collide on `album_review_submissions_source_key_uq` (partial-unique on `source_key`, which every `google_form` row carries) mid-restore. The only thing to repair is the link:
+
+  ```sql
+  -- Re-link the surviving submission(s) to the release's NEW library.id.
+  -- Find them by the text they were matched on, not by album_id (it is NULL now):
+  SELECT id, source_key, artist_name, album_title FROM wxyc_schema.album_review_submissions
+   WHERE album_id IS NULL AND norm_artist = <norm_artist> AND norm_album = <norm_album>;
+  UPDATE wxyc_schema.album_review_submissions SET album_id = <new library.id> WHERE id = <submission id>;
+  ```
+
+  It is also not in the snapshot for a second, independent reason: `reviewer_raw` / `social_consent_raw` are PII that ADR 0011 keeps out of every reader but one, so the capture must not copy them into a permanently-retained column.
 
 Verify the restore actually landed — the failure mode is silent:
 

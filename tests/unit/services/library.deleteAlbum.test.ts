@@ -55,7 +55,7 @@ jest.mock('@sentry/node', () => {
 import * as fs from 'fs';
 import * as path from 'path';
 import * as Sentry from '@sentry/node';
-import { db, library } from '@wxyc/database';
+import { album_review_submissions, captureCatalogDeleteSnapshot, db, library, reviews } from '@wxyc/database';
 
 const servicePath = path.resolve(__dirname, '../../../apps/backend/services/library.service.ts');
 const serviceSource = fs.readFileSync(servicePath, 'utf-8');
@@ -475,6 +475,39 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
 
       expect(outcome).toEqual({ outcome: 'deleted' });
       expect(ops.some((o) => o.op === 'delete')).toBe(true);
+    });
+  });
+
+  /**
+   * BS#2560 review, SECURITY. `album_review_submissions` must never be in the
+   * capture's `children` list, for two independent reasons (both written out
+   * on the capture itself): the row SURVIVES the delete (`onDelete: 'set
+   * null'`), so a capture preserves nothing; and the capture reads with an
+   * unprojected `tx.select()`, so listing the table copies `reviewer_raw` /
+   * `social_consent_raw` — real names collected under a "your name will not
+   * be shared" promise — into a permanently-retained jsonb column, becoming
+   * the second reader ADR 0011 forbids. This asserts on the args handed to
+   * the (mocked) helper, which is the only place the list is observable
+   * without a database.
+   */
+  describe('snapshot capture children (BS#2560 PII exclusion)', () => {
+    it('captures reviews but never album_review_submissions', async () => {
+      const { outcome } = await runDelete(42, CLEAN);
+      expect(outcome).toEqual({ outcome: 'deleted' });
+
+      const capture = captureCatalogDeleteSnapshot as unknown as {
+        mock: { calls: Array<[unknown, { children: Array<{ name: string; column: unknown }> }]> };
+      };
+      expect(capture.mock.calls).toHaveLength(1);
+      const { children } = capture.mock.calls[0][1];
+
+      expect(children.map((child) => child.name)).toContain('reviews');
+      expect(children.map((child) => child.name)).not.toContain('album_review_submissions');
+      // Column identity, not just the label: the mock maps every column to a
+      // table-qualified sentinel, so this still fails if the table is added
+      // back under some other key.
+      expect(children.map((child) => child.column)).toContain(reviews.album_id);
+      expect(children.map((child) => child.column)).not.toContain(album_review_submissions.album_id);
     });
   });
 
