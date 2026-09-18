@@ -2020,10 +2020,15 @@ paths:
           description: Album or artist not found
         '409':
           description: >-
-            Refused — another release by the same artist already holds this
-            `(code_number, code_volume_letters)` shelf slot (BS#2564). Only
-            raised when the request edits `code_number` and/or
-            `code_volume_letters`; an artist reassignment alone keeps the
+            Refused — another release already holds this `(artist_id,
+            genre_id, code_number, code_volume_letters)` shelf slot (BS#2564)
+            — genre-scoped, so the same artist can hold the same
+            `code_number` in two different genres without conflict. Raised
+            whenever the request edits `code_number` and/or
+            `code_volume_letters`, including an explicit `code_number`
+            supplied alongside an `artist_id`/`genre_id` move — that explicit
+            value always wins over the server. An artist or genre
+            reassignment with no explicit `code_number` keeps the
             pre-existing auto-regenerate behavior instead.
           content:
             application/json:

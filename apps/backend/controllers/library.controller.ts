@@ -3382,28 +3382,41 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       updates.artist_name = canonical_artist_name;
       // Re-attribution keeps the album's code_number unless the new artist
       // already owns it (issue 7) — only on collision do we burn the next
-      // number in the new artist's sequence.
-      if (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId)) {
+      // number in the new artist's sequence, and only when the body supplies
+      // no code_number of its own. An explicit body.code_number is the
+      // operator's deliberate choice for the destination shelf; regenerating
+      // over it would silently discard that choice (BS#2564). A supplied
+      // number rides the collision check below instead, exactly like a
+      // same-artist edit does.
+      const codeNumberTaken =
+        body.code_number === undefined &&
+        (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId));
+      if (codeNumberTaken) {
         updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id);
       }
     }
   }
 
-  // BS#2564: artist-scoped collision check, run only when the caller actually
-  // edits one of the call-code fields — an artist reassignment alone keeps
-  // the auto-regenerate behavior above (issue 7) unchanged. Effective values
-  // fold in whatever the blocks above already decided (including a
-  // same-request artist_id move or an auto-regenerated code_number), so this
-  // judges the row's state as it will exist after the write, not the body in
-  // isolation.
+  // BS#2564: collision check, run only when the caller actually edits one of
+  // the call-code fields — an artist/genre reassignment with no explicit
+  // code_number keeps the auto-regenerate behavior above (issue 7)
+  // unchanged. Effective values fold in whatever the blocks above already
+  // decided (including a same-request artist_id/genre_id move, or an
+  // auto-regenerated code_number when none was supplied), so this judges the
+  // row's state as it will exist after the write, not the body in isolation.
+  // Scoped by the destination genre_id, not the current one: call codes are
+  // genre-scoped (see findConflictingAlbumId), so a genre move has to be
+  // checked against the shelf it is moving to, not the one it is leaving.
   if ('code_number' in body || 'code_volume_letters' in body) {
     const effectiveArtistId = updates.artist_id ?? existing.artist_id;
+    const effectiveGenreId = updates.genre_id ?? existing.genre_id;
     const effectiveCodeNumber = updates.code_number ?? existing.code_number;
     const effectiveCodeVolumeLetters =
       'code_volume_letters' in updates ? (updates.code_volume_letters ?? null) : existing.code_volume_letters;
 
     const conflictingAlbumId = await libraryService.findConflictingAlbumId(
       effectiveArtistId,
+      effectiveGenreId,
       effectiveCodeNumber,
       effectiveCodeVolumeLetters,
       albumId
