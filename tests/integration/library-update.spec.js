@@ -1,5 +1,8 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest, expectErrorContains, expectFields } = require('../utils/test_helpers');
+const { getTestDb } = require('../utils/db');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 /**
  * Integration coverage for PATCH /library/:id (PR #1154 review).
@@ -306,6 +309,31 @@ describe('PATCH /library/:id', () => {
   // two genres has two independent shelves), matching the slot key
   // `jobs/library-call-number-dedup` merges duplicates on.
   describe('cross-genre collision scope (BS#2564 finding 1)', () => {
+    const sql = getTestDb();
+
+    /**
+     * File an already-created artist into a SECOND genre.
+     *
+     * There is no endpoint that does this: `POST /library/artists` always
+     * inserts a brand-new `artists` row — its own name pre-check
+     * (`artistIdFromName`) is genre-scoped, so the same name under a
+     * different genre_id doesn't collide, it just mints a second artist —
+     * and `POST /library/filings`' `kind: 'existing'` arm 400s an artist
+     * with no crossreference in `release.genre_id` rather than creating
+     * one. `tests/integration/library.spec.js`'s BS#2386 cross-reference
+     * fixtures document the same gap verbatim ("an artist filed under two
+     * genres ... [is] unreachable through `POST /library/artists`, which
+     * always writes exactly one crossreference row") and insert the second
+     * row directly; this follows that precedent. The `artist_genre_code`
+     * value is arbitrary — these tests exercise `library.code_number`
+     * collision scope, not the artist's own shelf code, and the
+     * crossreference table's only constraint is uniqueness on
+     * `(artist_id, genre_id)`.
+     */
+    const fileArtistInGenre = (artistId, genreId, artistGenreCode) =>
+      sql`INSERT INTO ${sql(SCHEMA)}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+          VALUES (${artistId}, ${genreId}, ${artistGenreCode})`;
+
     test('a same-artist, same-code_number release filed in a different genre is not treated as a collision', async () => {
       const a = await auth
         .post('/library/artists')
@@ -316,6 +344,13 @@ describe('PATCH /library/:id', () => {
           code_number: 9300 + (uniq % 500),
         })
         .expect(201);
+      // Genuinely file the artist in Jazz too, so `getAlbumFromDB`'s
+      // artist/genre inner join resolves for the Jazz release below —
+      // without this row the PATCH answers 200 with an empty body (the
+      // pre-existing wart recorded in this PR), and the assertion on
+      // `code_number` passes vacuously no matter what the collision check
+      // does.
+      await fileArtistInGenre(a.body.id, 7, 9300 + (uniq % 500) + 1);
 
       // Rock (genre 11) shelf: code_number 1 taken.
       await auth
@@ -345,6 +380,7 @@ describe('PATCH /library/:id', () => {
 
       const res = await auth.patch(`/library/${jazzAlbum.body.id}`).send({ code_number: 1 }).expect(200);
       expect(res.body.code_number).toBe(1);
+      expect(res.body.genre_id).toBe(7);
     });
 
     test('a genre move is checked against the destination shelf, not the one the release is leaving', async () => {
@@ -357,34 +393,30 @@ describe('PATCH /library/:id', () => {
           code_number: 9300 + (uniq % 500),
         })
         .expect(201);
+      await fileArtistInGenre(a.body.id, 7, 9300 + (uniq % 500) + 1);
 
-      // Rock (genre 11) shelf: code_number 1 taken by rockAlbum.
-      const rockAlbum = await auth
-        .post('/library')
-        .send({
-          album_title: `Cross-Genre Move Rock Owner ${uniq}`,
-          artist_id: a.body.id,
-          label: 'Cross-Genre Label',
-          genre_id: 11,
-          format_id: 1,
-          code_number: 1,
-        })
-        .expect(201);
-
-      // Jazz (genre 7) shelf: a DIFFERENT release also happens to sit at
-      // code_number 1 — the wrong-genre shelf the check must not consult.
+      // Jazz (genre 7) shelf — the one the release is LEAVING — has
+      // code_number 2 taken by a decoy. Rock (genre 11) — the DESTINATION —
+      // has nothing at code_number 2. A check scoped to the leaving genre,
+      // or not scoped by genre at all, would see the decoy as a conflict;
+      // only a destination-scoped check lets the move through. Because the
+      // decoy is the SOLE release this artist holds at code_number 2 in
+      // either genre, no query-plan row ordering can mask a wrong-genre
+      // lookup — a scope bug here has exactly one row to find, and it's the
+      // wrong one.
       await auth
         .post('/library')
         .send({
-          album_title: `Cross-Genre Move Jazz Owner ${uniq}`,
+          album_title: `Cross-Genre Move Jazz Decoy ${uniq}`,
           artist_id: a.body.id,
           label: 'Cross-Genre Label',
           genre_id: 7,
           format_id: 1,
-          code_number: 1,
+          code_number: 2,
         })
         .expect(201);
 
+      // moving starts on the Jazz shelf, at a number the decoy doesn't hold.
       const moving = await auth
         .post('/library')
         .send({
@@ -397,12 +429,9 @@ describe('PATCH /library/:id', () => {
         })
         .expect(201);
 
-      const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11, code_number: 1 }).expect(409);
-      expect(res.body.reason).toBe('album_code_conflict');
-      // Names the Rock-genre owner (the destination shelf) — not the
-      // Jazz-genre release that happens to share (artist_id, code_number 1)
-      // in the genre the release is leaving.
-      expect(res.body.album.id).toBe(rockAlbum.body.id);
+      const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11, code_number: 2 }).expect(200);
+      expect(res.body.genre_id).toBe(11);
+      expect(res.body.code_number).toBe(2);
     });
   });
 
