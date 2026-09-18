@@ -3630,8 +3630,17 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
  * `cascade`), or by bare `flowsheet.legacy_release_id` — plays the tubafrenzy
  * webhook wrote that `jobs/legacy-linkage-resolve` has not yet turned into an
  * `album_id`. The first two would silently blank historical play provenance;
- * the third would strand it, since the denylist means no future `library` row
- * ever carries that `legacy_release_id` for the resolver to join to.
+ * the third would strand it, since the release's `legacy_release_id` is
+ * recorded in `library_delete_denylist`, and `jobs/library-etl` consults
+ * that denylist on every run — scheduled or by hand — so no future `library`
+ * row will ever carry it for the resolver to join to (see
+ * `libraryService.deleteAlbumFromDB`'s Durability paragraph).
+ * Also refuses with 409 when the release has a bound `digital_asset` row
+ * (rip evidence / S3-backed files `jobs/digital-archive-bind` wrote): that FK
+ * has no `onDelete` at all, so letting the delete reach it would either raise
+ * a raw 500 or need the row destroyed to proceed, and audio-archive metadata
+ * is exactly the kind of hand-entered, irreplaceable data this endpoint
+ * otherwise snapshots rather than destroys.
  * `bins`, `library_identity`, `library_identity_source`, and
  * `artist_library_crossreference` are resolved explicitly inside the same
  * transaction as the delete (see `libraryService.deleteAlbumFromDB` for why
@@ -3639,15 +3648,18 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
  * `album_popularity.representative_library_id` is nulled there for want of
  * any FK, and the release's `legacy_release_id` is recorded in
  * `library_delete_denylist` so `jobs/library-etl` cannot resurrect it; every
- * other dependent is left to its own FK. Gated to `catalog:['write']`, the
- * same bar as `updateAlbum`/`addAlbum` — not the lighter `catalog:read` bar
- * `markMissing`/`markFound` use, since this is irreversible.
+ * other dependent is either captured by `captureCatalogDeleteSnapshot` (see
+ * that docstring in `schema.ts` for the exhaustive list) or left to its own
+ * FK. Gated to `catalog:['write']`, the same bar as `updateAlbum`/`addAlbum`
+ * — not the lighter `catalog:read` bar `markMissing`/`markFound` use, since
+ * this is irreversible.
  *
  * The 409 body is non-standard for this service (`{message, reason,
  * play_count, direct_play_count, rotation_linked_play_count,
- * legacy_linked_play_count}` rather than the error handler's shape) because
- * the count is the whole point of the refusal: the librarian needs to know
- * how much history the delete would have damaged, and by which path.
+ * legacy_linked_play_count}` for the flowsheet refusal, `{message, reason,
+ * assets}` for the digital-asset refusal, rather than the error handler's
+ * shape) because the specifics are the whole point of the refusal: the
+ * librarian needs to know what the delete would have damaged, and how.
  * Documented in `apps/backend/app.yaml`.
  *
  * A `503` with `reason: 'lock_unavailable'` means the delete stood down
@@ -3702,6 +3714,22 @@ export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
       direct_play_count: directPlayCount,
       rotation_linked_play_count: rotationLinkedPlayCount,
       legacy_linked_play_count: legacyLinkedPlayCount,
+    });
+    return;
+  }
+
+  if (result.outcome === 'has_digital_assets') {
+    const { assets } = result;
+    res.status(409).json({
+      message: `Cannot delete: release has ${assets.length} digital asset${assets.length === 1 ? '' : 's'} on record (ids: ${assets.map((a) => a.id).join(', ')})`,
+      reason: 'digital_asset_references',
+      asset_count: assets.length,
+      assets: assets.map((a) => ({
+        id: a.id,
+        provenance: a.provenance,
+        disc_number: a.discNumber,
+        status: a.status,
+      })),
     });
     return;
   }

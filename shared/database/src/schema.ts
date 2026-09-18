@@ -1988,32 +1988,41 @@ export const library_watermark = wxyc_schema.table(
  * transaction.
  *
  * This exists because the delete is otherwise **not durable**.
- * `jobs/library-etl` is still cron-registered every 30 minutes by the
- * `cron-schedule` field in its `package.json` — it was not flipped to
- * `job-type: one-shot` alongside `flowsheet-etl`/`rotation-etl` at the
- * wiki#88 Phase 3 decommission — and
- * the upstream `LIBRARY_RELEASE` row a librarian deleted in Backend still
- * exists in tubafrenzy's MySQL. Whenever a pass re-selects that row it finds
- * no `library` row carrying its `legacy_release_id` and takes the INSERT
- * branch of `ON CONFLICT (legacy_release_id) DO UPDATE`, resurrecting the
- * release under a NEW `library.id` — stripped of the `rotation` (binning
- * history, `kill_date`, LML-resolved `discogs_release_id`),
- * `album_metadata`, `reviews` and `album_critic_reviews` rows that
- * CASCADE-destroyed against the old id and are not re-imported.
- * `legacy_release_id` is 99.88% populated, so effectively the whole catalog
- * is resurrection-eligible.
+ * `jobs/library-etl`'s `package.json` now declares `job-type: one-shot`
+ * (`cd8f058e`, wiki#89 Phase 3.5), so a fresh deploy no longer re-registers
+ * its crontab entry. That commit's own message is explicit that it did not
+ * remove any half-hourly crontab line already installed on a host — the deploy only ever
+ * installs crontab lines, never deletes them — so whether one is still
+ * firing anywhere is a separate, unverified fact this table does not depend
+ * on either way (see "Un-deleting" below for why). The job stays invocable
+ * by hand regardless, and the upstream `LIBRARY_RELEASE` row a librarian
+ * deleted in Backend still exists in tubafrenzy's MySQL. Whenever a run
+ * re-selects that row — scheduled or by hand — it finds no `library` row
+ * carrying its `legacy_release_id` and takes the INSERT branch of
+ * `ON CONFLICT (legacy_release_id) DO UPDATE`, resurrecting the release
+ * under a NEW `library.id` — stripped of the `rotation` (binning history,
+ * `kill_date`, LML-resolved `discogs_release_id`), `album_metadata`,
+ * `reviews` and `album_critic_reviews` rows that CASCADE-destroyed against
+ * the old id and are not re-imported. `legacy_release_id` is 99.88%
+ * populated, so effectively the whole catalog is resurrection-eligible —
+ * UNLESS this table lists it, which is exactly what stops the INSERT branch
+ * above: `loadDeleteDenylist` / `isDeniedAtWriteTime` /
+ * `reconcileDenylistedInserts` in `job.ts` consult this table three times
+ * and skip a denylisted release on every run.
  *
  * **The trigger is an upstream edit or a full re-sync, not the clock.**
  * `fetchLegacyReleases` filters `WHERE lr.TIME_LAST_MODIFIED > <last run>`
  * and a Backend-side delete never touches tubafrenzy, so a release nobody
- * edits upstream is not re-selected by the next half-hourly pass, nor by any
- * number of them. What re-selects it is a librarian saving that release in
- * `/wxycdb` (which bumps `TIME_LAST_MODIFIED` — a routine thing to do to a
- * release someone just asked to have removed), or the documented full-resync
- * recipe, which drops the delta filter entirely. So the exposure is
- * open-ended rather than 30 minutes wide: the release does not come back on
- * a timer, it comes back the first time anything touches it upstream. Do not
- * read the ETL's schedule as a deadline in either direction.
+ * edits upstream is not re-selected by the next run, nor by any number of
+ * them, whether or not a run happens on a schedule. What re-selects it is a
+ * librarian saving that release in `/wxycdb` (which bumps
+ * `TIME_LAST_MODIFIED` — a routine thing to do to a release someone just
+ * asked to have removed), or the documented full-resync recipe, which drops
+ * the delta filter entirely. So the exposure is open-ended rather than tied
+ * to any particular run cadence: the release does not come back on a timer,
+ * it comes back the first time anything touches it upstream (or a run is
+ * forced) AND this table's row for it has been cleared. Do not read the
+ * ETL's schedule as a deadline in either direction.
  *
  * **This table has exactly ONE consumer: `jobs/library-etl`'s import loop**,
  * which skips any upstream release whose id is listed here. It is
@@ -2033,17 +2042,32 @@ export const library_watermark = wxyc_schema.table(
  * informational only — it deliberately carries **no FK**, since the row it
  * names is deleted in the same transaction.
  *
- * **Un-deleting.** `jobs/library-etl` is unscheduled now (`cd8f058e`) and
- * tubafrenzy's MySQL is frozen, so the ETL-driven resurrection path this
- * note used to warn about is dormant, not just rare — clearing the denylist
- * row alone no longer risks a surprise re-import via the next half-hourly
- * pass, because there is no next half-hourly pass. The job stays invocable
- * by hand (see its README), and if it is ever run again the same caveat
- * applies as before: the release returns under a FRESH `library.id` without
- * the dependents that cascade-destroyed against the old one. The real
- * restore path is `catalog_delete_snapshot`, written in the same
- * transaction as the delete, which captures those dependents so they don't
- * have to be re-derived.
+ * **Un-deleting.** Clearing this table's row is necessary but NOT
+ * sufficient, and it would be a mistake to read the `job-type: one-shot`
+ * flip above as having made it sufficient — that flip stops a fresh DEPLOY
+ * from re-registering the crontab entry, it says nothing about whether a
+ * previously-installed half-hourly crontab line is still firing on some host, and the job
+ * stays invocable by hand either way (see its README). So the operative fact
+ * is the one that was always true: the ETL only re-selects releases whose
+ * upstream `TIME_LAST_MODIFIED` is newer than its `cronjob_runs` watermark,
+ * and a Backend-side delete leaves that timestamp exactly where it was —
+ * older than every subsequent watermark — so a release whose row here is
+ * simply removed is not reliably re-selected on its own. The release has to
+ * be pushed back into the candidate set too:
+ *
+ * ```sql
+ * DELETE FROM wxyc_schema.library_delete_denylist WHERE legacy_release_id = <id>;
+ * -- then EITHER have a librarian re-save that release in tubafrenzy's
+ * -- /wxycdb (bumps TIME_LAST_MODIFIED; the next run that actually happens —
+ * -- scheduled or by hand — re-imports it), OR force one full re-sync:
+ * DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%';
+ * ```
+ *
+ * Either way the release returns under a FRESH `library.id`, without the
+ * dependents that cascade-destroyed against the old one. That is what
+ * `catalog_delete_snapshot` is for: written in the same transaction as the
+ * delete, it captures those dependents so they don't have to be re-derived.
+ * See `jobs/library-etl/README.md` for the full procedure and its caveats.
  *
  * **Who deleted it.** `deleted_by_*` records the authenticated subject at
  * delete time — this is the most destructive operation in the service and
@@ -2090,20 +2114,55 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * keyed by child table name, holding every row that referenced the deleted
  * parent, read inside the same transaction before the delete runs.
  *
- * Captures the SEVEN irreplaceable children only — the ones a person typed
+ * Captures the NINE irreplaceable children only — the ones a person typed
  * and nothing recomputes: `compilation_track_artist`, `library_urls`,
- * `reviews`, `album_critic_reviews`, `bins`, `rotation`,
- * `artist_library_crossreference`. Deliberately excludes four DERIVED
- * children, re-obtained after a restore rather than stored forever:
- * `album_metadata` (re-enriched from LML), `library_identity` +
- * `library_identity_source` (re-resolved), and
- * `uncovered_release_search_markers` (a marker, not data). Retention here is
- * PERMANENT — there is deliberately no prune job — which is exactly why
- * storing derived data would be a standing waste rather than a one-time one.
+ * `reviews`, `album_critic_reviews`, `album_review_submissions`, `bins`,
+ * `rotation`, `rotation_urls` (a depth-2 child — its own FK points at
+ * `rotation.id`, not `library.id`; `captureCatalogDeleteSnapshot`'s `via`
+ * shape resolves it as one correlated subquery riding along with the same
+ * `rotation` capture), `artist_library_crossreference`.
+ *
+ * This is meant to be the FULL `library.id` dependent list, re-derived from
+ * the deployed schema rather than asserted, and it is what a reviewer reads
+ * to decide whether some newly-added FK is already accounted for — so a new
+ * one belongs in one of the three buckets below even when it needs no new
+ * capture. Every dependent resolves to exactly one:
+ *   - Captured: the nine above.
+ *   - Excluded as DERIVED, re-obtained after a restore rather than stored
+ *     forever: `album_metadata` (re-enriched from LML), `library_identity` +
+ *     `library_identity_source` (re-resolved), and
+ *     `uncovered_release_search_markers` (a marker, not data). Retention
+ *     here is PERMANENT — there is deliberately no prune job — which is
+ *     exactly why storing derived data would be a standing waste rather than
+ *     a one-time one.
+ *   - Excluded because the delete REFUSES outright rather than ever reaching
+ *     them: `flowsheet` (the 409 flowsheet-plays guard) and `digital_asset`
+ *     (the 409 `has_digital_assets` guard — its FK has no `onDelete` at all,
+ *     and its rows are audio-archive metadata nobody can casually re-enter,
+ *     so the delete never proceeds far enough to need a snapshot of it; see
+ *     `deleteAlbumFromDB` in `library.service.ts`).
+ * `library_identity_history` is the one FK-LESS pointer at `library.id` and
+ * sits outside all three buckets on purpose: it is a supersedure audit log
+ * deliberately left DANGLING after a delete, on the reasoning that it has to
+ * outlive the row it describes — see `deleteAlbumFromDB`'s docstring.
  *
  * `batch_id` groups every snapshot row written by one delete request — the
  * legacy `ChangeLogEntry.batchId` field, carried forward: an artist delete
  * under #2562 that also captures each of its releases writes one batch.
+ *
+ * **Known tradeoff, recorded rather than silently accepted (BS#2560
+ * review):** `bins` rows are copied whole, including `dj_id` — an FK to
+ * `user.id` with `onDelete: 'cascade'` on the LIVE `bins` table, so deleting
+ * a DJ's account today removes their bin rows with it. The copy inside
+ * `captured` carries the same `dj_id` in a plain jsonb column with no FK to
+ * anything, so that account-deletion cascade cannot reach it — a DJ's
+ * account can be gone while their handle and bin notes remain readable in a
+ * `catalog_delete_snapshot` row forever (no prune job). `reviews.author`
+ * behaves the same way. This is deliberately NOT addressed by redacting
+ * `dj_id`/`author` from the capture: doing so would defeat the reason
+ * `bins`/`reviews` are captured at all (recoverability), for a PII-in-a-
+ * permanent-JSON-column concern that also has no redaction/purge mechanism
+ * designed for it yet. Tracked as follow-up work rather than fixed in BS#2560.
  */
 export const catalog_delete_snapshot = wxyc_schema.table(
   'catalog_delete_snapshot',

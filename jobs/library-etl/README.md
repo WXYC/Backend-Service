@@ -58,7 +58,7 @@ The cover is a **periodic full reconciliation pass**, chosen over recording unre
 
 A missing watermark row means an unbounded fetch for exactly that import, which is the first-run backfill.
 
-24 hours is **not** a reduction in the BS#2386 retry cadence, despite the job running every 30 minutes: the old retry already sat behind the release-delta early return, so it ran only on work slots — measured at ~1.15 per day. To force a pass immediately, without a deploy:
+24 hours is **not** a reduction in the BS#2386 retry cadence: the old retry already sat behind the release-delta early return, so on a live `*/30` cron schedule it ran only on work slots — measured at ~1.15 per day. (The job is now `job-type: one-shot` — a fresh deploy no longer registers that schedule, though the job is still invocable by hand at the same cadence if run manually; see [Delete denylist](#delete-denylist) below.) To force a pass immediately, without a deploy:
 
 ```sql
 DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl:secondary-full';
@@ -86,7 +86,7 @@ This job is the **only** consumer of `wxyc_schema.library_delete_denylist` (migr
 
 It exists because a Backend-side delete does not reach tubafrenzy. The upstream `LIBRARY_RELEASE` row survives, so whenever a pass re-selects it this job finds no `library` row carrying its `legacy_release_id` and takes the INSERT branch of `ON CONFLICT (legacy_release_id) DO UPDATE` — bringing the release back under a **new** `library.id`, stripped of the `rotation` (binning history, `kill_date`, LML-resolved `discogs_release_id`), `album_metadata`, `reviews` and `album_critic_reviews` rows that cascade-deleted against the old id and that this job never imports. `legacy_release_id` is ~99.88% populated, so effectively the whole catalog is resurrection-eligible without the denylist.
 
-**The trigger is an upstream edit or a full re-sync, not the clock.** `buildReleaseQuery` filters `WHERE lr.TIME_LAST_MODIFIED > <last run>` and a Backend-side delete leaves that timestamp alone, so a deleted release nobody touches upstream is not re-selected by the next half-hourly pass, or by any number of them. What re-selects it is a librarian saving that release in `/wxycdb`, or an operator forcing a full re-sync. The exposure is open-ended rather than half an hour wide — do not read the cron schedule as a countdown in either direction. (It also means a deleted release is _not_ reliably restored by removing its denylist row alone; see [Restoring a release](#restoring-a-release) below.)
+**The trigger is an upstream edit or a full re-sync, not the clock.** `buildReleaseQuery` filters `WHERE lr.TIME_LAST_MODIFIED > <last run>` and a Backend-side delete leaves that timestamp alone, so a deleted release nobody touches upstream is not re-selected by the next run, or by any number of them, whether or not a run happens on a schedule. What re-selects it is a librarian saving that release in `/wxycdb`, or an operator forcing a full re-sync. The exposure is open-ended rather than tied to any particular run cadence — do not read the cron schedule as a countdown in either direction, and note that `package.json` now declares `job-type: one-shot` (`cd8f058e`), so a fresh deploy does not register a crontab entry for this job at all; it remains invocable by hand. (It also means a deleted release is _not_ reliably restored by removing its denylist row alone; see [Restoring a release](#restoring-a-release) below.)
 
 ### Three checks, not one
 
@@ -114,14 +114,16 @@ Clearing the denylist row is necessary but **not sufficient**. This job only loo
 DELETE FROM wxyc_schema.library_delete_denylist WHERE legacy_release_id = <id>;
 ```
 
-Then **one** of:
+Then, in principle, **one** of:
 
-- **Preferred — an upstream edit.** Have a librarian open that release in tubafrenzy's `/wxycdb` and save it. That bumps `TIME_LAST_MODIFIED`, so the next half-hourly pass re-selects exactly that release and nothing else.
-- **Fallback — force a full re-sync**, when no upstream edit is possible:
+- **An upstream edit.** Have a librarian open that release in tubafrenzy's `/wxycdb` and save it. That bumps `TIME_LAST_MODIFIED`, so the next run that happens re-selects exactly that release and nothing else. **Not currently available**: `/wxycdb` went dark when Tomcat stopped (`cd8f058e`, 2026-09-16), so there is no live upstream-edit path today.
+- **Force a full re-sync**, the only option while `/wxycdb` is dark:
 
   ```sql
   DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%';
   ```
+
+  This alone does not re-import anything — `package.json` now declares `job-type: one-shot`, so a fresh deploy does not register a crontab entry for this job (see [Delete denylist](#delete-denylist) above). The job then has to be invoked by hand.
 
   The next run has no watermark, so `buildReleaseQuery` emits no `TIME_LAST_MODIFIED` predicate and re-selects the entire upstream catalog in one pass. Every other release re-upserts idempotently (the `setWhere` guard means unchanged rows are not touched), so this is safe — it is just slow, and it is the same recipe the troubleshooting table below gives for a stuck watermark.
 

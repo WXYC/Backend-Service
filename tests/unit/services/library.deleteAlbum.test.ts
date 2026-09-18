@@ -140,12 +140,17 @@ const runDelete = async (
 
 // SELECT order inside the delete transaction: existence (locked) → rotation
 // ids (locked) → direct play count → transitive play count (only when the
-// release has rotation rows) → legacy-id play count (always).
+// release has rotation rows) → legacy-id play count (always) →
+// digital_asset check (only reached once every play count is zero). Fixtures
+// below that stop short of that last select rely on `makeTx`'s `?? []`
+// default (see its own comment) rather than spelling out an empty result for
+// every case — a digital_asset row only needs to appear in fixtures that
+// mean to exercise the new guard.
 const EXISTS = [{ id: 42, legacy_release_id: 7788 }];
 const NO_ROTATION: unknown[] = [];
 const zero = [{ count: 0 }];
 
-/** A clean release: no rotation rows, no plays by any of the three paths. */
+/** A clean release: no rotation rows, no plays by any of the three paths, no bound digital asset. */
 const CLEAN = [EXISTS, NO_ROTATION, zero, zero];
 
 /**
@@ -221,8 +226,9 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const { outcome, ops } = await runDelete(42, CLEAN);
 
       expect(outcome).toEqual({ outcome: 'deleted' });
-      // existence + rotation ids + direct count + legacy-id count.
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(4);
+      // existence + rotation ids + direct count + legacy-id count +
+      // digital_asset check (BS#2560 finding 2a).
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(5);
     });
 
     it('deletes nothing when any path refuses', async () => {
@@ -257,8 +263,10 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const { ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero]);
 
       // The legacy count is unconditional; it is the transitive count that is
-      // skipped when there are no rotation ids.
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(4);
+      // skipped when there are no rotation ids. Plus the digital_asset check
+      // (BS#2560 finding 2a), reached because this fixture's play counts are
+      // all zero.
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(5);
     });
 
     /**
@@ -424,6 +432,49 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const body = deleteAlbumBody();
       expect(body).not.toContain('library_identity_history');
       expect(serviceSource).toContain('`library_identity_history` is the one reference deliberately LEFT dangling');
+    });
+  });
+
+  /**
+   * `digital_asset.library_id` is NOT NULL with no `onDelete` at all — no
+   * cascade, no set-null — so an unguarded `DELETE FROM library` raises a
+   * raw FK-violation 500. This is the check-and-act refusal that catches it
+   * before the delete ever reaches that statement (BS#2560 finding 2a).
+   */
+  describe('digital_asset guard (BS#2560 finding 2a)', () => {
+    it('refuses with has_digital_assets, naming the bound asset, rather than reaching the DELETE', async () => {
+      const asset = { id: 501, provenance: 'rotation_upload', disc_number: 1, status: 'needs_review' };
+      const { outcome, ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [asset]]);
+
+      expect(outcome).toEqual({
+        outcome: 'has_digital_assets',
+        assets: [{ id: 501, provenance: 'rotation_upload', discNumber: 1, status: 'needs_review' }],
+      });
+      expect(ops.filter((o) => o.op === 'delete')).toHaveLength(0);
+      expect(ops.filter((o) => o.op === 'insert')).toHaveLength(0);
+    });
+
+    it('names every bound asset when more than one exists', async () => {
+      const assets = [
+        { id: 501, provenance: 'rotation_upload', disc_number: 1, status: 'needs_review' },
+        { id: 502, provenance: 'cd_rip', disc_number: 2, status: 'bound' },
+      ];
+      const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, assets]);
+
+      expect(outcome).toEqual({
+        outcome: 'has_digital_assets',
+        assets: [
+          { id: 501, provenance: 'rotation_upload', discNumber: 1, status: 'needs_review' },
+          { id: 502, provenance: 'cd_rip', discNumber: 2, status: 'bound' },
+        ],
+      });
+    });
+
+    it('proceeds past the guard, and into the capture, when no digital_asset row is bound', async () => {
+      const { outcome, ops } = await runDelete(42, CLEAN);
+
+      expect(outcome).toEqual({ outcome: 'deleted' });
+      expect(ops.some((o) => o.op === 'delete')).toBe(true);
     });
   });
 

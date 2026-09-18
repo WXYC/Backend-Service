@@ -8,6 +8,9 @@ import WxycError from '../utils/error.js';
 import {
   db,
   captureCatalogDeleteSnapshot,
+  catalogDeleteChild,
+  catalogDeleteGrandchild,
+  type CatalogDeleteActor,
   extractSqlState,
   intArrayLiteral,
   isLockContentionError,
@@ -28,11 +31,13 @@ import {
   album_critic_reviews,
   album_plays,
   album_popularity,
+  album_review_submissions,
   artist_crossreference,
   artist_library_crossreference,
   artists,
   bins,
   compilation_track_artist,
+  digital_asset,
   flowsheet,
   genre_artist_crossreference,
   format,
@@ -4336,19 +4341,30 @@ export type DeleteAlbumOutcome =
       rotationLinkedPlayCount: number;
       /** Plays linked only by `flowsheet.legacy_release_id`, awaiting `jobs/legacy-linkage-resolve`. */
       legacyLinkedPlayCount: number;
+    }
+  | {
+      // `digital_asset.library_id` is NOT NULL with no `onDelete` (no cascade
+      // AND no set-null), so an unguarded delete raises a raw FK-violation
+      // 500 rather than silently destroying anything — but a raw 500 is
+      // still the wrong outcome for this endpoint's documented four-outcome
+      // taxonomy (204 / 409 refused-on-the-merits / 503 retryable / 404).
+      // This is that refusal: a bound asset is audio-archive metadata (rip
+      // evidence, S3-backed files) nobody can casually re-enter, so the
+      // delete refuses with 409 rather than either failing raw or resolving
+      // the FK by deleting through it.
+      outcome: 'has_digital_assets';
+      assets: Array<{ id: number; provenance: string; discNumber: number; status: string }>;
     };
 
 /**
  * The authenticated subject that issued a delete, recorded on the denylist
  * row. Every field is optional: `AUTH_BYPASS` and malformed-but-accepted
  * tokens produce a partial (or empty) actor, and a missing attribution must
- * never be a reason to refuse the delete.
+ * never be a reason to refuse the delete. Structurally identical to
+ * `CatalogDeleteActor` (`@wxyc/database`) — an alias rather than a second
+ * declaration, so the two stay in lockstep by construction.
  */
-export type DeleteAlbumActor = {
-  userId?: string | null;
-  email?: string | null;
-  role?: string | null;
-};
+export type DeleteAlbumActor = CatalogDeleteActor;
 
 /**
  * Bounds how long the delete will wait for the row locks it takes. Chosen
@@ -4442,18 +4458,24 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * is where this runs.
  *
  * **Durability.** The delete records the release's `legacy_release_id` in
- * `library_delete_denylist` in the same transaction. `jobs/library-etl` is
- * no longer cron-registered — `cd8f058e` unscheduled it once tubafrenzy's
- * MySQL froze and left it nothing to read — but it stays invocable by hand,
- * and a hand-run would still re-insert the release under a NEW `library.id`,
- * stripped of every cascade-destroyed dependent, the next time it re-selects
- * the still-present upstream row. So the trigger is a librarian editing the
- * release upstream or an operator forcing a full re-sync, not a schedule at
- * all now. See the table's docstring in `schema.ts` for the full mechanism
- * and the un-delete recipe. The same transaction also writes a
- * `catalog_delete_snapshot` row via `captureCatalogDeleteSnapshot` (below)
- * for every irreplaceable child, which is the actual undo path — the
- * denylist only ever protected the parent row from being clobbered again.
+ * `library_delete_denylist` in the same transaction. `jobs/library-etl`'s
+ * `package.json` now declares `job-type: one-shot` (`cd8f058e`, wiki#89
+ * Phase 3.5), so the deploy no longer re-registers its crontab entry — but
+ * `cd8f058e`'s own commit message is explicit that it did not remove any
+ * half-hourly crontab line already installed on a host ("the deploy only
+ * ever installs crontab lines, never deletes them"), so whether that line still fires
+ * anywhere is a separate, unverified fact this comment does not assume
+ * either way. It does not need to: `loadDeleteDenylist`,
+ * `isDeniedAtWriteTime`, and `reconcileDenylistedInserts` in `job.ts` all
+ * consult this denylist row and skip a denylisted release on every
+ * invocation — scheduled or by hand — so the release is NOT resurrected
+ * while its row here survives. What actually re-inserts it is clearing that
+ * row (see the un-delete recipe on `library_delete_denylist`'s own
+ * docstring in `schema.ts`), not the job's schedule state. The same
+ * transaction also writes a `catalog_delete_snapshot` row via
+ * `captureCatalogDeleteSnapshot` (below) for every irreplaceable child,
+ * which is the actual undo path for those dependents — the denylist only
+ * ever protected the parent row from being reinstated at all.
  *
  * **Attribution.** `actor` is recorded on the denylist row. It is optional at
  * every field: a delete under `AUTH_BYPASS` records what it has. Losing the
@@ -4470,14 +4492,20 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * match; verified directly against `pg_constraint.confdeltype` on the dev
  * DB (BS#2112 review). Migration 0147 repairs the constraint; the explicit
  * delete stays so the endpoint is correct on any environment that has not
- * applied it yet. `album_popularity.representative_library_id` is nulled
- * explicitly too — it names a library row but carries no FK at all, so
- * nothing would otherwise stop it dangling. Every other dependent
- * (`rotation`, `album_metadata`, `album_critic_reviews`, `reviews`,
- * `compilation_track_artist`: real `onDelete: 'cascade'`;
- * `album_review_submissions`: `onDelete: 'set null'`) is left to its own FK.
- * `library_watermark` advances via the `touch_library_watermark` trigger
- * (migration 0104/0142, unqualified on DELETE) — no app-level bump needed.
+ * applied it yet. `digital_asset.library_id` is the same shape (NOT NULL, no
+ * `onDelete`) but is NOT resolved this way: unlike the four above, its rows
+ * are audio-archive metadata (rip evidence, S3-backed `digital_asset_file`
+ * rows) nobody can casually re-enter, so a release one is bound to is
+ * refused outright — see the `has_digital_assets` outcome below — rather
+ * than deleted through. `album_popularity.representative_library_id` is
+ * nulled explicitly too — it names a library row but carries no FK at all,
+ * so nothing would otherwise stop it dangling. Every other dependent
+ * (`rotation`, `library_urls`, `album_metadata`, `album_critic_reviews`,
+ * `reviews`, `compilation_track_artist`, `uncovered_release_search_markers`:
+ * real `onDelete: 'cascade'`; `album_review_submissions`: `onDelete: 'set
+ * null'`) is left to its own FK. `library_watermark` advances via the
+ * `touch_library_watermark` trigger (migration 0104/0142, unqualified on
+ * DELETE) — no app-level bump needed.
  *
  * `library_identity_history` is the one reference deliberately LEFT dangling.
  * It is the other FK-less pointer at `library.id` (`schema.ts`,
@@ -4579,9 +4607,11 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // there, `IS DISTINCT FROM` rather than `<>` because the shape being
     // caught is precisely a NULL `album_id`), and the rotation clause
     // excludes the transitive arm. Deleting while any of these exist strands
-    // them forever — not because of the denylist, but because
-    // `jobs/library-etl` is unscheduled now, so no future `library` row will
-    // ever exist for the resolver to join to.
+    // them forever — the denylist guarantees no future `library` row will
+    // ever carry this `legacy_release_id` for the resolver to join to,
+    // whichever way `jobs/library-etl` next runs (see the `deleteAlbumFromDB`
+    // docstring's Durability paragraph and `library_delete_denylist`'s own
+    // docstring in `schema.ts`).
     const legacyLinkedRows = await tx
       .select({ count: sql<number>`count(*)::int` })
       .from(flowsheet)
@@ -4609,34 +4639,75 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
       };
     }
 
-    // Capture the seven irreplaceable children BEFORE any delete runs, so a
+    // Refuse before any delete runs when the release has a bound digital
+    // asset. `digital_asset.library_id` is NOT NULL with no `onDelete` (no
+    // cascade, no set-null), so an unguarded `DELETE FROM library` below
+    // would raise a raw FK-violation 500 — the wrong outcome for this
+    // endpoint's documented four-outcome taxonomy (204 / 409 refused on the
+    // merits / 503 retryable / 404). No extra lock is needed to make this
+    // check-and-act rather than check-then-act: an INSERT into
+    // `digital_asset` takes `FOR KEY SHARE` on the referenced `library` row
+    // via its own FK check, which already conflicts with the `FOR UPDATE`
+    // this transaction took on that row above, so a concurrent
+    // `jobs/digital-archive-bind` write is blocked before it could land
+    // between this check and the DELETE.
+    const digitalAssetRows = await tx
+      .select({
+        id: digital_asset.id,
+        provenance: digital_asset.provenance,
+        disc_number: digital_asset.disc_number,
+        status: digital_asset.status,
+      })
+      .from(digital_asset)
+      .where(eq(digital_asset.library_id, album_id));
+    if (digitalAssetRows.length > 0) {
+      return {
+        outcome: 'has_digital_assets',
+        assets: digitalAssetRows.map((row) => ({
+          id: row.id,
+          provenance: row.provenance,
+          discNumber: row.disc_number,
+          status: row.status,
+        })),
+      };
+    }
+
+    // Capture the nine irreplaceable children BEFORE any delete runs, so a
     // failed capture rolls back with the delete instead of leaving the
-    // subtree unrecoverable. `album_metadata`, `library_identity` +
-    // `library_identity_source`, and `uncovered_release_search_markers` are
-    // deliberately NOT in this list — see the `catalog_delete_snapshot`
-    // docstring in `schema.ts` for why storing that derived, re-obtainable
-    // data would be a standing waste under this table's permanent retention.
+    // subtree unrecoverable. `rotation_urls` is a depth-2 child — its FK
+    // points at `rotation.id`, not at `library.id`, so it rides along with
+    // `rotation`'s own capture via `catalogDeleteGrandchild` rather than a
+    // second top-level entry keyed on `album_id`. `album_metadata`,
+    // `library_identity` + `library_identity_source`, and
+    // `uncovered_release_search_markers` are deliberately NOT in this list
+    // — see the `catalog_delete_snapshot` docstring in `schema.ts` for why
+    // storing that derived, re-obtainable data would be a standing waste
+    // under this table's permanent retention. `digital_asset` is likewise
+    // absent: the check above refuses the delete outright rather than
+    // letting it reach a captured child.
     await captureCatalogDeleteSnapshot(tx, {
       entityKind: 'library',
       entityId: album_id,
       children: [
-        {
-          name: 'compilation_track_artist',
-          table: compilation_track_artist,
-          column: compilation_track_artist.library_id,
-        },
-        { name: 'library_urls', table: library_urls, column: library_urls.library_id },
-        { name: 'reviews', table: reviews, column: reviews.album_id },
-        { name: 'album_critic_reviews', table: album_critic_reviews, column: album_critic_reviews.album_id },
-        { name: 'bins', table: bins, column: bins.album_id },
-        { name: 'rotation', table: rotation, column: rotation.album_id },
-        {
-          name: 'artist_library_crossreference',
-          table: artist_library_crossreference,
-          column: artist_library_crossreference.library_id,
-        },
+        catalogDeleteChild('compilation_track_artist', compilation_track_artist, compilation_track_artist.library_id),
+        catalogDeleteChild('library_urls', library_urls, library_urls.library_id),
+        catalogDeleteChild('reviews', reviews, reviews.album_id),
+        catalogDeleteChild('album_critic_reviews', album_critic_reviews, album_critic_reviews.album_id),
+        catalogDeleteChild('album_review_submissions', album_review_submissions, album_review_submissions.album_id),
+        catalogDeleteChild('bins', bins, bins.album_id),
+        catalogDeleteChild('rotation', rotation, rotation.album_id),
+        catalogDeleteGrandchild('rotation_urls', rotation_urls, rotation_urls.rotation_id, {
+          table: rotation,
+          column: rotation.album_id,
+          idColumn: rotation.id,
+        }),
+        catalogDeleteChild(
+          'artist_library_crossreference',
+          artist_library_crossreference,
+          artist_library_crossreference.library_id
+        ),
       ],
-      actor: { userId: actor.userId, email: actor.email, role: actor.role },
+      actor,
     });
 
     // Tombstone BEFORE the delete, so the denylist row and the delete commit
