@@ -8,8 +8,6 @@ import WxycError from '../utils/error.js';
 import {
   db,
   captureCatalogDeleteSnapshot,
-  catalogDeleteChild,
-  catalogDeleteGrandchild,
   type CatalogDeleteActor,
   extractSqlState,
   intArrayLiteral,
@@ -37,6 +35,7 @@ import {
   bins,
   compilation_track_artist,
   digital_asset,
+  digital_asset_file,
   flowsheet,
   genre_artist_crossreference,
   format,
@@ -4347,13 +4346,46 @@ export type DeleteAlbumOutcome =
       // 500 rather than silently destroying anything — but a raw 500 is
       // still the wrong outcome for this endpoint's documented four-outcome
       // taxonomy (204 / 409 refused-on-the-merits / 503 retryable / 404).
-      // This is that refusal: a bound asset is audio-archive metadata (rip
-      // evidence, S3-backed files) nobody can casually re-enter, so the
-      // delete refuses with 409 rather than either failing raw or resolving
-      // the FK by deleting through it.
+      // This is that refusal, scoped to the asset statuses that are real
+      // blockers — see `NON_BLOCKING_DIGITAL_ASSET_STATUS`.
       outcome: 'has_digital_assets';
       assets: Array<{ id: number; provenance: string; discNumber: number; status: string }>;
     };
+
+/**
+ * The one `digital_asset.status` that does NOT make a release undeletable.
+ *
+ * The refusal exists because `digital_asset.library_id` is NOT NULL with no
+ * `onDelete`, so the delete must either refuse or destroy the row — and for a
+ * LIVE asset that row is rip evidence plus S3-backed `digital_asset_file`
+ * keys nobody can casually re-enter. `'rejected'` is deliberately excluded: a
+ * reviewer has already decided that asset is wrong, and NO endpoint in this
+ * service can clear or delete a `digital_asset` row (the only
+ * `delete(digital_asset*)` anywhere is `jobs/digital-archive-bind/write.ts`'s
+ * `digital_asset_file` reopen sweep), so refusing on a rejected row would make
+ * the release permanently undeletable through the API over evidence the
+ * station already threw out — recoverable only by hand-written SQL against
+ * prod. That state arises without anyone erring: `merge.ts` notes a merge
+ * "can leave an album bound to a rejected asset".
+ *
+ * `jobs/library-call-number-dedup/merge.ts` already classifies this table as
+ * RECOVERABLE and deletes through it on a merge — "BS#2319's bind job
+ * discovers assets by scanning the store, so a re-run re-binds an orphan" —
+ * logging the orphaned `object_key`s on the way out. This constant is the
+ * narrower half of that same judgement: a live binding is worth refusing
+ * over, a rejected one is not. Where merge.ts can only log the keys, this
+ * delete captures the rejected `digital_asset` rows AND their
+ * `digital_asset_file` rows into `catalog_delete_snapshot` first, so the
+ * re-bind those objects are owed stays findable.
+ *
+ * Written as "everything except this value" rather than an allowlist of
+ * blockers, because `status` is an open vocabulary (`schema.ts`:
+ * `'needs_review' | 'bound' | 'rejected'` today, with `'pulled'` /
+ * `'ripped'` / `'exception'` planned for the CD-rip phase) — so a status
+ * added later blocks by default instead of silently becoming
+ * deletable-through.
+ */
+export const NON_BLOCKING_DIGITAL_ASSET_STATUS = 'rejected';
 
 /**
  * The authenticated subject that issued a delete, recorded on the denylist
@@ -4445,6 +4477,25 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * them, and OIDs can wrap. If the order ever inverts, one side deadlocks, and
  * the side that loses might be a DJ's play insert mid-show.
  *
+ * **The snapshot widens that footprint, and the same bound covers it.** The
+ * capture takes `FOR SHARE` on every child row it reads (see
+ * `captureCatalogDeleteSnapshot`), so the full order is library → rotation →
+ * digital_asset → each captured child, in the order the `children` list gives.
+ * That is a real widening — a DJ editing a bin note, or a librarian editing a
+ * review, on THIS release now contends with the delete where before it did
+ * not — and it is deliberate: without it such an edit commits between the
+ * capture and the cascade and is destroyed with only its pre-edit version
+ * snapshotted, which is the silent loss this whole feature exists to prevent.
+ * No new lock-ORDER reasoning is needed, for the same reason the two locks
+ * above need none: nothing here is ordered against, only bounded. Every child
+ * writer takes exactly one row lock on its own table; the one writer that
+ * takes two — `flowsheet`'s INSERT, library then rotation — reaches a captured
+ * child only at `rotation`, which this transaction already holds `FOR UPDATE`
+ * from before the capture ran, in that same library-then-rotation order, so it
+ * introduces no new pair to order. A future writer that locked two captured
+ * children in the opposite order would deadlock — and would lose to the bound
+ * below rather than to the deadlock detector.
+ *
  * So the transaction does not rely on the order at all. It sets
  * `lock_timeout` to {@link DELETE_ALBUM_LOCK_TIMEOUT_MS}, deliberately BELOW
  * the default 1 s `deadlock_timeout`, which makes this transaction give up
@@ -4472,9 +4523,18 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * row (see the un-delete recipe on `library_delete_denylist`'s own
  * docstring in `schema.ts`), not the job's schedule state. The same
  * transaction also writes a `catalog_delete_snapshot` row via
- * `captureCatalogDeleteSnapshot` (below) for every irreplaceable child,
- * which is the actual undo path for those dependents — the denylist only
- * ever protected the parent row from being reinstated at all.
+ * `captureCatalogDeleteSnapshot` (below) holding the `library` row ITSELF plus
+ * every irreplaceable child, which is the actual undo path — the denylist only
+ * ever protected the parent row from being REINSTATED, never recorded what it
+ * said. That parent capture is not redundant with the ETL:
+ * `jobs/library-etl` refreshes only `LEGACY_SOURCED_LIBRARY_COLUMNS`, so
+ * `label`, `label_id`, `discogs_unavailable`, `discogs_unavailable_note` and
+ * the LML-resolved columns were never recoverable from upstream at all — and
+ * since the wiki#89 Phase 3.5 freeze there is no upstream row to re-import for
+ * a release Backend minted itself (BS#1963 mints `legacy_release_id` from a
+ * sequence), which is every release filed through the new classic UI. For
+ * those, the ETL restore path cannot work, and this row is the only record of
+ * what the release said.
  *
  * **Attribution.** `actor` is recorded on the denylist row. It is optional at
  * every field: a delete under `AUTH_BYPASS` records what it has. Losing the
@@ -4492,11 +4552,14 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * DB (BS#2112 review). Migration 0147 repairs the constraint; the explicit
  * delete stays so the endpoint is correct on any environment that has not
  * applied it yet. `digital_asset.library_id` is the same shape (NOT NULL, no
- * `onDelete`) but is NOT resolved this way: unlike the four above, its rows
- * are audio-archive metadata (rip evidence, S3-backed `digital_asset_file`
- * rows) nobody can casually re-enter, so a release one is bound to is
- * refused outright — see the `has_digital_assets` outcome below — rather
- * than deleted through. `album_popularity.representative_library_id` is
+ * `onDelete`) and is resolved BOTH ways, on the asset's status: a LIVE asset
+ * (anything but `'rejected'`) is audio-archive metadata (rip evidence,
+ * S3-backed `digital_asset_file` rows) nobody can casually re-enter, so a
+ * release bound to one is refused outright — see the `has_digital_assets`
+ * outcome and `NON_BLOCKING_DIGITAL_ASSET_STATUS` below; a `'rejected'` asset
+ * is snapshotted with its `digital_asset_file` rows and then deleted through,
+ * because no endpoint can clear such a row and refusing on it would leave the
+ * release permanently undeletable. `album_popularity.representative_library_id` is
  * nulled explicitly too — it names a library row but carries no FK at all,
  * so nothing would otherwise stop it dangling. Every other dependent
  * (`rotation`, `library_urls`, `album_metadata`, `album_critic_reviews`,
@@ -4509,8 +4572,9 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * DELETE) — no app-level bump needed.
  *
  * `library_identity_history` is the one reference deliberately LEFT dangling.
- * It is the other FK-less pointer at `library.id` (`schema.ts`,
- * `integer().notNull()` with no `.references()`), and it is a supersedure
+ * It is one of the THREE FK-less pointers at `library.id` (`schema.ts`,
+ * `integer().notNull()` with no `.references()`; the census of all three is on
+ * `catalog_delete_snapshot` there), and it is a supersedure
  * audit log: the whole reason it carries no FK is that a history row has to
  * outlive the row it describes, so cascading or nulling it here would destroy
  * exactly the record an auditor came for. After a delete its `library_id`
@@ -4646,18 +4710,24 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
       };
     }
 
-    // Refuse before any delete runs when the release has a bound digital
+    // Refuse before any delete runs when the release has a LIVE digital
     // asset. `digital_asset.library_id` is NOT NULL with no `onDelete` (no
     // cascade, no set-null), so an unguarded `DELETE FROM library` below
     // would raise a raw FK-violation 500 — the wrong outcome for this
     // endpoint's documented four-outcome taxonomy (204 / 409 refused on the
-    // merits / 503 retryable / 404). No extra lock is needed to make this
-    // check-and-act rather than check-then-act: an INSERT into
-    // `digital_asset` takes `FOR KEY SHARE` on the referenced `library` row
-    // via its own FK check, which already conflicts with the `FOR UPDATE`
-    // this transaction took on that row above, so a concurrent
-    // `jobs/digital-archive-bind` write is blocked before it could land
-    // between this check and the DELETE.
+    // merits / 503 retryable / 404). Which statuses count as live, and why
+    // `'rejected'` does not, is on `NON_BLOCKING_DIGITAL_ASSET_STATUS`.
+    //
+    // An INSERT into `digital_asset` needs no extra lock to be fenced: it
+    // takes `FOR KEY SHARE` on the referenced `library` row via its own FK
+    // check, which already conflicts with the `FOR UPDATE` this transaction
+    // took on that row above, so a concurrent `jobs/digital-archive-bind`
+    // write cannot land between this check and the DELETE. A status UPDATE is
+    // NOT fenced that way — Postgres takes no lock on the parent row for an
+    // UPDATE that leaves the FK column alone — so this SELECT takes
+    // `FOR UPDATE` on the asset rows themselves. Without it, a reviewer
+    // flipping a rejected asset to `'bound'` between this check and the
+    // delete-through below would have their now-live asset destroyed.
     const digitalAssetRows = await tx
       .select({
         id: digital_asset.id,
@@ -4666,11 +4736,13 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         status: digital_asset.status,
       })
       .from(digital_asset)
-      .where(eq(digital_asset.library_id, album_id));
-    if (digitalAssetRows.length > 0) {
+      .where(eq(digital_asset.library_id, album_id))
+      .for('update');
+    const blockingAssets = digitalAssetRows.filter((row) => row.status !== NON_BLOCKING_DIGITAL_ASSET_STATUS);
+    if (blockingAssets.length > 0) {
       return {
         outcome: 'has_digital_assets',
-        assets: digitalAssetRows.map((row) => ({
+        assets: blockingAssets.map((row) => ({
           id: row.id,
           provenance: row.provenance,
           discNumber: row.disc_number,
@@ -4678,16 +4750,22 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         })),
       };
     }
+    // Whatever is left is rejected, so the delete proceeds through it.
+    const rejectedAssetIds = digitalAssetRows.map((row) => row.id);
 
-    // Capture the irreplaceable children BEFORE any delete runs, so a
-    // failed capture rolls back with the delete instead of leaving the
-    // subtree unrecoverable. `rotation_urls` is a depth-2 child — its FK
-    // points at `rotation.id`, not at `library.id`, so it rides along with
-    // `rotation`'s own capture via `catalogDeleteGrandchild` rather than a
-    // second top-level entry keyed on `album_id`. That grandchild capture is
+    // Capture the release row ITSELF plus its irreplaceable children BEFORE
+    // any delete runs, so a failed capture rolls back with the delete instead
+    // of leaving the subtree unrecoverable. Each child is just its FK column —
+    // the table it reads and the JSON key it lands under are derived from that
+    // column, so a table/column mismatch is unrepresentable rather than merely
+    // documented (see `CatalogDeleteChild`). `rotation_urls` and
+    // `digital_asset_file` are the depth-2 children — their FKs point at
+    // `rotation.id` and `digital_asset.id`, not at `library.id`, so each rides
+    // along with its own parent's capture via `via` rather than a second
+    // top-level entry keyed on `album_id`. Those grandchild captures are
     // atomic only because of the `.for('update')` taken on the release's
-    // `rotation` rows above, not because of anything here — see the note on
-    // that lock. `album_metadata`,
+    // `rotation` rows and on its `digital_asset` rows above, not because of
+    // anything here — see the notes on those locks. `album_metadata`,
     // `library_identity` + `library_identity_source`, and
     // `uncovered_release_search_markers` are deliberately NOT in this list
     // — see the `catalog_delete_snapshot` docstring in `schema.ts` for why
@@ -4720,23 +4798,23 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     await captureCatalogDeleteSnapshot(tx, {
       entityKind: 'library',
       entityId: album_id,
+      entityIdColumn: library.id,
       children: [
-        catalogDeleteChild('compilation_track_artist', compilation_track_artist, compilation_track_artist.library_id),
-        catalogDeleteChild('library_urls', library_urls, library_urls.library_id),
-        catalogDeleteChild('reviews', reviews, reviews.album_id),
-        catalogDeleteChild('album_critic_reviews', album_critic_reviews, album_critic_reviews.album_id),
-        catalogDeleteChild('bins', bins, bins.album_id),
-        catalogDeleteChild('rotation', rotation, rotation.album_id),
-        catalogDeleteGrandchild('rotation_urls', rotation_urls, rotation_urls.rotation_id, {
-          table: rotation,
-          column: rotation.album_id,
-          idColumn: rotation.id,
-        }),
-        catalogDeleteChild(
-          'artist_library_crossreference',
-          artist_library_crossreference,
-          artist_library_crossreference.library_id
-        ),
+        compilation_track_artist.library_id,
+        library_urls.library_id,
+        reviews.album_id,
+        album_critic_reviews.album_id,
+        bins.album_id,
+        rotation.album_id,
+        { column: rotation_urls.rotation_id, via: { column: rotation.album_id, idColumn: rotation.id } },
+        artist_library_crossreference.library_id,
+        // Only rejected rows can reach here — the guard above refused
+        // otherwise — and they are about to be deleted through. Their
+        // `digital_asset_file` children carry the `object_key`s of the objects
+        // the cascade leaves unreferenced in the store, which is what keeps
+        // the re-bind they are owed findable afterwards.
+        digital_asset.library_id,
+        { column: digital_asset_file.asset_id, via: { column: digital_asset.library_id, idColumn: digital_asset.id } },
       ],
       actor,
     });
@@ -4765,6 +4843,16 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         set: { library_id: album_id, deleted_at: sql`now()`, ...attribution },
       });
 
+    // Rejected assets, deleted through rather than refused over — see
+    // `NON_BLOCKING_DIGITAL_ASSET_STATUS`. Scoped to the ids the guard above
+    // LOCKED and the snapshot just captured, not to `library_id`: a row that
+    // somehow appeared outside that set should raise the FK violation on the
+    // `DELETE FROM library` below rather than be destroyed unseen.
+    // `digital_asset_file.asset_id` is `onDelete: 'cascade'`, so the file rows
+    // go with these — captured above, `object_key`s included.
+    if (rejectedAssetIds.length > 0) {
+      await tx.delete(digital_asset).where(inArray(digital_asset.id, rejectedAssetIds));
+    }
     await tx.delete(bins).where(eq(bins.album_id, album_id));
     await tx.delete(library_identity_source).where(eq(library_identity_source.library_id, album_id));
     await tx.delete(library_identity).where(eq(library_identity.library_id, album_id));

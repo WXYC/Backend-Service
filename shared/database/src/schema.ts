@@ -2064,7 +2064,11 @@ export const library_watermark = wxyc_schema.table(
  * cascade-destroyed against the old id — those live in
  * `catalog_delete_snapshot` now (written in the same transaction as the
  * delete), keyed on the OLD `library.id`, and are restored from there under
- * the release's NEW `library.id` once it comes back, not re-derived. Which
+ * the release's NEW `library.id` once it comes back, not re-derived. That row
+ * also holds the deleted `library` row itself (`captured -> 'entity'`), which
+ * is what makes a restore possible at all for a release Backend minted rather
+ * than imported: there is no upstream row to re-select for those, so the ETL
+ * recipe below cannot bring one back. Which
  * re-sync path actually gets the release re-selected is moving faster than
  * this docstring: the upstream-edit branch (saving the release in
  * tubafrenzy's `/wxycdb`) went dark when Tomcat stopped and may or may not
@@ -2114,9 +2118,35 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * `artists.id` once WXYC/Backend-Service#2562 wires the artist delete onto
  * the same `captureCatalogDeleteSnapshot` helper. No FK on `entity_id`: the
  * row it names is gone by the time this table is read, same reasoning as
- * `library_delete_denylist.library_id` above. `captured` is a JSON object
- * keyed by child table name, holding every row that referenced the deleted
- * parent, read inside the same transaction before the delete runs.
+ * `library_delete_denylist.library_id` above.
+ *
+ * **`captured` shape.** Two namespaces, not one flat map:
+ *
+ * ```json
+ * {
+ *   "entity":   { "table": "library", "row": { "id": 42, "album_title": "…", … } },
+ *   "children": { "bins": [ … ], "reviews": [ … ], … }
+ * }
+ * ```
+ *
+ * `entity.row` is the DELETED PARENT ROW itself, every non-generated column of
+ * it (generated columns like `library.search_doc` are recomputed by Postgres on
+ * re-insert, so storing one would be permanent waste). `entity.table` names
+ * which table it came from, because `entity_kind` is the queryable label and
+ * does not always equal the table name (`'artist'` / `artists`).
+ * `children` maps child table name -> every row that referenced the deleted
+ * parent, read inside the same transaction before the delete runs. The
+ * envelope is what keeps the two from colliding: no child table name can ever
+ * shadow the parent's key.
+ *
+ * Capturing the parent is not redundant with re-importing it.
+ * `jobs/library-etl` refreshes only `LEGACY_SOURCED_LIBRARY_COLUMNS`, so
+ * `label`, `label_id`, `discogs_unavailable`, `discogs_unavailable_note` and
+ * every LML-resolved column were never recoverable from upstream — and since
+ * the wiki#89 Phase 3.5 freeze there is no upstream row at all for a release
+ * Backend minted itself, which is every release filed through the new classic
+ * UI. For those the documented ETL restore path cannot work, and this is the
+ * only record of what the release said.
  *
  * Captures the EIGHT irreplaceable children only — the ones a person typed
  * and nothing recomputes: `compilation_track_artist`, `library_urls`,
@@ -2157,16 +2187,25 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     "fix" this with a projection — reason (1) means there is nothing to
  *     restore.
  *   - Excluded because the delete REFUSES outright rather than ever reaching
- *     them: `flowsheet` (the 409 flowsheet-plays guard) and `digital_asset`
- *     (the 409 `has_digital_assets` guard — its FK has no `onDelete` at all,
- *     and its rows are audio-archive metadata nobody can casually re-enter,
- *     so the delete never proceeds far enough to need a snapshot of it; see
- *     `deleteAlbumFromDB` in `library.service.ts`).
- * `library_identity_history` and `album_popularity.representative_library_id`
- * are the two FK-LESS pointers at `library.id` (a new FK-less pointer is a
- * fifth thing worth checking for, alongside the four buckets above), and
- * each sits outside those buckets for a different reason. Neither is
- * captured here, and neither needs to be. `library_identity_history` is
+ *     it: `flowsheet` (the 409 flowsheet-plays guard).
+ *   - `digital_asset` + `digital_asset_file` are BOTH, split on status. Its FK
+ *     has no `onDelete` at all, so the delete must refuse or destroy the row.
+ *     A LIVE asset (any status but `'rejected'`) is audio-archive metadata
+ *     nobody can casually re-enter, so the delete refuses with 409
+ *     (`has_digital_assets`). A `'rejected'` asset is CAPTURED — together with
+ *     its `digital_asset_file` rows, a second depth-2 `via` child, so the
+ *     `object_key`s of the objects its cascade orphans stay on record — and
+ *     then deleted through, because nothing in the service can clear such a
+ *     row and refusing on it would leave the release permanently undeletable
+ *     over evidence the station already rejected. See
+ *     `NON_BLOCKING_DIGITAL_ASSET_STATUS` in `library.service.ts`, and
+ *     `jobs/library-call-number-dedup/merge.ts`, which already deletes through
+ *     this table on a merge for the same recoverability reason.
+ * `library_identity_history`, `album_popularity.representative_library_id` and
+ * `flowsheet_linkage_review.candidate_library_ids` are the THREE FK-LESS
+ * pointers at `library.id` (a new FK-less pointer is a fifth thing worth
+ * checking for, alongside the four buckets above), and each sits outside those
+ * buckets for a different reason. None is captured here. `library_identity_history` is
  * deliberately left DANGLING after a delete: it is a supersedure audit log
  * that has to outlive the row it describes — see `deleteAlbumFromDB`'s
  * docstring. `album_popularity.representative_library_id` is NULLed
@@ -2176,6 +2215,22 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * (a canonical pressing) recomputed by `album-popularity-refresh.service.ts`
  * on its own cadence, so the NULL is a transient gap the next refresh
  * closes, not data this table needs to hold.
+ *
+ * `flowsheet_linkage_review.candidate_library_ids` is the one this census
+ * MISSED until the BS#2560 review, and it is the one with an unhandled
+ * consequence rather than a reasoned exemption. It is an `integer[]` of
+ * candidate `library.id`s on the gray-zone LML match queue that
+ * `scripts/review-linkage.ts` drains interactively; a delete leaves a dead id
+ * inside that array, so a reviewer is later offered a candidate that resolves
+ * to nothing. Two things make it invisible to the guards above: the array is
+ * not an FK, so no RI action fires and no orphan scan over `library.id` finds
+ * it; and the row hangs off `flowsheet_id`, not `album_id`, so the play-count
+ * refusal STRUCTURALLY cannot catch it — an unreviewed queue row exists
+ * precisely because its entry is NOT linked to a library row yet, which is the
+ * state where all three play counts read zero. Nothing repairs this today; it
+ * is recorded here rather than fixed because repairing it means either
+ * rewriting the array mid-delete or refusing on an unreviewed queue row, and
+ * neither belongs in BS#2560.
  *
  * `batch_id` groups every snapshot row written by one delete request — the
  * legacy `ChangeLogEntry.batchId` field, carried forward: an artist delete

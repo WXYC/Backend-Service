@@ -55,7 +55,14 @@ jest.mock('@sentry/node', () => {
 import * as fs from 'fs';
 import * as path from 'path';
 import * as Sentry from '@sentry/node';
-import { album_review_submissions, captureCatalogDeleteSnapshot, db, library, reviews } from '@wxyc/database';
+import {
+  album_review_submissions,
+  captureCatalogDeleteSnapshot,
+  db,
+  digital_asset,
+  library,
+  reviews,
+} from '@wxyc/database';
 
 const servicePath = path.resolve(__dirname, '../../../apps/backend/services/library.service.ts');
 const serviceSource = fs.readFileSync(servicePath, 'utf-8');
@@ -136,6 +143,19 @@ const runDelete = async (
   const { deleteAlbumFromDB } = await loadService();
   const outcome = await deleteAlbumFromDB(albumId, options.actor);
   return { outcome, ops };
+};
+
+/**
+ * The args handed to the (mocked) `captureCatalogDeleteSnapshot`. The capture
+ * itself is doubled in `tests/mocks/database.mock.ts`, so its call args are
+ * the only place the children list is observable without a database.
+ */
+const captureArgs = () => {
+  const capture = captureCatalogDeleteSnapshot as unknown as {
+    mock: { calls: Array<[unknown, { entityIdColumn: unknown; children: unknown[] }]> };
+  };
+  expect(capture.mock.calls).toHaveLength(1);
+  return capture.mock.calls[0][1];
 };
 
 // SELECT order inside the delete transaction: existence (locked) → rotation
@@ -476,6 +496,73 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       expect(outcome).toEqual({ outcome: 'deleted' });
       expect(ops.some((o) => o.op === 'delete')).toBe(true);
     });
+
+    it('locks the asset rows it checks, since a status UPDATE takes no lock on the library row', async () => {
+      const { ops } = await runDelete(42, CLEAN);
+
+      const assetSelect = ops.filter((o) => o.op === 'select')[4];
+      expect(assetSelect.methods).toContain('for(update)');
+    });
+
+    /**
+     * BS#2560 review finding 2. Refusing on EVERY status made a release
+     * permanently undeletable through the API, because nothing in this service
+     * can clear or delete a `digital_asset` row — so a reviewer rejecting a
+     * mis-bound asset was enough to strand the release forever, recoverable
+     * only by hand-written SQL against prod. `merge.ts` already deletes
+     * through this table on a merge for the same recoverability reason.
+     */
+    describe('rejected assets are not blockers (BS#2560 review finding 2)', () => {
+      const rejected = { id: 501, provenance: 'rotation_upload', disc_number: 1, status: 'rejected' };
+
+      it('deletes a release whose only asset was rejected, rather than refusing forever', async () => {
+        const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected]]);
+
+        expect(outcome).toEqual({ outcome: 'deleted' });
+      });
+
+      it('deletes the rejected asset through, scoped to the ids it locked and captured', async () => {
+        const { ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected]]);
+
+        // Scoped to the locked ids rather than to `library_id`: a row that
+        // appeared outside that set must raise the FK violation on the
+        // library delete instead of being destroyed unseen.
+        expect(ops.some((o) => o.op === 'delete' && o.table === digital_asset)).toBe(true);
+      });
+
+      it('captures the rejected asset and its files before deleting through them', async () => {
+        await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected]]);
+
+        const { children } = captureArgs();
+        expect(children).toContain(digital_asset.library_id);
+        // The depth-2 file child carries the object keys of the S3 objects the
+        // cascade orphans, which is what keeps the owed re-bind findable.
+        expect(children).toEqual(expect.arrayContaining([expect.objectContaining({ via: expect.anything() })]));
+      });
+
+      it('still refuses when a live asset sits alongside a rejected one, naming only the live one', async () => {
+        const live = { id: 502, provenance: 'cd_rip', disc_number: 2, status: 'needs_review' };
+        const { outcome, ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected, live]]);
+
+        expect(outcome).toEqual({
+          outcome: 'has_digital_assets',
+          assets: [{ id: 502, provenance: 'cd_rip', discNumber: 2, status: 'needs_review' }],
+        });
+        expect(ops.filter((o) => o.op === 'delete')).toHaveLength(0);
+      });
+
+      it('refuses on a status the vocabulary has not grown yet, rather than deleting through it', async () => {
+        // `status` is an open vocabulary; the predicate is "everything except
+        // rejected" so a future value blocks by default.
+        const future = { id: 503, provenance: 'cd_rip', disc_number: 1, status: 'ripped' };
+        const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [future]]);
+
+        expect(outcome).toEqual({
+          outcome: 'has_digital_assets',
+          assets: [{ id: 503, provenance: 'cd_rip', discNumber: 1, status: 'ripped' }],
+        });
+      });
+    });
   });
 
   /**
@@ -495,19 +582,22 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const { outcome } = await runDelete(42, CLEAN);
       expect(outcome).toEqual({ outcome: 'deleted' });
 
-      const capture = captureCatalogDeleteSnapshot as unknown as {
-        mock: { calls: Array<[unknown, { children: Array<{ name: string; column: unknown }> }]> };
-      };
-      expect(capture.mock.calls).toHaveLength(1);
-      const { children } = capture.mock.calls[0][1];
+      const { children } = captureArgs();
+      // Children are bare FK columns now (the table and the JSON key are
+      // derived from the column), so the assertion is on column identity —
+      // and the mock maps every column to a table-qualified sentinel, so this
+      // fails however the table is reintroduced.
+      expect(children).toContain(reviews.album_id);
+      expect(children).not.toContain(album_review_submissions.album_id);
+    });
 
-      expect(children.map((child) => child.name)).toContain('reviews');
-      expect(children.map((child) => child.name)).not.toContain('album_review_submissions');
-      // Column identity, not just the label: the mock maps every column to a
-      // table-qualified sentinel, so this still fails if the table is added
-      // back under some other key.
-      expect(children.map((child) => child.column)).toContain(reviews.album_id);
-      expect(children.map((child) => child.column)).not.toContain(album_review_submissions.album_id);
+    it('names the parent id column so the deleted library row is captured too', async () => {
+      await runDelete(42, CLEAN);
+
+      // Without this the snapshot holds the subtree but not the row being
+      // deleted — and for a Backend-minted release there is no upstream row to
+      // restore the parent from, so nothing else records what it said.
+      expect(captureArgs().entityIdColumn).toBe(library.id);
     });
   });
 
