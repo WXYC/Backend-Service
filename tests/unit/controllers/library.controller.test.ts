@@ -151,16 +151,14 @@ const mockDeleteAlbumFromDB = jest.fn<
     id: number,
     actor?: { userId?: string | null; email?: string | null; role?: string | null }
   ) => Promise<
-    | { outcome: 'deleted' }
-    | { outcome: 'not_found' }
-    | { outcome: 'lock_unavailable' }
     | {
-        outcome: 'has_flowsheet_plays';
-        playCount: number;
+        outcome: 'deleted';
         directPlayCount: number;
         rotationLinkedPlayCount: number;
         legacyLinkedPlayCount: number;
       }
+    | { outcome: 'not_found' }
+    | { outcome: 'lock_unavailable' }
   >
 >();
 
@@ -4092,10 +4090,12 @@ describe('library.controller', () => {
       expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(999, expect.any(Object));
     });
 
-    it('refuses with 409 and names the play count when the release carries flowsheet plays', async () => {
+    // BS#2565 (D1): the flowsheet-play refusal is gone — a release with
+    // plays deletes, and the counts ride along on the 204 body, per arm and
+    // never summed, so the client can still say what it damaged.
+    it('deletes a release carrying flowsheet plays and reports the per-arm counts', async () => {
       mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'has_flowsheet_plays',
-        playCount: 59,
+        outcome: 'deleted',
         directPlayCount: 59,
         rotationLinkedPlayCount: 0,
         legacyLinkedPlayCount: 0,
@@ -4105,42 +4105,19 @@ describe('library.controller', () => {
 
       await deleteAlbum(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.status).toHaveBeenCalledWith(204);
       expect(res.json).toHaveBeenCalledWith({
-        message: expect.stringContaining('59'),
-        reason: 'flowsheet_references',
-        play_count: 59,
         direct_play_count: 59,
         rotation_linked_play_count: 0,
         legacy_linked_play_count: 0,
       });
     });
 
-    it('uses singular phrasing for exactly one flowsheet play', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'has_flowsheet_plays',
-        playCount: 1,
-        directPlayCount: 1,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
-      const req = { params: { id: '42' } } as unknown as Request;
-      const res = mockResponse();
-
-      await deleteAlbum(req, res, next);
-
-      const body = (res.json as jest.Mock).mock.calls[0][0] as { message: string };
-      expect(body.message).not.toContain('1 plays');
-    });
-
     // The transitive path (BS#2112 review finding 3): plays that reach the
     // release only through `flowsheet.rotation_id` -> `rotation.album_id`.
-    // A librarian looking at a release with zero directly-linked plays would
-    // otherwise have no way to understand the refusal.
-    it('spells out the split when plays arrive via the rotation entry', async () => {
+    it('reports plays that arrive via the rotation entry separately from direct plays', async () => {
       mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'has_flowsheet_plays',
-        playCount: 12,
+        outcome: 'deleted',
         directPlayCount: 0,
         rotationLinkedPlayCount: 12,
         legacyLinkedPlayCount: 0,
@@ -4150,58 +4127,21 @@ describe('library.controller', () => {
 
       await deleteAlbum(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(409);
-      const body = (res.json as jest.Mock).mock.calls[0][0] as {
-        message: string;
-        play_count: number;
-        direct_play_count: number;
-        rotation_linked_play_count: number;
-      };
-      expect(body.play_count).toBe(12);
-      expect(body.direct_play_count).toBe(0);
-      expect(body.rotation_linked_play_count).toBe(12);
-      expect(body.message).toContain('rotation entry');
-    });
-
-    it('omits the split when every play is linked directly', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'has_flowsheet_plays',
-        playCount: 4,
-        directPlayCount: 4,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
+      expect(res.json).toHaveBeenCalledWith({
+        direct_play_count: 0,
+        rotation_linked_play_count: 12,
+        legacy_linked_play_count: 0,
       });
-      const req = { params: { id: '42' } } as unknown as Request;
-      const res = mockResponse();
-
-      await deleteAlbum(req, res, next);
-
-      const body = (res.json as jest.Mock).mock.calls[0][0] as { message: string };
-      expect(body.message).not.toContain('rotation entry');
     });
 
-    it('returns 204 with no body on success', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
-      const req = { params: { id: '42' } } as unknown as Request;
-      const res = mockResponse();
-      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
-
-      await deleteAlbum(req, res, next);
-
-      expect(res.status).toHaveBeenCalledWith(204);
-      expect(res.end).toHaveBeenCalled();
-      expect(res.json).not.toHaveBeenCalled();
-    });
-
-    // BS#2112 review finding 8: plays the tubafrenzy webhook wrote carrying
-    // only `legacy_release_id`, which `jobs/legacy-linkage-resolve` has not yet
-    // turned into an `album_id`. Deleting in that window strands them for
-    // good, because the denylist means no future library row ever carries that
-    // legacy id for the resolver to join to.
-    it('spells out the split when plays are awaiting legacy-id linkage', async () => {
+    // BS#2112 review finding 8, still true post-BS#2565: plays the tubafrenzy
+    // webhook wrote carrying only `legacy_release_id`, which
+    // `jobs/legacy-linkage-resolve` has not yet turned into an `album_id`.
+    // Deleting strands them for good — the denylist means no future library
+    // row ever carries that legacy id for the resolver to join to.
+    it('reports legacy-linked plays separately, not summed into the other arms', async () => {
       mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'has_flowsheet_plays',
-        playCount: 3,
+        outcome: 'deleted',
         directPlayCount: 0,
         rotationLinkedPlayCount: 0,
         legacyLinkedPlayCount: 3,
@@ -4211,14 +4151,31 @@ describe('library.controller', () => {
 
       await deleteAlbum(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(409);
-      const body = (res.json as jest.Mock).mock.calls[0][0] as {
-        message: string;
-        legacy_linked_play_count: number;
-      };
-      expect(body.legacy_linked_play_count).toBe(3);
-      expect(body.message).toContain('legacy release id');
-      expect(body.message).not.toContain('rotation entry');
+      expect(res.json).toHaveBeenCalledWith({
+        direct_play_count: 0,
+        rotation_linked_play_count: 0,
+        legacy_linked_play_count: 3,
+      });
+    });
+
+    it('returns 204 with the (zero) per-arm counts when the release carries no plays', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteAlbum(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.json).toHaveBeenCalledWith({
+        direct_play_count: 0,
+        rotation_linked_play_count: 0,
+        legacy_linked_play_count: 0,
+      });
     });
 
     // BS#2112 review finding 7: the delete stands down rather than block a
@@ -4242,7 +4199,12 @@ describe('library.controller', () => {
     // without an actor incident response cannot tell a legitimate deletion
     // from an abusive one.
     it('threads the authenticated subject through to the service', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
       const req = {
         params: { id: '42' },
         auth: { id: 'user-abc', email: 'md@wxyc.org', role: 'musicDirector' },
@@ -4260,7 +4222,12 @@ describe('library.controller', () => {
     });
 
     it('falls back to the JWT `sub` claim when `id` is absent', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
       const req = {
         params: { id: '42' },
         auth: { sub: 'subject-xyz', email: 'sm@wxyc.org', role: 'stationManager' },
@@ -4276,7 +4243,12 @@ describe('library.controller', () => {
     // A thin token (AUTH_BYPASS, or a payload with no claims) must cost the
     // audit trail, never the delete.
     it('still deletes when no auth payload is present, recording nulls', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
+      mockDeleteAlbumFromDB.mockResolvedValue({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
       res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];

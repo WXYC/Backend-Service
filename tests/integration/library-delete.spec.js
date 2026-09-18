@@ -6,9 +6,9 @@
  *     delete 404s) rather than soft-tombstoned.
  *   - the library_watermark advance so a client holding a pre-delete
  *     Last-Modified re-pulls the catalog instead of 304-ing stale.
- *   - the flowsheet-referenced 409 refusal: never silently blank play
- *     history via the `flowsheet.album_id` set-null FK — the release and
- *     its plays both survive the refused request.
+ *   - the flowsheet play count (BS#2565 D1 removed the 409 refusal over it):
+ *     a release carrying plays deletes anyway, and the 204 body reports the
+ *     damage split by path, never summed.
  *   - the four blocking FKs (`bins`, `library_identity`,
  *     `library_identity_source`, `artist_library_crossreference`) resolved
  *     inside the same transaction as the delete, rather than the DELETE
@@ -28,10 +28,10 @@
  *     has no `onDelete` at all (no cascade, no set-null), so a bound release
  *     is refused with 409 (`reason: 'digital_asset_references'`) rather than
  *     raising a raw FK-violation 500.
- *   - the TRANSITIVE refusal: plays reachable only via `flowsheet.rotation_id`
+ *   - the TRANSITIVE count: plays reachable only via `flowsheet.rotation_id`
  *     -> `rotation.album_id` (`set null` behind a `cascade`), the routine
  *     shape the tubafrenzy webhook produces when it resolves the two columns
- *     independently. A direct-FK-only guard blanks these silently.
+ *     independently. A direct-FK-only count would miss these silently.
  *   - the delete-denylist row: `jobs/library-etl` consults it on every
  *     invocation (scheduled or by hand — see the job's own docstring for why
  *     that distinction matters post-`cd8f058e`) and skips a denylisted
@@ -43,11 +43,12 @@
  *   - the actor recorded on that denylist row: `catalog:write` is held by two
  *     roles, so what-and-when without who leaves incident response unable to
  *     tell a legitimate deletion from an abusive one.
- *   - the LEGACY-ID refusal: plays that name the release only via
+ *   - the LEGACY-ID count: plays that name the release only via
  *     `flowsheet.legacy_release_id`, which `jobs/legacy-linkage-resolve` has
- *     not yet resolved to an `album_id`. Deleting in that window is worse
- *     than blanking — the denylist guarantees no future library row carries
- *     that legacy id, so the resolver can never link them.
+ *     not yet resolved to an `album_id`. Deleting strands them permanently —
+ *     the denylist guarantees no future library row carries that legacy id,
+ *     so the resolver can never link them — which is why this arm is
+ *     reported separately from the other two, never summed into them.
  *   - `library_identity_history` deliberately RETAINED and left dangling: a
  *     supersedure audit log has to outlive the row it describes.
  *   - migration 0148's `flowsheet_rotation_id_idx`, without which the
@@ -117,11 +118,14 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * The 409 cases are the reason this teardown exists. They create a release,
-   * attach flowsheet plays, and then assert the endpoint REFUSES to delete it
-   * — so the endpoint under test cannot clean up after itself by design, and
-   * each run would otherwise leak a library row plus its plays into the
-   * shared integration database indefinitely.
+   * The digital-asset 409 cases are the reason this teardown still needs to
+   * be this thorough: they create a release and assert the endpoint REFUSES
+   * to delete it, so the endpoint under test cannot clean up after itself by
+   * design, and each run would otherwise leak a library row into the shared
+   * integration database indefinitely. (The flowsheet-play cases no longer
+   * refuse post-BS#2565 — the delete does the cleanup for them — but every
+   * `DELETE` here is idempotent, so covering both is cheaper than splitting
+   * the fixtures apart.)
    *
    * Order matters and mirrors the endpoint's own: children that block or
    * dangle first, then the library row (whose FKs cascade the rest).
@@ -246,29 +250,42 @@ describe('DELETE /library/:id (BS#2112)', () => {
     await auth.delete('/library/99999999').expect(404);
   });
 
-  test('refuses with 409 naming the play count when the release carries flowsheet plays (D10)', async () => {
-    const album = await createAlbum(`BS#2112 Flowsheet Refusal ${uniq}`);
+  // BS#2565 (D1): the 409 refusal over flowsheet plays is gone. A release
+  // carrying plays deletes, reports the damage on the 204 body split by
+  // path, and leaves a catalog_delete_snapshot row behind — the actual undo
+  // path now that there is nothing left to refuse over.
+  test('deletes a release carrying flowsheet plays, reporting the direct play count on the 204 body', async () => {
+    const album = await createAlbum(`BS#2112 Flowsheet Plays ${uniq}`);
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
        VALUES ($1, 'track', 9500, 'Built to Spill', $2, 'probe track one'),
               ($1, 'track', 9501, 'Built to Spill', $2, 'probe track two')`,
-      [album.id, `BS#2112 Flowsheet Refusal ${uniq}`]
+      [album.id, `BS#2112 Flowsheet Plays ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(409);
-    expect(res.body.reason).toBe('flowsheet_references');
-    expect(res.body.play_count).toBe(2);
+    const res = await auth.delete(`/library/${album.id}`).expect(204);
     expect(res.body.direct_play_count).toBe(2);
     expect(res.body.rotation_linked_play_count).toBe(0);
-    expect(res.body.message).toContain('2');
+    expect(res.body.legacy_linked_play_count).toBe(0);
 
-    // Refused, not partially applied: the release and its plays both survive.
-    const info = await auth.get('/library/info').query({ album_id: album.id }).expect(200);
-    expect(info.body.id).toBe(album.id);
-    const plays = await sql.unsafe(`SELECT count(*)::int AS n FROM "${SCHEMA}".flowsheet WHERE album_id = $1`, [
-      album.id,
+    // Really deleted, and the plays' FK went with it (set-null, not the row).
+    await auth.get('/library/info').query({ album_id: album.id }).expect(404);
+    const rows = await sql.unsafe(
+      `SELECT album_id FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`,
+      [`BS#2112 Flowsheet Plays ${uniq}`]
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.album_id === null)).toBe(true);
+
+    const snapshot = await sql.unsafe(
+      `SELECT 1 FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = $1`,
+      [album.id]
+    );
+    expect(snapshot).toHaveLength(1);
+
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
+      `BS#2112 Flowsheet Plays ${uniq}`,
     ]);
-    expect(plays[0].n).toBe(2);
   });
 
   test('resolves bins, library_identity, library_identity_source, and artist_library_crossreference inside the transaction instead of raising an FK violation', async () => {
@@ -369,16 +386,16 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * The transitive refusal. `rotation.album_id` is `cascade` and
+   * The transitive count. `rotation.album_id` is `cascade` and
    * `flowsheet.rotation_id` is `set null`, so deleting a release blanks
    * `rotation_id` on plays that reached it only through the rotation entry.
    * That is the routine shape, not an edge case: the tubafrenzy webhook
    * resolves `album_id` and `rotation_id` independently, so a play regularly
-   * carries a `rotation_id` with a NULL `album_id`. A guard that counted only
-   * `flowsheet.album_id` would return 204 here and silently destroy the
-   * provenance of every one of those plays.
+   * carries a `rotation_id` with a NULL `album_id`. A count that counted only
+   * `flowsheet.album_id` would report 0 here and silently miss the damage to
+   * every one of those plays.
    */
-  test('refuses with 409 when plays reach the release only through its rotation entry', async () => {
+  test('deletes a release whose plays reach it only through its rotation entry, reporting them apart from direct plays', async () => {
     const album = await createAlbum(`BS#2112 Rotation Transitive ${uniq}`);
 
     const rotationRows = await sql.unsafe(
@@ -394,19 +411,21 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [rotationId, `BS#2112 Rotation Transitive ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(409);
-    expect(res.body.reason).toBe('flowsheet_references');
-    expect(res.body.play_count).toBe(1);
+    const res = await auth.delete(`/library/${album.id}`).expect(204);
     expect(res.body.direct_play_count).toBe(0);
     expect(res.body.rotation_linked_play_count).toBe(1);
-    expect(res.body.message).toContain('rotation entry');
+    expect(res.body.legacy_linked_play_count).toBe(0);
 
-    // Refused, not partially applied: the rotation row and the play's link
-    // to it both survive.
+    // The rotation row cascaded away with the release; the play survives with
+    // its rotation_id blanked, not deleted.
     const surviving = await sql.unsafe(`SELECT count(*)::int AS n FROM "${SCHEMA}".flowsheet WHERE rotation_id = $1`, [
       rotationId,
     ]);
-    expect(surviving[0].n).toBe(1);
+    expect(surviving[0].n).toBe(0);
+
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
+      `BS#2112 Rotation Transitive ${uniq}`,
+    ]);
   });
 
   test('counts a play linked by both paths once, not twice', async () => {
@@ -422,10 +441,14 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [album.id, rotationRows[0].id, `BS#2112 Both Paths ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(409);
-    expect(res.body.play_count).toBe(1);
+    const res = await auth.delete(`/library/${album.id}`).expect(204);
     expect(res.body.direct_play_count).toBe(1);
     expect(res.body.rotation_linked_play_count).toBe(0);
+    expect(res.body.legacy_linked_play_count).toBe(0);
+
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
+      `BS#2112 Both Paths ${uniq}`,
+    ]);
   });
 
   /**
@@ -455,24 +478,34 @@ describe('DELETE /library/:id (BS#2112)', () => {
     expect(denylisted[0].deleted_at).not.toBeNull();
   });
 
-  test('writes no denylist row when the delete is refused', async () => {
+  // Flowsheet plays no longer refuse the delete post-BS#2565, so the only
+  // remaining refusal is the digital-asset one — this asserts the denylist
+  // stays clean for that path.
+  test('writes no denylist row when the delete is refused over a live digital asset', async () => {
     const album = await createAlbum(`BS#2112 Denylist Refusal ${uniq}`);
     const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
     const legacyReleaseId = before[0].legacy_release_id;
 
     await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
-       VALUES ($1, 'track', 9800, 'Built to Spill', $2, 'refusal probe')`,
-      [album.id, `BS#2112 Denylist Refusal ${uniq}`]
+      `INSERT INTO "${SCHEMA}".digital_asset (library_id, provenance, disc_number, status)
+       VALUES ($1, 'rotation_upload', 1, 'needs_review')`,
+      [album.id]
     );
 
-    await auth.delete(`/library/${album.id}`).expect(409);
+    try {
+      await auth.delete(`/library/${album.id}`).expect(409);
 
-    const denylisted = await sql.unsafe(
-      `SELECT 1 FROM "${SCHEMA}".library_delete_denylist WHERE legacy_release_id = $1`,
-      [legacyReleaseId]
-    );
-    expect(denylisted).toHaveLength(0);
+      const denylisted = await sql.unsafe(
+        `SELECT 1 FROM "${SCHEMA}".library_delete_denylist WHERE legacy_release_id = $1`,
+        [legacyReleaseId]
+      );
+      expect(denylisted).toHaveLength(0);
+    } finally {
+      // Same reason as the digital-asset refusal test below: the shared
+      // teardown's unconditional library DELETE would hit the FK violation
+      // this test exists to catch.
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".digital_asset WHERE library_id = $1`, [album.id]);
+    }
   });
 
   /**
@@ -552,16 +585,17 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * BS#2112 review finding 8. The tubafrenzy webhook writes
-   * `flowsheet.legacy_release_id` on every entry and resolves `album_id`
-   * separately; `jobs/legacy-linkage-resolve` closes the gap on a half-hourly
-   * cron. A play sitting in that window has a NULL `album_id` and no
-   * `rotation_id`, so a guard counting only the two FK paths reads zero.
-   * Deleting then is worse than blanking: the denylist means no future
-   * `library` row ever carries that `legacy_release_id`, so the resolver can
-   * never link the play and its provenance is stranded permanently.
+   * BS#2112 review finding 8, still true post-BS#2565. The tubafrenzy webhook
+   * writes `flowsheet.legacy_release_id` on every entry and resolves
+   * `album_id` separately; `jobs/legacy-linkage-resolve` closes the gap on a
+   * half-hourly cron. A play sitting in that window has a NULL `album_id` and
+   * no `rotation_id`, so a count of only the two FK paths reads zero. Deleting
+   * now strands it: the denylist means no future `library` row ever carries
+   * that `legacy_release_id`, so the resolver can never link the play and its
+   * provenance is gone for good — which is why this arm is reported apart
+   * from the other two on the 204 body, never summed into them.
    */
-  test('refuses with 409 when plays name the release only by its legacy release id', async () => {
+  test('deletes a release whose plays name it only by its legacy release id, reporting them as the stranded arm', async () => {
     const album = await createAlbum(`BS#2112 Legacy Linked ${uniq}`);
     const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
     const legacyReleaseId = before[0].legacy_release_id;
@@ -574,16 +608,13 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [legacyReleaseId, `BS#2112 Legacy Linked ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(409);
-    expect(res.body.reason).toBe('flowsheet_references');
-    expect(res.body.play_count).toBe(1);
+    const res = await auth.delete(`/library/${album.id}`).expect(204);
     expect(res.body.direct_play_count).toBe(0);
     expect(res.body.rotation_linked_play_count).toBe(0);
     expect(res.body.legacy_linked_play_count).toBe(1);
 
-    // Refused means untouched: the release and the play both survive.
     const stillThere = await sql.unsafe(`SELECT id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
-    expect(stillThere).toHaveLength(1);
+    expect(stillThere).toHaveLength(0);
 
     await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE legacy_release_id = $1`, [legacyReleaseId]);
   });
