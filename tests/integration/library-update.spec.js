@@ -300,6 +300,207 @@ describe('PATCH /library/:id', () => {
       expectErrorContains(badLetters, 'code_volume_letters');
     });
   });
+
+  // BS#2564 finding 1: `code_number`/`code_volume_letters` collide only
+  // within the SAME genre — call codes are genre-scoped (an artist filed in
+  // two genres has two independent shelves), matching the slot key
+  // `jobs/library-call-number-dedup` merges duplicates on.
+  describe('cross-genre collision scope (BS#2564 finding 1)', () => {
+    test('a same-artist, same-code_number release filed in a different genre is not treated as a collision', async () => {
+      const a = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Chuquimamani-Condori ${uniq}`,
+          code_letters: 'CQ',
+          genre_id: 11,
+          code_number: 9300 + (uniq % 500),
+        })
+        .expect(201);
+
+      // Rock (genre 11) shelf: code_number 1 taken.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Cross-Genre Rock ${uniq}`,
+          artist_id: a.body.id,
+          label: 'Cross-Genre Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+
+      // Jazz (genre 7) shelf: distinct, empty at code_number 1.
+      const jazzAlbum = await auth
+        .post('/library')
+        .send({
+          album_title: `Cross-Genre Jazz ${uniq}`,
+          artist_id: a.body.id,
+          label: 'Cross-Genre Label',
+          genre_id: 7,
+          format_id: 1,
+          code_number: 50,
+        })
+        .expect(201);
+
+      const res = await auth.patch(`/library/${jazzAlbum.body.id}`).send({ code_number: 1 }).expect(200);
+      expect(res.body.code_number).toBe(1);
+    });
+
+    test('a genre move is checked against the destination shelf, not the one the release is leaving', async () => {
+      const a = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Duke Ellington & John Coltrane ${uniq}`,
+          code_letters: 'DC',
+          genre_id: 11,
+          code_number: 9300 + (uniq % 500),
+        })
+        .expect(201);
+
+      // Rock (genre 11) shelf: code_number 1 taken by rockAlbum.
+      const rockAlbum = await auth
+        .post('/library')
+        .send({
+          album_title: `Cross-Genre Move Rock Owner ${uniq}`,
+          artist_id: a.body.id,
+          label: 'Cross-Genre Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+
+      // Jazz (genre 7) shelf: a DIFFERENT release also happens to sit at
+      // code_number 1 — the wrong-genre shelf the check must not consult.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Cross-Genre Move Jazz Owner ${uniq}`,
+          artist_id: a.body.id,
+          label: 'Cross-Genre Label',
+          genre_id: 7,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+
+      const moving = await auth
+        .post('/library')
+        .send({
+          album_title: `Cross-Genre Move Target ${uniq}`,
+          artist_id: a.body.id,
+          label: 'Cross-Genre Label',
+          genre_id: 7,
+          format_id: 1,
+          code_number: 60,
+        })
+        .expect(201);
+
+      const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11, code_number: 1 }).expect(409);
+      expect(res.body.reason).toBe('album_code_conflict');
+      // Names the Rock-genre owner (the destination shelf) — not the
+      // Jazz-genre release that happens to share (artist_id, code_number 1)
+      // in the genre the release is leaving.
+      expect(res.body.album.id).toBe(rockAlbum.body.id);
+    });
+  });
+
+  // BS#2564 finding 2: an explicit code_number supplied alongside an
+  // artist_id move must win over the pre-existing auto-regenerate (review
+  // issue 7) — that block tests the row's OLD code_number, which the
+  // operator's new explicit value makes irrelevant.
+  describe('artist move with an explicit code_number (BS#2564 finding 2)', () => {
+    let destArtist;
+    let originArtist;
+
+    beforeAll(async () => {
+      const dest = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Stereolab ${uniq}`,
+          code_letters: 'SL',
+          genre_id: 11,
+          code_number: 9350 + (uniq % 500),
+        })
+        .expect(201);
+      destArtist = dest.body;
+
+      const origin = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Cat Power ${uniq}`,
+          code_letters: 'CP',
+          genre_id: 11,
+          code_number: 9350 + (uniq % 500),
+        })
+        .expect(201);
+      originArtist = origin.body;
+
+      // destArtist already owns code_number 1 — the auto-regenerate's
+      // trigger, and the number a bad fix would silently hand back instead
+      // of the operator's explicit choice.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Explicit Move Dest Existing ${uniq}`,
+          artist_id: destArtist.id,
+          label: 'Explicit Move Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+    });
+
+    test('a free destination code_number is written verbatim, not auto-regenerated', async () => {
+      const moving = await auth
+        .post('/library')
+        .send({
+          album_title: `Explicit Move Origin A ${uniq}`,
+          artist_id: originArtist.id,
+          label: 'Explicit Move Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      // originArtist's own auto-assigned number happens to collide with
+      // destArtist's existing 1 — exactly the shape that fires the
+      // pre-existing auto-regenerate if the explicit value below is ignored.
+      expect(moving.body.code_number).toBe(1);
+
+      const res = await auth
+        .patch(`/library/${moving.body.id}`)
+        .send({ artist_id: destArtist.id, code_number: 5 })
+        .expect(200);
+      expect(res.body.artist_id).toBe(destArtist.id);
+      expect(res.body.code_number).toBe(5);
+    });
+
+    test('a colliding explicit code_number 409s instead of silently reassigning', async () => {
+      const moving = await auth
+        .post('/library')
+        .send({
+          album_title: `Explicit Move Origin B ${uniq}`,
+          artist_id: originArtist.id,
+          label: 'Explicit Move Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      const res = await auth
+        .patch(`/library/${moving.body.id}`)
+        .send({ artist_id: destArtist.id, code_number: 1 })
+        .expect(409);
+      expect(res.body.reason).toBe('album_code_conflict');
+
+      // Confirm nothing was silently written: the release stays under its
+      // original artist.
+      const info = await auth.get('/library/info').query({ album_id: moving.body.id }).expect(200);
+      expect(info.body.artist_id).toBe(originArtist.id);
+    });
+  });
 });
 
 describe('GET /library/artists/search — review-feedback regressions (PR #1154)', () => {
