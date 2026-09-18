@@ -71,7 +71,16 @@ const BRANCHA_ALBUM = 'BS88 BranchA Album';
 // rotation row's OWN columns not at all (they're NULL, so branch b can't
 // fire), leaving only rotation -> library -> artists text as the match path.
 const ROTATION_ID_BRANCH_C = 7172;
-const BRANCHC_ARTIST_ID = 7300;
+// Out of the `artists_id_seq` band on purpose (9xxx, matching the hardcoded
+// artist ids in library-search-alias / library-legacy-release-id-exposure).
+// The seed leaves that sequence in the 7xxx range, so a low literal here is in
+// the path of every API-minted artist the suite creates — and this fixture is
+// the destructive combination: `ON CONFLICT (id) DO UPDATE` silently HIJACKS
+// (and renames) whichever artist landed on the id first, then afterAll DELETEs
+// it, which fails on the crossreference FK any API-minted artist carries. It
+// showed up when BS#2564 added three artist POSTs to library-update.spec.js
+// and the third landed on 7300.
+const BRANCHC_ARTIST_ID = 9300;
 const BRANCHC_LIB_ID = 7301;
 const BRANCHC_ARTIST = 'BS88 BranchC Artist';
 const BRANCHC_ALBUM = 'BS88 BranchC Album';

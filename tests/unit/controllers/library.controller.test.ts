@@ -3369,6 +3369,25 @@ describe('library.controller', () => {
         expect(mockUpdateAlbumInDB).toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(200);
       });
+
+      // BS#2564: the field this comparison needs is only in the pre-edit row
+      // because `getLibraryRowById` selects it. Without that column
+      // `existing.code_volume_letters` is `undefined`, a resubmitted 'A'
+      // compares unequal, and a full-record Save runs an UPDATE whose SET list
+      // includes album_title — advancing the catalog watermark and forcing
+      // every iOS / dj-site poller into a full re-download for a write that
+      // changed nothing. (The service-side select is pinned end-to-end in
+      // tests/integration/library-update.spec.js; this case pins the
+      // controller's half.)
+      it('returns 200 without running the UPDATE when the submitted code_volume_letters equals the stored value', async () => {
+        mockGetLibraryRowById.mockResolvedValue({ ...existingRow, code_volume_letters: 'A' });
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_title: existingRow.album_title, code_volume_letters: 'A' }), res, next);
+
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
     });
 
     describe('enrichment repair on identity change (#1549)', () => {
@@ -3527,13 +3546,24 @@ describe('library.controller', () => {
       });
     });
 
-    // BS#2564 finding 2: an explicit body.code_number riding alongside an
-    // artist_id move must win over the pre-existing auto-regenerate (issue
-    // 7) — that block tests the row's OLD code_number, which is meaningless
-    // once the body supplies a new one, and a bug here silently discarded the
-    // operator's explicit choice.
+    // BS#2564 finding 2: a code_number riding alongside an artist_id move
+    // wins over the pre-existing auto-regenerate (issue 7) only when it
+    // DIFFERS from the stored value. A differing value is the operator naming
+    // the destination shelf; an echo of the stored value is what a
+    // full-record resubmit sends whether or not the operator touched the
+    // field, so it must still fall through to the collision regenerate.
     describe('artist move with an explicit code_number (BS#2564 finding 2)', () => {
-      it('the explicit code_number is written verbatim, never consulting the auto-regenerate', async () => {
+      // `clearMocks: true` (jest.unit.config.ts) is mockClear semantics: it
+      // drops recorded calls but leaves implementations installed, so the
+      // values these tests set would otherwise leak into every later test in
+      // the file — including a future artist-move test, which would inherit a
+      // phantom collision. Reset them at the block boundary.
+      afterEach(() => {
+        mockAlbumCodeNumberTaken.mockReset();
+        mockGenerateAlbumCodeNumber.mockReset();
+      });
+
+      it('a code_number differing from the stored value is written verbatim, never consulting the auto-regenerate', async () => {
         // Rigged to prove the auto-regenerate path is never reached: if it
         // fired, albumCodeNumberTaken would report a collision and
         // generateAlbumCodeNumber would overwrite the explicit 5 with 999.
@@ -3551,6 +3581,42 @@ describe('library.controller', () => {
         );
         expect(res.status).toHaveBeenCalledWith(200);
       });
+
+      it('a code_number that merely echoes the stored value still regenerates on a collision', async () => {
+        // The dj-site full-record-Save shape: the operator moved only the
+        // artist, but the body carries the row's own code_number because every
+        // read response emits it. The destination artist already owns that
+        // number, so the move must still burn the next one in its sequence
+        // instead of filing two releases into one shelf slot — there is no
+        // collision check and no DB constraint (BS#2033) behind this.
+        mockAlbumCodeNumberTaken.mockResolvedValue(true);
+        mockGenerateAlbumCodeNumber.mockResolvedValue(9);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ artist_id: 55, code_number: existingRow.code_number }), res, next);
+
+        expect(mockAlbumCodeNumberTaken).toHaveBeenCalledWith(55, existingRow.code_number, 42);
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ artist_id: 55, code_number: 9 })
+        );
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('an echoed code_number is kept when the destination artist has no collision', async () => {
+        mockAlbumCodeNumberTaken.mockResolvedValue(false);
+        mockGenerateAlbumCodeNumber.mockResolvedValue(999);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ artist_id: 55, code_number: existingRow.code_number }), res, next);
+
+        expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ artist_id: 55, code_number: existingRow.code_number })
+        );
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
     });
 
     // A PATCH omitting `code_volume_letters` leaves the stored value alone
@@ -3565,6 +3631,22 @@ describe('library.controller', () => {
         const res = mockResponse();
 
         await updateAlbum(reqFor({ code_volume_letters: null }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ code_volume_letters: null }));
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      // The documented sibling spelling (app.yaml: "an empty string or an
+      // explicit null clears it to NULL"), and the only path through the
+      // `?? null` coalesce — an explicit null takes the other ternary branch,
+      // so without this case the coalesce could be deleted with the whole
+      // suite still green, leaving a librarian who clears the box with a 200
+      // and the old letters still stored.
+      it('writes null when code_volume_letters is an empty string on a lettered row', async () => {
+        mockGetLibraryRowById.mockResolvedValue({ ...existingRow, code_volume_letters: 'A' });
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ code_volume_letters: '' }), res, next);
 
         expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ code_volume_letters: null }));
         expect(res.status).toHaveBeenCalledWith(200);
