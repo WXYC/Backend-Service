@@ -8,6 +8,9 @@ const mockMarkAlbumFound = jest.fn<() => Promise<{ id: number } | undefined>>();
 const mockFuzzySearchLibrary = jest.fn<() => Promise<unknown[]>>();
 const mockEnrichWithArtwork = jest.fn<(results: unknown[]) => Promise<unknown[]>>();
 const mockArtistIdFromName = jest.fn<(name: string, genreId: number) => Promise<number>>();
+// BS#2563 rename probe: spans every genre the artist is filed in, so it takes
+// the artist id instead of a genre id -- see `conflictingArtistIdForRename`.
+const mockConflictingArtistIdForRename = jest.fn<(name: string, artistId: number) => Promise<number>>();
 const mockGetArtistNameById = jest.fn<(id: number) => Promise<string | null>>();
 type ArtistConflictRow = { artist_id: number; artist_name: string; code_letters: string };
 const mockGetArtistByCode =
@@ -198,6 +201,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   updateCanonicalEntity: mockUpdateCanonicalEntity,
   mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
   artistIdFromName: mockArtistIdFromName,
+  conflictingArtistIdForRename: mockConflictingArtistIdForRename,
   getArtistNameById: mockGetArtistNameById,
   insertArtistWithGenreCrossreference: mockInsertArtistWithGenreCrossreference,
   getArtistByCode: mockGetArtistByCode,
@@ -4430,11 +4434,11 @@ describe('library.controller', () => {
     // 400ing, while a non-string value still 400s -- the entire runtime
     // defense behind `UpdateArtistRequest.artist_name?: string` being erased
     // at runtime, same as the `alphabetical_name` guard below.
-    it('writes a plausible rename, checking the collision pre-check by genre and returning the refreshed card', async () => {
+    it('writes a plausible rename, collision-probing every genre, and returns the refreshed card', async () => {
       mockGetArtistCardById
         .mockResolvedValueOnce(existingCard)
         .mockResolvedValueOnce({ ...existingCard, artist_name: 'Anohni Hegarty' });
-      mockArtistIdFromName.mockResolvedValue(0);
+      mockConflictingArtistIdForRename.mockResolvedValue(0);
       mockUpdateArtistInDB.mockResolvedValue({
         id: 42,
         artist_name: 'Anohni Hegarty',
@@ -4445,18 +4449,20 @@ describe('library.controller', () => {
 
       await updateArtistCard(req, res, next);
 
-      expect(mockArtistIdFromName).toHaveBeenCalledWith(
-        'Anohni Hegarty',
-        existingCard.genre_id,
-        existingCard.artist_id
-      );
+      // The ARTIST id, never `existingCard.genre_id`: that field is the lowest
+      // of a multi-genre artist's memberships, and probing it alone is the
+      // BS#2563-review bug this argument shape forecloses. `artistIdFromName`
+      // -- the single-genre probe -- must not be reached from the rename path
+      // at all.
+      expect(mockConflictingArtistIdForRename).toHaveBeenCalledWith('Anohni Hegarty', existingCard.artist_id);
+      expect(mockArtistIdFromName).not.toHaveBeenCalled();
       expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni Hegarty' });
       expect(res.status).toHaveBeenCalledWith(200);
     });
 
     it('writes both artist_name and alphabetical_name from the same body', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(0);
+      mockConflictingArtistIdForRename.mockResolvedValue(0);
       mockUpdateArtistInDB.mockResolvedValue({
         id: 42,
         artist_name: 'Anohni Hegarty',
@@ -4476,37 +4482,39 @@ describe('library.controller', () => {
       });
     });
 
-    // Advisory-only pre-check (BS#2106, no constraint backs it), scoped to
-    // the artist's own genre the same way `addArtist`'s collision pre-check
-    // is genre-scoped -- matching the `artist_name_conflict` precedent
-    // rather than a bare 400.
-    it('returns 409 with the conflicting artist when the new name collides in the same genre', async () => {
+    // Advisory-only pre-check (BS#2106, no constraint backs it) -- matching
+    // `addArtist`'s `artist_name_conflict` precedent rather than a bare 400.
+    // The message deliberately does NOT say "in that genre" the way the two
+    // create paths do: the client sent no genre and the probe spans all of
+    // them, so naming one would be a guess.
+    it('returns 409 with the conflicting artist when the new name collides in any of its genres', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(7);
+      mockConflictingArtistIdForRename.mockResolvedValue(7);
       mockGetArtistById.mockResolvedValue({ artist_id: 7, artist_name: 'Antony', code_letters: 'AN' });
       const req = { params: { id: '42' }, body: { artist_name: 'Antony' } } as unknown as Request;
       const res = mockResponse();
 
       await updateArtistCard(req, res, next);
 
-      expect(mockArtistIdFromName).toHaveBeenCalledWith('Antony', existingCard.genre_id, existingCard.artist_id);
+      expect(mockConflictingArtistIdForRename).toHaveBeenCalledWith('Antony', existingCard.artist_id);
       expect(res.status).toHaveBeenCalledWith(409);
       expect(res.json).toHaveBeenCalledWith({
-        message: 'Artist name already exists in that genre.',
+        message: "Artist name already exists in one of this artist's genres.",
         reason: 'artist_name_conflict',
         artist: { artist_id: 7, artist_name: 'Antony', code_letters: 'AN' },
       });
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
-    // Self-exclusion lives in `artistIdFromName` itself (BS#2563), not a
-    // post-hoc `!== artistId` check here -- a probe that can still return
-    // self would mask a genuine duplicate on a genre that already holds a
-    // pre-existing fold-equal pair. The controller's job is just to pass its
-    // own id through so the query can exclude it.
-    it('excludes its own artist id from the collision probe', async () => {
+    // Self-exclusion lives in `conflictingArtistIdForRename` itself (BS#2563),
+    // not a post-hoc `!== artistId` check here -- a probe that can still
+    // return self would mask a genuine duplicate on a genre that already holds
+    // a pre-existing fold-equal pair. The controller's job is just to pass its
+    // own id through so the query can exclude it; the exclusion itself is
+    // pinned end-to-end in `tests/integration/library.spec.js`.
+    it('hands its own artist id to the probe so the query can exclude it', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(0);
+      mockConflictingArtistIdForRename.mockResolvedValue(0);
       mockUpdateArtistInDB.mockResolvedValue({
         id: 42,
         artist_name: 'ANOHNI',
@@ -4517,7 +4525,7 @@ describe('library.controller', () => {
 
       await updateArtistCard(req, res, next);
 
-      expect(mockArtistIdFromName).toHaveBeenCalledWith('ANOHNI', existingCard.genre_id, existingCard.artist_id);
+      expect(mockConflictingArtistIdForRename).toHaveBeenCalledWith('ANOHNI', existingCard.artist_id);
       expect(mockGetArtistById).not.toHaveBeenCalled();
       expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'ANOHNI' });
     });
@@ -4528,7 +4536,7 @@ describe('library.controller', () => {
     // `addArtist` documents for its own pre-check.
     it('proceeds when the conflicting id from the pre-check no longer resolves to a row', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(7);
+      mockConflictingArtistIdForRename.mockResolvedValue(7);
       mockGetArtistById.mockResolvedValue(null);
       mockUpdateArtistInDB.mockResolvedValue({
         id: 42,
@@ -4558,7 +4566,7 @@ describe('library.controller', () => {
 
       await updateArtistCard(req, res, next);
 
-      expect(mockArtistIdFromName).not.toHaveBeenCalled();
+      expect(mockConflictingArtistIdForRename).not.toHaveBeenCalled();
       expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, {
         artist_name: existingCard.artist_name,
         alphabetical_name: 'Anohni Hegarty',
@@ -4599,7 +4607,7 @@ describe('library.controller', () => {
 
     it('stores the NFC-normalized, trimmed artist_name', async () => {
       mockGetArtistCardById.mockResolvedValue(existingCard);
-      mockArtistIdFromName.mockResolvedValue(0);
+      mockConflictingArtistIdForRename.mockResolvedValue(0);
       mockUpdateArtistInDB.mockResolvedValue({
         id: 42,
         artist_name: 'Anohni Hegarty',

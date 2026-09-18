@@ -3493,11 +3493,28 @@ describe('Library Artist Card (BS#2156)', () => {
     // `library.artist_name` is denormalized (Epic A.3) and the
     // `cascade_library_artist_name` trigger (migration 0060) is what keeps it
     // in sync -- this only fires against a real database, never the
-    // @wxyc/database unit mock. `library.search_doc` is a GENERATED column
-    // (schema.ts), so proving the renamed value is findable through catalog
-    // search -- not just readable off the album -- pins that the tsvector
-    // recomputed too, with no application-side reindex step.
-    test('cascades the rename onto every linked library.artist_name row, findable in catalog search', async () => {
+    // @wxyc/database unit mock. Two assertions for two columns:
+    //
+    //   1. `/library/info` reads `library.artist_name` -- the denormalized
+    //      column the trigger writes.
+    //   2. The tsvector predicate is asserted directly in SQL, because
+    //      `library.search_doc` is a STORED GENERATED column (schema.ts) and
+    //      no HTTP read path isolates it: `GET /library?artist_name=X` with no
+    //      `album_title` lands in `fuzzySearchLibrary`'s trigram-only branch,
+    //      which filters on `library.artist_name %` -- the same column
+    //      assertion 1 already covers -- and Both-mode's tsvector arm has a
+    //      trigram fallback over that column too. So an HTTP assertion here
+    //      would re-check the denormalized column and merely LOOK like it
+    //      checked the index.
+    //
+    // The rename shares no token with the original name ("Card Test Artist"
+    // -> "Chuquimamani-Condori", unique suffix retained), which is what makes
+    // both directions discriminating: the pre-rename search terms cannot match
+    // the renamed doc, and the renamed terms cannot match a stale one. The
+    // earlier shape here asked for the stored value plus a suffix, which
+    // trigram-matched the un-renamed row well above the 0.3 threshold and so
+    // would have passed with the cascade broken.
+    test('cascades the rename onto every linked library.artist_name row and recomputes search_doc', async () => {
       const artist = await createTestArtist();
       const release = await auth
         .post('/library')
@@ -3509,15 +3526,23 @@ describe('Library Artist Card (BS#2156)', () => {
           format_id: 1,
         })
         .expect(201);
+      const sql = getTestDb();
 
-      const renamed = `${artist.artist_name} Cascaded`;
+      const renamed = artist.artist_name.replace('Card Test Artist', 'Chuquimamani-Condori');
+      expect(renamed).not.toBe(artist.artist_name);
       await auth.patch(`/library/artists/${artist.id}`).send({ artist_name: renamed }).expect(200);
 
       const info = await auth.get('/library/info').query({ album_id: release.body.id }).expect(200);
       expect(info.body.artist_name).toBe(renamed);
 
-      const found = await auth.get('/library').query({ artist_name: renamed }).expect(200);
-      expect(found.body.some((row) => row.id === release.body.id)).toBe(true);
+      const [doc] = await sql`
+        SELECT search_doc @@ websearch_to_tsquery('simple', ${renamed}) AS matches_renamed,
+               search_doc @@ websearch_to_tsquery('simple', ${artist.artist_name}) AS matches_original
+          FROM ${sql(SCHEMA)}.library
+         WHERE id = ${release.body.id}
+      `;
+      expect(doc.matches_renamed).toBe(true);
+      expect(doc.matches_original).toBe(false);
     });
 
     // BS#2563: the trigger has to clear this marker itself, in the same
@@ -3552,6 +3577,62 @@ describe('Library Artist Card (BS#2156)', () => {
         `SELECT artwork_lookup_attempted_at FROM ${SCHEMA}.library WHERE id = ${release.body.id}`
       );
       expect(row.artwork_lookup_attempted_at).toBeNull();
+    });
+
+    // BS#2563 acceptance criterion, stated as a prohibition: the rename must
+    // NOT touch `flowsheet.artist_name`. That column is a historical on-air
+    // snapshot -- what was actually announced -- and rewriting it would
+    // falsify the archive, so "the cascade stops at `library`" is a real
+    // invariant and not merely the current behavior. It holds today because
+    // the only triggers on `wxyc_schema.artists` are `cdc_artists` (0046),
+    // `cascade_library_artist_name` (0060/0172) and
+    // `touch_library_watermark_from_artists` (0105), none of which writes
+    // `flowsheet`, and because no service path does either. Nothing enforced
+    // that, which is what this test is for: the play below is LINKED to the
+    // renamed artist's release (`album_id`), the strongest case, since a
+    // future artists->flowsheet propagation would reach a linked row first.
+    test('leaves flowsheet.artist_name alone -- the rename must not rewrite on-air history', async () => {
+      const artist = await createTestArtist();
+      const release = await auth
+        .post('/library')
+        .send({
+          album_title: `Flowsheet Invariant Album ${artist.code_letters}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      const sql = getTestDb();
+      // Straight into PG: the flowsheet endpoints need a live show and a DJ
+      // session, neither of which this invariant depends on. `play_order` is
+      // NOT NULL with no default; `show_id` is left NULL, which flowsheet
+      // permits (same shape as the BS#2410 link tests above).
+      const [play] = await sql`
+        INSERT INTO ${sql(SCHEMA)}.flowsheet
+          (play_order, entry_type, artist_name, album_title, track_title, album_id)
+        VALUES
+          (99997, 'track', ${artist.artist_name}, ${'Flowsheet Invariant Album ' + artist.code_letters},
+           'Invariant Test Track', ${release.body.id})
+        RETURNING id
+      `;
+
+      try {
+        const renamed = `${artist.artist_name} Renamed On Air`;
+        await auth.patch(`/library/artists/${artist.id}`).send({ artist_name: renamed }).expect(200);
+
+        // The library row moved...
+        const info = await auth.get('/library/info').query({ album_id: release.body.id }).expect(200);
+        expect(info.body.artist_name).toBe(renamed);
+
+        // ...and the play row did not.
+        const [after] = await sql`
+          SELECT artist_name FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${play.id}
+        `;
+        expect(after.artist_name).toBe(artist.artist_name);
+      } finally {
+        await sql`DELETE FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${play.id}`;
+      }
     });
 
     // `req.body` is undefined for a body-less request under body-parser 2.x +
@@ -3660,7 +3741,9 @@ describe('Library Artist Card (BS#2156)', () => {
         .expect(409);
 
       expect(res.body).toEqual({
-        message: 'Artist name already exists in that genre.',
+        // Not the create paths' "in that genre": the rename probe spans every
+        // genre the artist is filed in and the client named none.
+        message: "Artist name already exists in one of this artist's genres.",
         reason: 'artist_name_conflict',
         artist: { artist_id: first.id, artist_name: first.artist_name, code_letters: first.code_letters },
       });
@@ -3712,20 +3795,20 @@ describe('Library Artist Card (BS#2156)', () => {
       }
     });
 
-    // BS#2156 review: `existing.genre_id` off `getArtistCardById` is
-    // deliberately the LOWEST genre_id a multi-genre artist is
-    // crossreferenced in, and the collision probe below is scoped to that one
-    // genre -- the same single-genre scoping `addArtist`'s own pre-check uses
-    // (it takes the client's `genre_id` directly, one genre, no fan-out
-    // across an artist's other memberships). A fold-equal duplicate filed
-    // under a DIFFERENT genre than the one the card surfaces is out of scope
-    // for this pre-check by the same design, not a gap introduced here.
-    // Genre 6 sorts below the genre 11 `createTestArtist` uses, so the
-    // artist's OWN lowest crossreference is genre 6 -- and the fold-equal
-    // duplicate is seeded into genre 11, the one `getArtistCardById` does
-    // NOT surface as `existing.genre_id`, so the probe never reaches it and
-    // the rename succeeds.
-    test('does not see a fold-equal duplicate filed under a DIFFERENT genre than the card surfaces', async () => {
+    // The multi-genre half of the conflict guard (BS#2563 review). The probe
+    // spans EVERY genre the renamed artist is filed in, and this is the case
+    // that distinguishes that from probing the one genre the card surfaces:
+    // `getArtistCardById` deliberately collapses a multi-genre artist onto its
+    // LOWEST `genre_id`, so the card here reports genre 6 while the fold-equal
+    // duplicate sits in genre 11. A genre-6-only probe -- the shape this
+    // endpoint shipped with, and the shape `addArtist` legitimately uses
+    // because it creates an artist in exactly one genre -- misses, returns
+    // 200, and leaves genre 11 holding two fold-equal `artists` rows: the
+    // state `jobs/artist-unicode-dedup` and migration 0134 exist to repair,
+    // and the state that makes `artistIdFromName`'s later find-or-create split
+    // one artist's shelf across two ids. A rename is global to the `artists`
+    // row, so the pre-check has to be too.
+    test('409s on a fold-equal duplicate filed under a genre the card does NOT surface', async () => {
       const artist = await createTestArtist();
       const sql = getTestDb();
       await sql.unsafe(
@@ -3743,20 +3826,55 @@ describe('Library Artist Card (BS#2156)', () => {
       );
 
       try {
-        // The card now surfaces genre 6 (the artist's lowest), while the
+        // The card surfaces genre 6 (the artist's lowest), while the
         // fold-equal duplicate lives in genre 11.
         const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
         expect(card.body.genre_id).toBe(6);
 
         const renamed = artist.artist_name.toLowerCase();
-        const res = await auth.patch(`/library/artists/${artist.id}`).send({ artist_name: renamed }).expect(200);
-        expect(res.body.artist_name).toBe(renamed);
+        const res = await auth.patch(`/library/artists/${artist.id}`).send({ artist_name: renamed }).expect(409);
+        expect(res.body.reason).toBe('artist_name_conflict');
+        expect(res.body.artist.artist_id).toBe(duplicate.id);
+
+        // The rename did not take effect.
+        const after = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(after.body.artist_name).toBe(artist.artist_name);
       } finally {
         await sql.unsafe(`DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${duplicate.id}`);
         await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${duplicate.id}`);
         await sql.unsafe(
           `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 6`
         );
+      }
+    });
+
+    // A genre the renamed artist is NOT filed in stays out of scope, which is
+    // the other half of "every genre THIS artist is filed in": the probe must
+    // widen from one genre to all of the artist's, not to the whole library.
+    // Artist identity here is genre-scoped -- two same-named artists in two
+    // different genres are two legitimate shelves -- so a library-wide probe
+    // would refuse renames that are correct.
+    test('allows a rename whose fold-equal namesake is in a genre this artist is not filed in', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      const [namesake] = await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artists (artist_name, alphabetical_name, code_letters)
+         VALUES ('${artist.artist_name}', '${artist.alphabetical_name}', '${artist.code_letters}')
+         RETURNING id`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${namesake.id}, 6, 9915)`
+      );
+
+      try {
+        // The artist is filed in genre 11 only; the namesake only in genre 6.
+        const renamed = artist.artist_name.toLowerCase();
+        const res = await auth.patch(`/library/artists/${artist.id}`).send({ artist_name: renamed }).expect(200);
+        expect(res.body.artist_name).toBe(renamed);
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${namesake.id}`);
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${namesake.id}`);
       }
     });
 
