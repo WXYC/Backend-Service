@@ -1996,52 +1996,90 @@ paths:
           description: Album not found
         '409':
           description: >-
-            Refused — the release carries flowsheet plays. The body is
-            deliberately NOT this service's standard error shape: the counts
-            are the substance of the refusal, telling the librarian how much
-            history the delete would have damaged and by which path.
+            Refused on the merits — either the release carries flowsheet
+            plays, or it has a bound `digital_asset` row. Both bodies are
+            deliberately NOT this service's standard error shape: the
+            specifics are the substance of the refusal, telling the
+            librarian what the delete would have damaged and by which path.
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  [
-                    'message',
-                    'reason',
-                    'play_count',
-                    'direct_play_count',
-                    'rotation_linked_play_count',
-                    'legacy_linked_play_count',
-                  ]
-                properties:
-                  message:
-                    type: string
-                    description: Human-readable refusal naming the play count
-                    example: 'Cannot delete: release has 59 flowsheet plays on record'
-                  reason:
-                    type: string
-                    enum: ['flowsheet_references']
-                  play_count:
-                    type: integer
-                    description: Total distinct plays the delete would damage (the sum of the three below)
-                  direct_play_count:
-                    type: integer
-                    description: Plays linked to the release itself via `flowsheet.album_id`
-                  rotation_linked_play_count:
-                    type: integer
-                    description: >-
-                      Plays linked only to the release's rotation entry via
-                      `flowsheet.rotation_id`, whose `album_id` is NULL or
-                      names a different release
-                  legacy_linked_play_count:
-                    type: integer
-                    description: >-
-                      Plays that name the release only by
-                      `flowsheet.legacy_release_id`, not yet resolved to an
-                      `album_id` by the linkage-resolve cron. Counted on a
-                      best-effort basis: the column carries no foreign key, so
-                      unlike the other two paths there is no referential lock
-                      to hold a concurrent webhook insert behind this check.
+                oneOf:
+                  - type: object
+                    description: 'Refused: flowsheet plays reference this release'
+                    required:
+                      [
+                        'message',
+                        'reason',
+                        'play_count',
+                        'direct_play_count',
+                        'rotation_linked_play_count',
+                        'legacy_linked_play_count',
+                      ]
+                    properties:
+                      message:
+                        type: string
+                        description: Human-readable refusal naming the play count
+                        example: 'Cannot delete: release has 59 flowsheet plays on record'
+                      reason:
+                        type: string
+                        enum: ['flowsheet_references']
+                      play_count:
+                        type: integer
+                        description: Total distinct plays the delete would damage (the sum of the three below)
+                      direct_play_count:
+                        type: integer
+                        description: Plays linked to the release itself via `flowsheet.album_id`
+                      rotation_linked_play_count:
+                        type: integer
+                        description: >-
+                          Plays linked only to the release's rotation entry via
+                          `flowsheet.rotation_id`, whose `album_id` is NULL or
+                          names a different release
+                      legacy_linked_play_count:
+                        type: integer
+                        description: >-
+                          Plays that name the release only by
+                          `flowsheet.legacy_release_id`, not yet resolved to an
+                          `album_id` by the linkage-resolve cron. Counted on a
+                          best-effort basis: the column carries no foreign key, so
+                          unlike the other two paths there is no referential lock
+                          to hold a concurrent webhook insert behind this check.
+                  - type: object
+                    description: 'Refused: a bound digital_asset row references this release'
+                    required: ['message', 'reason', 'asset_count', 'assets']
+                    properties:
+                      message:
+                        type: string
+                        description: Human-readable refusal naming the asset count and ids
+                        example: 'Cannot delete: release has 2 digital assets on record (ids: 41, 42)'
+                      reason:
+                        type: string
+                        enum: ['digital_asset_references']
+                      asset_count:
+                        type: integer
+                        description: Number of `digital_asset` rows bound to this release (`assets.length`)
+                      assets:
+                        type: array
+                        description: >-
+                          The bound rows themselves — rip evidence /
+                          S3-backed audio-archive metadata that has no
+                          `onDelete` and nobody can casually re-enter, so the
+                          delete refuses rather than destroying it.
+                        items:
+                          type: object
+                          required: ['id', 'provenance', 'disc_number', 'status']
+                          properties:
+                            id:
+                              type: integer
+                            provenance:
+                              type: string
+                              enum: [rotation_upload, cd_rip]
+                            disc_number:
+                              type: integer
+                            status:
+                              type: string
+                              enum: [needs_review, bound, rejected]
         '503':
           description: >-
             The delete stood down rather than wait on rows a live writer holds.

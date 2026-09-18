@@ -2057,17 +2057,21 @@ export const library_watermark = wxyc_schema.table(
  *
  * ```sql
  * DELETE FROM wxyc_schema.library_delete_denylist WHERE legacy_release_id = <id>;
- * -- then EITHER have a librarian re-save that release in tubafrenzy's
- * -- /wxycdb (bumps TIME_LAST_MODIFIED; the next run that actually happens —
- * -- scheduled or by hand — re-imports it), OR force one full re-sync:
- * DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%';
  * ```
  *
- * Either way the release returns under a FRESH `library.id`, without the
- * dependents that cascade-destroyed against the old one. That is what
- * `catalog_delete_snapshot` is for: written in the same transaction as the
- * delete, it captures those dependents so they don't have to be re-derived.
- * See `jobs/library-etl/README.md` for the full procedure and its caveats.
+ * That alone lifts the block on re-import; it does not by itself get the
+ * release re-selected, and it does not restore any of the dependents that
+ * cascade-destroyed against the old id — those live in
+ * `catalog_delete_snapshot` now (written in the same transaction as the
+ * delete), keyed on the OLD `library.id`, and are restored from there under
+ * the release's NEW `library.id` once it comes back, not re-derived. Which
+ * re-sync path actually gets the release re-selected is moving faster than
+ * this docstring: the upstream-edit branch (saving the release in
+ * tubafrenzy's `/wxycdb`) went dark when Tomcat stopped and may or may not
+ * have a replacement by the time this is read. Rather than a second copy of
+ * that procedure here, see "Restoring a release" in
+ * `jobs/library-etl/README.md` for the current one, including how to pull
+ * the dependents back out of `catalog_delete_snapshot`.
  *
  * **Who deleted it.** `deleted_by_*` records the authenticated subject at
  * delete time — this is the most destructive operation in the service and
@@ -2141,10 +2145,20 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     and its rows are audio-archive metadata nobody can casually re-enter,
  *     so the delete never proceeds far enough to need a snapshot of it; see
  *     `deleteAlbumFromDB` in `library.service.ts`).
- * `library_identity_history` is the one FK-LESS pointer at `library.id` and
- * sits outside all three buckets on purpose: it is a supersedure audit log
- * deliberately left DANGLING after a delete, on the reasoning that it has to
- * outlive the row it describes — see `deleteAlbumFromDB`'s docstring.
+ * `library_identity_history` and `album_popularity.representative_library_id`
+ * are the two FK-LESS pointers at `library.id` (a new FK-less pointer is a
+ * fourth thing worth checking for, alongside the three buckets above), and
+ * each sits outside those buckets for a different reason. Neither is
+ * captured here, and neither needs to be. `library_identity_history` is
+ * deliberately left DANGLING after a delete: it is a supersedure audit log
+ * that has to outlive the row it describes — see `deleteAlbumFromDB`'s
+ * docstring. `album_popularity.representative_library_id` is NULLed
+ * explicitly, in the same transaction as the delete (`library.service.ts`'s
+ * `deleteAlbumFromDB`, the `album_popularity` update ahead of the `DELETE
+ * FROM library`), rather than left dangling — it is a display join target
+ * (a canonical pressing) recomputed by `album-popularity-refresh.service.ts`
+ * on its own cadence, so the NULL is a transient gap the next refresh
+ * closes, not data this table needs to hold.
  *
  * `batch_id` groups every snapshot row written by one delete request — the
  * legacy `ChangeLogEntry.batchId` field, carried forward: an artist delete
