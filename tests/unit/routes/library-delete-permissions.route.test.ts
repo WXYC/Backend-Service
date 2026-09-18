@@ -145,14 +145,14 @@ describe('DELETE /library/:id — permission tier (BS#2112)', () => {
   test('a musicDirector-role token is authorized', async () => {
     mockRole('musicDirector');
     const res = await request(app).delete('/library/1').set('Authorization', 'Bearer test-token');
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(204);
     expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(1, expect.objectContaining({ role: 'musicDirector' }));
   });
 
   test('a stationManager-role token is authorized', async () => {
     mockRole('stationManager');
     const res = await request(app).delete('/library/1').set('Authorization', 'Bearer test-token');
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(204);
     expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(1, expect.objectContaining({ role: 'stationManager' }));
   });
 

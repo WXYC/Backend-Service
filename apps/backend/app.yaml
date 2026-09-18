@@ -2003,15 +2003,18 @@ paths:
     delete:
       summary: Hard-delete a library release (BS#2112)
       description: >-
-        Irreversible. Deletes even when the release carries flowsheet plays
-        (BS#2565 removed the prior 409 refusal over them) — the 200 body
-        reports the damage split by the same three paths the refusal used to
-        count: linked directly (`flowsheet.album_id`), via its rotation entry
-        (`flowsheet.rotation_id` -> `rotation.album_id`), or by bare
-        `flowsheet.legacy_release_id` awaiting the linkage-resolve cron. The
-        first two just lose their link; the third is stranded permanently,
+        Irreversible. BS#2565 removed the prior 409 refusal that fired when
+        the release carried flowsheet plays — the delete now proceeds
+        regardless, and reports nothing about them. Those plays are still
+        affected, just not reported here: linked directly
+        (`flowsheet.album_id`) or via its rotation entry
+        (`flowsheet.rotation_id` -> `rotation.album_id`), a play just loses
+        its link; linked only by a bare `flowsheet.legacy_release_id`
+        awaiting the linkage-resolve cron, a play is stranded permanently,
         since the delete-denylist means no future library row will ever
-        carry that legacy id for the resolver to join to.
+        carry that legacy id for the resolver to join to. A pre-delete read
+        that surfaces this to the librarian before the delete is a separate
+        endpoint, not this one.
         Dependent rows are resolved in the same transaction as the delete, and
         the release's `legacy_release_id` is recorded in a delete-denylist so
         the library ETL cannot re-import it from tubafrenzy. The denylist row
@@ -2025,39 +2028,8 @@ paths:
           schema:
             type: integer
       responses:
-        '200':
-          description: >-
-            Deleted — 200, not 204, because a 204 carries no body and this
-            response's whole point is one: the flowsheet plays it damaged,
-            split by path and never summed, since the arms are not equally
-            recoverable.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: ['direct_play_count', 'rotation_linked_play_count', 'legacy_linked_play_count']
-                properties:
-                  direct_play_count:
-                    type: integer
-                    description: Plays linked to the release itself via `flowsheet.album_id`
-                  rotation_linked_play_count:
-                    type: integer
-                    description: >-
-                      Plays linked only to the release's rotation entry via
-                      `flowsheet.rotation_id`, whose `album_id` is NULL or
-                      names a different release
-                  legacy_linked_play_count:
-                    type: integer
-                    description: >-
-                      Plays that named the release only by
-                      `flowsheet.legacy_release_id`, not yet resolved to an
-                      `album_id` by the linkage-resolve cron — now stranded,
-                      since the delete-denylist means no future library row
-                      will ever carry that legacy id for the resolver to
-                      join to. Counted on a best-effort basis: the column
-                      carries no foreign key, so unlike the other two paths
-                      there is no referential lock to hold a concurrent
-                      webhook insert behind this count.
+        '204':
+          description: Deleted; no body
         '400':
           description: Invalid album ID
         '404':

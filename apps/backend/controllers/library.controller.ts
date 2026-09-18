@@ -3686,18 +3686,16 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
 /**
  * DELETE /library/:id (BS#2112). Hard delete — no soft-delete tombstone; see
  * the issue's decision record for why. BS#2565 (D1) removed the 409 refusal
- * D10 used to raise when the release carried `flowsheet` plays: the delete
- * now proceeds and reports what it damaged, split by the same three
- * disjoint paths the old refusal counted — linked directly via
- * `flowsheet.album_id` (`onDelete: 'set null'`), transitively via
- * `flowsheet.rotation_id` → `rotation.album_id` (`set null` behind a
- * `cascade`), or by bare `flowsheet.legacy_release_id` — plays the tubafrenzy
- * webhook wrote that `jobs/legacy-linkage-resolve` has not yet turned into an
- * `album_id`, and so strands rather than unlinks once the release is gone
- * (see `libraryService.deleteAlbumFromDB`'s Durability paragraph). The three
- * counts stay separate in the response rather than summed, because the
- * legacy-linked arm is not equally recoverable — the other two just lose
- * their link, this one loses its only path to ever gaining one.
+ * D10 used to raise when the release carried `flowsheet` plays, so the
+ * delete now proceeds regardless of how many plays the release carries or
+ * how they reach it. What actually happens to those plays — blanked via
+ * `flowsheet.album_id` directly, blanked transitively via
+ * `flowsheet.rotation_id` → `rotation.album_id`, or, for a play the
+ * tubafrenzy webhook wrote that `jobs/legacy-linkage-resolve` had not yet
+ * turned into an `album_id`, stranded rather than unlinked once the release
+ * is gone — is reasoned about in `libraryService.deleteAlbumFromDB`'s
+ * docstring, not reported here (see below for why, and for where it belongs
+ * instead).
  * Still refuses with 409 when the release has a bound `digital_asset` row
  * (rip evidence / S3-backed files `jobs/digital-archive-bind` wrote): that FK
  * has no `onDelete` at all, so letting the delete reach it would either raise
