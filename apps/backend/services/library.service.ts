@@ -4569,7 +4569,13 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // Lock the release's rotation rows for the same reason: a writer setting
     // `flowsheet.rotation_id` takes FOR KEY SHARE on the ROTATION row, never
     // on the library row, so the lock above does not cover the transitive
-    // path. Doubles as the id list the transitive count needs.
+    // path. Doubles as the id list the transitive count needs. ALSO
+    // load-bearing for the `rotation_urls` capture below: an INSERT into
+    // `rotation_urls` takes FOR KEY SHARE on its `rotation` row, not on
+    // `library`, so it is this `.for('update')` — not the one above — that
+    // blocks a concurrent write from landing between that capture's
+    // subquery and the cascade delete. Do not drop or move this lock
+    // without re-checking that capture's atomicity.
     const rotationRows = await tx
       .select({ id: rotation.id })
       .from(rotation)
@@ -4677,7 +4683,10 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // subtree unrecoverable. `rotation_urls` is a depth-2 child — its FK
     // points at `rotation.id`, not at `library.id`, so it rides along with
     // `rotation`'s own capture via `catalogDeleteGrandchild` rather than a
-    // second top-level entry keyed on `album_id`. `album_metadata`,
+    // second top-level entry keyed on `album_id`. That grandchild capture is
+    // atomic only because of the `.for('update')` taken on the release's
+    // `rotation` rows above, not because of anything here — see the note on
+    // that lock. `album_metadata`,
     // `library_identity` + `library_identity_source`, and
     // `uncovered_release_search_markers` are deliberately NOT in this list
     // — see the `catalog_delete_snapshot` docstring in `schema.ts` for why
