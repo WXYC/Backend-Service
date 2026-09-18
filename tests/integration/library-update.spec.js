@@ -263,6 +263,45 @@ describe('PATCH /library/:id', () => {
       const res = await auth.patch(`/library/${target.id}`).send({ code_volume_letters: null }).expect(200);
       expect(res.body.code_volume_letters).toBeNull();
     });
+
+    // The other documented clearing spelling (app.yaml: "an empty string or
+    // an explicit null clears it to NULL") — the librarian who empties the
+    // volume-letters box rather than sending a JSON null. This is the only
+    // case that reaches the `?? null` coalesce; an explicit null takes the
+    // other ternary branch, so without it the coalesce could be deleted and
+    // the clear would answer 200 with the old letters still stored.
+    test('code_volume_letters: an empty string clears the letters to NULL', async () => {
+      const target = await mkAlbum(artist.id, 53, 'A', `Patch Code Target Clear Blank ${uniq}`);
+      expect(target.code_volume_letters).toBe('A');
+
+      const res = await auth.patch(`/library/${target.id}`).send({ code_volume_letters: '' }).expect(200);
+      expect(res.body.code_volume_letters).toBeNull();
+    });
+
+    // #1555 no-op short-circuit, end to end over the real SELECT: a
+    // full-record Save that resubmits the stored letters must not run an
+    // UPDATE. `getLibraryRowById` has to project code_volume_letters for the
+    // comparison to work — without it the stored 'B' compares against
+    // `undefined`, the handler sees a change, and the UPDATE's SET list
+    // (carrying album_title) advances the catalog watermark, forcing every
+    // iOS / dj-site poller into a full re-download for a write that changed
+    // nothing.
+    test('resubmitting the stored code_volume_letters runs no UPDATE', async () => {
+      const target = await mkAlbum(artist.id, 54, 'B', `Patch Code Target Echo ${uniq}`);
+      expect(target.code_volume_letters).toBe('B');
+
+      const before = await auth.get('/library/info').query({ album_id: target.id }).expect(200);
+
+      const res = await auth
+        .patch(`/library/${target.id}`)
+        .send({ album_title: before.body.album_title, code_volume_letters: 'B' })
+        .expect(200);
+
+      expect(res.body.code_volume_letters).toBe('B');
+      // updateAlbumInDB always SETs last_modified = NOW(), so an unchanged
+      // timestamp is the proof that no UPDATE ran.
+      expect(new Date(res.body.last_modified).getTime()).toBe(new Date(before.body.last_modified).getTime());
+    });
   });
 
   // BS#2564 finding 2: an explicit code_number supplied alongside an
@@ -338,6 +377,35 @@ describe('PATCH /library/:id', () => {
         .expect(200);
       expect(res.body.artist_id).toBe(destArtist.id);
       expect(res.body.code_number).toBe(5);
+    });
+
+    // The regression the "explicit wins" rule has to stop short of: a
+    // code_number echoing the row's own value is what a full-record Save
+    // sends whether or not the operator touched the field, so it expresses no
+    // destination choice and must still auto-regenerate on collision. Filing
+    // two releases into one (artist, code_number) slot would be silent —
+    // there is no collision check on this path and no DB constraint (#2033).
+    test('a code_number echoing the stored value still auto-regenerates on collision', async () => {
+      const moving = await auth
+        .post('/library')
+        .send({
+          album_title: `Explicit Move Origin Echo ${uniq}`,
+          artist_id: originArtist.id,
+          label: 'Explicit Move Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      expect(moving.body.code_number).toBe(1);
+
+      const res = await auth
+        .patch(`/library/${moving.body.id}`)
+        .send({ artist_id: destArtist.id, code_number: moving.body.code_number })
+        .expect(200);
+      expect(res.body.artist_id).toBe(destArtist.id);
+      // destArtist owns 1 already, so the move burns the next number in its
+      // sequence rather than landing on the echoed 1.
+      expect(res.body.code_number).toBeGreaterThan(1);
     });
   });
 });

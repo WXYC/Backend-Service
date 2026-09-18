@@ -3339,10 +3339,17 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   // string — the column is nullable and GET already emits this field as
   // `nullable: true`, so a client round-tripping a GET body into a PATCH
   // must be able to send back the `null` it just received.
+  //
+  // Hence the two different presence tests, which is the handler's standing
+  // convention rather than an oversight: `'X' in body` marks a field whose
+  // explicit null is a meaningful "clear it" (`alternate_artist_name`,
+  // `label_id`, `discogsUnavailableNote`), and `body.X !== undefined` marks
+  // one that has no null to express. `code_number` is `notNull`, so it stays
+  // on the latter.
   if (body.code_number !== undefined) {
     updates.code_number = validateCodeNumber(body.code_number);
   }
-  if (body.code_volume_letters !== undefined) {
+  if ('code_volume_letters' in body) {
     updates.code_volume_letters =
       body.code_volume_letters === null ? null : (validateCodeVolumeLetters(body.code_volume_letters) ?? null);
   }
@@ -3390,16 +3397,34 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       updates.artist_name = canonical_artist_name;
       // Re-attribution keeps the album's code_number unless the new artist
       // already owns it (issue 7) — only on collision do we burn the next
-      // number in the new artist's sequence, and only when the body supplies
-      // no code_number of its own. An explicit body.code_number is the
-      // operator's deliberate choice for the destination shelf; regenerating
-      // over it would silently discard that choice (BS#2564). A supplied
-      // number is written verbatim, uncollision-checked, same as every other
-      // code_number write on this endpoint and on POST /library.
-      const codeNumberTaken =
-        body.code_number === undefined &&
-        (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId));
-      if (codeNumberTaken) {
+      // number in the new artist's sequence. A code_number that DIFFERS from
+      // the stored one is the operator deliberately choosing the destination
+      // shelf, so it is written verbatim, uncollision-checked, same as every
+      // other code_number write on this endpoint and on POST /library;
+      // regenerating over it would silently discard that choice (BS#2564).
+      //
+      // The test is "differs", not "present", and the distinction is
+      // load-bearing: a code_number that merely echoes the stored value
+      // expresses no intent about the call number at all. dj-site's album
+      // editor resubmits the whole record on Save (the same client shape the
+      // #1555 short-circuit below exists for) and every read response carries
+      // code_number, so a GET → PATCH round-trip hands this handler the
+      // stored value whether or not the operator touched the field — the very
+      // round-tripping that forces this endpoint to accept an explicit
+      // `code_volume_letters: null` a few lines above. An echo is therefore
+      // indistinguishable from "keep what's there", which is exactly what a
+      // move did before this PR, so it falls through to the regenerate rather
+      // than filing two releases into one (artist, code_number) slot. That
+      // matters more than usual here: there is no application-level collision
+      // check on this path and no DB uniqueness constraint yet (BS#2033), so
+      // this regenerate is the only thing standing between a full-record
+      // resubmit and a silent duplicate shelf slot.
+      const clientChoseDestinationCodeNumber =
+        body.code_number !== undefined && body.code_number !== existing.code_number;
+      if (
+        !clientChoseDestinationCodeNumber &&
+        (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId))
+      ) {
         updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id);
       }
     }

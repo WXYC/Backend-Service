@@ -1967,7 +1967,12 @@ paths:
                     application-level collision check, same as the POST side
                     (single-librarian decision, rotation-import plan D2); the
                     eventual DB uniqueness constraint and its 23505 → 409
-                    mapping are tracked on #2033.
+                    mapping are tracked on #2033. Alongside an `artist_id`
+                    move, a value that DIFFERS from the stored one is honored
+                    verbatim as the destination shelf; a value that merely
+                    echoes the stored one expresses no choice (a full-record
+                    resubmit carries it either way) and still auto-regenerates
+                    when the destination artist already owns that number.
                 code_volume_letters:
                   type: string
                   nullable: true
