@@ -69,9 +69,11 @@ app.set('trust proxy', true);
 // Wrapped rather than mounted directly (BS#2558 PR #2566 review Finding 5):
 // a body-parser PARSE error (malformed JSON, or a body over the default
 // 100kb limit) calls `next(err)`, which skips every downstream non-error
-// middleware — including both account-audit mounts below (`adminPrefixAuditMiddleware`
-// at line ~101, `mountPublicAccountAudit` at line ~111) — and this file
-// registers no error handler until `fallbackErrorHandler` at the very
+// middleware — including both account-audit mounts below (the
+// `app.use('/auth/admin', adminPrefixAuditMiddleware())` line and
+// `mountPublicAccountAudit(app)`; grep for them rather than trusting a line
+// number, which is what the first draft of this comment got wrong) — and
+// this file registers no error handler until `fallbackErrorHandler` at the very
 // bottom. Left unwrapped, that handler unconditionally answers 500
 // (`./fallback-error-handler.ts`), regardless of the error's real status —
 // so on exactly the widened content types this predicate exists to fix, a
