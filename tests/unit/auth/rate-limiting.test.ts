@@ -182,8 +182,21 @@ describe('Auth service rate limiting', () => {
     // account_audit_event INSERT on its way to a 429 — bounding nothing the
     // issue actually costs. See the limiter's own comment in app.ts.
     it('mounts the admin-prefix limiter ahead of the account-audit prefix mount', () => {
-      const limiterIndex = authAppSource.indexOf("app.use('/auth/admin', adminPrefixRateLimit)");
-      const auditMountIndex = authAppSource.indexOf("app.use('/auth/admin', adminPrefixAuditMiddleware())");
+      // Match STATEMENTS, not the first occurrence of the text. `app.ts`'s
+      // body-parser comment cites `app.use('/auth/admin',
+      // adminPrefixAuditMiddleware())` verbatim (PR #2593 replaced stale line
+      // numbers with the call expression, which is durable but also makes the
+      // literal greppable), and that comment sits near the top of the file --
+      // so a bare `indexOf` finds the COMMENT and reports the audit mount as
+      // preceding the limiter, failing this test for a reason that has nothing
+      // to do with mount order. Anchoring at line start after optional
+      // indentation excludes comment lines, whose first non-space characters
+      // are `//`.
+      const statementIndex = (mount: string): number =>
+        authAppSource.search(new RegExp(String.raw`^\s*app\.use\('/auth/admin',\s*${mount}\)`, 'm'));
+
+      const limiterIndex = statementIndex('adminPrefixRateLimit');
+      const auditMountIndex = statementIndex(String.raw`adminPrefixAuditMiddleware\(\)`);
       expect(limiterIndex).toBeGreaterThan(-1);
       expect(auditMountIndex).toBeGreaterThan(-1);
       expect(limiterIndex).toBeLessThan(auditMountIndex);
