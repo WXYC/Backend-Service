@@ -3773,7 +3773,7 @@ export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
     return;
   }
 
-  res.status(204).send();
+  res.status(204).end();
 };
 
 // ---------------------------------------------------------------------------

@@ -1777,22 +1777,28 @@ export const flowsheet = wxyc_schema.table(
       .where(sql`${table.metadata_status} = 'enriched_no_match' AND ${table.rotation_id} IS NOT NULL`),
     // BS#2112. The GENERAL partial index on `rotation_id`. Its sibling above
     // is the only other index touching this column and it does NOT serve an
-    // unqualified `rotation_id` predicate: a query saying
-    // `rotation_id IN (...) AND album_id IS DISTINCT FROM $1` does not imply
-    // `metadata_status = 'enriched_no_match'`, so the planner cannot use the
-    // partial index and falls back to a Seq Scan of the ~2.6M-row / ~1.7 GB
-    // heap — past the 5 s `DB_STATEMENT_TIMEOUT_MS`.
+    // unqualified `rotation_id` predicate: a lookup keyed on `rotation_id`
+    // alone does not imply `metadata_status = 'enriched_no_match'`, so the
+    // planner cannot use the partial index and falls back to a Seq Scan of the
+    // ~2.6M-row / ~1.7 GB heap — past the 5 s `DB_STATEMENT_TIMEOUT_MS`.
     //
-    // Two consumers make that a correctness problem rather than a slow page.
-    // (1) `DELETE /library/:id`'s transitive play-count guard
-    // (`deleteAlbumFromDB`) runs exactly that predicate while holding
-    // `FOR UPDATE` on the release's `library` row and all of its `rotation`
-    // rows, so a statement timeout there aborts the delete AND blocks live
-    // flowsheet writers for the duration. (2) The `ON DELETE SET NULL` RI
-    // action on `flowsheet.rotation_id` (migration 0097) does its own lookup
-    // per cascaded `rotation` row — an unindexed scan each. Postgres never
-    // auto-indexes the referencing side of an FK, which is why both paths
-    // were exposed.
+    // One consumer makes that a correctness problem rather than a slow page:
+    // the `ON DELETE SET NULL` RI action on `flowsheet.rotation_id`
+    // (migration 0097) does its own lookup per cascaded `rotation` row — an
+    // unindexed scan each, because Postgres never auto-indexes the
+    // referencing side of an FK. `DELETE /library/:id` (`deleteAlbumFromDB`)
+    // cascades a release's `rotation` rows away while holding `FOR UPDATE` on
+    // the release's `library` row and on all of those `rotation` rows, so a
+    // statement timeout in that RI lookup aborts the delete AND blocks live
+    // flowsheet writers for the duration.
+    //
+    // There was a second consumer when the index was built, and it was the
+    // one named first: that endpoint's transitive play-count guard, which ran
+    // the unqualified `rotation_id` predicate directly. BS#2565 deleted that
+    // query along with the 409 refusal it fed. That does NOT leave the index
+    // unjustified — removing the refusal made the RI consumer above strictly
+    // HOTTER, because every delete now runs the cascade where before a release
+    // carrying plays was refused outright.
     //
     // `rotation_id IS NOT NULL` keeps this to linked rows only — the
     // overwhelming majority of `flowsheet` never sets the column — so it is a

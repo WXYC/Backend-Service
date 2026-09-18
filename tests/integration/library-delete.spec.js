@@ -53,9 +53,13 @@
  *     merely lose their link.
  *   - `library_identity_history` deliberately RETAINED and left dangling: a
  *     supersedure audit log has to outlive the row it describes.
- *   - migration 0148's `flowsheet_rotation_id_idx`, without which the
- *     transitive count seq-scans a ~2.6M-row heap past the 5s statement
- *     timeout while holding FOR UPDATE on live rows.
+ *   - migration 0148's `flowsheet_rotation_id_idx`. BS#2565 deleted the
+ *     transitive play count that was its original consumer; what justifies it
+ *     now is the `ON DELETE SET NULL` RI action on `flowsheet.rotation_id`,
+ *     which does an unindexed lookup per cascaded `rotation` row — and
+ *     removing the refusal made that consumer strictly HOTTER, since every
+ *     delete now runs the cascade. Full consumer list on the index
+ *     definition in `schema.ts`.
  *   - `album_popularity.representative_library_id` nulled — it names a
  *     library row and carries no FK, so nothing else stops it dangling.
  *   - migration 0147's repair of the drifted
@@ -237,9 +241,9 @@ describe('DELETE /library/:id (BS#2112)', () => {
     await sleep(1100);
 
     const del = await auth.delete(`/library/${album.id}`).expect(204);
-    // Pinned so a future change can't quietly reintroduce a body: BS#2565
-    // removed the play counts that used to ride on a 200, and there is
-    // nothing left for this response to carry.
+    // Pinned so a future change can't quietly give this a body: BS#2565
+    // removed the flowsheet-play refusal, so there is nothing left for the
+    // response to report on and no reason for it to carry anything.
     expect(del.text).toBe('');
 
     // The row is really gone (hard delete, not a soft-delete tombstone) — a
@@ -415,12 +419,28 @@ describe('DELETE /library/:id (BS#2112)', () => {
 
     await auth.delete(`/library/${album.id}`).expect(204);
 
-    // The rotation row cascaded away with the release; the play survives with
-    // its rotation_id blanked, not deleted.
-    const surviving = await sql.unsafe(`SELECT count(*)::int AS n FROM "${SCHEMA}".flowsheet WHERE rotation_id = $1`, [
+    // The rotation row cascaded away with the release, and the play SURVIVES
+    // with only its rotation_id blanked. Selected by its denormalized text,
+    // not by `rotation_id`: a row deleted outright also fails to match
+    // `rotation_id = <the dead id>`, so counting by that id passes either
+    // way and could not catch `set null` regressing to `cascade`. Keeping the
+    // archived play text is the entire reason this delete is allowed to
+    // proceed, so the surviving row IS the assertion.
+    const surviving = await sql.unsafe(
+      `SELECT album_id, rotation_id, track_title FROM "${SCHEMA}".flowsheet
+        WHERE artist_name = 'Built to Spill' AND album_title = $1`,
+      [`BS#2112 Rotation Transitive ${uniq}`]
+    );
+    expect(surviving).toHaveLength(1);
+    expect(surviving[0].rotation_id).toBeNull();
+    expect(surviving[0].album_id).toBeNull();
+    expect(surviving[0].track_title).toBe('rotation-only probe');
+
+    // And the rotation row really is gone — the cascade is what blanked it.
+    const rotationLeft = await sql.unsafe(`SELECT count(*)::int AS n FROM "${SCHEMA}".rotation WHERE id = $1`, [
       rotationId,
     ]);
-    expect(surviving[0].n).toBe(0);
+    expect(rotationLeft[0].n).toBe(0);
 
     await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
       `BS#2112 Rotation Transitive ${uniq}`,
@@ -571,13 +591,24 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * Migration 0148. The only index that touched `flowsheet.rotation_id` was
+   * Migration 0148. The only other index on `flowsheet.rotation_id` is
    * `flowsheet_rotation_no_match_idx`, partial on `metadata_status =
-   * 'enriched_no_match'`. The transitive play-count query's predicate does not
-   * imply that, so the planner could not use it and fell back to a sequential
-   * scan of the ~2.6M-row / ~1.7 GB heap — past the 5s `DB_STATEMENT_TIMEOUT_MS`,
-   * while this transaction holds FOR UPDATE on the library row and every one of
-   * its rotation rows. Every binned release would have 500'd.
+   * 'enriched_no_match'`, which the planner cannot use for an unqualified
+   * `rotation_id` predicate.
+   *
+   * BS#2565 deleted the transitive play-count query that was this index's
+   * original consumer, so do NOT read that query's absence from
+   * `deleteAlbumFromDB` as evidence the index is now dead weight. Its
+   * surviving consumer is the `ON DELETE SET NULL` RI action on
+   * `flowsheet.rotation_id` (migration 0097), which Postgres never
+   * auto-indexes and which does one lookup per cascaded `rotation` row — and
+   * removing the refusal made that consumer strictly HOTTER, because every
+   * delete now runs the cascade where before a release carrying plays was
+   * refused outright. Drop the index and the cascade itself sequentially
+   * scans the ~2.6M-row / ~1.7 GB heap past the 5s `DB_STATEMENT_TIMEOUT_MS`,
+   * while the delete holds FOR UPDATE on the library row and every one of its
+   * rotation rows. The full consumer list lives on the index definition in
+   * `schema.ts`.
    *
    * Asserted against `pg_indexes` rather than the Drizzle model for the same
    * reason the 0147 assertion above is: what matters is what the database has.
