@@ -155,6 +155,84 @@ app.use(
   })
 );
 
+// Disable rate limiting in test environments to avoid flaky integration tests.
+// This matches the pattern used by the backend's rateLimiting middleware.
+// Positive-list gate (BS#1097): the AUTH_BYPASS / USE_MOCK_SERVICES escape
+// hatches are honored only when NODE_ENV is explicitly development or test.
+// In any other environment (production, staging, or unset) rate limits hold.
+//
+// Computed here — ahead of the admin-prefix limiter immediately below —
+// rather than only just above the larger `if (!isTestEnv)` block further
+// down (BS#2554): that block's own limiters all protect paths registered
+// AFTER it in this file, but the admin-prefix limiter has to run ahead of
+// the account-audit mount AND every hand-written `/auth/admin/*` route
+// (`resolve-organization`, `provision-user`, the station-signup admin
+// router) to actually bound them. Both usages read the same two consts; see
+// the admin-prefix limiter's own comment for why its registration position
+// is load-bearing.
+const isDevOrTest = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
+const isTestEnv =
+  process.env.NODE_ENV === 'test' ||
+  (isDevOrTest && (process.env.USE_MOCK_SERVICES === 'true' || process.env.AUTH_BYPASS === 'true'));
+
+if (!isTestEnv) {
+  // BS#2554 (parent epic #2534, decision recorded 2026-09-18) — dedicated
+  // limiter for the WHOLE `/auth/admin` prefix. Every anonymous request to
+  // a known admin path used to cost one `auth.api.getSession` DB read (the
+  // account-audit mount below resolves an actor unconditionally, ahead of
+  // any authorization check) plus one `account_audit_event` INSERT, with no
+  // limiter of any kind bounding how often that could happen.
+  //
+  // Registration order is load-bearing, same as every other pre-limiter
+  // mount in this file: this MUST sit above the account-audit prefix mount
+  // immediately below, or a request that trips the limiter still pays for
+  // both costs on its way to a 429 — the audit mount kicks off its session
+  // read and registers its `res.on('finish')` listener the moment a request
+  // reaches it, independent of what a later middleware does with it. It also
+  // has to sit above `resolve-organization`, `provision-user`, and the
+  // station-signup admin router (all registered further down as hand-written
+  // Express routes), since Express matches-and-terminates in registration
+  // order — a limiter mounted after a route that already answered the
+  // request bounds nothing on that route.
+  //
+  // Decision 1 (recorded 2026-09-18): this does NOT move the audit write
+  // behind the authorization outcome — a request within budget is still
+  // audited on a 401/403 exactly as before. The limiter bounds volume, not
+  // which outcomes get recorded; a probe against `set-role` or `remove-user`
+  // inside the budget is exactly the forensic signal the audit trail exists
+  // to produce.
+  //
+  // Own instance, own `MemoryStore` — never `authMutationRateLimit`'s shared
+  // 10/15min bucket (the PR #2550 lesson, restated by the OTP limiters
+  // below): the control room shares one egress IP, so folding admin traffic
+  // into sign-in's budget would let a manager's routine admin work 429
+  // sign-in for everyone in the building.
+  //
+  // Decision 2 (recorded 2026-09-18): sized at 100/15min, not the tighter
+  // 10/15min brute-force tier. The limiter runs ahead of authentication, so
+  // the budget has to clear the busiest legitimate burst — semester-start
+  // provisioning, a station manager creating 20-30 accounts in one sitting,
+  // each `POST /auth/admin/provision-user` paired with a `GET
+  // /auth/admin/resolve-organization`, all from the control room's one
+  // egress IP, sometimes with a second manager working alongside. ~60-90
+  // requests in a few minutes is the realistic peak; 100/15min clears it
+  // without much room to spare — if a real burst is ever measured exceeding
+  // it, raise the number rather than treating this comment as settled. A 429
+  // during provisioning is worse than a loose bound here. Anonymous abuse
+  // is still bounded to ~400/hour against a table whose size premise assumes
+  // "thousands of rows" (`shared/database/src/schema.ts`'s
+  // `account_audit_event` comment), which is the point.
+  const adminPrefixRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  app.use('/auth/admin', adminPrefixRateLimit);
+}
+
 // Account-audit prefix mount (BS#2537, parent epic #2534 decision 3). MUST
 // register above every hand-written `/auth/admin/*` route below — in
 // particular `resolve-organization` (originally line 227), `provision-user`
@@ -681,16 +759,10 @@ const stationSignupHandler = async (req: Request, res: Response) => {
   }
 };
 
-// Disable rate limiting in test environments to avoid flaky integration tests.
-// This matches the pattern used by the backend's rateLimiting middleware.
-// Positive-list gate (BS#1097): the AUTH_BYPASS / USE_MOCK_SERVICES escape
-// hatches are honored only when NODE_ENV is explicitly development or test.
-// In any other environment (production, staging, or unset) rate limits hold.
-const isDevOrTest = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
-const isTestEnv =
-  process.env.NODE_ENV === 'test' ||
-  (isDevOrTest && (process.env.USE_MOCK_SERVICES === 'true' || process.env.AUTH_BYPASS === 'true'));
-
+// isDevOrTest / isTestEnv are declared once, above the admin-prefix limiter
+// near the top of this file (BS#2554) — see that declaration's comment for
+// why it had to move ahead of the account-audit mount instead of staying
+// here.
 if (!isTestEnv) {
   // Strict limit for auth mutations vulnerable to brute-force attacks.
   // These are the only endpoints that need tight rate limiting.

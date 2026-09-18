@@ -152,4 +152,41 @@ describe('Auth service rate limiting', () => {
       expect(tier).not.toMatch(/forget-password\/email-otp/);
     });
   });
+
+  // BS#2554 (parent epic #2534, decision recorded 2026-09-18): the whole
+  // /auth/admin prefix gets its OWN limiter, not rateLimitedPaths' 10/15min
+  // brute-force tier — folding it in would share sign-in's bucket and let
+  // routine admin traffic from the control room's one shared egress IP 429
+  // sign-in for everyone in the building (the PR #2550 lesson). Source-block
+  // extraction throughout, not a bare `.toMatch` against the whole file
+  // (PR #2550's L2 finding): a loose substring match is what let a dead path
+  // sit pinned-and-green.
+  describe('admin-prefix limiter (BS#2554)', () => {
+    it('mounts its own 100/15min limiter on /auth/admin, keyed by rateLimitKeyFromRequest', () => {
+      expect(authAppSource).toMatch(
+        /const adminPrefixRateLimit = rateLimit\(\{[\s\S]*?windowMs: 15 \* 60 \* 1000,[\s\S]*?limit: 100,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
+      );
+      expect(authAppSource).toMatch(/app\.use\(\s*['"]\/auth\/admin['"]\s*,\s*adminPrefixRateLimit\s*\)/);
+    });
+
+    it('keeps /auth/admin out of the 10/15min rateLimitedPaths tier', () => {
+      const tier = authAppSource.match(/const rateLimitedPaths = \[([\s\S]*?)\n {2}\];/)?.[1];
+      expect(tier).toBeDefined();
+      expect(tier).not.toMatch(/\/auth\/admin/);
+    });
+
+    // Registration order is load-bearing here, not merely tidy: Express
+    // matches-and-terminates, so a limiter mounted after the account-audit
+    // prefix mount would still let every over-budget request pay for the
+    // audit mount's unconditional getSession call and its
+    // account_audit_event INSERT on its way to a 429 — bounding nothing the
+    // issue actually costs. See the limiter's own comment in app.ts.
+    it('mounts the admin-prefix limiter ahead of the account-audit prefix mount', () => {
+      const limiterIndex = authAppSource.indexOf("app.use('/auth/admin', adminPrefixRateLimit)");
+      const auditMountIndex = authAppSource.indexOf("app.use('/auth/admin', adminPrefixAuditMiddleware())");
+      expect(limiterIndex).toBeGreaterThan(-1);
+      expect(auditMountIndex).toBeGreaterThan(-1);
+      expect(limiterIndex).toBeLessThan(auditMountIndex);
+    });
+  });
 });

@@ -3503,6 +3503,12 @@ export type NewStationSignupAttempt = InferInsertModel<typeof station_signup_att
 // privileged ops per week — stays in the thousands of rows, so the daily
 // prune's range scan is a cheap seq scan and a third index would tax every
 // write for a query with no caller. Add it later if volume proves otherwise.
+// BS#2554 restored this premise for the one surface that had briefly
+// invalidated it: `/auth/admin/*` shipped with no limiter of any kind, so an
+// anonymous loop against a known admin path could mint a row per request
+// with nothing bounding volume. `apps/auth/app.ts`'s dedicated
+// `adminPrefixRateLimit` (100/15min/IP, its own instance) now caps that
+// surface at ~400 rows/hour/IP, same as every other write path here.
 export const account_audit_event = pgTable(
   'account_audit_event',
   {
