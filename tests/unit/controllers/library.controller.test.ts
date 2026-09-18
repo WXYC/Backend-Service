@@ -146,21 +146,13 @@ const mockRecheckDiscogsAvailability =
   >();
 
 // DELETE /library/:id (BS#2112).
-const mockDeleteAlbumFromDB = jest.fn<
-  (
-    id: number,
-    actor?: { userId?: string | null; email?: string | null; role?: string | null }
-  ) => Promise<
-    | {
-        outcome: 'deleted';
-        directPlayCount: number;
-        rotationLinkedPlayCount: number;
-        legacyLinkedPlayCount: number;
-      }
-    | { outcome: 'not_found' }
-    | { outcome: 'lock_unavailable' }
-  >
->();
+const mockDeleteAlbumFromDB =
+  jest.fn<
+    (
+      id: number,
+      actor?: { userId?: string | null; email?: string | null; role?: string | null }
+    ) => Promise<{ outcome: 'deleted' } | { outcome: 'not_found' } | { outcome: 'lock_unavailable' }>
+  >();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
@@ -351,6 +343,7 @@ function mockResponse(): Response {
   const res = {} as Response;
   res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
   res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
+  res.send = jest.fn().mockReturnValue(res) as unknown as Response['send'];
   return res;
 }
 
@@ -4090,93 +4083,23 @@ describe('library.controller', () => {
       expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(999, expect.any(Object));
     });
 
-    // BS#2565 (D1): the flowsheet-play refusal is gone — a release with
-    // plays deletes, and the counts ride along on the 200 body (not 204,
-    // which Express strips the body from), per arm and never summed, so the
-    // client can still say what it damaged.
-    it('deletes a release carrying flowsheet plays and reports the per-arm counts', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'deleted',
-        directPlayCount: 59,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
+    // BS#2565 (D1): the flowsheet-play refusal is gone, and so is the reason
+    // this endpoint was ever a 200 — a release deletes regardless of how many
+    // plays it carries, and the response says nothing about them. The
+    // `outcome: 'deleted'` shape no longer distinguishes direct / rotation /
+    // legacy plays (see `libraryService.deleteAlbumFromDB`'s docstring for
+    // that reasoning); pinned here so a future change can't quietly
+    // reintroduce a body.
+    it('deletes a release regardless of flowsheet plays and returns a bodiless 204', async () => {
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
 
       await deleteAlbum(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({
-        direct_play_count: 59,
-        rotation_linked_play_count: 0,
-        legacy_linked_play_count: 0,
-      });
-    });
-
-    // The transitive path (BS#2112 review finding 3): plays that reach the
-    // release only through `flowsheet.rotation_id` -> `rotation.album_id`.
-    it('reports plays that arrive via the rotation entry separately from direct plays', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 12,
-        legacyLinkedPlayCount: 0,
-      });
-      const req = { params: { id: '42' } } as unknown as Request;
-      const res = mockResponse();
-
-      await deleteAlbum(req, res, next);
-
-      expect(res.json).toHaveBeenCalledWith({
-        direct_play_count: 0,
-        rotation_linked_play_count: 12,
-        legacy_linked_play_count: 0,
-      });
-    });
-
-    // BS#2112 review finding 8, still true post-BS#2565: plays the tubafrenzy
-    // webhook wrote carrying only `legacy_release_id`, which
-    // `jobs/legacy-linkage-resolve` has not yet turned into an `album_id`.
-    // Deleting strands them for good — the denylist means no future library
-    // row ever carries that legacy id for the resolver to join to.
-    it('reports legacy-linked plays separately, not summed into the other arms', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 3,
-      });
-      const req = { params: { id: '42' } } as unknown as Request;
-      const res = mockResponse();
-
-      await deleteAlbum(req, res, next);
-
-      expect(res.json).toHaveBeenCalledWith({
-        direct_play_count: 0,
-        rotation_linked_play_count: 0,
-        legacy_linked_play_count: 3,
-      });
-    });
-
-    it('returns 200 with the (zero) per-arm counts when the release carries no plays', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
-      const req = { params: { id: '42' } } as unknown as Request;
-      const res = mockResponse();
-
-      await deleteAlbum(req, res, next);
-
-      expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({
-        direct_play_count: 0,
-        rotation_linked_play_count: 0,
-        legacy_linked_play_count: 0,
-      });
+      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.send).toHaveBeenCalledWith();
+      expect(res.json).not.toHaveBeenCalled();
     });
 
     // BS#2112 review finding 7: the delete stands down rather than block a
@@ -4200,18 +4123,12 @@ describe('library.controller', () => {
     // without an actor incident response cannot tell a legitimate deletion
     // from an abusive one.
     it('threads the authenticated subject through to the service', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
       const req = {
         params: { id: '42' },
         auth: { id: 'user-abc', email: 'md@wxyc.org', role: 'musicDirector' },
       } as unknown as Request;
       const res = mockResponse();
-      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
 
       await deleteAlbum(req, res, next);
 
@@ -4223,18 +4140,12 @@ describe('library.controller', () => {
     });
 
     it('falls back to the JWT `sub` claim when `id` is absent', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
       const req = {
         params: { id: '42' },
         auth: { sub: 'subject-xyz', email: 'sm@wxyc.org', role: 'stationManager' },
       } as unknown as Request;
       const res = mockResponse();
-      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
 
       await deleteAlbum(req, res, next);
 
@@ -4244,20 +4155,14 @@ describe('library.controller', () => {
     // A thin token (AUTH_BYPASS, or a payload with no claims) must cost the
     // audit trail, never the delete.
     it('still deletes when no auth payload is present, recording nulls', async () => {
-      mockDeleteAlbumFromDB.mockResolvedValue({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
+      mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
-      res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
 
       await deleteAlbum(req, res, next);
 
       expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42, { userId: null, email: null, role: null });
-      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.status).toHaveBeenCalledWith(204);
     });
   });
 

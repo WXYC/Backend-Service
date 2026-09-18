@@ -3,34 +3,41 @@
  * (BS#2112) — the repo's only endpoint that destroys catalog rows, so the
  * properties below are correctness barriers rather than coverage.
  *
- * Three review findings are pinned here:
+ * BS#2565 (D1) removed the 409 refusal this transaction used to raise when
+ * the release carried `flowsheet` plays, along with the three SELECTs that
+ * counted them. Nothing here queries `flowsheet` at all any more — the
+ * transaction takes exactly three locked SELECTs (library existence,
+ * rotation ids, digital_asset rows) regardless of how many plays the release
+ * carries, and every path a play can reach a release by is left entirely to
+ * the database's own FK actions. Findings pinned here:
  *
- *  1. **The count is check-AND-act, not check-then-act.** `db.transaction()`
- *     runs at READ COMMITTED; without a row lock, a writer attaching
- *     `flowsheet.album_id` between the count and the DELETE gets its play
- *     blanked by the `set null` RI action without being reflected in the
- *     counts this transaction reports (BS#2565 removed the 409 this used to
- *     gate). Three live writers reach that column
- *     (`flowsheet.service.ts`, `internal.route.ts`,
- *     `jobs/legacy-linkage-resolve/job.ts`). The lock must be `FOR UPDATE`:
- *     `FOR NO KEY UPDATE` does NOT conflict with the `FOR KEY SHARE` an
- *     inserting writer's FK check takes, so it would not block anything.
+ *  1. **The two remaining locks are check-AND-act, not check-then-act, for the
+ *     things that still refuse.** `db.transaction()` runs at READ COMMITTED;
+ *     without the `FOR UPDATE` on the library row, a concurrent
+ *     `digital_asset` INSERT could land between the `has_digital_assets`
+ *     check and the delete-through and be destroyed unseen. The lock must be
+ *     `FOR UPDATE`: `FOR NO KEY UPDATE` does NOT conflict with the
+ *     `FOR KEY SHARE` an inserting writer's FK check takes, so it would not
+ *     block anything.
  *
- *  2. **The count spans the transitive path too.** `rotation.album_id` is
- *     `cascade` and `flowsheet.rotation_id` is `set null`, so a delete also
- *     blanks `rotation_id` on plays whose own `album_id` is NULL — routine,
- *     since the tubafrenzy webhook resolves the two independently.
+ *  2. **The rotation lock is taken for its lock alone.** `rotation.album_id`
+ *     is `cascade` and `flowsheet.rotation_id` is `set null`, so deleting a
+ *     release blanks `rotation_id` on plays whose own `album_id` is NULL —
+ *     routine, since the tubafrenzy webhook resolves the two independently —
+ *     but nothing here counts or reads those rows; the lock exists to fence
+ *     the `rotation_urls` capture's atomicity, not a play count.
  *
  *  3. **The delete is durable.** The release's `legacy_release_id` is written
  *     to `library_delete_denylist` inside the same transaction, or
  *     `jobs/library-etl` re-imports the still-present upstream row under a new
  *     `library.id` the next time anything re-selects it upstream.
  *
- *  4. **The count spans the legacy-id path too.** A play the tubafrenzy
- *     webhook wrote carries `flowsheet.legacy_release_id` and gets its
- *     `album_id` from `jobs/legacy-linkage-resolve` later; in that window both
- *     counts above read zero, and deleting strands it permanently because the
- *     denylist guarantees no future `library` row carries that legacy id.
+ *  4. **A play linked only by `legacy_release_id` is stranded, not merely
+ *     unlinked — and nothing here can see it happen.** The column carries no
+ *     FK, so there is no lock to take and no SELECT to run against it; a play
+ *     sitting in that window is invisible to this transaction entirely, and
+ *     deleting the release strands it permanently because the denylist
+ *     guarantees no future `library` row ever carries that legacy id.
  *
  *  5. **Lock waits are bounded, and the delete is the side that yields.**
  *     `SET LOCAL lock_timeout` below the default `deadlock_timeout` means a
@@ -159,20 +166,18 @@ const captureArgs = () => {
   return capture.mock.calls[0][1];
 };
 
-// SELECT order inside the delete transaction: existence (locked) → rotation
-// ids (locked) → direct play count → transitive play count (only when the
-// release has rotation rows) → legacy-id play count (always) →
-// digital_asset check (only reached once every play count is zero). Fixtures
-// below that stop short of that last select rely on `makeTx`'s `?? []`
-// default (see its own comment) rather than spelling out an empty result for
-// every case — a digital_asset row only needs to appear in fixtures that
-// mean to exercise the new guard.
+// SELECT order inside the delete transaction, unconditional regardless of how
+// many plays the release carries or how it is linked: existence (locked) ->
+// rotation ids (locked, for the lock alone — nothing binds the result) ->
+// digital_asset rows (locked). Fixtures below that stop short of all three
+// rely on `makeTx`'s `?? []` default rather than spelling out an empty result
+// for every case.
 const EXISTS = [{ id: 42, legacy_release_id: 7788 }];
 const NO_ROTATION: unknown[] = [];
-const zero = [{ count: 0 }];
+const NO_ASSETS: unknown[] = [];
 
-/** A clean release: no rotation rows, no plays by any of the three paths, no bound digital asset. */
-const CLEAN = [EXISTS, NO_ROTATION, zero, zero];
+/** A clean release: no rotation rows, no bound digital asset. */
+const CLEAN = [EXISTS, NO_ROTATION, NO_ASSETS];
 
 /**
  * A Postgres rejection in the shape the catch block ACTUALLY sees.
@@ -192,23 +197,31 @@ const pgError = (code: string, message: string): Error => Object.assign(new Erro
 const drizzleWrapped = (cause: Error): Error => Object.assign(new Error('Failed query: <sql>\nparams: '), { cause });
 
 describe('deleteAlbumFromDB (BS#2112)', () => {
-  describe('check-then-act race on the play-count guard (finding 2)', () => {
-    it('takes FOR UPDATE on the library row before counting plays', async () => {
+  // BS#2565 (D1) removed the 409 refusal these locks used to gate the
+  // decision for. What is left to fence is narrower: the has_digital_assets
+  // check-and-act, and the rotation_urls capture's atomicity — neither has
+  // anything to do with a play count. See
+  // `libraryService.deleteAlbumFromDB`'s Concurrency paragraph.
+  describe('row locks taken before the delete (finding 1)', () => {
+    it('takes FOR UPDATE on the library row as the very first SELECT', async () => {
       const { ops } = await runDelete(42, CLEAN);
 
-      const lockIdx = ops.findIndex((o) => o.op === 'select');
-      expect(ops[lockIdx].methods).toContain('for(update)');
-
-      // The lock must precede the count, or it isn't a lock at all.
-      const firstCount = ops.findIndex((o) => o.op === 'select' && !o.methods.some((m) => m.startsWith('for(')));
-      expect(firstCount).toBeGreaterThan(lockIdx);
+      const selects = ops.filter((o) => o.op === 'select');
+      expect(selects[0].methods).toContain('for(update)');
     });
 
     it('takes FOR UPDATE on the release rotation rows, which the library-row lock does not cover', async () => {
-      const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], zero, zero, zero]);
+      const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], NO_ASSETS]);
 
       const rotationSelect = ops.filter((o) => o.op === 'select')[1];
       expect(rotationSelect.methods).toContain('for(update)');
+    });
+
+    it('takes FOR UPDATE on the digital_asset rows, which neither of the other two locks covers', async () => {
+      const { ops } = await runDelete(42, CLEAN);
+
+      const assetSelect = ops.filter((o) => o.op === 'select')[2];
+      expect(assetSelect.methods).toContain('for(update)');
     });
 
     it('pins FOR UPDATE rather than FOR NO KEY UPDATE in the source', () => {
@@ -218,96 +231,42 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     });
   });
 
-  // BS#2565 (D1) removed the 409 refusal these counts used to gate. The
-  // transaction still counts every path — the SELECTs and their FOR UPDATE
-  // locks below are unchanged — but now deletes regardless, carrying the
-  // counts on the `deleted` outcome instead of returning early on them.
-  describe('transitive rotation path in the play count (finding 3)', () => {
-    it('deletes and reports plays that reach the release only through its rotation entry', async () => {
-      const { outcome } = await runDelete(42, [EXISTS, [{ id: 900 }], zero, [{ count: 12 }], zero]);
+  // BS#2565 (D1). Nothing in the transaction queries `flowsheet` any more —
+  // the three SELECTs above are the whole of it, regardless of whether the
+  // release carries plays or how they reach it.
+  describe('no flowsheet awareness left (finding 2)', () => {
+    it('issues exactly three locked SELECTs on a clean release', async () => {
+      const { ops } = await runDelete(42, CLEAN);
 
-      expect(outcome).toEqual({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 12,
-        legacyLinkedPlayCount: 0,
-      });
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(3);
     });
 
-    it('sums every path without double-counting', async () => {
-      const { outcome } = await runDelete(42, [EXISTS, [{ id: 900 }], [{ count: 3 }], [{ count: 4 }], [{ count: 5 }]]);
+    it('issues the same three SELECTs when the release has rotation rows', async () => {
+      const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], NO_ASSETS]);
 
-      expect(outcome).toEqual({
-        outcome: 'deleted',
-        directPlayCount: 3,
-        rotationLinkedPlayCount: 4,
-        legacyLinkedPlayCount: 5,
-      });
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(3);
     });
 
-    it('skips the transitive count entirely when the release has no rotation rows', async () => {
-      const { outcome, ops } = await runDelete(42, CLEAN);
-
-      expect(outcome).toEqual({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
-      // existence + rotation ids + direct count + legacy-id count +
-      // digital_asset check (BS#2560 finding 2a).
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(5);
+    it('never references the flowsheet table in the transaction body', () => {
+      // The docstring and inline comments are allowed to talk about
+      // `flowsheet` — plenty of them do, reasoning about what the database's
+      // own FK actions do to it — but no query in the transaction body may
+      // touch it. `.from(flowsheet` / `.delete(flowsheet` would be the
+      // tell-tale shape of a count or a refusal creeping back in.
+      const body = deleteAlbumBody();
+      expect(body).not.toContain('.from(flowsheet');
+      expect(body).not.toContain('.delete(flowsheet');
     });
 
-    it('deletes through even when every path carries plays', async () => {
-      const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], zero, [{ count: 1 }], zero]);
+    it('deletes through regardless of how many rotation rows the release carries', async () => {
+      const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], NO_ASSETS]);
 
       expect(ops.some((o) => o.op === 'delete' && o.table === library)).toBe(true);
       expect(ops.some((o) => o.op === 'insert')).toBe(true);
     });
   });
 
-  /**
-   * Plays the tubafrenzy webhook wrote carrying only `legacy_release_id`,
-   * whose `album_id` `jobs/legacy-linkage-resolve` has not yet resolved. Both
-   * counts above read zero for them, and deleting strands them for good: the
-   * denylist means no future `library` row will ever carry that legacy id, so
-   * the resolver can never link them.
-   */
-  describe('legacy-id path in the play count (finding 4)', () => {
-    it('deletes and reports plays that name the release only by its legacy release id', async () => {
-      const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, [{ count: 6 }]]);
-
-      expect(outcome).toEqual({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 6,
-      });
-    });
-
-    it('counts the legacy path even when the release has no rotation rows at all', async () => {
-      const { ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero]);
-
-      // The legacy count is unconditional; it is the transitive count that is
-      // skipped when there are no rotation ids. Plus the digital_asset check
-      // (BS#2560 finding 2a), reached because this fixture's play counts are
-      // all zero.
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(5);
-    });
-
-    /**
-     * `NOT IN` alone evaluates to NULL for a NULL `rotation_id`, which would
-     * silently exclude exactly the unlinked rows this arm exists to count.
-     */
-    it('tolerates a NULL rotation_id when excluding the transitive arm', () => {
-      const body = deleteAlbumBody();
-      expect(body).toContain('isNull(flowsheet.rotation_id)');
-      expect(body).toContain('notInArray(flowsheet.rotation_id, rotationIds)');
-    });
-  });
-
-  describe('durability against the library ETL (finding 1)', () => {
+  describe('durability against the library ETL (finding 3)', () => {
     it('tombstones the legacy_release_id before deleting the row', async () => {
       const { ops } = await runDelete(42, CLEAN);
 
@@ -322,6 +281,30 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
 
       const insert = ops.find((o) => o.op === 'insert');
       expect(insert?.methods).toEqual(expect.arrayContaining(['values', 'onConflictDoUpdate']));
+    });
+  });
+
+  /**
+   * `flowsheet.legacy_release_id` carries no FK, so this transaction cannot
+   * lock it, query it, or even see a play that carries only it. Deleting the
+   * release still strands that play permanently — the denylist row this
+   * transaction writes guarantees no future `library` row will ever carry
+   * this `legacy_release_id` for `jobs/legacy-linkage-resolve` to join to —
+   * it is simply a fact about the database's own state after the delete
+   * commits, not something this transaction decides or observes.
+   */
+  describe('the legacy-id path is invisible here, and that is the point (finding 4)', () => {
+    it('takes no lock and runs no query keyed on legacy_release_id', () => {
+      const body = deleteAlbumBody();
+      // The column is read once, off the existence SELECT, to populate the
+      // denylist row — never queried or locked on its own.
+      expect(body).not.toContain('.where(eq(flowsheet.legacy_release_id');
+    });
+
+    it('deletes through regardless — there is nothing here to refuse on', async () => {
+      const { outcome } = await runDelete(42, CLEAN);
+
+      expect(outcome).toEqual({ outcome: 'deleted' });
     });
   });
 
@@ -429,12 +412,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     it('still deletes when no actor is available', async () => {
       const { outcome, ops } = await runDelete(42, CLEAN);
 
-      expect(outcome).toEqual({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
+      expect(outcome).toEqual({ outcome: 'deleted' });
       expect(ops.some((o) => o.op === 'delete' && o.table === library)).toBe(true);
     });
 
@@ -471,12 +449,13 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
    * `digital_asset.library_id` is NOT NULL with no `onDelete` at all — no
    * cascade, no set-null — so an unguarded `DELETE FROM library` raises a
    * raw FK-violation 500. This is the check-and-act refusal that catches it
-   * before the delete ever reaches that statement (BS#2560 finding 2a).
+   * before the delete ever reaches that statement (BS#2560 finding 2a) — the
+   * only refusal left in this transaction post-BS#2565.
    */
   describe('digital_asset guard (BS#2560 finding 2a)', () => {
     it('refuses with has_digital_assets, naming the bound asset, rather than reaching the DELETE', async () => {
       const asset = { id: 501, provenance: 'rotation_upload', disc_number: 1, status: 'needs_review' };
-      const { outcome, ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [asset]]);
+      const { outcome, ops } = await runDelete(42, [EXISTS, NO_ROTATION, [asset]]);
 
       expect(outcome).toEqual({
         outcome: 'has_digital_assets',
@@ -491,7 +470,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
         { id: 501, provenance: 'rotation_upload', disc_number: 1, status: 'needs_review' },
         { id: 502, provenance: 'cd_rip', disc_number: 2, status: 'bound' },
       ];
-      const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, assets]);
+      const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, assets]);
 
       expect(outcome).toEqual({
         outcome: 'has_digital_assets',
@@ -505,20 +484,8 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     it('proceeds past the guard, and into the capture, when no digital_asset row is bound', async () => {
       const { outcome, ops } = await runDelete(42, CLEAN);
 
-      expect(outcome).toEqual({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
+      expect(outcome).toEqual({ outcome: 'deleted' });
       expect(ops.some((o) => o.op === 'delete')).toBe(true);
-    });
-
-    it('locks the asset rows it checks, since a status UPDATE takes no lock on the library row', async () => {
-      const { ops } = await runDelete(42, CLEAN);
-
-      const assetSelect = ops.filter((o) => o.op === 'select')[4];
-      expect(assetSelect.methods).toContain('for(update)');
     });
 
     /**
@@ -533,18 +500,13 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const rejected = { id: 501, provenance: 'rotation_upload', disc_number: 1, status: 'rejected' };
 
       it('deletes a release whose only asset was rejected, rather than refusing forever', async () => {
-        const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected]]);
+        const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, [rejected]]);
 
-        expect(outcome).toEqual({
-          outcome: 'deleted',
-          directPlayCount: 0,
-          rotationLinkedPlayCount: 0,
-          legacyLinkedPlayCount: 0,
-        });
+        expect(outcome).toEqual({ outcome: 'deleted' });
       });
 
       it('deletes the rejected asset through, scoped to the ids it locked and captured', async () => {
-        const { ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected]]);
+        const { ops } = await runDelete(42, [EXISTS, NO_ROTATION, [rejected]]);
 
         // Scoped to the locked ids rather than to `library_id`: a row that
         // appeared outside that set must raise the FK violation on the
@@ -553,7 +515,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       });
 
       it('captures the rejected asset and its files before deleting through them', async () => {
-        await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected]]);
+        await runDelete(42, [EXISTS, NO_ROTATION, [rejected]]);
 
         const { children } = captureArgs();
         expect(children).toContain(digital_asset.library_id);
@@ -564,7 +526,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
 
       it('still refuses when a live asset sits alongside a rejected one, naming only the live one', async () => {
         const live = { id: 502, provenance: 'cd_rip', disc_number: 2, status: 'needs_review' };
-        const { outcome, ops } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected, live]]);
+        const { outcome, ops } = await runDelete(42, [EXISTS, NO_ROTATION, [rejected, live]]);
 
         expect(outcome).toEqual({
           outcome: 'has_digital_assets',
@@ -577,7 +539,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
         // `status` is an open vocabulary; the predicate is "everything except
         // rejected" so a future value blocks by default.
         const future = { id: 503, provenance: 'cd_rip', disc_number: 1, status: 'ripped' };
-        const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [future]]);
+        const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, [future]]);
 
         expect(outcome).toEqual({
           outcome: 'has_digital_assets',
@@ -602,12 +564,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
   describe('snapshot capture children (BS#2560 PII exclusion)', () => {
     it('captures reviews but never album_review_submissions', async () => {
       const { outcome } = await runDelete(42, CLEAN);
-      expect(outcome).toEqual({
-        outcome: 'deleted',
-        directPlayCount: 0,
-        rotationLinkedPlayCount: 0,
-        legacyLinkedPlayCount: 0,
-      });
+      expect(outcome).toEqual({ outcome: 'deleted' });
 
       const { children } = captureArgs();
       // Children are bare FK columns now (the table and the JSON key are

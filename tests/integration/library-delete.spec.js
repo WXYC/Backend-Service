@@ -2,14 +2,14 @@
  * Integration tests for DELETE /library/:id (BS#2112).
  *
  * Covers the D10 dependent-row policy end to end against the real DB:
- *   - happy-path hard delete (200, with a play-count body — not 204, which
- *     Express strips the body from), and the row is really gone (a second
- *     delete 404s) rather than soft-tombstoned.
+ *   - happy-path hard delete (204, bodiless), and the row is really gone (a
+ *     second delete 404s) rather than soft-tombstoned.
  *   - the library_watermark advance so a client holding a pre-delete
  *     Last-Modified re-pulls the catalog instead of 304-ing stale.
- *   - the flowsheet play count (BS#2565 D1 removed the 409 refusal over it):
- *     a release carrying plays deletes anyway, and the 200 body reports the
- *     damage split by path, never summed.
+ *   - BS#2565 (D1) removed the 409 refusal that used to fire over flowsheet
+ *     plays: a release carrying plays now deletes anyway, silently, and the
+ *     plays are blanked (or, for the legacy-id-only arm, stranded) by the
+ *     database's own FK actions — nothing in the response reports it.
  *   - the four blocking FKs (`bins`, `library_identity`,
  *     `library_identity_source`, `artist_library_crossreference`) resolved
  *     inside the same transaction as the delete, rather than the DELETE
@@ -29,10 +29,11 @@
  *     has no `onDelete` at all (no cascade, no set-null), so a bound release
  *     is refused with 409 (`reason: 'digital_asset_references'`) rather than
  *     raising a raw FK-violation 500.
- *   - the TRANSITIVE count: plays reachable only via `flowsheet.rotation_id`
+ *   - the TRANSITIVE path: plays reachable only via `flowsheet.rotation_id`
  *     -> `rotation.album_id` (`set null` behind a `cascade`), the routine
  *     shape the tubafrenzy webhook produces when it resolves the two columns
- *     independently. A direct-FK-only count would miss these silently.
+ *     independently. A direct-FK-only read would miss the damage to these
+ *     entirely.
  *   - the delete-denylist row: `jobs/library-etl` consults it on every
  *     invocation (scheduled or by hand — see the job's own docstring for why
  *     that distinction matters post-`cd8f058e`) and skips a denylisted
@@ -44,12 +45,12 @@
  *   - the actor recorded on that denylist row: `catalog:write` is held by two
  *     roles, so what-and-when without who leaves incident response unable to
  *     tell a legitimate deletion from an abusive one.
- *   - the LEGACY-ID count: plays that name the release only via
+ *   - the LEGACY-ID path: plays that name the release only via
  *     `flowsheet.legacy_release_id`, which `jobs/legacy-linkage-resolve` has
  *     not yet resolved to an `album_id`. Deleting strands them permanently —
  *     the denylist guarantees no future library row carries that legacy id,
- *     so the resolver can never link them — which is why this arm is
- *     reported separately from the other two, never summed into them.
+ *     so the resolver can never link them — unlike the other two arms, which
+ *     merely lose their link.
  *   - `library_identity_history` deliberately RETAINED and left dangling: a
  *     supersedure audit log has to outlive the row it describes.
  *   - migration 0148's `flowsheet_rotation_id_idx`, without which the
@@ -225,7 +226,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     return res.body;
   };
 
-  test('hard-deletes an unreferenced release, returns 200, and advances the catalog watermark', async () => {
+  test('hard-deletes an unreferenced release, returns a bodiless 204, and advances the catalog watermark', async () => {
     const album = await createAlbum(`BS#2112 Happy Path ${uniq}`);
 
     const before = await auth.get('/library/catalog').expect(200);
@@ -235,7 +236,11 @@ describe('DELETE /library/:id (BS#2112)', () => {
     // same guard `library-catalog-export.spec.js` uses.
     await sleep(1100);
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    const del = await auth.delete(`/library/${album.id}`).expect(204);
+    // Pinned so a future change can't quietly reintroduce a body: BS#2565
+    // removed the play counts that used to ride on a 200, and there is
+    // nothing left for this response to carry.
+    expect(del.text).toBe('');
 
     // The row is really gone (hard delete, not a soft-delete tombstone) — a
     // second delete has nothing left to find.
@@ -252,10 +257,10 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   // BS#2565 (D1): the 409 refusal over flowsheet plays is gone. A release
-  // carrying plays deletes, reports the damage on the 200 body split by
-  // path, and leaves a catalog_delete_snapshot row behind — the actual undo
-  // path now that there is nothing left to refuse over.
-  test('deletes a release carrying flowsheet plays, reporting the direct play count on the 200 body', async () => {
+  // carrying plays deletes silently, and leaves a catalog_delete_snapshot
+  // row behind — the actual undo path now that there is nothing left to
+  // refuse over.
+  test('deletes a release carrying flowsheet plays, blanking their album_id', async () => {
     const album = await createAlbum(`BS#2112 Flowsheet Plays ${uniq}`);
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
@@ -264,10 +269,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [album.id, `BS#2112 Flowsheet Plays ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(200);
-    expect(res.body.direct_play_count).toBe(2);
-    expect(res.body.rotation_linked_play_count).toBe(0);
-    expect(res.body.legacy_linked_play_count).toBe(0);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     // Really deleted, and the plays' FK went with it (set-null, not the row).
     await auth.get('/library/info').query({ album_id: album.id }).expect(404);
@@ -315,7 +317,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       album.id,
     ]);
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const counts = await sql.unsafe(
       `SELECT
@@ -357,7 +359,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [sourceKey, album.id]
     );
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const counts = await sql.unsafe(
       `SELECT
@@ -387,16 +389,15 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * The transitive count. `rotation.album_id` is `cascade` and
+   * The transitive path. `rotation.album_id` is `cascade` and
    * `flowsheet.rotation_id` is `set null`, so deleting a release blanks
    * `rotation_id` on plays that reached it only through the rotation entry.
    * That is the routine shape, not an edge case: the tubafrenzy webhook
    * resolves `album_id` and `rotation_id` independently, so a play regularly
-   * carries a `rotation_id` with a NULL `album_id`. A count that counted only
-   * `flowsheet.album_id` would report 0 here and silently miss the damage to
-   * every one of those plays.
+   * carries a `rotation_id` with a NULL `album_id` — and a reader that only
+   * looked at `flowsheet.album_id` would miss the damage to it entirely.
    */
-  test('deletes a release whose plays reach it only through its rotation entry, reporting them apart from direct plays', async () => {
+  test('deletes a release whose plays reach it only through its rotation entry, blanking their rotation_id', async () => {
     const album = await createAlbum(`BS#2112 Rotation Transitive ${uniq}`);
 
     const rotationRows = await sql.unsafe(
@@ -412,10 +413,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [rotationId, `BS#2112 Rotation Transitive ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(200);
-    expect(res.body.direct_play_count).toBe(0);
-    expect(res.body.rotation_linked_play_count).toBe(1);
-    expect(res.body.legacy_linked_play_count).toBe(0);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     // The rotation row cascaded away with the release; the play survives with
     // its rotation_id blanked, not deleted.
@@ -429,7 +427,14 @@ describe('DELETE /library/:id (BS#2112)', () => {
     ]);
   });
 
-  test('counts a play linked by both paths once, not twice', async () => {
+  /**
+   * A play can carry BOTH `album_id` and `rotation_id` pointing at the same
+   * release at once — the two columns are resolved independently by the
+   * tubafrenzy webhook, so nothing keeps them from agreeing. Both paths are
+   * blanked independently by their own FK action; neither survives just
+   * because the other one fired first.
+   */
+  test('blanks both album_id and rotation_id on a play linked by both paths at once', async () => {
     const album = await createAlbum(`BS#2112 Both Paths ${uniq}`);
 
     const rotationRows = await sql.unsafe(
@@ -442,10 +447,16 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [album.id, rotationRows[0].id, `BS#2112 Both Paths ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(200);
-    expect(res.body.direct_play_count).toBe(1);
-    expect(res.body.rotation_linked_play_count).toBe(0);
-    expect(res.body.legacy_linked_play_count).toBe(0);
+    await auth.delete(`/library/${album.id}`).expect(204);
+
+    const surviving = await sql.unsafe(
+      `SELECT album_id, rotation_id FROM "${SCHEMA}".flowsheet
+        WHERE artist_name = 'Built to Spill' AND album_title = $1`,
+      [`BS#2112 Both Paths ${uniq}`]
+    );
+    expect(surviving).toHaveLength(1);
+    expect(surviving[0].album_id).toBeNull();
+    expect(surviving[0].rotation_id).toBeNull();
 
     await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
       `BS#2112 Both Paths ${uniq}`,
@@ -468,7 +479,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     const legacyReleaseId = before[0].legacy_release_id;
     expect(legacyReleaseId).not.toBeNull();
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const denylisted = await sql.unsafe(
       `SELECT library_id, deleted_at FROM "${SCHEMA}".library_delete_denylist WHERE legacy_release_id = $1`,
@@ -525,7 +536,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [popularityKey, album.id]
     );
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const rows = await sql.unsafe(
       `SELECT representative_library_id FROM "${SCHEMA}".album_popularity WHERE logical_album_key = $1`,
@@ -590,13 +601,15 @@ describe('DELETE /library/:id (BS#2112)', () => {
    * writes `flowsheet.legacy_release_id` on every entry and resolves
    * `album_id` separately; `jobs/legacy-linkage-resolve` closes the gap on a
    * half-hourly cron. A play sitting in that window has a NULL `album_id` and
-   * no `rotation_id`, so a count of only the two FK paths reads zero. Deleting
-   * now strands it: the denylist means no future `library` row ever carries
+   * no `rotation_id`, so neither FK path touches it. Deleting now strands it
+   * permanently: the denylist means no future `library` row ever carries
    * that `legacy_release_id`, so the resolver can never link the play and its
-   * provenance is gone for good — which is why this arm is reported apart
-   * from the other two on the 200 body, never summed into them.
+   * provenance is gone for good — unlike the other two arms, which merely
+   * lose their link. This is why a future pre-delete read has to keep this
+   * arm apart from the other two rather than summing them (see
+   * `libraryService.deleteAlbumFromDB`'s docstring).
    */
-  test('deletes a release whose plays name it only by its legacy release id, reporting them as the stranded arm', async () => {
+  test('deletes a release whose plays name it only by its legacy release id, stranding rather than unlinking them', async () => {
     const album = await createAlbum(`BS#2112 Legacy Linked ${uniq}`);
     const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
     const legacyReleaseId = before[0].legacy_release_id;
@@ -609,13 +622,23 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [legacyReleaseId, `BS#2112 Legacy Linked ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(200);
-    expect(res.body.direct_play_count).toBe(0);
-    expect(res.body.rotation_linked_play_count).toBe(0);
-    expect(res.body.legacy_linked_play_count).toBe(1);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const stillThere = await sql.unsafe(`SELECT id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
     expect(stillThere).toHaveLength(0);
+
+    // The play row itself survives, untouched and now permanently
+    // unlinkable — nothing acted on `legacy_release_id` because nothing here
+    // can: it carries no FK, and the denylist row this delete just wrote
+    // guarantees no future `library` row will ever carry this legacy id for
+    // `jobs/legacy-linkage-resolve` to join to.
+    const stranded = await sql.unsafe(
+      `SELECT album_id, rotation_id FROM "${SCHEMA}".flowsheet WHERE legacy_release_id = $1`,
+      [legacyReleaseId]
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0].album_id).toBeNull();
+    expect(stranded[0].rotation_id).toBeNull();
 
     await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE legacy_release_id = $1`, [legacyReleaseId]);
   });
@@ -631,7 +654,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
     const legacyReleaseId = before[0].legacy_release_id;
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const rows = await sql.unsafe(
       `SELECT deleted_by_user_id, deleted_by_email, deleted_by_role
@@ -662,7 +685,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [album.id]
     );
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const rows = await sql.unsafe(
       `SELECT h.library_id, l.id AS library_row
@@ -752,7 +775,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     // A derived child, deliberately never captured — asserted absent below.
     await sql.unsafe(`INSERT INTO "${SCHEMA}".album_metadata (album_id) VALUES ($1)`, [album.id]);
 
-    await auth.delete(`/library/${album.id}`).expect(200);
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const rows = await sql.unsafe(
       `SELECT entity_kind, entity_id, captured, actor_user_id
@@ -963,7 +986,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
 
     try {
       // Not a 409: a rejected asset is not a reason to make a release immortal.
-      await auth.delete(`/library/${album.id}`).expect(200);
+      await auth.delete(`/library/${album.id}`).expect(204);
 
       const assetGone = await sql.unsafe(`SELECT id FROM "${SCHEMA}".digital_asset WHERE id = $1`, [assetRow.id]);
       expect(assetGone).toHaveLength(0);

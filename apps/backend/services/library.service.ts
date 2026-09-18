@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, sql, SQL, type Column } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -4404,60 +4404,92 @@ export type DeleteAlbumActor = CatalogDeleteActor;
 export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 
 /**
- * Hard-deletes a library release (BS#2112, D10 policy). Refuses when the
- * release carries `flowsheet` references: `flowsheet.album_id` is
- * `onDelete: 'set null'`, so an unguarded delete would silently blank
- * historical plays — the exact hazard the WXYC/Backend-Service#2108 orphan
- * audit exists to prevent.
+ * Hard-deletes a library release (BS#2112, D10 policy). BS#2565 (D1) removed
+ * the 409 refusal D10 used to raise when the release carried `flowsheet`
+ * plays, so the delete now proceeds regardless of what it carries. That does
+ * not make the mechanism below irrelevant — with nothing left to refuse
+ * over, what this docstring describes is no longer a justification for
+ * stopping the delete, it is simply what happens: `flowsheet.album_id` is
+ * `onDelete: 'set null'`, so the delete blanks it on every play that named
+ * this release directly. That is the exact hazard the
+ * WXYC/Backend-Service#2108 orphan audit exists to describe, now realized on
+ * every delete rather than refused on.
  *
- * **The refusal counts TWO paths to a play, not one.** `rotation.album_id` is
- * `onDelete: 'cascade'` and `flowsheet.rotation_id` is `onDelete: 'set null'`,
- * so deleting a release also blanks `rotation_id` on every play that reached
- * it through the rotation entry. That is not an edge case: the tubafrenzy
+ * **The delete reaches a play through TWO paths, not one.** `rotation.album_id`
+ * is `onDelete: 'cascade'` and `flowsheet.rotation_id` is `onDelete: 'set
+ * null'`, so deleting a release also cascades its `rotation` row away and, as
+ * a consequence, blanks `rotation_id` on every play that reached the release
+ * only through that rotation entry. That is not an edge case: the tubafrenzy
  * webhook resolves `album_id` and `rotation_id` independently
  * (`internal.route.ts:321-325`), so a play routinely carries a `rotation_id`
- * with a NULL `album_id` — invisible to a direct-FK-only count, and its
- * provenance destroyed just as silently. The SET NULL is an UPDATE on
- * `flowsheet`, so it would also fire `bump_flowsheet_updated_at` and
+ * with a NULL `album_id` — invisible to anything that only reads the direct
+ * FK, and its provenance blanked just as thoroughly. Both SET NULLs are
+ * UPDATEs on `flowsheet`, so each fires `bump_flowsheet_updated_at` and
  * `touch_flowsheet_watermark`, republishing untouched history to every
- * polling client.
+ * polling client — a side effect of the cascade, not of anything this
+ * endpoint chooses to do.
  *
- * **A third path is counted but cannot be locked.** `flowsheet` also carries
- * a bare `legacy_release_id` (no FK, `flowsheet_legacy_release_id_idx` only):
- * the tubafrenzy webhook writes it on every entry, and `album_id` is resolved
- * from it later, on a half-hourly cron, by `jobs/legacy-linkage-resolve`. A
- * play sitting in that window has a NULL `album_id` and no `rotation_id`, so
- * the two counts above see zero — and deleting the release makes the state
- * permanent, because the denylist guarantees no future `library` row will
- * ever carry that `legacy_release_id` for the resolver to join to. Those
- * plays are counted too. They cannot be *locked*, though: with no FK there is
- * no RI check to conflict with, so a webhook INSERT landing between this
- * count and the DELETE is invisible. The residual window is one statement
- * wide and one-sided (it can only mean a refusal that should have fired
- * didn't), and closing it would require a lock on a column no writer takes
- * one on. The resolver's own UPDATE *is* covered: setting `album_id` fires
- * the FK check, which takes `FOR KEY SHARE` on the library row this
- * transaction holds `FOR UPDATE`.
+ * **A third path is stranded, not merely unlinked — and nothing here can see
+ * it happen.** `flowsheet` also carries a bare `legacy_release_id` (no FK,
+ * `flowsheet_legacy_release_id_idx` only): the tubafrenzy webhook writes it
+ * on every entry, and `album_id` is resolved from it later, on a half-hourly
+ * cron, by `jobs/legacy-linkage-resolve`. A play sitting in that window has a
+ * NULL `album_id` and no `rotation_id`, so neither lock this transaction
+ * takes (below) touches it — with no FK there is no RI check for a
+ * `FOR UPDATE` to conflict with, so nothing here can detect, block, or even
+ * see a webhook INSERT landing in that same instant. For the other two paths
+ * that would only mean a slightly staler link; for this one it is permanent,
+ * because deleting the release means the denylist guarantees no future
+ * `library` row will ever carry that `legacy_release_id` for the resolver to
+ * join to. The other two arms just lose their link — the play, and its
+ * provenance up to that point, survive with `album_id` or `rotation_id` gone
+ * NULL. This arm loses its only remaining path to ever gaining one at all.
+ * That asymmetry is real, and this endpoint does nothing about it: it does
+ * not detect the exposure, does not report it, and does not slow down for
+ * it. A pre-delete read that tells a librarian what a delete would strand
+ * needs to keep this arm apart from the other two for exactly that reason —
+ * and that read is not this endpoint (see the controller docstring). Once
+ * the resolver DOES turn a play's `legacy_release_id` into an `album_id`
+ * before the delete reaches it, the exposure is over: setting `album_id`
+ * fires the FK check, which takes `FOR KEY SHARE` on the library row this
+ * transaction holds `FOR UPDATE`, fencing the resolver's own UPDATE exactly
+ * like every other `album_id` writer below.
  *
- * **Concurrency.** `db.transaction()` runs at READ COMMITTED, so a bare
- * existence check followed by a count is check-then-act: a writer attaching
- * `flowsheet.album_id` — `addTrack` (`flowsheet.service.ts:922`), the
- * tubafrenzy webhook's INSERT (`internal.route.ts:505`), the scheduled
- * resolver's UPDATE (`jobs/legacy-linkage-resolve/job.ts:271`), and
- * `linkRotationToAlbum`'s retroactive play flip (this file, line 1186) —
- * between the count and the DELETE would get its play blanked by the RI
- * action — exactly what the 409 exists to prevent. That enumeration is meant
- * to be exhaustive, and it is what a reviewer reads to decide whether some
- * newly-added write site is already covered, so a new one belongs in it even
- * when it needs no new defence: `linkRotationToAlbum`'s UPDATE is fenced
- * exactly like the other three, because setting `album_id` fires the FK
- * check, which takes `FOR KEY SHARE` on the `library` row this transaction
- * holds `FOR UPDATE`. Both lock-taking SELECTs below use `FOR UPDATE`, not
+ * **Concurrency.** There is no refusal left here for a check-then-act race to
+ * undermine — nothing this transaction decides depends on whether a play
+ * attached a moment before or after it ran. What the two `FOR UPDATE` locks
+ * below still buy has nothing to do with plays: the lock on the `library`
+ * row fences the `has_digital_assets` check-and-act against a concurrent
+ * `digital_asset` INSERT (its FK check takes `FOR KEY SHARE` on the same
+ * row), and the lock on the release's `rotation` rows fences the
+ * `rotation_urls` capture's atomicity the same way — see the comments at
+ * those two call sites for how. Both use `FOR UPDATE`, not
  * `FOR NO KEY UPDATE`: only `FOR UPDATE` conflicts with the `FOR KEY SHARE`
- * an inserting writer's FK check takes on the parent row. Locking the
- * `library` row closes the `album_id` path; locking the release's `rotation`
- * rows closes the `rotation_id` path, whose writers never touch the library
- * row at all.
+ * an inserting writer's FK check takes on the parent row.
+ *
+ * Holding those locks for the whole transaction has a side effect worth
+ * naming even though nothing here depends on it: it serializes every writer
+ * that attaches a play to this release while the delete is in flight, rather
+ * than letting one land mid-delete. `addTrack` (`flowsheet.service.ts:922`),
+ * the tubafrenzy webhook's INSERT (`internal.route.ts:505`), the scheduled
+ * resolver's UPDATE (`jobs/legacy-linkage-resolve/job.ts:271`), and
+ * `linkRotationToAlbum`'s retroactive play flip (this file, line 1186) each
+ * set `flowsheet.album_id`, which fires an FK check taking `FOR KEY SHARE` on
+ * the library row — conflicting with the `FOR UPDATE` this transaction
+ * already holds. That enumeration is meant to be exhaustive, and it is what a
+ * reviewer reads to decide whether some newly-added write site is already
+ * covered: `linkRotationToAlbum`'s UPDATE is fenced exactly like the other
+ * three, because setting `album_id` triggers the identical FK check.
+ * Whichever side commits first wins outright — land before this
+ * transaction's lock and the play is cleanly blanked by the DELETE's own
+ * cascading SET NULL when it runs; try to land after and the write blocks
+ * until this transaction finishes, then fails its own FK check against a
+ * library row that is simply gone. There is no interleaving where a play
+ * attaches to a release mid-deletion and ends up half-linked. The
+ * `rotation_id` path is fenced the identical way by the rotation-row lock.
+ * Locking the `library` row closes the `album_id` path; locking the
+ * release's `rotation` rows closes the `rotation_id` path, whose writers
+ * never touch the library row at all.
  *
  * **Lock order, and why it is bounded rather than reasoned about.** This
  * transaction takes library-then-rotation. A single `flowsheet` INSERT
@@ -4613,9 +4645,11 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // to this transaction only.
     await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${DELETE_ALBUM_LOCK_TIMEOUT_MS}ms'`));
 
-    // FOR UPDATE, not FOR NO KEY UPDATE — see the docstring. This is the lock
-    // that makes the play-count guard below an atomic check-and-act rather
-    // than a check-then-act race.
+    // FOR UPDATE, not FOR NO KEY UPDATE — see the docstring's Concurrency
+    // paragraph. This is the lock that makes the has_digital_assets guard
+    // below an atomic check-and-act against a concurrent digital_asset
+    // INSERT, and that serializes any writer attaching flowsheet.album_id to
+    // this release for as long as the delete is in flight.
     const existing = await tx
       .select({ id: library.id, legacy_release_id: library.legacy_release_id })
       .from(library)
