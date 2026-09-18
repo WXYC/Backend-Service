@@ -4199,9 +4199,10 @@ export const getLibraryRowById = async (album_id: number) => {
       alternate_artist_name: library.alternate_artist_name,
       disc_quantity: library.disc_quantity,
       code_number: library.code_number,
-      // BS#2564: the PATCH handler needs the pre-edit value to compute the
-      // effective (artist_id, code_number, code_volume_letters) tuple for
-      // its collision check when a request edits only one of the two.
+      // BS#2564: the PATCH handler's no-op short-circuit (#1555) compares
+      // every computed update against the pre-edit row, so a PATCH that
+      // resubmits the already-stored code_volume_letters needs this to
+      // detect "no change" instead of running a no-op UPDATE.
       code_volume_letters: library.code_volume_letters,
       artist_name: library.artist_name,
       // BS#1281: the PATCH handler reads the live flag to judge a note-only

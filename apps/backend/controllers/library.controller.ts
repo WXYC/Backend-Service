@@ -3394,8 +3394,8 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // no code_number of its own. An explicit body.code_number is the
       // operator's deliberate choice for the destination shelf; regenerating
       // over it would silently discard that choice (BS#2564). A supplied
-      // number rides the collision check below instead, exactly like a
-      // same-artist edit does.
+      // number is written verbatim, uncollision-checked, same as every other
+      // code_number write on this endpoint and on POST /library.
       const codeNumberTaken =
         body.code_number === undefined &&
         (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId));
