@@ -1113,16 +1113,13 @@ export const getArtistCard: RequestHandler<{ id: string }> = async (req, res) =>
 
 type UpdateArtistRequest = {
   alphabetical_name?: string;
+  artist_name?: string;
   // `/wxycdb`'s `artistCardModify.jsp:41-64` posts five fields --
   // `ArtistAdminServlet.java:196-206` applies all five -- but only
-  // `alphabetical_name` has a write path here. The other four are declared
-  // (not just left unread) so `ARTIST_NO_COLUMN_FIELDS` below can reject a
-  // client that sends one of them with a precise 400 instead of silently
-  // dropping it. `artist_name` is declared `unknown`, not `string`: it once
-  // had a write path on this endpoint, pulled before ship -- see
-  // `ARTIST_NO_COLUMN_FIELD_OWNERS.artist_name` and the doc comment on
-  // `updateArtistCard`.
-  artist_name?: unknown;
+  // `alphabetical_name` and `artist_name` have a write path here. The other
+  // three are declared (not just left unread) so `ARTIST_NO_COLUMN_FIELDS`
+  // below can reject a client that sends one of them with a precise 400
+  // instead of silently dropping it.
   genre_id?: unknown;
   code_letters?: unknown;
   code_artist_number?: unknown;
@@ -1130,9 +1127,9 @@ type UpdateArtistRequest = {
 
 const MAX_ARTIST_TEXT_LENGTH = 128;
 
-const UPDATABLE_ARTIST_FIELDS = ['alphabetical_name'] as const;
+const UPDATABLE_ARTIST_FIELDS = ['alphabetical_name', 'artist_name'] as const;
 
-const ARTIST_NO_COLUMN_FIELDS = ['artist_name', 'genre_id', 'code_letters', 'code_artist_number'] as const;
+const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number'] as const;
 
 // Why each field has no write path on THIS ENDPOINT today -- verified
 // against the full write surface, not asserted. `genre_id`/`code_letters`/
@@ -1140,13 +1137,7 @@ const ARTIST_NO_COLUMN_FIELDS = ['artist_name', 'genre_id', 'code_letters', 'cod
 // (the row that carries `genre_id` and `code_artist_number`, i.e.
 // `artist_genre_code`) is only ever `.insert()`ed -- by `POST /library/artists`
 // -- never `.update()`d, and `artists.code_letters` is likewise write-once.
-// `artist_name` is different in kind: `updateArtistInDB` still accepts it
-// (kept, not dead code -- the follow-up ticket below re-enables it by
-// re-adding it to `UPDATABLE_ARTIST_FIELDS`), but this endpoint deliberately
-// never passes it through. See the doc comment on `updateArtistCard`.
 const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[number], string> = {
-  artist_name:
-    "not editable while the catalog is tubafrenzy-canonical: jobs/library-etl is a live 30-minute cron whose ensureArtist matches by fold_artist_name and never UPDATEs artists, so a rename here would move the match key, get silently duplicated on the next ETL pass, and be reverted by that duplicate row's release upsert -- tracked as a follow-up ticket gated on library-etl becoming job-type: one-shot",
   genre_id:
     'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
   code_letters:
@@ -1158,35 +1149,41 @@ const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[num
 const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATABLE_ARTIST_FIELDS.join(', ')}`;
 
 /**
- * PATCH /library/artists/:id -- allowlists exactly one of the five
- * `/wxycdb` `modifyArtist` form fields, `alphabetical_name` (BS#2156). The
- * other four JSP fields (`artist_name`, `genre_id`, `code_letters`,
+ * PATCH /library/artists/:id -- allowlists two of the five `/wxycdb`
+ * `modifyArtist` form fields, `alphabetical_name` (BS#2156) and `artist_name`
+ * (BS#2563). The other three JSP fields (`genre_id`, `code_letters`,
  * `code_artist_number`) are REJECTED with a 400 naming why
  * (`ARTIST_NO_COLUMN_FIELD_OWNERS`), not silently dropped -- unlike the
  * `pickAddRotationFields` / `pickUpdateEntryFields` allowlist convention
  * elsewhere in this repo, which does drop silently. The difference: those
  * allowlists drop server-derived columns a client should never control;
- * these four are real edits a librarian can make on the legacy JSP, so
+ * these three are real edits a librarian can make on the legacy JSP, so
  * silently accepting-and-ignoring them would look like a successful edit
  * that wasn't.
  *
- * `artist_name` was allowlisted alongside `alphabetical_name` in an earlier
- * revision of this endpoint and was pulled before ship (review finding,
- * verified end to end): `artists`/`library` are still tubafrenzy-canonical,
- * and `jobs/library-etl` -- on a live 30-minute cron (its `package.json` has
- * no `job-type` key, and `deploy-base.yml` defaults that to `"cron"`; its
- * siblings `flowsheet-etl` and `rotation-etl` were both flipped to
- * `"job-type": "one-shot"` and this one was not) -- `ensureArtist`s by
- * finding-or-inserting on `fold_artist_name` and never UPDATEs `artists`. A
- * rename here moves the match key out from under that probe: the next ETL
- * pass misses, inserts a duplicate artist that lands the SAME shelf code
- * without violating anything (`genre_artist_crossreference` is unique only
- * on `(artist_id, genre_id)`), and that duplicate's release upsert repoints
- * the library row and reverts the name (`LEGACY_SOURCED_LIBRARY_COLUMNS`
- * carries both `artist_id` and `artist_name`) -- silently, no crash.
- * `alphabetical_name` is safe: it is not part of the ETL's match key and the
- * ETL never updates `artists` at all. Re-enabling `artist_name` renaming is
- * its own ticket, blocked on `library-etl` becoming `job-type: one-shot`.
+ * `artist_name` was pulled from this endpoint's original BS#2156 ship
+ * because `jobs/library-etl` was still a live 30-minute cron whose
+ * `ensureArtist` matched by `fold_artist_name` and never UPDATEd `artists`:
+ * a rename here would have moved the match key out from under that probe and
+ * been silently reverted by the ETL's next pass. That gate closed
+ * 2026-09-17 -- `library-etl` is now `"job-type": "one-shot"` with no
+ * crontab entry, so Backend-Service is the sole catalog writer and the
+ * rename is safe.
+ *
+ * The rename propagates to `library.artist_name` via the
+ * `cascade_library_artist_name` trigger (migration 0060) and clears
+ * `library.artwork_lookup_attempted_at` on every affected release (migration
+ * 0172) -- no application-side propagation needed, and `library.search_doc`
+ * (a GENERATED column) recomputes on its own. The cost is one watermark
+ * advance and a full catalog re-download for every poller, no matter how
+ * many releases the artist holds (0142's trigger is `FOR EACH STATEMENT`
+ * and the cascade above is a single `UPDATE`), and zero for a no-op edit
+ * (the trigger's own `IS DISTINCT FROM` guard, plus `effectiveChange` below).
+ *
+ * The folded-name collision pre-check below is advisory only -- no
+ * constraint backs it (BS#2106) -- so a rename can collide into an existing
+ * artist; that returns the conflicting artist rather than a bare 400,
+ * matching `addArtist`'s `artist_name_conflict` precedent.
  */
 export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArtistRequest> = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
@@ -1258,6 +1255,48 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
       throw new WxycError(`alphabetical_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
     }
     updates.alphabetical_name = trimmed;
+  }
+
+  if (body.artist_name !== undefined) {
+    if (typeof body.artist_name !== 'string') {
+      throw new WxycError('artist_name must be a non-empty string', 400);
+    }
+    // Same NFC-before-trim-before-length discipline as `alphabetical_name`
+    // above, for the same reason: `updateArtistInDB` stores the NFC form,
+    // and Postgres measures `varchar(128)` in code points.
+    const trimmedName = body.artist_name.normalize('NFC').trim();
+    if (trimmedName === '') {
+      throw new WxycError('artist_name must be a non-empty string', 400);
+    }
+    if (codePointLength(trimmedName) > MAX_ARTIST_TEXT_LENGTH) {
+      throw new WxycError(`artist_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
+    }
+    // Folded-name collision pre-check, scoped to the artist's own (lowest)
+    // genre membership the same way `addArtist`'s pre-check is genre-scoped
+    // -- advisory only, no constraint backs it (BS#2106). Skipped when the
+    // name isn't actually changing, so a resubmit of the current value costs
+    // no extra query and can never "collide" with itself. The artist's own id
+    // is excluded from the probe (see `artistIdFromName`), so a hit is always
+    // a genuinely different artist -- not just "some other artist_id", which
+    // a self-match on a pre-existing fold-equal duplicate could otherwise
+    // mask. A miss on the second lookup means the row was deleted between the
+    // two queries, so the name is free again: proceed rather than 409 with an
+    // `artist` the client can't act on -- same race tolerance as `addArtist`.
+    if (trimmedName !== existing.artist_name) {
+      const conflictingArtistId = await libraryService.artistIdFromName(trimmedName, existing.genre_id, artistId);
+      if (conflictingArtistId) {
+        const conflictingArtist = await libraryService.getArtistById(conflictingArtistId);
+        if (conflictingArtist) {
+          res.status(409).json({
+            message: 'Artist name already exists in that genre.',
+            reason: 'artist_name_conflict',
+            artist: conflictingArtist,
+          });
+          return;
+        }
+      }
+    }
+    updates.artist_name = trimmedName;
   }
 
   // Short-circuit a no-op edit. `updateArtistInDB` always SETs

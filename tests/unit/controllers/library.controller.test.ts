@@ -4424,49 +4424,193 @@ describe('library.controller', () => {
       expect(mockGetArtistCardById).not.toHaveBeenCalled();
     });
 
-    // Third-round review (verified end to end): `artist_name` renaming was
-    // pulled from this endpoint entirely -- `artists`/`library` are still
-    // tubafrenzy-canonical and `jobs/library-etl`'s `ensureArtist` matches by
-    // `fold_artist_name` and never UPDATEs `artists`, so a Backend-side
-    // rename would move the match key, get silently duplicated on the next
-    // ETL pass, and be reverted by that duplicate's release upsert. A client
-    // that sends `artist_name` is REJECTED with a 400 naming the field and
-    // the reason, not silently ignored -- silently dropping a requested
-    // write is its own defect class, and this endpoint already rejects
-    // `genre_id`/`code_letters`/`code_artist_number` the same way.
-    it.each([
-      ['a string (a plausible rename attempt)', 'Anohni Hegarty'],
-      ['a number', 123],
-      ['an array', ['a']],
-    ])(
-      'rejects a body containing artist_name (%s) with a 400 naming the field, before the existence lookup',
-      async (_label, value) => {
-        const req = { params: { id: '42' }, body: { artist_name: value } } as unknown as Request;
-        const res = mockResponse();
+    // BS#2563: `library-etl` closed the gate that BS#2156's third-round
+    // review pulled `artist_name` for (see the doc comment on
+    // `updateArtistCard`), so a plausible rename now writes rather than
+    // 400ing, while a non-string value still 400s -- the entire runtime
+    // defense behind `UpdateArtistRequest.artist_name?: string` being erased
+    // at runtime, same as the `alphabetical_name` guard below.
+    it('writes a plausible rename, checking the collision pre-check by genre and returning the refreshed card', async () => {
+      mockGetArtistCardById
+        .mockResolvedValueOnce(existingCard)
+        .mockResolvedValueOnce({ ...existingCard, artist_name: 'Anohni Hegarty' });
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockUpdateArtistInDB.mockResolvedValue({
+        id: 42,
+        artist_name: 'Anohni Hegarty',
+        alphabetical_name: 'Anohni',
+      });
+      const req = { params: { id: '42' }, body: { artist_name: 'Anohni Hegarty' } } as unknown as Request;
+      const res = mockResponse();
 
-        let caught: unknown;
-        try {
-          await updateArtistCard(req, res, next);
-        } catch (err) {
-          caught = err;
-        }
-        const message = (caught as Error).message;
-        expect(message).toContain('no write path exists for artist_name');
-        expect(message).toContain('tubafrenzy-canonical');
-        expect(mockGetArtistCardById).not.toHaveBeenCalled();
-        expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
-      }
-    );
+      await updateArtistCard(req, res, next);
 
-    it('rejects artist_name even when a valid alphabetical_name is present in the same body', async () => {
+      expect(mockArtistIdFromName).toHaveBeenCalledWith(
+        'Anohni Hegarty',
+        existingCard.genre_id,
+        existingCard.artist_id
+      );
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni Hegarty' });
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    it('writes both artist_name and alphabetical_name from the same body', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockUpdateArtistInDB.mockResolvedValue({
+        id: 42,
+        artist_name: 'Anohni Hegarty',
+        alphabetical_name: 'Hegarty, Anohni',
+      });
       const req = {
         params: { id: '42' },
-        body: { artist_name: 'Anohni Hegarty', alphabetical_name: 'Anohni Hegarty' },
+        body: { artist_name: 'Anohni Hegarty', alphabetical_name: 'Hegarty, Anohni' },
       } as unknown as Request;
       const res = mockResponse();
 
-      await expect(updateArtistCard(req, res, next)).rejects.toThrow('no write path exists for artist_name');
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, {
+        artist_name: 'Anohni Hegarty',
+        alphabetical_name: 'Hegarty, Anohni',
+      });
+    });
+
+    // Advisory-only pre-check (BS#2106, no constraint backs it), scoped to
+    // the artist's own genre the same way `addArtist`'s collision pre-check
+    // is genre-scoped -- matching the `artist_name_conflict` precedent
+    // rather than a bare 400.
+    it('returns 409 with the conflicting artist when the new name collides in the same genre', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(7);
+      mockGetArtistById.mockResolvedValue({ artist_id: 7, artist_name: 'Antony', code_letters: 'AN' });
+      const req = { params: { id: '42' }, body: { artist_name: 'Antony' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockArtistIdFromName).toHaveBeenCalledWith('Antony', existingCard.genre_id, existingCard.artist_id);
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith({
+        message: 'Artist name already exists in that genre.',
+        reason: 'artist_name_conflict',
+        artist: { artist_id: 7, artist_name: 'Antony', code_letters: 'AN' },
+      });
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    // Self-exclusion lives in `artistIdFromName` itself (BS#2563), not a
+    // post-hoc `!== artistId` check here -- a probe that can still return
+    // self would mask a genuine duplicate on a genre that already holds a
+    // pre-existing fold-equal pair. The controller's job is just to pass its
+    // own id through so the query can exclude it.
+    it('excludes its own artist id from the collision probe', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockUpdateArtistInDB.mockResolvedValue({
+        id: 42,
+        artist_name: 'ANOHNI',
+        alphabetical_name: 'Anohni',
+      });
+      const req = { params: { id: '42' }, body: { artist_name: 'ANOHNI' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockArtistIdFromName).toHaveBeenCalledWith('ANOHNI', existingCard.genre_id, existingCard.artist_id);
+      expect(mockGetArtistById).not.toHaveBeenCalled();
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'ANOHNI' });
+    });
+
+    // A miss on the second lookup means the row was deleted between the two
+    // queries -- the name is free again, so the write proceeds rather than
+    // 409ing with an `artist` the client can't act on. Same race tolerance
+    // `addArtist` documents for its own pre-check.
+    it('proceeds when the conflicting id from the pre-check no longer resolves to a row', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(7);
+      mockGetArtistById.mockResolvedValue(null);
+      mockUpdateArtistInDB.mockResolvedValue({
+        id: 42,
+        artist_name: 'Antony',
+        alphabetical_name: 'Anohni',
+      });
+      const req = { params: { id: '42' }, body: { artist_name: 'Antony' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Antony' });
+    });
+
+    it('skips the collision pre-check entirely when artist_name is unchanged', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockUpdateArtistInDB.mockResolvedValue({
+        id: 42,
+        artist_name: 'Anohni',
+        alphabetical_name: 'Anohni Hegarty',
+      });
+      const req = {
+        params: { id: '42' },
+        body: { artist_name: existingCard.artist_name, alphabetical_name: 'Anohni Hegarty' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockArtistIdFromName).not.toHaveBeenCalled();
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, {
+        artist_name: existingCard.artist_name,
+        alphabetical_name: 'Anohni Hegarty',
+      });
+    });
+
+    it.each([
+      ['a number', 123],
+      ['an array', ['a']],
+      ['an object', { toString: 'nope' }],
+      ['a boolean', true],
+    ])('returns 400 when artist_name is %s (non-string)', async (_label, value) => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body: { artist_name: value } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('artist_name must be a non-empty string');
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when artist_name is whitespace-only', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body: { artist_name: '   ' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('artist_name must be a non-empty string');
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 when artist_name exceeds 128 characters', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      const req = { params: { id: '42' }, body: { artist_name: 'x'.repeat(129) } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('artist_name must be 128 characters or fewer');
+      expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+
+    it('stores the NFC-normalized, trimmed artist_name', async () => {
+      mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockUpdateArtistInDB.mockResolvedValue({
+        id: 42,
+        artist_name: 'Anohni Hegarty',
+        alphabetical_name: 'Anohni',
+      });
+      const req = { params: { id: '42' }, body: { artist_name: '  Anohni Hegarty  ' } } as unknown as Request;
+      const res = mockResponse();
+
+      await updateArtistCard(req, res, next);
+
+      expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, { artist_name: 'Anohni Hegarty' });
     });
 
     // TypeScript's `UpdateArtistRequest` is erased at runtime, so this
@@ -4659,7 +4803,6 @@ describe('library.controller', () => {
         params: { id: '42' },
         body: {
           alphabetical_name: 'Anohni Renamed',
-          artist_name: 'Anohni Renamed',
           code_letters: 'ZZ',
           genre_id: 999,
           code_artist_number: 7,
@@ -4674,8 +4817,6 @@ describe('library.controller', () => {
         caught = err;
       }
       const message = (caught as Error).message;
-      expect(message).toContain('no write path exists for artist_name');
-      expect(message).toContain('tubafrenzy-canonical');
       expect(message).toContain(
         'genre_id (no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint)'
       );

@@ -1184,6 +1184,13 @@
       "when": 1789685182376,
       "tag": "0171_2560-catalog-delete-snapshot",
       "breakpoints": true
+    },
+    {
+      "idx": 172,
+      "version": "7",
+      "when": 1789761245944,
+      "tag": "0172_2563-artist-name-cascade-artwork-marker",
+      "breakpoints": true
     }
   ]
 }
