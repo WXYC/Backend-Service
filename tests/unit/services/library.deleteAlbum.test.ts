@@ -5,17 +5,18 @@
  *
  * Three review findings are pinned here:
  *
- *  1. **The guard is check-AND-act, not check-then-act.** `db.transaction()`
+ *  1. **The count is check-AND-act, not check-then-act.** `db.transaction()`
  *     runs at READ COMMITTED; without a row lock, a writer attaching
  *     `flowsheet.album_id` between the count and the DELETE gets its play
- *     blanked by the `set null` RI action — the exact failure the 409 exists
- *     to prevent. Three live writers reach that column
+ *     blanked by the `set null` RI action without being reflected in the
+ *     counts this transaction reports (BS#2565 removed the 409 this used to
+ *     gate). Three live writers reach that column
  *     (`flowsheet.service.ts`, `internal.route.ts`,
  *     `jobs/legacy-linkage-resolve/job.ts`). The lock must be `FOR UPDATE`:
  *     `FOR NO KEY UPDATE` does NOT conflict with the `FOR KEY SHARE` an
  *     inserting writer's FK check takes, so it would not block anything.
  *
- *  2. **The refusal counts the transitive path too.** `rotation.album_id` is
+ *  2. **The count spans the transitive path too.** `rotation.album_id` is
  *     `cascade` and `flowsheet.rotation_id` is `set null`, so a delete also
  *     blanks `rotation_id` on plays whose own `album_id` is NULL — routine,
  *     since the tubafrenzy webhook resolves the two independently.
@@ -25,10 +26,10 @@
  *     `jobs/library-etl` re-imports the still-present upstream row under a new
  *     `library.id` the next time anything re-selects it upstream.
  *
- *  4. **The refusal counts the legacy-id path too.** A play the tubafrenzy
+ *  4. **The count spans the legacy-id path too.** A play the tubafrenzy
  *     webhook wrote carries `flowsheet.legacy_release_id` and gets its
  *     `album_id` from `jobs/legacy-linkage-resolve` later; in that window both
- *     counts above read zero, and deleting makes it permanent because the
+ *     counts above read zero, and deleting strands it permanently because the
  *     denylist guarantees no future `library` row carries that legacy id.
  *
  *  5. **Lock waits are bounded, and the delete is the side that yields.**
@@ -217,13 +218,16 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     });
   });
 
-  describe('transitive rotation path in the refusal (finding 3)', () => {
-    it('refuses when the only plays reach the release through its rotation entry', async () => {
+  // BS#2565 (D1) removed the 409 refusal these counts used to gate. The
+  // transaction still counts every path — the SELECTs and their FOR UPDATE
+  // locks below are unchanged — but now deletes regardless, carrying the
+  // counts on the `deleted` outcome instead of returning early on them.
+  describe('transitive rotation path in the play count (finding 3)', () => {
+    it('deletes and reports plays that reach the release only through its rotation entry', async () => {
       const { outcome } = await runDelete(42, [EXISTS, [{ id: 900 }], zero, [{ count: 12 }], zero]);
 
       expect(outcome).toEqual({
-        outcome: 'has_flowsheet_plays',
-        playCount: 12,
+        outcome: 'deleted',
         directPlayCount: 0,
         rotationLinkedPlayCount: 12,
         legacyLinkedPlayCount: 0,
@@ -234,8 +238,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const { outcome } = await runDelete(42, [EXISTS, [{ id: 900 }], [{ count: 3 }], [{ count: 4 }], [{ count: 5 }]]);
 
       expect(outcome).toEqual({
-        outcome: 'has_flowsheet_plays',
-        playCount: 12,
+        outcome: 'deleted',
         directPlayCount: 3,
         rotationLinkedPlayCount: 4,
         legacyLinkedPlayCount: 5,
@@ -245,34 +248,38 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     it('skips the transitive count entirely when the release has no rotation rows', async () => {
       const { outcome, ops } = await runDelete(42, CLEAN);
 
-      expect(outcome).toEqual({ outcome: 'deleted' });
+      expect(outcome).toEqual({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
       // existence + rotation ids + direct count + legacy-id count +
       // digital_asset check (BS#2560 finding 2a).
       expect(ops.filter((o) => o.op === 'select')).toHaveLength(5);
     });
 
-    it('deletes nothing when any path refuses', async () => {
+    it('deletes through even when every path carries plays', async () => {
       const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], zero, [{ count: 1 }], zero]);
 
-      expect(ops.filter((o) => o.op === 'delete')).toHaveLength(0);
-      expect(ops.filter((o) => o.op === 'insert')).toHaveLength(0);
+      expect(ops.some((o) => o.op === 'delete' && o.table === library)).toBe(true);
+      expect(ops.some((o) => o.op === 'insert')).toBe(true);
     });
   });
 
   /**
    * Plays the tubafrenzy webhook wrote carrying only `legacy_release_id`,
    * whose `album_id` `jobs/legacy-linkage-resolve` has not yet resolved. Both
-   * counts above read zero for them, and deleting is worse than blanking: the
+   * counts above read zero for them, and deleting strands them for good: the
    * denylist means no future `library` row will ever carry that legacy id, so
-   * the resolver can never link them and the provenance is stranded for good.
+   * the resolver can never link them.
    */
-  describe('legacy-id path in the refusal (finding 4)', () => {
-    it('refuses when the only plays name the release by its legacy release id', async () => {
+  describe('legacy-id path in the play count (finding 4)', () => {
+    it('deletes and reports plays that name the release only by its legacy release id', async () => {
       const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, [{ count: 6 }]]);
 
       expect(outcome).toEqual({
-        outcome: 'has_flowsheet_plays',
-        playCount: 6,
+        outcome: 'deleted',
         directPlayCount: 0,
         rotationLinkedPlayCount: 0,
         legacyLinkedPlayCount: 6,
@@ -422,7 +429,12 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     it('still deletes when no actor is available', async () => {
       const { outcome, ops } = await runDelete(42, CLEAN);
 
-      expect(outcome).toEqual({ outcome: 'deleted' });
+      expect(outcome).toEqual({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
       expect(ops.some((o) => o.op === 'delete' && o.table === library)).toBe(true);
     });
 
@@ -493,7 +505,12 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     it('proceeds past the guard, and into the capture, when no digital_asset row is bound', async () => {
       const { outcome, ops } = await runDelete(42, CLEAN);
 
-      expect(outcome).toEqual({ outcome: 'deleted' });
+      expect(outcome).toEqual({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
       expect(ops.some((o) => o.op === 'delete')).toBe(true);
     });
 
@@ -518,7 +535,12 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       it('deletes a release whose only asset was rejected, rather than refusing forever', async () => {
         const { outcome } = await runDelete(42, [EXISTS, NO_ROTATION, zero, zero, [rejected]]);
 
-        expect(outcome).toEqual({ outcome: 'deleted' });
+        expect(outcome).toEqual({
+          outcome: 'deleted',
+          directPlayCount: 0,
+          rotationLinkedPlayCount: 0,
+          legacyLinkedPlayCount: 0,
+        });
       });
 
       it('deletes the rejected asset through, scoped to the ids it locked and captured', async () => {
@@ -580,7 +602,12 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
   describe('snapshot capture children (BS#2560 PII exclusion)', () => {
     it('captures reviews but never album_review_submissions', async () => {
       const { outcome } = await runDelete(42, CLEAN);
-      expect(outcome).toEqual({ outcome: 'deleted' });
+      expect(outcome).toEqual({
+        outcome: 'deleted',
+        directPlayCount: 0,
+        rotationLinkedPlayCount: 0,
+        legacyLinkedPlayCount: 0,
+      });
 
       const { children } = captureArgs();
       // Children are bare FK columns now (the table and the JSON key are

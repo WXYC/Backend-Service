@@ -3685,19 +3685,20 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
 
 /**
  * DELETE /library/:id (BS#2112). Hard delete — no soft-delete tombstone; see
- * the issue's decision record for why. Refuses with 409 when the release
- * carries `flowsheet` plays (D10 policy) by ANY of three paths: linked
- * directly via `flowsheet.album_id` (`onDelete: 'set null'`), transitively
- * via `flowsheet.rotation_id` → `rotation.album_id` (`set null` behind a
+ * the issue's decision record for why. BS#2565 (D1) removed the 409 refusal
+ * D10 used to raise when the release carried `flowsheet` plays: the delete
+ * now proceeds and reports what it damaged, split by the same three
+ * disjoint paths the old refusal counted — linked directly via
+ * `flowsheet.album_id` (`onDelete: 'set null'`), transitively via
+ * `flowsheet.rotation_id` → `rotation.album_id` (`set null` behind a
  * `cascade`), or by bare `flowsheet.legacy_release_id` — plays the tubafrenzy
  * webhook wrote that `jobs/legacy-linkage-resolve` has not yet turned into an
- * `album_id`. The first two would silently blank historical play provenance;
- * the third would strand it, since the release's `legacy_release_id` is
- * recorded in `library_delete_denylist`, and `jobs/library-etl` consults
- * that denylist on every run — scheduled or by hand — so no future `library`
- * row will ever carry it for the resolver to join to (see
- * `libraryService.deleteAlbumFromDB`'s Durability paragraph).
- * Also refuses with 409 when the release has a bound `digital_asset` row
+ * `album_id`, and so strands rather than unlinks once the release is gone
+ * (see `libraryService.deleteAlbumFromDB`'s Durability paragraph). The three
+ * counts stay separate in the response rather than summed, because the
+ * legacy-linked arm is not equally recoverable — the other two just lose
+ * their link, this one loses its only path to ever gaining one.
+ * Still refuses with 409 when the release has a bound `digital_asset` row
  * (rip evidence / S3-backed files `jobs/digital-archive-bind` wrote): that FK
  * has no `onDelete` at all, so letting the delete reach it would either raise
  * a raw 500 or need the row destroyed to proceed, and audio-archive metadata
@@ -3716,13 +3717,13 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
  * — not the lighter `catalog:read` bar `markMissing`/`markFound` use, since
  * this is irreversible.
  *
- * The 409 body is non-standard for this service (`{message, reason,
- * play_count, direct_play_count, rotation_linked_play_count,
- * legacy_linked_play_count}` for the flowsheet refusal, `{message, reason,
- * assets}` for the digital-asset refusal, rather than the error handler's
- * shape) because the specifics are the whole point of the refusal: the
- * librarian needs to know what the delete would have damaged, and how.
- * Documented in `apps/backend/app.yaml`.
+ * The 409 body is non-standard for this service (`{message, reason, assets}`
+ * for the digital-asset refusal, rather than the error handler's shape)
+ * because the specifics are the whole point of the refusal: the librarian
+ * needs to know what the delete would have damaged, and how. The 204 body
+ * is likewise non-standard (`{direct_play_count, rotation_linked_play_count,
+ * legacy_linked_play_count}`) for the same reason, now that there is nothing
+ * left to refuse over. Documented in `apps/backend/app.yaml`.
  *
  * A `503` with `reason: 'lock_unavailable'` means the delete stood down
  * rather than wait on a row a live writer holds — see
@@ -3754,32 +3755,6 @@ export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
     return;
   }
 
-  if (result.outcome === 'has_flowsheet_plays') {
-    const { playCount, directPlayCount, rotationLinkedPlayCount, legacyLinkedPlayCount } = result;
-    // Only spell out the split when an indirect path contributed — the common
-    // refusal reads as a plain play count, and the breakdown appears exactly
-    // when it explains something the librarian can't otherwise see (plays that
-    // name the rotation entry, or only the legacy release id, but not the
-    // release).
-    const parts = [`${directPlayCount} linked to the release`];
-    if (rotationLinkedPlayCount > 0) {
-      parts.push(`${rotationLinkedPlayCount} via its rotation entry`);
-    }
-    if (legacyLinkedPlayCount > 0) {
-      parts.push(`${legacyLinkedPlayCount} awaiting linkage from the legacy release id`);
-    }
-    const breakdown = parts.length > 1 ? ` (${parts.join(', ')})` : '';
-    res.status(409).json({
-      message: `Cannot delete: release has ${playCount} flowsheet play${playCount === 1 ? '' : 's'} on record${breakdown}`,
-      reason: 'flowsheet_references',
-      play_count: playCount,
-      direct_play_count: directPlayCount,
-      rotation_linked_play_count: rotationLinkedPlayCount,
-      legacy_linked_play_count: legacyLinkedPlayCount,
-    });
-    return;
-  }
-
   if (result.outcome === 'has_digital_assets') {
     const { assets } = result;
     res.status(409).json({
@@ -3796,7 +3771,15 @@ export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
     return;
   }
 
-  res.status(204).end();
+  // Not the whole play count summed — the legacy-linked arm strands its
+  // plays rather than merely unlinking them (see this handler's docstring),
+  // so a caller building a confirmation message needs the arms apart to say
+  // that honestly.
+  res.status(204).json({
+    direct_play_count: result.directPlayCount,
+    rotation_linked_play_count: result.rotationLinkedPlayCount,
+    legacy_linked_play_count: result.legacyLinkedPlayCount,
+  });
 };
 
 // ---------------------------------------------------------------------------

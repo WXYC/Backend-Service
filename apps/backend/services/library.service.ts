@@ -4333,13 +4333,8 @@ export const recheckDiscogsAvailability = async (
 };
 
 export type DeleteAlbumOutcome =
-  | { outcome: 'deleted' }
-  | { outcome: 'not_found' }
-  | { outcome: 'lock_unavailable' }
   | {
-      outcome: 'has_flowsheet_plays';
-      /** Total distinct plays the delete would damage — the sum of the three below. */
-      playCount: number;
+      outcome: 'deleted';
       /** Plays linked to the release itself (`flowsheet.album_id`). */
       directPlayCount: number;
       /** Plays linked only to the release's rotation entry (`flowsheet.rotation_id`). */
@@ -4347,6 +4342,8 @@ export type DeleteAlbumOutcome =
       /** Plays linked only by `flowsheet.legacy_release_id`, awaiting `jobs/legacy-linkage-resolve`. */
       legacyLinkedPlayCount: number;
     }
+  | { outcome: 'not_found' }
+  | { outcome: 'lock_unavailable' }
   | {
       // `digital_asset.library_id` is NOT NULL with no `onDelete` (no cascade
       // AND no set-null), so an unguarded delete raises a raw FK-violation
@@ -4415,13 +4412,13 @@ export type DeleteAlbumActor = CatalogDeleteActor;
 export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 
 /**
- * Hard-deletes a library release (BS#2112, D10 policy). Refuses when the
- * release carries `flowsheet` references: `flowsheet.album_id` is
- * `onDelete: 'set null'`, so an unguarded delete would silently blank
- * historical plays — the exact hazard the WXYC/Backend-Service#2108 orphan
- * audit exists to prevent.
+ * Hard-deletes a library release (BS#2112, D10 policy; BS#2565 removed the
+ * flowsheet-play refusal D10 rested on). `flowsheet.album_id` is
+ * `onDelete: 'set null'`, so the delete blanks it on every play that named
+ * this release — no longer refused over, but still counted, so the
+ * `deleted` outcome can carry what it damaged for the client to display.
  *
- * **The refusal counts TWO paths to a play, not one.** `rotation.album_id` is
+ * **The count spans TWO paths to a play, not one.** `rotation.album_id` is
  * `onDelete: 'cascade'` and `flowsheet.rotation_id` is `onDelete: 'set null'`,
  * so deleting a release also blanks `rotation_id` on every play that reached
  * it through the rotation entry. That is not an edge case: the tubafrenzy
@@ -4444,8 +4441,8 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * plays are counted too. They cannot be *locked*, though: with no FK there is
  * no RI check to conflict with, so a webhook INSERT landing between this
  * count and the DELETE is invisible. The residual window is one statement
- * wide and one-sided (it can only mean a refusal that should have fired
- * didn't), and closing it would require a lock on a column no writer takes
+ * wide and one-sided (it can only mean an undercount, never an over-count),
+ * and closing it would require a lock on a column no writer takes
  * one on. The resolver's own UPDATE *is* covered: setting `album_id` fires
  * the FK check, which takes `FOR KEY SHARE` on the library row this
  * transaction holds `FOR UPDATE`.
@@ -4457,7 +4454,8 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * resolver's UPDATE (`jobs/legacy-linkage-resolve/job.ts:271`), and
  * `linkRotationToAlbum`'s retroactive play flip (this file, line 1186) —
  * between the count and the DELETE would get its play blanked by the RI
- * action — exactly what the 409 exists to prevent. That enumeration is meant
+ * action without being reflected in the counts this transaction reports.
+ * That enumeration is meant
  * to be exhaustive, and it is what a reviewer reads to decide whether some
  * newly-added write site is already covered, so a new one belongs in it even
  * when it needs no new defence: `linkRotationToAlbum`'s UPDATE is fenced
@@ -4706,17 +4704,6 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
       );
     const legacyLinkedPlayCount = Number(legacyLinkedRows[0]?.count ?? 0);
 
-    const playCount = directPlayCount + rotationLinkedPlayCount + legacyLinkedPlayCount;
-    if (playCount > 0) {
-      return {
-        outcome: 'has_flowsheet_plays',
-        playCount,
-        directPlayCount,
-        rotationLinkedPlayCount,
-        legacyLinkedPlayCount,
-      };
-    }
-
     // Refuse before any delete runs when the release has a LIVE digital
     // asset. `digital_asset.library_id` is NOT NULL with no `onDelete` (no
     // cascade, no set-null), so an unguarded `DELETE FROM library` below
@@ -4896,7 +4883,7 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
       data: { album_id, legacy_release_id, actor_user_id: attribution.deleted_by_user_id },
     });
 
-    return { outcome: 'deleted' };
+    return { outcome: 'deleted', directPlayCount, rotationLinkedPlayCount, legacyLinkedPlayCount };
   });
 };
 
