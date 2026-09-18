@@ -21,6 +21,31 @@
 --
 -- @no-precondition-needed: this only changes a function body; it adds no
 -- constraint against existing data.
+--
+-- @no-analyze-needed: this migration rewrites ZERO rows when it is applied.
+-- Its only statement is the `CREATE OR REPLACE FUNCTION` below; the `UPDATE
+-- wxyc_schema.library` the checker matched is inside that function's
+-- dollar-quoted body, and `check-bulk-update-analyze.mjs` scans such bodies
+-- the same as top-level DML by design (see its "Limits" note), which is why
+-- the annotation is the answer here rather than a rewrite. An `ANALYZE
+-- wxyc_schema.library` at the bottom of this file would re-stat a table no
+-- row of which this migration touched -- it would silence the check and
+-- assert nothing.
+--
+-- The runtime half, stated so a future reader can check it rather than take
+-- it on faith: the trigger's UPDATE is scoped `WHERE artist_id = NEW.id`, one
+-- artist's shelf, on a rename an operator performs by hand through `PATCH
+-- /library/artists/:id`. It is not a backfill and never sweeps the table.
+-- Typical shelves are tens of rows; the known ceiling is 3,107 rows for
+-- artist 1087 ('Various Artists'), counted in
+-- `apps/backend/controllers/library.controller.ts`. The trigger itself must
+-- NOT `ANALYZE`: that would take a ShareUpdateExclusiveLock on `library` and
+-- re-sample the whole table inside every rename's transaction. So for the
+-- one case where planner-stats drift on `library.artist_name` /
+-- `library.search_doc` could plausibly matter -- renaming an artist with a
+-- shelf in the thousands -- the remedy is the out-of-band operator ANALYZE
+-- that `docs/bulk-update-playbook.md` names as an accepted suppression
+-- reason: `ANALYZE wxyc_schema.library;` after the rename.
 CREATE OR REPLACE FUNCTION wxyc_schema.cascade_library_artist_name() RETURNS trigger AS $$
 BEGIN
   UPDATE wxyc_schema.library

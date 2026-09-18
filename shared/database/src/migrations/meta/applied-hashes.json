@@ -168,5 +168,5 @@
   "0169_2522-artwork-lookup-attempted-at": "ffc35e7b3a46e1c5df7d7b2dc8dad5790043b196bde6f179d13bb3fc6a7b4c8c",
   "0170_account-audit-event": "f5384cc8b47941e927258ac67652491e856f05230880fef9d5de1a892e3b80e2",
   "0171_2560-catalog-delete-snapshot": "5f790da378c27f32a3f4c2eaf0808695f9de33c8364d87b2a32b8a97ff043f35",
-  "0172_2563-artist-name-cascade-artwork-marker": "d4915b1ddd486ed27232933b90383f54530103de0fc7a5ee26da638bfd46315b"
+  "0172_2563-artist-name-cascade-artwork-marker": "0dc41e29ef1ad8a2f55eb51d25f2d6835f97a19d2fa566bb03886fc279b3c43d"
 }
