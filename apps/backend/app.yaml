@@ -2692,9 +2692,10 @@ paths:
             remedy is field-specific: `album_title`, `record_label`, `format_id` and
             `label_id` are editable via `PATCH /library/{album_id}` (as `album_title`,
             `label`, `format_id`, `label_id`); `artist_name` is not —
-            `library.artist_name` is derived from the linked `artists` row via `artist_id`,
-            and no endpoint currently supports renaming an artist or setting free-text
-            `artist_name` on a catalogued release.
+            `library.artist_name` is derived from the linked `artists` row via `artist_id`.
+            Renaming the ARTIST is possible (`PATCH /library/artists/{id}`, BS#2563) and
+            cascades to every release it holds, but no endpoint supports setting free-text
+            `artist_name` on a single catalogued release.
 
   /library/artists:
     post:
@@ -3033,21 +3034,37 @@ paths:
           description: Artist not found
 
     patch:
-      summary: Update an artist's alphabetical_name (BS#2156)
+      summary: Update an artist's name or alphabetical_name (BS#2156, BS#2563)
       description: >
         Enforced by `requirePermissions({ catalog: ['write'] })` — musicDirector
-        or above, the same tier as `POST`/`PATCH /library`. `alphabetical_name`
-        is capped at 128 characters (the `varchar(128)` column width) and must
-        be a non-empty string. `artist_name`, `genre_id`, `code_letters`, and
-        `code_artist_number` are real fields on `/wxycdb`'s artist-card form
-        but have no write path on this endpoint — sending one is rejected with
-        a 400 naming why, not silently dropped. `artist_name` specifically:
-        `artists`/`library` are still tubafrenzy-canonical and
-        `jobs/library-etl` (a live cron) matches artists by `fold_artist_name`
-        and never updates `artists`, so a Backend-side rename would be
-        silently duplicated and reverted by the next ETL pass. Re-enabling
-        `artist_name` renaming is a follow-up gated on `library-etl` becoming
-        a one-shot job.
+        or above, the same tier as `POST`/`PATCH /library`. Two writable fields,
+        `artist_name` and `alphabetical_name`; send either or both. Each is
+        capped at 128 characters (the `varchar(128)` column width) and must be a
+        non-empty string. `genre_id`, `code_letters`, and `code_artist_number`
+        are real fields on `/wxycdb`'s artist-card form but have no write path
+        on this endpoint — sending one is rejected with a 400 naming why, not
+        silently dropped. A `code_letters` change is therefore still
+        unserviceable, so a rename that crosses a shelf-letter boundary
+        ('Ziu Ziu' → 'Xiu Xiu') leaves the filing code behind.
+
+        `artist_name` was excluded from the original BS#2156 ship while
+        `jobs/library-etl` was a live 30-minute cron that matched artists by
+        `fold_artist_name` and never updated `artists` — a Backend-side rename
+        would have been silently duplicated and reverted by the next ETL pass.
+        That job is now `job-type: one-shot` with no crontab entry, so
+        Backend-Service is the sole catalog writer and BS#2563 restored the
+        field.
+
+        An `artist_name` change cascades: the `cascade_library_artist_name`
+        trigger rewrites `library.artist_name` on every release the artist
+        holds, `library.search_doc` (a generated column) recomputes, and
+        `library.artwork_lookup_attempted_at` is cleared on those rows so a
+        corrected name is not left suppressed for the rest of the 7-day
+        artwork-lookup negative window. `flowsheet.artist_name` is deliberately
+        NOT rewritten — it is a historical on-air snapshot. Renaming a
+        large-shelf artist is proportionally expensive (the cascade is a
+        multi-thousand-row write for 'Various Artists') and advances the catalog
+        watermark, so every catalog poller re-downloads.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
@@ -3058,38 +3075,84 @@ paths:
             type: integer
       requestBody:
         required: true
-        description: At least one updatable field must be provided.
+        description: >-
+          At least one updatable field must be provided. Neither is individually
+          required, so a body carrying only `artist_name` or only
+          `alphabetical_name` is valid; an object with neither is a 400.
         content:
           application/json:
             schema:
               type: object
-              required: ['alphabetical_name']
+              minProperties: 1
               properties:
+                artist_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  description: >-
+                    The artist's display name. Trimmed and NFC-normalized before
+                    storage, then measured in CODE POINTS against the
+                    `varchar(128)` column. A blank-after-trim value is a 400,
+                    not a silent no-op. Checked against a folded-name collision
+                    probe (case/diacritic/Unicode-form insensitive) across every
+                    genre the artist is filed in; a hit is a 409.
                 alphabetical_name:
                   type: string
                   minLength: 1
                   maxLength: 128
                   description: >-
-                    Trimmed and NFC-normalized before storage, then measured in
-                    CODE POINTS against the `varchar(128)` column. A
-                    blank-after-trim value is a 400, not a silent no-op.
+                    The filing name that governs shelf order. Trimmed and
+                    NFC-normalized before storage, then measured in CODE POINTS
+                    against the `varchar(128)` column. A blank-after-trim value
+                    is a 400, not a silent no-op.
       responses:
         '200':
           description: >
             The refreshed artist card — the same field set `GET
-            /library/artists/{id}` returns.
+            /library/artists/{id}` returns. Also the answer to a no-op edit
+            (a field resubmitted at its current value), which writes nothing.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ArtistCard'
         '400':
           description: >
-            Invalid artist id, missing/non-object body, an `artist_name` /
-            `genre_id` / `code_letters` / `code_artist_number` field with no
-            write path on this endpoint, no updatable fields provided, or
-            `alphabetical_name` that is empty or over 128 characters
+            Invalid artist id, missing/non-object body, a `genre_id` /
+            `code_letters` / `code_artist_number` field with no write path on
+            this endpoint, no updatable fields provided, or an `artist_name` /
+            `alphabetical_name` that is non-string, empty, or over 128
+            characters
         '404':
           description: Artist not found
+        '409':
+          description: >
+            `reason: artist_name_conflict` — the requested `artist_name` folds
+            equal to a DIFFERENT artist already filed in one of this artist's
+            genres, so the rename would create the duplicate-artist state the
+            catalog has no constraint against. The body carries the conflicting
+            `artist` (`artist_id`, `artist_name`, `code_letters`) so a client
+            can offer merging into it rather than reporting a bare failure.
+            Advisory rather than authoritative: no unique constraint backs the
+            folded name, so a concurrent write can still produce the collision.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  reason:
+                    type: string
+                    enum: ['artist_name_conflict']
+                  artist:
+                    type: object
+                    properties:
+                      artist_id:
+                        type: integer
+                      artist_name:
+                        type: string
+                      code_letters:
+                        type: string
 
   /library/artists/{id}/releases:
     get:
