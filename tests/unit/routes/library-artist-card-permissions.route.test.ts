@@ -149,8 +149,7 @@ app.use('/library', library_route);
  * Without these, every artist-card test drives the routes through the
  * privileged integration token or calls the controller directly, so relaxing
  * the PATCH to `catalog:['read']` — letting any DJ edit a catalog artist's
- * `alphabetical_name` (the only field this endpoint can still write; a
- * follow-up review pulled `artist_name` off it entirely -- see
+ * `alphabetical_name` or `artist_name` (the two writable fields; see
  * `library.controller.ts`'s `updateArtistCard` doc comment) — would leave the
  * whole suite green.
  */
@@ -198,9 +197,8 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
 
   describe('PATCH /library/artists/:id (catalog:write)', () => {
     // `alphabetical_name`, not `artist_name`: these tests exist to pin the
-    // PERMISSION tier, and `artist_name` is no longer writable on this
-    // endpoint at all (BS#2156 follow-up review) -- sending it would 400
-    // regardless of role and defeat the point of a 200-on-authorized case.
+    // PERMISSION tier, not the field-write behavior BS#2563 covers -- either
+    // writable field would do.
     test.each(['stationManager', 'musicDirector'])('a %s-role token is authorized', async (role) => {
       mockRole(role);
       const res = await request(app)

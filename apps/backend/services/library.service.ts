@@ -3337,7 +3337,11 @@ export const searchArtistsInGenre = async (
   );
 };
 
-export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
+export const artistIdFromName = async (
+  artist_name: string,
+  genre_id: number,
+  excludeArtistId?: number
+): Promise<number> => {
   const response = await db
     .select({ id: artists.id })
     .from(artists)
@@ -3354,7 +3358,18 @@ export const artistIdFromName = async (artist_name: string, genre_id: number): P
         // an NFD-stored row. Backed by `artists_fold_name_idx`. The genre
         // scoping below is preserved unchanged.
         sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artist_name})`,
-        eq(genre_artist_crossreference.genre_id, genre_id)
+        eq(genre_artist_crossreference.genre_id, genre_id),
+        // `updateArtistCard`'s rename collision check passes its own artist id
+        // here (BS#2563): a rename to a case/Unicode-form variant of the
+        // artist's OWN current name folds equal to itself, and on a genre that
+        // already holds a pre-existing fold-equal duplicate (a legacy-import
+        // artifact -- real rows exist in production), the `.limit(1)` probe
+        // below could otherwise return either row. Returning self reads as "no
+        // conflict" to the caller and masks the real duplicate. Excluding the
+        // id being renamed makes the probe deterministic: a match is always a
+        // genuinely different artist. `addArtist`'s callers have no existing
+        // row to exclude, so they pass nothing and this filters out cleanly.
+        excludeArtistId !== undefined ? ne(artists.id, excludeArtistId) : undefined
       )
     )
     .limit(1);

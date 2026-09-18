@@ -3461,12 +3461,13 @@ describe('Library Artist Card (BS#2156)', () => {
   });
 
   describe('PATCH /library/artists/:id', () => {
-    test('updates alphabetical_name, answering in the GET card shape', async () => {
+    test('updates artist_name and alphabetical_name, answering in the GET card shape', async () => {
       const artist = await createTestArtist();
+      const renamed = `Renamed ${artist.artist_name}`;
 
       const res = await auth
         .patch(`/library/artists/${artist.id}`)
-        .send({ alphabetical_name: `${artist.alphabetical_name}, Renamed` })
+        .send({ artist_name: renamed, alphabetical_name: `${artist.alphabetical_name}, Renamed` })
         .expect(200);
 
       // Same field set the sibling GET on this URL serves -- `artist_id`, not
@@ -3482,12 +3483,75 @@ describe('Library Artist Card (BS#2156)', () => {
       );
       expect(res.body.artist_id).toBe(artist.id);
       expect(res.body.id).toBeUndefined();
-      // The card still carries `artist_name`; this endpoint just cannot write it.
-      expect(res.body.artist_name).toBe(artist.artist_name);
+      expect(res.body.artist_name).toBe(renamed);
       expect(res.body.alphabetical_name).toBe(`${artist.alphabetical_name}, Renamed`);
 
       const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
       expect(card.body).toEqual(res.body);
+    });
+
+    // `library.artist_name` is denormalized (Epic A.3) and the
+    // `cascade_library_artist_name` trigger (migration 0060) is what keeps it
+    // in sync -- this only fires against a real database, never the
+    // @wxyc/database unit mock. `library.search_doc` is a GENERATED column
+    // (schema.ts), so proving the renamed value is findable through catalog
+    // search -- not just readable off the album -- pins that the tsvector
+    // recomputed too, with no application-side reindex step.
+    test('cascades the rename onto every linked library.artist_name row, findable in catalog search', async () => {
+      const artist = await createTestArtist();
+      const release = await auth
+        .post('/library')
+        .send({
+          album_title: `Cascade Test Album ${artist.code_letters}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      const renamed = `${artist.artist_name} Cascaded`;
+      await auth.patch(`/library/artists/${artist.id}`).send({ artist_name: renamed }).expect(200);
+
+      const info = await auth.get('/library/info').query({ album_id: release.body.id }).expect(200);
+      expect(info.body.artist_name).toBe(renamed);
+
+      const found = await auth.get('/library').query({ artist_name: renamed }).expect(200);
+      expect(found.body.some((row) => row.id === release.body.id)).toBe(true);
+    });
+
+    // BS#2563: the trigger has to clear this marker itself, in the same
+    // statement as the cascade -- `updateAlbumInDB`'s PATCH /library/:id path
+    // clears it on an artist_name/album_title/artist_id edit, but a rename
+    // arriving through THIS endpoint never touches that path. Seeded directly
+    // via SQL: there is no public write path for the marker, only LML search
+    // enrichment (`enrichWithArtwork`) and this trigger clear it.
+    test('clears artwork_lookup_attempted_at on every release the rename cascades to', async () => {
+      const artist = await createTestArtist();
+      const release = await auth
+        .post('/library')
+        .send({
+          album_title: `Marker Clear Album ${artist.code_letters}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      const sql = getTestDb();
+      await sql.unsafe(
+        `UPDATE ${SCHEMA}.library SET artwork_lookup_attempted_at = NOW() WHERE id = ${release.body.id}`
+      );
+
+      await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ artist_name: `${artist.artist_name} Marker Cleared` })
+        .expect(200);
+
+      const [row] = await sql.unsafe(
+        `SELECT artwork_lookup_attempted_at FROM ${SCHEMA}.library WHERE id = ${release.body.id}`
+      );
+      expect(row.artwork_lookup_attempted_at).toBeNull();
     });
 
     // `req.body` is undefined for a body-less request under body-parser 2.x +
@@ -3497,7 +3561,7 @@ describe('Library Artist Card (BS#2156)', () => {
       const artist = await createTestArtist();
 
       const res = await auth.patch(`/library/artists/${artist.id}`).expect(400);
-      expectErrorContains(res, 'alphabetical_name');
+      expectErrorContains(res, 'artist_name');
     });
 
     test('returns 400 on a body-less PATCH even for an unknown artist id', async () => {
@@ -3521,9 +3585,7 @@ describe('Library Artist Card (BS#2156)', () => {
       expectErrorContains(res, field);
     });
 
-    // Only `alphabetical_name` reaches the length check -- `artist_name` is
-    // rejected earlier as a no-write-path field, with a different message.
-    test.each(['alphabetical_name'])('returns 400 when %s exceeds 128 characters', async (field) => {
+    test.each(['artist_name', 'alphabetical_name'])('returns 400 when %s exceeds 128 characters', async (field) => {
       const artist = await createTestArtist();
 
       const res = await auth
@@ -3543,10 +3605,10 @@ describe('Library Artist Card (BS#2156)', () => {
       expectErrorContains(res, field);
     });
 
-    // BS#2156 review: the AC says the endpoint "allowlists the two name
-    // fields and rejects anything else." These three real `artistCardModify.
-    // jsp` fields (`ArtistAdminServlet.java:196-206` applies all five) have
-    // no write path today, so a client sending one gets a 400 naming why --
+    // BS#2563: the AC says the endpoint now allowlists the two name fields
+    // and rejects anything else. These three real `artistCardModify.jsp`
+    // fields (`ArtistAdminServlet.java:196-206` applies all five) still have
+    // no write path anywhere, so a client sending one gets a 400 naming why --
     // not a 200 that looks like the edit took effect but silently didn't.
     test.each(['code_letters', 'genre_id', 'code_artist_number'])(
       'returns 400 rather than silently dropping %s',
@@ -3569,28 +3631,6 @@ describe('Library Artist Card (BS#2156)', () => {
       }
     );
 
-    // `artist_name` is rejected in KIND from the three above: the column is
-    // writable and `updateArtistInDB` still accepts it, but this endpoint
-    // deliberately refuses it while `jobs/library-etl` remains a live
-    // 30-minute cron matching on `fold_artist_name` -- a rename here would
-    // move the match key and be reverted by the next ETL pass. The 400 has to
-    // explain that, or a librarian reads it as a bug. WXYC/Backend-Service#2197.
-    test('rejects artist_name with the reason, rather than renaming or silently dropping it', async () => {
-      const artist = await createTestArtist();
-
-      const res = await auth
-        .patch(`/library/artists/${artist.id}`)
-        .send({ artist_name: `Renamed ${artist.artist_name}` })
-        .expect(400);
-      expectErrorContains(res, 'artist_name');
-      expectErrorContains(res, 'no write path');
-      expectErrorContains(res, 'library-etl');
-
-      // The rename did not take effect.
-      const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
-      expect(card.body.artist_name).toBe(artist.artist_name);
-    });
-
     test('rejects multiple no-write-path fields together, naming all of them', async () => {
       const artist = await createTestArtist();
 
@@ -3607,17 +3647,130 @@ describe('Library Artist Card (BS#2156)', () => {
       const artist = await createTestArtist();
 
       const res = await auth.patch(`/library/artists/${artist.id}`).send({}).expect(400);
-      expectErrorContains(res, 'alphabetical_name');
+      expectErrorContains(res, 'artist_name');
     });
 
-    // The rename-collision suite that lived here (409 on a same-genre
-    // duplicate; the two soundness cases for `artistIdFromName`'s unordered
-    // `.limit(1)` probe and for a fold-equal duplicate filed under a genre
-    // the card does not surface) moved to WXYC/Backend-Service#2197 with the
-    // `artist_name` rename itself. `artist_name` has no write path on this
-    // endpoint today -- it is rejected below -- so those tests could only
-    // assert behaviour that no longer exists. #2197 carries them verbatim as
-    // its acceptance criteria; re-add them here when the rename ships.
+    test('returns 409 when renamed to a name already used by another artist in the same genre', async () => {
+      const first = await createTestArtist();
+      const second = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${second.id}`)
+        .send({ artist_name: first.artist_name })
+        .expect(409);
+
+      expect(res.body).toEqual({
+        message: 'Artist name already exists in that genre.',
+        reason: 'artist_name_conflict',
+        artist: { artist_id: first.id, artist_name: first.artist_name, code_letters: first.code_letters },
+      });
+
+      // The rename did not take effect.
+      const card = await auth.get(`/library/artists/${second.id}`).expect(200);
+      expect(card.body.artist_name).toBe(second.artist_name);
+    });
+
+    // The soundness half of the conflict guard. `artistIdFromName` is
+    // `.limit(1)` with no `orderBy`, so on a genre that ALREADY holds two
+    // fold-equal rows (46 such groups / 93 rows exist in the production
+    // clone), a probe that didn't exclude the artist being renamed could
+    // return either row -- including the artist's own, which a "fetch one,
+    // compare to self" guard would read as no conflict at all and let the
+    // rename through. `artistIdFromName` excludes the renaming artist's own
+    // id (BS#2563) precisely so this case is deterministic: the only row
+    // left that can match is the real duplicate. The duplicate below is
+    // seeded straight into SQL because `POST /library/artists` refuses to
+    // create it.
+    test('409s on a fold-equal rename even when the genre already holds a fold-equal duplicate', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      const [duplicate] = await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artists (artist_name, alphabetical_name, code_letters)
+         VALUES ('${artist.artist_name}', '${artist.alphabetical_name}', '${artist.code_letters}')
+         RETURNING id`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${duplicate.id}, 11, 9912)`
+      );
+
+      try {
+        const res = await auth
+          .patch(`/library/artists/${artist.id}`)
+          .send({ artist_name: artist.artist_name.toLowerCase() })
+          .expect(409);
+        expect(res.body.reason).toBe('artist_name_conflict');
+        expect(res.body.artist.artist_id).toBe(duplicate.id);
+
+        // The rename did not take effect -- the genre still holds exactly the
+        // two fold-equal rows it started with, not a third spelling.
+        const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(card.body.artist_name).toBe(artist.artist_name);
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${duplicate.id}`);
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${duplicate.id}`);
+      }
+    });
+
+    // BS#2156 review: `existing.genre_id` off `getArtistCardById` is
+    // deliberately the LOWEST genre_id a multi-genre artist is
+    // crossreferenced in, and the collision probe below is scoped to that one
+    // genre -- the same single-genre scoping `addArtist`'s own pre-check uses
+    // (it takes the client's `genre_id` directly, one genre, no fan-out
+    // across an artist's other memberships). A fold-equal duplicate filed
+    // under a DIFFERENT genre than the one the card surfaces is out of scope
+    // for this pre-check by the same design, not a gap introduced here.
+    // Genre 6 sorts below the genre 11 `createTestArtist` uses, so the
+    // artist's OWN lowest crossreference is genre 6 -- and the fold-equal
+    // duplicate is seeded into genre 11, the one `getArtistCardById` does
+    // NOT surface as `existing.genre_id`, so the probe never reaches it and
+    // the rename succeeds.
+    test('does not see a fold-equal duplicate filed under a DIFFERENT genre than the card surfaces', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 6, 9913)`
+      );
+      const [duplicate] = await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artists (artist_name, alphabetical_name, code_letters)
+         VALUES ('${artist.artist_name}', '${artist.alphabetical_name}', '${artist.code_letters}')
+         RETURNING id`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${duplicate.id}, 11, 9914)`
+      );
+
+      try {
+        // The card now surfaces genre 6 (the artist's lowest), while the
+        // fold-equal duplicate lives in genre 11.
+        const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(card.body.genre_id).toBe(6);
+
+        const renamed = artist.artist_name.toLowerCase();
+        const res = await auth.patch(`/library/artists/${artist.id}`).send({ artist_name: renamed }).expect(200);
+        expect(res.body.artist_name).toBe(renamed);
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${duplicate.id}`);
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${duplicate.id}`);
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 6`
+        );
+      }
+    });
+
+    test('allows re-saving the same artist_name (no-op rename does not 409 against itself)', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth
+        .patch(`/library/artists/${artist.id}`)
+        .send({ artist_name: artist.artist_name, alphabetical_name: `${artist.alphabetical_name} Updated` })
+        .expect(200);
+
+      expect(res.body.artist_name).toBe(artist.artist_name);
+      expect(res.body.alphabetical_name).toBe(`${artist.alphabetical_name} Updated`);
+    });
 
     test('404s on an unknown artist id', async () => {
       const res = await auth.patch('/library/artists/99999999').send({ alphabetical_name: 'Nobody' }).expect(404);
