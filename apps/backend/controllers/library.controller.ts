@@ -3254,8 +3254,11 @@ type UpdateAlbumRequest = {
   // BS#2564: the PATCH half of BS#2410's release call-code fields. Reuses
   // `validateCodeNumber`/`validateCodeVolumeLetters` verbatim (defined above
   // for `addAlbum`), so the two write surfaces can't disagree on bounds.
+  // `code_volume_letters` additionally accepts an explicit `null` here (a
+  // create has no prior value to clear, so `addAlbum` never needed this) —
+  // see the clearing block below.
   code_number?: number;
-  code_volume_letters?: string;
+  code_volume_letters?: string | null;
 };
 
 const MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH = 500;
@@ -3331,12 +3334,17 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   // "no volume letters" on a create, where the column simply isn't SET, but
   // on a PATCH an omitted `updates.code_volume_letters` means "leave the
   // stored value alone" (`updateAlbumInDB` only SETs keys `!== undefined`),
-  // so clearing the field requires writing `null` explicitly.
+  // so clearing the field requires writing `null` explicitly. `null` is
+  // handled ahead of `validateCodeVolumeLetters`, which only accepts a
+  // string — the column is nullable and GET already emits this field as
+  // `nullable: true`, so a client round-tripping a GET body into a PATCH
+  // must be able to send back the `null` it just received.
   if (body.code_number !== undefined) {
     updates.code_number = validateCodeNumber(body.code_number);
   }
   if (body.code_volume_letters !== undefined) {
-    updates.code_volume_letters = validateCodeVolumeLetters(body.code_volume_letters) ?? null;
+    updates.code_volume_letters =
+      body.code_volume_letters === null ? null : (validateCodeVolumeLetters(body.code_volume_letters) ?? null);
   }
 
   if (body.format_id !== undefined) {
@@ -3394,41 +3402,6 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       if (codeNumberTaken) {
         updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id);
       }
-    }
-  }
-
-  // BS#2564: collision check, run only when the caller actually edits one of
-  // the call-code fields — an artist/genre reassignment with no explicit
-  // code_number keeps the auto-regenerate behavior above (issue 7)
-  // unchanged. Effective values fold in whatever the blocks above already
-  // decided (including a same-request artist_id/genre_id move, or an
-  // auto-regenerated code_number when none was supplied), so this judges the
-  // row's state as it will exist after the write, not the body in isolation.
-  // Scoped by the destination genre_id, not the current one: call codes are
-  // genre-scoped (see findConflictingAlbumId), so a genre move has to be
-  // checked against the shelf it is moving to, not the one it is leaving.
-  if ('code_number' in body || 'code_volume_letters' in body) {
-    const effectiveArtistId = updates.artist_id ?? existing.artist_id;
-    const effectiveGenreId = updates.genre_id ?? existing.genre_id;
-    const effectiveCodeNumber = updates.code_number ?? existing.code_number;
-    const effectiveCodeVolumeLetters =
-      'code_volume_letters' in updates ? (updates.code_volume_letters ?? null) : existing.code_volume_letters;
-
-    const conflictingAlbumId = await libraryService.findConflictingAlbumId(
-      effectiveArtistId,
-      effectiveGenreId,
-      effectiveCodeNumber,
-      effectiveCodeVolumeLetters,
-      albumId
-    );
-    if (conflictingAlbumId !== undefined) {
-      const conflictingAlbum = await libraryService.getAlbumFromDB(conflictingAlbumId);
-      res.status(409).json({
-        message: 'That call number is already assigned to another release by this artist.',
-        reason: 'album_code_conflict',
-        album: conflictingAlbum,
-      });
-      return;
     }
   }
 

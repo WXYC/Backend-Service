@@ -1,8 +1,5 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest, expectErrorContains, expectFields } = require('../utils/test_helpers');
-const { getTestDb } = require('../utils/db');
-
-const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 /**
  * Integration coverage for PATCH /library/:id (PR #1154 review).
@@ -199,15 +196,12 @@ describe('PATCH /library/:id', () => {
   });
 
   // BS#2564: makes code_number and code_volume_letters writable via PATCH,
-  // with an artist-scoped collision check on the (artist_id, code_number,
-  // code_volume_letters) tuple — mirroring the shelf-slot key
-  // `jobs/library-call-number-dedup` merges duplicates on, so a PATCH can't
-  // create the collision that job exists to drain.
+  // reusing the shared BS#2410 validators so the two write surfaces (POST
+  // /library, PATCH /library/:id) can't disagree on bounds. No collision
+  // check — that was split out (see the PR body); a colliding write just
+  // writes, same as POST /library always has.
   describe('code_number and code_volume_letters (BS#2564)', () => {
     let artist;
-    let otherArtist;
-    let base;
-    let baseLettered;
 
     const mkAlbum = async (artist_id, code_number, code_volume_letters, title) => {
       const body = {
@@ -234,46 +228,12 @@ describe('PATCH /library/:id', () => {
         })
         .expect(201);
       artist = a.body;
-
-      const b = await auth
-        .post('/library/artists')
-        .send({
-          artist_name: `Patch Code Conflict Artist Other ${uniq}`,
-          code_letters: 'PF',
-          genre_id: 11,
-          code_number: 9200 + (uniq % 500),
-        })
-        .expect(201);
-      otherArtist = b.body;
-
-      base = await mkAlbum(artist.id, 1, undefined, `Patch Code Base ${uniq}`);
-      baseLettered = await mkAlbum(artist.id, 1, 'A', `Patch Code Base Lettered ${uniq}`);
     });
 
     test.each([
-      ['same code_number, both null volume letters', { code_number: 1 }, () => base],
-      [
-        'same code_number, empty-string volume letters treated as null',
-        { code_number: 1, code_volume_letters: '' },
-        () => base,
-      ],
-      [
-        'same code_number and letters, compared case-insensitively',
-        { code_number: 1, code_volume_letters: 'a' },
-        () => baseLettered,
-      ],
-    ])('%s collides with the existing release (409)', async (_desc, patch, conflicting) => {
-      const target = await mkAlbum(artist.id, 50, undefined, `Patch Code Target ${uniq}`);
-
-      const res = await auth.patch(`/library/${target.id}`).send(patch).expect(409);
-      expect(res.body.reason).toBe('album_code_conflict');
-      expect(res.body.album.id).toBe(conflicting().id);
-    });
-
-    test.each([
-      ['a different code_number', { code_number: 2 }],
-      ['the same code_number but distinguishing volume letters', { code_number: 1, code_volume_letters: 'Z' }],
-    ])('%s is written without a conflict', async (_desc, patch) => {
+      ['a code_number', { code_number: 2 }],
+      ['a code_number with distinguishing volume letters', { code_number: 1, code_volume_letters: 'Z' }],
+    ])('%s is written on PATCH', async (_desc, patch) => {
       const target = await mkAlbum(artist.id, 50, undefined, `Patch Code Target ${uniq}`);
 
       const res = await auth.patch(`/library/${target.id}`).send(patch).expect(200);
@@ -281,16 +241,6 @@ describe('PATCH /library/:id', () => {
       if (patch.code_volume_letters !== undefined) {
         expect(res.body.code_volume_letters).toBe(patch.code_volume_letters);
       }
-    });
-
-    test('does not collide with an identical tuple filed under a different artist', async () => {
-      // artist already owns (code_number: 1, code_volume_letters: null) via
-      // `base`, but the check is artist-scoped, so otherArtist can hold the
-      // same tuple free of charge.
-      const target = await mkAlbum(otherArtist.id, 50, undefined, `Patch Code Target Scope ${uniq}`);
-
-      const res = await auth.patch(`/library/${target.id}`).send({ code_number: 1 }).expect(200);
-      expect(res.body.code_number).toBe(1);
     });
 
     test('rejects an out-of-range code_number and an over-length code_volume_letters', async () => {
@@ -302,136 +252,16 @@ describe('PATCH /library/:id', () => {
       const badLetters = await auth.patch(`/library/${target.id}`).send({ code_volume_letters: 'TOOLONG' }).expect(400);
       expectErrorContains(badLetters, 'code_volume_letters');
     });
-  });
 
-  // BS#2564 finding 1: `code_number`/`code_volume_letters` collide only
-  // within the SAME genre — call codes are genre-scoped (an artist filed in
-  // two genres has two independent shelves), matching the slot key
-  // `jobs/library-call-number-dedup` merges duplicates on.
-  describe('cross-genre collision scope (BS#2564 finding 1)', () => {
-    const sql = getTestDb();
+    // GET emits code_volume_letters as nullable:true, so a client that
+    // round-trips a GET body straight into a PATCH must be able to send
+    // back the null it just received, rather than 400ing on it.
+    test('code_volume_letters: null clears the letters explicitly', async () => {
+      const target = await mkAlbum(artist.id, 52, 'A', `Patch Code Target Clear ${uniq}`);
+      expect(target.code_volume_letters).toBe('A');
 
-    /**
-     * File an already-created artist into a SECOND genre.
-     *
-     * There is no endpoint that does this: `POST /library/artists` always
-     * inserts a brand-new `artists` row — its own name pre-check
-     * (`artistIdFromName`) is genre-scoped, so the same name under a
-     * different genre_id doesn't collide, it just mints a second artist —
-     * and `POST /library/filings`' `kind: 'existing'` arm 400s an artist
-     * with no crossreference in `release.genre_id` rather than creating
-     * one. `tests/integration/library.spec.js`'s BS#2386 cross-reference
-     * fixtures document the same gap verbatim ("an artist filed under two
-     * genres ... [is] unreachable through `POST /library/artists`, which
-     * always writes exactly one crossreference row") and insert the second
-     * row directly; this follows that precedent. The `artist_genre_code`
-     * value is arbitrary — these tests exercise `library.code_number`
-     * collision scope, not the artist's own shelf code, and the
-     * crossreference table's only constraint is uniqueness on
-     * `(artist_id, genre_id)`.
-     */
-    const fileArtistInGenre = (artistId, genreId, artistGenreCode) =>
-      sql`INSERT INTO ${sql(SCHEMA)}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
-          VALUES (${artistId}, ${genreId}, ${artistGenreCode})`;
-
-    test('a same-artist, same-code_number release filed in a different genre is not treated as a collision', async () => {
-      const a = await auth
-        .post('/library/artists')
-        .send({
-          artist_name: `Chuquimamani-Condori ${uniq}`,
-          code_letters: 'CQ',
-          genre_id: 11,
-          code_number: 9300 + (uniq % 500),
-        })
-        .expect(201);
-      // Genuinely file the artist in Jazz too, so `getAlbumFromDB`'s
-      // artist/genre inner join resolves for the Jazz release below —
-      // without this row the PATCH answers 200 with an empty body (the
-      // pre-existing wart recorded in this PR), and the assertion on
-      // `code_number` passes vacuously no matter what the collision check
-      // does.
-      await fileArtistInGenre(a.body.id, 7, 9300 + (uniq % 500) + 1);
-
-      // Rock (genre 11) shelf: code_number 1 taken.
-      await auth
-        .post('/library')
-        .send({
-          album_title: `Cross-Genre Rock ${uniq}`,
-          artist_id: a.body.id,
-          label: 'Cross-Genre Label',
-          genre_id: 11,
-          format_id: 1,
-          code_number: 1,
-        })
-        .expect(201);
-
-      // Jazz (genre 7) shelf: distinct, empty at code_number 1.
-      const jazzAlbum = await auth
-        .post('/library')
-        .send({
-          album_title: `Cross-Genre Jazz ${uniq}`,
-          artist_id: a.body.id,
-          label: 'Cross-Genre Label',
-          genre_id: 7,
-          format_id: 1,
-          code_number: 50,
-        })
-        .expect(201);
-
-      const res = await auth.patch(`/library/${jazzAlbum.body.id}`).send({ code_number: 1 }).expect(200);
-      expect(res.body.code_number).toBe(1);
-      expect(res.body.genre_id).toBe(7);
-    });
-
-    test('a genre move is checked against the destination shelf, not the one the release is leaving', async () => {
-      const a = await auth
-        .post('/library/artists')
-        .send({
-          artist_name: `Duke Ellington & John Coltrane ${uniq}`,
-          code_letters: 'DC',
-          genre_id: 11,
-          code_number: 9300 + (uniq % 500),
-        })
-        .expect(201);
-      await fileArtistInGenre(a.body.id, 7, 9300 + (uniq % 500) + 1);
-
-      // Jazz (genre 7) shelf — the one the release is LEAVING — has
-      // code_number 2 taken by a decoy. Rock (genre 11) — the DESTINATION —
-      // has nothing at code_number 2. A check scoped to the leaving genre,
-      // or not scoped by genre at all, would see the decoy as a conflict;
-      // only a destination-scoped check lets the move through. Because the
-      // decoy is the SOLE release this artist holds at code_number 2 in
-      // either genre, no query-plan row ordering can mask a wrong-genre
-      // lookup — a scope bug here has exactly one row to find, and it's the
-      // wrong one.
-      await auth
-        .post('/library')
-        .send({
-          album_title: `Cross-Genre Move Jazz Decoy ${uniq}`,
-          artist_id: a.body.id,
-          label: 'Cross-Genre Label',
-          genre_id: 7,
-          format_id: 1,
-          code_number: 2,
-        })
-        .expect(201);
-
-      // moving starts on the Jazz shelf, at a number the decoy doesn't hold.
-      const moving = await auth
-        .post('/library')
-        .send({
-          album_title: `Cross-Genre Move Target ${uniq}`,
-          artist_id: a.body.id,
-          label: 'Cross-Genre Label',
-          genre_id: 7,
-          format_id: 1,
-          code_number: 60,
-        })
-        .expect(201);
-
-      const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11, code_number: 2 }).expect(200);
-      expect(res.body.genre_id).toBe(11);
-      expect(res.body.code_number).toBe(2);
+      const res = await auth.patch(`/library/${target.id}`).send({ code_volume_letters: null }).expect(200);
+      expect(res.body.code_volume_letters).toBeNull();
     });
   });
 
@@ -444,10 +274,14 @@ describe('PATCH /library/:id', () => {
     let originArtist;
 
     beforeAll(async () => {
+      // Synthetic names, not real WXYC artists: `Stereolab`/`Cat Power` are
+      // permanent seed fixtures other suites prefix-match on exact name
+      // (`dev_env/seed_db.sql`, `library-query.spec.js`'s `artist:Stereolab`
+      // filter), and this row's uniq suffix would still match that prefix.
       const dest = await auth
         .post('/library/artists')
         .send({
-          artist_name: `Stereolab ${uniq}`,
+          artist_name: `Patch Explicit Move Dest Artist ${uniq}`,
           code_letters: 'SL',
           genre_id: 11,
           code_number: 9350 + (uniq % 500),
@@ -458,7 +292,7 @@ describe('PATCH /library/:id', () => {
       const origin = await auth
         .post('/library/artists')
         .send({
-          artist_name: `Cat Power ${uniq}`,
+          artist_name: `Patch Explicit Move Origin Artist ${uniq}`,
           code_letters: 'CP',
           genre_id: 11,
           code_number: 9350 + (uniq % 500),
@@ -504,30 +338,6 @@ describe('PATCH /library/:id', () => {
         .expect(200);
       expect(res.body.artist_id).toBe(destArtist.id);
       expect(res.body.code_number).toBe(5);
-    });
-
-    test('a colliding explicit code_number 409s instead of silently reassigning', async () => {
-      const moving = await auth
-        .post('/library')
-        .send({
-          album_title: `Explicit Move Origin B ${uniq}`,
-          artist_id: originArtist.id,
-          label: 'Explicit Move Label',
-          genre_id: 11,
-          format_id: 1,
-        })
-        .expect(201);
-
-      const res = await auth
-        .patch(`/library/${moving.body.id}`)
-        .send({ artist_id: destArtist.id, code_number: 1 })
-        .expect(409);
-      expect(res.body.reason).toBe('album_code_conflict');
-
-      // Confirm nothing was silently written: the release stays under its
-      // original artist.
-      const info = await auth.get('/library/info').query({ album_id: moving.body.id }).expect(200);
-      expect(info.body.artist_id).toBe(originArtist.id);
     });
   });
 });
