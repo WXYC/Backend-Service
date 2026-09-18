@@ -1137,6 +1137,21 @@ const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number
 // (the row that carries `genre_id` and `code_artist_number`, i.e.
 // `artist_genre_code`) is only ever `.insert()`ed -- by `POST /library/artists`
 // -- never `.update()`d, and `artists.code_letters` is likewise write-once.
+//
+// Re-verified for BS#2563, because `artist_name` becoming writable is exactly
+// the change that could have falsified the `code_letters` reason: it did not.
+// `code_letters` is operator-supplied, not derived from the name
+// (`validateArtistCodeLetters` only NFC-normalizes and length-checks it), so
+// nothing recomputes it on a rename and the write-once claim still holds
+// verbatim. What the rename DOES widen is the gap behind it: a correction
+// that crosses a shelf-letter boundary ('Ziu Ziu' -> 'Xiu Xiu') now succeeds
+// while the accompanying `ZI` -> `XI` edit from the same `/wxycdb` form is
+// still a 400, so the card can disagree with the physical shelf with direct
+// SQL the only remedy. Pre-existing rather than new -- the writable
+// `alphabetical_name` (the field that actually governs shelf ORDER) already
+// reached the same contradiction -- and refiling is a genre-scoped
+// crossreference rewrite plus a call-number reassignment, not a column
+// update, so it needs its own endpoint rather than a widened allowlist here.
 const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[number], string> = {
   genre_id:
     'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
@@ -1174,16 +1189,46 @@ const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATAB
  * `cascade_library_artist_name` trigger (migration 0060) and clears
  * `library.artwork_lookup_attempted_at` on every affected release (migration
  * 0172) -- no application-side propagation needed, and `library.search_doc`
- * (a GENERATED column) recomputes on its own. The cost is one watermark
- * advance and a full catalog re-download for every poller, no matter how
- * many releases the artist holds (0142's trigger is `FOR EACH STATEMENT`
- * and the cascade above is a single `UPDATE`), and zero for a no-op edit
- * (the trigger's own `IS DISTINCT FROM` guard, plus `effectiveChange` below).
+ * (a GENERATED column) recomputes on its own. A no-op edit costs nothing at
+ * all (the trigger's own `IS DISTINCT FROM` guard, plus `effectiveChange`
+ * below). A real rename has two costs, and they do NOT have the same shape:
+ *
+ *   - FLAT, regardless of shelf size: the catalog watermark advance, and
+ *     therefore a full catalog re-download for every poller. Two advances per
+ *     rename -- 0105's `artists`-side trigger and 0142's `library`-side one
+ *     are both `FOR EACH STATEMENT`, and the cascade is a single `UPDATE`, so
+ *     renaming a 1-release artist and renaming 'Various Artists' cost the same
+ *     here. (The marker clear adds no third advance: `artist_name` is on
+ *     0142's `UPDATE OF` list, `artwork_lookup_attempted_at` is not.)
+ *   - PROPORTIONAL to the artist's shelf, and HTTP-reachable for the first
+ *     time with this change: the cascade rewrites every `library` row the
+ *     artist holds (3,107 of them for artist 1087, 'Various Artists' -- see
+ *     `GET /library/artists/:id/releases`' doc comment below, which counted
+ *     them for its own pagination bound), and each row recomputes the STORED
+ *     `search_doc` tsvector, maintains `library_search_doc_idx` and
+ *     `library_artist_name_trgm_idx`, and fires the `FOR EACH ROW`
+ *     `cdc_library` trigger's `pg_notify` (migration 0046) -- all inside this
+ *     request's transaction, holding row locks on every one of those rows.
+ *     The marker clear rides along on the same rewrite, so it is free in
+ *     write cost but not in consequence: it restores LML artwork-lookup
+ *     eligibility for every cleared row at once (the 7-day
+ *     `ARTWORK_LOOKUP_NEGATIVE_WINDOW_MS` suppression is what it lifts), so a
+ *     large-shelf rename re-arms up to that many cold LML lookups, throttled
+ *     only by how many of those rows a later search actually returns. Renames
+ *     are rare and operator-driven, so this is documented rather than
+ *     batched; a measured latency problem on a large shelf is the trigger for
+ *     moving the cascade off the request path, not this comment.
  *
  * The folded-name collision pre-check below is advisory only -- no
  * constraint backs it (BS#2106) -- so a rename can collide into an existing
  * artist; that returns the conflicting artist rather than a bare 400,
- * matching `addArtist`'s `artist_name_conflict` precedent.
+ * matching `addArtist`'s `artist_name_conflict` precedent. It probes EVERY
+ * genre the artist is filed in, not the single genre the card surfaces --
+ * artist identity in this catalog is genre-scoped, and `getArtistCardById`
+ * deliberately collapses a multi-genre artist onto its lowest `genre_id`, so
+ * a one-genre probe would let a rename manufacture exactly the fold-equal
+ * duplicate the 409 exists to prevent. See
+ * `libraryService.conflictingArtistIdForRename`.
  */
 export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArtistRequest> = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
@@ -1271,24 +1316,39 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
     if (codePointLength(trimmedName) > MAX_ARTIST_TEXT_LENGTH) {
       throw new WxycError(`artist_name must be ${MAX_ARTIST_TEXT_LENGTH} characters or fewer`, 400);
     }
-    // Folded-name collision pre-check, scoped to the artist's own (lowest)
-    // genre membership the same way `addArtist`'s pre-check is genre-scoped
-    // -- advisory only, no constraint backs it (BS#2106). Skipped when the
-    // name isn't actually changing, so a resubmit of the current value costs
-    // no extra query and can never "collide" with itself. The artist's own id
-    // is excluded from the probe (see `artistIdFromName`), so a hit is always
-    // a genuinely different artist -- not just "some other artist_id", which
-    // a self-match on a pre-existing fold-equal duplicate could otherwise
-    // mask. A miss on the second lookup means the row was deleted between the
-    // two queries, so the name is free again: proceed rather than 409 with an
-    // `artist` the client can't act on -- same race tolerance as `addArtist`.
+    // Folded-name collision pre-check across EVERY genre this artist is filed
+    // in -- advisory only, no constraint backs it (BS#2106). Deliberately not
+    // `artistIdFromName(name, existing.genre_id)`: `existing` comes from
+    // `getArtistCardById`, which collapses a multi-genre artist onto its
+    // LOWEST `genre_id`, so probing that one genre asks "is this name taken in
+    // genre 6?" when the question a rename raises is "is it taken in ANY genre
+    // this artist is filed in?". A legacy-imported artist in genres 6 and 11
+    // renamed into a name genre 11 already holds would sail through a
+    // genre-6-only probe and leave genre 11 holding two fold-equal `artists`
+    // rows -- the state `jobs/artist-unicode-dedup` and migration 0134 exist
+    // to repair. `addArtist`'s single-genre probe is complete for the same
+    // reason this one isn't: it creates the artist in exactly one genre, while
+    // a rename is global to the `artists` row.
+    //
+    // Skipped when the name isn't actually changing, so a resubmit of the
+    // current value costs no extra query and can never "collide" with itself.
+    // The artist's own id is excluded inside the query (see
+    // `conflictingArtistIdForRename`), so a hit is always a genuinely
+    // different artist -- not just "some other artist_id", which a self-match
+    // on a pre-existing fold-equal duplicate could otherwise mask. A miss on
+    // the second lookup means the row was deleted between the two queries, so
+    // the name is free again: proceed rather than 409 with an `artist` the
+    // client can't act on -- same race tolerance as `addArtist`.
     if (trimmedName !== existing.artist_name) {
-      const conflictingArtistId = await libraryService.artistIdFromName(trimmedName, existing.genre_id, artistId);
+      const conflictingArtistId = await libraryService.conflictingArtistIdForRename(trimmedName, artistId);
       if (conflictingArtistId) {
         const conflictingArtist = await libraryService.getArtistById(conflictingArtistId);
         if (conflictingArtist) {
           res.status(409).json({
-            message: 'Artist name already exists in that genre.',
+            // Not the create paths' "in that genre" wording (lines above and
+            // below): the client sent no genre here, and the probe spans every
+            // genre the artist is filed in, so naming one would be a guess.
+            message: "Artist name already exists in one of this artist's genres.",
             reason: 'artist_name_conflict',
             artist: conflictingArtist,
           });

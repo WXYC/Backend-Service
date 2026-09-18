@@ -3337,11 +3337,7 @@ export const searchArtistsInGenre = async (
   );
 };
 
-export const artistIdFromName = async (
-  artist_name: string,
-  genre_id: number,
-  excludeArtistId?: number
-): Promise<number> => {
+export const artistIdFromName = async (artist_name: string, genre_id: number): Promise<number> => {
   const response = await db
     .select({ id: artists.id })
     .from(artists)
@@ -3358,20 +3354,79 @@ export const artistIdFromName = async (
         // an NFD-stored row. Backed by `artists_fold_name_idx`. The genre
         // scoping below is preserved unchanged.
         sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artist_name})`,
-        eq(genre_artist_crossreference.genre_id, genre_id),
-        // `updateArtistCard`'s rename collision check passes its own artist id
-        // here (BS#2563): a rename to a case/Unicode-form variant of the
-        // artist's OWN current name folds equal to itself, and on a genre that
-        // already holds a pre-existing fold-equal duplicate (a legacy-import
-        // artifact -- real rows exist in production), the `.limit(1)` probe
-        // below could otherwise return either row. Returning self reads as "no
-        // conflict" to the caller and masks the real duplicate. Excluding the
-        // id being renamed makes the probe deterministic: a match is always a
-        // genuinely different artist. `addArtist`'s callers have no existing
-        // row to exclude, so they pass nothing and this filters out cleanly.
-        excludeArtistId !== undefined ? ne(artists.id, excludeArtistId) : undefined
+        eq(genre_artist_crossreference.genre_id, genre_id)
       )
     )
+    // Deterministic under `.limit(1)` (BS#2563 review). A genre can already
+    // hold two fold-equal `artists` rows -- there is no constraint against it
+    // (BS#2106) and legacy-import duplicates exist in production -- and
+    // without an order the planner picks either one, so `POST /library`'s
+    // find-or-create could attach two consecutive releases by the same artist
+    // to two different `artist_id`s, splitting one shelf in half. Lowest id
+    // wins, the same tiebreak `conflictingArtistIdForRename` below reports, so
+    // the rename pre-check and this find-or-create name the same survivor.
+    .orderBy(asc(artists.id))
+    .limit(1);
+
+  if (!response.length) {
+    return 0;
+  } else {
+    return response[0].id;
+  }
+};
+
+/** `genre_artist_crossreference` under its second role in the join below: the memberships of the artist BEING renamed. */
+const renamingArtistMembership = alias(genre_artist_crossreference, 'renaming_artist_membership');
+
+/**
+ * Fold-equal name collision probe for a RENAME (BS#2563): is `artist_name`
+ * already held by a DIFFERENT artist in ANY genre the artist being renamed is
+ * filed in?
+ *
+ * Not `artistIdFromName` with a genre argument, and the difference is the
+ * whole point. `addArtist` is genre-complete with one genre because it is
+ * creating the artist in exactly one genre; a rename is global to the
+ * `artists` row, so a single-genre probe asks the wrong question. Passing
+ * `getArtistCardById`'s `genre_id` asks it in the wrong genre too: that
+ * lookup deliberately collapses a multi-genre artist onto its LOWEST
+ * `genre_id`, so an artist filed in genres 6 and 11 gets probed in 6 only and
+ * a rename can manufacture the fold-equal pair in 11 that the 409 exists to
+ * prevent. Artist identity in this catalog is genre-scoped, so the probe has
+ * to span every membership.
+ *
+ * The self-join is what spans them: `genre_artist_crossreference` in its
+ * first role carries the candidate conflicting artist's membership, and
+ * `renamingArtistMembership` restricts that to genres the renamed artist is
+ * also in. Own-id exclusion is in the query rather than a post-hoc
+ * `!== artist_id` check by the caller, because a rename to a case/Unicode
+ * variant of the artist's own name folds equal to ITSELF: a probe that could
+ * return self would read as "no conflict" and mask a genuine duplicate in a
+ * genre that already holds a fold-equal pair. Lowest id wins for the same
+ * reason `artistIdFromName` above orders that way -- the id reported here is
+ * the one that later find-or-creates will resolve to.
+ *
+ * Advisory only: no constraint backs the fold-equal invariant (BS#2106), so
+ * this narrows the window rather than closing it.
+ */
+export const conflictingArtistIdForRename = async (artist_name: string, artist_id: number): Promise<number> => {
+  const response = await db
+    .select({ id: artists.id })
+    .from(artists)
+    .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
+    .innerJoin(
+      renamingArtistMembership,
+      and(
+        eq(renamingArtistMembership.artist_id, artist_id),
+        eq(renamingArtistMembership.genre_id, genre_artist_crossreference.genre_id)
+      )
+    )
+    .where(
+      and(
+        sql`${FOLD_ARTIST_NAME_FN}(${artists.artist_name}) = ${FOLD_ARTIST_NAME_FN}(${artist_name})`,
+        ne(artists.id, artist_id)
+      )
+    )
+    .orderBy(asc(artists.id))
     .limit(1);
 
   if (!response.length) {
