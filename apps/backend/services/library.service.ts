@@ -4469,27 +4469,69 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  *
  * Holding those locks for the whole transaction has a side effect worth
  * naming even though nothing here depends on it: it serializes every writer
- * that attaches a play to this release while the delete is in flight, rather
- * than letting one land mid-delete. `addTrack` (`flowsheet.service.ts:922`),
- * the tubafrenzy webhook's INSERT (`internal.route.ts:505`), the scheduled
- * resolver's UPDATE (`jobs/legacy-linkage-resolve/job.ts:271`), and
- * `linkRotationToAlbum`'s retroactive play flip (this file, line 1186) each
- * set `flowsheet.album_id`, which fires an FK check taking `FOR KEY SHARE` on
- * the library row — conflicting with the `FOR UPDATE` this transaction
- * already holds. That enumeration is meant to be exhaustive, and it is what a
- * reviewer reads to decide whether some newly-added write site is already
- * covered: `linkRotationToAlbum`'s UPDATE is fenced exactly like the other
- * three, because setting `album_id` triggers the identical FK check.
- * Whichever side commits first wins outright — land before this
- * transaction's lock and the play is cleanly blanked by the DELETE's own
- * cascading SET NULL when it runs; try to land after and the write blocks
- * until this transaction finishes, then fails its own FK check against a
- * library row that is simply gone. There is no interleaving where a play
- * attaches to a release mid-deletion and ends up half-linked. The
- * `rotation_id` path is fenced the identical way by the rotation-row lock.
- * Locking the `library` row closes the `album_id` path; locking the
- * release's `rotation` rows closes the `rotation_id` path, whose writers
- * never touch the library row at all.
+ * that attaches a play to this release THROUGH AN FK while the delete is in
+ * flight, rather than letting one land mid-delete. `addTrack`
+ * (`flowsheet.service.ts:926`), the tubafrenzy webhook's INSERT
+ * (`internal.route.ts:505`), the scheduled resolver's drain UPDATE
+ * (`jobs/legacy-linkage-resolve/job.ts:470`), and `linkRotationToAlbum`'s
+ * retroactive play flip (this file, line 1852) each set `flowsheet.album_id`,
+ * which fires an FK check taking `FOR KEY SHARE` on the library row —
+ * conflicting with the `FOR UPDATE` this transaction already holds. That
+ * enumeration is meant to be exhaustive, and it is what a reviewer reads to
+ * decide whether some newly-added write site is already covered:
+ * `linkRotationToAlbum`'s UPDATE is fenced exactly like the other three,
+ * because setting `album_id` triggers the identical FK check. The
+ * `rotation_id` path is fenced the identical way by the rotation-row lock —
+ * its writers take `FOR KEY SHARE` on the `rotation` row and never touch the
+ * `library` row at all, which is why one lock does not stand in for the other.
+ *
+ * **What that fencing guarantees, and the one path it cannot reach.** For the
+ * two FK-backed paths the guarantee is total, and whichever side commits
+ * first wins outright: land before this transaction's lock and the play is
+ * cleanly blanked by the DELETE's own cascading SET NULL when it runs; try to
+ * land after and the write blocks until this transaction finishes, then fails
+ * its own FK check against a library row that is simply gone. Neither path
+ * can end up half-linked. That is NOT a blanket guarantee about plays, and it
+ * must not be read as one — the third path above lies entirely outside it. A
+ * webhook INSERT whose `album_id` AND `rotation_id` both resolve NULL
+ * (`internal.route.ts:495-503` documents why `resolveAlbumId` legitimately
+ * returns NULL) fires no RI check at all, so it takes `FOR KEY SHARE` on
+ * nothing, conflicts with neither lock, and commits freely inside the delete
+ * window while naming the release by `legacy_release_id`. The cascade never
+ * reaches that row — it matches only on `album_id`/`rotation_id` — and the
+ * denylist row written here guarantees the resolver can never join it to a
+ * future `library` row. So a play CAN attach to a release mid-deletion and be
+ * left naming a release that no longer exists, permanently. No lock available
+ * to this transaction prevents it, because there is no FK to lock against;
+ * only a pre-delete read that shows a librarian what the delete would strand
+ * can (see the controller docstring).
+ *
+ * **What the losing side pays, and where that is fixed — not here.** Before
+ * BS#2565 a release carrying legacy-linked plays was precisely the case that
+ * returned 409, so the delete rolled back, released its locks, and the
+ * resolver always won. Now the delete wins and the loser takes a raw
+ * SQLSTATE 23503. For `jobs/legacy-linkage-resolve` that is a FAILED RUN, not
+ * a stand-down: its drain UPDATE runs inside `runGuardedDrain`, which
+ * converts only `LOCK_CONTENTION_SQLSTATES` — exactly {`55P03`, `40P01`}
+ * (`shared/database/src/sqlstate.ts`) — into a clean `deferred` and rethrows
+ * everything else BY DESIGN, `23503` included (pinned by that job's unit test
+ * "does not mistake an unrelated wrapped error for lock contention"). Its
+ * cohort spans every release, so one librarian delete can discard that run's
+ * linkage repair for all of them and raise a Sentry issue; the next
+ * half-hourly run self-heals. The timing split does not favour the graceful
+ * branch either: that job's `LINKAGE_LOCK_TIMEOUT_MS` is 750 ms and this
+ * transaction normally commits well inside that, so a blocked drain usually
+ * survives the wait and then takes the 23503 rather than timing out into
+ * `deferred`. `addTrack` is newly exposed the same way — a DJ adding a track
+ * to a release being deleted now gets an opaque FK-violation 500 where the
+ * base refused the delete instead. Neither is fixable here: this transaction
+ * behaves correctly and the delete is the side that should win. The fix
+ * belongs in each loser's own error handling — classify `23503` on the
+ * resolver's drain as a benign retry-next-run outcome, and map it to a named
+ * client error in `addTrack` — as a separate change against those files. Do
+ * NOT widen `LOCK_CONTENTION_SQLSTATES` to cover it: that set is shared by
+ * every lock-bounded writer in the service, and a real FK bug in any of them
+ * would go silent.
  *
  * **Lock order, and why it is bounded rather than reasoned about.** This
  * transaction takes library-then-rotation. A single `flowsheet` INSERT

@@ -344,6 +344,10 @@ function mockResponse(): Response {
   res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
   res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
   res.send = jest.fn().mockReturnValue(res) as unknown as Response['send'];
+  // Bodiless 204s in this controller are `res.status(204).end()`, so every
+  // handler reaching one needs `end` present on the double — same shape as
+  // `flowsheet.controller.test.ts`'s response double.
+  res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
   return res;
 }
 
@@ -4083,13 +4087,18 @@ describe('library.controller', () => {
       expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(999, expect.any(Object));
     });
 
-    // BS#2565 (D1): the flowsheet-play refusal is gone, and so is the reason
-    // this endpoint was ever a 200 — a release deletes regardless of how many
-    // plays it carries, and the response says nothing about them. The
-    // `outcome: 'deleted'` shape no longer distinguishes direct / rotation /
-    // legacy plays (see `libraryService.deleteAlbumFromDB`'s docstring for
-    // that reasoning); pinned here so a future change can't quietly
-    // reintroduce a body.
+    // BS#2565 (D1): the flowsheet-play refusal is gone, so a release deletes
+    // regardless of how many plays it carries and the response says nothing
+    // about them — no count, no per-path breakdown, nothing. This endpoint's
+    // success arm is a bodiless 204; pinned here so a future change can't
+    // quietly give it a body. Why the response stays silent about what the
+    // delete unlinked or stranded is on
+    // `libraryService.deleteAlbumFromDB`'s docstring.
+    //
+    // `.end()`, not `.send()` — the repo's spelling for a bodiless 204
+    // (`deleteRotationCard` above, `flowsheet.controller.ts`,
+    // `internal-bans.route.ts`), and the one that makes the no-body property
+    // a consequence of the call rather than of Express's 204 special case.
     it('deletes a release regardless of flowsheet plays and returns a bodiless 204', async () => {
       mockDeleteAlbumFromDB.mockResolvedValue({ outcome: 'deleted' });
       const req = { params: { id: '42' } } as unknown as Request;
@@ -4098,8 +4107,9 @@ describe('library.controller', () => {
       await deleteAlbum(req, res, next);
 
       expect(res.status).toHaveBeenCalledWith(204);
-      expect(res.send).toHaveBeenCalledWith();
+      expect(res.end).toHaveBeenCalled();
       expect(res.json).not.toHaveBeenCalled();
+      expect(res.send).not.toHaveBeenCalled();
     });
 
     // BS#2112 review finding 7: the delete stands down rather than block a

@@ -70,6 +70,7 @@ import {
   digital_asset,
   library,
   reviews,
+  rotation,
 } from '@wxyc/database';
 
 const servicePath = path.resolve(__dirname, '../../../apps/backend/services/library.service.ts');
@@ -203,10 +204,15 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
   // anything to do with a play count. See
   // `libraryService.deleteAlbumFromDB`'s Concurrency paragraph.
   describe('row locks taken before the delete (finding 1)', () => {
+    // Each of these pins the TABLE as well as the mode. Position and mode
+    // alone are not enough: a refactor that pointed all three locked SELECTs
+    // at the same table would satisfy every positional assertion here (and
+    // the count-of-3 below) while dropping two of the three fences.
     it('takes FOR UPDATE on the library row as the very first SELECT', async () => {
       const { ops } = await runDelete(42, CLEAN);
 
       const selects = ops.filter((o) => o.op === 'select');
+      expect(selects[0].table).toBe(library);
       expect(selects[0].methods).toContain('for(update)');
     });
 
@@ -214,6 +220,12 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], NO_ASSETS]);
 
       const rotationSelect = ops.filter((o) => o.op === 'select')[1];
+      // The table matters most here. This lock's result is deliberately
+      // unbound — it is taken for the lock alone — so nothing else in this
+      // suite observes it. Retargeted at `library`, it would take a redundant
+      // second lock on a row already held and silently drop the only fence on
+      // the `rotation_urls` capture's atomicity.
+      expect(rotationSelect.table).toBe(rotation);
       expect(rotationSelect.methods).toContain('for(update)');
     });
 
@@ -221,6 +233,7 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       const { ops } = await runDelete(42, CLEAN);
 
       const assetSelect = ops.filter((o) => o.op === 'select')[2];
+      expect(assetSelect.table).toBe(digital_asset);
       expect(assetSelect.methods).toContain('for(update)');
     });
 
@@ -297,8 +310,13 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
     it('takes no lock and runs no query keyed on legacy_release_id', () => {
       const body = deleteAlbumBody();
       // The column is read once, off the existence SELECT, to populate the
-      // denylist row — never queried or locked on its own.
-      expect(body).not.toContain('.where(eq(flowsheet.legacy_release_id');
+      // denylist row — never queried or locked on its own. Matched on the bare
+      // predicate rather than on a `.where(`-anchored form: the count this
+      // replaces was written `.where(and(eq(flowsheet.legacy_release_id, …),
+      // …))`, so a guard anchored on `.where(eq(` would stay green against
+      // the exact query it is meant to forbid, and against every other
+      // multi-predicate spelling of it.
+      expect(body).not.toContain('eq(flowsheet.legacy_release_id');
     });
 
     it('deletes through regardless — there is nothing here to refuse on', async () => {
