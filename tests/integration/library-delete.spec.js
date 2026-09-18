@@ -662,6 +662,17 @@ describe('DELETE /library/:id (BS#2112)', () => {
    */
   test('writes a catalog_delete_snapshot row capturing the eight irreplaceable children', async () => {
     const album = await createAlbum(`BS#2560 Snapshot ${uniq}`);
+    // Two columns the ETL never refreshes (`LEGACY_SOURCED_LIBRARY_COLUMNS`
+    // covers neither), so they are recoverable from the parent capture or
+    // nowhere.
+    // `library_discogs_unavailable_note_check` is `flag OR note IS NULL`, so
+    // the flag has to be set for the note to be storable at all.
+    await sql.unsafe(
+      `UPDATE "${SCHEMA}".library
+          SET label = 'Snapshot Probe Label', discogs_unavailable = true, discogs_unavailable_note = 'snapshot probe note'
+        WHERE id = $1`,
+      [album.id]
+    );
     const submissionSourceKey = `bs2560-snapshot-probe-${album.id}`;
     createdSubmissionKeys.push(submissionSourceKey);
 
@@ -720,17 +731,35 @@ describe('DELETE /library/:id (BS#2112)', () => {
     const { captured } = rows[0];
     expect(rows[0].entity_kind).toBe('library');
     expect(typeof rows[0].actor_user_id).toBe('string');
-    expect(captured.bins).toHaveLength(1);
-    expect(captured.rotation).toHaveLength(1);
-    expect(captured.rotation_urls).toHaveLength(1);
-    expect(captured.rotation_urls[0].url).toBe('https://example.com/snapshot-probe-rotation-url');
-    expect(captured.rotation_urls[0].rotation_id).toBe(rotationRow.id);
-    expect(captured.reviews).toHaveLength(1);
-    expect(captured.reviews[0].review).toBe('snapshot probe review');
-    expect(captured.album_critic_reviews).toHaveLength(1);
-    expect(captured.compilation_track_artist).toHaveLength(1);
-    expect(captured.library_urls).toHaveLength(1);
-    expect(captured.artist_library_crossreference).toHaveLength(1);
+
+    // The deleted PARENT row, namespaced away from the children so no child
+    // table name can shadow it. This is the half the ETL restore path cannot
+    // reproduce: `LEGACY_SOURCED_LIBRARY_COLUMNS` excludes `label` and
+    // `discogs_unavailable*`, and a Backend-minted release has no upstream row
+    // to re-import at all.
+    expect(captured.entity.table).toBe('library');
+    expect(captured.entity.row.id).toBe(album.id);
+    expect(captured.entity.row.album_title).toBe(`BS#2560 Snapshot ${uniq}`);
+    expect(captured.entity.row.label).toBe('Snapshot Probe Label');
+    expect(captured.entity.row.discogs_unavailable).toBe(true);
+    expect(captured.entity.row.discogs_unavailable_note).toBe('snapshot probe note');
+    expect(captured.entity.row.legacy_release_id).not.toBeNull();
+    // Generated columns are recomputed on re-insert, so storing one would be
+    // permanent waste.
+    expect(captured.entity.row.search_doc).toBeUndefined();
+
+    const children = captured.children;
+    expect(children.bins).toHaveLength(1);
+    expect(children.rotation).toHaveLength(1);
+    expect(children.rotation_urls).toHaveLength(1);
+    expect(children.rotation_urls[0].url).toBe('https://example.com/snapshot-probe-rotation-url');
+    expect(children.rotation_urls[0].rotation_id).toBe(rotationRow.id);
+    expect(children.reviews).toHaveLength(1);
+    expect(children.reviews[0].review).toBe('snapshot probe review');
+    expect(children.album_critic_reviews).toHaveLength(1);
+    expect(children.compilation_track_artist).toHaveLength(1);
+    expect(children.library_urls).toHaveLength(1);
+    expect(children.artist_library_crossreference).toHaveLength(1);
     // Round-trip proof for the depth-2 child (finding 1): the rows are gone
     // from `rotation_urls` (cascade-destroyed) but recoverable from the
     // snapshot alone.
@@ -749,14 +778,14 @@ describe('DELETE /library/:id (BS#2112)', () => {
     );
     expect(submissionLive).toHaveLength(1);
     expect(submissionLive[0].album_id).toBeNull();
-    expect(captured.album_review_submissions).toBeUndefined();
+    expect(children.album_review_submissions).toBeUndefined();
     expect(JSON.stringify(captured)).not.toContain('reviewer_raw');
     expect(JSON.stringify(captured)).not.toContain('BS2560-PII-PROBE-REVIEWER');
     // The four derived children never appear in the captured JSON at all.
-    expect(captured.album_metadata).toBeUndefined();
-    expect(captured.library_identity).toBeUndefined();
-    expect(captured.library_identity_source).toBeUndefined();
-    expect(captured.uncovered_release_search_markers).toBeUndefined();
+    expect(children.album_metadata).toBeUndefined();
+    expect(children.library_identity).toBeUndefined();
+    expect(children.library_identity_source).toBeUndefined();
+    expect(children.uncovered_release_search_markers).toBeUndefined();
   });
 
   /**
@@ -829,7 +858,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
    * — unlike the flowsheet play-count refusal — there is no snapshot to fall
    * back on here; the librarian needs enough to go find the asset.
    */
-  test('refuses with 409, not 500, when the release has a bound digital asset', async () => {
+  test('refuses with 409, not 500, when the release has a live digital asset', async () => {
     const album = await createAlbum(`BS#2560 Digital Asset ${uniq}`);
 
     const [assetRow] = await sql.unsafe(
@@ -867,6 +896,68 @@ describe('DELETE /library/:id (BS#2112)', () => {
       // batched delete, not just this one. Clear it here rather than let
       // the suite's teardown be the one that discovers that.
       await sql.unsafe(`DELETE FROM "${SCHEMA}".digital_asset WHERE library_id = $1`, [album.id]);
+    }
+  });
+
+  /**
+   * BS#2560 review finding 2. Refusing on EVERY `digital_asset` status made a
+   * release permanently undeletable through the API: nothing in this service
+   * can clear or delete a `digital_asset` row, so a reviewer rejecting a
+   * mis-bound asset stranded the release forever — recoverable only by
+   * hand-written SQL against prod, over evidence the station had already
+   * decided was wrong. `merge.ts` already deletes through this table on a
+   * merge, on the reasoning that BS#2319's bind job rediscovers assets by
+   * scanning the store. A rejected asset is therefore deleted through, not
+   * refused over — but snapshotted first, with its `digital_asset_file` rows,
+   * so the `object_key`s of the objects the cascade orphans stay on record.
+   */
+  test('deletes a release whose only digital asset was rejected, snapshotting the asset and its files', async () => {
+    const album = await createAlbum(`BS#2560 Rejected Asset ${uniq}`);
+
+    const [assetRow] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".digital_asset (library_id, provenance, disc_number, status, bind_note)
+       VALUES ($1, 'rotation_upload', 1, 'rejected', 'wrong album') RETURNING id`,
+      [album.id]
+    );
+    const [storeRow] = await sql.unsafe(`INSERT INTO "${SCHEMA}".digital_asset_store (name) VALUES ($1) RETURNING id`, [
+      `bs2560-probe-store-${album.id}`,
+    ]);
+    const objectKey = `bs2560-probe/${album.id}/track01.mp3`;
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".digital_asset_file (asset_id, store_id, object_key, codec, title, bytes)
+       VALUES ($1, $2, $3, 'mp3', 'snapshot probe track', 1024)`,
+      [assetRow.id, storeRow.id, objectKey]
+    );
+
+    try {
+      // Not a 409: a rejected asset is not a reason to make a release immortal.
+      await auth.delete(`/library/${album.id}`).expect(204);
+
+      const assetGone = await sql.unsafe(`SELECT id FROM "${SCHEMA}".digital_asset WHERE id = $1`, [assetRow.id]);
+      expect(assetGone).toHaveLength(0);
+      // `digital_asset_file.asset_id` is ON DELETE cascade, so the file rows
+      // went with it — which is exactly why they had to be captured.
+      const fileGone = await sql.unsafe(`SELECT id FROM "${SCHEMA}".digital_asset_file WHERE asset_id = $1`, [
+        assetRow.id,
+      ]);
+      expect(fileGone).toHaveLength(0);
+
+      const [snapshot] = await sql.unsafe(
+        `SELECT captured FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = $1`,
+        [album.id]
+      );
+      const children = snapshot.captured.children;
+      expect(children.digital_asset).toHaveLength(1);
+      expect(children.digital_asset[0].id).toBe(assetRow.id);
+      expect(children.digital_asset[0].status).toBe('rejected');
+      // The depth-2 file child, reached through `digital_asset.id` rather than
+      // `library.id` — the second `via` child in the capture list, and the one
+      // carrying the store keys a re-bind needs.
+      expect(children.digital_asset_file).toHaveLength(1);
+      expect(children.digital_asset_file[0].object_key).toBe(objectKey);
+    } finally {
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".digital_asset WHERE library_id = $1`, [album.id]);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".digital_asset_store WHERE id = $1`, [storeRow.id]);
     }
   });
 });

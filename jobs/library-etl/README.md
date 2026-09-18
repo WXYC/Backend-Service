@@ -125,11 +125,34 @@ Then, in principle, **one** of:
 
   Whether this alone re-imports anything is not something this job verifies: `package.json` now declares `job-type: one-shot` (`cd8f058e`), so a fresh deploy no longer registers a crontab entry for this job (see [Delete denylist](#delete-denylist) above) — but that commit only ever installs crontab lines, it never removes one already installed on a host, so whether a previously-installed half-hourly line is still firing there is a separate, unverified fact. If one is, this `DELETE` alone is enough to start the re-sync: the next scheduled tick finds no watermark and fires the full-catalog re-import unattended, within thirty minutes. If none is, the job has to be invoked by hand instead. Do not assume the quiet case — check the host's crontab, or invoke the job explicitly, rather than waiting to see which one happens.
 
-  The next run has no watermark, so `buildReleaseQuery` emits no `TIME_LAST_MODIFIED` predicate and re-selects the entire upstream catalog in one pass. Every other release re-upserts idempotently (the `setWhere` guard means unchanged rows are not touched), so this is safe — it is just slow, and it is the same recipe the troubleshooting table below gives for a stuck watermark.
+  The next run has no watermark, so `buildReleaseQuery` emits no `TIME_LAST_MODIFIED` predicate and re-selects the entire upstream catalog in one pass. Every other release re-upserts idempotently (the `setWhere` guard means unchanged rows are not touched), so it is slow rather than dangerous for unchanged rows — but it is **not** the harmless operation the older wording implied:
+
+  > **⚠️ A full re-sync REVERTS every dj-site catalog edit made since the Phase 3.5 freeze.** The upsert's `ON CONFLICT (legacy_release_id) DO UPDATE` sets each of `LEGACY_SOURCED_LIBRARY_COLUMNS` from `excluded.*` — `artist_id`, `artist_name`, `genre_id`, `format_id`, `alternate_artist_name`, `album_artist`, `album_title`, `code_number`, `code_volume_letters`, `disc_quantity`, `add_date`, `last_modified`, `date_lost`, `date_found`, `on_streaming` — wherever the Backend value differs from tubafrenzy's. That treated tubafrenzy as authoritative for those columns, which was true while `/wxycdb` was the only editor. It is no longer: dj-site's classic catalog interface now owns them, and the MySQL copy has been frozen since `cd8f058e` (2026-09-16), so for every release a librarian has retitled, re-filed or re-coded through dj-site since that date, "re-select the entire upstream catalog" means "overwrite the correction with the stale pre-freeze value". The `setWhere` guard does not help here — a changed row is exactly what it lets through. The blast radius is every edited release in the catalog, not just the one being restored, and the revert is silent.
+  >
+  > So this recipe is safe only when no dj-site catalog edits have happened since the freeze, or when you have accepted losing them. To restore ONE release without that blast radius, put its row back from the snapshot's `captured -> 'entity'` instead (see below) rather than forcing a catalog-wide pass. The column-provenance fix — teaching the upsert which columns dj-site now owns — is tracked as WXYC/Backend-Service#2581.
 
   **Both clauses, not just the `=`.** The secondary imports carry their own `library-etl:*` watermark rows ([Delta bounds and watermarks](#delta-bounds-and-watermarks)). Deleting only the exact `library-etl` row leaves those in place, so the cross-reference and compilation-track imports stay bounded and the operator gets a release-only pass while believing they forced a full one. The predicate is written `= 'library-etl' OR LIKE 'library-etl:%'` rather than the looser `LIKE 'library-etl%'` so that a future job named `library-etl-something` is not swept up by an operator running this recipe — `:` is the namespace separator, and no job name elsewhere in `jobs/` contains one.
 
-Either way the release returns under a **fresh `library.id`**, without the dependents that cascade-destroyed against the old one — none of those are recoverable from tubafrenzy, and this job does not import them. As of BS#2560 the primary restore source for them is `catalog_delete_snapshot`, not a database backup: the delete's own transaction wrote one row there (`entity_kind = 'library'`, `entity_id = <old id>`) holding every `compilation_track_artist`, `library_urls`, `reviews`, `album_critic_reviews`, `bins`, `rotation`, `rotation_urls` and `artist_library_crossreference` row that referenced it — `SELECT captured FROM wxyc_schema.catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = <old id>;` — and each needs re-inserting by hand under the release's new id, since nothing does that automatically.
+**Neither path exists for a Backend-minted release.** Both recipes above start from an upstream `LIBRARY_RELEASE` row, and there is none for a release Backend created itself — BS#1963 mints `legacy_release_id` from a sequence, so every release filed through dj-site's classic interface since the Phase 3.5 freeze has no upstream counterpart to re-select at any watermark. For those, re-insert the `library` row directly from the snapshot instead:
+
+```sql
+-- The deleted parent row, verbatim, minus the generated search_doc column.
+SELECT captured -> 'entity' FROM wxyc_schema.catalog_delete_snapshot
+ WHERE entity_kind = 'library' AND entity_id = <old id>;
+```
+
+`captured -> 'entity' -> 'row'` holds every non-generated `library` column as it stood inside the delete's own transaction, so the release can be re-INSERTed with its `label`, `label_id`, `discogs_unavailable`, `discogs_unavailable_note` and code letters intact. Let `id` default (the new row gets a fresh one) and keep `legacy_release_id` if you want the ETL to continue recognising the release. Note that the four ETL-refreshed columns are the only ones an upstream re-import would ever have restored anyway: `LEGACY_SOURCED_LIBRARY_COLUMNS` does not include `label`, `label_id` or either `discogs_unavailable*` column, so the snapshot is the only source for those on **every** release, imported or minted.
+
+Either way the release returns under a **fresh `library.id`**, without the dependents that cascade-destroyed against the old one — none of those are recoverable from tubafrenzy, and this job does not import them. As of BS#2560 the primary restore source for them is `catalog_delete_snapshot`, not a database backup: the delete's own transaction wrote one row there (`entity_kind = 'library'`, `entity_id = <old id>`) holding every `compilation_track_artist`, `library_urls`, `reviews`, `album_critic_reviews`, `bins`, `rotation`, `rotation_urls` and `artist_library_crossreference` row that referenced it, plus any `digital_asset` / `digital_asset_file` rows the delete removed as rejected:
+
+```sql
+-- Children are namespaced under `children`, keyed by table name;
+-- the deleted library row itself is under `entity` (see above).
+SELECT captured -> 'children' FROM wxyc_schema.catalog_delete_snapshot
+ WHERE entity_kind = 'library' AND entity_id = <old id>;
+```
+
+Each child needs re-inserting by hand under the release's new id, since nothing does that automatically.
 
 Two groups are deliberately absent from that snapshot (see the `catalog_delete_snapshot` docstring in `schema.ts`), for different reasons:
 

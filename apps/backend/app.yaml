@@ -1997,7 +1997,9 @@ paths:
         '409':
           description: >-
             Refused on the merits — either the release carries flowsheet
-            plays, or it has a bound `digital_asset` row. Both bodies are
+            plays, or it has a LIVE `digital_asset` row (any status but
+            `rejected`; a rejected asset is snapshotted and deleted through
+            rather than refused over, since nothing can clear one). Both bodies are
             deliberately NOT this service's standard error shape: the
             specifics are the substance of the refusal, telling the
             librarian what the delete would have damaged and by which path.
@@ -2046,7 +2048,7 @@ paths:
                           unlike the other two paths there is no referential lock
                           to hold a concurrent webhook insert behind this check.
                   - type: object
-                    description: 'Refused: a bound digital_asset row references this release'
+                    description: 'Refused: a live digital_asset row references this release'
                     required: ['message', 'reason', 'asset_count', 'assets']
                     properties:
                       message:
@@ -2058,14 +2060,16 @@ paths:
                         enum: ['digital_asset_references']
                       asset_count:
                         type: integer
-                        description: Number of `digital_asset` rows bound to this release (`assets.length`)
+                        description: Number of LIVE `digital_asset` rows blocking this delete (`assets.length`)
                       assets:
                         type: array
                         description: >-
-                          The bound rows themselves — rip evidence /
+                          The live rows themselves — rip evidence /
                           S3-backed audio-archive metadata that has no
                           `onDelete` and nobody can casually re-enter, so the
-                          delete refuses rather than destroying it.
+                          delete refuses rather than destroying it. Rows with
+                          `status: rejected` are never listed here: the delete
+                          snapshots and removes those instead of refusing.
                         items:
                           type: object
                           required: ['id', 'provenance', 'disc_number', 'status']
@@ -2074,12 +2078,24 @@ paths:
                               type: integer
                             provenance:
                               type: string
-                              enum: [rotation_upload, cd_rip]
+                              description: >-
+                                Open vocabulary, NOT a closed enum — `schema.ts`
+                                documents `provenance` as free text so a new
+                                provenance costs no migration (the 0109 lesson).
+                                `rotation_upload` and `cd_rip` are the values in
+                                use today.
+                              example: rotation_upload
                             disc_number:
                               type: integer
                             status:
                               type: string
-                              enum: [needs_review, bound, rejected]
+                              description: >-
+                                Open vocabulary, NOT a closed enum, for the same
+                                reason as `provenance`. `needs_review`, `bound`
+                                and `rejected` are in use today; the CD-rip phase
+                                adds `pulled`, `ripped` and `exception`. A
+                                `rejected` row never appears in this array.
+                              example: needs_review
         '503':
           description: >-
             The delete stood down rather than wait on rows a live writer holds.
