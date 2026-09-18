@@ -512,9 +512,11 @@ export const flowsheet_freetext_resolution = {
   attempt_at: 'flowsheet_freetext_resolution.attempt_at',
   resolved_at: 'flowsheet_freetext_resolution.resolved_at',
 };
-// BS#2560. `deleteAlbumFromDB` now reads this table to snapshot the
-// hand-curated DJ review archive a delete would otherwise unlink silently
-// (`onDelete: 'set null'`).
+// Read by the ADR-0011 review-archive endpoint. Deliberately NOT read by
+// `deleteAlbumFromDB`: the delete leaves the row in place (`onDelete: 'set
+// null'`) and snapshotting it would copy `reviewer_raw`/`social_consent_raw`
+// into permanently-retained storage — see the exclusion note in
+// `library.service.ts`'s capture and on `catalog_delete_snapshot`.
 export const album_review_submissions = {
   id: 'album_review_submissions.id',
   album_id: 'album_review_submissions.album_id',

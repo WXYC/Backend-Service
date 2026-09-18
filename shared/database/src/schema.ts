@@ -2118,9 +2118,9 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * keyed by child table name, holding every row that referenced the deleted
  * parent, read inside the same transaction before the delete runs.
  *
- * Captures the NINE irreplaceable children only — the ones a person typed
+ * Captures the EIGHT irreplaceable children only — the ones a person typed
  * and nothing recomputes: `compilation_track_artist`, `library_urls`,
- * `reviews`, `album_critic_reviews`, `album_review_submissions`, `bins`,
+ * `reviews`, `album_critic_reviews`, `bins`,
  * `rotation`, `rotation_urls` (a depth-2 child — its own FK points at
  * `rotation.id`, not `library.id`; `captureCatalogDeleteSnapshot`'s `via`
  * shape resolves it as one correlated subquery riding along with the same
@@ -2129,9 +2129,9 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * This is meant to be the FULL `library.id` dependent list, re-derived from
  * the deployed schema rather than asserted, and it is what a reviewer reads
  * to decide whether some newly-added FK is already accounted for — so a new
- * one belongs in one of the three buckets below even when it needs no new
+ * one belongs in one of the four buckets below even when it needs no new
  * capture. Every dependent resolves to exactly one:
- *   - Captured: the nine above.
+ *   - Captured: the eight above.
  *   - Excluded as DERIVED, re-obtained after a restore rather than stored
  *     forever: `album_metadata` (re-enriched from LML), `library_identity` +
  *     `library_identity_source` (re-resolved), and
@@ -2139,6 +2139,23 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     here is PERMANENT — there is deliberately no prune job — which is
  *     exactly why storing derived data would be a standing waste rather than
  *     a one-time one.
+ *   - Excluded because the row SURVIVES the delete AND capturing it would
+ *     breach a PII barrier: `album_review_submissions`. Two independent
+ *     reasons, either sufficient. (1) Its `album_id` is
+ *     `onDelete: 'set null'` precisely "so a library deletion can't take the
+ *     submission with it" (see that table's own docstring), so the row is
+ *     still there, unlinked, after this delete commits — a capture would
+ *     duplicate a live row, not preserve a destroyed one. (2)
+ *     `captureCatalogDeleteSnapshot` reads each child with an UNPROJECTED
+ *     `tx.select()`, so capturing it would copy `reviewer_raw` and
+ *     `social_consent_raw` — real names collected under a form promise that
+ *     "your name will not be shared" — into this permanently-retained,
+ *     never-pruned `captured` column. ADR 0011 and that table's docstring
+ *     make the enumerated `select({...})` in `lookupWxycReviewsByAlbumId`
+ *     the ONLY reader and require any second reader to carry the same
+ *     exclusion; this capture would have been that second reader. Do not
+ *     "fix" this with a projection — reason (1) means there is nothing to
+ *     restore.
  *   - Excluded because the delete REFUSES outright rather than ever reaching
  *     them: `flowsheet` (the 409 flowsheet-plays guard) and `digital_asset`
  *     (the 409 `has_digital_assets` guard — its FK has no `onDelete` at all,
@@ -2147,7 +2164,7 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     `deleteAlbumFromDB` in `library.service.ts`).
  * `library_identity_history` and `album_popularity.representative_library_id`
  * are the two FK-LESS pointers at `library.id` (a new FK-less pointer is a
- * fourth thing worth checking for, alongside the three buckets above), and
+ * fifth thing worth checking for, alongside the four buckets above), and
  * each sits outside those buckets for a different reason. Neither is
  * captured here, and neither needs to be. `library_identity_history` is
  * deliberately left DANGLING after a delete: it is a supersedure audit log

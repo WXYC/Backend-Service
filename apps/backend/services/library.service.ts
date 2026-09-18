@@ -31,7 +31,6 @@ import {
   album_critic_reviews,
   album_plays,
   album_popularity,
-  album_review_submissions,
   artist_crossreference,
   artist_library_crossreference,
   artists,
@@ -4503,7 +4502,9 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * (`rotation`, `library_urls`, `album_metadata`, `album_critic_reviews`,
  * `reviews`, `compilation_track_artist`, `uncovered_release_search_markers`:
  * real `onDelete: 'cascade'`; `album_review_submissions`: `onDelete: 'set
- * null'`) is left to its own FK. `library_watermark` advances via the
+ * null'`, so that row SURVIVES the delete with a NULL link and is
+ * deliberately NOT snapshotted — see the capture's own comment for that and
+ * for the ADR-0011 PII reason it must stay out) is left to its own FK. `library_watermark` advances via the
  * `touch_library_watermark` trigger (migration 0104/0142, unqualified on
  * DELETE) — no app-level bump needed.
  *
@@ -4678,7 +4679,7 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
       };
     }
 
-    // Capture the nine irreplaceable children BEFORE any delete runs, so a
+    // Capture the irreplaceable children BEFORE any delete runs, so a
     // failed capture rolls back with the delete instead of leaving the
     // subtree unrecoverable. `rotation_urls` is a depth-2 child — its FK
     // points at `rotation.id`, not at `library.id`, so it rides along with
@@ -4694,6 +4695,28 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // under this table's permanent retention. `digital_asset` is likewise
     // absent: the check above refuses the delete outright rather than
     // letting it reach a captured child.
+    //
+    // `album_review_submissions` is absent for TWO independent reasons,
+    // either of which is sufficient, and it must not be added back:
+    //
+    //   1. Nothing is lost by omitting it. Its `album_id` is
+    //      `onDelete: 'set null'`, chosen precisely "so a library deletion
+    //      can't take the submission with it" (`schema.ts`), so the row
+    //      SURVIVES this delete with a NULL link. A capture would be a
+    //      verbatim copy of a row still sitting in the live table.
+    //   2. Capturing it BREACHES the ADR-0011 PII barrier. `reviewer_raw`
+    //      holds real names collected under a form promise that "your name
+    //      will not be shared", and the barrier is that the enumerated
+    //      `select({...})` in `lookupWxycReviewsByAlbumId` is the only
+    //      reader — "any second reader must carry the same exclusion".
+    //      `captureCatalogDeleteSnapshot` reads with an UNPROJECTED
+    //      `tx.select()`, so listing this table here would copy
+    //      `reviewer_raw` and `social_consent_raw` into a permanently-
+    //      retained jsonb column with no redaction or purge path: exactly
+    //      the second reader schema.ts and ADR 0011 forbid.
+    //
+    // Reason 2 is not answerable by adding a projection here, because reason
+    // 1 means there is nothing to restore in the first place.
     await captureCatalogDeleteSnapshot(tx, {
       entityKind: 'library',
       entityId: album_id,
@@ -4702,7 +4725,6 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         catalogDeleteChild('library_urls', library_urls, library_urls.library_id),
         catalogDeleteChild('reviews', reviews, reviews.album_id),
         catalogDeleteChild('album_critic_reviews', album_critic_reviews, album_critic_reviews.album_id),
-        catalogDeleteChild('album_review_submissions', album_review_submissions, album_review_submissions.album_id),
         catalogDeleteChild('bins', bins, bins.album_id),
         catalogDeleteChild('rotation', rotation, rotation.album_id),
         catalogDeleteGrandchild('rotation_urls', rotation_urls, rotation_urls.rotation_id, {
