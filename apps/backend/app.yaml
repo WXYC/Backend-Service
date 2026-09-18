@@ -2004,7 +2004,7 @@ paths:
       summary: Hard-delete a library release (BS#2112)
       description: >-
         Irreversible. Deletes even when the release carries flowsheet plays
-        (BS#2565 removed the prior 409 refusal over them) — the 204 body
+        (BS#2565 removed the prior 409 refusal over them) — the 200 body
         reports the damage split by the same three paths the refusal used to
         count: linked directly (`flowsheet.album_id`), via its rotation entry
         (`flowsheet.rotation_id` -> `rotation.album_id`), or by bare
@@ -2025,11 +2025,12 @@ paths:
           schema:
             type: integer
       responses:
-        '204':
+        '200':
           description: >-
-            Deleted. Carries a body (non-standard for a 204, but so is the
-            409's below) reporting the flowsheet plays it damaged, split by
-            path — never summed, since the arms are not equally recoverable.
+            Deleted — 200, not 204, because a 204 carries no body and this
+            response's whole point is one: the flowsheet plays it damaged,
+            split by path and never summed, since the arms are not equally
+            recoverable.
           content:
             application/json:
               schema:
