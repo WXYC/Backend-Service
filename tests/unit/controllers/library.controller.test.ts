@@ -81,17 +81,6 @@ const mockUpdateAlbumInDB =
 const mockGetFormatById = jest.fn<(id: number) => Promise<{ id: number; format_name: string } | undefined>>();
 const mockArtistExistsInGenre = jest.fn<(artistId: number, genreId: number) => Promise<boolean>>();
 const mockAlbumCodeNumberTaken = jest.fn<(artistId: number, code: number, exclude: number) => Promise<boolean>>();
-// BS#2564: the PATCH /library/:id call-code collision check.
-const mockFindConflictingAlbumId =
-  jest.fn<
-    (
-      artistId: number,
-      genreId: number,
-      code: number,
-      vol: string | null,
-      exclude: number
-    ) => Promise<number | undefined>
-  >();
 const mockUpdateOnStreaming = jest.fn<() => Promise<unknown>>();
 const mockUpdateArtworkUrl = jest.fn<() => Promise<unknown>>();
 const mockGetLabelById = jest.fn<(id: number) => Promise<{ id: number; label_name: string } | undefined>>();
@@ -240,7 +229,6 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   updateAlbumInDB: mockUpdateAlbumInDB,
   artistExistsInGenre: mockArtistExistsInGenre,
   albumCodeNumberTaken: mockAlbumCodeNumberTaken,
-  findConflictingAlbumId: mockFindConflictingAlbumId,
   recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
   getArtistCardById: mockGetArtistCardById,
@@ -3277,7 +3265,6 @@ describe('library.controller', () => {
       mockGetAlbumFromDB.mockResolvedValue(fullAlbum);
       mockGetArtistNameById.mockResolvedValue('Juana Molina');
       mockArtistExistsInGenre.mockResolvedValue(true);
-      mockFindConflictingAlbumId.mockResolvedValue(undefined);
     });
 
     describe('format_id existence guard (#1550)', () => {
@@ -3540,57 +3527,6 @@ describe('library.controller', () => {
       });
     });
 
-    // The 409 envelope mirrors `artist_code_conflict`'s precedent (see the
-    // `createLibraryFiling` suite above): flat `{message, reason, album}`,
-    // pinned literally so the shape can't drift out from under the typed
-    // clients that decode it.
-    describe('album_code_conflict (BS#2564)', () => {
-      const conflictingAlbum = {
-        id: 99,
-        artist_id: 7,
-        artist_name: 'Juana Molina',
-        album_title: 'DOGA (Reissue)',
-        code_number: 5,
-      };
-
-      it('answers 409 album_code_conflict with the flat contract shape and writes nothing', async () => {
-        mockFindConflictingAlbumId.mockResolvedValue(99);
-        mockGetAlbumFromDB.mockResolvedValue(conflictingAlbum);
-        const res = mockResponse();
-
-        await updateAlbum(reqFor({ code_number: 5 }), res, next);
-
-        expect(res.status).toHaveBeenCalledWith(409);
-        expect(res.json).toHaveBeenCalledWith({
-          message: 'That call number is already assigned to another release by this artist.',
-          reason: 'album_code_conflict',
-          album: conflictingAlbum,
-        });
-        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
-      });
-
-      it('checks the destination genre, not the current one, when genre_id moves in the same request', async () => {
-        mockFindConflictingAlbumId.mockResolvedValue(undefined);
-        const res = mockResponse();
-
-        await updateAlbum(reqFor({ genre_id: 7, code_number: 5 }), res, next);
-
-        // existingRow.genre_id is 11; the effective (destination) genre is
-        // the 7 the body just moved it to, not the row's current 11.
-        expect(mockFindConflictingAlbumId).toHaveBeenCalledWith(existingRow.artist_id, 7, 5, null, 42);
-        expect(res.status).toHaveBeenCalledWith(200);
-      });
-
-      it('checks the destination artist, not the current one, when artist_id moves in the same request', async () => {
-        mockFindConflictingAlbumId.mockResolvedValue(undefined);
-        const res = mockResponse();
-
-        await updateAlbum(reqFor({ artist_id: 55, code_number: 5 }), res, next);
-
-        expect(mockFindConflictingAlbumId).toHaveBeenCalledWith(55, existingRow.genre_id, 5, null, 42);
-      });
-    });
-
     // BS#2564 finding 2: an explicit body.code_number riding alongside an
     // artist_id move must win over the pre-existing auto-regenerate (issue
     // 7) — that block tests the row's OLD code_number, which is meaningless
@@ -3603,7 +3539,6 @@ describe('library.controller', () => {
         // generateAlbumCodeNumber would overwrite the explicit 5 with 999.
         mockAlbumCodeNumberTaken.mockResolvedValue(true);
         mockGenerateAlbumCodeNumber.mockResolvedValue(999);
-        mockFindConflictingAlbumId.mockResolvedValue(undefined);
         const res = mockResponse();
 
         await updateAlbum(reqFor({ artist_id: 55, code_number: 5 }), res, next);
@@ -3616,23 +3551,31 @@ describe('library.controller', () => {
         );
         expect(res.status).toHaveBeenCalledWith(200);
       });
+    });
 
-      it('a colliding explicit code_number 409s instead of silently reassigning', async () => {
-        mockFindConflictingAlbumId.mockResolvedValue(99);
-        mockGetAlbumFromDB.mockResolvedValue({
-          id: 99,
-          artist_id: 55,
-          artist_name: 'Cat Power',
-          album_title: 'The Greatest',
-          code_number: 5,
-        });
+    // A PATCH omitting `code_volume_letters` leaves the stored value alone
+    // (`updateAlbumInDB` only SETs keys `!== undefined`), so clearing it
+    // requires a distinct spelling. `Album.code_volume_letters` is
+    // `nullable: true` in app.yaml, so a client that round-trips a GET body
+    // straight into a PATCH must be able to send back the `null` it just
+    // received rather than 400ing on it.
+    describe('code_volume_letters: null clears explicitly', () => {
+      it('writes null when code_volume_letters is explicitly null on a lettered row', async () => {
+        mockGetLibraryRowById.mockResolvedValue({ ...existingRow, code_volume_letters: 'A' });
         const res = mockResponse();
 
-        await updateAlbum(reqFor({ artist_id: 55, code_number: 5 }), res, next);
+        await updateAlbum(reqFor({ code_volume_letters: null }), res, next);
 
-        expect(res.status).toHaveBeenCalledWith(409);
-        const body = (res.json as jest.Mock).mock.calls[0][0] as { reason: string };
-        expect(body.reason).toBe('album_code_conflict');
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ code_volume_letters: null }));
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('still rejects a non-string, non-null code_volume_letters', async () => {
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ code_volume_letters: 4 }), res, next)).rejects.toThrow(
+          'code_volume_letters must be a string'
+        );
         expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
       });
     });

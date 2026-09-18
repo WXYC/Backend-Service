@@ -229,39 +229,6 @@ components:
           type: string
           format: date-time
 
-    AlbumCodeConflictReason:
-      type: string
-      enum: [album_code_conflict]
-      description: >-
-        Discriminator for the `PATCH /library/{id}` 409 (BS#2564), pairing
-        with `AlbumCodeConflictError` the way `RotationConflictReason` pairs
-        with `RotationConflictError` in wxyc-shared's api.yaml. Purpose-built
-        rather than an extension of that spec's filings-scoped
-        `LibraryFilingConflictReason`: this endpoint has no 409 of any other
-        kind today, so this is new surface, not an append to an existing
-        discriminator. Declared here rather than in wxyc-shared because
-        WXYC/wxyc-shared#503 owns porting `PATCH /library/{id}` into that
-        spec at all; this file is Swagger-UI display only in the meantime.
-
-    AlbumCodeConflictError:
-      type: object
-      description: >-
-        The `PATCH /library/{id}` 409 body. Flat `{message, reason, album}` —
-        the conflicting resource as a top-level sibling field named for the
-        resource type — mirroring `addArtist`'s `artist_code_conflict` 409
-        (`artist_code_conflict` reason, `artist` field) rather than nesting
-        under a `details` wrapper.
-      required: ['message', 'reason', 'album']
-      properties:
-        message:
-          type: string
-        reason:
-          $ref: '#/components/schemas/AlbumCodeConflictReason'
-        album:
-          allOf:
-            - $ref: '#/components/schemas/Album'
-          description: The already-catalogued release that owns the collided call-code slot.
-
     NewAlbumRequest:
       type: object
       description: >-
@@ -1996,17 +1963,26 @@ paths:
                   maximum: 32767
                   description: >-
                     Operator-chosen release call number (BS#2564; the PATCH half
-                    of `NewAlbumRequest.code_number`, BS#2410). Artist-scoped
-                    collision check — see the 409 below. No DB uniqueness
-                    constraint (#2033).
+                    of `NewAlbumRequest.code_number`, BS#2410). No
+                    application-level collision check, same as the POST side
+                    (single-librarian decision, rotation-import plan D2); the
+                    eventual DB uniqueness constraint and its 23505 → 409
+                    mapping are tracked on #2033.
                 code_volume_letters:
                   type: string
+                  nullable: true
                   maxLength: 4
                   description: >-
                     Volume letters for the release call code
                     (`library.code_volume_letters`, varchar(4)). An empty
-                    string clears it to NULL, matching
-                    `NewAlbumRequest.code_volume_letters`'s rule.
+                    string or an explicit `null` clears it to NULL — `null` is
+                    accepted (unlike `NewAlbumRequest.code_volume_letters`,
+                    which has nothing to clear on a create) because omitting
+                    the key already means "leave unchanged" on a PATCH, so
+                    clearing needs a distinct spelling, and `Album`'s own
+                    `code_volume_letters` is `nullable: true`, so a client
+                    round-tripping a GET body into a PATCH must be able to
+                    send back the `null` it just received.
       responses:
         '200':
           description: Updated album
@@ -2018,22 +1994,6 @@ paths:
           description: Invalid field value or no updatable fields provided
         '404':
           description: Album or artist not found
-        '409':
-          description: >-
-            Refused — another release already holds this `(artist_id,
-            genre_id, code_number, code_volume_letters)` shelf slot (BS#2564)
-            — genre-scoped, so the same artist can hold the same
-            `code_number` in two different genres without conflict. Raised
-            whenever the request edits `code_number` and/or
-            `code_volume_letters`, including an explicit `code_number`
-            supplied alongside an `artist_id`/`genre_id` move — that explicit
-            value always wins over the server. An artist or genre
-            reassignment with no explicit `code_number` keeps the
-            pre-existing auto-regenerate behavior instead.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AlbumCodeConflictError'
 
     delete:
       summary: Hard-delete a library release (BS#2112)

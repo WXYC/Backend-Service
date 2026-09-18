@@ -4899,43 +4899,6 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
   });
 };
 
-/**
- * The id of the album (if any, excluding `exclude_album_id`) that already
- * owns this `(artist_id, genre_id, code_number, code_volume_letters)` shelf
- * slot (BS#2564, `PATCH /library/:id`'s call-code collision check) — the same
- * key `jobs/library-call-number-dedup` merges duplicates on (see that job's
- * README, "The slot key"). `genre_id` is part of the key because call codes
- * are genre-scoped: an artist filed under two genres has two shelves with
- * independent numbering, so `(artist_id, code_number)` alone would call a
- * legitimate cross-genre filing a collision.
- *
- * Volume letters compare case- and NULL-insensitively via
- * `upper(coalesce(..., ''))`, matching the same job's fold — a PATCH must not
- * be able to create the collision that job exists to drain.
- */
-export const findConflictingAlbumId = async (
-  artist_id: number,
-  genre_id: number,
-  code_number: number,
-  code_volume_letters: string | null,
-  exclude_album_id: number
-): Promise<number | undefined> => {
-  const rows = await db
-    .select({ id: library.id })
-    .from(library)
-    .where(
-      and(
-        eq(library.artist_id, artist_id),
-        eq(library.genre_id, genre_id),
-        eq(library.code_number, code_number),
-        ne(library.id, exclude_album_id),
-        sql`upper(coalesce(${library.code_volume_letters}, '')) = upper(coalesce(${code_volume_letters}, ''))`
-      )
-    )
-    .limit(1);
-  return rows[0]?.id;
-};
-
 /** True when `artist_id` already owns an album with this `code_number` (excluding `exclude_album_id`). */
 export const albumCodeNumberTaken = async (
   artist_id: number,
