@@ -4333,15 +4333,7 @@ export const recheckDiscogsAvailability = async (
 };
 
 export type DeleteAlbumOutcome =
-  | {
-      outcome: 'deleted';
-      /** Plays linked to the release itself (`flowsheet.album_id`). */
-      directPlayCount: number;
-      /** Plays linked only to the release's rotation entry (`flowsheet.rotation_id`). */
-      rotationLinkedPlayCount: number;
-      /** Plays linked only by `flowsheet.legacy_release_id`, awaiting `jobs/legacy-linkage-resolve`. */
-      legacyLinkedPlayCount: number;
-    }
+  | { outcome: 'deleted' }
   | { outcome: 'not_found' }
   | { outcome: 'lock_unavailable' }
   | {
@@ -4412,13 +4404,13 @@ export type DeleteAlbumActor = CatalogDeleteActor;
 export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 
 /**
- * Hard-deletes a library release (BS#2112, D10 policy; BS#2565 removed the
- * flowsheet-play refusal D10 rested on). `flowsheet.album_id` is
- * `onDelete: 'set null'`, so the delete blanks it on every play that named
- * this release — no longer refused over, but still counted, so the
- * `deleted` outcome can carry what it damaged for the client to display.
+ * Hard-deletes a library release (BS#2112, D10 policy). Refuses when the
+ * release carries `flowsheet` references: `flowsheet.album_id` is
+ * `onDelete: 'set null'`, so an unguarded delete would silently blank
+ * historical plays — the exact hazard the WXYC/Backend-Service#2108 orphan
+ * audit exists to prevent.
  *
- * **The count spans TWO paths to a play, not one.** `rotation.album_id` is
+ * **The refusal counts TWO paths to a play, not one.** `rotation.album_id` is
  * `onDelete: 'cascade'` and `flowsheet.rotation_id` is `onDelete: 'set null'`,
  * so deleting a release also blanks `rotation_id` on every play that reached
  * it through the rotation entry. That is not an edge case: the tubafrenzy
@@ -4441,8 +4433,8 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * plays are counted too. They cannot be *locked*, though: with no FK there is
  * no RI check to conflict with, so a webhook INSERT landing between this
  * count and the DELETE is invisible. The residual window is one statement
- * wide and one-sided (it can only mean an undercount, never an over-count),
- * and closing it would require a lock on a column no writer takes
+ * wide and one-sided (it can only mean a refusal that should have fired
+ * didn't), and closing it would require a lock on a column no writer takes
  * one on. The resolver's own UPDATE *is* covered: setting `album_id` fires
  * the FK check, which takes `FOR KEY SHARE` on the library row this
  * transaction holds `FOR UPDATE`.
@@ -4454,8 +4446,7 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * resolver's UPDATE (`jobs/legacy-linkage-resolve/job.ts:271`), and
  * `linkRotationToAlbum`'s retroactive play flip (this file, line 1186) —
  * between the count and the DELETE would get its play blanked by the RI
- * action without being reflected in the counts this transaction reports.
- * That enumeration is meant
+ * action — exactly what the 409 exists to prevent. That enumeration is meant
  * to be exhaustive, and it is what a reviewer reads to decide whether some
  * newly-added write site is already covered, so a new one belongs in it even
  * when it needs no new defence: `linkRotationToAlbum`'s UPDATE is fenced
@@ -4638,71 +4629,15 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
 
     // Lock the release's rotation rows for the same reason: a writer setting
     // `flowsheet.rotation_id` takes FOR KEY SHARE on the ROTATION row, never
-    // on the library row, so the lock above does not cover the transitive
-    // path. Doubles as the id list the transitive count needs. ALSO
-    // load-bearing for the `rotation_urls` capture below: an INSERT into
-    // `rotation_urls` takes FOR KEY SHARE on its `rotation` row, not on
-    // `library`, so it is this `.for('update')` — not the one above — that
-    // blocks a concurrent write from landing between that capture's
-    // subquery and the cascade delete. Do not drop or move this lock
-    // without re-checking that capture's atomicity.
-    const rotationRows = await tx
-      .select({ id: rotation.id })
-      .from(rotation)
-      .where(eq(rotation.album_id, album_id))
-      .for('update');
-    const rotationIds = rotationRows.map((row) => row.id);
-
-    const directRows = await tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(flowsheet)
-      .where(eq(flowsheet.album_id, album_id));
-    const directPlayCount = Number(directRows[0]?.count ?? 0);
-
-    // Transitive plays, de-duplicated against the direct count: a play that
-    // carries BOTH this album_id and one of its rotation ids is one damaged
-    // play, not two. `IS DISTINCT FROM` rather than `<>` because the shape
-    // this arm exists to catch is precisely `album_id IS NULL` (the webhook
-    // resolves the two columns independently), and `<>` would drop every one
-    // of those rows to NULL.
-    let rotationLinkedPlayCount = 0;
-    if (rotationIds.length > 0) {
-      const transitiveRows = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(flowsheet)
-        .where(
-          and(inArray(flowsheet.rotation_id, rotationIds), sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`)
-        );
-      rotationLinkedPlayCount = Number(transitiveRows[0]?.count ?? 0);
-    }
-
-    // Plays that name the release ONLY by its tubafrenzy id, waiting for
-    // `jobs/legacy-linkage-resolve` to turn that into an `album_id`. Disjoint
-    // from both counts above by construction, so the three sum to a true
-    // total: `album_id IS DISTINCT FROM` excludes the direct arm (and, as
-    // there, `IS DISTINCT FROM` rather than `<>` because the shape being
-    // caught is precisely a NULL `album_id`), and the rotation clause
-    // excludes the transitive arm. Deleting while any of these exist strands
-    // them forever — the denylist guarantees no future `library` row will
-    // ever carry this `legacy_release_id` for the resolver to join to,
-    // whichever way `jobs/library-etl` next runs (see the `deleteAlbumFromDB`
-    // docstring's Durability paragraph and `library_delete_denylist`'s own
-    // docstring in `schema.ts`).
-    const legacyLinkedRows = await tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(flowsheet)
-      .where(
-        and(
-          eq(flowsheet.legacy_release_id, legacy_release_id),
-          sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`,
-          // `NOT IN` alone would drop every NULL `rotation_id` row to NULL and
-          // silently exclude the exact population this arm exists to count.
-          rotationIds.length > 0
-            ? or(isNull(flowsheet.rotation_id), notInArray(flowsheet.rotation_id, rotationIds))
-            : undefined
-        )
-      );
-    const legacyLinkedPlayCount = Number(legacyLinkedRows[0]?.count ?? 0);
+    // on the library row, so the lock above does not cover that path. Taken
+    // for its lock alone — the rows themselves are unread, which is why
+    // nothing binds the result. Load-bearing for the `rotation_urls` capture
+    // below: an INSERT into `rotation_urls` takes FOR KEY SHARE on its
+    // `rotation` row, not on `library`, so it is this `.for('update')` — not
+    // the one above — that blocks a concurrent write from landing between
+    // that capture's subquery and the cascade delete. Do not drop or move
+    // this lock without re-checking that capture's atomicity.
+    await tx.select({ id: rotation.id }).from(rotation).where(eq(rotation.album_id, album_id)).for('update');
 
     // Refuse before any delete runs when the release has a LIVE digital
     // asset. `digital_asset.library_id` is NOT NULL with no `onDelete` (no
@@ -4883,7 +4818,7 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
       data: { album_id, legacy_release_id, actor_user_id: attribution.deleted_by_user_id },
     });
 
-    return { outcome: 'deleted', directPlayCount, rotationLinkedPlayCount, legacyLinkedPlayCount };
+    return { outcome: 'deleted' };
   });
 };
 
