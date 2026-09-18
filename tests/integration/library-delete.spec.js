@@ -17,20 +17,29 @@
  *     but the live constraint (migration 0022) was created `ON DELETE no
  *     action` and never migrated to match — verified against
  *     `pg_constraint.confdeltype`, not just the Drizzle model.
- *   - the real cascading dependents (`rotation`, `album_metadata`,
- *     `album_critic_reviews`, `reviews`, `compilation_track_artist`) left
+ *   - the real cascading dependents (`rotation`, `rotation_urls`,
+ *     `album_metadata`, `album_critic_reviews`, `reviews`,
+ *     `compilation_track_artist`, `uncovered_release_search_markers`) left
  *     to their own `onDelete: 'cascade'` FK, plus
  *     `album_review_submissions`'s `onDelete: 'set null'` divergence (the
- *     row survives, unlinked).
+ *     row survives, unlinked) — a subset of these are ALSO snapshotted
+ *     before the cascade runs, see the BS#2560 bullet below.
+ *   - the DIGITAL-ASSET refusal (BS#2560 finding 2): `digital_asset.library_id`
+ *     has no `onDelete` at all (no cascade, no set-null), so a bound release
+ *     is refused with 409 (`reason: 'digital_asset_references'`) rather than
+ *     raising a raw FK-violation 500.
  *   - the TRANSITIVE refusal: plays reachable only via `flowsheet.rotation_id`
  *     -> `rotation.album_id` (`set null` behind a `cascade`), the routine
  *     shape the tubafrenzy webhook produces when it resolves the two columns
  *     independently. A direct-FK-only guard blanks these silently.
- *   - the delete-denylist row, without which `jobs/library-etl` re-imports
- *     the still-present upstream release under a new `library.id` the next
- *     time anything re-selects it upstream (an edit in /wxycdb, or a full
- *     re-sync — NOT on a 30-minute timer; the ETL's delta filter is
- *     `TIME_LAST_MODIFIED >` and this delete never touches tubafrenzy).
+ *   - the delete-denylist row: `jobs/library-etl` consults it on every
+ *     invocation (scheduled or by hand — see the job's own docstring for why
+ *     that distinction matters post-`cd8f058e`) and skips a denylisted
+ *     release, so without this row it would re-import the still-present
+ *     upstream release under a new `library.id` the next time anything
+ *     re-selects it upstream. NOT on a 30-minute timer either way: the ETL's
+ *     delta filter is `TIME_LAST_MODIFIED >` and this delete never touches
+ *     tubafrenzy.
  *   - the actor recorded on that denylist row: `catalog:write` is held by two
  *     roles, so what-and-when without who leaves incident response unable to
  *     tell a legitimate deletion from an abusive one.
@@ -52,11 +61,13 @@
  *     (which claimed cascade all along).
  *   - 404 on an unknown id.
  *   - BS#2560 (F1): the delete writes a `catalog_delete_snapshot` row in the
- *     same transaction, capturing the seven irreplaceable children
+ *     same transaction, capturing the nine irreplaceable children
  *     (`compilation_track_artist`, `library_urls`, `reviews`,
- *     `album_critic_reviews`, `bins`, `rotation`,
- *     `artist_library_crossreference`) as JSON, and a snapshot write that
- *     fails rolls the whole delete back — no listener, no swallow.
+ *     `album_critic_reviews`, `album_review_submissions`, `bins`, `rotation`,
+ *     `rotation_urls` — a depth-2 child of `rotation`, not of `library`
+ *     directly — and `artist_library_crossreference`) as JSON, and a
+ *     snapshot write that fails rolls the whole delete back — no listener,
+ *     no swallow.
  *
  * TEARDOWN: this spec shares a database with the rest of the integration
  * suite, and its 409 cases deliberately create rows the endpoint under test
@@ -633,22 +644,37 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * BS#2560 (F1). Captures the seven irreplaceable children as JSON, keyed by
+   * BS#2560 (F1). Captures the nine irreplaceable children as JSON, keyed by
    * table name, in the same `catalog_delete_snapshot` row — one row per
    * insert into `bins`/`rotation`/`reviews`/etc, populated for every table
-   * this delete can reach. `album_metadata`, `library_identity` +
-   * `library_identity_source`, and `uncovered_release_search_markers` are
-   * deliberately absent (derived data, re-obtained on restore rather than
-   * stored forever — see the schema.ts docstring).
+   * this delete can reach. `rotation_urls` is the depth-2 case (finding 1):
+   * its own FK points at `rotation.id`, not `library.id`, so it proves
+   * `captureCatalogDeleteSnapshot`'s `via` shape actually resolves through
+   * the parent hop rather than silently capturing nothing. `album_metadata`,
+   * `library_identity` + `library_identity_source`, and
+   * `uncovered_release_search_markers` are deliberately absent (derived
+   * data, re-obtained on restore rather than stored forever — see the
+   * schema.ts docstring).
    */
-  test('writes a catalog_delete_snapshot row capturing the seven irreplaceable children', async () => {
+  test('writes a catalog_delete_snapshot row capturing the nine irreplaceable children', async () => {
     const album = await createAlbum(`BS#2560 Snapshot ${uniq}`);
+    const submissionSourceKey = `bs2560-snapshot-probe-${album.id}`;
+    createdSubmissionKeys.push(submissionSourceKey);
 
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".bins (dj_id, album_id, track_title) VALUES ($1, $2, 'snapshot probe bin')`,
       [global.primary_dj_id, album.id]
     );
-    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H')`, [album.id]);
+    const [rotationRow] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H') RETURNING id`,
+      [album.id]
+    );
+    // Depth-2 child of `library` (finding 1): its FK is `rotation_id ->
+    // rotation.id`, never `library.id` directly.
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation_urls (rotation_id, url, position) VALUES ($1, $2, 0)`, [
+      rotationRow.id,
+      'https://example.com/snapshot-probe-rotation-url',
+    ]);
     await sql.unsafe(`INSERT INTO "${SCHEMA}".reviews (album_id, review) VALUES ($1, 'snapshot probe review')`, [
       album.id,
     ]);
@@ -656,6 +682,11 @@ describe('DELETE /library/:id (BS#2112)', () => {
       `INSERT INTO "${SCHEMA}".album_critic_reviews (album_id, source, source_url, snippet)
        VALUES ($1, 'Probe Zine', 'https://example.com/snapshot-probe', 'a snapshot probe snippet')`,
       [album.id]
+    );
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".album_review_submissions (source, source_key, norm_artist, norm_album, album_id)
+       VALUES ('google_form', $1, 'snapshot probe artist', 'snapshot probe album', $2)`,
+      [submissionSourceKey, album.id]
     );
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".compilation_track_artist (library_id, artist_name) VALUES ($1, 'Snapshot Probe Artist')`,
@@ -685,12 +716,30 @@ describe('DELETE /library/:id (BS#2112)', () => {
     expect(typeof rows[0].actor_user_id).toBe('string');
     expect(captured.bins).toHaveLength(1);
     expect(captured.rotation).toHaveLength(1);
+    expect(captured.rotation_urls).toHaveLength(1);
+    expect(captured.rotation_urls[0].url).toBe('https://example.com/snapshot-probe-rotation-url');
+    expect(captured.rotation_urls[0].rotation_id).toBe(rotationRow.id);
     expect(captured.reviews).toHaveLength(1);
     expect(captured.reviews[0].review).toBe('snapshot probe review');
     expect(captured.album_critic_reviews).toHaveLength(1);
+    expect(captured.album_review_submissions).toHaveLength(1);
+    expect(captured.album_review_submissions[0].source_key).toBe(submissionSourceKey);
     expect(captured.compilation_track_artist).toHaveLength(1);
     expect(captured.library_urls).toHaveLength(1);
     expect(captured.artist_library_crossreference).toHaveLength(1);
+    // Round-trip proof for both new children (finding 1 + finding 2b): the
+    // rows are gone from their live tables (rotation_urls cascade-destroyed,
+    // album_review_submissions unlinked-but-surviving) but recoverable from
+    // the snapshot alone.
+    const rotationUrlsLive = await sql.unsafe(`SELECT 1 FROM "${SCHEMA}".rotation_urls WHERE rotation_id = $1`, [
+      rotationRow.id,
+    ]);
+    expect(rotationUrlsLive).toHaveLength(0);
+    const submissionLive = await sql.unsafe(
+      `SELECT album_id FROM "${SCHEMA}".album_review_submissions WHERE source_key = $1`,
+      [submissionSourceKey]
+    );
+    expect(submissionLive[0].album_id).toBeNull();
     // The four derived children never appear in the captured JSON at all.
     expect(captured.album_metadata).toBeUndefined();
     expect(captured.library_identity).toBeUndefined();
@@ -719,6 +768,13 @@ describe('DELETE /library/:id (BS#2112)', () => {
       END;
       $trigger$ LANGUAGE plpgsql;
     `);
+    // `CREATE TRIGGER` has no `OR REPLACE` form in PG 14 (unlike the
+    // function above), so a run that dies before reaching the `finally`
+    // below — a killed worker, a Jest timeout abort, `--bail` — would
+    // otherwise leave this trigger installed on the shared integration
+    // database and fail every later run's `CREATE TRIGGER` at setup, not at
+    // the assertion. Drop first so setup is idempotent regardless.
+    await sql.unsafe(`DROP TRIGGER IF EXISTS bs2560_fail_snapshot_trigger ON "${SCHEMA}".catalog_delete_snapshot`);
     await sql.unsafe(`
       CREATE TRIGGER bs2560_fail_snapshot_trigger
       BEFORE INSERT ON "${SCHEMA}".catalog_delete_snapshot
@@ -745,6 +801,60 @@ describe('DELETE /library/:id (BS#2112)', () => {
     } finally {
       await sql.unsafe(`DROP TRIGGER IF EXISTS bs2560_fail_snapshot_trigger ON "${SCHEMA}".catalog_delete_snapshot`);
       await sql.unsafe(`DROP FUNCTION IF EXISTS "${SCHEMA}".bs2560_fail_snapshot()`);
+    }
+  });
+
+  /**
+   * BS#2560 finding 2a. `digital_asset.library_id` is NOT NULL with no
+   * `onDelete` at all (no cascade, no set-null) — verified against
+   * migration 0158's DDL, not just the Drizzle model — so an unguarded
+   * `DELETE FROM library` would raise a raw FK-violation 500 for any release
+   * `jobs/digital-archive-bind` has written an asset for. That is the wrong
+   * outcome regardless: this endpoint's contract is a four-outcome taxonomy
+   * (204 / 409 refused on the merits / 503 retryable / 404), never a raw
+   * 500 and never a silent cascade through irreplaceable rip evidence. The
+   * refusal names the bound asset(s) rather than just counting them, since
+   * — unlike the flowsheet play-count refusal — there is no snapshot to fall
+   * back on here; the librarian needs enough to go find the asset.
+   */
+  test('refuses with 409, not 500, when the release has a bound digital asset', async () => {
+    const album = await createAlbum(`BS#2560 Digital Asset ${uniq}`);
+
+    const [assetRow] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".digital_asset (library_id, provenance, disc_number, status)
+       VALUES ($1, 'rotation_upload', 1, 'needs_review') RETURNING id`,
+      [album.id]
+    );
+
+    try {
+      const res = await auth.delete(`/library/${album.id}`).expect(409);
+      expect(res.body.reason).toBe('digital_asset_references');
+      expect(res.body.asset_count).toBe(1);
+      expect(res.body.assets).toEqual([
+        { id: assetRow.id, provenance: 'rotation_upload', disc_number: 1, status: 'needs_review' },
+      ]);
+
+      // Refused on the merits, not destroyed: the release and the asset both
+      // survive the refused request, and no snapshot was written for a
+      // delete that never happened.
+      const stillThere = await sql.unsafe(`SELECT id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+      expect(stillThere).toHaveLength(1);
+      const assetStillThere = await sql.unsafe(`SELECT id FROM "${SCHEMA}".digital_asset WHERE library_id = $1`, [
+        album.id,
+      ]);
+      expect(assetStillThere).toHaveLength(1);
+      const snapshot = await sql.unsafe(
+        `SELECT 1 FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = $1`,
+        [album.id]
+      );
+      expect(snapshot).toHaveLength(0);
+    } finally {
+      // `digital_asset` has no `onDelete`, so the shared `afterAll`
+      // teardown's unconditional `DELETE FROM library` would hit the same
+      // FK violation this test exists to catch — for every album in that
+      // batched delete, not just this one. Clear it here rather than let
+      // the suite's teardown be the one that discovers that.
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".digital_asset WHERE library_id = $1`, [album.id]);
     }
   });
 });

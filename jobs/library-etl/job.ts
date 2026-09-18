@@ -1274,15 +1274,21 @@ const LEGACY_SOURCED_SET_WHERE = buildLegacySourcedSetWhere();
  * `DELETE /library/:id` (BS#2112). This job is the denylist's ONLY consumer.
  *
  * Why it exists: a Backend-side delete does not reach tubafrenzy, so the
- * upstream `LIBRARY_RELEASE` row survives. This job still runs every 30
- * minutes (`cron-schedule` in `package.json`; it was NOT flipped to
- * `job-type: one-shot` alongside `flowsheet-etl`/`rotation-etl` at the
- * wiki#88 Phase 3 decommission), so the delta pass re-selects that row, finds
- * no `library` row carrying its `legacy_release_id`, and takes the INSERT
+ * upstream `LIBRARY_RELEASE` row survives. `package.json` now declares
+ * `job-type: one-shot` (`cd8f058e`, wiki#89 Phase 3.5), so a fresh deploy no
+ * longer re-registers this job's crontab entry — but that commit did not
+ * remove any half-hourly crontab line already installed on a host (its own
+ * message says so: the deploy only ever installs crontab lines, never
+ * deletes them), so whether one is still firing anywhere is a separate,
+ * unverified fact. This job also stays invocable by hand either way.
+ * Whenever a run happens —
+ * scheduled or by hand — the delta pass re-selects that row, finds no
+ * `library` row carrying its `legacy_release_id`, and takes the INSERT
  * branch of `ON CONFLICT (legacy_release_id) DO UPDATE` — resurrecting the
  * release under a NEW `library.id` with its `rotation`, `album_metadata`,
  * `reviews`, and `album_critic_reviews` rows gone for good (they cascaded
- * against the OLD id, and this job does not import them).
+ * against the OLD id, and this job does not import them) — UNLESS this
+ * denylist lists it, which is exactly what the three checks below prevent.
  *
  * **Deliberately unfiltered.** There is no `last_run` / delta predicate here
  * and there must never be one: the ETL's own delta filter is dropped

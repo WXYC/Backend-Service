@@ -194,6 +194,21 @@ export const catalog_delete_snapshot = {
 // before reaching the behaviour those tests assert. Resolves void, like the
 // real one; assert on the call args when a test cares what was captured.
 export const captureCatalogDeleteSnapshot = jest.fn().mockResolvedValue(undefined);
+// BS#2560. `catalogDeleteChild`/`catalogDeleteGrandchild` are pure
+// object-literal constructors in the real module (see
+// `shared/database/src/catalog-delete-snapshot.ts`) — no DB access, so the
+// double just reproduces that same shape rather than stubbing anything.
+// Needed because `deleteAlbumFromDB` calls them directly; without a double
+// here `import { catalogDeleteChild } from '@wxyc/database'` resolves to
+// `undefined` under this file's whole-module mapping, and calling it throws
+// before the unit tests reach any behaviour they assert on.
+export const catalogDeleteChild = (name: string, table: unknown, column: unknown) => ({ name, table, column });
+export const catalogDeleteGrandchild = (
+  name: string,
+  table: unknown,
+  column: unknown,
+  via: { table: unknown; column: unknown; idColumn: unknown }
+) => ({ name, table, column, via });
 export const album_popularity = {
   logical_album_key: 'album_popularity.logical_album_key',
   plays: 'album_popularity.plays',
@@ -222,6 +237,9 @@ export const digital_asset_store = {
   id: 'digital_asset_store.id',
   name: 'digital_asset_store.name',
 };
+// BS#2560. `deleteAlbumFromDB` now reads this table to refuse a delete with
+// 409 rather than raise a raw FK-violation 500 when a release has a bound
+// asset (`digital_asset.library_id` has no `onDelete` at all).
 export const digital_asset = {
   id: 'digital_asset.id',
   library_id: 'digital_asset.library_id',
@@ -494,6 +512,9 @@ export const flowsheet_freetext_resolution = {
   attempt_at: 'flowsheet_freetext_resolution.attempt_at',
   resolved_at: 'flowsheet_freetext_resolution.resolved_at',
 };
+// BS#2560. `deleteAlbumFromDB` now reads this table to snapshot the
+// hand-curated DJ review archive a delete would otherwise unlink silently
+// (`onDelete: 'set null'`).
 export const album_review_submissions = {
   id: 'album_review_submissions.id',
   album_id: 'album_review_submissions.album_id',
