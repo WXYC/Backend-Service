@@ -2,12 +2,13 @@
  * Integration tests for DELETE /library/:id (BS#2112).
  *
  * Covers the D10 dependent-row policy end to end against the real DB:
- *   - happy-path hard delete (204), and the row is really gone (a second
+ *   - happy-path hard delete (200, with a play-count body — not 204, which
+ *     Express strips the body from), and the row is really gone (a second
  *     delete 404s) rather than soft-tombstoned.
  *   - the library_watermark advance so a client holding a pre-delete
  *     Last-Modified re-pulls the catalog instead of 304-ing stale.
  *   - the flowsheet play count (BS#2565 D1 removed the 409 refusal over it):
- *     a release carrying plays deletes anyway, and the 204 body reports the
+ *     a release carrying plays deletes anyway, and the 200 body reports the
  *     damage split by path, never summed.
  *   - the four blocking FKs (`bins`, `library_identity`,
  *     `library_identity_source`, `artist_library_crossreference`) resolved
@@ -224,7 +225,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     return res.body;
   };
 
-  test('hard-deletes an unreferenced release, returns 204, and advances the catalog watermark', async () => {
+  test('hard-deletes an unreferenced release, returns 200, and advances the catalog watermark', async () => {
     const album = await createAlbum(`BS#2112 Happy Path ${uniq}`);
 
     const before = await auth.get('/library/catalog').expect(200);
@@ -234,7 +235,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     // same guard `library-catalog-export.spec.js` uses.
     await sleep(1100);
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     // The row is really gone (hard delete, not a soft-delete tombstone) — a
     // second delete has nothing left to find.
@@ -251,10 +252,10 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   // BS#2565 (D1): the 409 refusal over flowsheet plays is gone. A release
-  // carrying plays deletes, reports the damage on the 204 body split by
+  // carrying plays deletes, reports the damage on the 200 body split by
   // path, and leaves a catalog_delete_snapshot row behind — the actual undo
   // path now that there is nothing left to refuse over.
-  test('deletes a release carrying flowsheet plays, reporting the direct play count on the 204 body', async () => {
+  test('deletes a release carrying flowsheet plays, reporting the direct play count on the 200 body', async () => {
     const album = await createAlbum(`BS#2112 Flowsheet Plays ${uniq}`);
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
@@ -263,7 +264,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [album.id, `BS#2112 Flowsheet Plays ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(204);
+    const res = await auth.delete(`/library/${album.id}`).expect(200);
     expect(res.body.direct_play_count).toBe(2);
     expect(res.body.rotation_linked_play_count).toBe(0);
     expect(res.body.legacy_linked_play_count).toBe(0);
@@ -314,7 +315,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       album.id,
     ]);
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     const counts = await sql.unsafe(
       `SELECT
@@ -356,7 +357,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [sourceKey, album.id]
     );
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     const counts = await sql.unsafe(
       `SELECT
@@ -411,7 +412,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [rotationId, `BS#2112 Rotation Transitive ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(204);
+    const res = await auth.delete(`/library/${album.id}`).expect(200);
     expect(res.body.direct_play_count).toBe(0);
     expect(res.body.rotation_linked_play_count).toBe(1);
     expect(res.body.legacy_linked_play_count).toBe(0);
@@ -441,7 +442,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [album.id, rotationRows[0].id, `BS#2112 Both Paths ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(204);
+    const res = await auth.delete(`/library/${album.id}`).expect(200);
     expect(res.body.direct_play_count).toBe(1);
     expect(res.body.rotation_linked_play_count).toBe(0);
     expect(res.body.legacy_linked_play_count).toBe(0);
@@ -467,7 +468,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     const legacyReleaseId = before[0].legacy_release_id;
     expect(legacyReleaseId).not.toBeNull();
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     const denylisted = await sql.unsafe(
       `SELECT library_id, deleted_at FROM "${SCHEMA}".library_delete_denylist WHERE legacy_release_id = $1`,
@@ -524,7 +525,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [popularityKey, album.id]
     );
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     const rows = await sql.unsafe(
       `SELECT representative_library_id FROM "${SCHEMA}".album_popularity WHERE logical_album_key = $1`,
@@ -593,7 +594,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
    * now strands it: the denylist means no future `library` row ever carries
    * that `legacy_release_id`, so the resolver can never link the play and its
    * provenance is gone for good — which is why this arm is reported apart
-   * from the other two on the 204 body, never summed into them.
+   * from the other two on the 200 body, never summed into them.
    */
   test('deletes a release whose plays name it only by its legacy release id, reporting them as the stranded arm', async () => {
     const album = await createAlbum(`BS#2112 Legacy Linked ${uniq}`);
@@ -608,7 +609,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [legacyReleaseId, `BS#2112 Legacy Linked ${uniq}`]
     );
 
-    const res = await auth.delete(`/library/${album.id}`).expect(204);
+    const res = await auth.delete(`/library/${album.id}`).expect(200);
     expect(res.body.direct_play_count).toBe(0);
     expect(res.body.rotation_linked_play_count).toBe(0);
     expect(res.body.legacy_linked_play_count).toBe(1);
@@ -630,7 +631,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
     const legacyReleaseId = before[0].legacy_release_id;
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     const rows = await sql.unsafe(
       `SELECT deleted_by_user_id, deleted_by_email, deleted_by_role
@@ -661,7 +662,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
       [album.id]
     );
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     const rows = await sql.unsafe(
       `SELECT h.library_id, l.id AS library_row
@@ -751,7 +752,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
     // A derived child, deliberately never captured — asserted absent below.
     await sql.unsafe(`INSERT INTO "${SCHEMA}".album_metadata (album_id) VALUES ($1)`, [album.id]);
 
-    await auth.delete(`/library/${album.id}`).expect(204);
+    await auth.delete(`/library/${album.id}`).expect(200);
 
     const rows = await sql.unsafe(
       `SELECT entity_kind, entity_id, captured, actor_user_id
@@ -962,7 +963,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
 
     try {
       // Not a 409: a rejected asset is not a reason to make a release immortal.
-      await auth.delete(`/library/${album.id}`).expect(204);
+      await auth.delete(`/library/${album.id}`).expect(200);
 
       const assetGone = await sql.unsafe(`SELECT id FROM "${SCHEMA}".digital_asset WHERE id = $1`, [assetRow.id]);
       expect(assetGone).toHaveLength(0);

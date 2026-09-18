@@ -3717,13 +3717,16 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
  * — not the lighter `catalog:read` bar `markMissing`/`markFound` use, since
  * this is irreversible.
  *
- * The 409 body is non-standard for this service (`{message, reason, assets}`
- * for the digital-asset refusal, rather than the error handler's shape)
- * because the specifics are the whole point of the refusal: the librarian
- * needs to know what the delete would have damaged, and how. The 204 body
- * is likewise non-standard (`{direct_play_count, rotation_linked_play_count,
- * legacy_linked_play_count}`) for the same reason, now that there is nothing
- * left to refuse over. Documented in `apps/backend/app.yaml`.
+ * A successful delete is a `200`, not a `204`, DESPITE deleting no body:
+ * Express strips the body from a `204` (and a `304`) before it ever reaches
+ * the wire, and the whole point of this response is the play counts it
+ * carries (`{direct_play_count, rotation_linked_play_count,
+ * legacy_linked_play_count}`), now that there is nothing left to refuse
+ * over. The 409 body is non-standard for this service too (`{message,
+ * reason, assets}` for the digital-asset refusal, rather than the error
+ * handler's shape) because the specifics are the whole point of the
+ * refusal: the librarian needs to know what the delete would have damaged,
+ * and how. Documented in `apps/backend/app.yaml`.
  *
  * A `503` with `reason: 'lock_unavailable'` means the delete stood down
  * rather than wait on a row a live writer holds — see
@@ -3771,11 +3774,13 @@ export const deleteAlbum: RequestHandler<{ id: string }> = async (req, res) => {
     return;
   }
 
-  // Not the whole play count summed — the legacy-linked arm strands its
+  // 200, not 204: Express strips the body from a 204 (and a 304) before
+  // writing it, and the whole point of this response is the three counts
+  // below. Not summed into one total — the legacy-linked arm strands its
   // plays rather than merely unlinking them (see this handler's docstring),
   // so a caller building a confirmation message needs the arms apart to say
   // that honestly.
-  res.status(204).json({
+  res.status(200).json({
     direct_play_count: result.directPlayCount,
     rotation_linked_play_count: result.rotationLinkedPlayCount,
     legacy_linked_play_count: result.legacyLinkedPlayCount,

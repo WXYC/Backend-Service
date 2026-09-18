@@ -4091,8 +4091,9 @@ describe('library.controller', () => {
     });
 
     // BS#2565 (D1): the flowsheet-play refusal is gone — a release with
-    // plays deletes, and the counts ride along on the 204 body, per arm and
-    // never summed, so the client can still say what it damaged.
+    // plays deletes, and the counts ride along on the 200 body (not 204,
+    // which Express strips the body from), per arm and never summed, so the
+    // client can still say what it damaged.
     it('deletes a release carrying flowsheet plays and reports the per-arm counts', async () => {
       mockDeleteAlbumFromDB.mockResolvedValue({
         outcome: 'deleted',
@@ -4105,7 +4106,7 @@ describe('library.controller', () => {
 
       await deleteAlbum(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
         direct_play_count: 59,
         rotation_linked_play_count: 0,
@@ -4158,7 +4159,7 @@ describe('library.controller', () => {
       });
     });
 
-    it('returns 204 with the (zero) per-arm counts when the release carries no plays', async () => {
+    it('returns 200 with the (zero) per-arm counts when the release carries no plays', async () => {
       mockDeleteAlbumFromDB.mockResolvedValue({
         outcome: 'deleted',
         directPlayCount: 0,
@@ -4170,7 +4171,7 @@ describe('library.controller', () => {
 
       await deleteAlbum(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
         direct_play_count: 0,
         rotation_linked_play_count: 0,
@@ -4256,7 +4257,7 @@ describe('library.controller', () => {
       await deleteAlbum(req, res, next);
 
       expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42, { userId: null, email: null, role: null });
-      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.status).toHaveBeenCalledWith(200);
     });
   });
 
