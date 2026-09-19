@@ -45,12 +45,13 @@
  * candidate.ts`) at all — the integration project has no TypeScript
  * transform, and an earlier draft (BS#2594 review) worked around that by
  * `require`-ing a `dist/retired-candidate.cjs` bundle tsup emitted
- * specifically for this spec. Review found that require bought nothing the
- * unit suite (`tests/unit/jobs/legacy-linkage-resolve/job.test.ts`, hand-built
- * doubles for both the bare driver shape and the wrapped `DrizzleQueryError`
- * shape production actually hits) didn't already cover, so it — and the CJS
- * dual-emit that existed only to produce that artifact — were dropped
- * (BS#2601).
+ * specifically for this spec. That require made this whole jest project fail
+ * to LOAD: there is no TypeScript transform here, and the require pulled in
+ * `drizzle-orm`, which resolves to `tests/__mocks__/drizzle-orm.ts`. It — and
+ * the CJS dual-emit that existed only to produce that artifact — were dropped
+ * (BS#2601). Do not re-add it. What it would have bought is still owed: the
+ * unit suite feeds that predicate only a hand-built `DrizzleQueryError`-
+ * wrapped double, never a real driver error.
  *
  * What this spec proves instead: that a real concurrent `DELETE
  * /library/:id`, racing this job's own UPDATE past the FK insert-check the

@@ -1,23 +1,30 @@
 /**
  * The "retired linkage candidate" classifier — split out of `job.ts` (BS#2594
- * review) as its own single-responsibility module. Unit-tested against
- * hand-built doubles (both the bare driver shape and the wrapped
- * `DrizzleQueryError` shape production actually hits) in
- * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts`, exercised there
- * through `job.ts`'s normal import — this file changes WHERE the logic
- * lives, not who calls it. `shared/database/src/sqlstate.ts`'s docstring
- * records the general shape of the risk hand-built-double-only coverage
- * carries: a predicate proven only against doubles shipped as dead code
- * against a green suite once already (`deleteAlbumFromDB`'s
- * `lock_unavailable` arm). `tests/integration/legacy-linkage-retired-
- * candidate.spec.js` closes that gap from a different angle — not by
- * importing this predicate, but by proving the raw error shape the unit
- * doubles assume (SQLSTATE `23503`, `constraint_name` one of the two below)
- * is what a real concurrent `DELETE /library/:id` actually produces; an
- * earlier draft additionally built this module to a CJS bundle so that spec
- * could `require` and run the real predicate too, but review found that
- * bought nothing the unit suite didn't already cover, so BS#2601 dropped it
- * — see that spec's own docstring.
+ * review) as its own single-responsibility module. Unit-tested in
+ * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts` against a hand-built
+ * double of the wrapped `DrizzleQueryError` shape production actually hits
+ * (`retiredLinkageCandidateError`, wrapped unconditionally — nothing in this
+ * job ever sees a bare driver error), exercised there through `job.ts`'s
+ * normal import — this file changes WHERE the logic lives, not who calls it.
+ * The bare-shape fallback is covered one level down, on
+ * `extractConstraintName` itself (`tests/unit/database/sqlstate.test.ts`,
+ * "falls back to a top-level constraint_name when there is no cause"), not on
+ * this predicate. `shared/database/src/sqlstate.ts`'s docstring records the
+ * general shape of the risk hand-built-double-only coverage carries: a
+ * predicate proven only against doubles shipped as dead code against a green
+ * suite once already (`deleteAlbumFromDB`'s `lock_unavailable` arm).
+ * `tests/integration/legacy-linkage-retired-candidate.spec.js` NARROWS that
+ * gap without closing it — not by importing this predicate, but by proving
+ * the raw error shape the unit double assumes (SQLSTATE `23503`,
+ * `constraint_name` one of the two below) is what a real concurrent `DELETE
+ * /library/:id` actually produces. Nothing yet drives this predicate against
+ * a real driver error, wrapped or bare; WXYC/Backend-Service#2605 tracks
+ * that. An earlier draft built this module to a CJS bundle so that spec could
+ * `require` the real predicate, but the require made the integration jest
+ * project fail to LOAD — it has no TypeScript transform, and the require
+ * pulled in `drizzle-orm`, which resolves to `tests/__mocks__/drizzle-orm.ts`
+ * — so BS#2601 dropped it along with the CJS dual-emit that existed only to
+ * produce that artifact. See that spec's own docstring.
  */
 
 import { extractSqlState, extractConstraintName } from '@wxyc/database';

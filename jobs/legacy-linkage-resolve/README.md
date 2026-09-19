@@ -101,7 +101,7 @@ Since [BS#2064](https://github.com/WXYC/Backend-Service/issues/2064) the job _do
 
 A healthy idle run writes nothing and logs `candidates: 0`. Before BS#2064 that made a cron which had **stopped running** byte-identical to one that ran and found nothing — and the only failure signal, `run()`'s `captureError`, covers just "the job ran and threw". It cannot see the failures that actually take a cron off a host: the crontab entry dropped by a deploy or a hand edit, the image failing to pull, docker wedged, the host rebooted.
 
-Three signals now distinguish the cases. They are complementary, not redundant — each catches something the others miss.
+Four signals now distinguish the cases — the fourth, (d), in two kinds. They are complementary, not redundant — each catches something the others miss.
 
 | Signal                                                                          | Detects                                                                                                                                                                           | Latency                                                                                 | Survives                                                                   |
 | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
