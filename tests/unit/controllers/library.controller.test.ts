@@ -101,6 +101,15 @@ type ArtistCardMock = {
 const mockGetArtistCardById = jest.fn<(artistId: number) => Promise<ArtistCardMock | null>>();
 // POST /library/filings (BS#2474): genre-scoped artist-card resolution.
 const mockGetArtistCardByIdInGenre = jest.fn<(artistId: number, genreId: number) => Promise<ArtistCardMock | null>>();
+// BS#2597: the delete-refusal + informational counts merged onto the card response.
+type ArtistDependentCountsMock = {
+  release_count: number;
+  cross_reference_source_count: number;
+  cross_reference_target_count: number;
+  library_cross_reference_count: number;
+  compilation_credit_count: number;
+};
+const mockGetArtistDependentCounts = jest.fn<(artistId: number) => Promise<ArtistDependentCountsMock>>();
 const mockUpdateArtistInDB =
   jest.fn<
     (
@@ -227,6 +236,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
   getArtistCardById: mockGetArtistCardById,
   getArtistCardByIdInGenre: mockGetArtistCardByIdInGenre,
+  getArtistDependentCounts: mockGetArtistDependentCounts,
   updateArtistInDB: mockUpdateArtistInDB,
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
@@ -4322,7 +4332,7 @@ describe('library.controller', () => {
       await expect(getArtistCard(req, res, next)).rejects.toThrow('Artist not found');
     });
 
-    it('returns 200 with the card field set on success', async () => {
+    it('returns 200 with the card field set and the dependent counts on success', async () => {
       const card = {
         artist_id: 42,
         artist_name: 'Chuquimamani-Condori',
@@ -4331,15 +4341,69 @@ describe('library.controller', () => {
         code_letters: 'CH',
         code_artist_number: 3,
       };
+      const counts = {
+        release_count: 2,
+        cross_reference_source_count: 0,
+        cross_reference_target_count: 1,
+        library_cross_reference_count: 0,
+        compilation_credit_count: 3,
+      };
       mockGetArtistCardById.mockResolvedValue(card);
+      mockGetArtistDependentCounts.mockResolvedValue(counts);
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
 
       await getArtistCard(req, res, next);
 
       expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
+      expect(mockGetArtistDependentCounts).toHaveBeenCalledWith(42);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith(card);
+      expect(res.json).toHaveBeenCalledWith({ ...card, ...counts });
+    });
+
+    // The zero case: a fully deletable artist reports zeroes on every count
+    // rather than omitting the fields (issue acceptance criterion).
+    it('reports zero counts rather than omitting the fields for a deletable artist', async () => {
+      const card = {
+        artist_id: 43,
+        artist_name: 'Nilüfer Yanya',
+        alphabetical_name: 'Yanya, Nilüfer',
+        genre_id: 6,
+        code_letters: 'NY',
+        code_artist_number: 1,
+      };
+      const zeroCounts = {
+        release_count: 0,
+        cross_reference_source_count: 0,
+        cross_reference_target_count: 0,
+        library_cross_reference_count: 0,
+        compilation_credit_count: 0,
+      };
+      mockGetArtistCardById.mockResolvedValue(card);
+      mockGetArtistDependentCounts.mockResolvedValue(zeroCounts);
+      const req = { params: { id: '43' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistCard(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          release_count: 0,
+          cross_reference_source_count: 0,
+          cross_reference_target_count: 0,
+          library_cross_reference_count: 0,
+          compilation_credit_count: 0,
+        })
+      );
+    });
+
+    it('does not fetch the dependent counts when the artist does not exist', async () => {
+      mockGetArtistCardById.mockResolvedValue(null);
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistCard(req, res, next)).rejects.toThrow('Artist not found');
+      expect(mockGetArtistDependentCounts).not.toHaveBeenCalled();
     });
   });
 
