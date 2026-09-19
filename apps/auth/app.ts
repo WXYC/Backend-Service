@@ -204,9 +204,11 @@ if (!isTestEnv) {
   //
   // Own instance, own `MemoryStore` — never `authMutationRateLimit`'s shared
   // 10/15min bucket (the PR #2550 lesson, restated by the OTP limiters
-  // below): the control room shares one egress IP, so folding admin traffic
-  // into sign-in's budget would let a manager's routine admin work 429
-  // sign-in for everyone in the building.
+  // below): this key is the shared Cloudflare edge dj-site's browser client
+  // proxies every auth call through (see the BS#2604 block below for the
+  // full key-space finding), so folding admin traffic into sign-in's budget
+  // would let a manager's routine admin work 429 sign-in for whatever slice
+  // of the DJ population shares that edge bucket.
   //
   // Same `rateLimitKeyFromRequest` generator as nine other limiters in this
   // file (BS#2604 added three more sharing it), so it inherits the OPEN
@@ -222,12 +224,21 @@ if (!isTestEnv) {
   // the budget has to clear the busiest legitimate burst — semester-start
   // provisioning, a station manager creating 20-30 accounts in one sitting,
   // each `POST /auth/admin/provision-user` paired with a `GET
-  // /auth/admin/resolve-organization`, all from the control room's one
-  // egress IP, sometimes with a second manager working alongside. ~60-90
+  // /auth/admin/resolve-organization`, sometimes with a second manager
+  // working alongside. ~60-90
   // requests in a few minutes is the realistic peak; 100/15min clears it
   // without much room to spare — if a real burst is ever measured exceeding
   // it, raise the number rather than treating this comment as settled. A 429
-  // during provisioning is worse than a loose bound here. Anonymous abuse
+  // during provisioning is worse than a loose bound here.
+  //
+  // CORRECTION (BS#2604 review, binding): decision 2 above was reasoned on
+  // the premise that this bucket is "the control room's one egress IP". That
+  // premise is FALSE — production nginx sets `X-Real-IP` from `$remote_addr`
+  // with no `real_ip` directives, and dj-site proxies every `/auth/*` call
+  // through its own Cloudflare Workers route, so the peer is a Cloudflare
+  // edge shared by a large slice of the station. The 100/15min number above
+  // has NOT been re-derived for that key space; re-deriving it is its own
+  // ticket, not a drive-by here. See the BS#2604 block below. Anonymous abuse
   // is still bounded to ~400/hour against a table whose size premise assumes
   // "thousands of rows" (`shared/database/src/schema.ts`'s
   // `account_audit_event` comment), which is the point.
