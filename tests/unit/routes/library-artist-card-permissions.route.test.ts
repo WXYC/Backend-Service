@@ -291,11 +291,11 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
     test.each(['stationManager', 'musicDirector'])('a %s-role token is authorized', async (role) => {
       mockRole(role);
       const res = await request(app)
-        .get('/library/artists/1/next-release-number')
+        .get('/library/artists/1/next-release-number?genre_id=11')
         .set('Authorization', 'Bearer test-token');
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ next_code_number: 1 });
-      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(1);
+      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(1, 11);
     });
 
     test.each(['dj', 'member'])('a %s-role token (catalog:read only) is rejected', async (role) => {
