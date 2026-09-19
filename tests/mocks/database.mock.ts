@@ -944,6 +944,7 @@ export { intArrayLiteral } from '../../shared/database/src/int-array-literal.js'
 // let a consumer's test pass against a classifier that reads nothing in
 // production — the exact defect the extraction was made to kill.
 export {
+  extractConstraintName,
   extractSqlState,
   isLockContentionError,
   LOCK_CONTENTION_SQLSTATES,

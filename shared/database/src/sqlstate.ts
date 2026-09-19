@@ -43,6 +43,27 @@ export const extractSqlState = (error: unknown): string | undefined => {
 };
 
 /**
+ * Read the Postgres constraint name a `foreign_key_violation` (or any other
+ * constraint-carrying error) was raised against, off the same two-level shape
+ * `extractSqlState` reads `.code` from — postgres-js parses the wire
+ * `ErrorResponse`'s `n` field onto `.constraint_name`, and drizzle's wrapper
+ * puts the driver error on `.cause` unconditionally, so a caller that wants to
+ * scope a `23503` tolerance to a specific constraint needs this alongside the
+ * SQLSTATE, not instead of it — the code alone can't tell which FK fired.
+ *
+ * Returns `undefined` when no *string* constraint name can be read, same
+ * fail-safe posture as `extractSqlState`.
+ */
+export const extractConstraintName = (error: unknown): string | undefined => {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const cause = (error as { cause?: unknown }).cause;
+  const causeConstraint =
+    typeof cause === 'object' && cause !== null ? (cause as { constraint_name?: unknown }).constraint_name : undefined;
+  const constraint = causeConstraint ?? (error as { constraint_name?: unknown }).constraint_name;
+  return typeof constraint === 'string' ? constraint : undefined;
+};
+
+/**
  * Postgres SQLSTATEs a lock-bounded writer converts into a clean stand-down
  * rather than a failed run.
  *

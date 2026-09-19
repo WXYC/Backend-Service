@@ -92,9 +92,20 @@ const executeCallMatching = (pattern: RegExp): { values: unknown[] } | undefined
  * shape, and `bare` is the opt-out used by the one test that pins the
  * fallback path.
  */
-const pgError = (code: string, message: string): Error => Object.assign(new Error(message), { code });
+const pgError = (code: string, message: string, constraint_name?: string): Error =>
+  Object.assign(new Error(message), { code, ...(constraint_name ? { constraint_name } : {}) });
 
 const drizzleWrapped = (cause: Error): Error => Object.assign(new Error('Failed query: <sql>\nparams: '), { cause });
+
+/**
+ * A `23503` against one of the two constraints `isRetiredLinkageCandidateError`
+ * treats as "the library row was deleted mid-statement" — always wrapped, per
+ * the same docstring reasoning as `lockContentionError` below: nothing in this
+ * job ever sees a bare driver error in production.
+ */
+const retiredLinkageCandidateError = (
+  constraint: 'flowsheet_album_id_library_id_fk' | 'rotation_album_id_library_id_fk'
+): Error => drizzleWrapped(pgError('23503', 'insert or update on table violates foreign key constraint', constraint));
 
 /**
  * `55P03` (`lock_not_available`) is our own `lock_timeout` firing; `40P01`
@@ -126,6 +137,8 @@ type PassMock = {
   precheck?: number;
   /** Reject the CTE with a lock-contention SQLSTATE instead of resolving it. */
   defer?: '55P03' | '40P01';
+  /** Reject the CTE with a retired-linkage-candidate `23503` instead of resolving it. */
+  retire?: 'flowsheet_album_id_library_id_fk' | 'rotation_album_id_library_id_fk';
 };
 
 /**
@@ -149,6 +162,10 @@ const queuePass = (execute: jest.Mock, pass: PassMock): void => {
   execute.mockResolvedValueOnce([]); // SET LOCAL lock_timeout
   if (pass.defer) {
     execute.mockRejectedValueOnce(lockContentionError(pass.defer));
+    return;
+  }
+  if (pass.retire) {
+    execute.mockRejectedValueOnce(retiredLinkageCandidateError(pass.retire));
     return;
   }
   execute.mockResolvedValueOnce([{ candidates: pass.candidates, resolved: pass.resolved }]);
@@ -778,6 +795,58 @@ describe('legacy-linkage-resolve: lock guard (BS#2413)', () => {
     execute.mockResolvedValueOnce([{ count: 2 }]); // rotation pre-check
     execute.mockResolvedValueOnce([]); // SET LOCAL
     execute.mockRejectedValueOnce(drizzleWrapped(pgError('23503', 'insert or update violates foreign key')));
+
+    await expect(runOnce(false)).rejects.toThrow('Failed query');
+    expect(updateLastRun).not.toHaveBeenCalled();
+  });
+
+  it('stands down — not fails — on a 23503 against the flowsheet album_id FK, the other pass completing', async () => {
+    // A librarian deleted the library row a flowsheet candidate was about to
+    // link to, mid-statement (BS#2565 removed the refusal that made this
+    // reachable). Distinct from lock contention: the row is gone, not merely
+    // held, so it gets its own fingerprint below rather than
+    // `lock_contention`'s.
+    queueRun(
+      { candidates: 3, resolved: 0, retire: 'flowsheet_album_id_library_id_fk' },
+      { candidates: 1, resolved: 1 }
+    );
+
+    const result = await runOnce(false);
+
+    expect(result.flowsheet).toEqual({
+      candidates: 3,
+      resolved: 0,
+      residual: null,
+      deferred: true,
+      standDown: 'retired_candidate',
+    });
+    expect(result.rotation).toEqual({ candidates: 1, resolved: 1, residual: 0, deferred: false });
+    expect(updateLastRun).not.toHaveBeenCalled();
+
+    const messages = mockCaptureMessage.mock.calls.map((call) => call[0] as string);
+    expect(messages).toEqual([`${JOB_NAME}.retired_linkage_candidate`]);
+    expect(messages).not.toContain(`${JOB_NAME}.lock_contention`);
+  });
+
+  it('stands down on a 23503 against the rotation album_id FK too', async () => {
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 2, resolved: 0, retire: 'rotation_album_id_library_id_fk' });
+
+    const result = await runOnce(false);
+
+    expect(result.rotation.standDown).toBe('retired_candidate');
+    expect(mockCaptureMessage.mock.calls[0][0]).toBe(`${JOB_NAME}.retired_linkage_candidate`);
+  });
+
+  it('does not stand down on a 23503 against an unrelated constraint, even wrapped', async () => {
+    // Tolerance is scoped to the two named constraints, not to the SQLSTATE —
+    // a foreign-key violation from any other constraint is a real bug.
+    const execute = db.execute as jest.Mock;
+    execute.mockResolvedValueOnce([{ count: 0 }]); // flowsheet pre-check
+    execute.mockResolvedValueOnce([{ count: 2 }]); // rotation pre-check
+    execute.mockResolvedValueOnce([]); // SET LOCAL
+    execute.mockRejectedValueOnce(
+      drizzleWrapped(pgError('23503', 'insert or update violates foreign key', 'rotation_format_id_format_id_fk'))
+    );
 
     await expect(runOnce(false)).rejects.toThrow('Failed query');
     expect(updateLastRun).not.toHaveBeenCalled();

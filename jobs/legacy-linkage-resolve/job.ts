@@ -93,8 +93,10 @@ import {
   getLastRunTimestamp,
   updateLastRun,
   requirePositiveInt,
+  isLockContentionError,
 } from '@wxyc/database';
 import { initLogger, log, captureError, captureWarning, errorMessage, closeLogger } from './logger.js';
+import { isRetiredLinkageCandidateError } from './retired-candidate.js';
 
 export const JOB_NAME = 'legacy-linkage-resolve';
 
@@ -174,47 +176,27 @@ const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""
 export const LINKAGE_LOCK_TIMEOUT_MS = 750;
 
 /**
- * Postgres SQLSTATEs this job converts into a clean stand-down rather than a
- * failed run. Same pair as `library.service.ts`'s `LOCK_CONTENTION_SQLSTATES`.
+ * Lock-contention classification (`55P03`/`40P01`, deliberately never
+ * `57014`) is `@wxyc/database`'s `isLockContentionError` — the same predicate
+ * `library.service.ts`'s `deleteAlbumFromDB` uses for its own lock-bounded
+ * `DELETE /library/:id` guard. This job used to carry a byte-identical local
+ * copy (including the two-level `.cause` unwrap `extractSqlState` already
+ * does) even though it already imported other `sqlstate.ts` exports from the
+ * same package — that duplication is gone; see `shared/database/src/
+ * sqlstate.ts` for the wrap/fallback reasoning.
  *
- * Deliberately does NOT include `57014` (`query_canceled`, which is what the
- * 300 s `statement_timeout` raises). If the guard ever fails to bind — a
- * `SET LOCAL` issued outside an explicit transaction is silently
- * connection-scoped-and-discarded under the postgres-js driver — `57014` is
- * the error that comes back, and it must stay a hard failure rather than be
- * reported as a deliberate skip.
+ * The retired-linkage-candidate classifier (`23503` against one of this job's
+ * own two FK constraints — deliberately a SIBLING check to lock contention,
+ * never folded into it) lives in `./retired-candidate.js`, its own
+ * single-responsibility module, imported here normally. It is unit-tested
+ * against hand-built doubles (bare and `DrizzleQueryError`-wrapped) in
+ * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts`;
+ * `tests/integration/legacy-linkage-retired-candidate.spec.js` proves the
+ * raw error shape those doubles assume — SQLSTATE `23503` with
+ * `constraint_name` set to one of the two named FKs — is what a real
+ * concurrent `DELETE /library/:id` actually produces, without importing this
+ * module.
  */
-const LOCK_CONTENTION_SQLSTATES = new Set([
-  '55P03', // lock_not_available — our own lock_timeout fired
-  '40P01', // deadlock_detected — we were chosen as the victim
-]);
-
-/**
- * The SQLSTATE is NOT at the top level of what `tx.execute` throws.
- * drizzle-orm (0.45.x) wraps every query rejection in a `DrizzleQueryError`
- * whose `message` is the generic `Failed query: …` and whose `.cause` is the
- * postgres-js `PostgresError` carrying `.code` (`drizzle-orm/errors.js`; the
- * wrap is unconditional, in `pg-core/session.js`'s `queryWithCache`). Reading
- * only `error.code` therefore sees `undefined` for a real `55P03`, the guard
- * never converts the block into a stand-down, and the run fails with the
- * generic message this change exists to stop reporting — while every unit
- * test that throws a hand-built `{ code }` still passes, because a mock
- * cannot reproduce the wrapper.
- *
- * So: prefer `cause.code`, fall back to a top-level `.code`. Same shape as
- * `extractSqlState` in `jobs/flowsheet-metadata-backfill/orchestrate.ts`,
- * `classifyDatabaseError` in `apps/backend/services/health/database-check.ts`,
- * and the `23503` check in `apps/backend/routes/internal-bans.route.ts` — the
- * fallback is what keeps a bare driver error (and the test doubles that model
- * one) classifying correctly alongside the wrapped production form.
- */
-const isLockContentionError = (error: unknown): boolean => {
-  if (typeof error !== 'object' || error === null) return false;
-  const cause = (error as { cause?: unknown }).cause;
-  const causeCode = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
-  const code = causeCode ?? (error as { code?: unknown }).code;
-  return typeof code === 'string' && LOCK_CONTENTION_SQLSTATES.has(code);
-};
 
 /**
  * Must stay byte-identical to `package.json`'s `cron-schedule`, which is what
@@ -287,27 +269,55 @@ export const resolveMaxRunGapHours = (raw: string | undefined = process.env.LINK
   requirePositiveInt(raw, 'LINKAGE_RESOLVE_MAX_GAP_HOURS', MAX_RUN_GAP_HOURS_DEFAULT, { unit: 'hours' });
 
 /**
- * `residual` is `null` whenever the pass did not reach its UPDATE — on a dry
- * run, and (BS#2413) on a pass that stood down on lock contention. There is
- * no drain measurement to report in either case, and `0` would be misread as
- * "cohort is clear" rather than "not measured." Only a real (non-dry) pass
- * that actually ran its UPDATE produces a numeric residual.
+ * `residual` is `null` whenever the pass did not complete a drain
+ * measurement — on a dry run (which never reaches the UPDATE at all), and on
+ * EITHER stand-down kind (BS#2413 lock contention, BS#2594 a retired linkage
+ * candidate), both of which abort before the UPDATE commits. `0` would be
+ * misread as "cohort is clear" rather than "not measured" for those three
+ * cases, so they get `null` instead. That does NOT make a numeric residual
+ * proof the UPDATE ran: the `candidates === 0` early return also reports
+ * `residual: 0` on a real, non-dry, non-stood-down pass that issued no
+ * UPDATE at all — zero is the correct, literal answer for an empty cohort,
+ * not a stand-in for "not measured." A numeric residual therefore means
+ * either "nothing to do" (the early return) or "the UPDATE ran and this is
+ * what it left behind"; only `null` means "not measured."
  *
- * `deferred` marks the stand-down specifically. `candidates` on a deferred
- * pass is what the pre-check COUNT saw — the reason the pass tried at all —
- * and is reported so an operator knows how much repair was skipped; it is
- * never compared against `resolved`, which is what `residual: null` encodes.
+ * `deferred` marks a stand-down specifically — true for EITHER kind, false
+ * otherwise. Note a dry run is `deferred: false` even though it ALSO reports
+ * `residual: null`: the two fields overlap but are not the same claim.
+ * `deferred` does not itself gate signal (c) — `hasUnresolvedResidue` reads
+ * `residual`, never `deferred` — but the two move together on a stand-down:
+ * `deferred: true` always pairs with `residual: null`, so signal (c) can
+ * never fire on a stood-down pass; its own dedicated warning
+ * (`reportLockContention`/`reportRetiredLinkageCandidates`) covers that case
+ * instead. `candidates` on a deferred pass is what the pre-check COUNT saw —
+ * the reason the pass tried at all — and is reported so an operator knows
+ * how much repair was skipped; it is never compared against `resolved`,
+ * which is what `residual: null` already encodes as "not measured."
+ *
+ * `standDown` names WHICH kind, for logging only, and is `undefined` on
+ * every pass where `deferred` is `false` — every pass that was NOT a
+ * stand-down, whether it ran its UPDATE to completion (resolving everything
+ * it found, or falling short — see `hasUnresolvedResidue`) or never needed
+ * to (the `candidates === 0` early return, or a dry run).
  */
-export type PassResult = { candidates: number; resolved: number; residual: number | null; deferred: boolean };
+export type PassResult = {
+  candidates: number;
+  resolved: number;
+  residual: number | null;
+  deferred: boolean;
+  standDown?: 'lock_contention' | 'retired_candidate';
+};
 export type RunResult = { flowsheet: PassResult; rotation: PassResult };
 
 /**
  * Runs one pass's data-modifying CTE inside an explicit transaction that
  * bounds every lock wait first (BS#2413).
  *
- * Returns `null` — never throws — when the statement is rejected for lock
- * contention, which is the caller's signal to record a stand-down rather than
- * a result. Any other error propagates unchanged.
+ * Returns a `standDown` reason — never throws — when the statement is
+ * rejected for lock contention or a retired linkage candidate, which is the
+ * caller's signal to record a stand-down rather than a result. Any other
+ * error propagates unchanged.
  *
  * The transaction is not here for isolation: READ COMMITTED gives each
  * statement its own snapshot either way, and BS#2071's whole point is that
@@ -318,9 +328,11 @@ export type RunResult = { flowsheet: PassResult; rotation: PassResult };
  * a pooled connection and discarded, leaving the CTE unguarded while looking
  * guarded.
  */
+type DrainStandDown = { standDown: 'lock_contention' | 'retired_candidate' };
+
 const runGuardedDrain = async (
   statement: Parameters<typeof db.execute>[0]
-): Promise<{ candidates: number; resolved: number } | null> => {
+): Promise<{ candidates: number; resolved: number } | DrainStandDown> => {
   try {
     const rows = (await db.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${LINKAGE_LOCK_TIMEOUT_MS}ms'`));
@@ -330,7 +342,8 @@ const runGuardedDrain = async (
     const row = rows?.[0];
     return { candidates: Number(row?.candidates ?? 0), resolved: Number(row?.resolved ?? 0) };
   } catch (error) {
-    if (isLockContentionError(error)) return null;
+    if (isLockContentionError(error)) return { standDown: 'lock_contention' };
+    if (isRetiredLinkageCandidateError(error)) return { standDown: 'retired_candidate' };
     throw error;
   }
 };
@@ -480,8 +493,8 @@ const resolveFlowsheetAlbumIds = async (dryRun: boolean): Promise<PassResult> =>
       (SELECT COUNT(*)::int FROM upd) AS resolved
   `);
 
-  if (measured === null) {
-    return { candidates: seen, resolved: 0, residual: null, deferred: true };
+  if ('standDown' in measured) {
+    return { candidates: seen, resolved: 0, residual: null, deferred: true, standDown: measured.standDown };
   }
 
   const { candidates, resolved } = measured;
@@ -562,8 +575,8 @@ const resolveRotationAlbumIds = async (dryRun: boolean): Promise<PassResult> => 
       (SELECT COUNT(*)::int FROM upd) AS resolved
   `);
 
-  if (measured === null) {
-    return { candidates: seen, resolved: 0, residual: null, deferred: true };
+  if ('standDown' in measured) {
+    return { candidates: seen, resolved: 0, residual: null, deferred: true, standDown: measured.standDown };
   }
 
   const { candidates, resolved } = measured;
@@ -680,6 +693,17 @@ export const gapHours = (lastRunMs: number, startedAtMs: number): number =>
  * measurement either. It must not reach signal (c) — "the UPDATE did not
  * resolve what it found" would be a claim about a cohort the pass never
  * looked at — and gets its own `lock_contention` warning instead.
+ *
+ * BS#2594 adds a fourth: a pass that stood down on a retired linkage
+ * candidate — the `library` row a candidate was about to link to deleted
+ * mid-statement, surfacing as a `23503` `isRetiredLinkageCandidateError`
+ * recognizes — also never ran its UPDATE, for the identical reason. It must
+ * not reach signal (c) either, and gets its own `retired_candidate` warning
+ * instead (`reportRetiredLinkageCandidates`). `PassResult`'s docblock already
+ * names both kinds together as EITHER stand-down; this enumeration is that
+ * same pair, not a narrower one — a future editor tightening this predicate
+ * to an explicit two-case check would leave a retired-candidate stand-down
+ * reaching signal (c) and warning about a cohort it never measured.
  */
 export const hasUnresolvedResidue = ({ residual }: PassResult): boolean => residual !== null && residual > 0;
 
@@ -720,8 +744,20 @@ const passesOf = (result: RunResult) =>
     ['rotation', result.rotation],
   ] as const;
 
-/** True when either pass stood down on lock contention rather than repairing. */
-export const hasLockContention = (result: RunResult): boolean => result.flowsheet.deferred || result.rotation.deferred;
+/**
+ * True when either pass stood down rather than repairing — for EITHER
+ * reason a pass can stand down, lock contention or a retired linkage
+ * candidate (BS#2594). Both set `deferred: true` on their `PassResult`, and
+ * for the one thing this predicate gates — whether the heartbeat may
+ * advance — the two reasons are equivalent: either way the pass's UPDATE
+ * never committed, so nothing was resolved and the whole cohort it saw goes
+ * back into the pool for next slot. `reportLockContention` and
+ * `reportRetiredLinkageCandidates` are what tell the two apart for anyone
+ * reading the logs or Sentry — this predicate deliberately does not, so
+ * don't rename it back to something lock-specific without also giving the
+ * retired-candidate stand-down its own heartbeat gate.
+ */
+export const hasStandDown = (result: RunResult): boolean => result.flowsheet.deferred || result.rotation.deferred;
 
 /**
  * BS#2413. A stand-down is reported on its own fingerprint, never folded into
@@ -739,7 +775,7 @@ export const hasLockContention = (result: RunResult): boolean => result.flowshee
  */
 const reportLockContention = (result: RunResult): void => {
   for (const [pass, passResult] of passesOf(result)) {
-    if (!passResult.deferred) continue;
+    if (passResult.standDown !== 'lock_contention') continue;
     log('warn', `lock-${pass}`, 'Stood down on lock contention; repair deferred to the next slot.', {
       pass,
       candidates: passResult.candidates,
@@ -749,6 +785,68 @@ const reportLockContention = (result: RunResult): void => {
       pass,
       candidates: passResult.candidates,
       lock_timeout_ms: LINKAGE_LOCK_TIMEOUT_MS,
+      cron_schedule: CRON_SCHEDULE,
+    });
+  }
+};
+
+/**
+ * A `23503` on `flowsheet_album_id_library_id_fk` / `rotation_album_id_
+ * library_id_fk` — a librarian deleted the `library` row a candidate was
+ * about to link to, mid-statement (see `isRetiredLinkageCandidateError` in
+ * `./retired-candidate.js`). Reachability differs by pass: the rotation
+ * pass's FK check has always been able to race a `library` delete this way;
+ * BS#2565 is what newly exposed the FLOWSHEET pass, by removing `DELETE
+ * /library/:id`'s old refusal to delete a `library` row any `flowsheet` row
+ * still referenced — before that, a flowsheet-linked row was effectively
+ * undeletable and this race effectively flowsheet-impossible.
+ *
+ * Its own fingerprint and its own wording, never folded into
+ * `reportLockContention`'s message: "the row is gone" and "someone else
+ * holds the row" are different claims, and conflating them in a log search
+ * is exactly what a sibling predicate (over widening
+ * `LOCK_CONTENTION_SQLSTATES`) exists to avoid.
+ *
+ * **`candidates` is the whole pre-check cohort size, not a count of rows
+ * actually retired — the message below must not say otherwise.** The FK
+ * violation aborts the WHOLE statement, so `passResult.candidates` here is
+ * `countUnresolvedFlowsheetCandidates`/`countUnresolvedRotationCandidates`'s
+ * pre-UPDATE COUNT of the entire cohort, the same value a lock-contention
+ * stand-down reports. Postgres raises one FK violation for the one row whose
+ * `library` target it was checking when the delete committed — it does not
+ * report which row, or how many others in the same cohort also point at a
+ * now-deleted `library` row, so this job cannot learn a genuine retired
+ * count from an aborted statement, only that at least one candidate's
+ * `library` row is gone. In the common case that is exactly one row; the
+ * REST of the cohort is not retired at all — like a lock-contention
+ * stand-down, the whole batch simply retries next slot (see the "no separate
+ * shortfall counter" paragraph below) and drains normally, per the third
+ * case in `tests/integration/legacy-linkage-retired-candidate.spec.js`. A
+ * message that reported `candidates` as a retired count would tell Sentry
+ * that the job just permanently lost the whole cohort — on a healthy cron
+ * cadence, plausibly thousands of rows — over a single librarian delete.
+ *
+ * No separate shortfall counter against signal (c): the FK violation aborts
+ * the whole statement, so nothing in this pass's cohort was resolved and the
+ * next run retries all of it — the same accounting `deferred`/`residual:
+ * null` already give a lock-contention stand-down, not the partial-drain
+ * shape `hasUnresolvedResidue` covers.
+ */
+const reportRetiredLinkageCandidates = (result: RunResult): void => {
+  for (const [pass, passResult] of passesOf(result)) {
+    if (passResult.standDown !== 'retired_candidate') continue;
+    log(
+      'warn',
+      `retired-${pass}`,
+      "Stood down: a candidate's linked library row was deleted mid-statement; whole pass deferred to the next slot (cohort size logged below, not a retired-row count).",
+      {
+        pass,
+        candidates: passResult.candidates,
+      }
+    );
+    captureWarning(`${JOB_NAME}.retired_linkage_candidate`, `retired-${pass}`, {
+      pass,
+      candidates: passResult.candidates,
       cron_schedule: CRON_SCHEDULE,
     });
   }
@@ -799,23 +897,25 @@ export const runOnce = async (dryRun: boolean): Promise<RunResult> => {
   // cannot check in `ok` with the repair half-done. `withMonitor` re-throws,
   // so the caller's catch is unchanged.
   //
-  // BS#2413: a run in which either pass stood down on lock contention
-  // deliberately does NOT advance the heartbeat. Signal (b) measures the gap
-  // between *successful* runs, and a stand-down repaired nothing — stamping
-  // it would make a collision that persists for hours read as healthy, which
-  // is the one thing the gap warning exists to catch.
+  // BS#2413 (lock contention), extended by BS#2594 (retired candidate): a run
+  // in which either pass stood down for EITHER reason deliberately does NOT
+  // advance the heartbeat. Signal (b) measures the gap between *successful*
+  // runs, and a stand-down repaired nothing — stamping it would make a
+  // collision or a retired candidate that persists for hours read as
+  // healthy, which is the one thing the gap warning exists to catch.
   //
   // That is the one case where `ok` and the heartbeat part company, and it is
   // deliberate: a stand-down is a run that HAPPENED, which is all signal (a)
   // claims, so it checks in `ok` while (b)'s gap keeps growing and (d) names
   // the reason. Do not read a green cron check-in as proof the heartbeat
-  // advanced — `reportLockContention`'s warning is what distinguishes them.
+  // advanced — `reportLockContention`/`reportRetiredLinkageCandidates`'s
+  // warnings are what distinguish them, and which of the two fired.
   let deferred = false;
   const result = await Sentry.withMonitor(
     JOB_NAME,
     async () => {
       const passes = await runResolve(false);
-      deferred = hasLockContention(passes);
+      deferred = hasStandDown(passes);
       if (!deferred) await updateLastRun(JOB_NAME, startedAt);
       return passes;
     },
@@ -831,6 +931,7 @@ export const runOnce = async (dryRun: boolean): Promise<RunResult> => {
   }
   reportDrain(result);
   reportLockContention(result);
+  reportRetiredLinkageCandidates(result);
   return result;
 };
 
@@ -846,7 +947,7 @@ const run = async () => {
   let exitCode = 0;
   try {
     const result = await runOnce(dryRun);
-    const deferred = hasLockContention(result);
+    const deferred = hasStandDown(result);
     log('info', 'complete', deferred ? 'Linkage resolve complete (a pass stood down).' : 'Linkage resolve complete.', {
       dry_run: dryRun,
       flowsheet_resolved: result.flowsheet.resolved,
