@@ -3848,8 +3848,13 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
  * would damage, so a confirmation screen can warn the librarian before the
  * button is pressed rather than after — see `libraryService.getFlowsheetPlayImpact`
  * for why they must never be summed. Deliberately NOT on `GET /library/info`
- * — see that route's docstring — and gated `catalog:['write']` to match the
- * DELETE it precedes, not the `catalog:['read']` bar every DJ holds.
+ * (`getAlbum`, above): that route is `catalog:['read']` and serves as the
+ * tubafrenzy-keyed permalink front door for external callers (LML, wxyc.info,
+ * the request line) — widening its bar to `catalog:['write']` to carry this
+ * data would lock those callers out, and gating just this one field to
+ * `write` on an otherwise `read` route is its own kind of confusing. This
+ * endpoint is gated `catalog:['write']` instead, to match the DELETE it
+ * precedes rather than the `catalog:['read']` bar every DJ holds.
  */
 export const getFlowsheetPlayCounts: RequestHandler<{ id: string }> = async (req, res) => {
   const albumId = parseAlbumId(req.params.id);

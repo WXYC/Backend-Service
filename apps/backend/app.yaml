@@ -2188,6 +2188,15 @@ paths:
         single total would misstate what the delete actually does. Gated
         `catalog:['write']` to match the DELETE it precedes, not the lighter
         `catalog:['read']` bar `GET /library/info` uses.
+
+        Two statements, not one: a library existence probe (to 404 before
+        counting anything), then a single `count(*) FILTER (WHERE …)`
+        aggregate over `flowsheet` that computes all three arm counts from one
+        row set in one statement. That single aggregate is what makes `direct`
+        and `rotation_linked` exact as of the moment it ran — nothing between
+        the three arms can move a row from one count to another when all
+        three are FILTER clauses of the same statement. `legacy_linked` is the
+        one arm with residual staleness; see its field description below.
       security:
         - BearerAuth: ['station-management']
       parameters:
@@ -2207,23 +2216,33 @@ paths:
                 properties:
                   direct:
                     type: integer
-                    description: Plays linked via `flowsheet.album_id`; unlinked (not deleted) by the delete.
+                    description: >-
+                      Plays linked via `flowsheet.album_id`; unlinked (not
+                      deleted) by the delete. FK-backed and counted by the
+                      same aggregate statement as the other two arms, so this
+                      is exact as of that statement's snapshot.
                   rotation_linked:
                     type: integer
                     description: >-
                       Plays reachable only via `flowsheet.rotation_id` ->
                       `rotation.album_id`; unlinked by the delete's rotation
                       cascade. Excludes any play already counted in `direct`.
+                      FK-backed and counted by the same aggregate statement as
+                      the other two arms, so this is exact as of that
+                      statement's snapshot.
                   legacy_linked:
                     type: integer
                     description: >-
                       Plays naming the release only by a bare
                       `flowsheet.legacy_release_id`, awaiting
-                      `jobs/legacy-linkage-resolve`. Best-effort: that column
-                      carries no FK, so there is no row to lock against a
-                      concurrent webhook INSERT, and the count can only be
-                      stale on the undercount side. Deleting STRANDS these
-                      plays permanently rather than unlinking them, since the
+                      `jobs/legacy-linkage-resolve`. Best-effort, unlike the
+                      other two arms: that column carries no FK, so a
+                      concurrent tubafrenzy webhook can INSERT a legacy-linked
+                      row after this statement's snapshot was taken and before
+                      the response is read, with no row yet in existence for
+                      it to conflict against — the count can only be stale on
+                      the undercount side. Deleting STRANDS these plays
+                      permanently rather than unlinking them, since the
                       delete-denylist guarantees no future release will ever
                       carry this legacy id again.
         '404':
