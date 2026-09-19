@@ -1632,8 +1632,8 @@ describe('Bandcamp re-ask de-freeze — ENRICHMENT_BANDCAMP_REASK gate', () => {
  * WXYC/Backend-Service#2603 (LML found nothing vs. LML found something the
  * trust gate rejected) is diagnosable from `flowsheet.no_match_evidence`
  * after the fact. `trust_gate` is a closed, exhaustively-switched vocabulary
- * (`no_results` | `rejected_substitution` | `unknown`) — see the function's
- * doc comment for the classification rule.
+ * (`no_results` | `rejected_substitution` | `vouched_no_artwork`) — see the
+ * function's doc comment for the classification rule.
  */
 describe('buildNoMatchEvidence (BS#2606)', () => {
   it('classifies an empty results array as no_results', () => {
@@ -1724,7 +1724,7 @@ describe('buildNoMatchEvidence (BS#2606)', () => {
     expect(evidence.trust_gate).toBe('rejected_substitution');
   });
 
-  it('classifies a gate-vouched result with no usable artwork as unknown', () => {
+  it('classifies a gate-vouched result with no usable artwork as vouched_no_artwork', () => {
     // `direct` is trusted outright (lmlTrackContextTrust returns
     // 'search_type'), but no result in `results` carries an `artwork`
     // object — extractArtwork still finds nothing to persist. Rarer,
@@ -1736,7 +1736,21 @@ describe('buildNoMatchEvidence (BS#2606)', () => {
 
     const evidence = buildNoMatchEvidence(response, 'DOGA');
 
-    expect(evidence.trust_gate).toBe('unknown');
+    expect(evidence.trust_gate).toBe('vouched_no_artwork');
+  });
+
+  it("records LML's release_id: 0 sentinel verbatim rather than normalizing it to null", () => {
+    // 0 is LML's "no Discogs id" sentinel, not release 0 — see
+    // shared/lml-client/src/trust.ts, which deliberately leaves that reading
+    // to the caller. This column is forensic, so it keeps LML's literal
+    // answer; the consumer (BS#2607's renderer) owns treating 0 as absent.
+    // Pinned so a later "fix" can't quietly change the payload's meaning.
+    const response = {
+      search_type: 'direct',
+      results: [{ library_item: { id: 5, title: 'DOGA' }, artwork: { release_id: 0 } }],
+    } as unknown as LookupResponse;
+
+    expect(buildNoMatchEvidence(response, 'DOGA').top_release_id).toBe(0);
   });
 
   it('reads degraded/degraded_reason/timeout straight off the response', () => {
