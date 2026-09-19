@@ -189,7 +189,8 @@ export const LINKAGE_LOCK_TIMEOUT_MS = 750;
  * own two FK constraints — deliberately a SIBLING check to lock contention,
  * never folded into it) lives in `./retired-candidate.js`, its own
  * single-responsibility module, imported here normally. It is unit-tested
- * against hand-built doubles (bare and `DrizzleQueryError`-wrapped) in
+ * against a hand-built `DrizzleQueryError`-wrapped double — the only shape a
+ * drizzle query rejection can have in production — in
  * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts`;
  * `tests/integration/legacy-linkage-retired-candidate.spec.js` proves the
  * raw error shape those doubles assume — SQLSTATE `23503` with
