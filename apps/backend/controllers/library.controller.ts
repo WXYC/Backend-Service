@@ -3783,6 +3783,30 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
 };
 
 /**
+ * GET /library/:id/flowsheet-play-counts (BS#2592). Pre-delete read for the
+ * DELETE below: reports the three disjoint flowsheet-play arms a delete
+ * would damage, so a confirmation screen can warn the librarian before the
+ * button is pressed rather than after — see `libraryService.getFlowsheetPlayImpact`
+ * for why they must never be summed. Deliberately NOT on `GET /library/info`
+ * — see that route's docstring — and gated `catalog:['write']` to match the
+ * DELETE it precedes, not the `catalog:['read']` bar every DJ holds.
+ */
+export const getFlowsheetPlayCounts: RequestHandler<{ id: string }> = async (req, res) => {
+  const albumId = parseAlbumId(req.params.id);
+
+  const result = await libraryService.getFlowsheetPlayImpact(albumId);
+  if (result.outcome === 'not_found') {
+    throw new WxycError('Album not found', 404);
+  }
+
+  res.status(200).json({
+    direct: result.direct,
+    rotation_linked: result.rotationLinked,
+    legacy_linked: result.legacyLinked,
+  });
+};
+
+/**
  * DELETE /library/:id (BS#2112). Hard delete — no soft-delete tombstone; see
  * the issue's decision record for why. BS#2565 (D1) removed the 409 refusal
  * D10 used to raise when the release carried `flowsheet` plays, so the

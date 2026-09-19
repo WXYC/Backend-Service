@@ -2116,6 +2116,60 @@ paths:
                     type: string
                     enum: ['lock_unavailable']
 
+  /library/{id}/flowsheet-play-counts:
+    get:
+      summary: "Pre-delete read: the release's flowsheet plays, by arm (BS#2592)"
+      description: >-
+        Answers "what would deleting this release damage?" for the
+        confirmation screen `DELETE /library/{id}` cannot answer on its own
+        response — by the time a delete returns, the screen has already been
+        read. The three arms are disjoint by construction and reported
+        separately; they are deliberately NOT summed, because the
+        legacy-linked arm strands its plays rather than unlinking them, so a
+        single total would misstate what the delete actually does. Gated
+        `catalog:['write']` to match the DELETE it precedes, not the lighter
+        `catalog:['read']` bar `GET /library/info` uses.
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The release's flowsheet plays, by arm
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['direct', 'rotation_linked', 'legacy_linked']
+                properties:
+                  direct:
+                    type: integer
+                    description: Plays linked via `flowsheet.album_id`; unlinked (not deleted) by the delete.
+                  rotation_linked:
+                    type: integer
+                    description: >-
+                      Plays reachable only via `flowsheet.rotation_id` ->
+                      `rotation.album_id`; unlinked by the delete's rotation
+                      cascade. Excludes any play already counted in `direct`.
+                  legacy_linked:
+                    type: integer
+                    description: >-
+                      Plays naming the release only by a bare
+                      `flowsheet.legacy_release_id`, awaiting
+                      `jobs/legacy-linkage-resolve`. Best-effort: that column
+                      carries no FK, so there is no row to lock against a
+                      concurrent webhook INSERT, and the count can only be
+                      stale on the undercount side. Deleting STRANDS these
+                      plays permanently rather than unlinking them, since the
+                      delete-denylist guarantees no future release will ever
+                      carry this legacy id again.
+        '404':
+          description: Album not found
+
   /library/{id}/missing:
     patch:
       summary: Mark an album as missing
