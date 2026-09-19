@@ -1564,11 +1564,21 @@ export const flowsheet = wxyc_schema.table(
     // `enriched_no_match` write. Populated on the no-match arms only (both
     // linked and unlinked) of `apps/enrichment-worker/enrich.ts#finalizeRow`
     // — see `buildNoMatchEvidence` there for the payload shape and the
-    // `trust_gate` classification. NULL means either "row predates this
-    // column" or "row is not (currently or ever) `enriched_no_match`" —
+    // `trust_gate` classification. THREE things make this NULL, and the third
+    // is not a historical artifact: "row predates this column", "row is not
+    // (currently or ever) `enriched_no_match`", and — ongoing — "the row was
+    // made `enriched_no_match` by a writer that does not populate this
+    // column". `jobs/flowsheet-metadata-backfill`, the hourly C6 gap-recovery
+    // sweep, is exactly that writer: it writes the terminal status and never
+    // this column (nothing under `jobs/` references `no_match_evidence` at
+    // all), so it mints NULL-evidence rows that POSTDATE migration 0173 every
+    // hour. Do not read a NULL as "old row" — check which writer produced it.
+    // What is here is the LANDING verdict, not necessarily the current one:
     // never cleared on a later transition to `enriched_match`, so a rechecked
-    // row keeps the record of the earlier wrong verdict; `metadata_status`
-    // is what disambiguates current state. Per-playcut, not album-keyed
+    // row keeps the record of the earlier wrong verdict; `metadata_status` is
+    // what disambiguates current state, and the payload's own `at` compared
+    // against `no_match_recheck_attempted_at` is what says whether a later
+    // re-ask has happened since. Per-playcut, not album-keyed
     // (BS#1499 precedent) — two DJs typing the same album differently can
     // get different verdicts, so this rides the flowsheet row, never
     // `album_metadata`.

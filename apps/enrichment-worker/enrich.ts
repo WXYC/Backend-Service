@@ -544,12 +544,24 @@ export const extractArtwork = (response: LookupResponse, requestedAlbum?: string
  *                               album).
  *   - `vouched_no_artwork`    — the gate vouched for a result (`direct`,
  *                               `compilation`, or a correspondence-gated
- *                               row-less match), but `extractArtwork` still
- *                               found no usable artwork among the results it
- *                               vouches for — the LML#408 degraded shape:
- *                               LML agreed on the album and returned no
- *                               image, structurally different from (and
- *                               rarer than) an outright rejection.
+ *                               row-less match), but NONE of the results it
+ *                               vouches for carried an `artwork` object at
+ *                               all, so `extractArtwork` returned null and
+ *                               `finalizeRow` took the no-match arm.
+ *                               Structurally different from (and rarer than)
+ *                               an outright rejection.
+ *
+ *                               This is NOT the LML#408 degraded shape — an
+ *                               `artwork` object whose `artwork_url` is null.
+ *                               `extractArtwork` returns the artwork OBJECT
+ *                               and `finalizeRow` branches on its truthiness,
+ *                               so a present-but-imageless record takes the
+ *                               MATCH arm and never reaches this classifier.
+ *                               `empty-outcome.ts` owns that shape as
+ *                               `lml_degraded`, on exactly that test
+ *                               (`if (!artwork.artwork_url)`). The reachable
+ *                               shape here is the BS#961 one: every vouched
+ *                               result's `artwork` absent or null.
  */
 export type NoMatchTrustGate = 'no_results' | 'rejected_substitution' | 'vouched_no_artwork';
 
@@ -579,9 +591,21 @@ function classifyNoMatchTrustGate(response: LookupResponse, requestedAlbum: stri
  * as "no id, inline tracklist still valid"), so a consumer of this column —
  * including BS#2607's digest renderer — must treat `0` as absent and never
  * build a `discogs.com/release/0` link from it.
+ *
+ * `at` is when THIS verdict was recorded, and it is what makes the record
+ * legible next to a later re-ask. BS#2608 compresses the interval before
+ * `jobs/flowsheet-no-match-recheck` asks LML about the same row again from
+ * roughly five months to roughly days, and that job records only
+ * `flowsheet.no_match_recheck_attempted_at` — a bare marker carrying no
+ * verdict of its own, written by a module this one does not touch. Without a
+ * timestamp here, a row holding both columns cannot say how far apart they
+ * are, so a digest could render this verdict several re-asks stale with no way
+ * to detect that. Read this column as the LANDING verdict and compare `at`
+ * against `no_match_recheck_attempted_at` before treating it as current.
  */
 export type NoMatchEvidence = {
   v: 1;
+  at: string;
   search_type: LookupResponse['search_type'];
   results_count: number;
   top_library_item_id: number | null;
@@ -599,6 +623,7 @@ export const buildNoMatchEvidence = (response: LookupResponse, requestedAlbum: s
   const top = response.results?.[0];
   return {
     v: 1,
+    at: new Date().toISOString(),
     search_type: response.search_type,
     results_count: response.results?.length ?? 0,
     top_library_item_id: top?.library_item?.id ?? null,
