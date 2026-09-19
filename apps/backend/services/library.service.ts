@@ -4211,7 +4211,18 @@ export type DeletedArchiveEntity = {
 export type DeletedArchiveBatch = {
   batch_id: string;
   captured_at: Date;
-  actor: { user_id: string | null; email: string | null; role: string | null };
+  /**
+   * Deliberately omits `catalog_delete_snapshot.actor_email`, which the
+   * capture DOES store. `docs/pii.md` classifies `auth_user.email` as PII and
+   * permits three read-site categories — authentication internals, roster
+   * admin, email delivery — and an archive listing is none of them. dj-site
+   * resolves a `user_id` to a display name through roster admin, which IS a
+   * permitted site, so projecting the denormalized copy here would buy nothing
+   * and would make this the column's first read site ever. Keep it that way:
+   * the capture exists so a restore can attribute the delete, not so an
+   * endpoint can echo an address.
+   */
+  actor: { user_id: string | null; role: string | null };
   entities: DeletedArchiveEntity[];
   unrecoverable: readonly string[];
 };
@@ -4333,7 +4344,6 @@ export const getDeletedArchivePage = async (
       captured_at,
       actor: {
         user_id: primary?.actor_user_id ?? null,
-        email: primary?.actor_email ?? null,
         role: primary?.actor_role ?? null,
       },
       entities: ordered.map((row) => {

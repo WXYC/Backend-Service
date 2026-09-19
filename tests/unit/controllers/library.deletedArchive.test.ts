@@ -17,7 +17,7 @@ function mockReqResNext(overrides: Partial<Request> = {}) {
 const BATCH: libraryService.DeletedArchiveBatch = {
   batch_id: '11111111-1111-1111-1111-111111111111',
   captured_at: new Date('2026-09-10T12:00:00Z'),
-  actor: { user_id: 'librarian-1', email: 'md@wxyc.org', role: 'musicDirector' },
+  actor: { user_id: 'librarian-1', role: 'musicDirector' },
   entities: [
     {
       entity_kind: 'library',

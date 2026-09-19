@@ -3691,11 +3691,15 @@ paths:
                           format: date-time
                         actor:
                           type: object
+                          description: >-
+                            Attribution for the delete. Carries no email: the
+                            snapshot stores `actor_email` for restore
+                            attribution, but `docs/pii.md` does not list an
+                            archive listing among the permitted read sites for
+                            a PII email, so callers resolve `user_id` through
+                            roster admin instead.
                           properties:
                             user_id:
-                              type: string
-                              nullable: true
-                            email:
                               type: string
                               nullable: true
                             role:

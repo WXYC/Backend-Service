@@ -188,6 +188,27 @@ describe('getDeletedArchivePage (BS#2561 / F2a)', () => {
     expect(batch.entities[0].row).toEqual({ id: 42, album_title: 'On Your Own Love Again' });
     expect(batch.entities[0].children).toEqual({ bins: 2, reviews: 0 });
   });
+
+  // The snapshot row carries `actor_email` — the capture stores it so a
+  // restore can attribute the delete — and the projection deliberately drops
+  // it, because `docs/pii.md` does not list an archive listing among the
+  // permitted read sites for a PII email. Asserted as an ABSENCE rather than
+  // simply left unasserted: without this, a projection that started echoing
+  // the address would pass every other test in this file, and there is no
+  // lint rule or sentinel scoped to `email` that would catch it either.
+  it('does not project the actor email, though the snapshot row carries one', async () => {
+    const fixture = snapshotRow({});
+    primeReads({
+      batchPage: [{ batch_id: 'batch-1', captured_at: fixture.captured_at }],
+      rows: [fixture],
+    });
+
+    const [batch] = await getDeletedArchivePage(0, 50);
+
+    expect(fixture.actor_email).toBe('md@wxyc.org');
+    expect(batch.actor).toEqual({ user_id: 'librarian-1', role: 'musicDirector' });
+    expect(batch.actor).not.toHaveProperty('email');
+  });
 });
 
 describe('countDeletedArchiveBatches (BS#2561 / F2a)', () => {
