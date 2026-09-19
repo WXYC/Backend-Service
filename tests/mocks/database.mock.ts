@@ -194,6 +194,21 @@ export const catalog_delete_snapshot = {
 // before reaching the behaviour those tests assert. Resolves void, like the
 // real one; assert on the call args when a test cares what was captured.
 export const captureCatalogDeleteSnapshot = jest.fn().mockResolvedValue(undefined);
+// BS#2561. `library.service.ts`'s `GET /library/deleted` helpers import these
+// from `catalog-delete-envelope.ts` (a pure module -- no DB dependency of its
+// own), so the double just needs to exist for that import to resolve; tests
+// that care about the real ordering/parsing logic import the real module
+// directly (`tests/unit/database/catalog-delete-envelope.test.ts`), same
+// convention as `catalog-delete-snapshot.test.ts`.
+export const parseCapturedEnvelope = jest.fn((captured: unknown) => captured);
+export const orderBatchEntities = jest.fn((rows: unknown[]) => rows);
+export const UNRECOVERABLE_DEPENDENTS = [
+  'album_metadata',
+  'library_identity',
+  'library_identity_source',
+  'uncovered_release_search_markers',
+  'album_review_submissions',
+];
 export const album_popularity = {
   logical_album_key: 'album_popularity.logical_album_key',
   plays: 'album_popularity.plays',

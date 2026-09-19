@@ -89,6 +89,19 @@ library_route.get(
   libraryController.exportBmiPerformanceList
 );
 
+// BS#2561 (F2a): the catalog-delete archive `DELETE /library/:id` writes to
+// `catalog_delete_snapshot`. `catalog: ['write']` matches the delete itself —
+// the archive holds deleted-card contents plus the deleter's identity, audit
+// data per `library_delete_denylist`'s docstring, not a DJ-facing read.
+//
+// A bare literal, mounted like `/catalog` and `/bmi-performance-list` above.
+// It does NOT need the registration-order treatment those routes' neighbors
+// carry: this router registers no `GET '/:id'` at all (only `patch` and
+// `delete` on `/:id`, further down), and Express matches method as well as
+// path, so there is no templated GET for a literal `/deleted` to collide
+// with. That would change if a `GET '/:id'` is ever added to this router.
+library_route.get('/deleted', requirePermissions({ catalog: ['write'] }), libraryController.listDeletedArchive);
+
 // The two legacy cross-reference listings — successors to `/wxycdb`'s
 // `xrefsToLibraryCodes.jsp` and `xrefsToLibraryReleases.jsp`. Read-only: both
 // sets are frozen (artist codes) or dropped (releases) by WXYC/wiki#89's
