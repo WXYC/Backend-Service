@@ -204,29 +204,41 @@ if (!isTestEnv) {
   //
   // Own instance, own `MemoryStore` — never `authMutationRateLimit`'s shared
   // 10/15min bucket (the PR #2550 lesson, restated by the OTP limiters
-  // below): the control room shares one egress IP, so folding admin traffic
-  // into sign-in's budget would let a manager's routine admin work 429
-  // sign-in for everyone in the building.
+  // below): this key is the shared Cloudflare edge dj-site's browser client
+  // proxies every auth call through (see the BS#2604 block below for the
+  // full key-space finding), so folding admin traffic into sign-in's budget
+  // would let a manager's routine admin work 429 sign-in for whatever slice
+  // of the DJ population shares that edge bucket.
   //
-  // Same `rateLimitKeyFromRequest` generator as six other limiters in this
-  // file, so it inherits the OPEN ASSUMPTION (BS#2193) documented on the
-  // get-session ceiling below: keying is on the full `X-Real-IP`, not a /56
-  // prefix, so an IPv6 client on a /64 could mint effectively unlimited
-  // buckets if nginx ever hands this service an IPv6 `X-Real-IP`. Not
-  // rekeyed here — that would silently rekey those six sibling limiters
-  // too, which is its own follow-up, not a drive-by.
+  // Same `rateLimitKeyFromRequest` generator as nine other limiters in this
+  // file (BS#2604 added three more sharing it), so it inherits the OPEN
+  // ASSUMPTION (BS#2193) documented on the get-session ceiling below: keying
+  // is on the full `X-Real-IP`, not a /56 prefix, so an IPv6 client on a /64
+  // could mint effectively unlimited buckets if nginx ever hands this
+  // service an IPv6 `X-Real-IP`. Not rekeyed here — that would silently
+  // rekey those nine sibling limiters too, which is its own follow-up, not
+  // a drive-by.
   //
   // Decision 2 (recorded 2026-09-18): sized at 100/15min, not the tighter
   // 10/15min brute-force tier. The limiter runs ahead of authentication, so
   // the budget has to clear the busiest legitimate burst — semester-start
   // provisioning, a station manager creating 20-30 accounts in one sitting,
   // each `POST /auth/admin/provision-user` paired with a `GET
-  // /auth/admin/resolve-organization`, all from the control room's one
-  // egress IP, sometimes with a second manager working alongside. ~60-90
+  // /auth/admin/resolve-organization`, sometimes with a second manager
+  // working alongside. ~60-90
   // requests in a few minutes is the realistic peak; 100/15min clears it
   // without much room to spare — if a real burst is ever measured exceeding
   // it, raise the number rather than treating this comment as settled. A 429
-  // during provisioning is worse than a loose bound here. Anonymous abuse
+  // during provisioning is worse than a loose bound here.
+  //
+  // CORRECTION (BS#2604 review, binding): decision 2 above was reasoned on
+  // the premise that this bucket is "the control room's one egress IP". That
+  // premise is FALSE — production nginx sets `X-Real-IP` from `$remote_addr`
+  // with no `real_ip` directives, and dj-site proxies every `/auth/*` call
+  // through its own Cloudflare Workers route, so the peer is a Cloudflare
+  // edge shared by a large slice of the station. The 100/15min number above
+  // has NOT been re-derived for that key space; re-deriving it is its own
+  // ticket, not a drive-by here. See the BS#2604 block below. Anonymous abuse
   // is still bounded to ~400/hour against a table whose size premise assumes
   // "thousands of rows" (`shared/database/src/schema.ts`'s
   // `account_audit_event` comment), which is the point.
@@ -994,12 +1006,240 @@ if (!isTestEnv) {
   });
 
   app.use('/auth/get-session', getSessionIpRateLimit, getSessionIdentityRateLimit);
+
+  // BS#2604 (parent epic #2534) — the fourteen authenticated flat mounts
+  // `mountAuthenticatedAccountAudit` dispatches below (`/auth/change-password`,
+  // `/auth/change-email`, `/auth/update-user`, `/auth/delete-user`, and the
+  // ten `/auth/organization/*` mutations) carried NO rate limiter at all —
+  // the exact defect class BS#2554 fixed for `/auth/admin`, left open here
+  // until now (see the `account_audit_event` comment in
+  // `shared/database/src/schema.ts`). That dispatch middleware resolves the
+  // caller's session and INSERTs an audit row unconditionally, matching by
+  // path with no auth check at that layer — the real authorization happens
+  // later, inside better-auth's own handler — so an anonymous or
+  // credential-stuffing loop against any of these paths cost one
+  // `auth.api.getSession` DB read plus one `account_audit_event` INSERT per
+  // request, with nothing bounding how often that could happen.
+  //
+  // Three dedicated instances below, not one shared bucket: the fourteen
+  // paths are not one traffic profile, and a single bucket would reproduce
+  // the PR #2550 shared-bucket hazard one level down — a DJ toggling dark
+  // mode must not drain the budget a station manager needs for roster work.
+  //
+  // KEY-SPACE CORRECTION (found in review, binding — supersedes an earlier
+  // "the control room is one egress IP" framing this block used to carry):
+  // `rateLimitKeyFromRequest` does not key on a control-room IP. dj-site's
+  // browser auth client resolves its base URL to a same-origin
+  // `${window.location.origin}/auth` proxy (`lib/features/authentication/
+  // client.ts`), and `app/auth/[...path]/route.ts` fetches `api.wxyc.org`
+  // from the Cloudflare Workers runtime — so the TCP peer nginx sees, and
+  // the value `X-Real-IP` carries (the live `/etc/nginx/nginx.conf` has no
+  // `set_real_ip_from`/`real_ip_header`/`real_ip_recursive` directive; it
+  // assigns `$remote_addr` verbatim), is a Cloudflare edge egress IP, not a
+  // DJ's browser or a single control-room machine. Already measured on this
+  // exact generator: `plans/bs2169-get-session-limiter-key.md` found 100%
+  // of `/auth/get-session` traffic — same client, same proxy, same upstream
+  // — landing on ~10 Cloudflare egress buckets. `auth_member` holds 174
+  // `dj` + 8 `stationManager` + 5 `musicDirector`; split unevenly across
+  // ~10 buckets, the busiest one plausibly carries most of the station.
+  //
+  // Consequence: under a shared-edge key, a tight limit buys NO brute-force
+  // protection, only collateral damage. These three limiters are DoS
+  // ceilings on audit-row minting, nothing more — see each limiter's own
+  // comment below for why its number is sized that way. Per-account
+  // brute-force defense is better-auth's own limiter (next paragraph) plus
+  // a future identity-keyed arm, not this layer's job.
+  //
+  // better-auth's own limiter does NOT make this redundant.
+  // `shared/authentication/src/auth.definition.ts` sets only
+  // `customRules: { '/get-session': false }`, leaving its built-in limiter
+  // at production defaults (10s/100) covering all fourteen of these paths
+  // too. But that limiter lives inside `toNodeHandler`, mounted BELOW
+  // `mountAuthenticatedAccountAudit` (see that call's own comment below) —
+  // a request it rejects has already paid the audit dispatch's `getSession`
+  // read, and the `finish` listener still fires with `outcome: 429`, so the
+  // row is written regardless. It bounds handler work, not audit-layer
+  // cost; these three Express-layer limiters are what bounds the latter, by
+  // registering ahead of the audit dispatch.
+  //
+  // Sizing note that applies to all three limiters below: the live
+  // `account_audit_event` table held 17 rows total spanning these fourteen
+  // paths over the two days since BS#2537 shipped, and only `update-user`
+  // appeared at all (6 events, never more than one in any 60s or 15min
+  // window; zero organization mutations). That sample is too thin to size
+  // from and does not cover semester start, which is the peak these numbers
+  // have to clear — so they come from what the dj-site UI can emit plus
+  // margin, not from measured load. If a real burst is ever measured above
+  // one of them, raise the number rather than treating this comment as
+  // settled — a 429 during legitimate use is worse than a loose bound.
+  //
+  // IPv6 caveat (BS#2193): keying on the full `X-Real-IP` rather than a /56
+  // prefix is now load-bearing for fifteen paths across parent epic #2534 —
+  // `adminPrefixRateLimit`'s one plus these three limiters' fourteen — not
+  // just the two get-session limiters it was first flagged against. A
+  // single IPv6 client could still mint effectively unlimited buckets
+  // across all of them if nginx ever hands this service an IPv6
+  // `X-Real-IP`. Not rekeyed here, same reason as the get-session ceiling's
+  // own comment: rekeying would silently rekey every sibling limiter
+  // sharing the generator, which is a follow-up, not a drive-by.
+  //
+  // No 429 observability on these three, unlike the `/auth/get-session`
+  // pair above (`makeRateLimitMetricsHandler`): a throttled request here
+  // publishes no CloudWatch metric, only the standard `RateLimit-*`
+  // response headers. Not built here — follow-up, not a drive-by.
+  //
+  // Forensic inversion, worth knowing before reading this table after an
+  // incident: because these three limiters register ahead of
+  // `mountAuthenticatedAccountAudit` (below), a burst that exceeds one of
+  // them yields exactly `limit` audit rows and then silence for the rest of
+  // the window — the 429 short-circuits above the audit dispatch, so a
+  // sustained attempt looks, in the table, like it stopped rather than like
+  // it continued unrecorded.
+
+  // `/auth/update-user` is wired to an undebounced UI control: dj-site's
+  // `ColorSchemeToggle` calls `authClient.updateUser()` straight out of an
+  // `IconButton onClick` (via `useThemePreferenceActions().persistPreference`
+  // in `src/hooks/themePreferenceHooks.ts`) with no debounce and no reload.
+  // `ThemeSwitcher`/`ThemePicker` hit the same path but force a
+  // `window.location.reload()` afterward, so they self-limit — the
+  // light/dark toggle does not. A 60-SECOND window, not the 15-minute tier
+  // below: a 15-minute window would mean one burst of toggling locks the
+  // account out for the remaining fourteen minutes, while 60s recovers
+  // within a minute. Shape borrowed from `checkRequestBanRateLimit` above,
+  // for the same reason. Own instance: folding this into either tier below
+  // would either starve the roster-work budget or apply a 15-minute lockout
+  // to a UI toggle.
+  //
+  // 300, not a brute-force number: this key is the shared Cloudflare edge
+  // (see the block comment above), so the legitimate worst case isn't one
+  // DJ mashing a toggle — it's a client-side theme-migration firing
+  // `updateUser()` once on load for every signed-in DJ, landing however
+  // many of 174 `dj` + 8 `stationManager` + 5 `musicDirector` accounts sit
+  // on the busiest of ~10 edge buckets, inside the same 60-second window.
+  // 300/60s clears that with margin. Still a DoS ceiling, not brute-force
+  // defense: a shared-edge key gives no individual account fairness, so
+  // throttling one account being toggle-spammed by someone else on the same
+  // edge is not this limiter's job — that needs a per-account
+  // (identity-keyed) arm, a follow-up, not built here.
+  const updateUserRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 300,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  app.use('/auth/update-user', updateUserRateLimit);
+
+  // `/auth/change-password`, `/auth/change-email`, `/auth/delete-user` —
+  // rare, deliberate, security-sensitive operations, not UI chrome.
+  // `change-password` takes `currentPassword` and is therefore a password
+  // oracle; `change-email` sends mail. Its own instance and its own store —
+  // never folded into `authMutationRateLimit`'s shared bucket, for the same
+  // shared-edge-key reason as every other limiter in this block.
+  //
+  // Mounting `/auth/delete-user` also covers better-auth's
+  // `/delete-user/callback` (the email-confirmation arm of the same flow).
+  // That route is not itself one of the fourteen audited paths, so bounding
+  // it is a small bonus, not a regression — noted here so the next reader
+  // knows the mount is deliberately one route wider than the audited path.
+  //
+  // 200/15min, corrected from an earlier 10/15min that assumed this bucket
+  // was a control-room IP. It is the shared Cloudflare edge instead (see
+  // the block comment above), so 10/15min meant "ten of these three
+  // security-sensitive operations, shared across whatever fraction of 174
+  // `dj` + 8 `stationManager` + 5 `musicDirector` lands on one busy edge
+  // bucket" — a semester-start password wave clears that in minutes and
+  // locks legitimate DJs out of a security operation for the rest of the
+  // window. 200/15min is sized for that wave with margin. Still a DoS
+  // ceiling, not brute-force defense: a shared-edge key cannot give any one
+  // account fairness, so throttling a genuine password-guessing attempt is
+  // better-auth's own limiter's job (see the block comment above) plus a
+  // future identity-keyed arm — not this instance's.
+  const sensitiveAuthMutationRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 200,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  for (const path of ['/auth/change-password', '/auth/change-email', '/auth/delete-user']) {
+    app.use(path, sensitiveAuthMutationRateLimit);
+  }
+
+  // The ten `/auth/organization/*` mutations, as an EXPLICIT path list —
+  // NOT the `/auth/organization` prefix. better-auth mounts 35 routes under
+  // `/organization/`, of which only these ten are audited mutations;
+  // dj-site reads its roster through `organization.listMembers` and
+  // `getFullOrganization` from a handful of production call sites
+  // (`lib/features/admin/api.ts`, `lib/features/authentication/
+  // organization-utils.ts`, `AccountEditForm.tsx`), and a prefix limiter
+  // would 429 the roster page for whichever slice of the shared edge is
+  // browsing it — the same mistake PR #2550 made, in a new place.
+  //
+  // Segment-aware matching verified empirically before relying on it
+  // (Express 5.2.1, `app.use`): `/auth/organization/create` matches
+  // `/auth/organization/create` and `/auth/organization/create/sub`, and
+  // does NOT match `create-role`, `create-team`, or `createx`. Without that
+  // verification this list would silently over-match — `update` would
+  // swallow `update-member-role`, `update-role`, and `update-team`, and
+  // `delete` would swallow `delete-role`. That verification is load-bearing
+  // for this path list being safe.
+  //
+  // 300/15min, corrected from an earlier 100/15min that mirrored
+  // `adminPrefixRateLimit` as a genuine peer — same sitting, same manager,
+  // roster work alternating with `/auth/admin/provision-user`. That peer
+  // relationship still holds, but 100 inherited `adminPrefixRateLimit`'s
+  // own control-room framing rather than being sized for the shared-edge
+  // key this actually is — see the corrected BS#2554 note in
+  // docs/authentication.md (its number is unchanged there; out of scope
+  // here). 300/15min re-derives this one for the real key space: a
+  // semester-start roster burst from a busy edge bucket, with margin. Still
+  // a DoS ceiling, not brute-force defense: this key gives no manager
+  // individual fairness against traffic from other managers on the same
+  // edge — that is a future identity-keyed arm, not this instance's job.
+  const organizationMutationRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 300,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  const organizationMutationPaths = [
+    '/auth/organization/create',
+    '/auth/organization/update',
+    '/auth/organization/delete',
+    '/auth/organization/invite-member',
+    '/auth/organization/cancel-invitation',
+    '/auth/organization/accept-invitation',
+    '/auth/organization/reject-invitation',
+    '/auth/organization/remove-member',
+    '/auth/organization/update-member-role',
+    '/auth/organization/leave',
+  ];
+  for (const path of organizationMutationPaths) {
+    app.use(path, organizationMutationRateLimit);
+  }
 }
 
 // Account-audit flat mounts, authenticated half (BS#2537). Ahead of the
 // better-auth catch-all below, like every other authenticated flat mount —
-// these resolve the caller's session (`resolveActor: true`) since there is
-// no rate limiter to get ahead of for a DoS-amplifier concern to attach to.
+// these resolve the caller's session (`resolveActor: true`). Unlike the
+// public mounts above (`adminPrefixAuditMiddleware` and
+// `mountPublicAccountAudit`'s own FlatMounts), which sit ahead of the rate
+// limiters declared LATER in this file — but NOT ahead of every rate
+// limiter: `adminPrefixRateLimit` is deliberately mounted FIRST, at the top
+// of the preceding `if (!isTestEnv)` block, specifically so the admin
+// prefix stays bounded even before its own audit mount (see that limiter's
+// own comment) — this mount now registers BELOW the `/auth/update-user`,
+// sensitive-trio, and `/auth/organization/*` limiters declared in the
+// `if (!isTestEnv)` block above (BS#2604): an over-budget request against
+// any of those fourteen paths 429s before this middleware's `getSession`
+// read and INSERT ever run. Nothing in Express enforces that registration
+// order by itself, so tests/unit/auth/account-audit-mount-order.test.ts
+// pins it explicitly.
 // One `/auth` layer dispatching every authenticated FlatMount internally
 // (simplify pass, code review BS#2537 PR #2545 follow-up) — this exact call
 // site is a needle in tests/unit/auth/account-audit-mount-order.test.ts, so
