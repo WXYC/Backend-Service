@@ -124,6 +124,55 @@ export const resolveLiveActivityMaxPauseMs = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_MAX_PAUSE_MS
 ): number => resolveLiveActivityMaxPauseMsShared(raw, LIVE_ACTIVITY_MAX_PAUSE_MS_ENV);
 
+/**
+ * The cooperative-pause gate every candidate awaits, as one accrual closure.
+ *
+ * Exported (BS#2222) so `job.ts` can build ONE of these and hand the SAME
+ * closure to both `runNoMatchRecheck` passes, pooling the
+ * `LIVE_ACTIVITY_MAX_PAUSE_MS` ceiling across them. The first BS#2222 draft
+ * split the ceiling proportionally instead (head 10%, tail 90%) and ran the
+ * head first — and `buildWaitForQuietPeriod` THROWS
+ * `LiveActivityPauseCeilingExceededError` on exhaustion with no per-pass
+ * catch, so a busy evening show could burn the head's 3-minute share inside
+ * its first few rows and unwind past the tail pass entirely. The tail pass is
+ * the BS#2218 starvation guard and the whole historical-cohort drain, and
+ * before BS#2222 the single pass had the full 30 minutes. Pooling keeps that
+ * budget intact and makes "which pass spent it" irrelevant: whichever pass is
+ * running when the real ceiling is hit is the one that aborts, exactly as the
+ * pre-BS#2222 single pass did.
+ */
+export const buildRecheckWaitForQuietPeriod = (deps: {
+  liveActivityLookbackSeconds?: number;
+  liveActivityPauseMs?: number;
+  /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
+  liveActivityMaxPauseMs?: number;
+  checkLiveActivity?: CheckLiveActivityFn;
+  onLivePause?: () => void;
+}): (() => Promise<boolean>) => {
+  const liveActivityMaxPauseMs = deps.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
+  return buildWaitForQuietPeriod({
+    lookbackSeconds: deps.liveActivityLookbackSeconds ?? resolveLiveActivityLookback(),
+    pauseMs: deps.liveActivityPauseMs ?? resolveLiveActivityPauseMs(),
+    maxTotalPauseMs: liveActivityMaxPauseMs,
+    probe: deps.checkLiveActivity ?? defaultCheckLiveActivity,
+    onPause: () => deps.onLivePause?.(),
+    onProbeError: (error) => {
+      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
+        error_message: error instanceof Error ? error.message : String(error),
+      });
+      captureError(error, 'probe_error');
+    },
+    onBudgetExhausted: (pausedMs) => {
+      log(
+        'error',
+        'live_activity_pause_ceiling_exceeded',
+        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
+        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs }
+      );
+    },
+  });
+};
+
 type AttemptBucket = 'unresolved' | 'trust_rejected';
 
 const incrementAttemptBucket = (totals: Totals, bucket: AttemptBucket): void => {
@@ -149,6 +198,14 @@ export const runNoMatchRecheck = async (deps: {
   liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
   onLivePause?: () => void;
+  /**
+   * A pre-built cooperative-pause gate, so several passes can SHARE one
+   * accrual closure and pool one `LIVE_ACTIVITY_MAX_PAUSE_MS` ceiling
+   * (BS#2222 — see `buildRecheckWaitForQuietPeriod`). Omitted, this pass
+   * builds its own with its own full budget, the pre-BS#2222 shape every
+   * existing caller and test relies on.
+   */
+  waitForQuietPeriod?: () => Promise<boolean>;
 }): Promise<RunResult> => {
   const totals: Totals = {
     scanned: 0,
@@ -161,32 +218,7 @@ export const runNoMatchRecheck = async (deps: {
     db_error: 0,
   };
 
-  const liveActivityLookbackSeconds = deps.liveActivityLookbackSeconds ?? resolveLiveActivityLookback();
-  const liveActivityPauseMs = deps.liveActivityPauseMs ?? resolveLiveActivityPauseMs();
-  const liveActivityMaxPauseMs = deps.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
-  const probe = deps.checkLiveActivity ?? defaultCheckLiveActivity;
-
-  const waitForQuietPeriod = buildWaitForQuietPeriod({
-    lookbackSeconds: liveActivityLookbackSeconds,
-    pauseMs: liveActivityPauseMs,
-    maxTotalPauseMs: liveActivityMaxPauseMs,
-    probe,
-    onPause: () => deps.onLivePause?.(),
-    onProbeError: (error) => {
-      log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
-        error_message: error instanceof Error ? error.message : String(error),
-      });
-      captureError(error, 'probe_error');
-    },
-    onBudgetExhausted: (pausedMs) => {
-      log(
-        'error',
-        'live_activity_pause_ceiling_exceeded',
-        `cooperative-pause budget exceeded (${pausedMs}ms >= LIVE_ACTIVITY_MAX_PAUSE_MS=${liveActivityMaxPauseMs}ms); aborting instead of pausing indefinitely`,
-        { paused_ms: pausedMs, live_activity_max_pause_ms: liveActivityMaxPauseMs }
-      );
-    },
-  });
+  const waitForQuietPeriod = deps.waitForQuietPeriod ?? buildRecheckWaitForQuietPeriod(deps);
 
   const recordAttemptedOutcome = async (rowId: number, bucket: AttemptBucket): Promise<void> => {
     if (deps.dryRun) {

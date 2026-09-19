@@ -79,16 +79,44 @@
  * UPDATE (BS#2222): that trade stopped holding — a 2026-09-19 replay found
  * ~1 in 4 fresh no-match rows resolves cleanly under the worker's own
  * auto-persist rule, so the deferral was hiding a real, live-visible miss.
- * `job.ts` now reads `query.ts`'s `HEAD_SLICE_DEFAULT` rows at OFFSET 0
- * every run, in addition to `batchSize - headSlice` at this cursor, so the
- * head is sampled every run without giving up the wraparound guarantee
- * below. That head read is NOT folded into the totals this cursor advances
- * by — `job.ts` calls `nextCursorPosition` with only the tail run's
- * `Totals`, since the head slice never occupied a cursor position and
- * folding it in would over-advance past unread tail rows. The advance rule
- * itself (below) is unchanged, just run against the smaller tail window,
- * which stretches the wrap period by `batchSize / (batchSize - headSlice)`
- * (+11% at the defaults — see README "HEAD_SLICE derivation").
+ * `job.ts` now reads `query.ts`'s `HEAD_SLICE_DEFAULT` rows near the front of
+ * the ordering every run, in addition to `batchSize - headSlice` at this
+ * cursor, so the head is sampled every run without giving up the wraparound
+ * guarantee below. The advance rule itself (below) is unchanged, just run
+ * against the smaller tail window, which stretches the wrap period by
+ * `batchSize / (batchSize - headSlice)` (+11% at the defaults — see README
+ * "HEAD_SLICE derivation").
+ *
+ * THE HEAD SLICE GETS ITS OWN ROTATING CURSOR, for the same reason the tail
+ * has one. An unguarded `OFFSET 0` head read has exactly the defect this
+ * module exists to remove: a front-of-ordering row that transients on every
+ * call keeps ordering position 0 forever (the marker is deliberately left
+ * untouched — BS#1977 / BS#2179 review HIGH 2), so the head would re-ask the
+ * identical 20 rows every run, permanently burning ~10% of the per-run LML
+ * budget on rows that can never progress. `headCursorWindow` +
+ * `nextHeadCursorPosition` give the head a second offset that advances by
+ * `headSlice` each run and wraps modulo a SMALL recent window
+ * (`query.ts`'s `HEAD_CURSOR_WINDOW_DEFAULT`, 200 rows ≈ 5 days of measured
+ * inflow) rather than modulo the whole cohort — the head's job is same-week
+ * coverage of the newest rows, and wrapping it against the full 137k-row
+ * count would just make it a second tail. Stamping the marker on a transient
+ * head attempt was considered and REJECTED: it violates the BS#1977 contract
+ * and manufactures false no-match TTL gating. Persisted under its own
+ * `cronjob_runs` row (`HEAD_CURSOR_JOB_NAME`, the `<job>:<sub-key>` idiom
+ * `library-etl` already uses for its per-pass watermarks), so no new column
+ * and no change to the tail cursor's own row.
+ *
+ * THE TAIL ADVANCE SUBTRACTS THE HEAD'S DEPARTURES. A head row that gets a
+ * definitive answer leaves the candidate set from an ordering position BELOW
+ * the tail cursor, which pulls every later row — including unread ones —
+ * one position toward the front. An advance computed from the tail totals
+ * alone therefore over-advances by up to `headSlice` positions per run,
+ * stepping over that many never-read rows: the exact double-count class this
+ * module's "still candidates, not scanned" rule exists to prevent,
+ * reintroduced from a second source of shrinkage. `nextCursorPosition` takes
+ * that correction as its `headDeparturesBelowCursor` argument; see
+ * `headDeparturesBelowCursor` below for why the head rows the tail read
+ * already covered are excluded from it.
  *
  * Persisted on the fleet-standard `cronjob_runs` table (migration 0152)
  * rather than a new per-job table, under this job's own `JOB_NAME` row —
@@ -105,14 +133,24 @@ import type { Totals } from './orchestrate.js';
 
 export const JOB_NAME = 'flowsheet-no-match-recheck';
 
+/**
+ * `cronjob_runs` key for the BS#2222 head cursor — a sibling row, not a new
+ * column, following the `<job>:<sub-key>` idiom `library-etl` already uses
+ * for its per-pass watermarks (`library-etl:artist-crossref`, …). Keeping it
+ * off `JOB_NAME`'s own row means the tail cursor's `cursor_position`
+ * semantics are byte-unchanged and a full reset of either cursor is a
+ * single-row DELETE.
+ */
+export const HEAD_CURSOR_JOB_NAME = `${JOB_NAME}:head`;
+
 type DbClient = typeof db;
 
-/** The stored `cronjob_runs.cursor_position` for `JOB_NAME`, or `null` when no row exists yet, or when the row exists (written by a heartbeat that predates this cursor) but never had a cursor stamped. Either case means "start from offset 0". */
-export const getCursorPosition = async (): Promise<number | null> => {
+/** The stored `cronjob_runs.cursor_position` for `jobName`, or `null` when no row exists yet, or when the row exists (written by a heartbeat that predates this cursor) but never had a cursor stamped. Either case means "start from offset 0". `jobName` defaults to the tail cursor's row; pass `HEAD_CURSOR_JOB_NAME` for the head cursor. */
+export const getCursorPosition = async (jobName: string = JOB_NAME): Promise<number | null> => {
   const rows = await db
     .select({ cursorPosition: cronjob_runs.cursor_position })
     .from(cronjob_runs)
-    .where(eq(cronjob_runs.job_name, JOB_NAME))
+    .where(eq(cronjob_runs.job_name, jobName))
     .limit(1);
   return rows[0]?.cursorPosition ?? null;
 };
@@ -132,12 +170,21 @@ export const getCursorPosition = async (): Promise<number | null> => {
  * incident triage. Called only on a completed non-dry-run pass, so the
  * timestamp means "a real run finished", which is what a heartbeat should
  * mean.
+ *
+ * `jobName` defaults to the tail cursor's row; the head cursor passes
+ * `HEAD_CURSOR_JOB_NAME`. Both rows carry a `last_run`, which is harmless —
+ * the liveness recipe reads one `job_name` at a time — and keeps either row
+ * honest if it is ever the one someone greps.
  */
-export const setCursorPosition = async (dbClient: DbClient, position: number): Promise<void> => {
+export const setCursorPosition = async (
+  dbClient: DbClient,
+  position: number,
+  jobName: string = JOB_NAME
+): Promise<void> => {
   const now = new Date();
   await dbClient
     .insert(cronjob_runs)
-    .values({ job_name: JOB_NAME, cursor_position: position, last_run: now })
+    .values({ job_name: jobName, cursor_position: position, last_run: now })
     .onConflictDoUpdate({
       target: cronjob_runs.job_name,
       set: { cursor_position: position, last_run: now },
@@ -160,28 +207,92 @@ export const wrapCursor = (value: number, totalCandidates: number): number => {
 };
 
 /**
+ * How many of a run's candidates LEFT the candidate set: `resolved` flipped
+ * `metadata_status` off `enriched_no_match`; `unresolved` and
+ * `trust_rejected` stamped `no_match_recheck_attempted_at = now()`, which
+ * fails `query.ts`'s TTL predicate; `raced` means another writer already
+ * moved the row off that status.
+ *
+ * Spelled as the departures rather than as the equivalent-today
+ * `lml_error + db_error` stayers so the fail-safe direction is the right one:
+ * a bucket added to `Totals` later and not classified here counts as having
+ * stayed. `resolved_dry` is deliberately not counted: it only increments
+ * under `DRY_RUN`, and a dry run never persists a cursor at all.
+ */
+export const departedCandidates = (totals: Totals): number =>
+  totals.resolved + totals.unresolved + totals.trust_rejected + totals.raced;
+
+/**
  * How many of this run's candidates still match `query.ts`'s predicate now
  * that the run is over — the cursor's advance amount, and the number to
  * watch if the queue ever looks stalled again (a run where this equals
  * `scanned` disposed of nothing, which is the BS#2218 signature).
  *
- * Computed by subtracting the buckets that DEPARTED rather than by adding
- * the equivalent-today `lml_error + db_error`, so the fail-safe direction is
- * the right one: a bucket added to `Totals` later and not classified here
- * counts as having stayed, which makes the cursor advance further than
- * necessary. That over-advances — a row read one wrap later than it could
- * have been — where the opposite spelling would under-advance and re-read
- * the same window, which is the starvation this whole module exists to
- * prevent. `resolved_dry` is deliberately not subtracted: it only increments
- * under `DRY_RUN`, and a dry run never persists a cursor at all.
+ * Because it is `scanned - departedCandidates`, an unclassified future bucket
+ * makes the cursor advance FURTHER than necessary. That over-advances — a row
+ * read one wrap later than it could have been — where the opposite spelling
+ * would under-advance and re-read the same window, which is the starvation
+ * this whole module exists to prevent.
  */
-export const stillCandidates = (totals: Totals): number =>
-  totals.scanned - (totals.resolved + totals.unresolved + totals.trust_rejected + totals.raced);
+export const stillCandidates = (totals: Totals): number => totals.scanned - departedCandidates(totals);
 
 /**
- * This run's OFFSET advanced past its leftovers and wrapped into range —
- * see the module doc comment for why the advance is "what stayed" rather
- * than "what was scanned".
+ * The head pass's departures that removed an ordering position BELOW the tail
+ * cursor — the correction `nextCursorPosition` subtracts (BS#2222 review
+ * finding 1).
+ *
+ * `headRowsInTailWindow` is how many of the head read's rows also appeared in
+ * the tail read before `orchestrate.ts`'s `excludeCandidateIds` dropped them
+ * (non-zero only when the two windows overlap, i.e. the tail cursor sits
+ * inside the head's small window). Those rows are NOT subtracted here,
+ * because dropping them already shrank `tailTotals.scanned` by the same
+ * amount — subtracting them again would double-count and under-advance the
+ * cursor into re-reading rows it just read. Clamped at `>= 0` so an overlap
+ * larger than the head's departure count (head rows that transiented) can
+ * never push the correction negative and turn it into an over-advance.
  */
-export const nextCursorPosition = (currentOffset: number, totals: Totals, totalCandidates: number): number =>
-  wrapCursor(currentOffset + stillCandidates(totals), totalCandidates);
+export const headDeparturesBelowCursor = (headTotals: Totals, headRowsInTailWindow: number): number =>
+  Math.max(departedCandidates(headTotals) - headRowsInTailWindow, 0);
+
+/**
+ * This run's OFFSET advanced past its leftovers and wrapped into range — see
+ * the module doc comment for why the advance is "what stayed" rather than
+ * "what was scanned", and why the head pass's below-cursor departures
+ * (`headDeparturesBelowCursor`) come back off it.
+ *
+ * `totals` is the TAIL run's totals only. The head slice never occupied a
+ * position at this cursor, so folding its `scanned` in would advance past
+ * tail rows nobody read; its DEPARTURES still have to come off, because they
+ * shrink the ordering ahead of the cursor. Clamped at `>= 0` before wrapping:
+ * a run whose head departures exceed its tail leftovers would otherwise wrap
+ * a negative offset to near the END of the cohort, skipping the whole
+ * remainder of the traversal.
+ */
+export const nextCursorPosition = (
+  currentOffset: number,
+  totals: Totals,
+  totalCandidates: number,
+  headDeparturesBelowCursorCount = 0
+): number =>
+  wrapCursor(Math.max(currentOffset + stillCandidates(totals) - headDeparturesBelowCursorCount, 0), totalCandidates);
+
+/**
+ * The head cursor's modulus: `window` rows, or the whole cohort when it is
+ * smaller than that (so a head offset can never land past the end of a small
+ * cohort and read nothing). Never negative.
+ */
+export const headCursorWindow = (totalCandidates: number, window: number): number =>
+  Math.max(Math.min(window, totalCandidates), 0);
+
+/**
+ * The head cursor advanced one head slice and wrapped inside its small recent
+ * window — so a persistently-transient front-of-ordering row is re-asked once
+ * per rotation (`window / headSlice` runs) instead of once per run, while a
+ * genuinely new row still gets looked at within one rotation.
+ *
+ * `window <= 0` (an empty cohort) returns 0 via `wrapCursor`. A `window` that
+ * is not an exact multiple of `headSlice` is fine: the offsets drift rather
+ * than repeating a fixed set, which still covers the window.
+ */
+export const nextHeadCursorPosition = (currentOffset: number, headSlice: number, window: number): number =>
+  wrapCursor(currentOffset + headSlice, window);

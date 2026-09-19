@@ -27,6 +27,20 @@
  *      matching predicate (both the never-attempted tier and the TTL-expired
  *      tier `query.ts` already rotates), so a row's TTL rotation is never
  *      permanently skipped.
+ *
+ * BS#2222 adds two more, both of which the review of PR #2608 found wrong on
+ * the first pass:
+ *   4. `departedCandidates` / `headDeparturesBelowCursor` and the corrected
+ *      advance — the head slice's departures remove ordering positions BELOW
+ *      the tail cursor, so an advance computed from the tail totals alone
+ *      steps over up to `HEAD_SLICE` never-read rows every run. The review's
+ *      N=1000 counter-example is simulated at the bottom of this file against
+ *      the real arithmetic.
+ *   5. `headCursorWindow` / `nextHeadCursorPosition` — the head read's own
+ *      small rotating cursor, which is the head's answer to the same
+ *      starvation the tail cursor solves: a transient outcome leaves the
+ *      marker untouched, so a bare `OFFSET 0` head read would re-ask the
+ *      identical rows forever.
  */
 import { jest } from '@jest/globals';
 
@@ -54,9 +68,14 @@ jest.mock('drizzle-orm', () => ({
 
 import type { Totals } from '../../../../jobs/flowsheet-no-match-recheck/orchestrate';
 import {
+  departedCandidates,
   getCursorPosition,
+  headCursorWindow,
+  headDeparturesBelowCursor,
+  HEAD_CURSOR_JOB_NAME,
   JOB_NAME,
   nextCursorPosition,
+  nextHeadCursorPosition,
   setCursorPosition,
   stillCandidates,
   wrapCursor,
@@ -139,6 +158,32 @@ describe('setCursorPosition', () => {
   it('JOB_NAME is the job-scoped cronjob_runs key, not shared with any other job', () => {
     expect(JOB_NAME).toBe('flowsheet-no-match-recheck');
   });
+
+  it('BS#2222: the head cursor lives on its own sub-keyed row, so the tail cursor row is untouched', async () => {
+    // `<job>:<sub-key>` is the idiom library-etl already uses for per-pass
+    // watermarks. Two rows rather than a second column means no migration and
+    // no change to what `cursor_position` means on JOB_NAME's own row.
+    expect(HEAD_CURSOR_JOB_NAME).toBe('flowsheet-no-match-recheck:head');
+    expect(HEAD_CURSOR_JOB_NAME.startsWith(`${JOB_NAME}:`)).toBe(true);
+    // varchar(64) primary key -- a longer key would fail on INSERT.
+    expect(HEAD_CURSOR_JOB_NAME.length).toBeLessThanOrEqual(64);
+
+    await setCursorPosition(fakeDb as never, 40, HEAD_CURSOR_JOB_NAME);
+
+    expect(mockValues).toHaveBeenCalledWith(
+      expect.objectContaining({ job_name: HEAD_CURSOR_JOB_NAME, cursor_position: 40 })
+    );
+  });
+
+  it('BS#2222: getCursorPosition reads the row it is asked for, defaulting to the tail cursor', async () => {
+    mockLimit.mockResolvedValueOnce([{ cursorPosition: 40 }]);
+    await getCursorPosition(HEAD_CURSOR_JOB_NAME);
+    expect(mockWhere).toHaveBeenLastCalledWith({ eq: ['job_name', HEAD_CURSOR_JOB_NAME] });
+
+    mockLimit.mockResolvedValueOnce([{ cursorPosition: 400 }]);
+    await getCursorPosition();
+    expect(mockWhere).toHaveBeenLastCalledWith({ eq: ['job_name', JOB_NAME] });
+  });
 });
 
 describe('stillCandidates', () => {
@@ -186,6 +231,143 @@ describe('nextCursorPosition', () => {
     // now sit at offsets 0..19, so the next run starts at 20.
     const totals = totalsOf({ scanned: 200, resolved: 60, unresolved: 100, trust_rejected: 20, lml_error: 20 });
     expect(nextCursorPosition(0, totals, 137160)).toBe(20);
+  });
+
+  it("BS#2222: subtracts the head pass's below-cursor departures, which shrink the ordering AHEAD of the cursor", () => {
+    // The whole 180-row tail window transiented, so the tail leftovers are
+    // 180 -- but the head pass disposed of 20 rows at positions below the
+    // cursor, pulling 20 unread rows back behind it. Advancing by 180 would
+    // step over exactly those 20.
+    const tail = totalsOf({ scanned: 180, lml_error: 180 });
+    const head = totalsOf({ scanned: 20, resolved: 5, unresolved: 12, trust_rejected: 2, raced: 1 });
+    expect(nextCursorPosition(160, tail, 137320, headDeparturesBelowCursor(head, 0))).toBe(320);
+    // Without the correction (the shipped-then-reviewed shape) it lands 20 too far.
+    expect(nextCursorPosition(160, tail, 137320)).toBe(340);
+  });
+
+  it('BS#2222: clamps at >= 0 so a head-heavy run cannot wrap a negative offset to the END of the cohort', () => {
+    // A tail that disposed of everything (0 leftovers) plus 20 head
+    // departures would compute -20; wrapping that into range would land the
+    // next run near the last rows of the ordering and skip the entire
+    // remainder of the traversal.
+    const tail = totalsOf({ scanned: 180, resolved: 180 });
+    const head = totalsOf({ scanned: 20, unresolved: 20 });
+    expect(nextCursorPosition(0, tail, 137140, headDeparturesBelowCursor(head, 0))).toBe(0);
+  });
+});
+
+describe('departedCandidates / headDeparturesBelowCursor (BS#2222)', () => {
+  it('counts exactly the buckets whose rows left the candidate set', () => {
+    expect(departedCandidates(totalsOf({ resolved: 5, unresolved: 12, trust_rejected: 2, raced: 1 }))).toBe(20);
+    // Stayers and the dry-run-only bucket are never departures.
+    expect(departedCandidates(totalsOf({ lml_error: 9, db_error: 3, resolved_dry: 7 }))).toBe(0);
+  });
+
+  it('excludes head rows the tail read also covered, because excludeCandidateIds already shrank tailTotals by them', () => {
+    const head = totalsOf({ scanned: 20, unresolved: 20 });
+    // Full overlap (the cursor sits inside the head window): the dedupe
+    // already removed all 20 from the tail's scanned count, so subtracting
+    // them again would under-advance into re-reading rows just read.
+    expect(headDeparturesBelowCursor(head, 20)).toBe(0);
+    // Partial overlap.
+    expect(headDeparturesBelowCursor(head, 8)).toBe(12);
+    // No overlap -- the ordinary steady state.
+    expect(headDeparturesBelowCursor(head, 0)).toBe(20);
+  });
+
+  it('never goes negative when more head rows overlapped than departed', () => {
+    const head = totalsOf({ scanned: 20, unresolved: 5, lml_error: 15 });
+    expect(headDeparturesBelowCursor(head, 20)).toBe(0);
+  });
+});
+
+describe('headCursorWindow / nextHeadCursorPosition (BS#2222)', () => {
+  it('rotates by one head slice per run and cycles the whole window before repeating', () => {
+    const window = 200;
+    const headSlice = 20;
+    const seen = new Set<number>();
+    let offset = 0;
+    for (let run = 0; run < window / headSlice; run++) {
+      seen.add(offset);
+      offset = nextHeadCursorPosition(offset, headSlice, window);
+    }
+    // 10 distinct head windows -- 2.5 days at 4 runs/day -- then back to 0.
+    expect(seen.size).toBe(10);
+    expect(offset).toBe(0);
+  });
+
+  it('acceptance criterion: an all-transient head window is NOT re-selected next run', () => {
+    // The defect this exists for: a transient outcome deliberately leaves
+    // `no_match_recheck_attempted_at` untouched (BS#1977 / BS#2179 review
+    // HIGH 2), so those rows keep their ordering position. A bare OFFSET 0
+    // head read would re-ask the identical 20 rows every run forever.
+    expect(nextHeadCursorPosition(0, 20, 200)).not.toBe(0);
+  });
+
+  it('caps the window at the cohort size so a head offset never lands past the end of a small cohort', () => {
+    expect(headCursorWindow(137340, 200)).toBe(200);
+    expect(headCursorWindow(50, 200)).toBe(50);
+    expect(headCursorWindow(0, 200)).toBe(0);
+    // An empty cohort collapses the rotation to offset 0 rather than dividing by zero.
+    expect(nextHeadCursorPosition(0, 20, headCursorWindow(0, 200))).toBe(0);
+  });
+
+  it('wraps a window that is not an exact multiple of the head slice instead of stepping past it', () => {
+    // 30 does not divide 200: the offsets drift (…180 -> 10) rather than
+    // repeating a fixed set, which still covers the window.
+    expect(nextHeadCursorPosition(180, 30, 200)).toBe(10);
+  });
+});
+
+describe("BS#2222 cursor-advance simulation (the review's N=1000 counter-example)", () => {
+  const HEAD_SLICE = 20;
+  const TAIL_BATCH = 180;
+
+  /**
+   * Walk the reviewer's scenario with the REAL arithmetic: 1000 candidate
+   * rows, the head read at the front, head rows answered definitively (they
+   * leave the candidate set) and tail rows transient (they stay). The head is
+   * held at offset 0 here — its own first-run position, and the worst case for
+   * the tail cursor, since that is where the head's departures do the most
+   * damage to the positions the tail cursor counts.
+   */
+  const simulate = (runs: number) => {
+    let rows = Array.from({ length: 1000 }, (_, index) => index);
+    const read = new Set<number>();
+    let cursor = 0;
+    const cursorRows: number[] = [];
+
+    for (let run = 0; run < runs; run++) {
+      const headRows = rows.slice(0, HEAD_SLICE);
+      const headIds = new Set(headRows);
+      const tailWindow = rows.slice(cursor, cursor + TAIL_BATCH);
+      const tailRows = tailWindow.filter((row) => !headIds.has(row));
+      const overlap = tailWindow.length - tailRows.length;
+
+      for (const row of [...headRows, ...tailRows]) read.add(row);
+
+      const headTotals = totalsOf({ scanned: headRows.length, unresolved: headRows.length });
+      const tailTotals = totalsOf({ scanned: tailRows.length, lml_error: tailRows.length });
+
+      rows = rows.filter((row) => !headIds.has(row));
+      cursor = nextCursorPosition(cursor, tailTotals, rows.length, headDeparturesBelowCursor(headTotals, overlap));
+      cursorRows.push(rows[cursor] ?? -1);
+
+      // The invariant: the cursor may never sit ahead of a row nobody read.
+      expect(rows.slice(0, cursor).filter((row) => !read.has(row))).toEqual([]);
+    }
+    return { cursorRows, read };
+  };
+
+  it('lands run 1 exactly at r180 — the first row neither read covered', () => {
+    expect(simulate(1).cursorRows[0]).toBe(180);
+  });
+
+  it('never steps over an unread row across five runs (the shipped shape skipped 20 per run from run 2 on)', () => {
+    const { cursorRows } = simulate(5);
+    // Each run reads 180 distinct positions, so the cursor advances exactly
+    // one tail window per run: r180, r360, r540, r720, r900.
+    expect(cursorRows).toEqual([180, 360, 540, 720, 900]);
   });
 });
 
