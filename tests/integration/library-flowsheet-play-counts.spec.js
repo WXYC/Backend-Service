@@ -20,7 +20,11 @@
  * so a real row routinely carries the bare legacy id ALONGSIDE a resolved
  * album_id or rotation_id. The "direct plus legacy" / "rotation plus legacy"
  * / sum-invariant tests reproduce that overlap and would fail if either of
- * legacy_linked's exclusion guards were removed.
+ * legacy_linked's exclusion guards were removed. The "all three columns"
+ * test reproduces the single MOST COMMON production shape this webhook
+ * produces — every play of an in-library, rotating release resolves all
+ * three columns in that same INSERT — which none of the other fixtures set
+ * on one row.
  */
 
 const postgres = require('postgres');
@@ -231,63 +235,112 @@ describe('GET /library/:id/flowsheet-play-counts (BS#2592)', () => {
     }
   );
 
-  test('the three counts sum to the number of distinct flowsheet rows, across every overlap shape a production row can take', async () => {
-    const title = `BS#2592 Sum Invariant ${uniq}`;
-    const album = await createAlbum(title);
-    const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
-    const legacyReleaseId = before[0].legacy_release_id;
-    const rotationRows = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H') RETURNING id`,
-      [album.id]
-    );
-    const rotationId = rotationRows[0].id;
+  test(
+    'a play carrying album_id, rotation_id, and legacy_release_id together (the full ' +
+      'tubafrenzy webhook shape) is counted once, as direct, never as rotation_linked or legacy_linked',
+    async () => {
+      const album = await createAlbum(`BS#2592 All Three Columns ${uniq}`);
+      const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+      const legacyReleaseId = before[0].legacy_release_id;
+      const rotationRows = await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H') RETURNING id`,
+        [album.id]
+      );
 
-    // Five rows, one per shape a real flowsheet row can take against this
-    // release: direct-only, rotation-only, legacy-only, direct+legacy and
-    // rotation+legacy (both webhook shapes, per the two tests above). If any
-    // pair of arms ever overlapped in the aggregate's FILTER conditions --
-    // the exact defect the disjointness guards exist to prevent -- this sum
-    // would exceed 5 regardless of whether any single per-arm assertion
-    // happened to look right in isolation.
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
+      // apps/backend/routes/internal.route.ts resolves album_id, rotation_id
+      // AND legacy_release_id together in one `.values({...})` INSERT
+      // (resolveAlbumId + resolveRotationId feeding the same webhook write),
+      // so this is not an edge case: it's the shape of every play of an
+      // in-library, rotating release. None of the fixtures above set all
+      // three columns on one row.
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (album_id, rotation_id, legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
+         VALUES ($1, $2, $3, 'track', 9807, 'Built to Spill', $4, 'all-three-columns probe')`,
+        [album.id, rotationRows[0].id, legacyReleaseId, `BS#2592 All Three Columns ${uniq}`]
+      );
+
+      const res = await auth.get(`/library/${album.id}/flowsheet-play-counts`).expect(200);
+      // direct's `album_id = $albumId` predicate carries no exclusion of its
+      // own; rotation_linked and legacy_linked both exclude `album_id IS
+      // DISTINCT FROM $albumId`, so a row satisfying all three raw
+      // predicates still lands in direct alone.
+      expect(res.body).toEqual({ direct: 1, rotation_linked: 0, legacy_linked: 0 });
+
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
+        `BS#2592 All Three Columns ${uniq}`,
+      ]);
+    }
+  );
+
+  test(
+    'the three counts sum to the number of distinct flowsheet rows, across every legacy-linkage ' +
+      'overlap shape a production row can take (album_id+rotation_id with no legacy_release_id is ' +
+      'a different shape — a live DJ play, never a webhook row — and is covered by its own test above)',
+    async () => {
+      const title = `BS#2592 Sum Invariant ${uniq}`;
+      const album = await createAlbum(title);
+      const before = await sql.unsafe(`SELECT legacy_release_id FROM "${SCHEMA}".library WHERE id = $1`, [album.id]);
+      const legacyReleaseId = before[0].legacy_release_id;
+      const rotationRows = await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin) VALUES ($1, 'H') RETURNING id`,
+        [album.id]
+      );
+      const rotationId = rotationRows[0].id;
+
+      // Six rows, one per legacy_release_id-involving shape a real flowsheet
+      // row can take against this release: direct-only, rotation-only,
+      // legacy-only, direct+legacy, rotation+legacy, and all-three (every
+      // webhook shape, per the tests above). If any pair of arms ever
+      // overlapped in the aggregate's FILTER conditions -- the exact defect
+      // the disjointness guards exist to prevent -- this sum would exceed 6
+      // regardless of whether any single per-arm assertion happened to look
+      // right in isolation.
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (album_id, entry_type, play_order, artist_name, album_title, track_title)
        VALUES ($1, 'track', 9810, 'Built to Spill', $2, 'sum: direct-only')`,
-      [album.id, title]
-    );
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".flowsheet (rotation_id, entry_type, play_order, artist_name, album_title, track_title)
+        [album.id, title]
+      );
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (rotation_id, entry_type, play_order, artist_name, album_title, track_title)
        VALUES ($1, 'track', 9811, 'Built to Spill', $2, 'sum: rotation-only')`,
-      [rotationId, title]
-    );
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".flowsheet (legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
+        [rotationId, title]
+      );
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
        VALUES ($1, 'track', 9812, 'Built to Spill', $2, 'sum: legacy-only')`,
-      [legacyReleaseId, title]
-    );
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".flowsheet (album_id, legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
+        [legacyReleaseId, title]
+      );
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (album_id, legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
        VALUES ($1, $2, 'track', 9813, 'Built to Spill', $3, 'sum: direct-plus-legacy')`,
-      [album.id, legacyReleaseId, title]
-    );
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".flowsheet (rotation_id, legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
+        [album.id, legacyReleaseId, title]
+      );
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (rotation_id, legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
        VALUES ($1, $2, 'track', 9814, 'Built to Spill', $3, 'sum: rotation-plus-legacy')`,
-      [rotationId, legacyReleaseId, title]
-    );
+        [rotationId, legacyReleaseId, title]
+      );
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".flowsheet (album_id, rotation_id, legacy_release_id, entry_type, play_order, artist_name, album_title, track_title)
+       VALUES ($1, $2, $3, 'track', 9815, 'Built to Spill', $4, 'sum: all-three-columns')`,
+        [album.id, rotationId, legacyReleaseId, title]
+      );
 
-    const res = await auth.get(`/library/${album.id}/flowsheet-play-counts`).expect(200);
-    // Exact per-arm breakdown first, so a failure points at which guard
-    // broke rather than just "the sum is wrong somehow": direct-only and
-    // direct-plus-legacy both land in `direct` (2); rotation-only and
-    // rotation-plus-legacy both land in `rotation_linked` (2); only
-    // legacy-only has no other predicate to satisfy, so `legacy_linked` is 1.
-    expect(res.body).toEqual({ direct: 2, rotation_linked: 2, legacy_linked: 1 });
-    expect(res.body.direct + res.body.rotation_linked + res.body.legacy_linked).toBe(5);
+      const res = await auth.get(`/library/${album.id}/flowsheet-play-counts`).expect(200);
+      // Exact per-arm breakdown first, so a failure points at which guard
+      // broke rather than just "the sum is wrong somehow": direct-only,
+      // direct-plus-legacy, and all-three-columns all land in `direct` (3);
+      // rotation-only and rotation-plus-legacy both land in
+      // `rotation_linked` (2); only legacy-only has no other predicate to
+      // satisfy, so `legacy_linked` is 1.
+      expect(res.body).toEqual({ direct: 3, rotation_linked: 2, legacy_linked: 1 });
+      expect(res.body.direct + res.body.rotation_linked + res.body.legacy_linked).toBe(6);
 
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
-      title,
-    ]);
-  });
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE artist_name = 'Built to Spill' AND album_title = $1`, [
+        title,
+      ]);
+    }
+  );
 
   test('reports legacy_linked for a release whose ONLY plays are legacy-linked', async () => {
     const album = await createAlbum(`BS#2592 Legacy Only ${uniq}`);

@@ -2131,13 +2131,30 @@ paths:
         `catalog:['read']` bar `GET /library/info` uses.
 
         Two statements, not one: a library existence probe (to 404 before
-        counting anything), then a single `count(*) FILTER (WHERE …)`
-        aggregate over `flowsheet` that computes all three arm counts from one
-        row set in one statement. That single aggregate is what makes `direct`
-        and `rotation_linked` exact as of the moment it ran — nothing between
-        the three arms can move a row from one count to another when all
-        three are FILTER clauses of the same statement. `legacy_linked` is the
-        one arm with residual staleness; see its field description below.
+        counting anything), then a single statement that bounds the scan to
+        this release's own plays (a `WITH candidate_rows AS (… UNION …)` over
+        the three arms' own indexes, never a full `flowsheet` scan) and
+        computes all three arm counts from that one row set in one snapshot.
+        That single statement is what makes the three counts internally
+        consistent as of the moment it ran — nothing between the three arms
+        can move a row from one count to another, or drop it, when all three
+        are FILTER clauses partitioning the same row set.
+
+        That internal consistency is not a freshness guarantee. This is a
+        standalone advisory read that takes no lock — deliberately, since it
+        precedes rather than wraps the delete it informs. Two live writers
+        can move a row between arms after this statement's snapshot is
+        taken: `jobs/legacy-linkage-resolve`, which re-links exactly this
+        data every 30 minutes (its flowsheet pass moves a row out of
+        `legacy_linked` and into `direct` as an unresolved
+        `legacy_release_id` newly resolves to a `library` row; its rotation
+        pass moves a row out of `legacy_linked` and into `rotation_linked`
+        the same way); and ordinary catalog editing (`PATCH /flowsheet`),
+        which can re-link or un-link a play's `album_id` or `rotation_id` by
+        hand at any time, in either direction, when an MD corrects a wrong
+        match. So: any of the three counts may differ, in
+        either direction, by the time the delete this read precedes actually
+        runs. None of the three arms carries a one-sided bound.
       security:
         - BearerAuth: ['station-management']
       parameters:
@@ -2159,33 +2176,46 @@ paths:
                     type: integer
                     description: >-
                       Plays linked via `flowsheet.album_id`; unlinked (not
-                      deleted) by the delete. FK-backed and counted by the
-                      same aggregate statement as the other two arms, so this
-                      is exact as of that statement's snapshot.
+                      deleted) by the delete. Counted by the same statement,
+                      from the same row set, as the other two arms, so it is
+                      exact as of that statement's snapshot. See the
+                      staleness note above for what can happen after that
+                      snapshot: this endpoint holds no lock, so a concurrent
+                      `jobs/legacy-linkage-resolve` pass or catalog edit can
+                      still move a play into or out of this arm before the
+                      delete this read precedes actually runs.
                   rotation_linked:
                     type: integer
                     description: >-
                       Plays reachable only via `flowsheet.rotation_id` ->
                       `rotation.album_id`; unlinked by the delete's rotation
                       cascade. Excludes any play already counted in `direct`.
-                      FK-backed and counted by the same aggregate statement as
-                      the other two arms, so this is exact as of that
-                      statement's snapshot.
+                      Counted by the same statement, from the same row set, as
+                      the other two arms, so it is exact as of that
+                      statement's snapshot. See the staleness note above for
+                      what can happen after that snapshot: this endpoint
+                      holds no lock, so a concurrent
+                      `jobs/legacy-linkage-resolve` pass or catalog edit can
+                      still move a play into or out of this arm before the
+                      delete this read precedes actually runs.
                   legacy_linked:
                     type: integer
                     description: >-
                       Plays naming the release only by a bare
                       `flowsheet.legacy_release_id`, awaiting
-                      `jobs/legacy-linkage-resolve`. Best-effort, unlike the
-                      other two arms: that column carries no FK, so a
-                      concurrent tubafrenzy webhook can INSERT a legacy-linked
-                      row after this statement's snapshot was taken and before
-                      the response is read, with no row yet in existence for
-                      it to conflict against — the count can only be stale on
-                      the undercount side. Deleting STRANDS these plays
-                      permanently rather than unlinking them, since the
-                      delete-denylist guarantees no future release will ever
-                      carry this legacy id again.
+                      `jobs/legacy-linkage-resolve`. Counted by the same
+                      statement, from the same row set, as the other two
+                      arms, so it is exact as of that statement's snapshot.
+                      See the staleness note above for what can happen after
+                      that snapshot: this endpoint holds no lock, so a
+                      concurrent `jobs/legacy-linkage-resolve` pass can drain
+                      a play out of this arm, a new tubafrenzy webhook
+                      delivery can add one, or a catalog edit can move one
+                      either way, before the delete this read precedes
+                      actually runs. Deleting STRANDS whatever is still in
+                      this arm at delete time permanently rather than
+                      unlinking it, since the delete-denylist guarantees no
+                      future release will ever carry this legacy id again.
         '404':
           description: Album not found
 
