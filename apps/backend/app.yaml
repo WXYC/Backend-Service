@@ -3549,15 +3549,23 @@ paths:
 
   /library/artists/{id}/next-release-number:
     get:
-      summary: Peek the next release call number for an artist (BS#2502)
+      summary: Peek the next release call number for an artist in a genre (BS#2502, BS#2587)
       description: >-
         Previews the release `code_number` a `POST /library` would assign this
-        artist — `generateAlbumCodeNumber(artist_id)`, MAX(`code_number`) + 1 for
-        the artist and 1 when it has no releases, the same server-side value the
-        create path falls back to when `code_number` is omitted. Lets the classic
-        add-release form prepopulate an editable field with the authoritative next
-        value instead of a client-side `max+1`, which the paginated releases list
-        can get wrong. Pure read, no side effects.
+        artist in the given genre — `generateAlbumCodeNumber(artist_id, genre_id)`,
+        MAX(`code_number`) + 1 for that artist's releases WITHIN that genre, and 1
+        when it has none there, the same server-side value the create path falls
+        back to when `code_number` is omitted. Lets the classic add-release form
+        prepopulate an editable field with the authoritative next value instead of
+        a client-side `max+1`, which the paginated releases list can get wrong.
+        Pure read, no side effects.
+
+
+        `genre_id` is REQUIRED (BS#2587): call numbers are genre-scoped shelves, so
+        a preview that didn't ask which shelf could only ever be a guess — an
+        artist filed under two genres has two independently-numbered shelves, and
+        answering from the wrong one is exactly the defect this parameter closes.
+        Breaking change from the prior genre-blind signature.
 
 
         Gated at `requirePermissions({ catalog: ['write'] })` — musicDirector or
@@ -3572,9 +3580,14 @@ paths:
           required: true
           schema:
             type: integer
+        - in: query
+          name: genre_id
+          required: true
+          schema:
+            type: integer
       responses:
         '200':
-          description: The next release call number for the artist
+          description: The next release call number for the artist in that genre
           content:
             application/json:
               schema:
@@ -3583,7 +3596,7 @@ paths:
                   next_code_number:
                     type: integer
         '400':
-          description: Malformed artist id
+          description: Malformed artist id, or missing/malformed genre_id
         '404':
           description: Artist not found
 
