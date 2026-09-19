@@ -85,6 +85,31 @@ export type Totals = {
 
 export type RunResult = { totals: Totals };
 
+/**
+ * Combine two runs' `Totals` field-by-field. BS#2222's `job.ts` runs
+ * `runNoMatchRecheck` twice per pass (head slice + cursor tail, kept
+ * separate for the cursor math — see `watermark.ts`) and merges them here
+ * for one counter line.
+ */
+export const mergeTotals = (a: Totals, b: Totals): Totals => ({
+  scanned: a.scanned + b.scanned,
+  resolved: a.resolved + b.resolved,
+  resolved_dry: a.resolved_dry + b.resolved_dry,
+  unresolved: a.unresolved + b.unresolved,
+  trust_rejected: a.trust_rejected + b.trust_rejected,
+  lml_error: a.lml_error + b.lml_error,
+  raced: a.raced + b.raced,
+  db_error: a.db_error + b.db_error,
+});
+
+/**
+ * `candidates` with any row whose `id` is in `excludeIds` dropped. BS#2222's
+ * dedupe between the head-slice read (OFFSET 0) and the tail read (at the
+ * cursor) — they overlap whenever the cursor sits inside `[0, HEAD_SLICE)`.
+ */
+export const excludeCandidateIds = (candidates: Candidate[], excludeIds: ReadonlySet<number>): Candidate[] =>
+  candidates.filter((candidate) => !excludeIds.has(candidate.id));
+
 export const resolveLiveActivityLookback = (
   raw: string | undefined = process.env.LIVE_ACTIVITY_LOOKBACK_SECONDS
 ): number =>

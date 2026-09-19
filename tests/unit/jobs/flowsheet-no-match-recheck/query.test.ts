@@ -19,7 +19,14 @@
 import { jest } from '@jest/globals';
 
 import { db } from '@wxyc/database';
-import { countCandidates, loadCandidates } from '../../../../jobs/flowsheet-no-match-recheck/query';
+import {
+  countCandidates,
+  loadCandidates,
+  HEAD_SLICE_COVERAGE_MARGIN,
+  HEAD_SLICE_DEFAULT,
+  MEASURED_INFLOW_ROWS_PER_DAY,
+  RUNS_PER_DAY,
+} from '../../../../jobs/flowsheet-no-match-recheck/query';
 import { renderSql } from '../../../utils/render-sql';
 
 describe('loadCandidates', () => {
@@ -176,5 +183,26 @@ describe('countCandidates', () => {
     const count = await countCandidates(14);
 
     expect(count).toBe(0);
+  });
+});
+
+describe('HEAD_SLICE_DEFAULT (BS#2222)', () => {
+  test('is derived arithmetic, not a bare constant: ceil(inflow * margin / runsPerDay)', () => {
+    expect(HEAD_SLICE_DEFAULT).toBe(
+      Math.ceil((MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN) / RUNS_PER_DAY)
+    );
+  });
+
+  test('matches the README table: 40/day inflow, 2x margin, 4 runs/day -> 20', () => {
+    expect(MEASURED_INFLOW_ROWS_PER_DAY).toBe(40);
+    expect(HEAD_SLICE_COVERAGE_MARGIN).toBe(2);
+    expect(RUNS_PER_DAY).toBe(4);
+    expect(HEAD_SLICE_DEFAULT).toBe(20);
+  });
+
+  test('clears the measured inflow with the stated margin: headSlice * runsPerDay >= inflow * margin', () => {
+    expect(HEAD_SLICE_DEFAULT * RUNS_PER_DAY).toBeGreaterThanOrEqual(
+      MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN
+    );
   });
 });

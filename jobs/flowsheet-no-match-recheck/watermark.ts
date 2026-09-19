@@ -76,11 +76,19 @@
  * that only ever failed under the ~4s clamp this ticket removes. Re-asking
  * those promptly buys little.
  *
- * If that trade stops holding — e.g. new-arrival volume rises, or the
- * cohort grows enough to stretch the wrap — the shape to reach for is
- * reserving a slice of each batch for offset 0 and spending the rest at the
- * cursor, so the head is sampled every run without giving up the guard.
- * Deliberately not built here; BS#2218 is scoped to unlocking the queue.
+ * UPDATE (BS#2222): that trade stopped holding — a 2026-09-19 replay found
+ * ~1 in 4 fresh no-match rows resolves cleanly under the worker's own
+ * auto-persist rule, so the deferral was hiding a real, live-visible miss.
+ * `job.ts` now reads `query.ts`'s `HEAD_SLICE_DEFAULT` rows at OFFSET 0
+ * every run, in addition to `batchSize - headSlice` at this cursor, so the
+ * head is sampled every run without giving up the wraparound guarantee
+ * below. That head read is NOT folded into the totals this cursor advances
+ * by — `job.ts` calls `nextCursorPosition` with only the tail run's
+ * `Totals`, since the head slice never occupied a cursor position and
+ * folding it in would over-advance past unread tail rows. The advance rule
+ * itself (below) is unchanged, just run against the smaller tail window,
+ * which stretches the wrap period by `batchSize / (batchSize - headSlice)`
+ * (+11% at the defaults — see README "HEAD_SLICE derivation").
  *
  * Persisted on the fleet-standard `cronjob_runs` table (migration 0152)
  * rather than a new per-job table, under this job's own `JOB_NAME` row —
