@@ -389,15 +389,21 @@ describe('subject extraction', () => {
   );
 });
 
-// BS#2553: the res.locals subject-hint seam from STATION_SIGNUP_ACTOR_LOCAL
-// does not reach a better-auth plugin route (see account-audit-middleware.ts's
-// header comment for the empirical finding), so these four routes resolve
-// their subject from the operation's own 2xx response body instead — three
-// via the new 'response-user-id' strategy, one (invite-member) via the
-// pre-existing 'email-lookup' strategy. Every test here asserts BOTH a
-// resolved subjectUserId AND that the raw identifier submitted in the
-// request (a member id or an email) never appears anywhere in the recorded
-// event — the hazard this ticket exists to close.
+// BS#2553 (extended by M1, code review PR #2596): four of these five routes
+// resolve their subject from the operation's own 2xx response body via the
+// 'response-user-id' strategy (admin/create-user, admin/provision-user,
+// organization/remove-member, organization/update-member-role). For the
+// three better-auth plugin routes among them that's because the res.locals
+// subject-hint seam from STATION_SIGNUP_ACTOR_LOCAL never reaches a
+// better-auth plugin route at all (see account-audit-middleware.ts's header
+// comment for the empirical finding); admin/provision-user (M1) is a
+// hand-written route that reaches its own `res` just fine, but has no
+// `userId` in its request body to extract either, so it reuses the same
+// machinery. The fifth (invite-member) uses the pre-existing 'email-lookup'
+// strategy instead. Every test here asserts BOTH a resolved subjectUserId
+// AND that the raw identifier submitted in the request (a member id or an
+// email) never appears anywhere in the recorded event — the hazard this
+// ticket exists to close.
 describe('response-body subject strategy (BS#2553)', () => {
   it('resolves admin/create-user subject from the 2xx response body, never the submitted email', async () => {
     auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
@@ -410,7 +416,76 @@ describe('response-body subject strategy (BS#2553)', () => {
     const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(call.action).toBe('admin.create-user');
     expect(call.subjectUserId).toBe('new-user-1');
-    expect(call.subjectUserId).not.toContain('@');
+    expect(JSON.stringify(call)).not.toContain('newdj@wxyc.org');
+  });
+
+  // M1 (code review PR #2596): /admin/provision-user is the route dj-site's
+  // admin pages actually call to create a DJ — /admin/create-user above is
+  // the better-auth plugin route, which no WXYC client calls. Before this
+  // fix, provision-user had no `subject` declared (defaulting to
+  // 'body-user-id'), and provisionUser()'s request body carries no `userId`
+  // field to extract, so every real provisioning wrote subjectUserId: null.
+  // Same 2xx response shape as create-user (`{ user: { id, ... }, ... }`),
+  // confirmed against provision-user.ts:73-81's ProvisionUserResult type.
+  it('resolves admin/provision-user subject from the 2xx response body, never the submitted email', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const { res } = await start(
+      adminPrefixAuditMiddleware(),
+      mockAdminReq({
+        path: '/provision-user',
+        body: { email: 'newdj@wxyc.org', username: 'newdj', organizationSlug: 'wxyc', role: 'dj' },
+      })
+    );
+    res.end(
+      JSON.stringify({
+        user: { id: 'new-user-2', email: 'newdj@wxyc.org' },
+        member: { id: 'member-3', organizationId: 'org-1', role: 'dj' },
+        emailSent: true,
+      })
+    );
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe('admin.provision-user');
+    expect(call.subjectUserId).toBe('new-user-2');
+    expect(JSON.stringify(call)).not.toContain('newdj@wxyc.org');
+  });
+
+  // L1 (code review PR #2596): a >4KB 2xx body used to truncate mid-JSON
+  // under the shared 4KB capture cap (sized for a tiny better-auth error
+  // payload, not a whole user row) — JSON.parse threw, and subjectUserId
+  // came back null, reintroducing the exact defect this PR fixes. This
+  // fixture's `image` field alone is ~5KB, wider than the old cap but well
+  // under the new captureBodyOn2xx-specific one.
+  it('resolves the subject from a 2xx body wider than the old 4KB cap', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const { res } = await start(
+      adminPrefixAuditMiddleware(),
+      mockAdminReq({ path: '/create-user', body: { email: 'newdj@wxyc.org', password: 'x', name: 'New DJ' } })
+    );
+    res.end(JSON.stringify({ user: { id: 'new-user-3', email: 'newdj@wxyc.org', image: 'x'.repeat(5000) } }));
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.subjectUserId).toBe('new-user-3');
+  });
+
+  // M5 (code review PR #2596, mutation-proven): the reviewer changed
+  // subjectFromResponseBody's guard to `return typeof cur === 'string' ? cur
+  // : null` — dropping isPlausibleUserId entirely — and the suite still
+  // passed 455/455, because the create-user fixture's id ('new-user-1')
+  // never exercises the '@' rejection (the email sits at a different path,
+  // user.email, that the walk never visits). This test drives an id field
+  // that IS email-shaped, so the guard has something to reject.
+  it('rejects an email-shaped id in the response body (L3-style guard, response-body walk)', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const { res } = await start(
+      adminPrefixAuditMiddleware(),
+      mockAdminReq({ path: '/create-user', body: { email: 'newdj@wxyc.org', password: 'x', name: 'New DJ' } })
+    );
+    res.end(JSON.stringify({ user: { id: 'attacker@evil.com' } }));
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe('admin.create-user');
+    expect(call.subjectUserId).toBeNull();
   });
 
   it('resolves organization/update-member-role subject from the bare member object, never the raw memberId', async () => {
@@ -424,7 +499,6 @@ describe('response-body subject strategy (BS#2553)', () => {
     const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(call.action).toBe('organization.update-member-role');
     expect(call.subjectUserId).toBe('target-user-1');
-    expect(call.subjectUserId).not.toBe('member-1');
   });
 
   it('resolves organization/remove-member subject from the nested member.userId, never the raw memberIdOrEmail', async () => {
@@ -455,6 +529,28 @@ describe('response-body subject strategy (BS#2553)', () => {
     expect(call.action).toBe('organization.invite-member');
     expect(call.subjectUserId).toBe('existing-user-1');
     expect(JSON.stringify(call)).not.toContain('returning-dj@wxyc.org');
+  });
+
+  // M2 (code review PR #2596): organization/invite-member is resolveActor:
+  // true (this dispatcher's getSession read always runs) AND email-lookup
+  // (this middleware's own DB read), but reaching this dispatcher never
+  // means the caller is actually authenticated — there is no auth check
+  // ahead of it, only a path match (app.ts mounts it by path alone). Before
+  // this fix, the subject gate was `resolve.resolveActor || res.statusCode <
+  // 300`, so an authenticated-mount email lookup ran on EVERY outcome,
+  // including a 401 from an unauthenticated caller — an extra `auth_user`
+  // SELECT per request on a path absent from app.ts's `rateLimitedPaths`.
+  it('does not resolve organization/invite-member subject on a non-2xx outcome, even though the mount is resolveActor: true (DoS-amplifier guard)', async () => {
+    auth.api.getSession = () => Promise.resolve(null);
+    const { res } = await start(
+      dispatchAuthenticated,
+      mockReq({ path: orgInviteMemberMount.path, body: { email: 'returning-dj@wxyc.org', role: 'dj' } })
+    );
+    res.statusCode = 401;
+    res.end(JSON.stringify({ error: 'Unauthorized', code: 'UNAUTHORIZED' }));
+    await settle(res);
+    expect(db._chain.limit).not.toHaveBeenCalled();
+    expectAudited({ action: 'organization.invite-member', subjectUserId: null, outcome: 401 });
   });
 
   it('leaves subjectUserId null on organization/remove-member when the response body carries no member (e.g. an error)', async () => {

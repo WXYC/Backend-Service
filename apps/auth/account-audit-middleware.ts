@@ -53,7 +53,17 @@ import {
 } from './audit-coverage.js';
 import { realIpFromRequest } from './rate-limit-key.js';
 
-const MAX_BODY_CAPTURE_BYTES = 4096;
+/** Cap for an ERROR body (>=400), captured for `errorCode` extraction — sized for a tiny better-auth `{ message, code }` payload. */
+const MAX_ERROR_BODY_CAPTURE_BYTES = 4096;
+/**
+ * L1 (code review PR #2596): separate, larger cap for a `captureBodyOn2xx`
+ * mount's SUCCESS body — the whole created user row (`admin/create-user`,
+ * `admin/provision-user`), incl. `image` (a URL, possibly a data URI). The
+ * 4KB error cap doesn't transfer: a >4KB 2xx body used to truncate mid-JSON,
+ * `JSON.parse` threw, and the subject came back NULL — reintroducing this
+ * PR's own defect through the capture cap instead of the extraction logic.
+ */
+const MAX_2XX_BODY_CAPTURE_BYTES = 16384;
 
 /** better-auth's own `generateId()` default (shared/authentication/src/auth.definition.ts's `generateId(32)` call) is a 32-char a-zA-Z0-9 string. */
 const BETTER_AUTH_ID_LENGTH = 32;
@@ -177,14 +187,47 @@ function subjectStrategyFor(
 
 const ipHashOf = (req: Request): string | null => deriveStationSignupIpHash(realIpFromRequest(req));
 
+/**
+ * M4 (code review PR #2596): derives BOTH per-mount capture/gate flags from
+ * `subject` in ONE place, reused by `adminPrefixAuditMiddleware` and
+ * `flatMountAuditMiddleware` — previously each independently computed
+ * `subject === 'response-user-id'` for `captureBodyOn2xx`, a duplication a
+ * future strategy could update at one call site and silently miss the
+ * other. Single-derivation is the substantive hardening here, not a new
+ * assertion — the scoping itself (e.g. `/admin/list-users`' full-user-list
+ * 2xx body never buffered) isn't observable through the public surface.
+ */
+function subjectPolicyFor(subject: SubjectStrategy): { captureBodyOn2xx: boolean; gateSubjectTo2xx: boolean } {
+  return {
+    captureBodyOn2xx: subject === 'response-user-id',
+    gateSubjectTo2xx: subject === 'email-lookup',
+  };
+}
+
 interface ClassifiedRequest {
   action: string;
   includeGet: boolean;
   serializeSessionRead: boolean;
-  /** Public mounts (resolveActor:false) gate this to 2xx outcomes — decision 12's DoS-amplifier guard. Receives the response body `capture()` already recorded (empty unless `captureBodyOn2xx` is set). */
+  /** Gated per `gateSubjectTo2xx` below (plus decision 12's public-mount DoS-amplifier guard) — see `finishOnce`. Receives the response body `capture()` already recorded (empty unless `captureBodyOn2xx` is set). */
   subjectFrom: (req: Request, actorId: string | null, capturedBody: readonly Buffer[]) => Promise<string | null>;
   /** True only for a `'response-user-id'` mount/action — widens `capture()` to also record 2xx bytes (every other mount/action only ever captures >=400 bodies, for `errorCode`). */
   captureBodyOn2xx: boolean;
+  /**
+   * M2 (code review PR #2596): true only for `'email-lookup'` — forces the
+   * 2xx-only subject gate even when `resolveActor: true`, which the pre-fix
+   * gate exempted unconditionally. `resolveActor: true` only means this
+   * middleware calls `getSession` on every request through the mount's
+   * path — there is no auth check ahead of this dispatcher, so it says
+   * nothing about whether the caller is actually authenticated.
+   * `organization/invite-member` is the first `email-lookup` mount with
+   * `resolveActor: true`: without this flag, an unauthenticated caller
+   * looping a guessed email costs one extra `auth_user` SELECT per request
+   * on every outcome including the 401 — a path absent from `app.ts`'s
+   * `rateLimitedPaths` too. Every other strategy keeps the pre-fix
+   * behavior, where an already-paid `getSession` read makes one more
+   * lookup unremarkable.
+   */
+  gateSubjectTo2xx: boolean;
 }
 
 interface ResolvedMount {
@@ -215,9 +258,15 @@ function auditMiddleware(resolve: ResolvedMount) {
       // Normally only an error body is captured (for `errorCode`
       // extraction below). `captureBodyOn2xx` widens this to a 2xx body
       // too, for the one class of mount whose `subjectFrom` strategy is
-      // `'response-user-id'` — see this file's header comment.
-      const shouldCapture = res.statusCode >= 400 || (captureBodyOn2xx && res.statusCode < 300);
-      if (!shouldCapture || capturedBytes >= MAX_BODY_CAPTURE_BYTES) return;
+      // `'response-user-id'` — see this file's header comment. L1: the two
+      // branches get DIFFERENT caps (see MAX_2XX_BODY_CAPTURE_BYTES's doc
+      // comment) — an error body and a 2xx success body are different
+      // shapes with different realistic sizes.
+      const is2xxCapture = captureBodyOn2xx && res.statusCode < 300;
+      const shouldCapture = res.statusCode >= 400 || is2xxCapture;
+      if (!shouldCapture) return;
+      const cap = is2xxCapture ? MAX_2XX_BODY_CAPTURE_BYTES : MAX_ERROR_BODY_CAPTURE_BYTES;
+      if (capturedBytes >= cap) return;
       // HIGH 2 (code review BS#2537 PR #2545): better-call's setResponse
       // pumps `response.body.getReader()` values into res.write(value) as
       // plain Uint8Array chunks — Buffer.isBuffer is false for those.
@@ -233,8 +282,8 @@ function auditMiddleware(resolve: ResolvedMount) {
         typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
       // L2: truncate the chunk that crosses the cap rather than only
       // checking it beforehand — without this, a single chunk arriving
-      // near the boundary could push capturedBytes past MAX_BODY_CAPTURE_BYTES.
-      const remaining = MAX_BODY_CAPTURE_BYTES - capturedBytes;
+      // near the boundary could push capturedBytes past the cap.
+      const remaining = cap - capturedBytes;
       if (buf.length > remaining) buf = buf.subarray(0, remaining);
       capturedBody.push(buf);
       capturedBytes += buf.length;
@@ -343,11 +392,13 @@ function auditMiddleware(resolve: ResolvedMount) {
         // Public mounts (resolveActor:false) gate subject resolution to
         // 2xx — the finish handler fires on 429s too, and an ungated
         // lookup would hand a distributed brute force one DB read per
-        // throttled attempt.
-        const subjectUserId =
-          resolve.resolveActor || res.statusCode < 300
-            ? await classified.subjectFrom(req, actorId, capturedBody)
-            : null;
+        // throttled attempt. M2: `classified.gateSubjectTo2xx` (set only for
+        // `'email-lookup'`) forces that same 2xx-only gate even when
+        // `resolveActor` is true — see `ClassifiedRequest.gateSubjectTo2xx`'s
+        // doc comment for why `resolveActor: true` doesn't mean "reached by
+        // an authenticated caller" here.
+        const subjectGateOpen = res.statusCode < 300 || (resolve.resolveActor && !classified.gateSubjectTo2xx);
+        const subjectUserId = subjectGateOpen ? await classified.subjectFrom(req, actorId, capturedBody) : null;
 
         await recordAccountAuditEvent(
           {
@@ -410,7 +461,7 @@ export function adminPrefixAuditMiddleware() {
         includeGet: known.includeGet === true,
         serializeSessionRead: known.serializeSessionRead === true,
         subjectFrom: subjectStrategyFor(subject, known.responsePath),
-        captureBodyOn2xx: subject === 'response-user-id',
+        ...subjectPolicyFor(subject),
       };
     },
     resolveActor: true,
@@ -433,7 +484,7 @@ function flatMountAuditMiddleware(mount: FlatMount) {
   // strategy is static (unlike ADMIN_ACTIONS, where one middleware instance
   // dispatches many actions).
   const subjectFrom = subjectStrategyFor(mount.subject, mount.responsePath);
-  const captureBodyOn2xx = mount.subject === 'response-user-id';
+  const subjectPolicy = subjectPolicyFor(mount.subject);
   return auditMiddleware({
     classify: (req) => {
       const action = classifyFlatMountAction(mount, req.body);
@@ -443,7 +494,7 @@ function flatMountAuditMiddleware(mount: FlatMount) {
         includeGet: false, // every FlatMount is a POST-only mutation; a stray GET 404s unlogged.
         serializeSessionRead: mount.serializeSessionRead === true,
         subjectFrom,
-        captureBodyOn2xx,
+        ...subjectPolicy,
       };
     },
     resolveActor: mount.resolveActor,
