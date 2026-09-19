@@ -64,26 +64,16 @@ describe('getArtistDependentCounts (BS#2597)', () => {
     expect(result).toEqual(zeroRow);
   });
 
-  // `getArtistCardById` collapses a multi-genre artist onto its lowest
-  // `genre_id` crossreference row (BS#2156's documented design), but none of
-  // the five dependent counts are genre-scoped -- they key on `artist_id`
-  // alone, so a multi-genre artist's dependents must be reported in full
-  // regardless of which genre the card collapsed to.
-  it('does not collapse dependents for a multi-genre artist', async () => {
-    const row = {
-      release_count: 6,
-      cross_reference_source_count: 1,
-      cross_reference_target_count: 1,
-      library_cross_reference_count: 2,
-      compilation_credit_count: 7,
-    };
-    db.execute.mockResolvedValueOnce([row]);
-
-    const result = await getArtistDependentCounts(7);
-
-    expect(result).toEqual(row);
-    // The query is keyed on the artist id alone -- one call regardless of how
-    // many genre_artist_crossreference rows that artist carries.
-    expect(db.execute).toHaveBeenCalledTimes(1);
-  });
+  // The multi-genre case -- `getArtistCardById` collapses a multi-genre
+  // artist onto its lowest `genre_id` crossreference row (BS#2156's
+  // documented design), but none of the five dependent counts are
+  // genre-scoped -- lives in the integration tier
+  // (`tests/integration/library.spec.js`, "does not collapse dependent
+  // counts for a multi-genre artist"), where a real
+  // `genre_artist_crossreference` row and a real cross-genre release can
+  // actually exercise it. A version of this test used to live here, but with
+  // `db.execute` mocked to resolve a single canned row it carried no genre
+  // state at all -- it was mechanically identical to "returns all five
+  // counts from the single query result" above with different numbers, and
+  // could not have failed for the behavior its name claimed.
 });
