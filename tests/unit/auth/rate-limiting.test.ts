@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { statementIndex } from '../../utils/statement-index';
 
 describe('Auth service rate limiting', () => {
   const authAppSource = readFileSync(resolve(__dirname, '../../../apps/auth/app.ts'), 'utf-8');
@@ -162,10 +163,24 @@ describe('Auth service rate limiting', () => {
   // (PR #2550's L2 finding): a loose substring match is what let a dead path
   // sit pinned-and-green.
   describe('admin-prefix limiter (BS#2554)', () => {
+    // L (adjudicated finding, BS#2554 follow-up): the previous version chained
+    // the three property clauses with unbounded `[\s\S]*?` against the WHOLE
+    // file. Deleting `keyGenerator: rateLimitKeyFromRequest,` from this
+    // limiter still passed, because the lazy scan happily satisfied that
+    // clause from `authMutationRateLimit`'s block ~24k characters later —
+    // this is the same class of bug the block header comment above already
+    // warns about (PR #2550), reintroduced within this very describe block.
+    // Capture the `adminPrefixRateLimit` block FIRST, then assert each
+    // property only within that capture, matching the `rateLimitedPaths`
+    // tier test's idiom elsewhere in this file.
     it('mounts its own 100/15min limiter on /auth/admin, keyed by rateLimitKeyFromRequest', () => {
-      expect(authAppSource).toMatch(
-        /const adminPrefixRateLimit = rateLimit\(\{[\s\S]*?windowMs: 15 \* 60 \* 1000,[\s\S]*?limit: 100,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
-      );
+      const adminPrefixRateLimitBlock = authAppSource.match(
+        /const adminPrefixRateLimit = rateLimit\(\{([\s\S]*?)\}\);/
+      )?.[1];
+      expect(adminPrefixRateLimitBlock).toBeDefined();
+      expect(adminPrefixRateLimitBlock).toMatch(/windowMs: 15 \* 60 \* 1000,/);
+      expect(adminPrefixRateLimitBlock).toMatch(/limit: 100,/);
+      expect(adminPrefixRateLimitBlock).toMatch(/keyGenerator: rateLimitKeyFromRequest,/);
       expect(authAppSource).toMatch(/app\.use\(\s*['"]\/auth\/admin['"]\s*,\s*adminPrefixRateLimit\s*\)/);
     });
 
@@ -189,14 +204,16 @@ describe('Auth service rate limiting', () => {
       // literal greppable), and that comment sits near the top of the file --
       // so a bare `indexOf` finds the COMMENT and reports the audit mount as
       // preceding the limiter, failing this test for a reason that has nothing
-      // to do with mount order. Anchoring at line start after optional
-      // indentation excludes comment lines, whose first non-space characters
-      // are `//`.
-      const statementIndex = (mount: string): number =>
-        authAppSource.search(new RegExp(String.raw`^\s*app\.use\('/auth/admin',\s*${mount}\)`, 'm'));
-
-      const limiterIndex = statementIndex('adminPrefixRateLimit');
-      const auditMountIndex = statementIndex(String.raw`adminPrefixAuditMiddleware\(\)`);
+      // to do with mount order. `statementIndex` (tests/utils/statement-index.ts)
+      // anchors at line start after optional indentation, which excludes
+      // comment lines, whose first non-space characters are `//` — shared
+      // with tests/unit/auth/account-audit-mount-order.test.ts, which hit the
+      // identical bug against the identical line.
+      const limiterIndex = statementIndex(authAppSource, String.raw`app\.use\('/auth/admin',\s*adminPrefixRateLimit\)`);
+      const auditMountIndex = statementIndex(
+        authAppSource,
+        String.raw`app\.use\('/auth/admin',\s*adminPrefixAuditMiddleware\(\)\)`
+      );
       expect(limiterIndex).toBeGreaterThan(-1);
       expect(auditMountIndex).toBeGreaterThan(-1);
       expect(limiterIndex).toBeLessThan(auditMountIndex);

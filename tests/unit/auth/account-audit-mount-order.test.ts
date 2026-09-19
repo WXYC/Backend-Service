@@ -16,10 +16,24 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { ADMIN_PREFIX, STATION_SIGNUP_ADMIN_OPS } from '../../../apps/auth/audit-coverage';
+import { statementIndex } from '../../utils/statement-index';
 
 describe('account-audit prefix mount ordering', () => {
   const authAppSource = readFileSync(resolve(__dirname, '../../../apps/auth/app.ts'), 'utf-8');
-  const auditMountIndex = authAppSource.indexOf("app.use('/auth/admin', adminPrefixAuditMiddleware())");
+  // Match the STATEMENT, not the first occurrence of the text. `app.ts`'s
+  // body-parser comment (near the top of the file, well before the real
+  // mount) cites this exact call expression verbatim, so a bare `indexOf`
+  // finds the comment instead — every "registers above X" case below then
+  // passes unconditionally, since the comment's offset precedes every
+  // needle in the file regardless of where the real mount actually sits.
+  // `statementIndex` (tests/utils/statement-index.ts, shared with
+  // tests/unit/auth/rate-limiting.test.ts, which hit the identical bug
+  // against the identical line) anchors at line start after optional
+  // indentation, which excludes comment lines.
+  const auditMountIndex = statementIndex(
+    authAppSource,
+    String.raw`app\.use\('/auth/admin', adminPrefixAuditMiddleware\(\)\);`
+  );
 
   it('registers the audit prefix mount at all', () => {
     expect(auditMountIndex).toBeGreaterThan(-1);
