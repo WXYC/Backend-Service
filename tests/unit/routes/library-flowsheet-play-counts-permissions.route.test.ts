@@ -112,10 +112,21 @@ app.use(express.json());
 app.use('/library', library_route);
 
 /**
- * BS#2592. Gated `catalog:['write']` to match the DELETE it precedes — the
- * same bar as `updateAlbum`/`addAlbum`/`deleteAlbum` — deliberately NOT the
- * lighter `catalog:['read']` bar every DJ holds, since it reports
- * delete-damage figures.
+ * BS#2592. Gated `catalog:['read']`, not `catalog:['write']`: the DELETE this
+ * read precedes is write-gated because it ACTS, while this endpoint only
+ * counts, and a caller who learns a number still has to clear the DELETE's own
+ * bar to use it. Cardinality is read, contents are write — the same rule
+ * `GET /artists/:id`'s dependent counts follow (BS#2597).
+ *
+ * `catalog:['read']` is held by all four roles, `member` included, so NO role
+ * is rejected and the per-role cases below are authorization assertions rather
+ * than a mix of allow and deny. That is deliberate, not a weakened test: what
+ * still has teeth is the unauthenticated 401. If a future change re-narrows
+ * this endpoint, the role cases are where that must become visible, so they
+ * enumerate every role individually instead of asserting once and trusting the
+ * chain — `requirePermissions` checks each role's own flat grant set and the
+ * member < dj < musicDirector < stationManager chain is an invariant on the
+ * grant data, not a runtime fallback.
  */
 describe('GET /library/:id/flowsheet-play-counts — permission tier (BS#2592)', () => {
   beforeEach(() => {
@@ -138,20 +149,28 @@ describe('GET /library/:id/flowsheet-play-counts — permission tier (BS#2592)',
     expect(mockGetFlowsheetPlayImpact).toHaveBeenCalledWith(1);
   });
 
-  test('a dj-role token (catalog:read only) is rejected', async () => {
+  test('a dj-role token is authorized', async () => {
     mockRole('dj');
     const res = await request(app).get('/library/1/flowsheet-play-counts').set('Authorization', 'Bearer test-token');
-    expect(res.status).toBe(403);
-    expect(mockGetFlowsheetPlayImpact).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(mockGetFlowsheetPlayImpact).toHaveBeenCalledWith(1);
   });
 
-  test('a member-role token (catalog:read only) is rejected', async () => {
+  // `member` is the pre-DJ tier and it holds `catalog:['read']`, so it reaches
+  // this endpoint. Acceptable only because these are flowsheet plays and
+  // `/playlists/recentEntries` already serves those unauthenticated — pinned
+  // here so the consequence of the tier is stated where someone changing it
+  // will see it, rather than inferred from the grant matrix.
+  test('a member-role token is authorized — read is the pre-DJ tier too', async () => {
     mockRole('member');
     const res = await request(app).get('/library/1/flowsheet-play-counts').set('Authorization', 'Bearer test-token');
-    expect(res.status).toBe(403);
-    expect(mockGetFlowsheetPlayImpact).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(mockGetFlowsheetPlayImpact).toHaveBeenCalledWith(1);
   });
 
+  // The one case that still rejects, and therefore the only proof left that
+  // `requirePermissions` is actually mounted on this route rather than the
+  // handler being reachable bare.
   test('a request with no Authorization header is rejected', async () => {
     const res = await request(app).get('/library/1/flowsheet-play-counts');
     expect(res.status).toBe(401);

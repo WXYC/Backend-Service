@@ -2186,8 +2186,13 @@ paths:
         separately; they are deliberately NOT summed, because the
         legacy-linked arm strands its plays rather than unlinking them, so a
         single total would misstate what the delete actually does. Gated
-        `catalog:['write']` to match the DELETE it precedes, not the lighter
-        `catalog:['read']` bar `GET /library/info` uses.
+        `catalog:['read']`, not `catalog:['write']`: the DELETE it precedes is
+        write-gated because it ACTS, while this only counts, and a caller who
+        learns a number still has to clear the DELETE's own bar to use it —
+        cardinality is read, contents are write. Note that `catalog:['read']`
+        is held by `member` as well as `dj`; that is acceptable here because
+        these are flowsheet plays, which `/playlists/recentEntries` already
+        serves with no authentication at all.
 
         Two statements, not one: a library existence probe (to 404 before
         counting anything), then a single statement that bounds the scan to
@@ -2215,7 +2220,7 @@ paths:
         either direction, by the time the delete this read precedes actually
         runs. None of the three arms carries a one-sided bound.
       security:
-        - BearerAuth: ['station-management']
+        - BearerAuth: ['catalog-read']
       parameters:
         - name: id
           in: path

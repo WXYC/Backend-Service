@@ -370,13 +370,19 @@ library_route.patch('/:id', requirePermissions({ catalog: ['write'] }), libraryC
 
 // BS#2592: pre-delete read for the DELETE below — the three disjoint
 // flowsheet-play arms a delete would damage, reported separately. Gated
-// catalog:write to match the DELETE it precedes, deliberately NOT the
-// lighter catalog:read bar `GET /library/info` uses. Two-segment path, so it
-// carries none of the bare `/:id` ordering hazards documented throughout
+// catalog:read, NOT catalog:write: the DELETE is write-gated because it ACTS,
+// while this only counts, and a caller who learns a number still has to clear
+// the DELETE's own bar to use it. Same rule as `GET /artists/:id`'s dependent
+// counts (BS#2597) — cardinality is read, contents are write. Read is held by
+// `member` as well as `dj`, which is acceptable HERE only because these are
+// flowsheet plays and `/playlists/recentEntries` already serves those with no
+// auth at all; see `getFlowsheetPlayCounts`'s docstring before reusing this
+// tier for a pre-delete read over a non-public relation. Two-segment path, so
+// it carries none of the bare `/:id` ordering hazards documented throughout
 // this file.
 library_route.get(
   '/:id/flowsheet-play-counts',
-  requirePermissions({ catalog: ['write'] }),
+  requirePermissions({ catalog: ['read'] }),
   libraryController.getFlowsheetPlayCounts
 );
 
