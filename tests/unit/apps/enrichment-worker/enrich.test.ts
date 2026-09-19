@@ -19,6 +19,7 @@ import { album_metadata, db, flowsheet } from '@wxyc/database';
 import { sanitizeLookupStreamingUrls } from '@wxyc/lml-client';
 import type { LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import {
+  buildNoMatchEvidence,
   buildStreamingFieldConflictSet,
   extractArtwork,
   finalizeRow,
@@ -1623,4 +1624,208 @@ describe('Bandcamp re-ask de-freeze — ENRICHMENT_BANDCAMP_REASK gate', () => {
       expect(insertPayload.spotify_status).toBe('verified');
     });
   });
+});
+
+/**
+ * BS#2606 — `buildNoMatchEvidence` pins the durable record of what LML
+ * returned when a row lands in the no-match arm, so the class described in
+ * WXYC/Backend-Service#2603 (LML found nothing vs. LML found something the
+ * trust gate rejected) is diagnosable from `flowsheet.no_match_evidence`
+ * after the fact. `trust_gate` is a closed, exhaustively-switched vocabulary
+ * (`no_results` | `rejected_substitution` | `unknown`) — see the function's
+ * doc comment for the classification rule.
+ */
+describe('buildNoMatchEvidence (BS#2606)', () => {
+  it('classifies an empty results array as no_results', () => {
+    const response = {
+      search_type: 'none',
+      results: [],
+      song_not_found: false,
+      found_on_compilation: false,
+      degraded: false,
+      timeout: false,
+    } as unknown as LookupResponse;
+
+    const evidence = buildNoMatchEvidence(response, 'DOGA');
+
+    expect(evidence).toEqual({
+      v: 1,
+      search_type: 'none',
+      results_count: 0,
+      top_library_item_id: null,
+      top_resolved_title: null,
+      top_release_id: null,
+      found_on_compilation: false,
+      song_not_found: false,
+      degraded: false,
+      degraded_reason: null,
+      timeout: false,
+      trust_gate: 'no_results',
+    });
+  });
+
+  it('classifies a row-less same-artist substitution (Hiding Places -> High Places) as rejected_substitution', () => {
+    // The 2026-09-19 audit shape from WXYC/Backend-Service#2606: LML
+    // substituted a different album by the same artist. Row-less
+    // (library_item.id === 0) but the returned title doesn't correspond to
+    // the requested album, so the correspondence gate rejects it.
+    const response = {
+      search_type: 'fallback',
+      results: [
+        {
+          library_item: { id: 0, title: 'High Places' },
+          artwork: { release_id: 1471882, release_url: 'https://discogs.com/release/1471882' },
+        },
+      ],
+      song_not_found: true,
+      found_on_compilation: false,
+      degraded: false,
+      timeout: false,
+    } as unknown as LookupResponse;
+
+    const evidence = buildNoMatchEvidence(response, 'Hiding Places');
+
+    expect(evidence).toEqual({
+      v: 1,
+      search_type: 'fallback',
+      results_count: 1,
+      top_library_item_id: 0,
+      top_resolved_title: 'High Places',
+      top_release_id: 1471882,
+      found_on_compilation: false,
+      song_not_found: true,
+      degraded: false,
+      degraded_reason: null,
+      timeout: false,
+      trust_gate: 'rejected_substitution',
+    });
+  });
+
+  it('classifies a real-library-id substitution (Vantaa/Animaru shape) as rejected_substitution', () => {
+    const response = {
+      search_type: 'alternative',
+      results: [{ library_item: { id: 64288, title: 'DOGA' }, artwork: { release_id: 999 } }],
+    } as unknown as LookupResponse;
+
+    const evidence = buildNoMatchEvidence(response, 'DOGA');
+
+    expect(evidence.trust_gate).toBe('rejected_substitution');
+    expect(evidence.top_library_item_id).toBe(64288);
+  });
+
+  it('classifies song_as_artist as rejected_substitution (the gate rejects it outright, regardless of title)', () => {
+    const response = {
+      search_type: 'song_as_artist',
+      results: [{ library_item: { id: 0, title: 'DOGA' }, artwork: { release_id: 7 } }],
+    } as unknown as LookupResponse;
+
+    const evidence = buildNoMatchEvidence(response, 'DOGA');
+
+    expect(evidence.trust_gate).toBe('rejected_substitution');
+  });
+
+  it('classifies a gate-vouched result with no usable artwork as unknown', () => {
+    // `direct` is trusted outright (lmlTrackContextTrust returns
+    // 'search_type'), but no result in `results` carries an `artwork`
+    // object — extractArtwork still finds nothing to persist. Rarer,
+    // structurally different from an outright rejection.
+    const response = {
+      search_type: 'direct',
+      results: [{ library_item: { id: 5, title: 'DOGA' } }],
+    } as unknown as LookupResponse;
+
+    const evidence = buildNoMatchEvidence(response, 'DOGA');
+
+    expect(evidence.trust_gate).toBe('unknown');
+  });
+
+  it('reads degraded/degraded_reason/timeout straight off the response', () => {
+    const response = {
+      search_type: 'none',
+      results: [],
+      degraded: true,
+      degraded_reason: 'upstream_unavailable',
+      timeout: true,
+    } as unknown as LookupResponse;
+
+    const evidence = buildNoMatchEvidence(response, null);
+
+    expect(evidence.degraded).toBe(true);
+    expect(evidence.degraded_reason).toBe('upstream_unavailable');
+    expect(evidence.timeout).toBe(true);
+  });
+});
+
+/**
+ * BS#2606 — `finalizeRow` end to end: the no-match arms (both linked and
+ * unlinked) write `no_match_evidence` on the flowsheet UPDATE, never on
+ * `album_metadata` (per-playcut, not album-keyed — BS#1499 precedent). The
+ * regression test pins the acceptance criterion that a response satisfying
+ * the worker's auto-persist rule NEVER produces an `enriched_no_match` write
+ * — covering all three satisfying shapes named in the issue.
+ */
+describe('finalizeRow (BS#2606) — no_match_evidence on the no-match arms', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('unlinked no-match: writes no_match_evidence on the flowsheet UPDATE', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(ROW, noMatchResponse);
+
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall.no_match_evidence).toEqual(buildNoMatchEvidence(noMatchResponse, ROW.album_title));
+    expect((setCall.no_match_evidence as { trust_gate: string }).trust_gate).toBe('no_results');
+  });
+
+  it('linked no-match: writes no_match_evidence on the flowsheet UPDATE, never on the album_metadata UPSERT', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+    await finalizeRow(LINKED_ROW, noMatchResponse);
+
+    const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setCall.no_match_evidence).toEqual(buildNoMatchEvidence(noMatchResponse, LINKED_ROW.album_title));
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload).not.toHaveProperty('no_match_evidence');
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    expect(conflictCfg.set).not.toHaveProperty('no_match_evidence');
+  });
+
+  it.each([
+    ['a positive library_item.id', matchResponse],
+    [
+      'found_on_compilation',
+      {
+        search_type: 'compilation',
+        results: [{ artwork: { artwork_url: 'https://i.discogs.com/comp/cover.jpg' } }],
+        found_on_compilation: true,
+      } as unknown as LookupResponse,
+    ],
+    [
+      'a row-less match whose title corresponds to the requested album',
+      {
+        search_type: 'alternative',
+        results: [
+          {
+            library_item: { id: 0, title: ROW.album_title },
+            artwork: { artwork_url: 'https://i.discogs.com/rowless/cover.jpg' },
+          },
+        ],
+      } as unknown as LookupResponse,
+    ],
+  ])(
+    'regression: a response satisfying the auto-persist rule (%s) never produces an enriched_no_match write',
+    async (_label, response) => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+
+      const outcome = await finalizeRow(ROW, response);
+
+      expect(outcome).toBe('enriched_match');
+      const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(setCall.metadata_status).toBe('enriched_match');
+      expect(setCall).not.toHaveProperty('no_match_evidence');
+    }
+  );
 });

@@ -75,6 +75,17 @@
  * any actual re-ask happened. The increment is now gated on the row already
  * carrying a load-bearing match (`artwork_url` OR `discogs_url` present)
  * *before* this write — a shell->matched transition leaves the counter at 0.
+ *
+ * BS#2606 (`no_match_evidence`). Both no-match arms below (linked and
+ * unlinked) write `flowsheet.no_match_evidence` — a durable, versioned
+ * summary of the LML response that produced the terminal `enriched_no_match`
+ * status, built by `buildNoMatchEvidence`. Written on the no-match arm ONLY
+ * (matches are ~87% of rows; restricting to no-match keeps the write
+ * negligible), never cleared on a later transition to `enriched_match` (the
+ * earlier wrong verdict stays visible — `metadata_status` disambiguates
+ * current state), and never on `album_metadata` — see the column's
+ * `schema.ts` comment for why this rides the per-playcut flowsheet row.
+ * Observability only: this write changes no verdict and no control flow.
  */
 
 import { and, eq, sql } from 'drizzle-orm';
@@ -514,6 +525,80 @@ export const extractArtwork = (response: LookupResponse, requestedAlbum?: string
 };
 
 /**
+ * Closed vocabulary for `NoMatchEvidence.trust_gate` (BS#2606). Kept closed
+ * and exhaustively switched in `classifyNoMatchTrustGate` below — adding a
+ * `LmlTrackContextTrust` value LML/`trust.ts` doesn't have yet fails that
+ * switch to compile, rather than silently falling through to `unknown`.
+ *
+ *   - `no_results`            — LML returned nothing (`results` empty).
+ *   - `rejected_substitution` — LML returned at least one candidate, but the
+ *                               track-context trust gate rejected all of
+ *                               them (wrong artist/album, a same-artist
+ *                               substitution, or a row-less candidate whose
+ *                               title doesn't correspond to the requested
+ *                               album).
+ *   - `unknown`               — the gate vouched for a result (`direct`,
+ *                               `compilation`, or a correspondence-gated
+ *                               row-less match), but `extractArtwork` still
+ *                               found no usable artwork among the results it
+ *                               vouches for — a rarer, structurally
+ *                               different shape than an outright rejection.
+ */
+export type NoMatchTrustGate = 'no_results' | 'rejected_substitution' | 'unknown';
+
+function classifyNoMatchTrustGate(response: LookupResponse, requestedAlbum: string | null): NoMatchTrustGate {
+  const trust = lmlTrackContextTrust(response, requestedAlbum);
+  switch (trust) {
+    case 'none':
+      return (response.results?.length ?? 0) === 0 ? 'no_results' : 'rejected_substitution';
+    case 'search_type':
+    case 'correspondence':
+      return 'unknown';
+  }
+}
+
+/**
+ * Durable evidence of the LML response that produced a terminal
+ * `enriched_no_match` write (BS#2606) — see `flowsheet.no_match_evidence`'s
+ * schema comment. `v: 1` so a later payload shape change is detectable by a
+ * reader querying old rows. Called only from `finalizeRow`'s no-match arms,
+ * after `extractArtwork` has already returned null for this same
+ * `(response, requestedAlbum)` pair — never on a match.
+ */
+export type NoMatchEvidence = {
+  v: 1;
+  search_type: LookupResponse['search_type'];
+  results_count: number;
+  top_library_item_id: number | null;
+  top_resolved_title: string | null;
+  top_release_id: number | null;
+  found_on_compilation: boolean;
+  song_not_found: boolean;
+  degraded: boolean;
+  degraded_reason: string | null;
+  timeout: boolean;
+  trust_gate: NoMatchTrustGate;
+};
+
+export const buildNoMatchEvidence = (response: LookupResponse, requestedAlbum: string | null): NoMatchEvidence => {
+  const top = response.results?.[0];
+  return {
+    v: 1,
+    search_type: response.search_type,
+    results_count: response.results?.length ?? 0,
+    top_library_item_id: top?.library_item?.id ?? null,
+    top_resolved_title: top?.library_item?.title ?? null,
+    top_release_id: top?.artwork?.release_id ?? null,
+    found_on_compilation: response.found_on_compilation,
+    song_not_found: response.song_not_found,
+    degraded: response.degraded,
+    degraded_reason: response.degraded_reason ?? null,
+    timeout: response.timeout,
+    trust_gate: classifyNoMatchTrustGate(response, requestedAlbum),
+  };
+};
+
+/**
  * Finalize an enriching row with LML's response.
  *
  * Returns the outcome so the dispatcher can count it. The `_raced` variants
@@ -596,6 +681,13 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
   // left untouched — preserves any prior out-of-band values (e.g. recovery
   // writes from #686-era scripts). Mirrors the backfill's deliberate
   // divergence from the runtime path (see backfill enrich.ts header).
+  //
+  // BS#2606: record what LML actually returned, so this class of write is
+  // diagnosable after the fact. Computed once and written on both no-match
+  // arms below (never on album_metadata — see `no_match_evidence`'s schema
+  // comment for why this rides the per-playcut flowsheet row).
+  const noMatchEvidence = buildNoMatchEvidence(response, row.album_title);
+
   if (row.album_id !== null) {
     // Linked + no-match: UPSERT just the 4 search URLs into album_metadata
     // (Apple stays out per BS#1192). INSERT path leaves the other 6 columns
@@ -649,7 +741,7 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
       // composer rides the flowsheet UPDATE, not the album_metadata UPSERT
       // above (per-playcut, not album-level — BS#1499). On no-match this is
       // the artist-as-proxy value.
-      .set({ metadata_status: 'enriched_no_match', composer, composer_source })
+      .set({ metadata_status: 'enriched_no_match', composer, composer_source, no_match_evidence: noMatchEvidence })
       .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
       .returning({ id: flowsheet.id });
     return updated.length === 0 ? 'enriched_no_match_raced' : 'enriched_no_match';
@@ -666,6 +758,7 @@ export const finalizeRow = async (row: EnrichRow, response: LookupResponse): Pro
       // BS#1499: per-playcut composer (artist-as-proxy on no-match).
       composer,
       composer_source,
+      no_match_evidence: noMatchEvidence,
     })
     .where(and(eq(flowsheet.id, row.id), eq(flowsheet.metadata_status, 'enriching')))
     .returning({ id: flowsheet.id });
