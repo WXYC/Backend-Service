@@ -47,9 +47,23 @@
  * `require`s the REAL compiled classifier (`jobs/legacy-linkage-resolve/
  * retired-candidate.ts`, built to `dist/retired-candidate.cjs` — see
  * `tsup.config.ts`) and calls it against the error a real concurrent delete
- * actually produces, so the wrapped-in-a-mock assumption `sqlstate.ts`'s
- * docstring warns about (a predicate proven only against hand-built doubles
- * shipped as dead code against a green suite once already) can't recur here.
+ * actually produces.
+ *
+ * That error arrives via a RAW `postgres` client (`worker`, no drizzle in the
+ * path), so on its own this spec proves only the fallback half of
+ * `extractSqlState`/`extractConstraintName`'s two-level read: `code` and
+ * `constraint_name` sit at the TOP level here, never under `.cause`. Every
+ * production rejection takes the OTHER branch instead — drizzle's
+ * `DrizzleQueryError` wraps every query rejection unconditionally (see
+ * `sqlstate.ts`'s docstring), so `.cause` is where the real SQLSTATE and
+ * constraint name live in production, and `error.code`/`error.constraint_name`
+ * are `undefined` there. The rotation test below adds one more assertion that
+ * re-wraps that SAME real driver error in the `.cause` shape and
+ * re-classifies it, so this spec proves both branches against a real error —
+ * never a hand-built double asserting the same two fields against itself —
+ * and the wrapped-shape gap `sqlstate.ts` warns about (a predicate proven
+ * only against hand-built doubles, shipped as dead code against a green
+ * suite once already) cannot recur here.
  */
 
 const path = require('path');
@@ -231,6 +245,17 @@ describe('legacy-linkage-resolve stands down on a retired candidate (BS#2594)', 
     worker = makeSql();
     observer = makeSql();
     await cleanupProbes(worker);
+    // postgres.js connects lazily: without this, `observer`'s FIRST-EVER
+    // statement (TCP connect + startup + SCRAM auth, then the query) would be
+    // its `waitUntilBlocked` poll inside `runAgainstRacingDelete` — issued
+    // AFTER `worker`'s blocking statement has already gone out, i.e. inside
+    // `worker`'s own ~750ms LOCK_TIMEOUT_MS window. `holder` is warmed by its
+    // own BEGIN/DELETE before that window opens; `observer` had no equivalent
+    // warm-up and paid handshake cost against the very clock it exists to be
+    // immune to. On a loaded runner that overrun means `worker` raises 55P03
+    // instead of 23503, and `waitUntilBlocked` polls a backend that already
+    // stopped waiting until it times out.
+    await observer.unsafe('SELECT 1');
   });
 
   afterAll(async () => {
@@ -317,6 +342,16 @@ describe('legacy-linkage-resolve stands down on a retired candidate (BS#2594)', 
     // The real predicate, against the real driver error — not a hand-built
     // double asserting the same two fields against itself.
     expect(isRetiredLinkageCandidateError(error)).toBe(true);
+
+    // Same real driver error, re-wrapped in the shape drizzle's
+    // `DrizzleQueryError` actually produces (`.cause` carries the driver
+    // error; the wrapper's own `code`/`constraint_name` are `undefined`) —
+    // the branch of `extractSqlState`/`extractConstraintName` every
+    // production `tx.execute` rejection takes, which the bare `error` above
+    // never exercises. Proves the `.cause` branch against a REAL error, not
+    // a hand-built double asserting the same two fields against itself.
+    const wrapped = { message: 'Failed query', code: undefined, constraint_name: undefined, cause: error };
+    expect(isRetiredLinkageCandidateError(wrapped)).toBe(true);
   });
 
   test('a concurrent delete mid-statement produces 23503 on flowsheet_album_id_library_id_fk too', async () => {
