@@ -136,17 +136,20 @@ describe('Library Catalog', () => {
     //
     // `insertAlbum` itself never checks `genre_artist_crossreference` (it
     // will happily insert a `library` row against a genre the artist has no
-    // membership in), but every genre-scoped read (`getArtistCardById`, the
-    // browse routes, `generateAlbumCodeNumber`'s own shelf model) joins
-    // through that crossreference. A library row filed under a genre with no
-    // matching crossreference is therefore a state the real catalog can't
-    // reach through any Backend write path -- the only writer of
-    // `genre_artist_crossreference` is `insertArtistWithGenreCrossreference`,
-    // fired once at artist creation. A multi-genre artist (one `artist_id`,
-    // several crossreference rows) is a real, legacy-imported shape though
-    // (see the `artist_genre_key` uniqueness note a few tests down), so the
-    // fixture seeds the second membership directly, the same way that test
-    // does.
+    // membership in), and `addAlbum` only consults membership on the
+    // `artist_name` branch, via `artistIdFromName`'s join to that table --
+    // a request that supplies `artist_id` directly skips the check entirely.
+    // So a library row filed under a genre with no matching crossreference
+    // is reachable through a real Backend write path, not a hypothetical one.
+    // `genre_artist_crossreference` itself has two writers:
+    // `insertArtistWithGenreCrossreference` (one row per artist, at `POST
+    // /library/artists` creation) and `jobs/library-etl/job.ts`'s
+    // `ensureGenreArtistCrossref` (the legacy tubafrenzy import, upserted per
+    // crossreference row on every run) -- the latter is what makes a
+    // multi-genre artist (one `artist_id`, several crossreference rows) a
+    // real, legacy-imported shape (see the `artist_genre_key` uniqueness note
+    // a few tests down). The fixture seeds the second membership directly,
+    // the same way that test does, rather than depending on the ETL job.
     test('auto-generates code_number scoped to the release genre, not the artist-wide max', async () => {
       const uniq = Date.now();
       const artist = await auth
