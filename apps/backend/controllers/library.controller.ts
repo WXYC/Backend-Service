@@ -807,9 +807,13 @@ type ArtistByCodeQuery = {
  * blank check before the numeric one.
  */
 const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): number => {
-  // `resolveArtistByCode` pre-filters absence itself (its own "Missing query
-  // parameters" 400) before either of its two call sites here, so this branch
-  // was historically unreachable for `undefined`. `peekArtistReleaseNumber`
+  // Both `resolveArtistByCode` call sites reached this with a value already,
+  // so the branch was historically unreachable for `undefined` -- but by two
+  // different mechanisms, and only one is that handler's "Missing query
+  // parameters" 400. `code_number` is deliberately excluded from that 400
+  // (BS#2489: absent, it selects the browse), so what kept THAT call site
+  // from passing `undefined` is the browse early return, not a required-
+  // parameter check. Do not "align" the browse branch to throw. `peekArtistReleaseNumber`
   // has no such pre-check, so an omitted `genre_id` reaches this function
   // directly -- distinguish that from the repeated-key case below, or an
   // absent parameter misdiagnoses as a repeated one.

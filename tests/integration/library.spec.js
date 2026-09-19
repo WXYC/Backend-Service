@@ -142,8 +142,10 @@ describe('Library Catalog', () => {
     // So a library row filed under a genre with no matching crossreference
     // is reachable through a real Backend write path, not a hypothetical one.
     // `genre_artist_crossreference` itself has two writers:
-    // `insertArtistWithGenreCrossreference` (one row per artist, at `POST
-    // /library/artists` creation) and `jobs/library-etl/job.ts`'s
+    // `insertArtistWithGenreCrossreference` (one row per artist, reached from
+    // TWO routes -- `addArtist` for `POST /library/artists`, and
+    // `createLibraryFiling`'s create-artist arm for `POST /library/filings`,
+    // which threads the caller's `tx`) and `jobs/library-etl/job.ts`'s
     // `ensureGenreArtistCrossref` (the legacy tubafrenzy import, upserted per
     // crossreference row on every run) -- the latter is what makes a
     // multi-genre artist (one `artist_id`, several crossreference rows) a
