@@ -73,6 +73,7 @@ import {
   headCursorWindow,
   headDeparturesBelowCursor,
   headRotationIsInert,
+  headRotationWarrantsWarning,
   HEAD_CURSOR_JOB_NAME,
   JOB_NAME,
   nextCursorPosition,
@@ -545,5 +546,48 @@ describe('headRotationIsInert (BS#2222 review finding 2)', () => {
 
     expect(seen.size).toBe(10);
     expect(offset).toBe(0);
+  });
+});
+
+/**
+ * `/code-review` on PR #2608: inertness alone is the wrong warning condition.
+ * Two configurations reach it without being misconfigured, and warning on
+ * either sends the operator to a knob that is not the problem.
+ */
+describe('headRotationWarrantsWarning (/code-review on PR #2608)', () => {
+  const WINDOW_DEFAULT = 200;
+
+  it('warns on the genuine case: a full-width window and a head slice that is a multiple of it', () => {
+    // BATCH_SIZE=400 + HEAD_SLICE=200 passes the half-batch ceiling exactly.
+    expect(headRotationWarrantsWarning(200, 200, WINDOW_DEFAULT)).toBe(true);
+    expect(headRotationWarrantsWarning(400, 200, WINDOW_DEFAULT)).toBe(true);
+  });
+
+  it('does NOT warn for a disabled head slice, which head_slice_disabled already reports', () => {
+    // `headSlice` 0 is inert by definition, but the inert warning's advice
+    // ("the window is fully covered every run; lower HEAD_SLICE") is false
+    // here — nothing is read — and names the wrong variable. Emitting both
+    // gave one condition two contradictory remediations.
+    expect(headRotationIsInert(0, 200)).toBe(true);
+    expect(headRotationWarrantsWarning(0, 200, WINDOW_DEFAULT)).toBe(false);
+  });
+
+  it('does NOT warn when the window was cohort-clamped, where full coverage is the intended behaviour', () => {
+    // A 40-row cohort clamps the window to 40 (headCursorWindow), and a head
+    // slice covering all of it is correct at that size.
+    const window = headCursorWindow(40, WINDOW_DEFAULT);
+    expect(window).toBe(40);
+    expect(headRotationIsInert(40, window)).toBe(true);
+    expect(headRotationWarrantsWarning(40, window, WINDOW_DEFAULT)).toBe(false);
+  });
+
+  it('does not warn for the shipped defaults, or for any slice that actually rotates', () => {
+    expect(headRotationWarrantsWarning(20, 200, WINDOW_DEFAULT)).toBe(false);
+    expect(headRotationWarrantsWarning(100, 200, WINDOW_DEFAULT)).toBe(false);
+    expect(headRotationWarrantsWarning(300, 200, WINDOW_DEFAULT)).toBe(false);
+  });
+
+  it('does not warn on an empty cohort, where the window is 0 and there is nothing to rotate through', () => {
+    expect(headRotationWarrantsWarning(20, headCursorWindow(0, WINDOW_DEFAULT), WINDOW_DEFAULT)).toBe(false);
   });
 });

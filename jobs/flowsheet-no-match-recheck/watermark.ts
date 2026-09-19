@@ -363,6 +363,32 @@ export const nextHeadCursorPosition = (currentOffset: number, headSlice: number,
 export const headRotationIsInert = (headSlice: number, window: number): boolean =>
   window > 0 && headSlice % window === 0;
 
+/**
+ * Whether an inert rotation is worth warning an operator about.
+ *
+ * Inertness alone is not — two configurations reach it without being
+ * misconfigured, and warning on either sends the operator to the wrong knob
+ * (`/code-review` on PR #2608):
+ *
+ *   - **A disabled head slice** (`headSlice === 0`, reachable only at
+ *     `BATCH_SIZE=1`, see `resolveHeadSliceConfig`). Inert by definition — a
+ *     head that reads nothing rotates nowhere — but `job.ts` already emits
+ *     `head_slice_disabled` for it, and the inert warning's advice ("the window
+ *     is fully covered every run; lower HEAD_SLICE") is both false and aimed at
+ *     the wrong variable. Two contradictory remediations for one condition is
+ *     worse than one.
+ *   - **A cohort smaller than the window**, where `headCursorWindow` clamps the
+ *     window down to the cohort and a head slice covering all of it is the
+ *     intended behaviour at that size. Detected by the window having been
+ *     clamped below `windowDefault`.
+ *
+ * What is left is the genuine case: a full-width window and a head slice that
+ * is a multiple of it — e.g. `BATCH_SIZE=400` + `HEAD_SLICE=200`, which passes
+ * the half-batch ceiling exactly while standing the rotation still.
+ */
+export const headRotationWarrantsWarning = (headSlice: number, window: number, windowDefault: number): boolean =>
+  headSlice > 0 && window >= windowDefault && headRotationIsInert(headSlice, window);
+
 /** One cursor write: which `cronjob_runs` row, and the offset to stamp on it. */
 export type CursorWrite = { jobName: string; position: number };
 
