@@ -4418,6 +4418,178 @@ export type DeleteAlbumOutcome =
       assets: Array<{ id: number; provenance: string; discNumber: number; status: string }>;
     };
 
+export type FlowsheetPlayImpact =
+  { outcome: 'not_found' } | { outcome: 'found'; direct: number; rotationLinked: number; legacyLinked: number };
+
+/**
+ * BS#2592 pre-delete read: the three disjoint flowsheet-play arms
+ * `deleteAlbumFromDB` counted before BS#2565 removed the refusal they fed
+ * (see `047ad9ae^`'s copy of this function for the original query shapes).
+ * Reported separately and never summed — the legacy arm STRANDS a play
+ * rather than unlinking it, so a sum would misstate what the delete does.
+ * Takes no lock and must never be called from inside
+ * `runDeleteAlbumTransaction`: it exists to inform a confirmation screen the
+ * delete transaction has no reason to wait on.
+ *
+ * Two statements, not one: a library existence probe (needed for the 404 --
+ * the legacy arm's predicate depends on `existing.legacy_release_id`, so the
+ * aggregate can't even be built before this resolves), then a SINGLE
+ * statement that computes all three arms against one row set in one
+ * snapshot. That second statement is what the atomicity claim below is
+ * about: earlier revisions of this function ran the three counts as three
+ * independent autocommit statements with no shared snapshot, so a row could
+ * move between arms mid-read and be double-counted — collapsing them into
+ * one statement closes that window entirely, because Postgres evaluates
+ * every clause of a single statement against the same snapshot. The
+ * existence probe racing a concurrent delete is just the ordinary
+ * 404-vs-410 race any read-before-write endpoint has; it feeds no count, so
+ * it cannot reintroduce a cross-arm miscount.
+ *
+ * A first cut of this collapse (BS#2592 review round 1) ran the `FILTER`
+ * aggregate straight over `flowsheet` with no `WHERE` at all — correct, but
+ * a full scan of the ~2.6M-row / ~1.7GB heap on every call, past the 5s
+ * `DB_STATEMENT_TIMEOUT_MS`. This shape bounds the scan to the release's own
+ * plays with a `WITH candidate_rows AS (... UNION ... UNION ...)` CTE, one
+ * branch per arm, each a standalone, single-predicate `SELECT` the planner
+ * can satisfy from an existing index without any help from OR-clause
+ * handling:
+ *   - `WHERE flowsheet.album_id = $albumId` — `flowsheet_album_id_linked_idx`
+ *     (partial, `WHERE album_id IS NOT NULL`; a bound equality on a non-null
+ *     value implies the partial predicate).
+ *   - `INNER JOIN rotation ON rotation.id = flowsheet.rotation_id AND
+ *     rotation.album_id = $albumId` — driven from `rotation`'s own
+ *     `album_id_idx` (a release has at most a handful of rotation rows
+ *     across its kill/reactivate history), nested-loop-indexed into
+ *     `flowsheet_rotation_id_idx` (partial, `WHERE rotation_id IS NOT
+ *     NULL`) per matching rotation id. Deliberately a `JOIN`, not a bare
+ *     `rotation_id IN (subquery)`: that shape sits fine on its own (as the
+ *     `rotationLinked`/`legacyLinked` `FILTER`s below still use it,
+ *     unchanged), but nested inside a flat `WHERE ... OR ... OR ...` a
+ *     `SubLink` disjunct isn't one `match_clause_to_index` can turn into a
+ *     bitmap index scan, and the whole `OR` falls back to a seq scan — the
+ *     exact failure mode this rewrite exists to close. An explicit `JOIN`,
+ *     as its own `UNION` branch rather than one arm of an `OR`, has no such
+ *     ambiguity. An album with zero rotation rows makes this branch's
+ *     `JOIN` match nothing — the empty-rotation-set case degrades to
+ *     "contributes no candidate rows," with no special-casing needed.
+ *   - `WHERE flowsheet.legacy_release_id = $legacyReleaseId` --
+ *     `flowsheet_legacy_release_id_idx` (full index; also degrades safely
+ *     to zero rows when `existing.legacy_release_id` is NULL, since `col =
+ *     NULL` matches nothing).
+ * `UNION` (not `UNION ALL`) is the actual bound: it dedups a row that
+ * matches more than one branch — the routine tubafrenzy-webhook shape
+ * where one row carries `album_id`, `rotation_id`, AND `legacy_release_id`
+ * together — down to one `candidate_rows` entry, so `count(*) FILTER (...)`
+ * below still counts real rows, not branch memberships. The three `FILTER`
+ * predicates that partition `candidate_rows` into the disjoint arms are
+ * SEMANTICALLY equivalent to the ones the prior revision ran directly over
+ * `flowsheet` — every arm was re-checked against `047ad9ae^`, including NULL
+ * `album_id`/`legacy_release_id` and the empty-rotation-set case — but they
+ * are NOT textually unchanged, and the difference is load-bearing. The prior
+ * revision interpolated Drizzle `Column` objects, which render
+ * schema-qualified against `flowsheet`; these are bare identifiers that
+ * resolve against `candidate_rows`' OUTPUT ALIASES. They therefore bind to
+ * whatever `candidateRowProjection` names its keys, not to the table: rename
+ * or re-alias a key there and these predicates must be re-read, not assumed
+ * untouched.
+ *
+ * Rotation membership in those `FILTER` predicates is still a correlated
+ * subquery (`rotation.album_id = ...`), not a JS-materialized id list: an
+ * empty result set makes `IN (...)` false — never NULL — for every row
+ * regardless of `flowsheet.rotation_id`'s own nullness, which is exactly
+ * the "this album has no rotation rows" case a hand-written short-circuit
+ * would otherwise need to special-case. Running over `candidate_rows`
+ * instead of `flowsheet`, that subquery now evaluates against a handful of
+ * rows rather than 2.6M, so its own index support is no longer
+ * performance-critical.
+ *
+ * Staleness: this statement's own snapshot is internally consistent — the
+ * three `FILTER`s partition ONE row set, so `direct` + `rotationLinked` +
+ * `legacyLinked` never double-counts or drops a row that existed at the
+ * moment this statement ran. What it does NOT guarantee is that these
+ * numbers still hold by the time a librarian, having read them, clicks
+ * delete: this is a standalone advisory read with no lock (deliberately --
+ * see the function's opening paragraph), and `jobs/legacy-linkage-resolve`
+ * runs every 30 minutes re-linking exactly this data. Its flowsheet pass
+ * moves a row OUT of `legacyLinked` and INTO `direct` whenever
+ * `library.legacy_release_id` newly resolves to a `library.id` (`UPDATE
+ * flowsheet SET album_id = l.id ... WHERE album_id IS NULL`); its rotation
+ * pass moves a row OUT of `legacyLinked` (or out of no arm at all) and INTO
+ * `rotationLinked` whenever a previously-unlinked `rotation.album_id`
+ * resolves the same way. Ordinary corrections (an MD re-pointing
+ * `flowsheet.album_id` via `updateEntry`) can move a row again later still.
+ * So: any of the three counts may differ, in either direction, by the time
+ * the delete this read precedes actually runs — not a one-sided
+ * undercount-only bound on `legacyLinked` alone, and not a guarantee this
+ * function could only buy by taking a lock it deliberately does not take.
+ */
+export const getFlowsheetPlayImpact = async (album_id: number): Promise<FlowsheetPlayImpact> => {
+  const [existing] = await db
+    .select({ legacy_release_id: library.legacy_release_id })
+    .from(library)
+    .where(eq(library.id, album_id))
+    .limit(1);
+  if (!existing) {
+    return { outcome: 'not_found' };
+  }
+
+  const rotationIdsForAlbum = db.select({ id: rotation.id }).from(rotation).where(eq(rotation.album_id, album_id));
+
+  // Row shape the three `UNION`ed `SELECT`s below all share, in the same
+  // column order, so they stay aligned by construction (see `rawProjection`'s
+  // docblock on why that matters for a hand-written multi-branch query). `id`
+  // is the PK and is what makes `UNION` (not `UNION ALL`) a correct row-level
+  // dedup rather than a value-level one: a row is a genuine duplicate across
+  // branches only if every column, `id` included, matches — which happens
+  // exactly when it's the same physical row, never a coincidence. Kept local
+  // to this call rather than hoisted to module scope: it is the only
+  // consumer, and several unit tests supply their own minimal
+  // `@wxyc/database` mock that only stocks the tables their own call graph
+  // touches — a module-top-level reference to `flowsheet` would demand it
+  // everywhere, for one caller's benefit.
+  const candidateRowProjection = rawProjection({
+    id: flowsheet.id,
+    album_id: flowsheet.album_id,
+    rotation_id: flowsheet.rotation_id,
+    legacy_release_id: flowsheet.legacy_release_id,
+  });
+
+  const [counts] = (await db.execute(sql`
+    WITH candidate_rows AS (
+      SELECT ${candidateRowProjection}
+      FROM ${flowsheet}
+      WHERE ${flowsheet.album_id} = ${album_id}::int
+      UNION
+      SELECT ${candidateRowProjection}
+      FROM ${flowsheet}
+      INNER JOIN ${rotation} ON ${rotation.id} = ${flowsheet.rotation_id} AND ${rotation.album_id} = ${album_id}::int
+      UNION
+      SELECT ${candidateRowProjection}
+      FROM ${flowsheet}
+      WHERE ${flowsheet.legacy_release_id} = ${existing.legacy_release_id}::int
+    )
+    SELECT
+      count(*) FILTER (WHERE album_id = ${album_id}::int)::int AS ${sql.identifier('direct')},
+      count(*) FILTER (
+        WHERE rotation_id IN (${rotationIdsForAlbum})
+          AND album_id IS DISTINCT FROM ${album_id}::int
+      )::int AS ${sql.identifier('rotationLinked')},
+      count(*) FILTER (
+        WHERE legacy_release_id = ${existing.legacy_release_id}::int
+          AND album_id IS DISTINCT FROM ${album_id}::int
+          AND (rotation_id IS NULL OR rotation_id NOT IN (${rotationIdsForAlbum}))
+      )::int AS ${sql.identifier('legacyLinked')}
+    FROM candidate_rows
+  `)) as unknown as Array<{ direct: number; rotationLinked: number; legacyLinked: number }>;
+
+  return {
+    outcome: 'found',
+    direct: Number(counts?.direct ?? 0),
+    rotationLinked: Number(counts?.rotationLinked ?? 0),
+    legacyLinked: Number(counts?.legacyLinked ?? 0),
+  };
+};
+
 /**
  * The one `digital_asset.status` that does NOT make a release undeletable.
  *
