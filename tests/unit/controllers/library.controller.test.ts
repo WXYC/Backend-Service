@@ -3641,40 +3641,33 @@ describe('library.controller', () => {
       });
     });
 
-    // BS#2587 follow-up: before this PR, code_number shelves were artist-wide,
-    // so a genre-only move (same artist) could never collide -- the number
-    // was already unique across every genre the artist held. Now each genre
-    // restarts its own shelf at 1, so the same move can silently land on a
-    // slot the artist already owns on the destination shelf. This reuses the
-    // artist-move arm's existing collision guard rather than adding a new
-    // predicate.
-    describe('genre-only move regenerates on collision (BS#2587 follow-up)', () => {
+    // BS#2587 follow-up, corrected: a genre-only move (same artist) does NOT
+    // run the collision/regenerate guard. An earlier revision of this fix
+    // routed genre-only moves through it anyway, but the guard's collision
+    // check (`albumCodeNumberTaken`) is artist-wide, not genre-scoped
+    // (#2579), so it can fire on a same-number collision in some OTHER genre
+    // the artist holds and burn a code_number that was actually free on the
+    // destination shelf -- renumbering a physical disc for no reason. That
+    // is new exposure a genre-only move never had before this PR, since
+    // numbering used to be artist-wide and a genre-only move never touched
+    // code_number at all. Until `albumCodeNumberTaken` is genre-scoped
+    // (#2579), the correct behavior is to leave code_number exactly as
+    // stored on a genre-only move and accept that an actual destination-shelf
+    // collision goes uncaught, same as the pre-#2587 status quo.
+    describe('genre-only move leaves code_number untouched (BS#2587 follow-up)', () => {
       afterEach(() => {
         mockAlbumCodeNumberTaken.mockReset();
         mockGenerateAlbumCodeNumber.mockReset();
       });
 
-      it('regenerates the code_number when a genre-only move collides on the destination shelf', async () => {
-        mockAlbumCodeNumberTaken.mockResolvedValue(true);
-        mockGenerateAlbumCodeNumber.mockResolvedValue(9);
+      it('does not consult the collision guard or regenerate on a genre-only move', async () => {
         const res = mockResponse();
 
         await updateAlbum(reqFor({ genre_id: 15 }), res, next);
 
-        // existingRow.artist_id (7) is unchanged -- only the genre moved.
-        expect(mockAlbumCodeNumberTaken).toHaveBeenCalledWith(7, existingRow.code_number, 42);
-        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(7, 15);
-        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ genre_id: 15, code_number: 9 }));
-        expect(res.status).toHaveBeenCalledWith(200);
-      });
-
-      it('leaves code_number untouched on a genre-only move with no collision', async () => {
-        mockAlbumCodeNumberTaken.mockResolvedValue(false);
-        mockGenerateAlbumCodeNumber.mockResolvedValue(999);
-        const res = mockResponse();
-
-        await updateAlbum(reqFor({ genre_id: 15 }), res, next);
-
+        // existingRow.artist_id (7) is unchanged -- only the genre moved, so
+        // the artist-move guard never runs.
+        expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
         expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
         const updates = mockUpdateAlbumInDB.mock.calls[0][1];
         expect(updates).toMatchObject({ genre_id: 15 });
@@ -3682,7 +3675,7 @@ describe('library.controller', () => {
         expect(res.status).toHaveBeenCalledWith(200);
       });
 
-      it('respects an explicit destination code_number on a genre-only move, skipping the collision check', async () => {
+      it('still writes an explicit destination code_number verbatim on a genre-only move', async () => {
         const res = mockResponse();
 
         await updateAlbum(reqFor({ genre_id: 15, code_number: 20 }), res, next);
