@@ -44,7 +44,7 @@ Fix, all three required together (see BS#2218 for the full measurement and decis
 
 The cursor above has a cost the module doc calls out: it defers the head of the ordering. `query.ts` sorts never-attempted rows newest-first, so a no-match row the live worker writes today lands at ordering position 0 — but once the cursor has moved off 0 it does not return until it wraps, ~5.7 months at the 2026-08-18 cohort size. That was accepted when BS#2218 shipped on the theory that a fresh no-match is a weak recheck candidate (it already failed a full headerless cascade). A 2026-09-19 replay measured that theory false: 4 of 17 rows in one day's digest resolve cleanly under the worker's own auto-persist rule, so roughly 1 in 4 fresh no-matches is a live miss, not a settled answer — and until this fix, nothing would look at it again for months.
 
-The fix reserves a slice of every batch for OFFSET 0, read every run regardless of where the cursor sits:
+The fix reserves a slice of every batch for the FRONT of the ordering, read every run regardless of where the tail cursor sits. That slice is not a bare `OFFSET 0` — it has its own small rotating cursor, for the reason "The head cursor" below gives:
 
 ```text
 HEAD_SLICE = ceil(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN / RUNS_PER_DAY)
@@ -54,7 +54,7 @@ HEAD_SLICE = ceil(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN / RU
 
 `MEASURED_INFLOW_ROWS_PER_DAY` (40) is 199 new `enriched_no_match` rows over 2026-09-13 → 2026-09-18 (5 days), replayed against `flowsheet.updated_at`. `RUNS_PER_DAY` (4) is **derived from `CRON_SCHEDULE`**, which the unit suite pins against `package.json`'s `cron-schedule` field — the same field `scripts/resolve-cron-schedule.sh` installs at deploy time — so changing the real cadence fails a test instead of silently leaving the head slice sized for the old one. `HEAD_SLICE_COVERAGE_MARGIN` (2) is the safety factor over that average so a heavier play day or a backfill drain still gets same-day head coverage instead of re-creating the queueing this whole job exists to remove.
 
-**What a resize does and does not recompute.** A **cadence** change recomputes `HEAD_SLICE_DEFAULT` automatically, through `RUNS_PER_DAY`. A **`BATCH_SIZE`** change does not, and cannot: head coverage is an inflow requirement, and none of the three inputs is a function of batch size. What a `BATCH_SIZE` resize (BS#2186) _does_ invalidate is prose in this file, and it has to be re-checked by hand — the wrap/stretch table below, the +11% figure, the head's share of each run (halving `BATCH_SIZE` doubles it from 10% to 20%), and the headroom behind `job.ts`'s `headSlice < batchSize` clamp.
+**What a resize does and does not recompute.** A **cadence** change recomputes `HEAD_SLICE_DEFAULT` automatically, through `RUNS_PER_DAY`. A **`BATCH_SIZE`** change does not, and cannot: head coverage is an inflow requirement, and none of the three inputs is a function of batch size. What a `BATCH_SIZE` resize (BS#2186) _does_ invalidate is prose in this file, and it has to be re-checked by hand — the wrap/stretch table below, the +11% figure, the head's share of each run (halving `BATCH_SIZE` doubles it from 10% to 20%), and the headroom behind `job.ts`'s half-batch clamp (`HEAD_SLICE_MAX_BATCH_SHARE`).
 
 | `HEAD_SLICE`     | head coverage/day | vs ~40/day inflow | wrap (days) | stretch vs no head slice |
 | ---------------- | ----------------- | ----------------- | ----------- | ------------------------ |

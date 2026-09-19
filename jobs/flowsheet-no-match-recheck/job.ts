@@ -116,11 +116,9 @@ import {
   JOB_NAME,
   getCursorPosition,
   headCursorWindow,
-  headDeparturesBelowCursor,
-  nextCursorPosition,
-  nextHeadCursorPosition,
+  headRotationIsInert,
+  planCursorAdvance,
   setCursorPosition,
-  stillCandidates,
   wrapCursor,
 } from './watermark.js';
 import { initLogger, log, captureError, closeLogger } from './logger.js';
@@ -291,10 +289,19 @@ const main = async (): Promise<void> => {
     });
     const { headSlice, tailBatchSize, clamped } = resolveHeadSliceConfig(requestedHeadSlice, batchSize);
     if (clamped) {
+      // `headSlice === 0` is reachable only at `batchSize` 1, where the half-
+      // batch ceiling floors to zero. It is a different event from a clamp:
+      // the whole BS#2222 head mechanism is OFF, not narrowed, and "clamped to
+      // 0" reads as a tuning note rather than as "the feature this job exists
+      // for is disabled". Same rule as the ceiling itself — a misconfiguration
+      // that disables the mechanism must not read as healthy.
+      const disabled = headSlice === 0;
       log(
         'warn',
-        'head_slice_clamped',
-        `${HEAD_SLICE_ENV} (${requestedHeadSlice}) exceeds ${HEAD_SLICE_MAX_BATCH_SHARE * 100}% of batch size (${batchSize}); clamped to ${headSlice} so the tail read keeps at least half the batch and the BS#2218 cursor keeps traversing`,
+        disabled ? 'head_slice_disabled' : 'head_slice_clamped',
+        disabled
+          ? `batch size (${batchSize}) is too small to reserve any head slice at ${HEAD_SLICE_MAX_BATCH_SHARE * 100}%, so the BS#2222 head read is DISABLED for this run and the head cursor will not move; raise ${BATCH_SIZE_ENV} to at least 2 (${requestedHeadSlice} was requested)`
+          : `${HEAD_SLICE_ENV} (${requestedHeadSlice}) exceeds ${HEAD_SLICE_MAX_BATCH_SHARE * 100}% of batch size (${batchSize}); clamped to ${headSlice} so the tail read keeps at least half the batch and the BS#2218 cursor keeps traversing`,
         {
           requested_head_slice: requestedHeadSlice,
           head_slice: headSlice,
@@ -316,6 +323,32 @@ const main = async (): Promise<void> => {
     const headWindow = headCursorWindow(totalCandidates, HEAD_CURSOR_WINDOW_DEFAULT);
     const storedHeadCursor = await getCursorPosition(HEAD_CURSOR_JOB_NAME);
     const headCursorOffset = wrapCursor(storedHeadCursor ?? 0, headWindow);
+
+    // The batch-share clamp and the head window are unrelated constants, so a
+    // config can satisfy the clamp and still stand the rotation still — e.g.
+    // BATCH_SIZE=400 + HEAD_SLICE=200 against the hardcoded 200-row window,
+    // where every run re-reads [0, 200). Coverage is unaffected (a slice that
+    // wide reads the whole window); what is lost is the once-per-rotation
+    // re-ask cadence, so a permanently-transient row burns LML budget every
+    // run. Warn rather than clamp: the operator asked for a wide head, and a
+    // silently narrowed one would be the same class of surprise.
+    //
+    // Gated on the window NOT having been cohort-clamped. On a cohort smaller
+    // than the window `headCursorWindow` shrinks the window to the cohort, and
+    // a head slice covering all of it is correct at that size, not a
+    // misconfiguration — see `headRotationIsInert`.
+    if (headRotationIsInert(headSlice, headWindow) && headWindow === HEAD_CURSOR_WINDOW_DEFAULT) {
+      log(
+        'warn',
+        'head_rotation_inert',
+        `head slice (${headSlice}) is a multiple of the ${headWindow}-row head cursor window, so the head cursor never moves; the window is fully covered every run, but a persistently-transient row is re-asked every run instead of once per rotation — lower ${HEAD_SLICE_ENV} below ${headWindow}`,
+        {
+          head_slice: headSlice,
+          head_cursor_window: headWindow,
+          total_candidates: totalCandidates,
+        }
+      );
+    }
 
     log('info', 'init', `${JOB_NAME} initialized`, {
       dry_run: dryRun,
@@ -367,27 +400,26 @@ const main = async (): Promise<void> => {
     // re-reads leftovers, never skips unread rows. The aborted run still
     // exits non-zero and captures to Sentry.
     if (!dryRun) {
-      const headDepartures = headDeparturesBelowCursor(headTotals, headRowsInTailWindow);
-      const nextCursor = nextCursorPosition(tailCursorOffset, tailTotals, totalCandidates, headDepartures);
-      await setCursorPosition(db, nextCursor);
-      // The head cursor is a rotation, not a progress measure: it advances by
-      // one head slice regardless of the outcome mix, which is what stops a
-      // permanently-transient front-of-ordering row from being re-asked every
-      // single run.
-      const nextHeadCursor = nextHeadCursorPosition(headCursorOffset, headSlice, headWindow);
-      await setCursorPosition(db, nextHeadCursor, HEAD_CURSOR_JOB_NAME);
-      log('info', 'cursor_advanced', "persisted the next run's OFFSET cursors", {
-        cursor_offset: tailCursorOffset,
-        next_cursor: nextCursor,
-        tail_scanned: tailTotals.scanned,
-        still_candidates: stillCandidates(tailTotals),
-        head_departures_below_cursor: headDepartures,
-        head_rows_in_tail_window: headRowsInTailWindow,
-        head_cursor_offset: headCursorOffset,
-        next_head_cursor: nextHeadCursor,
-        head_cursor_window: headWindow,
-        total_candidates: totalCandidates,
+      // Both advances come from `planCursorAdvance` as data — which row, which
+      // modulus, which totals — rather than being spelled out here. `main` is
+      // unexported and so untestable, and the BS#2222 review's mutation probe
+      // showed that both defects the earlier iterations fixed could be
+      // reintroduced at exactly this spot with a fully green suite. Nothing in
+      // this block may name a `cronjob_runs` row or a modulus of its own.
+      const { writes, logFields } = planCursorAdvance({
+        tailCursorOffset,
+        headCursorOffset,
+        tailTotals,
+        headTotals,
+        headRowsInTailWindow,
+        headSlice,
+        totalCandidates,
+        headWindow,
       });
+      for (const write of writes) {
+        await setCursorPosition(db, write.position, write.jobName);
+      }
+      log('info', 'cursor_advanced', "persisted the next run's OFFSET cursors", logFields);
     }
 
     // The head/tail split is reported alongside the merged totals, and OUTSIDE

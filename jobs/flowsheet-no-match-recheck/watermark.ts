@@ -302,7 +302,9 @@ export const headCursorWindow = (totalCandidates: number, window: number): numbe
  *
  * `window <= 0` (an empty cohort) returns 0 via `wrapCursor`. A `window` that
  * is not an exact multiple of `headSlice` is fine: the offsets drift rather
- * than repeating a fixed set, which still covers the window.
+ * than repeating a fixed set, which still covers the window. A `headSlice`
+ * that IS an exact multiple of `window` is the degenerate case — see
+ * `headRotationIsInert`, which `job.ts` warns off.
  *
  * COVERAGE IS CONDITIONAL, and the condition is `headSlice > arrivals per run`
  * (BS#2222 review). An OFFSET is a position in an ordering that MOVES: new
@@ -332,3 +334,91 @@ export const headCursorWindow = (totalCandidates: number, window: number): numbe
  */
 export const nextHeadCursorPosition = (currentOffset: number, headSlice: number, window: number): number =>
   wrapCursor(currentOffset + headSlice, window);
+
+/**
+ * Whether the head rotation stands still — `nextHeadCursorPosition` returns the
+ * offset it was given, every run, forever (BS#2222 review finding 2).
+ *
+ * True when `headSlice` is an exact multiple of `window`, `headSlice` being a
+ * multiple of the modulus meaning the advance is congruent to zero. `headSlice`
+ * 0 (the `batchSize` 1 degenerate, see `resolveHeadSliceConfig`) counts, since a
+ * head that reads nothing rotates nowhere either.
+ *
+ * Reachable in production through the supported `HEAD_SLICE` knob without
+ * tripping the batch-share clamp: `BATCH_SIZE=400` + `HEAD_SLICE=200` passes the
+ * half-batch ceiling exactly, and the window is a hardcoded 200. Nothing relates
+ * the two constants, so `job.ts` warns rather than either constant silently
+ * defeating the other. The cost is not lost coverage — a head slice that wide
+ * reads the whole window every run — it is the re-ask cadence: a permanently
+ * transient front-of-ordering row, whose marker the BS#1977 contract
+ * deliberately leaves untouched, is re-asked every run instead of once per
+ * rotation, spending LML budget on rows that cannot progress with nothing in the
+ * counters to distinguish it from healthy churn.
+ *
+ * The small-cohort case is NOT this defect and must not warn: when the cohort is
+ * smaller than the window, `headCursorWindow` clamps the window down to the
+ * cohort, and a head slice covering all of it is the intended behaviour at that
+ * size. `job.ts` gates the warning on the window not having been cohort-clamped.
+ */
+export const headRotationIsInert = (headSlice: number, window: number): boolean =>
+  window > 0 && headSlice % window === 0;
+
+/** One cursor write: which `cronjob_runs` row, and the offset to stamp on it. */
+export type CursorWrite = { jobName: string; position: number };
+
+/**
+ * Both cursor advances for a completed run, as data.
+ *
+ * This exists because `main`'s inline wiring was the one place the two cursors
+ * were actually distinguished — which `Totals` feeds the tail advance, which
+ * modulus the head wraps against, and which `cronjob_runs` row each is stamped
+ * on — and being inside an unexported `main` it was reachable by no test
+ * (BS#2222 review finding 1). A mutation probe on the pre-extraction shape
+ * reintroduced BOTH defects the prior review iterations fixed — the tail
+ * advancing on the MERGED head+tail totals, and the head rotation written onto
+ * the tail's own row — with all 128 tests still passing. Returning the writes as
+ * data means `main` cannot name a row or a modulus of its own, so the whole
+ * wiring is pinned in `watermark.test.ts` instead of only its arithmetic.
+ *
+ * Pure: the caller performs the writes. Not called in dry-run mode.
+ */
+export const planCursorAdvance = (input: {
+  tailCursorOffset: number;
+  headCursorOffset: number;
+  /** The TAIL pass's totals only — never the merged pair. See `nextCursorPosition`. */
+  tailTotals: Totals;
+  headTotals: Totals;
+  headRowsInTailWindow: number;
+  headSlice: number;
+  /** The whole cohort: the tail cursor's modulus. */
+  totalCandidates: number;
+  /** The small recent window: the head cursor's modulus. */
+  headWindow: number;
+}): { writes: readonly CursorWrite[]; logFields: Record<string, number> } => {
+  const headDepartures = headDeparturesBelowCursor(input.headTotals, input.headRowsInTailWindow);
+  const nextCursor = nextCursorPosition(
+    input.tailCursorOffset,
+    input.tailTotals,
+    input.totalCandidates,
+    headDepartures
+  );
+  const nextHeadCursor = nextHeadCursorPosition(input.headCursorOffset, input.headSlice, input.headWindow);
+  return {
+    writes: [
+      { jobName: JOB_NAME, position: nextCursor },
+      { jobName: HEAD_CURSOR_JOB_NAME, position: nextHeadCursor },
+    ],
+    logFields: {
+      cursor_offset: input.tailCursorOffset,
+      next_cursor: nextCursor,
+      tail_scanned: input.tailTotals.scanned,
+      still_candidates: stillCandidates(input.tailTotals),
+      head_departures_below_cursor: headDepartures,
+      head_rows_in_tail_window: input.headRowsInTailWindow,
+      head_cursor_offset: input.headCursorOffset,
+      next_head_cursor: nextHeadCursor,
+      head_cursor_window: input.headWindow,
+      total_candidates: input.totalCandidates,
+    },
+  };
+};
