@@ -23,8 +23,10 @@
  * legacy_linked's exclusion guards were removed. The "all three columns"
  * test reproduces the single MOST COMMON production shape this webhook
  * produces — every play of an in-library, rotating release resolves all
- * three columns in that same INSERT — which none of the other fixtures set
- * on one row.
+ * three columns in that same INSERT. The sum-invariant test carries a
+ * three-column row too, deliberately rather than redundantly: that one
+ * exercises the `UNION` dedup path across all three branches at once, so
+ * neither row substitutes for the other.
  */
 
 const postgres = require('postgres');
