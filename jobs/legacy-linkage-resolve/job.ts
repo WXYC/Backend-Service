@@ -187,9 +187,15 @@ export const LINKAGE_LOCK_TIMEOUT_MS = 750;
  *
  * The retired-linkage-candidate classifier (`23503` against one of this job's
  * own two FK constraints — deliberately a SIBLING check to lock contention,
- * never folded into it) lives in `./retired-candidate.js`, split out so
- * `tests/integration/legacy-linkage-retired-candidate.spec.js` can exercise
- * the real predicate rather than a second hand-built copy of it.
+ * never folded into it) lives in `./retired-candidate.js`, its own
+ * single-responsibility module, imported here normally. It is unit-tested
+ * against hand-built doubles (bare and `DrizzleQueryError`-wrapped) in
+ * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts`;
+ * `tests/integration/legacy-linkage-retired-candidate.spec.js` proves the
+ * raw error shape those doubles assume — SQLSTATE `23503` with
+ * `constraint_name` set to one of the two named FKs — is what a real
+ * concurrent `DELETE /library/:id` actually produces, without importing this
+ * module.
  */
 
 /**
