@@ -85,7 +85,9 @@ describe('flat mounts', () => {
     }
   });
 
-  // Item 1 (simplify pass, code review BS#2537 PR #2545 follow-up).
+  // Item 1 (simplify pass, code review BS#2537 PR #2545 follow-up); extended
+  // by BS#2553 for the two new 'response-user-id' mounts and
+  // /organization/invite-member's move to 'email-lookup'.
   it('annotates the subject strategy correctly for each category', () => {
     const emailLookupPaths = [
       '/request-password-reset',
@@ -93,6 +95,7 @@ describe('flat mounts', () => {
       '/email-otp/reset-password',
       '/forget-password/email-otp',
       '/email-otp/send-verification-otp',
+      '/organization/invite-member',
     ];
     for (const path of emailLookupPaths) {
       expect(FLAT_MOUNTS.find((m) => m.path === path)?.subject).toBe('email-lookup');
@@ -100,22 +103,31 @@ describe('flat mounts', () => {
     for (const path of ['/change-password', '/change-email', '/update-user', '/delete-user']) {
       expect(FLAT_MOUNTS.find((m) => m.path === path)?.subject).toBe('actor');
     }
+    const responseUserIdPaths = ['/organization/remove-member', '/organization/update-member-role'];
+    for (const path of responseUserIdPaths) {
+      expect(FLAT_MOUNTS.find((m) => m.path === path)?.subject).toBe('response-user-id');
+    }
     for (const mount of FLAT_MOUNTS) {
-      if (emailLookupPaths.includes(mount.path) || mount.subject === 'actor') continue;
+      if (
+        emailLookupPaths.includes(mount.path) ||
+        mount.subject === 'actor' ||
+        responseUserIdPaths.includes(mount.path)
+      )
+        continue;
       expect(mount.subject).toBe('body-user-id');
     }
   });
 
   // BS#2547 (M5 re-decision, parent epic #2534); extended by BS#2551
-  // (Option A) to five. The tally is the cheapest possible drift check for
-  // "did every email-lookup mount actually land with the right strategy" —
-  // counting the whole set is stronger than counting the known paths above
-  // (which would report green even if a stray email-lookup mount appeared
-  // and a real one among them regressed to a different strategy by
-  // coincidence).
-  it('carries exactly five email-lookup mounts (1 token flow + 3 OTP arms + 1 discriminated send-verification-otp, BS#2547/BS#2551)', () => {
+  // (Option A) to five, and by BS#2553's invite-member move to six. The
+  // tally is the cheapest possible drift check for "did every email-lookup
+  // mount actually land with the right strategy" — counting the whole set is
+  // stronger than counting the known paths above (which would report green
+  // even if a stray email-lookup mount appeared and a real one among them
+  // regressed to a different strategy by coincidence).
+  it('carries exactly six email-lookup mounts (1 token flow + 3 OTP arms + 1 discriminated send-verification-otp + invite-member, BS#2547/BS#2551/BS#2553)', () => {
     const emailLookupMounts = FLAT_MOUNTS.filter((m) => m.subject === 'email-lookup');
-    expect(emailLookupMounts).toHaveLength(5);
+    expect(emailLookupMounts).toHaveLength(6);
     expect(emailLookupMounts.map((m) => m.path).sort()).toEqual(
       [
         '/request-password-reset',
@@ -123,8 +135,24 @@ describe('flat mounts', () => {
         '/email-otp/reset-password',
         '/forget-password/email-otp',
         '/email-otp/send-verification-otp',
+        '/organization/invite-member',
       ].sort()
     );
+  });
+
+  // BS#2553: the two mounts whose subject is resolved from the operation's
+  // own 2xx response body, and the responsePath each declares — pinned so a
+  // future refactor of either better-auth response shape (or a copy-paste
+  // path typo) fails loudly here instead of silently nulling subject_user_id
+  // in production.
+  it('declares the correct responsePath for each response-user-id mount', () => {
+    expect(FLAT_MOUNTS.find((m) => m.path === '/organization/remove-member')?.responsePath).toEqual([
+      'member',
+      'userId',
+    ]);
+    expect(FLAT_MOUNTS.find((m) => m.path === '/organization/update-member-role')?.responsePath).toEqual(['userId']);
+    expect(ADMIN_ACTIONS.get('/admin/create-user')?.subject).toBe('response-user-id');
+    expect(ADMIN_ACTIONS.get('/admin/create-user')?.responsePath).toEqual(['user', 'id']);
   });
 
   it('mounts the three OTP password-reset arms public (resolveActor: false), per BS#2547', () => {

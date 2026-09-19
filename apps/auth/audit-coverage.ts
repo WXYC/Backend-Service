@@ -39,10 +39,39 @@
 
 export const ADMIN_PREFIX = '/admin';
 
+/**
+ * Which `subjectFrom` strategy an audited mount/action uses — shared between
+ * `AdminAction` and `FlatMount` (BS#2553 unified the two, which previously
+ * each hard-coded their own single strategy: every admin action went through
+ * `extractBodyUserId` and every flat mount picked one of the first three
+ * here at construction time). `'response-user-id'` is the BS#2553 addition:
+ * read the subject id out of the operation's own 2xx JSON response body
+ * (which `account-audit-middleware.ts` already captures for error bodies,
+ * widened to also capture on 2xx for a mount using this strategy) instead of
+ * a body field or a fresh DB read. That is the right source for a subject
+ * that doesn't exist, or has just stopped existing, at request time:
+ * `admin/create-user`'s new user has no id until the row is created, and
+ * `organization/remove-member`'s target `auth_member` row is GONE by the
+ * time a post-finish DB lookup would run — deleting it is the whole point of
+ * the operation. See `account-audit-middleware.ts`'s `subjectStrategyFor`
+ * for what each strategy actually does.
+ */
+export type SubjectStrategy = 'body-user-id' | 'actor' | 'email-lookup' | 'response-user-id';
+
 export interface AdminAction {
   action: string;
   /** True only for the PII-bulk-read GETs (decision 3's explicit include list). Omitted (falsy) for every mutation. */
   includeGet?: true;
+  /**
+   * Subject-resolution strategy (BS#2553). Omitted (defaults to
+   * `'body-user-id'`, the pre-BS#2553 baseline every admin action used) for
+   * every action whose body already carries a plain `userId`. Only
+   * `/admin/create-user` sets this, to `'response-user-id'` — see
+   * `SubjectStrategy`'s doc comment for why.
+   */
+  subject?: SubjectStrategy;
+  /** Path into the parsed 2xx response body, e.g. `['user', 'id']` for admin/create-user. Read only when `subject === 'response-user-id'`. */
+  responsePath?: readonly string[];
   /**
    * MEDIUM 1 (code review BS#2537 PR #2545, second round): true for an
    * action that can DESTROY THE SESSION mid-request on the account it acts
@@ -113,12 +142,16 @@ export const STATION_SIGNUP_ADMIN_OPS = ['reveal', 'rotate', 'revoke', 'clear-co
 export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
   ['/admin/set-role', { action: 'admin.set-role' }],
   ['/admin/get-user', { action: 'admin.get-user', includeGet: true }],
-  // M4 (code review BS#2537 PR #2545): the created user doesn't exist yet
-  // at request time, so there is no `userId` in the body to extract — this
-  // action's rows always write subject_user_id NULL. The new user's id is
-  // only known from the RESPONSE, which the generic body-only extractor
-  // never sees. Same follow-up as the organization mounts below.
-  ['/admin/create-user', { action: 'admin.create-user' }],
+  // BS#2553 (resolves the M4 follow-up, code review BS#2537 PR #2545): the
+  // created user doesn't exist yet at request time, so there is no `userId`
+  // in the BODY to extract — but the id IS in the 2xx RESPONSE body
+  // (`{ user: { id, ... } }`, confirmed against
+  // node_modules/better-auth/dist/plugins/admin/routes.mjs's `createUser`
+  // — the same `ctx.json({ user: ... })` shape the `hooks.after` block in
+  // shared/authentication/src/auth.definition.ts already reads via
+  // `ctx.context.returned` for its own auto-verify-email purpose), so
+  // `subject: 'response-user-id'` reads it from there instead.
+  ['/admin/create-user', { action: 'admin.create-user', subject: 'response-user-id', responsePath: ['user', 'id'] }],
   ['/admin/update-user', { action: 'admin.update-user' }],
   ['/admin/list-users', { action: 'admin.list-users', includeGet: true }],
   // `list-user-sessions` is POST in the installed better-auth version
@@ -205,11 +238,15 @@ interface FlatMountFields {
    * and subject); `'email-lookup'` is the one DB read this layer performs,
    * resolving a submitted email to a user id so the email string itself
    * never lands in the table (AC#3); `'body-user-id'` is the generic
-   * best-effort `body.userId` extractor (decision 12). Selected once at
-   * `flatMountAuditMiddleware(mount)` construction time rather than
+   * best-effort `body.userId` extractor (decision 12); `'response-user-id'`
+   * (BS#2553) reads the subject out of the operation's own 2xx JSON
+   * response body instead — see `SubjectStrategy`'s doc comment. Selected
+   * once at `flatMountAuditMiddleware(mount)` construction time rather than
    * re-branching on `mount.action` per request.
    */
-  subject: 'body-user-id' | 'actor' | 'email-lookup';
+  subject: SubjectStrategy;
+  /** Path into the parsed 2xx response body — set (and meaningful) only when `subject === 'response-user-id'`. */
+  responsePath?: readonly string[];
   /** Same MEDIUM 1 flag as `AdminAction.serializeSessionRead` (see that doc comment) — set only on `delete-user`, the one FlatMount whose action destroys the caller's own session mid-request. */
   serializeSessionRead?: true;
 }
@@ -403,19 +440,37 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
   { path: '/update-user', action: 'update-user', resolveActor: true, subject: 'actor' },
   { path: '/delete-user', action: 'delete-user', resolveActor: true, subject: 'actor', serializeSessionRead: true },
 
-  // Authenticated organization mutations. KNOWN LIMITATION (M4, code review
-  // BS#2537 PR #2545): every one of these bodies carries a target
-  // identifier under a DIFFERENT field than `userId` — `invite-member` uses
-  // `email`, `remove-member`/`update-member-role` use `memberIdOrEmail`/
-  // `memberId`, `accept/cancel/reject-invitation` use `invitationId` — so
-  // the generic `body.userId` lookup always misses and `subject_user_id` is
-  // NULL on every row these mounts write. Deliberately NOT widened to also
-  // try those field names: `memberIdOrEmail` can BE an email address, and
-  // this column must never carry PII (the same constraint AC#3 enforces
-  // for `forget-password`). Resolving a real member/invitation identifier
-  // to a `subject_user_id` needs its own lookup (member -> userId,
-  // invitation -> invited userId) and is a follow-up, not a drive-by fix
-  // here.
+  // Authenticated organization mutations. KNOWN LIMITATION, narrowed by
+  // BS#2553 (was M4, code review BS#2537 PR #2545): `create`/`update`/
+  // `delete`/`cancel/accept/reject-invitation`/`leave` still carry their
+  // target under a field `body.userId` can't reach (`invitationId`, or no
+  // target at all), so `subject_user_id` stays NULL there — out of this
+  // ticket's scope (the parent issue named exactly four routes; these
+  // aren't among them). The three below `leave` WERE, and are fixed:
+  //
+  // - `invite-member`: the invitee usually has no account yet (an
+  //   organization invite is email-only — confirmed against
+  //   node_modules/better-auth/dist/plugins/organization/routes/crud-invites.mjs's
+  //   `createInvitation`, whose response never carries a `userId`), so
+  //   `subject: 'email-lookup'` reuses the SAME strategy `forget-password`
+  //   already uses (AC#3's email-never-persisted guarantee included) —
+  //   resolves only when the invited email already has an account (e.g.
+  //   re-inviting a former DJ), else best-effort NULL.
+  // - `remove-member` / `update-member-role`: `subject: 'response-user-id'`
+  //   instead of a member-id DB lookup, which would be actively WRONG for
+  //   `remove-member` — deleting the `auth_member` row IS the operation, so
+  //   by the time this middleware's post-finish lookup would run, the row
+  //   it needs is already gone. Both endpoints' 2xx bodies already carry
+  //   the resolved `userId` (confirmed against the same file's
+  //   `removeMember`/`updateMemberRole`: `ctx.json({ member: toBeRemovedMember })`
+  //   and `ctx.json(updatedMember)` — different nesting, hence the
+  //   different `responsePath`), so reading it there costs no extra query
+  //   and can't race the deletion.
+  //
+  // `memberIdOrEmail`/`memberId` are still never read directly —
+  // `subject_user_id` must never carry PII or a member id (same constraint
+  // AC#3 enforces for `forget-password`), and neither strategy above
+  // touches those fields.
   { path: '/organization/create', action: 'organization.create', resolveActor: true, subject: 'body-user-id' },
   { path: '/organization/update', action: 'organization.update', resolveActor: true, subject: 'body-user-id' },
   { path: '/organization/delete', action: 'organization.delete', resolveActor: true, subject: 'body-user-id' },
@@ -423,7 +478,7 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
     path: '/organization/invite-member',
     action: 'organization.invite-member',
     resolveActor: true,
-    subject: 'body-user-id',
+    subject: 'email-lookup',
   },
   {
     path: '/organization/cancel-invitation',
@@ -447,13 +502,15 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
     path: '/organization/remove-member',
     action: 'organization.remove-member',
     resolveActor: true,
-    subject: 'body-user-id',
+    subject: 'response-user-id',
+    responsePath: ['member', 'userId'],
   },
   {
     path: '/organization/update-member-role',
     action: 'organization.update-member-role',
     resolveActor: true,
-    subject: 'body-user-id',
+    subject: 'response-user-id',
+    responsePath: ['userId'],
   },
   { path: '/organization/leave', action: 'organization.leave', resolveActor: true, subject: 'body-user-id' },
 ];
