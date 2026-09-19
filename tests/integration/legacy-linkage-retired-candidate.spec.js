@@ -40,55 +40,38 @@
  * contention instead of a retired candidate.
  *
  * Pure SQL, Postgres-dependent, `--runInBand` — cross-session lock timing, not
- * something a mock can model. `isRetiredLinkageCandidateError`'s
- * classification of the resulting error (constraint-scoped, not
- * SQLSTATE-only) is unit-tested against hand-built doubles in
- * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts`; this spec instead
- * `require`s the REAL compiled classifier (`jobs/legacy-linkage-resolve/
- * retired-candidate.ts`, built to `dist/retired-candidate.cjs` — see
- * `tsup.config.ts`) and calls it against the error a real concurrent delete
- * actually produces.
+ * something a mock can model. This spec does not import `job.ts` or
+ * `isRetiredLinkageCandidateError` (`jobs/legacy-linkage-resolve/retired-
+ * candidate.ts`) at all — the integration project has no TypeScript
+ * transform, and an earlier draft (BS#2594 review) worked around that by
+ * `require`-ing a `dist/retired-candidate.cjs` bundle tsup emitted
+ * specifically for this spec. Review found that require bought nothing the
+ * unit suite (`tests/unit/jobs/legacy-linkage-resolve/job.test.ts`, hand-built
+ * doubles for both the bare driver shape and the wrapped `DrizzleQueryError`
+ * shape production actually hits) didn't already cover, so it — and the CJS
+ * dual-emit that existed only to produce that artifact — were dropped
+ * (BS#2601).
  *
- * That error arrives via a RAW `postgres` client (`worker`, no drizzle in the
- * path), so on its own this spec proves only the fallback half of
- * `extractSqlState`/`extractConstraintName`'s two-level read: `code` and
- * `constraint_name` sit at the TOP level here, never under `.cause`. Every
- * production rejection takes the OTHER branch instead — drizzle's
- * `DrizzleQueryError` wraps every query rejection unconditionally (see
- * `sqlstate.ts`'s docstring), so `.cause` is where the real SQLSTATE and
- * constraint name live in production, and `error.code`/`error.constraint_name`
- * are `undefined` there. The rotation test below adds one more assertion that
- * re-wraps that SAME real driver error and re-classifies it — so the
- * SQLSTATE and constraint name sitting under `.cause` are genuine postgres-js
- * output, not invented — but the wrapper placed around them
- * (`{ message, code: undefined, constraint_name: undefined, cause: error }`)
- * is a hand-built object literal standing in for `DrizzleQueryError`, not a
- * real one: nothing in this repo constructs a `DrizzleQueryError` directly,
- * and every one of the ~14 sites that names the type models `.cause` by hand
- * the same way this assertion does. So what this spec actually exercises is
- * the real bare driver shape end to end, plus the classifier run against a
- * hand-built stand-in for drizzle's wrap — never a hand-built double
- * asserting the same two fields against itself. That is real ground gained
- * over the unit doubles alone (`tests/unit/jobs/legacy-linkage-resolve/
- * job.test.ts`, which still cover the wrapped shape otherwise), but it is not
- * a full closure of the wrapped-shape gap `sqlstate.ts` warns about (a
- * predicate proven only against hand-built doubles, shipped as dead code
- * against a green suite once already). A test that drives a real drizzle
- * instance through this same race, so the wrapper shape itself is observed
- * rather than assumed, is tracked as a follow-up.
+ * What this spec proves instead: that a real concurrent `DELETE
+ * /library/:id`, racing this job's own UPDATE past the FK insert-check the
+ * way the paragraphs above describe, actually produces the error shape the
+ * unit doubles assume — SQLSTATE `23503`, `constraint_name` set to one of
+ * `RETIRED_LINKAGE_CONSTRAINTS`'s two entries — rather than a lock timeout or
+ * some other FK violation. That is real ground gained over the unit doubles
+ * alone: the doubles prove the classifier reads those two fields correctly,
+ * this spec proves a real driver error under this specific race actually
+ * carries them. It does not prove the classifier accepts what it proves is
+ * real — that link stays covered only by the unit suite's hand-built
+ * doubles, the same class of gap `shared/database/src/sqlstate.ts`'s
+ * docstring warns about (a predicate proven only against doubles, shipped as
+ * dead code against a green suite once already: `deleteAlbumFromDB`'s
+ * `lock_unavailable` arm). A test that drives a real drizzle instance
+ * through this same race, so the classifier is exercised end to end against
+ * a real wrapped error rather than assumed to handle one, is tracked as a
+ * follow-up (WXYC/Backend-Service#2605).
  */
 
-const path = require('path');
 const postgres = require('postgres');
-
-const distDir = path.join(__dirname, '..', '..', 'jobs', 'legacy-linkage-resolve', 'dist');
-// The REAL compiled classifier — no reimplementation — so what this spec
-// proves is the behavior that ships, not a second hand-built copy of the
-// SQLSTATE-plus-constraint-name check (BS#2594 review). See
-// `retired-candidate.ts`'s docstring and `shared/database/src/sqlstate.ts`'s
-// (a predicate proven only against hand-built doubles shipped as dead code
-// against a green suite once already).
-const { isRetiredLinkageCandidateError } = require(path.join(distDir, 'retired-candidate.cjs'));
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const SHAPE_FIXTURE_LIBRARY_ID = 7000;
@@ -351,19 +334,6 @@ describe('legacy-linkage-resolve stands down on a retired candidate (BS#2594)', 
     expect(error).not.toBeNull();
     expect(error.code).toBe('23503');
     expect(error.constraint_name).toBe('rotation_album_id_library_id_fk');
-    // The real predicate, against the real driver error — not a hand-built
-    // double asserting the same two fields against itself.
-    expect(isRetiredLinkageCandidateError(error)).toBe(true);
-
-    // Same real driver error, re-wrapped in the shape drizzle's
-    // `DrizzleQueryError` actually produces (`.cause` carries the driver
-    // error; the wrapper's own `code`/`constraint_name` are `undefined`) —
-    // the branch of `extractSqlState`/`extractConstraintName` every
-    // production `tx.execute` rejection takes, which the bare `error` above
-    // never exercises. Proves the `.cause` branch against a REAL error, not
-    // a hand-built double asserting the same two fields against itself.
-    const wrapped = { message: 'Failed query', code: undefined, constraint_name: undefined, cause: error };
-    expect(isRetiredLinkageCandidateError(wrapped)).toBe(true);
   });
 
   test('a concurrent delete mid-statement produces 23503 on flowsheet_album_id_library_id_fk too', async () => {
@@ -374,8 +344,6 @@ describe('legacy-linkage-resolve stands down on a retired candidate (BS#2594)', 
     expect(error).not.toBeNull();
     expect(error.code).toBe('23503');
     expect(error.constraint_name).toBe('flowsheet_album_id_library_id_fk');
-    // The real predicate, against the real driver error.
-    expect(isRetiredLinkageCandidateError(error)).toBe(true);
   });
 
   test('retried on the next slot, with no racing delete, the retired candidate is gone and the rest of the cohort still drains', async () => {
