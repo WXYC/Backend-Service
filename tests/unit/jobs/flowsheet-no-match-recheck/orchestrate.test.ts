@@ -40,6 +40,7 @@ import type { DiscogsMatchResult } from '@wxyc/lml-client';
 
 import {
   runNoMatchRecheck,
+  buildRecheckWaitForQuietPeriod,
   excludeCandidateIds,
   mergeTotals,
   type Candidate,
@@ -423,6 +424,61 @@ describe('runNoMatchRecheck', () => {
     });
 
     expect(checkLiveActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildRecheckWaitForQuietPeriod / the shared pause budget (BS#2222)', () => {
+  const oneRow = (): Candidate[] => [
+    { id: 42, artist_name: 'Juana Molina', album_title: 'DOGA', track_title: 'la paradoja', album_id: null },
+  ];
+
+  test('an injected gate is awaited once per candidate, and the pass builds no gate of its own', async () => {
+    // This is what lets job.ts hand ONE accrual closure to both passes so they
+    // pool one LIVE_ACTIVITY_MAX_PAUSE_MS ceiling. The pre-review shape split
+    // the ceiling between two independently-accruing gates and ran the head
+    // first, so head exhaustion threw past the tail pass — the starvation
+    // guard and the whole historical-cohort drain — entirely.
+    const waitForQuietPeriod = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
+    const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+
+    await runNoMatchRecheck({
+      loadCandidates: makeLoadCandidates(oneRow()),
+      lookup: jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' }),
+      write: jest.fn<WriteFn>().mockResolvedValue({ written: true }),
+      markAttempted: makeMarkAttempted(),
+      waitForQuietPeriod,
+      checkLiveActivity,
+    });
+
+    expect(waitForQuietPeriod).toHaveBeenCalledTimes(1);
+    // The injected gate replaces the built one outright — a pass that also
+    // built its own would probe (and pause) twice per row.
+    expect(checkLiveActivity).not.toHaveBeenCalled();
+  });
+
+  test('shared across two passes, one budget covers both: the gate accrues across passes and throws in whichever pass hits the ceiling', async () => {
+    const waitForQuietPeriod = buildRecheckWaitForQuietPeriod({
+      liveActivityLookbackSeconds: 60,
+      liveActivityPauseMs: 0,
+      liveActivityMaxPauseMs: 1,
+      checkLiveActivity: jest.fn<CheckLiveActivityFn>().mockResolvedValue(true),
+    });
+    const pass = (): Promise<unknown> =>
+      runNoMatchRecheck({
+        loadCandidates: makeLoadCandidates(oneRow()),
+        lookup: jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' }),
+        write: jest.fn<WriteFn>().mockResolvedValue({ written: true }),
+        markAttempted: makeMarkAttempted(),
+        waitForQuietPeriod,
+      });
+
+    // First pass pauses (budget not yet spent) and finishes its row only once
+    // the gate lets it through; with a 1 ms ceiling the gate throws on the
+    // second iteration, so the pass aborts.
+    await expect(pass()).rejects.toThrow(/Cooperative-pause budget exceeded/);
+    // The SAME closure is already exhausted for the second pass — which is the
+    // point: one run, one ceiling, regardless of how many passes it has.
+    await expect(pass()).rejects.toThrow(/Cooperative-pause budget exceeded/);
   });
 });
 

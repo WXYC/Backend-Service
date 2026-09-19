@@ -30,16 +30,36 @@
  * into the orchestrator or its transient-handling contract.
  *
  * BS#2222 adds a second, independent read: `query.ts`'s `HEAD_SLICE_DEFAULT`
- * rows always read at OFFSET 0, so a row the live worker writes today isn't
- * deferred a full cursor wrap for its first recheck. Both `loadCandidates`
- * calls (head + tail) run BEFORE either `runNoMatchRecheck` pass, since the
- * head pass's writes would otherwise shrink the ordering's front out from
- * under `cursorOffset` before the tail SELECT issues. The head slice runs
- * as its own `runNoMatchRecheck` pass so `nextCursorPosition` sees only the
- * tail run's `Totals` (folding the head's in would over-advance past unread
- * tail rows — see `watermark.ts`); `excludeCandidateIds` drops any tail row
- * the head read already covered, and each pass gets its own slice of
- * `LIVE_ACTIVITY_MAX_PAUSE_MS` so the two together don't double the ceiling.
+ * rows read near the front of the ordering every run, so a row the live worker
+ * writes today isn't deferred a full cursor wrap for its first recheck. Four
+ * things about that composition are load-bearing, and the first BS#2222 draft
+ * got three of them wrong (see that issue's review):
+ *
+ *   1. Both `loadCandidates` calls (head + tail) run BEFORE either
+ *      `runNoMatchRecheck` pass, since the first pass's writes would otherwise
+ *      shrink the ordering out from under the other pass's OFFSET before its
+ *      SELECT issues.
+ *   2. The head read has its OWN rotating cursor (`watermark.ts`'s
+ *      `HEAD_CURSOR_JOB_NAME` row, advancing by `headSlice` each run inside
+ *      `HEAD_CURSOR_WINDOW_DEFAULT`), not a bare OFFSET 0. A transient LML
+ *      outcome deliberately leaves `no_match_recheck_attempted_at` untouched
+ *      (BS#1977 / BS#2179 review HIGH 2), so an unguarded OFFSET 0 would
+ *      re-ask the identical front-of-ordering rows every run forever — the
+ *      exact starvation BS#2218's cursor exists to escape.
+ *   3. The two passes SHARE one cooperative-pause closure, so they pool one
+ *      `LIVE_ACTIVITY_MAX_PAUSE_MS` ceiling instead of splitting it. A split
+ *      ceiling let the first pass exhaust its share and throw
+ *      `LiveActivityPauseCeilingExceededError` past the second pass entirely;
+ *      the tail pass is the starvation guard and the whole historical-cohort
+ *      drain, so it runs FIRST and on the full pooled budget.
+ *   4. The tail cursor advances on the TAIL run's `Totals` MINUS the head
+ *      run's below-cursor departures. The head slice never occupied a tail
+ *      cursor position (folding its `scanned` in would over-advance past
+ *      unread tail rows), but its departures remove ordering positions below
+ *      that cursor, which pulls unread rows behind it — see `watermark.ts`'s
+ *      `headDeparturesBelowCursor`. `excludeCandidateIds` drops any tail row
+ *      the head read already covered, and the count it dropped is what keeps
+ *      that correction from double-counting.
  *
  * Cursor resolution is fail-fast, not best-effort: a `getCursorPosition` /
  * `countCandidates` failure aborts the run before any lookup (same posture
@@ -67,12 +87,23 @@
 
 import { closeDatabaseConnection, db, requirePositiveInt } from '@wxyc/database';
 
-import { runNoMatchRecheck, mergeTotals, excludeCandidateIds, resolveLiveActivityMaxPauseMs } from './orchestrate.js';
+import {
+  runNoMatchRecheck,
+  mergeTotals,
+  excludeCandidateIds,
+  buildRecheckWaitForQuietPeriod,
+  type Candidate,
+  type LookupFn,
+  type MarkAttemptedFn,
+  type Totals,
+  type WriteFn,
+} from './orchestrate.js';
 import {
   loadCandidates,
   countCandidates,
   BATCH_SIZE_DEFAULT,
   BATCH_SIZE_ENV,
+  HEAD_CURSOR_WINDOW_DEFAULT,
   HEAD_SLICE_DEFAULT,
   HEAD_SLICE_ENV,
   NO_MATCH_TTL_DAYS_DEFAULT,
@@ -81,9 +112,13 @@ import {
 import { lookupNoMatchRecheck } from './lml-fetch.js';
 import { markRecheckAttempted, writeMatch } from './writer.js';
 import {
+  HEAD_CURSOR_JOB_NAME,
   JOB_NAME,
   getCursorPosition,
+  headCursorWindow,
+  headDeparturesBelowCursor,
   nextCursorPosition,
+  nextHeadCursorPosition,
   setCursorPosition,
   stillCandidates,
   wrapCursor,
@@ -109,6 +144,100 @@ const resolveDryRun = (): boolean => {
   return raw === 'true' || raw === '1';
 };
 
+/**
+ * Split `batchSize` into the head slice and the tail the BS#2218 cursor reads.
+ *
+ * Clamped so the tail read — and with it the cursor advance — never drops to
+ * zero rows: a `HEAD_SLICE >= BATCH_SIZE` would otherwise silently disable the
+ * starvation guard. `clamped` is what `main` logs the warning off.
+ */
+export const resolveHeadSliceConfig = (
+  requestedHeadSlice: number,
+  batchSize: number
+): { headSlice: number; tailBatchSize: number; clamped: boolean } => {
+  const headSlice = Math.max(Math.min(requestedHeadSlice, batchSize - 1), 0);
+  return { headSlice, tailBatchSize: batchSize - headSlice, clamped: headSlice !== requestedHeadSlice };
+};
+
+/** Where this run's two reads sit, resolved from the two persisted cursors. */
+export type RecheckPassPlan = {
+  noMatchTtlDays: number;
+  headSlice: number;
+  tailBatchSize: number;
+  /** The head cursor's offset, inside its small rotating window. */
+  headCursorOffset: number;
+  /** The BS#2218 tail cursor's offset, inside the whole cohort. */
+  tailCursorOffset: number;
+  dryRun: boolean;
+};
+
+export type RecheckPassDeps = {
+  loadCandidates: (noMatchTtlDays: number, batchSize: number, cursorOffset: number) => Promise<Candidate[]>;
+  runRecheck: typeof runNoMatchRecheck;
+  lookup: LookupFn;
+  write: WriteFn;
+  markAttempted: MarkAttemptedFn;
+  /** ONE shared accrual closure for both passes — see `buildRecheckWaitForQuietPeriod`. */
+  waitForQuietPeriod: () => Promise<boolean>;
+};
+
+export type RecheckPassOutcome = {
+  headTotals: Totals;
+  tailTotals: Totals;
+  /** `headTotals` + `tailTotals`, for the run's single `finished` counter line. */
+  totals: Totals;
+  /** Tail rows `excludeCandidateIds` dropped because the head read already covered them. */
+  headRowsInTailWindow: number;
+};
+
+/**
+ * Both candidate reads, then both `runNoMatchRecheck` passes — the BS#2222
+ * composition, with every IO dependency injected so
+ * `tests/unit/jobs/flowsheet-no-match-recheck/job.test.ts` can pin the four
+ * load-bearing properties in the module doc comment above (read-before-write
+ * ordering, the two offsets, the shared pause closure, and the tail-first pass
+ * order).
+ */
+export const runRecheckPasses = async (plan: RecheckPassPlan, deps: RecheckPassDeps): Promise<RecheckPassOutcome> => {
+  // Both reads happen against the SAME pre-write snapshot -- running either
+  // pass first would shrink the ordering before the other SELECT issues,
+  // landing its offset past unread rows every run.
+  const headCandidates =
+    plan.headSlice > 0 ? await deps.loadCandidates(plan.noMatchTtlDays, plan.headSlice, plan.headCursorOffset) : [];
+  const tailCandidatesRaw =
+    plan.tailBatchSize > 0
+      ? await deps.loadCandidates(plan.noMatchTtlDays, plan.tailBatchSize, plan.tailCursorOffset)
+      : [];
+  const tailCandidates = excludeCandidateIds(
+    tailCandidatesRaw,
+    new Set(headCandidates.map((candidate) => candidate.id))
+  );
+
+  const runPass = (candidates: Candidate[]): Promise<{ totals: Totals }> =>
+    deps.runRecheck({
+      loadCandidates: () => Promise.resolve(candidates),
+      lookup: deps.lookup,
+      write: deps.write,
+      markAttempted: deps.markAttempted,
+      dryRun: plan.dryRun,
+      waitForQuietPeriod: deps.waitForQuietPeriod,
+    });
+
+  // Tail FIRST: it is the starvation guard and the historical-cohort drain, so
+  // if the shared pause budget is exhausted mid-run it is the head that loses
+  // its turn, not the drain. The head loses little by yielding -- its cursor
+  // stays put, so the same window is read next run.
+  const { totals: tailTotals } = await runPass(tailCandidates);
+  const { totals: headTotals } = await runPass(headCandidates);
+
+  return {
+    headTotals,
+    tailTotals,
+    totals: mergeTotals(headTotals, tailTotals),
+    headRowsInTailWindow: tailCandidatesRaw.length - tailCandidates.length,
+  };
+};
+
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   const dryRun = resolveDryRun();
@@ -127,16 +256,13 @@ const main = async (): Promise<void> => {
       context: JOB_NAME,
       note: 'This bounds the LML call volume per run — the whole point of the recurring drip.',
     });
-    // BS#2222: rows always read at OFFSET 0 — see query.ts's HEAD_SLICE_DEFAULT derivation.
+    // BS#2222: rows read at the head cursor every run, and the amount that
+    // cursor rotates by — see query.ts's HEAD_SLICE_DEFAULT derivation.
     const requestedHeadSlice = requirePositiveInt(process.env[HEAD_SLICE_ENV], HEAD_SLICE_ENV, HEAD_SLICE_DEFAULT, {
       context: JOB_NAME,
     });
-    // Clamp so the tail read (and with it the BS#2218 cursor advance) never
-    // drops to zero rows — a HEAD_SLICE >= BATCH_SIZE would otherwise
-    // silently disable the starvation guard.
-    const headSlice = Math.min(requestedHeadSlice, batchSize - 1);
-    const tailBatchSize = batchSize - headSlice;
-    if (headSlice !== requestedHeadSlice) {
+    const { headSlice, tailBatchSize, clamped } = resolveHeadSliceConfig(requestedHeadSlice, batchSize);
+    if (clamped) {
       log(
         'warn',
         'head_slice_clamped',
@@ -149,26 +275,19 @@ const main = async (): Promise<void> => {
       );
     }
 
-    // Split the cooperative-pause ceiling proportionally across the two
-    // runNoMatchRecheck calls below -- each otherwise resolves and enforces
-    // its own full LIVE_ACTIVITY_MAX_PAUSE_MS budget, which would let one
-    // run pause up to 2x the configured ceiling.
-    const totalLiveActivityMaxPauseMs = resolveLiveActivityMaxPauseMs();
-    const headLiveActivityMaxPauseMs =
-      totalLiveActivityMaxPauseMs > 0
-        ? Math.max(Math.round((totalLiveActivityMaxPauseMs * headSlice) / batchSize), 1)
-        : 0;
-    const tailLiveActivityMaxPauseMs =
-      totalLiveActivityMaxPauseMs > 0 ? Math.max(totalLiveActivityMaxPauseMs - headLiveActivityMaxPauseMs, 0) : 0;
-
     // BS#2218 starvation guard: resolve this run's OFFSET from the stored
     // cursor, clamped into the current candidate count's range (the cohort
     // shrinks between runs as rows resolve, so a stale cursor can otherwise
     // land past the current end) — see `watermark.ts`'s module doc comment
-    // for the full mechanism.
+    // for the full mechanism. BS#2222's head cursor is the same mechanism at
+    // a smaller modulus: its own `cronjob_runs` row, wrapped inside a recent
+    // window rather than the whole cohort.
     const totalCandidates = await countCandidates(noMatchTtlDays);
     const storedCursor = await getCursorPosition();
-    const cursorOffset = wrapCursor(storedCursor ?? 0, totalCandidates);
+    const tailCursorOffset = wrapCursor(storedCursor ?? 0, totalCandidates);
+    const headWindow = headCursorWindow(totalCandidates, HEAD_CURSOR_WINDOW_DEFAULT);
+    const storedHeadCursor = await getCursorPosition(HEAD_CURSOR_JOB_NAME);
+    const headCursorOffset = wrapCursor(storedHeadCursor ?? 0, headWindow);
 
     log('info', 'init', `${JOB_NAME} initialized`, {
       dry_run: dryRun,
@@ -177,65 +296,68 @@ const main = async (): Promise<void> => {
       head_slice: headSlice,
       tail_batch_size: tailBatchSize,
       total_candidates: totalCandidates,
-      cursor_offset: cursorOffset,
+      cursor_offset: tailCursorOffset,
+      head_cursor_offset: headCursorOffset,
+      head_cursor_window: headWindow,
     });
 
-    const onLivePause = (): void => {
-      log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
-    };
+    // ONE accrual closure for both passes, so they pool a single
+    // LIVE_ACTIVITY_MAX_PAUSE_MS ceiling instead of each enforcing its own
+    // (2x the configured ceiling) or splitting it (the first pass's
+    // exhaustion throwing past the second) — see orchestrate.ts.
+    const waitForQuietPeriod = buildRecheckWaitForQuietPeriod({
+      onLivePause: () => {
+        log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
+      },
+    });
 
-    // Both reads happen against the SAME pre-write snapshot -- running the
-    // head pass first would shrink the ordering's front before the tail
-    // SELECT issues, landing cursorOffset past unread rows every run.
-    const headCandidates = await loadCandidates(noMatchTtlDays, headSlice, 0);
-    const tailCandidatesRaw =
-      tailBatchSize > 0 ? await loadCandidates(noMatchTtlDays, tailBatchSize, cursorOffset) : [];
-    const tailCandidates = excludeCandidateIds(
-      tailCandidatesRaw,
-      new Set(headCandidates.map((candidate) => candidate.id))
+    const { headTotals, tailTotals, totals, headRowsInTailWindow } = await runRecheckPasses(
+      { noMatchTtlDays, headSlice, tailBatchSize, headCursorOffset, tailCursorOffset, dryRun },
+      {
+        loadCandidates,
+        runRecheck: runNoMatchRecheck,
+        lookup: lookupNoMatchRecheck,
+        write: writeMatch,
+        markAttempted: markRecheckAttempted,
+        waitForQuietPeriod,
+      }
     );
 
-    const { totals: headTotals } = await runNoMatchRecheck({
-      loadCandidates: () => Promise.resolve(headCandidates),
-      lookup: lookupNoMatchRecheck,
-      write: writeMatch,
-      markAttempted: markRecheckAttempted,
-      dryRun,
-      onLivePause,
-      liveActivityMaxPauseMs: headLiveActivityMaxPauseMs,
-    });
-    const { totals: tailTotals } = await runNoMatchRecheck({
-      loadCandidates: () => Promise.resolve(tailCandidates),
-      lookup: lookupNoMatchRecheck,
-      write: writeMatch,
-      markAttempted: markRecheckAttempted,
-      dryRun,
-      onLivePause,
-      liveActivityMaxPauseMs: tailLiveActivityMaxPauseMs,
-    });
-
-    const totals = mergeTotals(headTotals, tailTotals);
-
     // Advance past however many of the TAIL run's candidates are still
-    // candidates — the head slice's totals are deliberately excluded (see
-    // watermark.ts): it never occupied a cursor position, so folding it in
-    // would over-advance past unread tail rows. Skipped in dry-run mode.
+    // candidates, less the head run's below-cursor departures — the head's
+    // `scanned` is deliberately excluded (it never occupied a cursor
+    // position, so folding it in would over-advance past unread tail rows)
+    // while its DEPARTURES are deliberately subtracted (they remove ordering
+    // positions below the cursor, pulling unread rows behind it). See
+    // watermark.ts. Skipped in dry-run mode.
     //
     // Not reached when a run throws (a lookup failure is isolated per-row,
     // but `orchestrate.ts`'s cooperative-pause ceiling aborts the whole
-    // loop). Leaving the cursor unmoved there is the safe direction under
-    // this advance rule: the rows the aborted run did dispose of have left
-    // the candidate set, so the stored offset is a lower bound on where the
-    // next run should start — it re-reads leftovers, never skips unread
-    // rows. The aborted run still exits non-zero and captures to Sentry.
+    // loop). Leaving both cursors unmoved there is the safe direction: the
+    // rows the aborted run did dispose of have left the candidate set, so the
+    // stored offset is a lower bound on where the next run should start — it
+    // re-reads leftovers, never skips unread rows. The aborted run still
+    // exits non-zero and captures to Sentry.
     if (!dryRun) {
-      const nextCursor = nextCursorPosition(cursorOffset, tailTotals, totalCandidates);
+      const headDepartures = headDeparturesBelowCursor(headTotals, headRowsInTailWindow);
+      const nextCursor = nextCursorPosition(tailCursorOffset, tailTotals, totalCandidates, headDepartures);
       await setCursorPosition(db, nextCursor);
-      log('info', 'cursor_advanced', "persisted the next run's OFFSET cursor", {
-        cursor_offset: cursorOffset,
+      // The head cursor is a rotation, not a progress measure: it advances by
+      // one head slice regardless of the outcome mix, which is what stops a
+      // permanently-transient front-of-ordering row from being re-asked every
+      // single run.
+      const nextHeadCursor = nextHeadCursorPosition(headCursorOffset, headSlice, headWindow);
+      await setCursorPosition(db, nextHeadCursor, HEAD_CURSOR_JOB_NAME);
+      log('info', 'cursor_advanced', "persisted the next run's OFFSET cursors", {
+        cursor_offset: tailCursorOffset,
         next_cursor: nextCursor,
         tail_scanned: tailTotals.scanned,
         still_candidates: stillCandidates(tailTotals),
+        head_departures_below_cursor: headDepartures,
+        head_rows_in_tail_window: headRowsInTailWindow,
+        head_cursor_offset: headCursorOffset,
+        next_head_cursor: nextHeadCursor,
+        head_cursor_window: headWindow,
         total_candidates: totalCandidates,
       });
     }
@@ -251,4 +373,8 @@ const main = async (): Promise<void> => {
   }
 };
 
-void main();
+// Gated so the unit suite can import this module's exported helpers without
+// executing a run, the same guard 17+ sibling jobs use.
+if (process.env.NODE_ENV !== 'test') {
+  void main();
+}
