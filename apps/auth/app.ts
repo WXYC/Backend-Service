@@ -208,6 +208,14 @@ if (!isTestEnv) {
   // into sign-in's budget would let a manager's routine admin work 429
   // sign-in for everyone in the building.
   //
+  // Same `rateLimitKeyFromRequest` generator as six other limiters in this
+  // file, so it inherits the OPEN ASSUMPTION (BS#2193) documented on the
+  // get-session ceiling below: keying is on the full `X-Real-IP`, not a /56
+  // prefix, so an IPv6 client on a /64 could mint effectively unlimited
+  // buckets if nginx ever hands this service an IPv6 `X-Real-IP`. Not
+  // rekeyed here — that would silently rekey those six sibling limiters
+  // too, which is its own follow-up, not a drive-by.
+  //
   // Decision 2 (recorded 2026-09-18): sized at 100/15min, not the tighter
   // 10/15min brute-force tier. The limiter runs ahead of authentication, so
   // the budget has to clear the busiest legitimate burst — semester-start

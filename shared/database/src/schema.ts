@@ -3509,12 +3509,26 @@ export type NewStationSignupAttempt = InferInsertModel<typeof station_signup_att
 // privileged ops per week — stays in the thousands of rows, so the daily
 // prune's range scan is a cheap seq scan and a third index would tax every
 // write for a query with no caller. Add it later if volume proves otherwise.
-// BS#2554 restored this premise for the one surface that had briefly
-// invalidated it: `/auth/admin/*` shipped with no limiter of any kind, so an
-// anonymous loop against a known admin path could mint a row per request
-// with nothing bounding volume. `apps/auth/app.ts`'s dedicated
+// BS#2554 bounds exactly ONE of the surfaces that can invalidate this
+// premise, not the last one: `/auth/admin/*` shipped with no limiter of any
+// kind, so an anonymous loop against a known admin path could mint a row
+// per request with nothing bounding volume. `apps/auth/app.ts`'s dedicated
 // `adminPrefixRateLimit` (100/15min/IP, its own instance) now caps that
-// surface at ~400 rows/hour/IP, same as every other write path here.
+// surface at ~400 rows/hour/IP. That is NOT "same as every other write path
+// here" — the other tiers run 10/15min (~40/hr), 30/min (~1800/hr), and
+// 120/min (~7200/hr), each a different number, and the fourteen
+// authenticated flat mounts this table also audits (`/change-password`,
+// `/change-email`, `/update-user`, `/delete-user`, and the ten
+// `/organization/*` mutations dispatched by `mountAuthenticatedAccountAudit`
+// in `apps/auth/app.ts`) carry no limiter at all — still the exact defect
+// class BS#2554 fixed for the admin prefix, just not yet fixed for them.
+// And even on the one surface it does bound, 400/hour/IP against this
+// table's 730-day default retention
+// (`ACCOUNT_AUDIT_EVENT_DEFAULT_RETENTION_DAYS`, `account-audit.ts`) is
+// ~9.6k rows/day sustained from a single IP at the cap, before counting a
+// distributed source at all — the "stays in the thousands of rows" premise
+// above is not restored by this limiter, on this surface or the fourteen
+// still-open ones. Revisit if the standalone index is ever needed.
 export const account_audit_event = pgTable(
   'account_audit_event',
   {
