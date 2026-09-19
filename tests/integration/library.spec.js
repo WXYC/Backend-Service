@@ -3378,6 +3378,93 @@ describe('Library Artist Card (BS#2156)', () => {
     return res.body;
   }
 
+  /**
+   * Seeds `artist`'s five dependent counts to DISTINCT non-zero values --
+   * release_count=1, cross_reference_source_count=2,
+   * cross_reference_target_count=3, library_cross_reference_count=4,
+   * compilation_credit_count=5 -- the same shape and discipline as "reports
+   * each dependent count independently across all five predicates" below:
+   * distinct rather than equal expected values so a transposition between any
+   * two counts fails a caller's assertions, not just a zero-vs-nonzero
+   * omission. Shared by the PATCH tests that need a non-empty artist to pin
+   * count VALUE provenance, not just field presence. Returns a cleanup
+   * function the caller must invoke (typically in a `finally` block).
+   */
+  async function seedDistinctDependentCounts(artist) {
+    const sql = getTestDb();
+    const otherB = await createTestArtist();
+    const otherC = await createTestArtist();
+    const otherD = await createTestArtist();
+
+    // release_count: 1.
+    const release = await auth
+      .post('/library')
+      .send({
+        album_title: `Dependent Counts ${Date.now()}`,
+        artist_id: artist.id,
+        label: 'Test Label',
+        genre_id: 11,
+        format_id: 1,
+      })
+      .expect(201);
+
+    // library_cross_reference_count: 4, via `otherB`'s releases so they can't
+    // also inflate release_count.
+    const xrefLibraryIds = [];
+    for (let i = 0; i < 4; i += 1) {
+      const xrefRelease = await auth
+        .post('/library')
+        .send({
+          album_title: `Dependent Counts Xref ${i} ${Date.now()}`,
+          artist_id: otherB.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      xrefLibraryIds.push(xrefRelease.body.id);
+    }
+    for (const libraryId of xrefLibraryIds) {
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_library_crossreference (artist_id, library_id) VALUES (${artist.id}, ${libraryId})`
+      );
+    }
+
+    // cross_reference_source_count: 2 -- `artist` as SOURCE, two distinct targets.
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${artist.id}, ${otherB.id})`
+    );
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${artist.id}, ${otherC.id})`
+    );
+    // cross_reference_target_count: 3 -- `artist` as TARGET, three distinct sources.
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherB.id}, ${artist.id})`
+    );
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherC.id}, ${artist.id})`
+    );
+    await sql.unsafe(
+      `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherD.id}, ${artist.id})`
+    );
+
+    // compilation_credit_count: 5.
+    for (let i = 0; i < 5; i += 1) {
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.compilation_track_artist (library_id, artist_name, track_artist_id)
+         VALUES (${release.body.id}, 'Comp Artist ${i}', ${artist.id})`
+      );
+    }
+
+    return async () => {
+      await sql.unsafe(`DELETE FROM ${SCHEMA}.compilation_track_artist WHERE track_artist_id = ${artist.id}`);
+      await sql.unsafe(`DELETE FROM ${SCHEMA}.artist_library_crossreference WHERE artist_id = ${artist.id}`);
+      await sql.unsafe(
+        `DELETE FROM ${SCHEMA}.artist_crossreference WHERE source_artist_id = ${artist.id} OR target_artist_id = ${artist.id}`
+      );
+    };
+  }
+
   describe('GET /library/artists/:id', () => {
     test('returns the full card field set', async () => {
       const artist = await createTestArtist();
@@ -3391,13 +3478,166 @@ describe('Library Artist Card (BS#2156)', () => {
         'alphabetical_name',
         'genre_id',
         'code_letters',
-        'code_artist_number'
+        'code_artist_number',
+        'release_count',
+        'cross_reference_source_count',
+        'cross_reference_target_count',
+        'library_cross_reference_count',
+        'compilation_credit_count'
       );
       expect(res.body.artist_id).toBe(artist.id);
       expect(res.body.artist_name).toBe(artist.artist_name);
       expect(res.body.alphabetical_name).toBe(artist.alphabetical_name);
       expect(res.body.genre_id).toBe(11);
       expect(res.body.code_letters).toBe(artist.code_letters);
+    });
+
+    // Acceptance criterion: a fully deletable artist reports zeroes on every
+    // dependent count rather than omitting the fields.
+    test('reports zero dependent counts for a freshly created artist', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+
+      expect(res.body.release_count).toBe(0);
+      expect(res.body.cross_reference_source_count).toBe(0);
+      expect(res.body.cross_reference_target_count).toBe(0);
+      expect(res.body.library_cross_reference_count).toBe(0);
+      expect(res.body.compilation_credit_count).toBe(0);
+    });
+
+    // Each of the five counts gets a DISTINCT expected value (1/2/3/4/5) so
+    // the test is NOT invariant under a permutation of the five
+    // subquery-to-alias mappings -- in particular the `artist_crossreference`
+    // source/target transposition the ticket names as the easy mistake to
+    // make. With five equal expected values (the fixture's original shape),
+    // swapping `source_artist_id` and `target_artist_id` in the service
+    // leaves every assertion passing; with these five distinct values,
+    // transposing ANY two of the five subqueries lands the wrong number on
+    // at least one field and fails the test.
+    test('reports each dependent count independently across all five predicates', async () => {
+      const artist = await createTestArtist();
+      // Three distinct "other" artists, reused across both cross-reference
+      // directions -- `(artist, otherB)` and `(otherB, artist)` are different
+      // ordered pairs, so the same artist can sit on both sides without
+      // colliding with the `artist_crossref_source_target` unique index.
+      const otherB = await createTestArtist();
+      const otherC = await createTestArtist();
+      const otherD = await createTestArtist();
+      const sql = getTestDb();
+
+      // release_count: 1 -- the one release actually owned by `artist`.
+      const release = await auth
+        .post('/library')
+        .send({
+          album_title: `Dependent Counts ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      // library_cross_reference_count: 4 -- four distinct releases, owned by
+      // `otherB` (not `artist`) so they cannot also inflate release_count,
+      // which counts a different column (`library.artist_id`) entirely.
+      const xrefLibraryIds = [];
+      for (let i = 0; i < 4; i += 1) {
+        const xrefRelease = await auth
+          .post('/library')
+          .send({
+            album_title: `Dependent Counts Xref ${i} ${Date.now()}`,
+            artist_id: otherB.id,
+            label: 'Test Label',
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        xrefLibraryIds.push(xrefRelease.body.id);
+      }
+      for (const libraryId of xrefLibraryIds) {
+        await sql.unsafe(
+          `INSERT INTO ${SCHEMA}.artist_library_crossreference (artist_id, library_id) VALUES (${artist.id}, ${libraryId})`
+        );
+      }
+
+      // cross_reference_source_count: 2 -- `artist` as SOURCE, two distinct targets.
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${artist.id}, ${otherB.id})`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${artist.id}, ${otherC.id})`
+      );
+      // cross_reference_target_count: 3 -- `artist` as TARGET, three distinct sources.
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherB.id}, ${artist.id})`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherC.id}, ${artist.id})`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherD.id}, ${artist.id})`
+      );
+
+      // compilation_credit_count: 5 -- five distinct credit rows naming
+      // `artist` as the resolved track artist.
+      for (let i = 0; i < 5; i += 1) {
+        await sql.unsafe(
+          `INSERT INTO ${SCHEMA}.compilation_track_artist (library_id, artist_name, track_artist_id)
+           VALUES (${release.body.id}, 'Comp Artist ${i}', ${artist.id})`
+        );
+      }
+
+      try {
+        const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(res.body.release_count).toBe(1);
+        expect(res.body.cross_reference_source_count).toBe(2);
+        expect(res.body.cross_reference_target_count).toBe(3);
+        expect(res.body.library_cross_reference_count).toBe(4);
+        expect(res.body.compilation_credit_count).toBe(5);
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.compilation_track_artist WHERE track_artist_id = ${artist.id}`);
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artist_library_crossreference WHERE artist_id = ${artist.id}`);
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.artist_crossreference WHERE source_artist_id = ${artist.id} OR target_artist_id = ${artist.id}`
+        );
+      }
+    });
+
+    // `getArtistCardById` collapses a multi-genre artist onto its lowest
+    // `genre_id` crossreference (see the test above), but the dependent
+    // counts key on `artist_id` alone -- a release filed under a DIFFERENT
+    // genre than the one the card collapsed to must still count.
+    test('does not collapse dependent counts for a multi-genre artist', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 6, 9922)`
+      );
+
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Multi Genre Dependents ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      try {
+        const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        // The card collapses to genre 6, the lower id...
+        expect(res.body.genre_id).toBe(6);
+        // ...but the release, filed under genre 11, still counts.
+        expect(res.body.release_count).toBe(1);
+      } finally {
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 6`
+        );
+      }
     });
 
     // `artist_genre_key` is unique on (artist_id, genre_id), not on artist_id
@@ -3488,6 +3728,37 @@ describe('Library Artist Card (BS#2156)', () => {
 
       const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
       expect(card.body).toEqual(res.body);
+    });
+
+    // BS#2597 review (iteration 2, FIX C): the sibling GET-shape parity test
+    // above compares the PATCH body against the GET body via `toEqual`, but
+    // `createTestArtist()` yields all-zero counts on both sides -- that
+    // comparison would still pass if `getArtistDependentCounts` (or a caller
+    // of it) answered structurally-present-but-WRONG counts, as long as GET
+    // and PATCH were wrong the SAME way. This test gives the PATCH post-write
+    // 200 body its own ABSOLUTE, distinct-per-count assertions -- the same
+    // discipline "reports each dependent count independently across all five
+    // predicates" (GET, above) uses -- so a future regression that's wrong on
+    // both endpoints identically, not just a GET/PATCH divergence, still
+    // fails here.
+    test('reports each dependent count independently, with real values, in the post-write PATCH body', async () => {
+      const artist = await createTestArtist();
+      const cleanupDependents = await seedDistinctDependentCounts(artist);
+
+      try {
+        const res = await auth
+          .patch(`/library/artists/${artist.id}`)
+          .send({ artist_name: `${artist.artist_name} Counted Rename` })
+          .expect(200);
+
+        expect(res.body.release_count).toBe(1);
+        expect(res.body.cross_reference_source_count).toBe(2);
+        expect(res.body.cross_reference_target_count).toBe(3);
+        expect(res.body.library_cross_reference_count).toBe(4);
+        expect(res.body.compilation_credit_count).toBe(5);
+      } finally {
+        await cleanupDependents();
+      }
     });
 
     // `library.artist_name` is denormalized (Epic A.3) and the
@@ -3888,6 +4159,42 @@ describe('Library Artist Card (BS#2156)', () => {
 
       expect(res.body.artist_name).toBe(artist.artist_name);
       expect(res.body.alphabetical_name).toBe(`${artist.alphabetical_name} Updated`);
+    });
+
+    // BS#2597 review (iteration 2, FIX B): the test above still changes
+    // `alphabetical_name`, so it (like the GET-shape parity test near the top
+    // of this block) takes the POST-WRITE branch. No prior integration test
+    // resubmitted every writable field at its CURRENT value, so the true
+    // no-op short-circuit (`updateArtistCard`'s `if (!effectiveChange)`
+    // branch in the controller) had its 200 shape pinned only by a
+    // controller unit test against a mocked service -- which cannot see what
+    // `getArtistCard`'s GET actually composes. Seeding non-zero, distinct
+    // dependent counts (not `createTestArtist()`'s all-zero defaults) and
+    // asserting both an exact GET-body match AND each count's own value
+    // means this test would fail if the no-op branch were ever "optimised"
+    // to answer a stale/cached card instead of a fresh
+    // `getArtistDependentCounts` read.
+    test('resubmitting every field unchanged short-circuits to a no-op 200 in exact GET-shape parity', async () => {
+      const artist = await createTestArtist();
+      const cleanupDependents = await seedDistinctDependentCounts(artist);
+
+      try {
+        const res = await auth
+          .patch(`/library/artists/${artist.id}`)
+          .send({ artist_name: artist.artist_name, alphabetical_name: artist.alphabetical_name })
+          .expect(200);
+
+        expect(res.body.release_count).toBe(1);
+        expect(res.body.cross_reference_source_count).toBe(2);
+        expect(res.body.cross_reference_target_count).toBe(3);
+        expect(res.body.library_cross_reference_count).toBe(4);
+        expect(res.body.compilation_credit_count).toBe(5);
+
+        const card = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(card.body).toEqual(res.body);
+      } finally {
+        await cleanupDependents();
+      }
     });
 
     test('404s on an unknown artist id', async () => {

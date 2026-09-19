@@ -101,6 +101,15 @@ type ArtistCardMock = {
 const mockGetArtistCardById = jest.fn<(artistId: number) => Promise<ArtistCardMock | null>>();
 // POST /library/filings (BS#2474): genre-scoped artist-card resolution.
 const mockGetArtistCardByIdInGenre = jest.fn<(artistId: number, genreId: number) => Promise<ArtistCardMock | null>>();
+// BS#2597: the delete-refusal + informational counts merged onto the card response.
+type ArtistDependentCountsMock = {
+  release_count: number;
+  cross_reference_source_count: number;
+  cross_reference_target_count: number;
+  library_cross_reference_count: number;
+  compilation_credit_count: number;
+};
+const mockGetArtistDependentCounts = jest.fn<(artistId: number) => Promise<ArtistDependentCountsMock>>();
 const mockUpdateArtistInDB =
   jest.fn<
     (
@@ -227,6 +236,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
   getArtistCardById: mockGetArtistCardById,
   getArtistCardByIdInGenre: mockGetArtistCardByIdInGenre,
+  getArtistDependentCounts: mockGetArtistDependentCounts,
   updateArtistInDB: mockUpdateArtistInDB,
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
@@ -4322,7 +4332,7 @@ describe('library.controller', () => {
       await expect(getArtistCard(req, res, next)).rejects.toThrow('Artist not found');
     });
 
-    it('returns 200 with the card field set on success', async () => {
+    it('returns 200 with the card field set and the dependent counts on success', async () => {
       const card = {
         artist_id: 42,
         artist_name: 'Chuquimamani-Condori',
@@ -4331,15 +4341,69 @@ describe('library.controller', () => {
         code_letters: 'CH',
         code_artist_number: 3,
       };
+      const counts = {
+        release_count: 2,
+        cross_reference_source_count: 0,
+        cross_reference_target_count: 1,
+        library_cross_reference_count: 0,
+        compilation_credit_count: 3,
+      };
       mockGetArtistCardById.mockResolvedValue(card);
+      mockGetArtistDependentCounts.mockResolvedValue(counts);
       const req = { params: { id: '42' } } as unknown as Request;
       const res = mockResponse();
 
       await getArtistCard(req, res, next);
 
       expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
+      expect(mockGetArtistDependentCounts).toHaveBeenCalledWith(42);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith(card);
+      expect(res.json).toHaveBeenCalledWith({ ...card, ...counts });
+    });
+
+    // The zero case: a fully deletable artist reports zeroes on every count
+    // rather than omitting the fields (issue acceptance criterion).
+    it('reports zero counts rather than omitting the fields for a deletable artist', async () => {
+      const card = {
+        artist_id: 43,
+        artist_name: 'Nilüfer Yanya',
+        alphabetical_name: 'Yanya, Nilüfer',
+        genre_id: 6,
+        code_letters: 'NY',
+        code_artist_number: 1,
+      };
+      const zeroCounts = {
+        release_count: 0,
+        cross_reference_source_count: 0,
+        cross_reference_target_count: 0,
+        library_cross_reference_count: 0,
+        compilation_credit_count: 0,
+      };
+      mockGetArtistCardById.mockResolvedValue(card);
+      mockGetArtistDependentCounts.mockResolvedValue(zeroCounts);
+      const req = { params: { id: '43' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistCard(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          release_count: 0,
+          cross_reference_source_count: 0,
+          cross_reference_target_count: 0,
+          library_cross_reference_count: 0,
+          compilation_credit_count: 0,
+        })
+      );
+    });
+
+    it('does not fetch the dependent counts when the artist does not exist', async () => {
+      mockGetArtistCardById.mockResolvedValue(null);
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(getArtistCard(req, res, next)).rejects.toThrow('Artist not found');
+      expect(mockGetArtistDependentCounts).not.toHaveBeenCalled();
     });
   });
 
@@ -4728,8 +4792,20 @@ describe('library.controller', () => {
     // iOS and dj-site poller re-download the full catalog for a write that
     // changed nothing. `updateAlbum` guards exactly this (#1555); this path
     // reaches it through a coarser statement-level trigger on the parent table.
+    // BS#2597: the no-op short-circuit is one of the two PATCH 200 sites
+    // that must answer in the same `ArtistCardWithDependentCounts` shape
+    // `getArtistCard` serves -- a resubmit of the current value still writes
+    // nothing, but it does not get to skip the counts.
     it('short-circuits a no-op edit without writing, so the catalog watermark does not advance', async () => {
+      const noOpCounts = {
+        release_count: 4,
+        cross_reference_source_count: 1,
+        cross_reference_target_count: 2,
+        library_cross_reference_count: 3,
+        compilation_credit_count: 5,
+      };
       mockGetArtistCardById.mockResolvedValue(existingCard);
+      mockGetArtistDependentCounts.mockResolvedValue(noOpCounts);
       const req = {
         params: { id: '42' },
         body: { alphabetical_name: existingCard.alphabetical_name },
@@ -4739,8 +4815,9 @@ describe('library.controller', () => {
       await updateArtistCard(req, res, next);
 
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+      expect(mockGetArtistDependentCounts).toHaveBeenCalledWith(42);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith(existingCard);
+      expect(res.json).toHaveBeenCalledWith({ ...existingCard, ...noOpCounts });
     });
 
     it('still writes when the value actually changes', async () => {
@@ -4845,6 +4922,8 @@ describe('library.controller', () => {
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 
+    // BS#2597: the post-write 200 -- the other of the two PATCH sites that
+    // must answer in the `ArtistCardWithDependentCounts` shape.
     it('returns 200 with the refreshed card shape (not the bare artists row) on success', async () => {
       const refreshed: ArtistCardMock = {
         artist_id: 42,
@@ -4854,12 +4933,20 @@ describe('library.controller', () => {
         code_letters: 'AN',
         code_artist_number: 3,
       };
+      const refreshedCounts = {
+        release_count: 2,
+        cross_reference_source_count: 0,
+        cross_reference_target_count: 1,
+        library_cross_reference_count: 4,
+        compilation_credit_count: 3,
+      };
       mockGetArtistCardById.mockResolvedValueOnce(existingCard).mockResolvedValueOnce(refreshed);
       mockUpdateArtistInDB.mockResolvedValue({
         id: 42,
         artist_name: 'Anohni',
         alphabetical_name: 'Anohni Renamed',
       });
+      mockGetArtistDependentCounts.mockResolvedValue(refreshedCounts);
       const req = {
         params: { id: '42' },
         body: { alphabetical_name: 'Anohni Renamed' },
@@ -4871,9 +4958,11 @@ describe('library.controller', () => {
       expect(mockUpdateArtistInDB).toHaveBeenCalledWith(42, {
         alphabetical_name: 'Anohni Renamed',
       });
+      expect(mockGetArtistDependentCounts).toHaveBeenCalledWith(42);
       expect(res.status).toHaveBeenCalledWith(200);
-      // Same field set GET /library/artists/:id serves — `artist_id`, not `id`.
-      expect(res.json).toHaveBeenCalledWith(refreshed);
+      // Same field set GET /library/artists/:id serves — `artist_id`, not
+      // `id`, PLUS the dependent counts (BS#2597 parity).
+      expect(res.json).toHaveBeenCalledWith({ ...refreshed, ...refreshedCounts });
     });
   });
 

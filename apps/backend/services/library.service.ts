@@ -3747,6 +3747,49 @@ export const getArtistCardByIdInGenre = async (artist_id: number, genre_id: numb
   return response[0] ?? null;
 };
 
+export type ArtistDependentCounts = {
+  release_count: number;
+  cross_reference_source_count: number;
+  cross_reference_target_count: number;
+  library_cross_reference_count: number;
+  compilation_credit_count: number;
+};
+
+/**
+ * BS#2597 -- the dependent counts behind BS#2562's `DELETE /library/artists/:id`
+ * refusal. The first four are refusal predicates that issue enforces; this
+ * exports them so it consumes rather than reimplements. The fifth,
+ * `compilation_credit_count` (`compilation_track_artist.track_artist_id`), is
+ * reported only -- that FK is `ON DELETE set null` (see the schema comment on
+ * that column) and never blocks a delete.
+ *
+ * `getArtistCard` calls this on every artist-card read, so it is ONE
+ * statement with five scalar subqueries rather than five round trips. Every
+ * column filtered on here is indexed: `artist_id_idx` (library), the leading
+ * column of `artist_crossref_source_target` (source_artist_id),
+ * `library_id_artist_id` (artist_library_crossreference), and
+ * `cta_track_artist_id_idx` (compilation_track_artist). The one exception is
+ * `artist_crossreference.target_artist_id`, which is only the trailing column
+ * of that composite unique index and has no index of its own to serve this
+ * filter -- flagged on the issue rather than adding a migration here, since
+ * the table is small (78 rows as of the 2026-08-11 measurement on
+ * WXYC/wiki#89 -- see the doc comment above `sourceArtist` further down this
+ * file, which cites the same measurement) and unindexed cost is currently
+ * negligible.
+ */
+export const getArtistDependentCounts = async (artist_id: number): Promise<ArtistDependentCounts> => {
+  const rows = (await db.execute(sql`
+    SELECT
+      (SELECT count(*)::int FROM ${library} WHERE ${library.artist_id} = ${artist_id}) AS release_count,
+      (SELECT count(*)::int FROM ${artist_crossreference} WHERE ${artist_crossreference.source_artist_id} = ${artist_id}) AS cross_reference_source_count,
+      (SELECT count(*)::int FROM ${artist_crossreference} WHERE ${artist_crossreference.target_artist_id} = ${artist_id}) AS cross_reference_target_count,
+      (SELECT count(*)::int FROM ${artist_library_crossreference} WHERE ${artist_library_crossreference.artist_id} = ${artist_id}) AS library_cross_reference_count,
+      (SELECT count(*)::int FROM ${compilation_track_artist} WHERE ${compilation_track_artist.track_artist_id} = ${artist_id}) AS compilation_credit_count
+  `)) as unknown as ArtistDependentCounts[];
+
+  return rows[0];
+};
+
 /** Partial-update payload for PATCH /library/artists/:id -- the two `modifyArtist` form fields. */
 export type UpdateArtistRow = {
   artist_name?: string;

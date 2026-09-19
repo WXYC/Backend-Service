@@ -297,6 +297,25 @@ library_route.get('/artists/by-code', requirePermissions({ catalog: ['read'] }),
 // `/:id/compilation-tracks` trap documented above. `/artists/search` and
 // `/artists/peek-code` staying on their own handlers is pinned by the
 // integration spec.
+//
+// BS#2597 widened this response (both the GET and the PATCH 200) to include
+// the five artist-delete-refusal dependent counts, and left the tier at
+// `catalog: ['read']` -- member and dj -- deliberately, even though three of
+// the five counts (`cross_reference_source_count`,
+// `cross_reference_target_count`, `library_cross_reference_count`) aggregate
+// the same two collections `/crossreferences/artists` and
+// `/crossreferences/releases` gate at `catalog: ['write']` above. The two
+// tiers are not describing the same thing: those two endpoints hand back
+// collection CONTENTS (which artist cross-references to which, under what
+// comment), while these three fields hand back CARDINALITY alone -- a member
+// learning an artist has two source cross-references learns catalog
+// structure, not the rows themselves. The `catalog: ['write']` gate on the
+// collections exists to protect their contents, not their counts, and the
+// delete control this cardinality feeds (WXYC/Backend-Service#2562) is
+// itself `catalog: ['write']`-gated at the DELETE verb -- reading "how many"
+// here cannot let a lower-tier caller act on it. If a future field on this
+// response ever carries collection contents rather than a count, it needs
+// its own tier decision; this one does not generalize to that case.
 library_route.get('/artists/:id', requirePermissions({ catalog: ['read'] }), libraryController.getArtistCard);
 
 library_route.patch('/artists/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateArtistCard);

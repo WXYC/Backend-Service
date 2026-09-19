@@ -39,14 +39,7 @@ const tableDoubles = (): Array<[string, Record<string, string>]> =>
   );
 
 /** Doubles still declared bare `{}`. Recorded drift — this list may only SHRINK. */
-const EMPTY_DOUBLES = [
-  'anonymous_devices',
-  'user_activity',
-  'specialty_shows',
-  'schedule',
-  'artist_crossreference',
-  'cronjob_runs',
-];
+const EMPTY_DOUBLES = ['anonymous_devices', 'user_activity', 'specialty_shows', 'schedule', 'cronjob_runs'];
 
 describe('database.mock table doubles: table-qualified sentinels', () => {
   it('finds the doubles at all (guards the filter above against a silent zero)', () => {

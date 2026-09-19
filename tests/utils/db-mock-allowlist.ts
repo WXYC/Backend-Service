@@ -77,7 +77,7 @@ export const DB_MOCK_ALLOWLIST: DbMockAllowlist = {
       'blockedReason',
       'requestCount',
     ],
-    artist_crossreference: ['source_artist_id', 'target_artist_id', 'comment'],
+    artist_crossreference: ['comment'],
     artist_library_crossreference: ['comment'],
     artist_metadata: ['artist_bio'],
     artists: [

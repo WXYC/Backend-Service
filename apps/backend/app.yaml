@@ -625,10 +625,11 @@ components:
     ArtistCard:
       type: object
       description: >-
-        The artist-card field set, returned by `GET /library/artists/{id}` and by
-        the `PATCH` 200 on the same path. `artist_id`, not `id` — the two
-        endpoints deliberately agree so a client that PATCHes and a client that
-        re-GETs the URL decode one shape.
+        The base artist-card field set (`artist_id`, not `id`). Not returned
+        directly by either artist-card endpoint — both `GET
+        /library/artists/{id}` and its `PATCH` 200 answer
+        `ArtistCardWithDependentCounts`, which embeds this shape via `allOf`
+        and is where the two endpoints' parity contract is documented.
       properties:
         artist_id:
           type: integer
@@ -642,6 +643,64 @@ components:
           type: string
         code_artist_number:
           type: integer
+
+    ArtistCardWithDependentCounts:
+      description: >-
+        `ArtistCard` plus the dependent counts behind `DELETE
+        /library/artists/{id}`'s (BS#2562) refusal. Returned by BOTH `GET
+        /library/artists/{id}` and the `PATCH` 200 on the same path (BS#2597)
+        — the two endpoints deliberately agree, so a client that PATCHes can
+        refresh its delete-control state straight from the PATCH body instead
+        of re-GETting, and a client that re-GETs the URL decodes the same
+        shape either way. A field added to this schema, or to either 200
+        response's construction in `library.controller.ts`
+        (`updateArtistCard` has TWO 200 sites — the no-op short-circuit and
+        the post-write return — both must stay in step with `getArtistCard`),
+        must be added to all three or the parity contract breaks silently.
+      allOf:
+        - $ref: '#/components/schemas/ArtistCard'
+        - type: object
+          properties:
+            release_count:
+              type: integer
+              description: >-
+                Catalog releases filed to this artist (`library.artist_id`).
+                A non-zero count is the primary delete refusal — move or
+                delete the releases first.
+            cross_reference_source_count:
+              type: integer
+              description: >-
+                Legacy artist-to-artist cross-references naming this artist
+                as the source (tubafrenzy's `LIBRARY_CODE_CROSS_REFERENCE`).
+                A non-zero count refuses the delete.
+            cross_reference_target_count:
+              type: integer
+              description: >-
+                The same legacy cross-reference collection, naming this
+                artist as the target. A non-zero count refuses the delete.
+            library_cross_reference_count:
+              type: integer
+              description: >-
+                Legacy release cross-references pointing at this artist
+                (tubafrenzy's `RELEASE_CROSS_REFERENCE`). A non-zero count
+                refuses the delete.
+            compilation_credit_count:
+              type: integer
+              description: >-
+                Compilation-track credits attributed to this artist
+                (`compilation_track_artist.track_artist_id`). Informational
+                only — never a delete refusal. That foreign key is `ON DELETE
+                set null`, matching the `concerts.headlining_artist_id`
+                precedent: deleting the artist clears the credit's link
+                rather than being blocked by it, so this count tells a
+                librarian what attribution they are about to unlink, not
+                what would prevent the delete.
+          required:
+            - release_count
+            - cross_reference_source_count
+            - cross_reference_target_count
+            - library_cross_reference_count
+            - compilation_credit_count
 
     NewRotationRequest:
       type: object
@@ -3023,11 +3082,13 @@ paths:
             type: integer
       responses:
         '200':
-          description: The artist-card field set
+          description: >-
+            The artist-card field set, plus the delete-refusal dependent
+            counts (BS#2597) — see `ArtistCardWithDependentCounts`.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ArtistCard'
+                $ref: '#/components/schemas/ArtistCardWithDependentCounts'
         '400':
           description: Invalid artist id
         '404':
@@ -3108,13 +3169,17 @@ paths:
       responses:
         '200':
           description: >
-            The refreshed artist card — the same field set `GET
-            /library/artists/{id}` returns. Also the answer to a no-op edit
-            (a field resubmitted at its current value), which writes nothing.
+            The refreshed artist card in the same `ArtistCardWithDependentCounts`
+            shape the `GET` on this path returns (BS#2597) — the dependent
+            counts are recomputed and included here too, so a client can
+            refresh its delete-control state from the PATCH body without a
+            follow-up GET. Also the answer to a no-op edit (a field
+            resubmitted at its current value), which writes nothing but still
+            answers with the current counts.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ArtistCard'
+                $ref: '#/components/schemas/ArtistCardWithDependentCounts'
         '400':
           description: >
             Invalid artist id, missing/non-object body, a `genre_id` /
