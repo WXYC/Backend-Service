@@ -1,15 +1,23 @@
 /**
  * The "retired linkage candidate" classifier — split out of `job.ts` (BS#2594
- * review) so `tests/integration/legacy-linkage-retired-candidate.spec.js` can
- * `require` the REAL predicate against a REAL driver error, rather than
- * hand-rolling a second copy of the SQLSTATE-plus-constraint-name check and
- * only proving that copy agrees with itself. `shared/database/src/
- * sqlstate.ts`'s docstring records the exact shape of that gap: a predicate
- * proven only against hand-built doubles shipped as dead code against a green
- * suite once already (`deleteAlbumFromDB`'s `lock_unavailable` arm). Every
- * job-local unit test (`tests/unit/jobs/legacy-linkage-resolve/job.test.ts`)
- * still exercises this through `job.ts`'s normal import — this file changes
- * WHERE the logic lives, not who calls it.
+ * review) as its own single-responsibility module. Unit-tested against
+ * hand-built doubles (both the bare driver shape and the wrapped
+ * `DrizzleQueryError` shape production actually hits) in
+ * `tests/unit/jobs/legacy-linkage-resolve/job.test.ts`, exercised there
+ * through `job.ts`'s normal import — this file changes WHERE the logic
+ * lives, not who calls it. `shared/database/src/sqlstate.ts`'s docstring
+ * records the general shape of the risk hand-built-double-only coverage
+ * carries: a predicate proven only against doubles shipped as dead code
+ * against a green suite once already (`deleteAlbumFromDB`'s
+ * `lock_unavailable` arm). `tests/integration/legacy-linkage-retired-
+ * candidate.spec.js` closes that gap from a different angle — not by
+ * importing this predicate, but by proving the raw error shape the unit
+ * doubles assume (SQLSTATE `23503`, `constraint_name` one of the two below)
+ * is what a real concurrent `DELETE /library/:id` actually produces; an
+ * earlier draft additionally built this module to a CJS bundle so that spec
+ * could `require` and run the real predicate too, but review found that
+ * bought nothing the unit suite didn't already cover, so BS#2601 dropped it
+ * — see that spec's own docstring.
  */
 
 import { extractSqlState, extractConstraintName } from '@wxyc/database';
