@@ -243,13 +243,24 @@ export const stillCandidates = (totals: Totals): number => totals.scanned - depa
  *
  * `headRowsInTailWindow` is how many of the head read's rows also appeared in
  * the tail read before `orchestrate.ts`'s `excludeCandidateIds` dropped them
- * (non-zero only when the two windows overlap, i.e. the tail cursor sits
- * inside the head's small window). Those rows are NOT subtracted here,
- * because dropping them already shrank `tailTotals.scanned` by the same
+ * (non-zero only when the two windows overlap). Those rows are NOT subtracted
+ * here, because dropping them already shrank `tailTotals.scanned` by the same
  * amount — subtracting them again would double-count and under-advance the
  * cursor into re-reading rows it just read. Clamped at `>= 0` so an overlap
  * larger than the head's departure count (head rows that transiented) can
  * never push the correction negative and turn it into an over-advance.
+ *
+ * This is a correction, not an exact accounting, and it is deliberately
+ * spelled to err toward under-advancing. The one case it over-corrects is a
+ * head window sitting entirely PAST the tail window — reachable for a run or
+ * two right after the tail cursor wraps, e.g. head at 180 while the tail reads
+ * [0, 180): those head departures are above the cursor and outside the tail
+ * read, so `headRowsInTailWindow` is 0 and up to `headSlice` departures are
+ * subtracted that removed no position below the cursor. The cost is bounded at
+ * `headSlice` re-read rows, which is the safe direction (this module's rule is
+ * "re-read leftovers, never skip unread rows"); the alternative — reasoning
+ * about each head row's position relative to the cursor — would need the
+ * positions themselves, which an OFFSET read does not return.
  */
 export const headDeparturesBelowCursor = (headTotals: Totals, headRowsInTailWindow: number): number =>
   Math.max(departedCandidates(headTotals) - headRowsInTailWindow, 0);
@@ -287,12 +298,37 @@ export const headCursorWindow = (totalCandidates: number, window: number): numbe
 /**
  * The head cursor advanced one head slice and wrapped inside its small recent
  * window — so a persistently-transient front-of-ordering row is re-asked once
- * per rotation (`window / headSlice` runs) instead of once per run, while a
- * genuinely new row still gets looked at within one rotation.
+ * per rotation instead of once per run.
  *
  * `window <= 0` (an empty cohort) returns 0 via `wrapCursor`. A `window` that
  * is not an exact multiple of `headSlice` is fine: the offsets drift rather
  * than repeating a fixed set, which still covers the window.
+ *
+ * COVERAGE IS CONDITIONAL, and the condition is `headSlice > arrivals per run`
+ * (BS#2222 review). An OFFSET is a position in an ordering that MOVES: new
+ * `enriched_no_match` rows land at position 0 (`query.ts` sorts never-attempted
+ * rows `id DESC`), so every existing row's position grows by the arrival count
+ * `A` each run while this cursor grows by `headSlice`. A row therefore closes
+ * on the head window at `headSlice - A` positions per run:
+ *
+ *   A <  headSlice   the cursor gains; any row in the window is read within
+ *                    `window / (headSlice - A)` runs. At the defaults
+ *                    (headSlice 20, A = 40/day / 4 runs = 10, window 200) that
+ *                    is <= 20 runs, ~5 days — inside the window's ~5 days of
+ *                    residency, but not by much.
+ *   A >= headSlice   the gap never closes. A row that entered above the cursor
+ *                    is carried out of the window unread and falls back to the
+ *                    tail cursor's ~191-day wrap — the deferral BS#2222 exists
+ *                    to remove.
+ *
+ * So `HEAD_SLICE_COVERAGE_MARGIN` (2) is not only volume headroom, it IS the
+ * coverage condition: margin > 1 means `headSlice > A`. A sustained doubling of
+ * the measured inflow consumes it exactly, which is why `query.test.ts` pins
+ * `margin > 1` rather than treating it as a comfort factor, and why the README
+ * names re-measuring inflow as the response to a head-coverage complaint.
+ * Escaping the condition entirely needs a keyset (`id`-anchored) head cursor
+ * rather than an OFFSET one, which is a different mechanism than the one BS#2222
+ * settled on and is left to that ticket.
  */
 export const nextHeadCursorPosition = (currentOffset: number, headSlice: number, window: number): number =>
   wrapCursor(currentOffset + headSlice, window);

@@ -76,7 +76,18 @@ HEAD_CURSOR_WINDOW = min(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_CURSOR_WINDOW_DAYS,
                    = min(40 * 5, total_candidates) = 200 rows in steady state
 ```
 
-At the defaults that is 10 offsets (0, 20, 40, … 180) and a full rotation every **10 runs = 2.5 days**, comfortably inside the ~5 days of inflow the window holds — so a row written today is still inside the window when the head comes back to its position. Properties worth knowing:
+At the defaults that is 10 offsets (0, 20, 40, … 180), so the cursor returns to any given offset every **10 runs = 2.5 days**.
+
+**But an OFFSET is a position in an ordering that moves, so returning to an offset is not the same as returning to a row.** New `enriched_no_match` rows land at position 0 (`query.ts` sorts never-attempted rows `id DESC`), so every existing row's position grows by the arrival count `A` each run while the cursor grows by `HEAD_SLICE`. A row therefore closes on the head window at `HEAD_SLICE − A` positions per run, and the coverage guarantee is conditional on that being positive:
+
+| relation          | what happens                                                                                                                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `A < HEAD_SLICE`  | the cursor gains; every row in the window is read within `HEAD_CURSOR_WINDOW / (HEAD_SLICE − A)` runs. At the defaults (`A` = 40/day ÷ 4 = 10) that is **≤ 20 runs, ~5 days**.             |
+| `A >= HEAD_SLICE` | the gap never closes. A row that entered above the cursor is carried out of the window unread and falls back to the tail cursor's ~191-day wrap — the deferral this section exists to fix. |
+
+So **`HEAD_SLICE_COVERAGE_MARGIN` (2) is the coverage condition, not just headroom on call volume**: margin > 1 is exactly `HEAD_SLICE > A`. A sustained doubling of the measured inflow consumes it, which is why `query.test.ts` pins `margin > 1` rather than treating it as a comfort factor, and why **the response to "the newest rows aren't being rechecked" is to re-measure inflow first** — `MEASURED_INFLOW_ROWS_PER_DAY` going stale is the failure mode, and the run's `finished` line carries `head_scanned`/`head_resolved` so the head's productivity is observable without a query. Escaping the condition altogether needs a keyset (`id`-anchored) head cursor rather than an OFFSET one; that is a different mechanism than the one BS#2222 settled on, and is left to that ticket.
+
+Other properties worth knowing:
 
 - **The modulus is the window, not the cohort.** Wrapping the head against the full ~137k-row count would just make it a second tail. The head's job is same-week coverage of the newest rows.
 - **`min(window, total_candidates)`** keeps a head offset from landing past the end of a small cohort and reading nothing (`watermark.ts`'s `headCursorWindow`).
@@ -172,24 +183,36 @@ JSON log line emitted on `step: finished`:
   "lml_error": 22,
   "raced": 2,
   "db_error": 0,
+  "head_slice": 20,
+  "head_scanned": 20,
+  "head_resolved": 5,
+  "head_resolved_dry": 0,
+  "head_unresolved": 12,
+  "head_trust_rejected": 1,
+  "head_lml_error": 2,
+  "tail_scanned": 180,
+  "tail_resolved": 41,
+  "tail_resolved_dry": 0,
   "repo": "Backend-Service",
   "tool": "flowsheet-no-match-recheck",
   "run_id": "<uuid>"
 }
 ```
 
-Invariant: `scanned == resolved + resolved_dry + unresolved + trust_rejected + lml_error + raced + db_error`.
+Invariant: `scanned == resolved + resolved_dry + unresolved + trust_rejected + lml_error + raced + db_error`, and `scanned == head_scanned + tail_scanned`.
 
-| Counter          | Meaning                                                                                                                                              |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scanned`        | Rows visited (matches the candidate query's row count, bounded by `FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE`)                                           |
-| `resolved`       | LML returned a track-context-trusted match and the write, including the row's status flip, landed cleanly                                            |
-| `resolved_dry`   | LML returned a trusted match; `DRY_RUN` suppressed the write                                                                                         |
-| `unresolved`     | LML found no candidate at all (or a trusted `search_type` with no artwork among its results); marker stamped so the TTL applies                      |
-| `trust_rejected` | LML found a candidate, but its `search_type` (`fallback`/`alternative`/`song_as_artist`) isn't trustworthy for a track-context write; marker stamped |
-| `lml_error`      | LML call threw, returned a `{timeout:true}` cascade-exhaustion body, or a breaker-open/shed response with no usable answer; marker left untouched    |
-| `raced`          | The write matched zero rows because a concurrent writer already moved the row off `enriched_no_match` between select and update                      |
-| `db_error`       | The marker or match write threw (deadlock, connection reset, …); isolated to the row so the batch continues, retried next tick                       |
+The `head_*` / `tail_*` fields (BS#2222) split the merged totals by pass, and they are emitted on dry runs too. Two reasons they are not merely nice to have: the premise this whole head slice rests on is a **head-vs-tail resolution rate** (~1 in 4 fresh no-match rows resolving), which is unrecoverable from the merged counters; and a head that has stopped reaching new rows — the coverage condition in "The head cursor" going false — shows up as a `head_resolved` that flatlines while `tail_resolved` keeps moving. Also note a run now emits **two** `candidates_loaded` lines, one per pass, discriminated by a `pass` field (`head` / `tail`); each one's `projected_lml_calls` is that pass's projection, not the run's.
+
+| Counter          | Meaning                                                                                                                                                                                                                                                     |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scanned`        | Rows visited across both passes, bounded by `FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE`. Legitimately BELOW that bound when the head and tail windows overlap, since the overlap is deduped out of the tail pass (`excludeCandidateIds`) — that is not a defect |
+| `resolved`       | LML returned a track-context-trusted match and the write, including the row's status flip, landed cleanly                                                                                                                                                   |
+| `resolved_dry`   | LML returned a trusted match; `DRY_RUN` suppressed the write                                                                                                                                                                                                |
+| `unresolved`     | LML found no candidate at all (or a trusted `search_type` with no artwork among its results); marker stamped so the TTL applies                                                                                                                             |
+| `trust_rejected` | LML found a candidate, but its `search_type` (`fallback`/`alternative`/`song_as_artist`) isn't trustworthy for a track-context write; marker stamped                                                                                                        |
+| `lml_error`      | LML call threw, returned a `{timeout:true}` cascade-exhaustion body, or a breaker-open/shed response with no usable answer; marker left untouched                                                                                                           |
+| `raced`          | The write matched zero rows because a concurrent writer already moved the row off `enriched_no_match` between select and update                                                                                                                             |
+| `db_error`       | The marker or match write threw (deadlock, connection reset, …); isolated to the row so the batch continues, retried next tick                                                                                                                              |
 
 `trust_rejected` and `unresolved` rows are exactly the kind the digest job (`jobs/metadata-no-match-digest`) reports — they now self-heal on this job's own TTL cadence instead of staying wrong forever.
 

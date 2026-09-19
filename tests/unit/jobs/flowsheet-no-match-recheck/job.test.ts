@@ -149,11 +149,24 @@ describe('resolveHeadSliceConfig', () => {
     });
   });
 
-  it('clamps a head slice that would leave the tail read empty, so the starvation guard survives', () => {
-    // A zero-row tail read means the BS#2218 cursor never advances — the
-    // self-lock that job exists to break, re-armed by a config value.
-    expect(resolveHeadSliceConfig(200, 200)).toEqual({ headSlice: 199, tailBatchSize: 1, clamped: true });
-    expect(resolveHeadSliceConfig(5000, 200)).toEqual({ headSlice: 199, tailBatchSize: 1, clamped: true });
+  it('caps the head at half the batch, so a misconfiguration cannot crawl the cursor', () => {
+    // `batchSize - 1` satisfied "the tail stays non-empty" only literally: a
+    // one-row tail advances the BS#2218 cursor one row per run, ~94 years to
+    // wrap the measured 137k-row cohort, while every counter reads healthy.
+    // Halving the traversal rate is the worst this ceiling permits.
+    expect(resolveHeadSliceConfig(200, 200)).toEqual({ headSlice: 100, tailBatchSize: 100, clamped: true });
+    expect(resolveHeadSliceConfig(5000, 200)).toEqual({ headSlice: 100, tailBatchSize: 100, clamped: true });
+    expect(resolveHeadSliceConfig(101, 200)).toEqual({ headSlice: 100, tailBatchSize: 100, clamped: true });
+    // Exactly at the ceiling is not a clamp.
+    expect(resolveHeadSliceConfig(100, 200)).toEqual({ headSlice: 100, tailBatchSize: 100, clamped: false });
+  });
+
+  it('never lets the tail read drop below half the batch, at any batch size', () => {
+    for (const batchSize of [1, 2, 3, 7, 50, 200, 1000]) {
+      const { headSlice, tailBatchSize } = resolveHeadSliceConfig(Number.MAX_SAFE_INTEGER, batchSize);
+      expect(tailBatchSize).toBeGreaterThanOrEqual(batchSize / 2);
+      expect(headSlice + tailBatchSize).toBe(batchSize);
+    }
   });
 
   it('degenerates safely at batchSize 1: no head slice, the whole batch is the tail', () => {
@@ -259,6 +272,17 @@ describe('runRecheckPasses (BS#2222)', () => {
     // Merged for the `finished` log; the cursor math uses the two separately.
     expect(outcome.totals.scanned).toBe(10);
     expect(outcome.totals.unresolved).toBe(10);
+  });
+
+  it('labels each pass so the two candidates_loaded lines a run emits are distinguishable', async () => {
+    const harness = harnessOver(rows);
+
+    await runRecheckPasses(planOf(), harness.deps);
+
+    // Without the label, the BS#2176 "candidate count / projected LML call
+    // volume" line reads as the run's projection when it is one pass's, and an
+    // operator reading the first line under-reports the run by the head slice.
+    expect(harness.runRecheck.mock.calls.map((call) => call[0].pass)).toEqual(['tail', 'head']);
   });
 
   it('forwards dryRun to both passes', async () => {

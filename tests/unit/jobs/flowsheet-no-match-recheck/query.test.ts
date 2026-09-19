@@ -222,6 +222,14 @@ describe('RUNS_PER_DAY (BS#2222)', () => {
     expect(runsPerDayFromCronSchedule('0,30 2,14 * * *')).toBe(4); // comma lists
   });
 
+  test('deduplicates overlapping comma members instead of summing their spans', () => {
+    // `'*/6,0'` selects {0,6,12,18} -- four hours, not five. Summing spans
+    // counted 5 and silently UNDER-sized HEAD_SLICE_DEFAULT.
+    expect(runsPerDayFromCronSchedule('47 */6,0 * * *')).toBe(4);
+    expect(runsPerDayFromCronSchedule('47 0-5,3-8 * * *')).toBe(9); // {0..8}
+    expect(runsPerDayFromCronSchedule('0,0,0 4 * * *')).toBe(1);
+  });
+
   test('refuses a schedule whose runs-per-day is undefined or unparseable, rather than guessing', () => {
     // A weekly cron (rotation-release-id-pollution-check's `0 7 * * 1`) has no
     // runs-per-day, so deriving a head slice from it would be nonsense.
@@ -231,6 +239,13 @@ describe('RUNS_PER_DAY (BS#2222)', () => {
     expect(() => runsPerDayFromCronSchedule('47 banana * * *')).toThrow(/Unsupported cron field/);
     expect(() => runsPerDayFromCronSchedule('47 */0 * * *')).toThrow(/Unsupported cron field/);
     expect(() => runsPerDayFromCronSchedule('47 24 * * *')).toThrow(/Unsupported cron field/);
+    // `Number('')` is 0, so an empty spec or step must be rejected explicitly
+    // or it silently parses as a valid `0`.
+    expect(() => runsPerDayFromCronSchedule('47 /5 * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 6/ * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('3,,4 6 * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 6-/2 * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 1/2/3 * * *')).toThrow(/Unsupported cron field/);
   });
 });
 
@@ -277,5 +292,28 @@ describe('HEAD_CURSOR_WINDOW_DEFAULT (BS#2222)', () => {
     // wrap -- the deferral this whole change removes.
     const rotationRuns = HEAD_CURSOR_WINDOW_DEFAULT / HEAD_SLICE_DEFAULT;
     expect(rotationRuns / RUNS_PER_DAY).toBeLessThan(HEAD_CURSOR_WINDOW_DAYS);
+  });
+
+  test('the coverage condition holds: the head slice outruns per-run arrivals', () => {
+    // An OFFSET is a position in a MOVING ordering -- new rows land at position
+    // 0, so every existing row's position grows by the arrival count each run
+    // while the head cursor grows by HEAD_SLICE. The cursor only ever closes on
+    // a row if HEAD_SLICE > arrivals/run; at HEAD_SLICE <= arrivals/run the gap
+    // is frozen (or widening) and a row can be carried out of the window having
+    // never been head-read, falling back to the tail's ~191-day wrap.
+    //
+    // That makes HEAD_SLICE_COVERAGE_MARGIN > 1 load-bearing for COVERAGE, not
+    // just headroom on call volume -- margin 1 means zero closing speed. Pinned
+    // so a future "trim the margin to save LML calls" cannot silently take the
+    // head from "catches every row in <= 20 runs" to "may never catch one".
+    const arrivalsPerRun = MEASURED_INFLOW_ROWS_PER_DAY / RUNS_PER_DAY;
+    expect(HEAD_SLICE_COVERAGE_MARGIN).toBeGreaterThan(1);
+    expect(HEAD_SLICE_DEFAULT).toBeGreaterThan(arrivalsPerRun);
+
+    // And the closing speed has to cross the whole window before a row ages out
+    // of it: window / (headSlice - arrivals) runs <= window / arrivals runs.
+    const runsToCatch = HEAD_CURSOR_WINDOW_DEFAULT / (HEAD_SLICE_DEFAULT - arrivalsPerRun);
+    const runsOfResidency = HEAD_CURSOR_WINDOW_DEFAULT / arrivalsPerRun;
+    expect(runsToCatch).toBeLessThanOrEqual(runsOfResidency);
   });
 });

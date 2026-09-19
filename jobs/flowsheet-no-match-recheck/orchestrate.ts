@@ -206,6 +206,13 @@ export const runNoMatchRecheck = async (deps: {
    * existing caller and test relies on.
    */
   waitForQuietPeriod?: () => Promise<boolean>;
+  /**
+   * Which pass this is, when a caller composes more than one per run (BS#2222's
+   * head + tail). Logged on `candidates_loaded` so the two lines a run emits are
+   * distinguishable — the BS#2176 acceptance criterion is a per-pass count, and
+   * an operator reading one line unlabelled would take it for the run's.
+   */
+  pass?: string;
 }): Promise<RunResult> => {
   const totals: Totals = {
     scanned: 0,
@@ -252,11 +259,17 @@ export const runNoMatchRecheck = async (deps: {
   // call volume as soon as candidates are loaded — before any lookup or
   // write, in both dry-run and live runs. This job is single-row (never
   // bulk), so the projection is exact: one candidate is at most one LML call.
-  log('info', 'candidates_loaded', `${candidates.length} candidate row(s) loaded`, {
-    candidates: candidates.length,
-    projected_lml_calls: candidates.length,
-    dry_run: deps.dryRun ?? false,
-  });
+  log(
+    'info',
+    'candidates_loaded',
+    `${candidates.length} candidate row(s) loaded${deps.pass ? ` (${deps.pass} pass)` : ''}`,
+    {
+      pass: deps.pass ?? 'single',
+      candidates: candidates.length,
+      projected_lml_calls: candidates.length,
+      dry_run: deps.dryRun ?? false,
+    }
+  );
   for (const candidate of candidates) {
     await waitForQuietPeriod();
 
