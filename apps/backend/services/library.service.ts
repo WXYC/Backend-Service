@@ -4223,11 +4223,13 @@ const DELETED_ARCHIVE_NAME_FIELDS = ['album_title', 'artist_name', 'alternate_ar
 
 // Parenthesized even though it is used as the sole predicate today: `sql.join`
 // over `OR` composes wrong under a future `and(...)` otherwise (`a OR b AND c`
-// binds tighter than the caller would expect).
+// binds tighter than the caller would expect). `ilikeEscaped` (not a bare
+// ILIKE) so `%`/`_` in a librarian's search are matched literally rather than
+// treated as wildcards, matching every other user-supplied ILIKE in this file.
 const deletedArchiveSearchCondition = (search: string): SQL =>
   sql`(${sql.join(
-    DELETED_ARCHIVE_NAME_FIELDS.map(
-      (field) => sql`${catalog_delete_snapshot.captured}->'entity'->'row'->>${field} ILIKE ${`%${search}%`}`
+    DELETED_ARCHIVE_NAME_FIELDS.map((field) =>
+      ilikeEscaped(sql`${catalog_delete_snapshot.captured}->'entity'->'row'->>${field}`, search, 'contains')
     ),
     sql` OR `
   )})`;
