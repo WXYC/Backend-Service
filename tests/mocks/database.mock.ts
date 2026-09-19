@@ -642,7 +642,10 @@ export const account_audit_event = {
 };
 export const specialty_shows = {};
 export const schedule = {};
-export const artist_crossreference = {};
+export const artist_crossreference = {
+  source_artist_id: 'artist_crossreference.source_artist_id',
+  target_artist_id: 'artist_crossreference.target_artist_id',
+};
 export const artist_library_crossreference = {
   artist_id: 'artist_library_crossreference.artist_id',
   library_id: 'artist_library_crossreference.library_id',

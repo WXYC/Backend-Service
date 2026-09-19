@@ -3391,13 +3391,114 @@ describe('Library Artist Card (BS#2156)', () => {
         'alphabetical_name',
         'genre_id',
         'code_letters',
-        'code_artist_number'
+        'code_artist_number',
+        'release_count',
+        'cross_reference_source_count',
+        'cross_reference_target_count',
+        'library_cross_reference_count',
+        'compilation_credit_count'
       );
       expect(res.body.artist_id).toBe(artist.id);
       expect(res.body.artist_name).toBe(artist.artist_name);
       expect(res.body.alphabetical_name).toBe(artist.alphabetical_name);
       expect(res.body.genre_id).toBe(11);
       expect(res.body.code_letters).toBe(artist.code_letters);
+    });
+
+    // Acceptance criterion: a fully deletable artist reports zeroes on every
+    // dependent count rather than omitting the fields.
+    test('reports zero dependent counts for a freshly created artist', async () => {
+      const artist = await createTestArtist();
+
+      const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+
+      expect(res.body.release_count).toBe(0);
+      expect(res.body.cross_reference_source_count).toBe(0);
+      expect(res.body.cross_reference_target_count).toBe(0);
+      expect(res.body.library_cross_reference_count).toBe(0);
+      expect(res.body.compilation_credit_count).toBe(0);
+    });
+
+    test('reports each dependent count independently across all five predicates', async () => {
+      const artist = await createTestArtist();
+      const other = await createTestArtist();
+      const sql = getTestDb();
+
+      const release = await auth
+        .post('/library')
+        .send({
+          album_title: `Dependent Counts ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${artist.id}, ${other.id})`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${other.id}, ${artist.id})`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.artist_library_crossreference (artist_id, library_id) VALUES (${artist.id}, ${release.body.id})`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.compilation_track_artist (library_id, artist_name, track_artist_id)
+         VALUES (${release.body.id}, 'Comp Artist', ${artist.id})`
+      );
+
+      try {
+        const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        expect(res.body.release_count).toBe(1);
+        expect(res.body.cross_reference_source_count).toBe(1);
+        expect(res.body.cross_reference_target_count).toBe(1);
+        expect(res.body.library_cross_reference_count).toBe(1);
+        expect(res.body.compilation_credit_count).toBe(1);
+      } finally {
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.compilation_track_artist WHERE library_id = ${release.body.id}`);
+        await sql.unsafe(`DELETE FROM ${SCHEMA}.artist_library_crossreference WHERE artist_id = ${artist.id}`);
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.artist_crossreference WHERE source_artist_id = ${artist.id} OR target_artist_id = ${artist.id}`
+        );
+      }
+    });
+
+    // `getArtistCardById` collapses a multi-genre artist onto its lowest
+    // `genre_id` crossreference (see the test above), but the dependent
+    // counts key on `artist_id` alone -- a release filed under a DIFFERENT
+    // genre than the one the card collapsed to must still count.
+    test('does not collapse dependent counts for a multi-genre artist', async () => {
+      const artist = await createTestArtist();
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 6, 9922)`
+      );
+
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Multi Genre Dependents ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+
+      try {
+        const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+        // The card collapses to genre 6, the lower id...
+        expect(res.body.genre_id).toBe(6);
+        // ...but the release, filed under genre 11, still counts.
+        expect(res.body.release_count).toBe(1);
+      } finally {
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 6`
+        );
+      }
     });
 
     // `artist_genre_key` is unique on (artist_id, genre_id), not on artist_id

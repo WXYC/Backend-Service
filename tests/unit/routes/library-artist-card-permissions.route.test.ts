@@ -56,6 +56,15 @@ const ARTIST_CARD: ArtistCard = {
 };
 
 const mockGetArtistCardById = jestGlobals.fn<() => Promise<ArtistCard | null>>();
+const mockGetArtistDependentCounts = jestGlobals.fn<
+  () => Promise<{
+    release_count: number;
+    cross_reference_source_count: number;
+    cross_reference_target_count: number;
+    library_cross_reference_count: number;
+    compilation_credit_count: number;
+  }>
+>();
 const mockUpdateArtistInDB =
   jestGlobals.fn<() => Promise<{ id: number; artist_name: string; alphabetical_name: string } | undefined>>();
 const mockGetArtistNameById = jestGlobals.fn<() => Promise<string | null>>();
@@ -104,6 +113,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   albumCodeNumberTaken: jest.fn(),
   recheckDiscogsAvailability: jest.fn(),
   getArtistCardById: mockGetArtistCardById,
+  getArtistDependentCounts: mockGetArtistDependentCounts,
   updateArtistInDB: mockUpdateArtistInDB,
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
@@ -156,6 +166,13 @@ app.use('/library', library_route);
 describe('BS#2156 artist-card routes — permission tiers', () => {
   beforeEach(() => {
     mockGetArtistCardById.mockReset().mockResolvedValue(ARTIST_CARD);
+    mockGetArtistDependentCounts.mockReset().mockResolvedValue({
+      release_count: 0,
+      cross_reference_source_count: 0,
+      cross_reference_target_count: 0,
+      library_cross_reference_count: 0,
+      compilation_credit_count: 0,
+    });
     mockUpdateArtistInDB
       .mockReset()
       .mockResolvedValue({ id: 1, artist_name: 'Jessica Pratt', alphabetical_name: 'Pratt, Jessica' });
