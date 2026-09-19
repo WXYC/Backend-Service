@@ -4705,9 +4705,16 @@ export type FlowsheetPlayImpact =
  * together — down to one `candidate_rows` entry, so `count(*) FILTER (...)`
  * below still counts real rows, not branch memberships. The three `FILTER`
  * predicates that partition `candidate_rows` into the disjoint arms are
- * BYTE-IDENTICAL to the ones the prior revision ran directly over
- * `flowsheet` (verified correct then, unchanged now) — only their `FROM`
- * target shrank, from the whole table to this release's own candidate set.
+ * SEMANTICALLY equivalent to the ones the prior revision ran directly over
+ * `flowsheet` — every arm was re-checked against `047ad9ae^`, including NULL
+ * `album_id`/`legacy_release_id` and the empty-rotation-set case — but they
+ * are NOT textually unchanged, and the difference is load-bearing. The prior
+ * revision interpolated Drizzle `Column` objects, which render
+ * schema-qualified against `flowsheet`; these are bare identifiers that
+ * resolve against `candidate_rows`' OUTPUT ALIASES. They therefore bind to
+ * whatever `candidateRowProjection` names its keys, not to the table: rename
+ * or re-alias a key there and these predicates must be re-read, not assumed
+ * untouched.
  *
  * Rotation membership in those `FILTER` predicates is still a correlated
  * subquery (`rotation.album_id = ...`), not a JS-materialized id list: an
