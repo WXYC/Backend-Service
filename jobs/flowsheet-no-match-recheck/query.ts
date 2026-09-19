@@ -103,6 +103,10 @@
  * accepts the already-resolved offset; it has no opinion on how the caller
  * got it.
  *
+ * BS#2222 composes this same `loadCandidates` twice per run: once at OFFSET
+ * 0 for `HEAD_SLICE_DEFAULT` rows, once at the cursor for the rest — see
+ * `job.ts`.
+ *
  * LEFT JOINs `library` on `album_id` to pre-read `discogs_unavailable`
  * (BS#1293 gate) the same way `rotation-release-id-backfill/query.ts` does —
  * a LEFT (not INNER) JOIN is required because `flowsheet.album_id` is
@@ -122,6 +126,24 @@ export const NO_MATCH_TTL_DAYS_DEFAULT = 14;
 
 export const BATCH_SIZE_ENV = 'FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE';
 export const BATCH_SIZE_DEFAULT = 200;
+
+/**
+ * HEAD_SLICE (BS#2222): rows always read at `loadCandidates`'s OFFSET 0, on
+ * top of the cursor-read tail `job.ts` composes it with — so a row the live
+ * worker writes today isn't deferred a full cursor wrap before its first
+ * recheck (see `watermark.ts`, `job.ts`). Derived rather than a bare
+ * constant, so a `BATCH_SIZE`/cadence resize (BS#2186) recomputes it:
+ *
+ *   HEAD_SLICE = ceil(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN / RUNS_PER_DAY)
+ *
+ * See README "HEAD_SLICE derivation" for the measurement + wrap-period table.
+ */
+export const RUNS_PER_DAY = 4; // cron cadence `47 */6 * * *` UTC (see README "Schedule")
+export const MEASURED_INFLOW_ROWS_PER_DAY = 40; // 199 new enriched_no_match rows, 2026-09-13 -> 2026-09-18
+export const HEAD_SLICE_COVERAGE_MARGIN = 2; // clears a heavy play day / backfill drain, not just the average
+
+export const HEAD_SLICE_ENV = 'FLOWSHEET_NO_MATCH_RECHECK_HEAD_SLICE';
+export const HEAD_SLICE_DEFAULT = Math.ceil((MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN) / RUNS_PER_DAY);
 
 /**
  * The candidate predicate shared verbatim between `loadCandidates` and
