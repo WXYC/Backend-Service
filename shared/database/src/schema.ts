@@ -3531,13 +3531,30 @@ export type NewStationSignupAttempt = InferInsertModel<typeof station_signup_att
 // paths this comment used to call still-open: `/auth/change-password`,
 // `/auth/change-email`, `/auth/update-user`, `/auth/delete-user`, and the
 // ten `/auth/organization/*` mutations each now sit behind their own
-// dedicated `apps/auth/app.ts` limiter (60s/60, 15min/10, and 15min/100
-// respectively) instead of none. Every authenticated flat mount this table
+// dedicated `apps/auth/app.ts` limiter (60s/300, 15min/200, and 15min/300
+// respectively) instead of none. Every AUTHENTICATED flat mount this table
 // audits is now rate-limited; the premise above is still not measured true
 // (these bounds are sized from UI-emittable volume plus margin, not from
 // observed load — see the BS#2604 limiters' own comments), just no longer
-// contradicted by an outright-unbounded surface. Revisit if the standalone
-// index is ever needed.
+// contradicted by an outright-unbounded surface on that half of the table.
+//
+// Two things still not fixed, so "every flat mount" above deliberately says
+// "authenticated": (1) `/auth/reset-password` (`apps/auth/audit-coverage.ts`,
+// public, `resolveActor: false`) has no Express-layer limiter of any kind —
+// only its OTP sibling `/auth/email-otp/reset-password` does — so an
+// anonymous loop against it (it takes a reset token) still mints one row
+// per request, unbounded. (2) even where a public flat mount IS rate
+// limited, that limiter does not bound this table's write volume the way
+// the BS#2604 limiters do for the authenticated half: `mountPublicAccountAudit`
+// registers AHEAD of every public-path rate limiter in `apps/auth/app.ts`
+// (deliberately — resolving a session there would be a pre-limit DB-read
+// DoS amplifier), so a throttled request still runs the audit dispatch
+// first and its `finish` listener still fires with `outcome: 429` once the
+// limiter downstream rejects it — the row gets written regardless. Rate
+// limiting a public path bounds handler-layer cost on that path; it does
+// not bound this table's INSERT volume the way it does on the authenticated
+// side, where the limiter runs first. Revisit if the standalone index is
+// ever needed.
 export const account_audit_event = pgTable(
   'account_audit_event',
   {

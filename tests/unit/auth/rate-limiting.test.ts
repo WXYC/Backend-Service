@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { FLAT_MOUNTS } from '../../../apps/auth/audit-coverage';
 import { statementIndex } from '../../utils/statement-index';
 
 describe('Auth service rate limiting', () => {
@@ -113,8 +114,13 @@ describe('Auth service rate limiting', () => {
       expect(authAppSource).toMatch(
         /const otpPasswordResetSendRateLimit = rateLimit\(\{[\s\S]*?windowMs: 15 \* 60 \* 1000,[\s\S]*?limit: 10,[\s\S]*?keyGenerator: rateLimitKeyFromRequest,[\s\S]*?\}\);/
       );
+      // Bounded capture (BS#2604 review hardening) — `[^\]]*` cannot cross a
+      // `]`, so it can only match this array's own content, never bridge
+      // into an unrelated `for (const path of [...])` block elsewhere in
+      // the file. See the sensitive-trio test below for the concrete bug
+      // this class of lazy `[\s\S]*?` capture produced.
       const mountBlock = authAppSource.match(
-        /for \(const path of \[([\s\S]*?)\]\) \{\s*app\.use\(path, otpPasswordResetSendRateLimit\);\s*\}/
+        /for \(const path of \[([^\]]*)\]\) \{\s*app\.use\(path, otpPasswordResetSendRateLimit\);\s*\}/
       )?.[1];
       expect(mountBlock).toBeDefined();
       expect(mountBlock).toMatch(/\/auth\/email-otp\/request-password-reset/);
@@ -232,24 +238,37 @@ describe('Auth service rate limiting', () => {
   // characters away. Mount-order-relative-to-`mountAuthenticatedAccountAudit`
   // is pinned separately, in tests/unit/auth/account-audit-mount-order.test.ts.
   describe('authenticated flat-mount limiters (BS#2604)', () => {
-    it('mounts its own 60s/60 limiter on /auth/update-user, keyed by rateLimitKeyFromRequest', () => {
+    it('mounts its own 60s/300 limiter on /auth/update-user, keyed by rateLimitKeyFromRequest', () => {
       const block = authAppSource.match(/const updateUserRateLimit = rateLimit\(\{([\s\S]*?)\}\);/)?.[1];
       expect(block).toBeDefined();
       expect(block).toMatch(/windowMs: 60_000,/);
-      expect(block).toMatch(/limit: 60,/);
+      expect(block).toMatch(/limit: 300,/);
       expect(block).toMatch(/keyGenerator: rateLimitKeyFromRequest,/);
       expect(authAppSource).toMatch(/app\.use\(\s*['"]\/auth\/update-user['"]\s*,\s*updateUserRateLimit\s*\)/);
     });
 
-    it('mounts change-password/change-email/delete-user on their own 15min/10 limiter, keyed by rateLimitKeyFromRequest', () => {
+    // L (adjudicated finding, BS#2604 review): the previous version of this
+    // test extracted the mount array with `\[([\s\S]*?)\]\) \{` — a LAZY
+    // capture starting from the FIRST `for (const path of [` in the whole
+    // file, which is the OTP-send mount ~185 lines earlier. Since that
+    // block's own `]) {` doesn't satisfy the `sensitiveAuthMutationRateLimit`
+    // suffix, the engine backtracked past it and swallowed everything up to
+    // THIS block's `]) {` instead — ~9,968 characters, including the prose
+    // comments naming `/auth/change-password` etc. above this limiter's own
+    // definition. Emptying the real array to `for (const path of []) {`
+    // still passed: the assertions were satisfied by comment prose, never by
+    // the mount array. Fixed by bounding the capture with `[^\]]*` — it
+    // cannot cross a `]`, so it can only ever match content between the ONE
+    // `[` and its own closing `]`, never bridge into an unrelated block.
+    it('mounts change-password/change-email/delete-user on their own 15min/200 limiter, keyed by rateLimitKeyFromRequest', () => {
       const block = authAppSource.match(/const sensitiveAuthMutationRateLimit = rateLimit\(\{([\s\S]*?)\}\);/)?.[1];
       expect(block).toBeDefined();
       expect(block).toMatch(/windowMs: 15 \* 60 \* 1000,/);
-      expect(block).toMatch(/limit: 10,/);
+      expect(block).toMatch(/limit: 200,/);
       expect(block).toMatch(/keyGenerator: rateLimitKeyFromRequest,/);
 
       const mountBlock = authAppSource.match(
-        /for \(const path of \[([\s\S]*?)\]\) \{\s*app\.use\(path, sensitiveAuthMutationRateLimit\);\s*\}/
+        /for \(const path of \[([^\]]*)\]\) \{\s*app\.use\(path, sensitiveAuthMutationRateLimit\);\s*\}/
       )?.[1];
       expect(mountBlock).toBeDefined();
       expect(mountBlock).toMatch(/\/auth\/change-password/);
@@ -257,14 +276,14 @@ describe('Auth service rate limiting', () => {
       expect(mountBlock).toMatch(/\/auth\/delete-user/);
     });
 
-    it('mounts exactly the ten organization mutations, as an explicit list, on their own 15min/100 limiter', () => {
+    it('mounts exactly the ten organization mutations, as an explicit list, on their own 15min/300 limiter', () => {
       const block = authAppSource.match(/const organizationMutationRateLimit = rateLimit\(\{([\s\S]*?)\}\);/)?.[1];
       expect(block).toBeDefined();
       expect(block).toMatch(/windowMs: 15 \* 60 \* 1000,/);
-      expect(block).toMatch(/limit: 100,/);
+      expect(block).toMatch(/limit: 300,/);
       expect(block).toMatch(/keyGenerator: rateLimitKeyFromRequest,/);
 
-      const pathListBlock = authAppSource.match(/const organizationMutationPaths = \[([\s\S]*?)\];/)?.[1];
+      const pathListBlock = authAppSource.match(/const organizationMutationPaths = \[([^\]]*)\];/)?.[1];
       expect(pathListBlock).toBeDefined();
       const paths = [...pathListBlock.matchAll(/'([^']+)'/g)].map((m) => m[1]);
       expect(paths).toEqual([
@@ -285,14 +304,51 @@ describe('Auth service rate limiting', () => {
       );
     });
 
+    // Derived from the source of truth, not hand-copied: a fifteenth
+    // `resolveActor: true` entry added to `FLAT_MOUNTS` in
+    // `apps/auth/audit-coverage.ts` without a matching mount anywhere below
+    // must fail this test, not ship silently unbounded. Subsumes the three
+    // per-limiter mount-content checks above for coverage purposes (they
+    // stay for their own error messages and their windowMs/limit pins) —
+    // this is the one assertion that can catch drift in EITHER direction:
+    // a FLAT_MOUNTS addition with no limiter, or a limiter mounting a path
+    // FLAT_MOUNTS no longer lists.
+    it('rate-limits exactly the union of the fourteen resolveActor FLAT_MOUNTS paths — no more, no fewer', () => {
+      const expectedPaths = new Set(
+        FLAT_MOUNTS.filter((mount) => mount.resolveActor).map((mount) => `/auth${mount.path}`)
+      );
+      expect(expectedPaths.size).toBe(14);
+
+      const updateUserMatch = authAppSource.match(
+        /app\.use\(\s*'(\/auth\/update-user)'\s*,\s*updateUserRateLimit\s*\)/
+      );
+      const sensitiveBlock = authAppSource.match(
+        /for \(const path of \[([^\]]*)\]\) \{\s*app\.use\(path, sensitiveAuthMutationRateLimit\);\s*\}/
+      )?.[1];
+      const organizationBlock = authAppSource.match(/const organizationMutationPaths = \[([^\]]*)\];/)?.[1];
+
+      expect(updateUserMatch).not.toBeNull();
+      expect(sensitiveBlock).toBeDefined();
+      expect(organizationBlock).toBeDefined();
+
+      const mountedPaths = new Set<string>([
+        updateUserMatch[1],
+        ...[...sensitiveBlock.matchAll(/'([^']+)'/g)].map((m) => m[1]),
+        ...[...organizationBlock.matchAll(/'([^']+)'/g)].map((m) => m[1]),
+      ]);
+
+      expect(mountedPaths).toEqual(expectedPaths);
+    });
+
     // Regression guard for the exact mistake the decision comment rejected:
     // a single `app.use('/auth/organization', ...)` prefix mount would bound
-    // the 25 dj-site `listMembers` read call sites along with the ten
-    // mutations, 429-ing the roster page for the whole control room.
-    it('never mounts the organization limiter on the bare /auth/organization prefix', () => {
-      expect(authAppSource).not.toMatch(
-        /app\.use\(\s*['"]\/auth\/organization['"]\s*,\s*organizationMutationRateLimit\s*\)/
-      );
+    // dj-site's roster-read call sites (`listMembers`, `getFullOrganization`)
+    // along with the ten mutations, 429-ing the roster page for whichever
+    // slice of the shared Cloudflare edge is browsing it. Matches ANY second
+    // argument, not just the current `organizationMutationRateLimit` name —
+    // a rename of that limiter must not silently defang this guard.
+    it('never mounts anything on the bare /auth/organization prefix', () => {
+      expect(authAppSource).not.toMatch(/app\.use\(\s*['"]\/auth\/organization['"]\s*,/);
     });
 
     it('keeps all fourteen BS#2604 paths out of the 10/15min rateLimitedPaths tier', () => {
