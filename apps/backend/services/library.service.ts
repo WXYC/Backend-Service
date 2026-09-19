@@ -3773,9 +3773,9 @@ export type ArtistDependentCounts = {
  * of that composite unique index and has no index of its own to serve this
  * filter -- flagged on the issue rather than adding a migration here, since
  * the table is small (78 rows as of the 2026-08-11 measurement on
- * WXYC/wiki#89 -- see the doc comment above `artistCrossReferencesQuery`
- * further down this file, which cites the same measurement) and unindexed
- * cost is currently negligible.
+ * WXYC/wiki#89 -- see the doc comment above `sourceArtist` further down this
+ * file, which cites the same measurement) and unindexed cost is currently
+ * negligible.
  */
 export const getArtistDependentCounts = async (artist_id: number): Promise<ArtistDependentCounts> => {
   const rows = (await db.execute(sql`
