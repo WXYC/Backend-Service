@@ -41,11 +41,25 @@ describe('GET /library/deleted (BS#2561)', () => {
   let sql;
   const uniq = Date.now();
   const marker = `BS#2561 Archive ${uniq}`;
+  const artistName = `${marker} Artist`;
   const createdAlbumIds = [];
+  let artistId;
 
   beforeAll(async () => {
     auth = createAuthRequest(request, global.access_token);
     sql = makeSql();
+
+    // A fresh artist, not a shared fixture name -- `POST /library` resolves
+    // `artist_name` via a genre-scoped exact lookup (`artistIdFromName`), so
+    // a made-up name 400s ("Artist doesn't exist..."). Same recipe
+    // library-update.spec.js's `beforeAll` uses: a `uniq`-suffixed name plus
+    // an explicit `code_number` so this run's bucket can't collide with a
+    // concurrent one.
+    const artist = await auth
+      .post('/library/artists')
+      .send({ artist_name: artistName, code_letters: 'B9', genre_id: GEN, code_number: 9000 + (uniq % 500) })
+      .expect(201);
+    artistId = artist.body.id;
   });
 
   afterAll(async () => {
@@ -56,7 +70,9 @@ describe('GET /library/deleted (BS#2561)', () => {
           // -- every album here is deleted via the API before this spec ends.
           // Only the (permanently-retained-by-design) snapshot rows this
           // spec's deletes wrote are left to clear, same as
-          // library-delete.spec.js's teardown.
+          // library-delete.spec.js's teardown. The artist row created above
+          // is left in place, matching library-update.spec.js's convention
+          // of not tearing down `uniq`-suffixed fixture artists it creates.
           await sql.unsafe(
             `DELETE FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = ANY($1::int[])`,
             [createdAlbumIds]
@@ -68,10 +84,16 @@ describe('GET /library/deleted (BS#2561)', () => {
     }
   });
 
-  const createAndDeleteAlbum = async (title, artist_name) => {
+  const createAndDeleteAlbum = async (title) => {
     const created = await auth
       .post('/library')
-      .send({ album_title: title, artist_name, label: `BS#2561 Archive Test ${uniq}`, genre_id: GEN, format_id: FMT })
+      .send({
+        album_title: title,
+        artist_id: artistId,
+        label: `BS#2561 Archive Test ${uniq}`,
+        genre_id: GEN,
+        format_id: FMT,
+      })
       .expect(201);
     createdAlbumIds.push(created.body.id);
     await auth.delete(`/library/${created.body.id}`).expect(204);
@@ -80,7 +102,7 @@ describe('GET /library/deleted (BS#2561)', () => {
 
   test('lists a real delete as a batch, with the deleted row, its children, the actor, and the unrecoverable-dependents note', async () => {
     const title = `${marker} Solo`;
-    const album = await createAndDeleteAlbum(title, 'BS#2561 Archive Artist');
+    const album = await createAndDeleteAlbum(title);
 
     const res = await auth.get('/library/deleted').query({ search: title }).expect(200);
 
@@ -139,7 +161,7 @@ describe('GET /library/deleted (BS#2561)', () => {
       .post('/library')
       .send({
         album_title: title,
-        artist_name: 'BS#2561 Archive Artist',
+        artist_id: artistId,
         label: `BS#2561 Archive Test ${uniq}`,
         genre_id: GEN,
         format_id: FMT,
@@ -155,8 +177,8 @@ describe('GET /library/deleted (BS#2561)', () => {
     const sourceKey = `bs2561:${uniq}`;
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".album_review_submissions (source, source_key, norm_artist, norm_album, album_id, reviewer_raw)
-       VALUES ('google_form', $1, 'bs#2561 archive artist', $2, $3, 'BS2561-PII-PROBE-REVIEWER')`,
-      [sourceKey, title, album.id]
+       VALUES ('google_form', $1, $2, $3, $4, 'BS2561-PII-PROBE-REVIEWER')`,
+      [sourceKey, artistName.toLowerCase(), title, album.id]
     );
 
     await auth.delete(`/library/${album.id}`).expect(204);
@@ -172,8 +194,8 @@ describe('GET /library/deleted (BS#2561)', () => {
 
   test('pages newest batch first, and search scopes both the page and the total', async () => {
     const pagingMarker = `${marker} Page`;
-    const first = await createAndDeleteAlbum(`${pagingMarker} First`, 'BS#2561 Archive Artist');
-    const second = await createAndDeleteAlbum(`${pagingMarker} Second`, 'BS#2561 Archive Artist');
+    const first = await createAndDeleteAlbum(`${pagingMarker} First`);
+    const second = await createAndDeleteAlbum(`${pagingMarker} Second`);
 
     const page0 = await auth.get('/library/deleted').query({ search: pagingMarker, limit: 1, page: 0 }).expect(200);
     const page1 = await auth.get('/library/deleted').query({ search: pagingMarker, limit: 1, page: 1 }).expect(200);
@@ -189,7 +211,7 @@ describe('GET /library/deleted (BS#2561)', () => {
   });
 
   test('search is a name-field substring match, not field-scoped', async () => {
-    await createAndDeleteAlbum(`${marker} Findable`, `Findable Artist ${uniq}`);
+    await createAndDeleteAlbum(`${marker} Findable`);
 
     const byTitle = await auth
       .get('/library/deleted')
@@ -197,10 +219,9 @@ describe('GET /library/deleted (BS#2561)', () => {
       .expect(200);
     expect(byTitle.body.results.length).toBeGreaterThanOrEqual(1);
 
-    const byArtist = await auth
-      .get('/library/deleted')
-      .query({ search: `Findable Artist ${uniq}` })
-      .expect(200);
+    // `artistName` isn't in any album_title this spec creates, so a match
+    // here can only have come through the entity row's `artist_name` field.
+    const byArtist = await auth.get('/library/deleted').query({ search: artistName }).expect(200);
     expect(byArtist.body.results.length).toBeGreaterThanOrEqual(1);
 
     const noMatch = await auth
