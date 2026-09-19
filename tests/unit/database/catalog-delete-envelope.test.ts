@@ -32,6 +32,36 @@ describe('parseCapturedEnvelope', () => {
     expect(parseCapturedEnvelope(null)).toEqual({ entity: { table: '', row: null }, children: {} });
     expect(parseCapturedEnvelope({})).toEqual({ entity: { table: '', row: null }, children: {} });
   });
+
+  // BS#2561 F2a review finding 4: `table` was guarded by a `typeof ===
+  // 'string'` check but `row`/`children` were not, so a wrong-typed value
+  // passed straight through under a cast instead of reading as "absent" the
+  // way the docstring promised. Each case below is the concrete
+  // counterexample the review cited (or its natural sibling), asserted
+  // directly against the type this module's declared return type claims.
+  it('defends entity.row against a wrong-typed value the same way it defends entity.table', () => {
+    const captured = { entity: { table: 'library', row: 'oops' }, children: {} };
+    expect(parseCapturedEnvelope(captured)).toEqual({ entity: { table: 'library', row: null }, children: {} });
+  });
+
+  it('treats an array as a wrong-typed row too, not a plain object', () => {
+    const captured = { entity: { table: 'library', row: [1, 2, 3] }, children: {} };
+    expect(parseCapturedEnvelope(captured).entity.row).toBeNull();
+  });
+
+  it('defends children against a wrong-typed value, not just entity.table', () => {
+    // The review's own counterexample.
+    const captured = { entity: { table: 'library', row: 'oops' }, children: 7 };
+    expect(parseCapturedEnvelope(captured)).toEqual({ entity: { table: 'library', row: null }, children: {} });
+  });
+
+  it('defends a wrong-typed child list inside an otherwise-valid children map', () => {
+    const captured = {
+      entity: { table: 'library', row: null },
+      children: { bins: 'not-an-array', reviews: [{ id: 1 }] },
+    };
+    expect(parseCapturedEnvelope(captured).children).toEqual({ bins: [], reviews: [{ id: 1 }] });
+  });
 });
 
 describe('orderBatchEntities', () => {

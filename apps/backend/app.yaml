@@ -3626,6 +3626,21 @@ paths:
         survives unlinked, and its `reviewer_raw` is PII behind ADR 0011's
         projection barrier, so this endpoint never reads that table). It is
         the same list on every batch, not a per-batch computation.
+
+
+        `entities[].children` is per-child-table ROW COUNTS, not the rows —
+        `catalog_delete_snapshot.captured` holds full, unprojected child rows
+        (`bins.dj_id`/`track_title`, `reviews.author` plus the full review
+        text, `album_critic_reviews.author`, …) because a restore
+        legitimately needs every column, but this listing is read by any
+        `catalog: ['write']` principal, not by whoever has a legitimate need
+        to see who binned a release or another DJ's review text. Applying
+        the same ADR 0011 standard `catalog_delete_snapshot`'s own docstring
+        sets for `album_review_submissions` — "any second reader must carry
+        the same exclusion" — to this second READ SURFACE: a librarian sees
+        `{ "bins": 3, "reviews": 1 }`, never the rows themselves. The capture
+        side is unaffected; a future restore (WXYC/Backend-Service#2585)
+        reads the envelope directly.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
@@ -3701,7 +3716,12 @@ paths:
                                 description: The deleted parent row itself, every non-generated column.
                               children:
                                 type: object
-                                description: Child table name -> every row that referenced the deleted parent.
+                                additionalProperties:
+                                  type: integer
+                                description: >
+                                  Child table name -> COUNT of rows that referenced the deleted
+                                  parent, not the rows themselves (ADR 0011 standard applied to
+                                  this read surface — see the operation description).
                         unrecoverable:
                           type: array
                           items:

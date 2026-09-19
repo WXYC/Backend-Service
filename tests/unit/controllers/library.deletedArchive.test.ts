@@ -23,7 +23,9 @@ const BATCH: libraryService.DeletedArchiveBatch = {
       entity_kind: 'library',
       table: 'library',
       row: { id: 42, album_title: 'On Your Own Love Again', artist_name: 'Jessica Pratt' },
-      children: { bins: [{ id: 1, album_id: 42 }], reviews: [] },
+      // Counts, not rows (BS#2561 F2a review finding 1) — see
+      // `childCounts` in `library.service.ts`.
+      children: { bins: 1, reviews: 0 },
     },
   ],
   unrecoverable: [
