@@ -1,5 +1,8 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest, expectErrorContains, expectFields } = require('../utils/test_helpers');
+const { getTestDb } = require('../utils/db');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 /**
  * Integration coverage for PATCH /library/:id (PR #1154 review).
@@ -406,6 +409,108 @@ describe('PATCH /library/:id', () => {
       // destArtist owns 1 already, so the move burns the next number in its
       // sequence rather than landing on the echoed 1.
       expect(res.body.code_number).toBeGreaterThan(1);
+    });
+  });
+
+  // BS#2587: `genre_id` is itself in `UPDATABLE_ALBUM_FIELDS`, so a PATCH can
+  // move a release to a new artist AND a new genre at once. The auto-regenerate
+  // must scope against the DESTINATION genre, not the row's own stored
+  // (soon-to-be-stale) genre -- reading `existing.genre_id` would re-file the
+  // release onto the shelf it is leaving rather than the one it is landing on.
+  describe('artist move that also changes genre regenerates against the destination genre (BS#2587)', () => {
+    let destArtist;
+    let originArtist;
+
+    beforeAll(async () => {
+      const dest = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Genre Move Dest Artist ${uniq}`,
+          code_letters: 'GM',
+          genre_id: 11,
+          code_number: 9450 + (uniq % 500),
+        })
+        .expect(201);
+      destArtist = dest.body;
+
+      // destArtist is filed under a SECOND genre too -- `POST /library/artists`
+      // always inserts exactly one crossreference row, so a real multi-genre
+      // artist has to be constructed with a direct insert, the same approach
+      // the cross-reference fixtures elsewhere in this suite use.
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${destArtist.id}, 15, ${9450 + (uniq % 500)})`
+      );
+
+      // destArtist's Rock (11) shelf tops out at 1 -- if the regenerate reads
+      // the row's OLD genre instead of the destination, it would (wrongly)
+      // answer from this shelf.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Move Dest Rock ${uniq}`,
+          artist_id: destArtist.id,
+          label: 'Genre Move Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+
+      // destArtist's Electronic (15) shelf tops out much higher -- the
+      // regenerate must answer from HERE, because that's the genre the moving
+      // release is landing in.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Move Dest Electronic ${uniq}`,
+          artist_id: destArtist.id,
+          label: 'Genre Move Label',
+          genre_id: 15,
+          format_id: 1,
+          code_number: 40,
+        })
+        .expect(201);
+
+      const origin = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Genre Move Origin Artist ${uniq}`,
+          code_letters: 'GO',
+          genre_id: 11,
+          code_number: 9460 + (uniq % 500),
+        })
+        .expect(201);
+      originArtist = origin.body;
+    });
+
+    test('regenerates from the destination genre shelf (41), not the origin genre shelf (2)', async () => {
+      const moving = await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Move Origin Release ${uniq}`,
+          artist_id: originArtist.id,
+          label: 'Genre Move Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      // originArtist's first release auto-assigns 1, which collides with
+      // destArtist's Rock code_number 1 -- the trigger for the regenerate.
+      expect(moving.body.code_number).toBe(1);
+
+      const res = await auth
+        .patch(`/library/${moving.body.id}`)
+        .send({ artist_id: destArtist.id, genre_id: 15 })
+        .expect(200);
+
+      expect(res.body.artist_id).toBe(destArtist.id);
+      expect(res.body.genre_id).toBe(15);
+      // 41 = destArtist's Electronic max (40) + 1. A regenerate scoped to the
+      // stale genre_id=11 would have answered 2 (Rock's max, 1, plus one)
+      // instead -- a number that belongs on the shelf the release just left.
+      expect(res.body.code_number).toBe(41);
     });
   });
 });

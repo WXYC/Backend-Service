@@ -264,8 +264,9 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     label: label,
     label_id: label_id,
     // BS#2410: an omitted code_number still takes MAX+1 for the artist, which
-    // is byte-for-byte the pre-2410 behavior.
-    code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id)),
+    // is byte-for-byte the pre-2410 behavior (now scoped to the release's own
+    // genre -- BS#2587).
+    code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id, body.genre_id)),
     code_volume_letters: code_volume_letters,
     alternate_artist_name: body.alternate_artist_name,
     disc_quantity: body.disc_quantity,
@@ -1436,17 +1437,26 @@ export const getArtistReleases: RequestHandler<
 
 /**
  * GET /library/artists/:id/next-release-number — previews the release
- * `code_number` a `POST /library` would assign this artist, so the classic
- * add-release form can prepopulate an EDITABLE field with the authoritative
- * value instead of a client-side `max+1`. That client guess is unreliable
- * because `/artists/:id/releases` is paginated, and a wrong-but-valid call
- * number written onto a physical card is the expensive outcome this endpoint
- * exists to prevent.
+ * `code_number` a `POST /library` would assign this artist in a given genre,
+ * so the classic add-release form can prepopulate an EDITABLE field with the
+ * authoritative value instead of a client-side `max+1`. That client guess is
+ * unreliable because `/artists/:id/releases` is paginated, and a
+ * wrong-but-valid call number written onto a physical card is the expensive
+ * outcome this endpoint exists to prevent.
  *
- * The value is `generateAlbumCodeNumber(artist_id)` — the SAME server-side
- * generator `addAlbum` and `createLibraryFiling` fall back to when `code_number`
- * is omitted (MAX(code_number)+1 for the artist, 1 when none) — so the preview
- * and the eventual write agree by construction. Pure read, no side effects.
+ * `genre_id` is a REQUIRED query parameter (BS#2587) -- call numbers are
+ * genre-scoped shelves, so a preview that didn't ask which shelf could only
+ * ever be a guess. This is a breaking change from the prior genre-blind
+ * signature; the classic card is already genre-scoped
+ * (`getArtistCardByIdInGenre`), so dj-site has the genre in hand at the call
+ * site. Missing or malformed is the same named 400 `parseArtistId` gives a
+ * malformed id, never a silent fallback.
+ *
+ * The value is `generateAlbumCodeNumber(artist_id, genre_id)` — the SAME
+ * server-side generator `addAlbum` and `createLibraryFiling` fall back to
+ * when `code_number` is omitted (MAX(code_number)+1 for the artist within
+ * that genre, 1 when none) — so the preview and the eventual write agree by
+ * construction. Pure read, no side effects.
  *
  * Mirrors the `/artists/peek-code` sibling: an internal `{ next_code_number }`
  * shape with no wxyc-shared contract schema, gated at `catalog: ['write']`
@@ -1457,12 +1467,16 @@ export const getArtistReleases: RequestHandler<
  * existed with no releases. A malformed id is the named 400 from
  * `parseArtistId`, never a 500.
  */
-export const peekArtistReleaseNumber: RequestHandler<{ id: string }> = async (req, res) => {
+export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, unknown, { genre_id?: string }> = async (
+  req,
+  res
+) => {
   const artistId = parseArtistId(req.params.id);
+  const genreId = parseCodeQueryInt(req.query.genre_id, 'genre_id', 1);
   if (!(await libraryService.getArtistCardById(artistId))) {
     throw new WxycError('Artist not found', 404);
   }
-  const next_code_number = await libraryService.generateAlbumCodeNumber(artistId);
+  const next_code_number = await libraryService.generateAlbumCodeNumber(artistId, genreId);
   res.status(200).json({ next_code_number });
 };
 
@@ -2555,7 +2569,7 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
       }
 
       const release_code_number =
-        supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artistRow.id, tx));
+        supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artistRow.id, release_genre_id, tx));
       const releaseRow = await libraryService.insertAlbum(
         {
           artist_id: artistRow.id,
@@ -3524,7 +3538,12 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
         !clientChoseDestinationCodeNumber &&
         (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId))
       ) {
-        updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id);
+        // `effectiveGenreId`, not `existing.genre_id`: `genre_id` is itself in
+        // `UPDATABLE_ALBUM_FIELDS`, so a request can move the release to a new
+        // genre in the same PATCH that triggers this regenerate. Reading
+        // `existing.genre_id` alone would re-file the release onto the shelf
+        // it is leaving rather than the one it is landing on (BS#2587).
+        updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id, effectiveGenreId);
       }
     }
   }

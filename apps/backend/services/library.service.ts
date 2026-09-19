@@ -4153,11 +4153,25 @@ export const countReleaseCrossReferences = async (): Promise<number> => {
 // moments earlier in that same, uncommitted transaction, and (b) not borrow a
 // second pool connection while the transaction's own sits reserved — see
 // `addToRotation`'s identity-read comment for the pool-wedge mechanics.
-export const generateAlbumCodeNumber = async (artist_id: number, tx?: DbTransaction): Promise<number> => {
+//
+// `genre_id` is required, not optional (BS#2587): call numbers are
+// genre-scoped shelves -- the dedup slot key `jobs/library-call-number-dedup`
+// enforces is `(artist_id, genre_id, code_number, ...)` -- so a MAX(code_number)
+// scoped to `artist_id` alone reads off whichever genre happens to hold the
+// highest number and proposes a number from the wrong shelf for any artist
+// filed under more than one genre. An optional genre would leave that defect
+// reachable from the next caller that forgets to pass one, which is how it
+// arrived here in the first place: `generateArtistNumber`, the very next
+// function below, has always taken `genre_id` for the same reason.
+export const generateAlbumCodeNumber = async (
+  artist_id: number,
+  genre_id: number,
+  tx?: DbTransaction
+): Promise<number> => {
   const response = await (tx ?? db)
     .select({ code_number: library.code_number })
     .from(library)
-    .where(eq(library.artist_id, artist_id))
+    .where(and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id)))
     .orderBy(desc(library.code_number))
     .limit(1);
   //in case this is the first album
