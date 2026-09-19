@@ -528,7 +528,12 @@ export const extractArtwork = (response: LookupResponse, requestedAlbum?: string
  * Closed vocabulary for `NoMatchEvidence.trust_gate` (BS#2606). Kept closed
  * and exhaustively switched in `classifyNoMatchTrustGate` below — adding a
  * `LmlTrackContextTrust` value LML/`trust.ts` doesn't have yet fails that
- * switch to compile, rather than silently falling through to `unknown`.
+ * switch to compile, rather than silently falling through to a catch-all.
+ *
+ * Every value names the shape it describes. There is deliberately no
+ * `unknown`/`other` member: BS#2607 renders these to a human, and a fallback
+ * label would read as "unclassified noise" for what is in fact the most
+ * actionable class in the taxonomy (`vouched_no_artwork`).
  *
  *   - `no_results`            — LML returned nothing (`results` empty).
  *   - `rejected_substitution` — LML returned at least one candidate, but the
@@ -537,14 +542,16 @@ export const extractArtwork = (response: LookupResponse, requestedAlbum?: string
  *                               substitution, or a row-less candidate whose
  *                               title doesn't correspond to the requested
  *                               album).
- *   - `unknown`               — the gate vouched for a result (`direct`,
+ *   - `vouched_no_artwork`    — the gate vouched for a result (`direct`,
  *                               `compilation`, or a correspondence-gated
  *                               row-less match), but `extractArtwork` still
  *                               found no usable artwork among the results it
- *                               vouches for — a rarer, structurally
- *                               different shape than an outright rejection.
+ *                               vouches for — the LML#408 degraded shape:
+ *                               LML agreed on the album and returned no
+ *                               image, structurally different from (and
+ *                               rarer than) an outright rejection.
  */
-export type NoMatchTrustGate = 'no_results' | 'rejected_substitution' | 'unknown';
+export type NoMatchTrustGate = 'no_results' | 'rejected_substitution' | 'vouched_no_artwork';
 
 function classifyNoMatchTrustGate(response: LookupResponse, requestedAlbum: string | null): NoMatchTrustGate {
   const trust = lmlTrackContextTrust(response, requestedAlbum);
@@ -553,7 +560,7 @@ function classifyNoMatchTrustGate(response: LookupResponse, requestedAlbum: stri
       return (response.results?.length ?? 0) === 0 ? 'no_results' : 'rejected_substitution';
     case 'search_type':
     case 'correspondence':
-      return 'unknown';
+      return 'vouched_no_artwork';
   }
 }
 
@@ -564,6 +571,14 @@ function classifyNoMatchTrustGate(response: LookupResponse, requestedAlbum: stri
  * reader querying old rows. Called only from `finalizeRow`'s no-match arms,
  * after `extractArtwork` has already returned null for this same
  * `(response, requestedAlbum)` pair — never on a match.
+ *
+ * Fields record LML's answer verbatim rather than a normalized reading of it,
+ * which matters for one of them: **`top_release_id: 0` is LML's "no Discogs
+ * id" sentinel, not release 0.** `shared/lml-client/src/trust.ts` keeps that
+ * reading with the caller by design (the rotation picker treats the sentinel
+ * as "no id, inline tracklist still valid"), so a consumer of this column —
+ * including BS#2607's digest renderer — must treat `0` as absent and never
+ * build a `discogs.com/release/0` link from it.
  */
 export type NoMatchEvidence = {
   v: 1;
