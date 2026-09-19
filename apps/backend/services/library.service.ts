@@ -9,13 +9,17 @@ import {
   db,
   captureCatalogDeleteSnapshot,
   type CatalogDeleteActor,
+  type CatalogDeleteSnapshot,
   extractSqlState,
   intArrayLiteral,
   isLockContentionError,
+  orderBatchEntities,
+  parseCapturedEnvelope,
   parseRotationBin,
   rotationActiveSql,
   rotationKilledSql,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
+  UNRECOVERABLE_DEPENDENTS,
   type RotationBin,
 } from '@wxyc/database';
 import {
@@ -33,6 +37,7 @@ import {
   artist_library_crossreference,
   artists,
   bins,
+  catalog_delete_snapshot,
   compilation_track_artist,
   digital_asset,
   digital_asset_file,
@@ -4144,6 +4149,171 @@ export const countReleaseCrossReferences = async (): Promise<number> => {
   const response = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(releaseCrossReferencesQuery().as('release_cross_references'));
+
+  return Number(response[0]?.count ?? 0);
+};
+
+/** One entity captured by a delete, as `GET /library/deleted` (BS#2561) renders it. */
+export type DeletedArchiveEntity = {
+  entity_kind: string;
+  table: string;
+  row: Record<string, unknown> | null;
+  /**
+   * Per-child ROW COUNTS, not the rows (BS#2561 F2a review finding 1) — see
+   * `childCounts` below for why.
+   */
+  children: Record<string, number>;
+};
+
+export type DeletedArchiveBatch = {
+  batch_id: string;
+  captured_at: Date;
+  actor: { user_id: string | null; email: string | null; role: string | null };
+  entities: DeletedArchiveEntity[];
+  unrecoverable: readonly string[];
+};
+
+/**
+ * Name fields a librarian would recognize a deleted card by. Not field-scoped
+ * like `GET /library/query`'s `q` — `catalog_delete_snapshot.captured` is
+ * jsonb with no indexed text column, and the volume (a handful of deletes a
+ * week, read a few times a month) doesn't justify extracting and indexing one
+ * (BS#2561 decision comment).
+ */
+const DELETED_ARCHIVE_NAME_FIELDS = ['album_title', 'artist_name', 'alternate_artist_name'] as const;
+
+// Parenthesized even though it is used as the sole predicate today: `sql.join`
+// over `OR` composes wrong under a future `and(...)` otherwise (`a OR b AND c`
+// binds tighter than the caller would expect). `ilikeEscaped` (not a bare
+// ILIKE) so `%`/`_` in a librarian's search are matched literally rather than
+// treated as wildcards, matching every other user-supplied ILIKE in this file.
+const deletedArchiveSearchCondition = (search: string): SQL =>
+  sql`(${sql.join(
+    DELETED_ARCHIVE_NAME_FIELDS.map((field) =>
+      ilikeEscaped(sql`${catalog_delete_snapshot.captured}->'entity'->'row'->>${field}`, search, 'contains')
+    ),
+    sql` OR `
+  )})`;
+
+/**
+ * Projects a captured envelope's `children` from full rows to per-table
+ * COUNTS (BS#2561 F2a review finding 1). `captureCatalogDeleteSnapshot`
+ * reads every child with an UNPROJECTED `tx.select()` — correctly, because a
+ * restore needs every column: `bins.dj_id`/`track_title`, `reviews.author`
+ * plus the full review text, `album_critic_reviews.author`, and so on. That
+ * is the capture's job, not this listing's. `GET /library/deleted` is
+ * gated at `catalog: ['write']` only — the delete's own bar, not anything
+ * that vets a principal to read who binned a release or another DJ's review
+ * authorship — so handing back the envelope wholesale would make every
+ * catalog-write principal a cross-user reader of that content. This is the
+ * ADR-0011 standard `catalog_delete_snapshot`'s own docstring already
+ * applies to `album_review_submissions` ("any second reader must carry the
+ * same exclusion"), applied here to a second READ SURFACE instead of a
+ * second captured table: a librarian sees "this release had 3 bin entries
+ * and 1 review", never the bin entries or the review text themselves. Do
+ * not "simplify" this back to echoing `envelope.children` — the capture
+ * side (`captureCatalogDeleteSnapshot`, `catalog-delete-snapshot.ts`) is what
+ * a future restore (WXYC/Backend-Service#2585) reads, and it stays
+ * unprojected on purpose; only this listing's projection changes here.
+ * `Array.isArray` guards a malformed `children` value the same way
+ * `parseCapturedEnvelope` itself does — a count of 0 rather than a thrown
+ * error for one archive row.
+ */
+const childCounts = (children: Record<string, unknown[]>): Record<string, number> =>
+  Object.fromEntries(Object.entries(children).map(([table, rows]) => [table, Array.isArray(rows) ? rows.length : 0]));
+
+/**
+ * One page of `GET /library/deleted`, newest batch first. Rows in
+ * `catalog_delete_snapshot` group by `batch_id`: `captureCatalogDeleteSnapshot`
+ * writes one row per captured entity, and a caller deleting several entities
+ * under one delete (WXYC/Backend-Service#2562's artist delete is the first —
+ * not shipped yet, so every batch today holds exactly one row) passes the
+ * same `batchId` to each call so the rows group together.
+ *
+ * Two queries, not one, so a page boundary can never split a batch across two
+ * pages: the first pages DISTINCT `batch_id`s (`search`, when given, filters
+ * this query — a batch qualifies if any one of its rows' entity matches), the
+ * second fetches every row belonging to just that page's batch ids.
+ *
+ * `captured_at` in the first query is `max()` over the rows THIS query saw —
+ * every row when `search` is absent, only the matching ones when it's
+ * present. Harmless while every batch is single-entity (the `max` has one
+ * input either way), but once WXYC/Backend-Service#2562 lands and a batch can
+ * hold several entities, a search matching only one of them would report that
+ * entity's `captured_at` rather than the batch's true (identical, same
+ * transaction) value — still correct today, just not for the reason it looks
+ * like at a glance.
+ */
+export const getDeletedArchivePage = async (
+  page: number,
+  limit: number,
+  search?: string
+): Promise<DeletedArchiveBatch[]> => {
+  const condition = search ? deletedArchiveSearchCondition(search) : undefined;
+
+  const batchPage = await db
+    .select({
+      batch_id: catalog_delete_snapshot.batch_id,
+      captured_at: sql<Date>`max(${catalog_delete_snapshot.captured_at})`,
+    })
+    .from(catalog_delete_snapshot)
+    .where(condition)
+    .groupBy(catalog_delete_snapshot.batch_id)
+    .orderBy(desc(sql`max(${catalog_delete_snapshot.captured_at})`), desc(sql`max(${catalog_delete_snapshot.id})`))
+    .limit(limit)
+    .offset(page * limit);
+
+  if (batchPage.length === 0) {
+    return [];
+  }
+
+  const rows: CatalogDeleteSnapshot[] = await db
+    .select()
+    .from(catalog_delete_snapshot)
+    .where(
+      inArray(
+        catalog_delete_snapshot.batch_id,
+        batchPage.map((batch) => batch.batch_id)
+      )
+    );
+
+  const rowsByBatch = new Map<string, CatalogDeleteSnapshot[]>();
+  for (const row of rows) {
+    rowsByBatch.set(row.batch_id, [...(rowsByBatch.get(row.batch_id) ?? []), row]);
+  }
+
+  return batchPage.map(({ batch_id, captured_at }) => {
+    const ordered = orderBatchEntities(rowsByBatch.get(batch_id) ?? []);
+    const [primary] = ordered;
+    return {
+      batch_id,
+      captured_at,
+      actor: {
+        user_id: primary?.actor_user_id ?? null,
+        email: primary?.actor_email ?? null,
+        role: primary?.actor_role ?? null,
+      },
+      entities: ordered.map((row) => {
+        const envelope = parseCapturedEnvelope(row.captured);
+        return {
+          entity_kind: row.entity_kind,
+          table: envelope.entity.table,
+          row: envelope.entity.row,
+          children: childCounts(envelope.children),
+        };
+      }),
+      unrecoverable: UNRECOVERABLE_DEPENDENTS,
+    };
+  });
+};
+
+/** Total batch count for `getDeletedArchivePage`'s page envelope (same search scope). */
+export const countDeletedArchiveBatches = async (search?: string): Promise<number> => {
+  const condition = search ? deletedArchiveSearchCondition(search) : undefined;
+  const response = await db
+    .select({ count: sql<number>`count(distinct ${catalog_delete_snapshot.batch_id})::int` })
+    .from(catalog_delete_snapshot)
+    .where(condition);
 
   return Number(response[0]?.count ?? 0);
 };

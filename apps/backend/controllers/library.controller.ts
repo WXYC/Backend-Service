@@ -1590,6 +1590,43 @@ export const listReleaseCrossReferences: RequestHandler<object, unknown, unknown
   res.status(200).json({ results, total, page, totalPages: Math.ceil(total / limit) });
 };
 
+type DeletedArchiveQueryParams = { page?: string; limit?: string; search?: string };
+
+/**
+ * GET /library/deleted — BS#2561 (F2a): the catalog-delete archive, newest
+ * batch first. Gated `catalog: ['write']`, the same bar as the `DELETE
+ * /library/:id` that writes these rows — the archive exposes deleted-card
+ * contents plus the deleter's identity, audit data per
+ * `library_delete_denylist`'s docstring, not a DJ-facing catalog read.
+ *
+ * Same `{ results, total, page, totalPages }` page shape as
+ * `GET /library/crossreferences/*` (`DEFAULT_LIMIT`/`MAX_LIMIT`, the bounds
+ * the open-ended catalog listings share — this archive grows without bound
+ * too, since retention is permanent).
+ *
+ * `search`, when present, is a plain substring match over the captured
+ * entity's name fields, NOT the field-scoped `artist:`/`album:` syntax
+ * `GET /library/query`'s `q` parses (BS#2561 decision comment) — see
+ * `deletedArchiveSearchCondition` for why.
+ */
+export const listDeletedArchive: RequestHandler<object, unknown, unknown, DeletedArchiveQueryParams> = async (
+  req,
+  res
+) => {
+  const { page, limit } = parsePageParams(req.query, DEFAULT_LIMIT, MAX_LIMIT);
+
+  if (req.query.search !== undefined && typeof req.query.search !== 'string') {
+    throw new WxycError('search must be a single string value', 400);
+  }
+  const search = req.query.search?.trim() || undefined;
+
+  const [results, total] = await Promise.all([
+    libraryService.getDeletedArchivePage(page, limit, search),
+    libraryService.countDeletedArchiveBatches(search),
+  ]);
+  res.status(200).json({ results, total, page, totalPages: Math.ceil(total / limit) });
+};
+
 /**
  * Validate one optional free-text body field: must be a string, must not be
  * blank after trimming, must fit the column. Returns the trimmed value.
