@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, ne, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -4640,6 +4640,74 @@ export type DeleteAlbumOutcome =
       outcome: 'has_digital_assets';
       assets: Array<{ id: number; provenance: string; discNumber: number; status: string }>;
     };
+
+export type FlowsheetPlayImpact =
+  { outcome: 'not_found' } | { outcome: 'found'; direct: number; rotationLinked: number; legacyLinked: number };
+
+/**
+ * BS#2592 pre-delete read: the three disjoint flowsheet-play arms
+ * `deleteAlbumFromDB` counted before BS#2565 removed the refusal they fed
+ * (see `047ad9ae^`'s copy of this function for the original query shapes).
+ * Reported separately and never summed — the legacy arm STRANDS a play
+ * rather than unlinking it, so a sum would misstate what the delete does.
+ * Takes no lock and must never be called from inside
+ * `runDeleteAlbumTransaction`: it exists to inform a confirmation screen the
+ * delete transaction has no reason to wait on.
+ *
+ * `legacyLinked` is best-effort: `flowsheet.legacy_release_id` carries no FK
+ * (`flowsheet_legacy_release_id_idx` only), so there is no row for a
+ * concurrent webhook INSERT to conflict with. The window is one statement
+ * wide and one-sided — it can only undercount.
+ */
+export const getFlowsheetPlayImpact = async (album_id: number): Promise<FlowsheetPlayImpact> => {
+  const [existing] = await db
+    .select({ legacy_release_id: library.legacy_release_id })
+    .from(library)
+    .where(eq(library.id, album_id))
+    .limit(1);
+  if (!existing) {
+    return { outcome: 'not_found' };
+  }
+
+  const rotationRows = await db.select({ id: rotation.id }).from(rotation).where(eq(rotation.album_id, album_id));
+  const rotationIds = rotationRows.map((row) => row.id);
+
+  const [directRow] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(flowsheet)
+    .where(eq(flowsheet.album_id, album_id));
+
+  let rotationLinked = 0;
+  if (rotationIds.length > 0) {
+    const [rotationRow] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(flowsheet)
+      .where(
+        and(inArray(flowsheet.rotation_id, rotationIds), sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`)
+      );
+    rotationLinked = Number(rotationRow?.count ?? 0);
+  }
+
+  const [legacyRow] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(flowsheet)
+    .where(
+      and(
+        eq(flowsheet.legacy_release_id, existing.legacy_release_id),
+        sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`,
+        rotationIds.length > 0
+          ? or(isNull(flowsheet.rotation_id), notInArray(flowsheet.rotation_id, rotationIds))
+          : undefined
+      )
+    );
+
+  return {
+    outcome: 'found',
+    direct: Number(directRow?.count ?? 0),
+    rotationLinked,
+    legacyLinked: Number(legacyRow?.count ?? 0),
+  };
+};
 
 /**
  * The one `digital_asset.status` that does NOT make a release undeletable.
