@@ -93,6 +93,8 @@ import {
   getLastRunTimestamp,
   updateLastRun,
   requirePositiveInt,
+  extractSqlState,
+  extractConstraintName,
 } from '@wxyc/database';
 import { initLogger, log, captureError, captureWarning, errorMessage, closeLogger } from './logger.js';
 
@@ -217,6 +219,40 @@ const isLockContentionError = (error: unknown): boolean => {
 };
 
 /**
+ * The two FK constraints a `23503` on this job's own UPDATEs can legitimately
+ * mean "the `library` row this candidate was about to link to was deleted
+ * mid-statement" — a librarian's `DELETE /library/:id` racing this pass, made
+ * reachable by BS#2565 removing that endpoint's flowsheet-references refusal.
+ * Names are Drizzle's own naming (`<table>_<column>_<ref-table>_<ref-column>_fk`),
+ * not Postgres's default `_fkey` suffix.
+ *
+ * Deliberately a SIBLING set to `LOCK_CONTENTION_SQLSTATES`, not a widening of
+ * it: `55P03`/`40P01` mean "someone else holds the row, try later" and `23503`
+ * here means "the row is gone, this candidate is retired" — different claims,
+ * reported under different Sentry fingerprints below. Folding `23503` into
+ * `LOCK_CONTENTION_SQLSTATES` would also make every OTHER foreign-key bug on a
+ * lock-bounded writer silently retryable, which is exactly what the job's own
+ * "does not mistake an unrelated wrapped error for lock contention" test
+ * guards against — that test's `23503` carries no constraint name, so it falls
+ * through this predicate and stays a hard failure.
+ */
+const RETIRED_LINKAGE_CONSTRAINTS = new Set(['flowsheet_album_id_library_id_fk', 'rotation_album_id_library_id_fk']);
+
+/**
+ * True only for a `23503` against one of the two constraints above — never for
+ * a `23503` on any other constraint, which stays a hard failure. Uses the
+ * shared `extractSqlState`/`extractConstraintName` (`shared/database/src/
+ * sqlstate.ts`) rather than re-deriving the two-level `.cause` unwrap here:
+ * the constraint name lives at the same depth as the SQLSTATE, off the same
+ * postgres-js driver error, so one extraction shape covers both.
+ */
+const isRetiredLinkageCandidateError = (error: unknown): boolean => {
+  if (extractSqlState(error) !== '23503') return false;
+  const constraint = extractConstraintName(error);
+  return constraint !== undefined && RETIRED_LINKAGE_CONSTRAINTS.has(constraint);
+};
+
+/**
  * Must stay byte-identical to `package.json`'s `cron-schedule`, which is what
  * `deploy-base.yml` installs in the EC2 crontab. Sentry upserts the monitor
  * from this value on the first check-in, so a drift here would make the monitor
@@ -298,16 +334,30 @@ export const resolveMaxRunGapHours = (raw: string | undefined = process.env.LINK
  * and is reported so an operator knows how much repair was skipped; it is
  * never compared against `resolved`, which is what `residual: null` encodes.
  */
-export type PassResult = { candidates: number; resolved: number; residual: number | null; deferred: boolean };
+/**
+ * `standDown` names WHY `deferred` is true, for logging only — `deferred`
+ * itself still gates the heartbeat and signal (c) the same way for both
+ * causes, since either way the pass's UPDATE never committed and the whole
+ * cohort it saw is simply retried next slot. `undefined` on a pass that ran
+ * (deferred or not) its UPDATE.
+ */
+export type PassResult = {
+  candidates: number;
+  resolved: number;
+  residual: number | null;
+  deferred: boolean;
+  standDown?: 'lock_contention' | 'retired_candidate';
+};
 export type RunResult = { flowsheet: PassResult; rotation: PassResult };
 
 /**
  * Runs one pass's data-modifying CTE inside an explicit transaction that
  * bounds every lock wait first (BS#2413).
  *
- * Returns `null` — never throws — when the statement is rejected for lock
- * contention, which is the caller's signal to record a stand-down rather than
- * a result. Any other error propagates unchanged.
+ * Returns a `standDown` reason — never throws — when the statement is
+ * rejected for lock contention or a retired linkage candidate, which is the
+ * caller's signal to record a stand-down rather than a result. Any other
+ * error propagates unchanged.
  *
  * The transaction is not here for isolation: READ COMMITTED gives each
  * statement its own snapshot either way, and BS#2071's whole point is that
@@ -318,9 +368,11 @@ export type RunResult = { flowsheet: PassResult; rotation: PassResult };
  * a pooled connection and discarded, leaving the CTE unguarded while looking
  * guarded.
  */
+type DrainStandDown = { standDown: 'lock_contention' | 'retired_candidate' };
+
 const runGuardedDrain = async (
   statement: Parameters<typeof db.execute>[0]
-): Promise<{ candidates: number; resolved: number } | null> => {
+): Promise<{ candidates: number; resolved: number } | DrainStandDown> => {
   try {
     const rows = (await db.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${LINKAGE_LOCK_TIMEOUT_MS}ms'`));
@@ -330,7 +382,8 @@ const runGuardedDrain = async (
     const row = rows?.[0];
     return { candidates: Number(row?.candidates ?? 0), resolved: Number(row?.resolved ?? 0) };
   } catch (error) {
-    if (isLockContentionError(error)) return null;
+    if (isLockContentionError(error)) return { standDown: 'lock_contention' };
+    if (isRetiredLinkageCandidateError(error)) return { standDown: 'retired_candidate' };
     throw error;
   }
 };
@@ -480,8 +533,8 @@ const resolveFlowsheetAlbumIds = async (dryRun: boolean): Promise<PassResult> =>
       (SELECT COUNT(*)::int FROM upd) AS resolved
   `);
 
-  if (measured === null) {
-    return { candidates: seen, resolved: 0, residual: null, deferred: true };
+  if ('standDown' in measured) {
+    return { candidates: seen, resolved: 0, residual: null, deferred: true, standDown: measured.standDown };
   }
 
   const { candidates, resolved } = measured;
@@ -562,8 +615,8 @@ const resolveRotationAlbumIds = async (dryRun: boolean): Promise<PassResult> => 
       (SELECT COUNT(*)::int FROM upd) AS resolved
   `);
 
-  if (measured === null) {
-    return { candidates: seen, resolved: 0, residual: null, deferred: true };
+  if ('standDown' in measured) {
+    return { candidates: seen, resolved: 0, residual: null, deferred: true, standDown: measured.standDown };
   }
 
   const { candidates, resolved } = measured;
@@ -739,7 +792,7 @@ export const hasLockContention = (result: RunResult): boolean => result.flowshee
  */
 const reportLockContention = (result: RunResult): void => {
   for (const [pass, passResult] of passesOf(result)) {
-    if (!passResult.deferred) continue;
+    if (passResult.standDown !== 'lock_contention') continue;
     log('warn', `lock-${pass}`, 'Stood down on lock contention; repair deferred to the next slot.', {
       pass,
       candidates: passResult.candidates,
@@ -749,6 +802,37 @@ const reportLockContention = (result: RunResult): void => {
       pass,
       candidates: passResult.candidates,
       lock_timeout_ms: LINKAGE_LOCK_TIMEOUT_MS,
+      cron_schedule: CRON_SCHEDULE,
+    });
+  }
+};
+
+/**
+ * A `23503` on `flowsheet_album_id_library_id_fk` / `rotation_album_id_
+ * library_id_fk` — a librarian deleted the `library` row a candidate was
+ * about to link to, mid-statement (BS#2565 made this reachable; see
+ * `isRetiredLinkageCandidateError`). Its own fingerprint and its own wording,
+ * never folded into `reportLockContention`'s message: "the row is gone" and
+ * "someone else holds the row" are different claims, and conflating them in a
+ * log search is exactly what a sibling predicate (over widening
+ * `LOCK_CONTENTION_SQLSTATES`) exists to avoid.
+ *
+ * No separate shortfall counter against signal (c): the FK violation aborts
+ * the whole statement, so nothing in this pass's cohort was resolved and the
+ * next run retries all of it — the same accounting `deferred`/`residual:
+ * null` already give a lock-contention stand-down, not the partial-drain
+ * shape `hasUnresolvedResidue` covers.
+ */
+const reportRetiredLinkageCandidates = (result: RunResult): void => {
+  for (const [pass, passResult] of passesOf(result)) {
+    if (passResult.standDown !== 'retired_candidate') continue;
+    log('warn', `retired-${pass}`, 'Stood down: a linked library row was deleted mid-statement; candidates retired.', {
+      pass,
+      candidates: passResult.candidates,
+    });
+    captureWarning(`${JOB_NAME}.retired_linkage_candidate`, `retired-${pass}`, {
+      pass,
+      candidates: passResult.candidates,
       cron_schedule: CRON_SCHEDULE,
     });
   }
@@ -831,6 +915,7 @@ export const runOnce = async (dryRun: boolean): Promise<RunResult> => {
   }
   reportDrain(result);
   reportLockContention(result);
+  reportRetiredLinkageCandidates(result);
   return result;
 };
 

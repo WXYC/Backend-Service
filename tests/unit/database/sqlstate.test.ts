@@ -14,13 +14,15 @@
  */
 
 import {
+  extractConstraintName,
   extractSqlState,
   isLockContentionError,
   LOCK_CONTENTION_SQLSTATES,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
 } from '../../../shared/database/src/sqlstate';
 
-const pgError = (code: unknown, message = 'driver error'): Error => Object.assign(new Error(message), { code });
+const pgError = (code: unknown, message = 'driver error', constraint_name?: unknown): Error =>
+  Object.assign(new Error(message), { code, ...(constraint_name !== undefined ? { constraint_name } : {}) });
 const drizzleWrapped = (cause: unknown): Error => Object.assign(new Error('Failed query: <sql>\nparams: '), { cause });
 
 describe('extractSqlState', () => {
@@ -54,6 +56,25 @@ describe('extractSqlState', () => {
     ['undefined', undefined],
   ])('returns undefined for %s', (_label, input) => {
     expect(extractSqlState(input)).toBeUndefined();
+  });
+});
+
+describe('extractConstraintName', () => {
+  it('reads the constraint name off the drizzle wrapper’s cause', () => {
+    expect(extractConstraintName(drizzleWrapped(pgError('23503', 'boom', 'flowsheet_album_id_library_id_fk')))).toBe(
+      'flowsheet_album_id_library_id_fk'
+    );
+  });
+
+  it('falls back to a top-level constraint_name when there is no cause', () => {
+    expect(extractConstraintName(pgError('23503', 'boom', 'rotation_album_id_library_id_fk'))).toBe(
+      'rotation_album_id_library_id_fk'
+    );
+  });
+
+  it('returns undefined when no constraint name can be read', () => {
+    expect(extractConstraintName(drizzleWrapped(pgError('23503', 'boom')))).toBeUndefined();
+    expect(extractConstraintName(null)).toBeUndefined();
   });
 });
 
