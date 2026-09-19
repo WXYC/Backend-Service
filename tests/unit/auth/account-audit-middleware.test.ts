@@ -83,6 +83,11 @@ function mustFindMountByPath(path: string): FlatMount {
   return mount;
 }
 const sendVerificationOtpMount = mustFindMountByPath('/email-otp/send-verification-otp');
+// BS#2553: the two response-body-resolved organization mounts, plus
+// invite-member's move to the existing email-lookup strategy.
+const orgUpdateMemberRoleMount = mustFindMount('organization.update-member-role');
+const orgRemoveMemberMount = mustFindMount('organization.remove-member');
+const orgInviteMemberMount = mustFindMount('organization.invite-member');
 
 /**
  * Captures the ONE middleware function a `mountPublicAccountAudit`/
@@ -382,6 +387,87 @@ describe('subject extraction', () => {
       expectAudited({ action: mount.action, subjectUserId: null, outcome: 429 });
     }
   );
+});
+
+// BS#2553: the res.locals subject-hint seam from STATION_SIGNUP_ACTOR_LOCAL
+// does not reach a better-auth plugin route (see account-audit-middleware.ts's
+// header comment for the empirical finding), so these four routes resolve
+// their subject from the operation's own 2xx response body instead — three
+// via the new 'response-user-id' strategy, one (invite-member) via the
+// pre-existing 'email-lookup' strategy. Every test here asserts BOTH a
+// resolved subjectUserId AND that the raw identifier submitted in the
+// request (a member id or an email) never appears anywhere in the recorded
+// event — the hazard this ticket exists to close.
+describe('response-body subject strategy (BS#2553)', () => {
+  it('resolves admin/create-user subject from the 2xx response body, never the submitted email', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const { res } = await start(
+      adminPrefixAuditMiddleware(),
+      mockAdminReq({ path: '/create-user', body: { email: 'newdj@wxyc.org', password: 'x', name: 'New DJ' } })
+    );
+    res.end(JSON.stringify({ user: { id: 'new-user-1', email: 'newdj@wxyc.org' } }));
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe('admin.create-user');
+    expect(call.subjectUserId).toBe('new-user-1');
+    expect(call.subjectUserId).not.toContain('@');
+  });
+
+  it('resolves organization/update-member-role subject from the bare member object, never the raw memberId', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const { res } = await start(
+      dispatchAuthenticated,
+      mockReq({ path: orgUpdateMemberRoleMount.path, body: { memberId: 'member-1', role: 'dj' } })
+    );
+    res.end(JSON.stringify({ id: 'member-1', userId: 'target-user-1', organizationId: 'org-1', role: 'dj' }));
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe('organization.update-member-role');
+    expect(call.subjectUserId).toBe('target-user-1');
+    expect(call.subjectUserId).not.toBe('member-1');
+  });
+
+  it('resolves organization/remove-member subject from the nested member.userId, never the raw memberIdOrEmail', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const { res } = await start(
+      dispatchAuthenticated,
+      mockReq({ path: orgRemoveMemberMount.path, body: { memberIdOrEmail: 'exdj@wxyc.org' } })
+    );
+    res.end(
+      JSON.stringify({ member: { id: 'member-2', userId: 'target-user-2', organizationId: 'org-1', role: 'dj' } })
+    );
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe('organization.remove-member');
+    expect(call.subjectUserId).toBe('target-user-2');
+    expect(JSON.stringify(call)).not.toContain('exdj@wxyc.org');
+  });
+
+  it('resolves organization/invite-member subject via the existing email-lookup strategy, never the raw email', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    db._chain.limit.mockResolvedValueOnce([{ id: 'existing-user-1' }]);
+    const { res } = await start(
+      dispatchAuthenticated,
+      mockReq({ path: orgInviteMemberMount.path, body: { email: 'returning-dj@wxyc.org', role: 'dj' } })
+    );
+    await settle(res);
+    const call = recordAccountAuditEvent.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.action).toBe('organization.invite-member');
+    expect(call.subjectUserId).toBe('existing-user-1');
+    expect(JSON.stringify(call)).not.toContain('returning-dj@wxyc.org');
+  });
+
+  it('leaves subjectUserId null on organization/remove-member when the response body carries no member (e.g. an error)', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const { res } = await start(
+      dispatchAuthenticated,
+      mockReq({ path: orgRemoveMemberMount.path, body: { memberIdOrEmail: 'exdj@wxyc.org' } })
+    );
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: 'MEMBER_NOT_FOUND', code: 'MEMBER_NOT_FOUND' }));
+    await settle(res);
+    expectAudited({ action: 'organization.remove-member', subjectUserId: null, outcome: 400 });
+  });
 });
 
 // BS#2551 (Option A, parent epic #2534): AC#2 of the issue — a unit test

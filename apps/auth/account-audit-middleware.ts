@@ -11,6 +11,31 @@
  * after the response is already sent — the write cannot be awaited by the
  * request path because there is nothing left to fail closed against
  * (parent epic decision 2/7).
+ *
+ * EMPIRICAL FINDING (BS#2553): the `res.locals` subject-hint pattern
+ * `STATION_SIGNUP_ACTOR_LOCAL` uses (`apps/auth/app.ts`) does NOT reach a
+ * better-auth plugin route (organization `remove-member`/`update-member-role`/
+ * `invite-member`, admin `create-user`) — confirmed by reading the actual
+ * request path, not assuming it. `toNodeHandler(auth)`
+ * (`node_modules/better-call/dist/node.mjs`) is
+ * `async (req, res) => setResponse(res, await handler(getRequest({ request: req })))`.
+ * `getRequest` (`.../adapters/node/request.mjs`) builds a brand-new standard
+ * `Request` from the raw Node `req` and returns it — no reference to `res`
+ * is ever created. `handler(...)` — better-auth's whole plugin/route/hook
+ * pipeline, including `hooks.before`/`hooks.after` — runs on that `Request`
+ * alone and never receives `res`; `res` surfaces again only in
+ * `setResponse`, called AFTER `handler` already returned, purely to stream
+ * the finished response back. So there is no `res` for a plugin route or
+ * its hooks to write `res.locals` onto. (`STATION_SIGNUP_ADMIN_PREFIX`'s
+ * hand-written router in `app.ts` never goes through `toNodeHandler` and
+ * keeps the real `res` throughout — why the gate pattern works there.)
+ *
+ * Fallback: a `'response-user-id'` subject strategy (see `SubjectStrategy`
+ * in `audit-coverage.js`) reads the subject id out of the operation's own
+ * JSON response body, which this middleware already captures (widened here
+ * to also capture on 2xx, not just >=400 for `errorCode`) — no `res.locals`,
+ * no extra DB read, and no race against `organization/remove-member`
+ * deleting its own `auth_member` row before a post-finish lookup could run.
  */
 import { eq } from 'drizzle-orm';
 import type { Express, NextFunction, Request, Response } from 'express';
@@ -18,7 +43,14 @@ import { auth, deriveStationSignupIpHash } from '@wxyc/authentication';
 import { db, recordAccountAuditEvent, user } from '@wxyc/database';
 import { fromNodeHeaders } from 'better-auth/node';
 import { onAccountAuditError } from './account-audit-error.js';
-import { ADMIN_ACTIONS, ADMIN_PREFIX, FLAT_MOUNTS, classifyFlatMountAction, type FlatMount } from './audit-coverage.js';
+import {
+  ADMIN_ACTIONS,
+  ADMIN_PREFIX,
+  FLAT_MOUNTS,
+  classifyFlatMountAction,
+  type FlatMount,
+  type SubjectStrategy,
+} from './audit-coverage.js';
 import { realIpFromRequest } from './rate-limit-key.js';
 
 const MAX_BODY_CAPTURE_BYTES = 4096;
@@ -91,23 +123,69 @@ const resolveUserIdByEmail = async (email: unknown): Promise<string | null> => {
 };
 
 /**
- * Which `subjectFrom` strategy a `FlatMount` uses, selected ONCE at
- * `flatMountAuditMiddleware(mount)` construction time (simplify pass, item
- * 5) rather than re-branching on `mount.action` per request — replaces the
- * old `SELF_ACTIONS` set + `mount.action === 'forget-password'` compare.
+ * Reads the subject id out of the response body the middleware already
+ * captured for this request (only non-empty when `captureBodyOn2xx` was set
+ * — see `ClassifiedRequest`). `path` walks the parsed JSON: `['user', 'id']`
+ * for admin/create-user, `['userId']` for organization/update-member-role,
+ * `['member', 'userId']` for organization/remove-member — see the
+ * `FLAT_MOUNTS`/`ADMIN_ACTIONS` entries in `audit-coverage.ts` for exactly
+ * which better-auth response shape each path matches. Reuses
+ * `isPlausibleUserId` — a malformed or attacker-shaped response is not
+ * assumed to be a valid id just because it parsed.
  */
-function subjectFromStrategy(mount: FlatMount): (req: Request, actorId: string | null) => Promise<string | null> {
-  switch (mount.subject) {
+const subjectFromResponseBody = (path: readonly string[], capturedBody: readonly Buffer[]): string | null => {
+  if (capturedBody.length === 0) return null;
+  try {
+    let cur: unknown = JSON.parse(Buffer.concat(capturedBody as Buffer[]).toString('utf8'));
+    for (const key of path) {
+      if (typeof cur !== 'object' || cur === null) return null;
+      cur = (cur as Record<string, unknown>)[key];
+    }
+    return typeof cur === 'string' && isPlausibleUserId(cur) ? cur : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Which `subjectFrom` strategy a `FlatMount`/`AdminAction` uses (BS#2553:
+ * unified across both — previously `FlatMount` alone had this dispatch and
+ * `adminPrefixAuditMiddleware` hard-coded `extractBodyUserId`). Selected
+ * once per classified request rather than re-branching on `mount.action`
+ * per request — for a `FlatMount` that's once at
+ * `flatMountAuditMiddleware(mount)` construction time (simplify pass, item
+ * 5); for an admin action it's once per `classify()` call, since one
+ * `adminPrefixAuditMiddleware()` instance dispatches every admin action and
+ * most of them still use the `'body-user-id'` default.
+ */
+function subjectStrategyFor(
+  subject: SubjectStrategy,
+  responsePath: readonly string[] | undefined
+): (req: Request, actorId: string | null, capturedBody: readonly Buffer[]) => Promise<string | null> {
+  switch (subject) {
     case 'email-lookup':
       return (req) => resolveUserIdByEmail((req.body as Record<string, unknown> | undefined)?.email);
     case 'actor':
       return (_req, actorId) => Promise.resolve(actorId);
     case 'body-user-id':
       return (req) => Promise.resolve(extractBodyUserId(req));
+    case 'response-user-id':
+      return (_req, _actorId, capturedBody) =>
+        Promise.resolve(subjectFromResponseBody(responsePath ?? [], capturedBody));
   }
 }
 
 const ipHashOf = (req: Request): string | null => deriveStationSignupIpHash(realIpFromRequest(req));
+
+interface ClassifiedRequest {
+  action: string;
+  includeGet: boolean;
+  serializeSessionRead: boolean;
+  /** Public mounts (resolveActor:false) gate this to 2xx outcomes — decision 12's DoS-amplifier guard. Receives the response body `capture()` already recorded (empty unless `captureBodyOn2xx` is set). */
+  subjectFrom: (req: Request, actorId: string | null, capturedBody: readonly Buffer[]) => Promise<string | null>;
+  /** True only for a `'response-user-id'` mount/action — widens `capture()` to also record 2xx bytes (every other mount/action only ever captures >=400 bodies, for `errorCode`). */
+  captureBodyOn2xx: boolean;
+}
 
 interface ResolvedMount {
   /**
@@ -118,10 +196,8 @@ interface ResolvedMount {
    * any-work gate for `adminPrefixAuditMiddleware`; every `FlatMount`
    * request is trivially known, since it's mounted at its own literal path.
    */
-  classify: (req: Request) => { action: string; includeGet: boolean; serializeSessionRead: boolean } | null;
+  classify: (req: Request) => ClassifiedRequest | null;
   resolveActor: boolean;
-  /** Public mounts (resolveActor:false) gate this to 2xx outcomes — decision 12's DoS-amplifier guard. */
-  subjectFrom: (req: Request, actorId: string | null) => Promise<string | null>;
 }
 
 function auditMiddleware(resolve: ResolvedMount) {
@@ -131,12 +207,17 @@ function auditMiddleware(resolve: ResolvedMount) {
     if (!classified) return next();
     if (req.method === 'GET' && !classified.includeGet) return next();
 
-    const { action } = classified;
+    const { action, captureBodyOn2xx } = classified;
 
     const capturedBody: Buffer[] = [];
     let capturedBytes = 0;
     const capture = (chunk: unknown): void => {
-      if (res.statusCode < 400 || capturedBytes >= MAX_BODY_CAPTURE_BYTES) return;
+      // Normally only an error body is captured (for `errorCode`
+      // extraction below). `captureBodyOn2xx` widens this to a 2xx body
+      // too, for the one class of mount whose `subjectFrom` strategy is
+      // `'response-user-id'` — see this file's header comment.
+      const shouldCapture = res.statusCode >= 400 || (captureBodyOn2xx && res.statusCode < 300);
+      if (!shouldCapture || capturedBytes >= MAX_BODY_CAPTURE_BYTES) return;
       // HIGH 2 (code review BS#2537 PR #2545): better-call's setResponse
       // pumps `response.body.getReader()` values into res.write(value) as
       // plain Uint8Array chunks — Buffer.isBuffer is false for those.
@@ -264,7 +345,9 @@ function auditMiddleware(resolve: ResolvedMount) {
         // lookup would hand a distributed brute force one DB read per
         // throttled attempt.
         const subjectUserId =
-          resolve.resolveActor || res.statusCode < 300 ? await resolve.subjectFrom(req, actorId) : null;
+          resolve.resolveActor || res.statusCode < 300
+            ? await classified.subjectFrom(req, actorId, capturedBody)
+            : null;
 
         await recordAccountAuditEvent(
           {
@@ -313,16 +396,24 @@ export function adminPrefixAuditMiddleware() {
     // attacker-controlled path text (HIGH 1's other half of the fix).
     classify: (req) => {
       const known = ADMIN_ACTIONS.get(canonicalPath(req));
-      return known
-        ? {
-            action: known.action,
-            includeGet: known.includeGet === true,
-            serializeSessionRead: known.serializeSessionRead === true,
-          }
-        : null;
+      if (!known) return null;
+      // BS#2553: subject strategy resolved per matched action, not
+      // hard-coded — most admin actions still default to 'body-user-id'
+      // (`known.subject` omitted), only admin/create-user sets
+      // 'response-user-id'. Recomputed per request rather than cached
+      // per-path: this ONE middleware instance dispatches every admin
+      // action, so there's no single per-mount closure to cache it on the
+      // way `flatMountAuditMiddleware` does below.
+      const subject = known.subject ?? 'body-user-id';
+      return {
+        action: known.action,
+        includeGet: known.includeGet === true,
+        serializeSessionRead: known.serializeSessionRead === true,
+        subjectFrom: subjectStrategyFor(subject, known.responsePath),
+        captureBodyOn2xx: subject === 'response-user-id',
+      };
     },
     resolveActor: true,
-    subjectFrom: (req) => Promise.resolve(extractBodyUserId(req)),
   });
 }
 
@@ -338,6 +429,11 @@ export function adminPrefixAuditMiddleware() {
  * `req.body`.
  */
 function flatMountAuditMiddleware(mount: FlatMount) {
+  // Resolved once per mount, not per request — every FlatMount's subject
+  // strategy is static (unlike ADMIN_ACTIONS, where one middleware instance
+  // dispatches many actions).
+  const subjectFrom = subjectStrategyFor(mount.subject, mount.responsePath);
+  const captureBodyOn2xx = mount.subject === 'response-user-id';
   return auditMiddleware({
     classify: (req) => {
       const action = classifyFlatMountAction(mount, req.body);
@@ -346,10 +442,11 @@ function flatMountAuditMiddleware(mount: FlatMount) {
         action,
         includeGet: false, // every FlatMount is a POST-only mutation; a stray GET 404s unlogged.
         serializeSessionRead: mount.serializeSessionRead === true,
+        subjectFrom,
+        captureBodyOn2xx,
       };
     },
     resolveActor: mount.resolveActor,
-    subjectFrom: subjectFromStrategy(mount),
   });
 }
 
