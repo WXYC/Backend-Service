@@ -1397,8 +1397,14 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   // field added to one of `getArtistCard` / `updateArtistCard`'s two 200
   // sites (this one and the no-op short-circuit above) must be added to all
   // three, or the two endpoints answer in different shapes again -- the exact
-  // divergence `tests/integration/library.spec.js` guards
-  // ("PATCH /library/artists/:id ... answering in the GET card shape").
+  // divergence `tests/integration/library.spec.js` guards on THIS branch
+  // ("PATCH /library/artists/:id ... answering in the GET card shape", which
+  // sends a real rename) and, for the no-op branch above, on
+  // "resubmitting every field unchanged short-circuits to a no-op 200 in
+  // exact GET-shape parity" (BS#2597 review iteration 2, FIX B -- the earlier
+  // "allows re-saving the same artist_name" test also changes
+  // `alphabetical_name`, so it lands here too and does not pin the no-op
+  // branch on its own).
   const refreshed = await libraryService.getArtistCardById(artistId);
   if (!refreshed) {
     throw new WxycError('Artist not found', 404);
