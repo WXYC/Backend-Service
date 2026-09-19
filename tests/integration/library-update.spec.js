@@ -1,5 +1,8 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest, expectErrorContains, expectFields } = require('../utils/test_helpers');
+const { getTestDb } = require('../utils/db');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 /**
  * Integration coverage for PATCH /library/:id (PR #1154 review).
@@ -406,6 +409,127 @@ describe('PATCH /library/:id', () => {
       // destArtist owns 1 already, so the move burns the next number in its
       // sequence rather than landing on the echoed 1.
       expect(res.body.code_number).toBeGreaterThan(1);
+    });
+  });
+
+  // BS#2587: `genre_id` is itself in `UPDATABLE_ALBUM_FIELDS`, so a PATCH can
+  // move a release to a new artist AND a new genre at once. The auto-regenerate
+  // must scope against the DESTINATION genre, not the row's own stored
+  // (soon-to-be-stale) genre -- reading `existing.genre_id` would re-file the
+  // release onto the shelf it is leaving rather than the one it is landing on.
+  //
+  // The fixture is deliberately shaped so the genre-scoped answer and the OLD
+  // genre-blind answer (MAX(code_number) across every genre the artist is
+  // filed under, not just the destination) DIFFER: destArtist's Rock (11)
+  // shelf sits much higher than its Electronic (15) shelf, and the moving
+  // release lands in Electronic -- the LOW shelf. A genre-blind generator
+  // would still see Rock's high max and answer off it; scoped correctly, the
+  // destination shelf is nearly empty. (An earlier version of this fixture
+  // had it backwards -- destination shelf high, other shelf low -- which
+  // happened to make both answers agree and passed unchanged even with the
+  // pre-#2587 genre-blind generator.) Reverting the service's genre-scoping
+  // fix makes this test's final assertion fail.
+  describe('artist move that also changes genre regenerates against the destination genre (BS#2587)', () => {
+    let destArtist;
+    let originArtist;
+
+    beforeAll(async () => {
+      const dest = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Genre Move Dest Artist ${uniq}`,
+          code_letters: 'GM',
+          genre_id: 11,
+          code_number: 9450 + (uniq % 500),
+        })
+        .expect(201);
+      destArtist = dest.body;
+
+      // destArtist is filed under a SECOND genre too -- `POST /library/artists`
+      // always inserts exactly one crossreference row, so a real multi-genre
+      // artist has to be constructed with a direct insert, the same approach
+      // the cross-reference fixtures elsewhere in this suite use.
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${destArtist.id}, 15, ${9450 + (uniq % 500)})`
+      );
+
+      // destArtist's Rock (11) shelf tops out HIGH -- a genre-blind
+      // MAX(code_number) across every genre the artist is filed under would
+      // answer off this shelf regardless of where the moving release lands.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Move Dest Rock ${uniq}`,
+          artist_id: destArtist.id,
+          label: 'Genre Move Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 40,
+        })
+        .expect(201);
+
+      // destArtist's Electronic (15) shelf tops out at 1 -- the DESTINATION
+      // the moving release is landing in. A genre-scoped regenerate must
+      // answer from HERE (2), not from Rock's much higher shelf (41).
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Move Dest Electronic ${uniq}`,
+          artist_id: destArtist.id,
+          label: 'Genre Move Label',
+          genre_id: 15,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+
+      const origin = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Genre Move Origin Artist ${uniq}`,
+          code_letters: 'GO',
+          genre_id: 11,
+          code_number: 9460 + (uniq % 500),
+        })
+        .expect(201);
+      originArtist = origin.body;
+    });
+
+    test('regenerates from the destination genre shelf (2), not the artist-wide max (41)', async () => {
+      const moving = await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Move Origin Release ${uniq}`,
+          artist_id: originArtist.id,
+          label: 'Genre Move Label',
+          genre_id: 11,
+          format_id: 1,
+        })
+        .expect(201);
+      // originArtist's first release auto-assigns 1, which collides with
+      // destArtist's Electronic code_number 1 -- the trigger for the
+      // regenerate. `albumCodeNumberTaken` is artist-wide
+      // (WXYC/Backend-Service#2579, deliberately not fixed here), so it fires
+      // on that collision regardless of which genre either release is filed
+      // under -- see the module comment above for that known scope gap.
+      expect(moving.body.code_number).toBe(1);
+
+      const res = await auth
+        .patch(`/library/${moving.body.id}`)
+        .send({ artist_id: destArtist.id, genre_id: 15 })
+        .expect(200);
+
+      expect(res.body.artist_id).toBe(destArtist.id);
+      expect(res.body.genre_id).toBe(15);
+      // 2 = destArtist's Electronic max (1) + 1 -- the destination shelf the
+      // release is landing on. A genre-blind regenerate (MAX(code_number)
+      // across every genre the artist is filed under, the pre-#2587
+      // behavior) would instead answer 41, off Rock's much higher shelf --
+      // the exact defect BS#2587 fixed, and the point of shaping the fixture
+      // this way rather than the other way around.
+      expect(res.body.code_number).toBe(2);
     });
   });
 });

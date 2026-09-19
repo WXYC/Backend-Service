@@ -130,6 +130,92 @@ describe('Library Catalog', () => {
       expect(res.body.album_title).toContain('Test Album');
     });
 
+    // BS#2587: the server-assigned code_number is scoped to (artist_id,
+    // genre_id), not just artist_id -- an artist with releases in two genres
+    // has two independently-numbered shelves.
+    //
+    // `insertAlbum` itself never checks `genre_artist_crossreference` (it
+    // will happily insert a `library` row against a genre the artist has no
+    // membership in), and `addAlbum` only consults membership on the
+    // `artist_name` branch, via `artistIdFromName`'s join to that table --
+    // a request that supplies `artist_id` directly skips the check entirely.
+    // So a library row filed under a genre with no matching crossreference
+    // is reachable through a real Backend write path, not a hypothetical one.
+    // `genre_artist_crossreference` itself has two writers:
+    // `insertArtistWithGenreCrossreference` (one row per artist, reached from
+    // TWO routes -- `addArtist` for `POST /library/artists`, and
+    // `createLibraryFiling`'s create-artist arm for `POST /library/filings`,
+    // which threads the caller's `tx`) and `jobs/library-etl/job.ts`'s
+    // `ensureGenreArtistCrossref` (the legacy tubafrenzy import, upserted per
+    // crossreference row on every run) -- the latter is what makes a
+    // multi-genre artist (one `artist_id`, several crossreference rows) a
+    // real, legacy-imported shape (see the `artist_genre_key` uniqueness note
+    // a few tests down). The fixture seeds the second membership directly,
+    // the same way that test does, rather than depending on the ETL job.
+    test('auto-generates code_number scoped to the release genre, not the artist-wide max', async () => {
+      const uniq = Date.now();
+      const artist = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Post Genre Scope Artist ${uniq}`,
+          code_letters: 'PG',
+          genre_id: 11,
+          code_number: 9500 + (uniq % 500),
+        })
+        .expect(201);
+
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.body.id}, 15, ${9000 + (uniq % 500)})`
+      );
+
+      try {
+        const rock1 = await auth
+          .post('/library')
+          .send({
+            album_title: `Post Genre Scope Rock 1 ${uniq}`,
+            artist_id: artist.body.id,
+            label: 'Test Label',
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        expect(rock1.body.code_number).toBe(1);
+
+        const rock2 = await auth
+          .post('/library')
+          .send({
+            album_title: `Post Genre Scope Rock 2 ${uniq}`,
+            artist_id: artist.body.id,
+            label: 'Test Label',
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        expect(rock2.body.code_number).toBe(2);
+
+        // Same artist, already-established second genre (via the
+        // crossreference seeded above): the shelf is empty, so this must
+        // land at 1 -- a genre-blind generator would have proposed 3.
+        const electronic1 = await auth
+          .post('/library')
+          .send({
+            album_title: `Post Genre Scope Electronic 1 ${uniq}`,
+            artist_id: artist.body.id,
+            label: 'Test Label',
+            genre_id: 15,
+            format_id: 1,
+          })
+          .expect(201);
+        expect(electronic1.body.code_number).toBe(1);
+      } finally {
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.body.id} AND genre_id = 15`
+        );
+      }
+    });
+
     // BS#1963: a Backend-sourced catalog add mints its own legacy_release_id
     // from a Postgres sequence floored at 1,000,000, above the tubafrenzy id
     // space (legacy max ~72,276), so the Backend-authored library.db producer
@@ -4091,11 +4177,14 @@ describe('Library Artist Card (BS#2156)', () => {
   // `generateAlbumCodeNumber` (MAX(code_number)+1, 1 when none) — so the classic
   // add-release form can prepopulate an editable field. The unit suite mocks the
   // service; these exercise the real generator against Postgres.
+  //
+  // BS#2587: `genre_id` is a REQUIRED query parameter, and the generator scopes
+  // its MAX to (artist_id, genre_id) rather than every genre the artist owns.
   describe('GET /library/artists/:id/next-release-number', () => {
-    async function addRelease(artistId, title) {
+    async function addRelease(artistId, title, genreId = 11) {
       const res = await auth
         .post('/library')
-        .send({ album_title: title, artist_id: artistId, label: 'Test Label', genre_id: 11, format_id: 1 })
+        .send({ album_title: title, artist_id: artistId, label: 'Test Label', genre_id: genreId, format_id: 1 })
         .expect(201);
       return res.body;
     }
@@ -4103,7 +4192,7 @@ describe('Library Artist Card (BS#2156)', () => {
     test('previews 1 for an artist with no releases', async () => {
       const artist = await createTestArtist();
 
-      const res = await auth.get(`/library/artists/${artist.id}/next-release-number`).expect(200);
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
 
       expect(res.body).toEqual({ next_code_number: 1 });
     });
@@ -4115,20 +4204,72 @@ describe('Library Artist Card (BS#2156)', () => {
       await addRelease(artist.id, `Next Number One ${Date.now()}`);
       await addRelease(artist.id, `Next Number Two ${Date.now()}`);
 
-      const res = await auth.get(`/library/artists/${artist.id}/next-release-number`).expect(200);
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
       expect(res.body).toEqual({ next_code_number: 3 });
 
       const third = await addRelease(artist.id, `Next Number Three ${Date.now()}`);
       expect(third.code_number).toBe(3);
     });
 
+    // The regression case BS#2587 exists for: an artist with releases in two
+    // genres has two independently-numbered shelves. Before this fix, the
+    // generator's MAX(code_number) ignored genre_id entirely and would answer
+    // from whichever genre held the higher number regardless of which shelf
+    // was being filed to -- concretely, an Electronic filing would have been
+    // offered 51 (Rock's next number) instead of 3 (Electronic's own next).
+    test('scopes the preview to the queried genre, not the artist-wide max', async () => {
+      const artist = await createTestArtist();
+      // Rock (genre 11): two releases, next would be 3 if genre-blind.
+      await addRelease(artist.id, `Rock Shelf One ${Date.now()}`, 11);
+      await addRelease(artist.id, `Rock Shelf Two ${Date.now()}`, 11);
+      // Electronic (genre 15): one release at a much higher code_number, so a
+      // genre-blind MAX across both genres would answer from this shelf
+      // instead of Rock's.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Electronic Shelf High ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 15,
+          format_id: 1,
+          code_number: 50,
+        })
+        .expect(201);
+
+      const rockRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
+      expect(rockRes.body).toEqual({ next_code_number: 3 });
+
+      const electronicRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=15`).expect(200);
+      expect(electronicRes.body).toEqual({ next_code_number: 51 });
+
+      // A genre the artist has no releases in previews 1, not an error and not
+      // a leak of another genre's numbering.
+      const jazzRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=7`).expect(200);
+      expect(jazzRes.body).toEqual({ next_code_number: 1 });
+    });
+
     test('404s on an unknown artist id', async () => {
-      const res = await auth.get('/library/artists/99999999/next-release-number').expect(404);
+      const res = await auth.get('/library/artists/99999999/next-release-number?genre_id=11').expect(404);
       expectErrorContains(res, 'not found');
     });
 
     test('400s on a malformed artist id', async () => {
-      await auth.get('/library/artists/2147483648/next-release-number').expect(400);
+      await auth.get('/library/artists/2147483648/next-release-number?genre_id=11').expect(400);
+    });
+
+    // BS#2587: genre_id is required, not an optional fallback to genre-blind
+    // behavior -- omitting it must never silently answer from the wrong shelf.
+    test('400s when genre_id is omitted', async () => {
+      const artist = await createTestArtist();
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number`).expect(400);
+      expectErrorContains(res, 'genre_id');
+    });
+
+    test('400s on a malformed genre_id', async () => {
+      const artist = await createTestArtist();
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=abc`).expect(400);
+      expectErrorContains(res, 'genre_id');
     });
 
     // Matches GET/PATCH /artists/:id and /releases: an artist row with no genre
@@ -4143,7 +4284,7 @@ describe('Library Artist Card (BS#2156)', () => {
       );
 
       try {
-        const res = await auth.get(`/library/artists/${orphan.id}/next-release-number`).expect(404);
+        const res = await auth.get(`/library/artists/${orphan.id}/next-release-number?genre_id=11`).expect(404);
         expectErrorContains(res, 'not found');
       } finally {
         await sql.unsafe(`DELETE FROM ${SCHEMA}.artists WHERE id = ${orphan.id}`);

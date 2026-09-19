@@ -264,8 +264,9 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     label: label,
     label_id: label_id,
     // BS#2410: an omitted code_number still takes MAX+1 for the artist, which
-    // is byte-for-byte the pre-2410 behavior.
-    code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id)),
+    // is byte-for-byte the pre-2410 behavior (now scoped to the release's own
+    // genre -- BS#2587).
+    code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id, body.genre_id)),
     code_volume_letters: code_volume_letters,
     alternate_artist_name: body.alternate_artist_name,
     disc_quantity: body.disc_quantity,
@@ -793,9 +794,12 @@ type ArtistByCodeQuery = {
 };
 
 /**
- * Parses one required integer query parameter for `resolveArtistByCode`,
- * bounded on both ends. The upper bound is the int4 guard described at
- * `INT4_MAX`; the lower bound differs per parameter, so it is passed in.
+ * Parses one required integer query parameter, bounded on both ends. The
+ * upper bound is the int4 guard described at `INT4_MAX`; the lower bound
+ * differs per parameter, so it is passed in.
+ *
+ * Two callers: `resolveArtistByCode` (both `genre_id` and `code_number`) and
+ * `peekArtistReleaseNumber` (`genre_id`, required by BS#2587).
  *
  * `Number('')` is 0 and `Number(' ')` is 0, so a present-but-empty parameter
  * (`?code_number=`) would sail through `Number.isInteger` as a legitimate
@@ -803,6 +807,19 @@ type ArtistByCodeQuery = {
  * blank check before the numeric one.
  */
 const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): number => {
+  // Both `resolveArtistByCode` call sites reached this with a value already,
+  // so the branch was historically unreachable for `undefined` -- but by two
+  // different mechanisms, and only one is that handler's "Missing query
+  // parameters" 400. `code_number` is deliberately excluded from that 400
+  // (BS#2489: absent, it selects the browse), so what kept THAT call site
+  // from passing `undefined` is the browse early return, not a required-
+  // parameter check. Do not "align" the browse branch to throw. `peekArtistReleaseNumber`
+  // has no such pre-check, so an omitted `genre_id` reaches this function
+  // directly -- distinguish that from the repeated-key case below, or an
+  // absent parameter misdiagnoses as a repeated one.
+  if (raw === undefined) {
+    throw new WxycError(`Missing query parameter: ${name}`, 400);
+  }
   // Express's `simple` query parser yields string[] for repeated keys
   // (`?genre_id=1&genre_id=2`), which `Number()` would collapse to NaN with a
   // misleading message; name the real problem instead.
@@ -1436,17 +1453,26 @@ export const getArtistReleases: RequestHandler<
 
 /**
  * GET /library/artists/:id/next-release-number — previews the release
- * `code_number` a `POST /library` would assign this artist, so the classic
- * add-release form can prepopulate an EDITABLE field with the authoritative
- * value instead of a client-side `max+1`. That client guess is unreliable
- * because `/artists/:id/releases` is paginated, and a wrong-but-valid call
- * number written onto a physical card is the expensive outcome this endpoint
- * exists to prevent.
+ * `code_number` a `POST /library` would assign this artist in a given genre,
+ * so the classic add-release form can prepopulate an EDITABLE field with the
+ * authoritative value instead of a client-side `max+1`. That client guess is
+ * unreliable because `/artists/:id/releases` is paginated, and a
+ * wrong-but-valid call number written onto a physical card is the expensive
+ * outcome this endpoint exists to prevent.
  *
- * The value is `generateAlbumCodeNumber(artist_id)` — the SAME server-side
- * generator `addAlbum` and `createLibraryFiling` fall back to when `code_number`
- * is omitted (MAX(code_number)+1 for the artist, 1 when none) — so the preview
- * and the eventual write agree by construction. Pure read, no side effects.
+ * `genre_id` is a REQUIRED query parameter (BS#2587) -- call numbers are
+ * genre-scoped shelves, so a preview that didn't ask which shelf could only
+ * ever be a guess. This is a breaking change from the prior genre-blind
+ * signature; the classic card is already genre-scoped
+ * (`getArtistCardByIdInGenre`), so dj-site has the genre in hand at the call
+ * site. Missing or malformed is the same named 400 `parseArtistId` gives a
+ * malformed id, never a silent fallback.
+ *
+ * The value is `generateAlbumCodeNumber(artist_id, genre_id)` — the SAME
+ * server-side generator `addAlbum` and `createLibraryFiling` fall back to
+ * when `code_number` is omitted (MAX(code_number)+1 for the artist within
+ * that genre, 1 when none) — so the preview and the eventual write agree by
+ * construction. Pure read, no side effects.
  *
  * Mirrors the `/artists/peek-code` sibling: an internal `{ next_code_number }`
  * shape with no wxyc-shared contract schema, gated at `catalog: ['write']`
@@ -1457,12 +1483,16 @@ export const getArtistReleases: RequestHandler<
  * existed with no releases. A malformed id is the named 400 from
  * `parseArtistId`, never a 500.
  */
-export const peekArtistReleaseNumber: RequestHandler<{ id: string }> = async (req, res) => {
+export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, unknown, { genre_id?: string }> = async (
+  req,
+  res
+) => {
   const artistId = parseArtistId(req.params.id);
+  const genreId = parseCodeQueryInt(req.query.genre_id, 'genre_id', 1);
   if (!(await libraryService.getArtistCardById(artistId))) {
     throw new WxycError('Artist not found', 404);
   }
-  const next_code_number = await libraryService.generateAlbumCodeNumber(artistId);
+  const next_code_number = await libraryService.generateAlbumCodeNumber(artistId, genreId);
   res.status(200).json({ next_code_number });
 };
 
@@ -2555,7 +2585,7 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
       }
 
       const release_code_number =
-        supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artistRow.id, tx));
+        supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artistRow.id, release_genre_id, tx));
       const releaseRow = await libraryService.insertAlbum(
         {
           artist_id: artistRow.id,
@@ -3491,6 +3521,37 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     }
 
     if (body.genre_id !== undefined) updates.genre_id = body.genre_id;
+
+    // A genre-only move (artist unchanged) deliberately does NOT get the
+    // collision/regenerate guard below. A prior revision of this fix widened
+    // the guard to `artistIsMoving || genreIsMoving`, reasoning that each
+    // genre is now its own shelf restarting at 1, so a genre-only move could
+    // land the row's unchanged `code_number` on a slot the artist already
+    // owns on the destination shelf. That reasoning was correct about the
+    // hazard but wrong about the fix: the guard's collision check,
+    // `albumCodeNumberTaken`, is artist-wide, not genre-scoped (see the
+    // comment on it below), so a genre-only arm asks "does this artist hold
+    // this number in ANY genre" and, on a same-number hit in some unrelated
+    // genre, regenerates the code_number even when the destination shelf had
+    // that slot free the whole time -- a physical disc's call number
+    // changing for no reason. That is new exposure a genre-only move never
+    // had before this PR (numbering used to be artist-wide, so a genre-only
+    // move never touched code_number at all), and it is not a rare case:
+    // WXYC/Backend-Service#2579's production measurement found 3,035
+    // cross-genre (artist, code_number) duplicates that the genre-blind
+    // predicate miscalls. So a genre-only move leaves code_number exactly as
+    // stored and does not consult `albumCodeNumberTaken` at all -- an actual
+    // destination-shelf collision on that path goes uncaught (no worse than
+    // the pre-#2587 status quo, which never checked genre-only moves either)
+    // until `albumCodeNumberTaken` is genre-scoped. Do not re-widen this
+    // guard to cover genre-only moves without that fix landing first.
+    //
+    // Written as the inline condition (not a boolean extracted to a named
+    // const) so TypeScript narrows `body.artist_id` to `number` for the rest
+    // of this block -- narrowing does not follow through an intermediate
+    // `const artistIsMoving = body.artist_id !== undefined && ...` binding,
+    // which is exactly the typecheck break a prior revision of this fix hit
+    // by extracting one.
     if (body.artist_id !== undefined && body.artist_id !== existing.artist_id) {
       updates.artist_id = body.artist_id;
       updates.artist_name = canonical_artist_name;
@@ -3520,11 +3581,27 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // resubmit and a silent duplicate shelf slot.
       const clientChoseDestinationCodeNumber =
         body.code_number !== undefined && body.code_number !== existing.code_number;
+      // `albumCodeNumberTaken` is still artist-wide, not genre-scoped -- that
+      // is WXYC/Backend-Service#2579's fix, deliberately not made here (the
+      // issue calls the two functions "same root cause, different function,
+      // different consequence"). So this trigger can fire on a same-number
+      // collision in a genre the release isn't even moving to, while the
+      // regenerate below now answers from the correct (destination) shelf.
+      // That mismatch is over-eager, never under-eager: artist-wide collision
+      // detection is a superset of genre-scoped, so it never treats an
+      // actually-taken slot as free, only occasionally burns a number that a
+      // genre-scoped check would have left alone. No correctness hazard, just
+      // avoidable churn until #2579 lands.
       if (
         !clientChoseDestinationCodeNumber &&
         (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId))
       ) {
-        updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id);
+        // `effectiveGenreId`, not `existing.genre_id`: `genre_id` is itself in
+        // `UPDATABLE_ALBUM_FIELDS`, so a request can move the release to a new
+        // genre in the same PATCH that triggers this regenerate. Reading
+        // `existing.genre_id` alone would re-file the release onto the shelf
+        // it is leaving rather than the one it is landing on (BS#2587).
+        updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id, effectiveGenreId);
       }
     }
   }

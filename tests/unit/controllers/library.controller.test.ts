@@ -31,7 +31,7 @@ const mockGenerateArtistNumber = jest.fn<(codeLetters: string, genreId: number) 
 const mockInsertArtistWithGenreCrossreference =
   jest.fn<(artist: Record<string, unknown>, genreId: number, codeNumber: number) => Promise<Record<string, unknown>>>();
 const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
-const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number) => Promise<number>>();
+const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number, genreId: number) => Promise<number>>();
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
 const mockMapLookupToCanonicalEntity = jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
@@ -666,12 +666,12 @@ describe('library.controller', () => {
         expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
       });
 
-      it('falls back to generateAlbumCodeNumber when code_number is omitted', async () => {
+      it('falls back to generateAlbumCodeNumber, scoped to the release genre, when code_number is omitted', async () => {
         mockGenerateAlbumCodeNumber.mockResolvedValue(7);
 
         await addAlbum(req({}), mockResponse(), next);
 
-        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42);
+        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 11);
         expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_number: 7 }));
       });
 
@@ -3595,11 +3595,34 @@ describe('library.controller', () => {
         await updateAlbum(reqFor({ artist_id: 55, code_number: existingRow.code_number }), res, next);
 
         expect(mockAlbumCodeNumberTaken).toHaveBeenCalledWith(55, existingRow.code_number, 42);
+        // BS#2587: the regenerate is scoped to the effective genre -- here the
+        // request carries no genre_id, so it falls back to the existing row's
+        // genre (11), not a genre-blind MAX across every genre the artist owns.
+        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(55, 11);
         expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
           42,
           expect.objectContaining({ artist_id: 55, code_number: 9 })
         );
         expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      // BS#2587: `genre_id` is itself in `UPDATABLE_ALBUM_FIELDS`, so a single
+      // PATCH can move both the artist and the genre at once. The regenerate
+      // must scope to the DESTINATION genre the request names, not the row's
+      // stored genre -- reading `existing.genre_id` here would re-file the
+      // release onto the shelf it is leaving.
+      it('an artist move that also changes genre regenerates against the destination genre, not the stored one', async () => {
+        mockAlbumCodeNumberTaken.mockResolvedValue(true);
+        mockGenerateAlbumCodeNumber.mockResolvedValue(9);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ artist_id: 55, genre_id: 15, code_number: existingRow.code_number }), res, next);
+
+        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(55, 15);
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ artist_id: 55, genre_id: 15, code_number: 9 })
+        );
       });
 
       it('an echoed code_number is kept when the destination artist has no collision', async () => {
@@ -3615,6 +3638,54 @@ describe('library.controller', () => {
           expect.objectContaining({ artist_id: 55, code_number: existingRow.code_number })
         );
         expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    // BS#2587 follow-up, corrected: a genre-only move (same artist) does NOT
+    // run the collision/regenerate guard. An earlier revision of this fix
+    // routed genre-only moves through it anyway, but the guard's collision
+    // check (`albumCodeNumberTaken`) is artist-wide, not genre-scoped
+    // (#2579), so it can fire on a same-number collision in some OTHER genre
+    // the artist holds and burn a code_number that was actually free on the
+    // destination shelf -- renumbering a physical disc for no reason. That
+    // is new exposure a genre-only move never had before this PR, since
+    // numbering used to be artist-wide and a genre-only move never touched
+    // code_number at all. Until `albumCodeNumberTaken` is genre-scoped
+    // (#2579), the correct behavior is to leave code_number exactly as
+    // stored on a genre-only move and accept that an actual destination-shelf
+    // collision goes uncaught, same as the pre-#2587 status quo.
+    describe('genre-only move leaves code_number untouched (BS#2587 follow-up)', () => {
+      afterEach(() => {
+        mockAlbumCodeNumberTaken.mockReset();
+        mockGenerateAlbumCodeNumber.mockReset();
+      });
+
+      it('does not consult the collision guard or regenerate on a genre-only move', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ genre_id: 15 }), res, next);
+
+        // existingRow.artist_id (7) is unchanged -- only the genre moved, so
+        // the artist-move guard never runs.
+        expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
+        expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ genre_id: 15 });
+        expect(updates).not.toHaveProperty('code_number');
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('still writes an explicit destination code_number verbatim on a genre-only move', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ genre_id: 15, code_number: 20 }), res, next);
+
+        expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
+        expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ genre_id: 15, code_number: 20 })
+        );
       });
     });
 
@@ -5053,32 +5124,34 @@ describe('library.controller', () => {
       jest.clearAllMocks();
     });
 
-    // The number is `generateAlbumCodeNumber` verbatim (MAX(code_number)+1),
-    // so an artist with releases previews max+1.
-    it('returns the generator value (max+1) for an artist with releases', async () => {
+    // The number is `generateAlbumCodeNumber` verbatim (MAX(code_number)+1
+    // scoped to the queried genre), so an artist with releases previews
+    // max+1 for that genre.
+    it('returns the generator value (max+1) for an artist with releases, scoped to genre_id', async () => {
       mockGetArtistCardById.mockResolvedValue(anyCard);
       mockGenerateAlbumCodeNumber.mockResolvedValue(4);
-      const req = { params: { id: '42' } } as unknown as Request;
+      const req = { params: { id: '42' }, query: { genre_id: '11' } } as unknown as Request;
       const res = mockResponse();
 
       await peekArtistReleaseNumber(req, res, next);
 
       expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
-      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42);
+      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 11);
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({ next_code_number: 4 });
     });
 
-    // `generateAlbumCodeNumber` returns 1 when the artist has no releases, and
-    // this endpoint passes it straight through.
-    it('returns 1 for an artist with no releases', async () => {
+    // `generateAlbumCodeNumber` returns 1 when the artist has no releases in
+    // that genre, and this endpoint passes it straight through.
+    it('returns 1 for an artist with no releases in the queried genre', async () => {
       mockGetArtistCardById.mockResolvedValue(anyCard);
       mockGenerateAlbumCodeNumber.mockResolvedValue(1);
-      const req = { params: { id: '42' } } as unknown as Request;
+      const req = { params: { id: '42' }, query: { genre_id: '15' } } as unknown as Request;
       const res = mockResponse();
 
       await peekArtistReleaseNumber(req, res, next);
 
+      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 15);
       expect(res.json).toHaveBeenCalledWith({ next_code_number: 1 });
     });
 
@@ -5088,7 +5161,7 @@ describe('library.controller', () => {
     // than previewing 1 as if the artist existed with no releases.
     it('returns 404 for an unknown artist id, without invoking the generator', async () => {
       mockGetArtistCardById.mockResolvedValue(null);
-      const req = { params: { id: '999' } } as unknown as Request;
+      const req = { params: { id: '999' }, query: { genre_id: '11' } } as unknown as Request;
       const res = mockResponse();
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Artist not found');
@@ -5106,10 +5179,31 @@ describe('library.controller', () => {
       ['leading-zero padded', '007'],
       ['empty', ''],
     ])('rejects an id that is %s with 400', async (_label, rawId) => {
-      const req = { params: { id: rawId } } as unknown as Request;
+      const req = { params: { id: rawId }, query: { genre_id: '11' } } as unknown as Request;
       const res = mockResponse();
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Invalid artist ID');
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+    });
+
+    // BS#2587: genre_id is a required query parameter, not an optional one
+    // that falls back to genre-blind behaviour -- an omitted or malformed
+    // value is the same named 400 shape `resolveArtistByCode` uses for its
+    // own required `genre_id`, and it must reach neither the existence read
+    // nor the generator.
+    it.each([
+      ['missing', undefined],
+      ['non-numeric', 'abc'],
+      ['zero', '0'],
+      ['negative', '-11'],
+      ['repeated', ['11', '15']],
+    ])('rejects a genre_id that is %s with 400', async (_label, rawGenreId) => {
+      const query = rawGenreId === undefined ? {} : { genre_id: rawGenreId };
+      const req = { params: { id: '42' }, query } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('genre_id');
       expect(mockGetArtistCardById).not.toHaveBeenCalled();
       expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
     });
@@ -5674,7 +5768,7 @@ describe('library.controller', () => {
         expect.objectContaining({ artist_id: 55, album_title: 'DOGA', label: 'Sonamos', label_id: 77 }),
         expect.anything()
       );
-      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(55, expect.anything());
+      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(55, 11, expect.anything());
       expect(mockAddToRotation).toHaveBeenCalledWith(
         { rotation_bin: 'S', album_id: 42, card_id: undefined },
         undefined,
