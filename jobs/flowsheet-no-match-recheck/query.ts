@@ -239,8 +239,9 @@ export const runsPerDayFromCronSchedule = (schedule: string): number => {
  * does not. What a `BATCH_SIZE` resize DOES invalidate is prose, not
  * arithmetic, and has to be re-checked by hand: the README's wrap-period /
  * stretch table, the +11% figure, and the headroom behind `job.ts`'s
- * `headSlice < batchSize` clamp (halving `BATCH_SIZE` doubles the head's share
- * of every run from 10% to 20%).
+ * half-batch clamp (`HEAD_SLICE_MAX_BATCH_SHARE`; halving `BATCH_SIZE` doubles
+ * the head's share of every run from 10% to 20%, and halves the ceiling the
+ * requested head slice is clamped against).
  *
  * See README "HEAD_SLICE derivation" for the measurement + wrap-period table.
  */

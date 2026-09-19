@@ -104,8 +104,11 @@ export const mergeTotals = (a: Totals, b: Totals): Totals => ({
 
 /**
  * `candidates` with any row whose `id` is in `excludeIds` dropped. BS#2222's
- * dedupe between the head-slice read (OFFSET 0) and the tail read (at the
- * cursor) — they overlap whenever the cursor sits inside `[0, HEAD_SLICE)`.
+ * dedupe between the head-slice read (at the head cursor, inside its small
+ * recent window) and the tail read (at the BS#2218 cursor, inside the whole
+ * cohort) — the two windows overlap whenever they intersect, which the head
+ * cursor's rotation makes a moving condition rather than the fixed
+ * `[0, HEAD_SLICE)` band the first shape of this job had.
  */
 export const excludeCandidateIds = (candidates: Candidate[], excludeIds: ReadonlySet<number>): Candidate[] =>
   candidates.filter((candidate) => !excludeIds.has(candidate.id));

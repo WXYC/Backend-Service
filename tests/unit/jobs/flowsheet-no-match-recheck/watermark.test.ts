@@ -72,10 +72,12 @@ import {
   getCursorPosition,
   headCursorWindow,
   headDeparturesBelowCursor,
+  headRotationIsInert,
   HEAD_CURSOR_JOB_NAME,
   JOB_NAME,
   nextCursorPosition,
   nextHeadCursorPosition,
+  planCursorAdvance,
   setCursorPosition,
   stillCandidates,
   wrapCursor,
@@ -406,5 +408,142 @@ describe('wrapCursor', () => {
     }
     expect(seen.size).toBe(5);
     expect(offset).toBe(0); // back to the start -- the cycle closed cleanly
+  });
+});
+
+/**
+ * BS#2222 review finding 1. `main`'s inline wiring was the only place the two
+ * cursors were distinguished — which `Totals` feeds the tail advance, which
+ * modulus the head wraps against, and which `cronjob_runs` row each is stamped
+ * on — and `main` is unexported, so no test could reach any of it. The review's
+ * mutation probe reintroduced BOTH defects the earlier iterations fixed (the
+ * tail advancing on the MERGED totals; the head rotation written onto the tail's
+ * row) with all 128 tests still green.
+ *
+ * These cases pin the wiring itself, not just its arithmetic: each one fails
+ * under one of those two mutations.
+ */
+describe('planCursorAdvance (BS#2222 review finding 1)', () => {
+  /** A run where head and tail differ in every respect, so a swap of either is visible. */
+  const input = {
+    tailCursorOffset: 1000,
+    headCursorOffset: 60,
+    tailTotals: totalsOf({ scanned: 180, resolved: 30 }),
+    headTotals: totalsOf({ scanned: 20, resolved: 8 }),
+    headRowsInTailWindow: 0,
+    headSlice: 20,
+    totalCandidates: 137340,
+    headWindow: 200,
+  };
+
+  it('stamps the tail advance on the job row and the head rotation on the :head row, in that order', () => {
+    const { writes } = planCursorAdvance(input);
+
+    expect(writes.map((write) => write.jobName)).toEqual([JOB_NAME, HEAD_CURSOR_JOB_NAME]);
+    // The head rotation must NOT land on the tail's row: doing so overwrites the
+    // BS#2218 cursor with a value from a 200-row modulus every run, destroying
+    // the traversal outright.
+    expect(writes.find((write) => write.jobName === JOB_NAME)?.position).toBe(1142);
+    expect(writes.find((write) => write.jobName === HEAD_CURSOR_JOB_NAME)?.position).toBe(80);
+  });
+
+  it('advances the tail on the TAIL totals alone, never the merged head+tail pair', () => {
+    const { writes } = planCursorAdvance(input);
+    const tail = writes.find((write) => write.jobName === JOB_NAME)?.position;
+
+    // 1000 + stillCandidates(tail) - headDepartures = 1000 + (180 - 30) - 8.
+    expect(tail).toBe(1142);
+    // The mutation the review probe applied — the MERGED head+tail totals —
+    // gives 1000 + (200 - 38) - 8 = 1154, stepping over 12 unread tail rows
+    // every run. Named here so the difference is the assertion, not a coincidence.
+    const merged = totalsOf({ scanned: 200, resolved: 38 });
+    expect(nextCursorPosition(1000, merged, 137340, 8)).toBe(1154);
+    expect(tail).not.toBe(1154);
+  });
+
+  it('wraps the head rotation against the head WINDOW, not the whole cohort', () => {
+    // Offset 190 + slice 20 = 210, which must wrap inside the 200-row window to
+    // 10. Against the 137,340-row cohort it would stay 210 and walk the head
+    // cursor out of the recent window entirely.
+    const { writes } = planCursorAdvance({ ...input, headCursorOffset: 190 });
+
+    expect(writes.find((write) => write.jobName === HEAD_CURSOR_JOB_NAME)?.position).toBe(10);
+  });
+
+  it('reports each cursor under its own log key, so a swap is visible in the log line too', () => {
+    const { logFields } = planCursorAdvance(input);
+
+    expect(logFields).toEqual({
+      cursor_offset: 1000,
+      next_cursor: 1142,
+      tail_scanned: 180,
+      still_candidates: 150,
+      head_departures_below_cursor: 8,
+      head_rows_in_tail_window: 0,
+      head_cursor_offset: 60,
+      next_head_cursor: 80,
+      head_cursor_window: 200,
+      total_candidates: 137340,
+    });
+  });
+
+  it('subtracts the head pass departures from the tail advance', () => {
+    // 8 head rows left the cohort and none of them were also in the tail read,
+    // so they removed 8 ordering positions below the cursor: 1000 + 150 - 8.
+    const { writes } = planCursorAdvance({ ...input, headRowsInTailWindow: 0 });
+    const withOverlap = planCursorAdvance({ ...input, headRowsInTailWindow: 8 });
+
+    expect(writes.find((write) => write.jobName === JOB_NAME)?.position).toBe(1142);
+    // With all 8 already deduped out of the tail read, `tailTotals.scanned` is
+    // already 8 smaller, so subtracting again would double-count and under-
+    // advance into re-reading. The correction clamps to 0 and the advance is
+    // the full 150.
+    expect(withOverlap.writes.find((write) => write.jobName === JOB_NAME)?.position).toBe(1150);
+  });
+});
+
+/**
+ * BS#2222 review finding 2: the half-batch clamp and the 200-row head window are
+ * unrelated constants, so a config can pass the clamp and still leave the head
+ * cursor standing still.
+ */
+describe('headRotationIsInert (BS#2222 review finding 2)', () => {
+  it.each([
+    ['head slice equal to the window', 200, 200],
+    ['head slice a multiple of the window', 400, 200],
+    ['a disabled head slice', 0, 200],
+  ])('reports %s as inert', (_label, headSlice, window) => {
+    expect(headRotationIsInert(headSlice, window)).toBe(true);
+    // The defining symptom: the rotation returns the offset it was given.
+    expect(nextHeadCursorPosition(37, headSlice, window)).toBe(37);
+  });
+
+  it.each([
+    ['the default pairing', 20, 200],
+    ['an exact divisor that still rotates', 100, 200],
+    ['a slice wider than the window but not a multiple', 300, 200],
+  ])('reports %s as rotating', (_label, headSlice, window) => {
+    expect(headRotationIsInert(headSlice, window)).toBe(false);
+    expect(nextHeadCursorPosition(37, headSlice, window)).not.toBe(37);
+  });
+
+  it('is false for an empty window, which wrapCursor already collapses to 0', () => {
+    // An empty cohort is not a misconfiguration to warn about — there is
+    // nothing to rotate through — so this must not fire on it.
+    expect(headRotationIsInert(20, 0)).toBe(false);
+  });
+
+  it('the shipped default pairing covers the whole window rather than repeating a fixed set', () => {
+    const window = 200;
+    const headSlice = 20;
+    const seen = new Set<number>();
+    let offset = 0;
+    for (let run = 0; run < window / headSlice; run++) {
+      seen.add(offset);
+      offset = nextHeadCursorPosition(offset, headSlice, window);
+    }
+
+    expect(seen.size).toBe(10);
+    expect(offset).toBe(0);
   });
 });
