@@ -119,13 +119,16 @@ describe('account-audit prefix mount ordering', () => {
   // way to a 429, bounding none of the cost the ticket exists to bound.
   // Nothing in Express enforces this by itself, so it is pinned here
   // explicitly, same idiom as the admin-prefix limiter's ordering pin in
-  // tests/unit/auth/rate-limiting.test.ts. statementIndex, not bare indexOf:
-  // these three `app.use(...)` call sites also appear, in prose, inside
-  // this file's own comments above (e.g. "a limiter mounted below the audit
-  // dispatch"), which a bare `indexOf` could latch onto instead of the real
-  // statement.
+  // tests/unit/auth/rate-limiting.test.ts. statementIndex, not bare indexOf,
+  // for all four needles below — including `authenticatedMountIndex` itself:
+  // `authAppSource` is `apps/auth/app.ts`'s OWN text (this test file's
+  // comments are never scanned), and `app.ts` cites all four of these call
+  // sites in prose inside its OWN comments above their real statements
+  // (e.g. "this mount now registers BELOW the ... limiters", "a limiter
+  // mounted below the audit dispatch"), which a bare `indexOf` scan of
+  // `authAppSource` cannot tell apart from the real statement.
   describe('BS#2604 authenticated flat-mount limiter ordering', () => {
-    const authenticatedMountIndex = authAppSource.indexOf('mountAuthenticatedAccountAudit(app);');
+    const authenticatedMountIndex = statementIndex(authAppSource, String.raw`mountAuthenticatedAccountAudit\(app\);`);
 
     const rateLimiterNeedles: Record<string, number> = {
       "app.use('/auth/update-user', updateUserRateLimit)": statementIndex(
