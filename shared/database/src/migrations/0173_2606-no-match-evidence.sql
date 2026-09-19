@@ -1,0 +1,28 @@
+-- 0173 flowsheet.no_match_evidence (BS#2606): durable evidence of the LML
+-- response that produced a terminal `enriched_no_match` write.
+--
+-- Today, nothing durable records what LML actually returned on a no-match:
+-- the enrichment worker's dispatch span is 10%-sampled and carries no
+-- per-item detail, and Sentry deliberately suppresses the `lml_no_match`
+-- cause (BS#1311). The class this leaves undiagnosable is "LML found
+-- nothing" vs. "LML found something and the trust gate rejected it" — two
+-- entirely different bugs indistinguishable after the fact.
+--
+-- Populated by `apps/enrichment-worker/enrich.ts#finalizeRow`'s no-match
+-- arms only (both linked and unlinked) via `buildNoMatchEvidence`. Per-
+-- playcut, not album-keyed (BS#1499 precedent): two DJs typing the same
+-- album differently get different verdicts, so this rides `flowsheet`, never
+-- `album_metadata`. Never cleared on a later transition to `enriched_match`
+-- — the earlier wrong verdict stays visible; `metadata_status` disambiguates
+-- current state.
+--
+-- Lock behavior: a nullable ADD COLUMN with no DEFAULT is catalog-only on
+-- PG11+ — no table rewrite, no per-row work. Expected duration: sub-second,
+-- independent of row count.
+--
+-- No backfill: NULL is the correct initial value for every existing row —
+-- "written before this shipped", not "no evidence".
+--
+-- @no-precondition-needed: adds a nullable column with no DEFAULT and no
+-- constraint, so there is no invariant existing rows could violate.
+ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "no_match_evidence" jsonb;

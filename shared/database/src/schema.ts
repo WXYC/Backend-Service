@@ -901,6 +901,8 @@ export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
 //   enriched_no_match — LML succeeded but found no Discogs match. Only the
 //                       synthesized YouTube/Bandcamp/SoundCloud search URLs
 //                       are populated (post-#873 fallback path).
+//                       `no_match_evidence` (BS#2606) records what LML
+//                       actually returned when a row lands here.
 //   failed_no_retry   — exceeded the retry budget; terminal. The cron skips
 //                       these rows and they require manual triage.
 //
@@ -1558,6 +1560,19 @@ export const flowsheet = wxyc_schema.table(
     // candidate set, so no further write to this column is needed once
     // that happens.
     no_match_recheck_attempted_at: timestamp('no_match_recheck_attempted_at', { withTimezone: true }),
+    // BS#2606: durable evidence of the LML response that produced a terminal
+    // `enriched_no_match` write. Populated on the no-match arms only (both
+    // linked and unlinked) of `apps/enrichment-worker/enrich.ts#finalizeRow`
+    // — see `buildNoMatchEvidence` there for the payload shape and the
+    // `trust_gate` classification. NULL means either "row predates this
+    // column" or "row is not (currently or ever) `enriched_no_match`" —
+    // never cleared on a later transition to `enriched_match`, so a rechecked
+    // row keeps the record of the earlier wrong verdict; `metadata_status`
+    // is what disambiguates current state. Per-playcut, not album-keyed
+    // (BS#1499 precedent) — two DJs typing the same album differently can
+    // get different verdicts, so this rides the flowsheet row, never
+    // `album_metadata`.
+    no_match_evidence: jsonb('no_match_evidence'),
     // STORED GENERATED tsvector covering the searchable text fields with
     // weight bands (artist=A, track+dj=B, album=C, label=D). Managed by
     // migration 0054 (which extended the original 0052 expression to include
