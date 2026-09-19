@@ -994,12 +994,143 @@ if (!isTestEnv) {
   });
 
   app.use('/auth/get-session', getSessionIpRateLimit, getSessionIdentityRateLimit);
+
+  // BS#2604 (parent epic #2534) — the fourteen authenticated flat mounts
+  // `mountAuthenticatedAccountAudit` dispatches below (`/auth/change-password`,
+  // `/auth/change-email`, `/auth/update-user`, `/auth/delete-user`, and the
+  // ten `/auth/organization/*` mutations) carried NO rate limiter at all —
+  // the exact defect class BS#2554 fixed for `/auth/admin`, left open here
+  // until now (see the `account_audit_event` comment in
+  // `shared/database/src/schema.ts`). That dispatch middleware resolves the
+  // caller's session and INSERTs an audit row unconditionally, matching by
+  // path with no auth check at that layer — the real authorization happens
+  // later, inside better-auth's own handler — so an anonymous or
+  // credential-stuffing loop against any of these paths cost one
+  // `auth.api.getSession` DB read plus one `account_audit_event` INSERT per
+  // request, with nothing bounding how often that could happen.
+  //
+  // Three dedicated instances below, not one shared bucket: the fourteen
+  // paths are not one traffic profile, and a single bucket would reproduce
+  // the PR #2550 shared-bucket hazard one level down — the control room is
+  // one egress IP, so a DJ toggling dark mode would drain the budget a
+  // station manager needs for roster work.
+  //
+  // Sizing note that applies to all three limiters below: the live
+  // `account_audit_event` table held 17 rows total spanning these fourteen
+  // paths over the two days since BS#2537 shipped, and only `update-user`
+  // appeared at all (6 events, never more than one in any 60s or 15min
+  // window; zero organization mutations). That sample is too thin to size
+  // from and does not cover semester start, which is the peak these numbers
+  // have to clear — so they come from what the dj-site UI can emit plus
+  // margin, not from measured load. If a real burst is ever measured above
+  // one of them, raise the number rather than treating this comment as
+  // settled — a 429 during legitimate use is worse than a loose bound.
+
+  // `/auth/update-user` is wired to an undebounced UI control: dj-site's
+  // `ColorSchemeToggle` calls `authClient.updateUser()` straight out of an
+  // `IconButton onClick` (via `useThemePreferenceActions().persistPreference`
+  // in `src/hooks/themePreferenceHooks.ts`) with no debounce and no reload.
+  // `ThemeSwitcher`/`ThemePicker` hit the same path but force a
+  // `window.location.reload()` afterward, so they self-limit — the
+  // light/dark toggle does not. A 60-SECOND window, not the 15-minute tier
+  // below: a 15-minute window would mean one burst of toggling locks the
+  // account out for the remaining fourteen minutes, while 60s recovers
+  // within a minute. Shape borrowed from `checkRequestBanRateLimit` above,
+  // for the same reason. Own instance: folding this into either tier below
+  // would either starve the roster-work budget or apply a 15-minute lockout
+  // to a UI toggle.
+  const updateUserRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 60,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  app.use('/auth/update-user', updateUserRateLimit);
+
+  // `/auth/change-password`, `/auth/change-email`, `/auth/delete-user` —
+  // rare, deliberate, security-sensitive operations, not UI chrome.
+  // `change-password` takes `currentPassword` and is therefore a password
+  // oracle; `change-email` sends mail. Same tier as `authMutationRateLimit`
+  // above, but its own instance and its own store — never folded into that
+  // shared bucket, for the same control-room reason as every other limiter
+  // in this block.
+  //
+  // Mounting `/auth/delete-user` also covers better-auth's
+  // `/delete-user/callback` (the email-confirmation arm of the same flow).
+  // That route is not itself one of the fourteen audited paths, so bounding
+  // it is a small bonus, not a regression — noted here so the next reader
+  // knows the mount is deliberately one route wider than the audited path.
+  const sensitiveAuthMutationRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  for (const path of ['/auth/change-password', '/auth/change-email', '/auth/delete-user']) {
+    app.use(path, sensitiveAuthMutationRateLimit);
+  }
+
+  // The ten `/auth/organization/*` mutations, as an EXPLICIT path list —
+  // NOT the `/auth/organization` prefix. better-auth mounts 35 routes under
+  // `/organization/`, of which only these ten are audited mutations;
+  // dj-site calls `organization.listMembers` from 25 sites plus
+  // `getFullOrganization` for the roster page's reads, and a prefix limiter
+  // would 429 the roster for the whole control room on a read path — the
+  // same mistake PR #2550 made, in a new place.
+  //
+  // Segment-aware matching verified empirically before relying on it
+  // (Express 5.2.1, `app.use`): `/auth/organization/create` matches
+  // `/auth/organization/create` and `/auth/organization/create/sub`, and
+  // does NOT match `create-role`, `create-team`, or `createx`. Without that
+  // verification this list would silently over-match — `update` would
+  // swallow `update-member-role`, `update-role`, and `update-team`, and
+  // `delete` would swallow `delete-role`. That verification is load-bearing
+  // for this path list being safe.
+  //
+  // 100/15min mirrors `adminPrefixRateLimit` above, and here that is a
+  // genuine peer rather than a copied number: semester-start roster work is
+  // the same sitting by the same manager as `/auth/admin/provision-user`,
+  // alternating between the two prefixes.
+  const organizationMutationRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 100,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: { error: 'Too many requests, please try again later.' },
+    keyGenerator: rateLimitKeyFromRequest,
+  });
+  const organizationMutationPaths = [
+    '/auth/organization/create',
+    '/auth/organization/update',
+    '/auth/organization/delete',
+    '/auth/organization/invite-member',
+    '/auth/organization/cancel-invitation',
+    '/auth/organization/accept-invitation',
+    '/auth/organization/reject-invitation',
+    '/auth/organization/remove-member',
+    '/auth/organization/update-member-role',
+    '/auth/organization/leave',
+  ];
+  for (const path of organizationMutationPaths) {
+    app.use(path, organizationMutationRateLimit);
+  }
 }
 
 // Account-audit flat mounts, authenticated half (BS#2537). Ahead of the
 // better-auth catch-all below, like every other authenticated flat mount —
-// these resolve the caller's session (`resolveActor: true`) since there is
-// no rate limiter to get ahead of for a DoS-amplifier concern to attach to.
+// these resolve the caller's session (`resolveActor: true`). Unlike the
+// public mounts above (which sit AHEAD of every rate limiter, so resolving a
+// session there would be a pre-limit DB-read DoS amplifier), this mount now
+// registers BELOW the `/auth/update-user`, sensitive-trio, and
+// `/auth/organization/*` limiters declared in the `if (!isTestEnv)` block
+// above (BS#2604): an over-budget request against any of those fourteen
+// paths 429s before this middleware's `getSession` read and INSERT ever
+// run. Nothing in Express enforces that registration order by itself, so
+// tests/unit/auth/account-audit-mount-order.test.ts pins it explicitly.
 // One `/auth` layer dispatching every authenticated FlatMount internally
 // (simplify pass, code review BS#2537 PR #2545 follow-up) — this exact call
 // site is a needle in tests/unit/auth/account-audit-mount-order.test.ts, so

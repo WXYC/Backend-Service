@@ -109,4 +109,49 @@ describe('account-audit prefix mount ordering', () => {
     expect(match).not.toBeNull();
     expect(match?.[1]).toBe(`/auth${ADMIN_PREFIX}/station-signup`);
   });
+
+  // BS#2604 (parent epic #2534): the three dedicated limiters covering the
+  // fourteen authenticated flat-mount paths must register ABOVE
+  // `mountAuthenticatedAccountAudit(app)` — Express matches-and-terminates in
+  // registration order, so a limiter mounted below the audit dispatch would
+  // still let every over-budget request pay for that middleware's
+  // unconditional getSession call and its account_audit_event INSERT on its
+  // way to a 429, bounding none of the cost the ticket exists to bound.
+  // Nothing in Express enforces this by itself, so it is pinned here
+  // explicitly, same idiom as the admin-prefix limiter's ordering pin in
+  // tests/unit/auth/rate-limiting.test.ts. statementIndex, not bare indexOf:
+  // these three `app.use(...)` call sites also appear, in prose, inside
+  // this file's own comments above (e.g. "a limiter mounted below the audit
+  // dispatch"), which a bare `indexOf` could latch onto instead of the real
+  // statement.
+  describe('BS#2604 authenticated flat-mount limiter ordering', () => {
+    const authenticatedMountIndex = authAppSource.indexOf('mountAuthenticatedAccountAudit(app);');
+
+    const rateLimiterNeedles: Record<string, number> = {
+      "app.use('/auth/update-user', updateUserRateLimit)": statementIndex(
+        authAppSource,
+        String.raw`app\.use\('/auth/update-user',\s*updateUserRateLimit\)`
+      ),
+      'app.use(path, sensitiveAuthMutationRateLimit)': statementIndex(
+        authAppSource,
+        String.raw`app\.use\(path, sensitiveAuthMutationRateLimit\);`
+      ),
+      'app.use(path, organizationMutationRateLimit)': statementIndex(
+        authAppSource,
+        String.raw`app\.use\(path, organizationMutationRateLimit\);`
+      ),
+    };
+
+    it('registers the authenticated mount at all', () => {
+      expect(authenticatedMountIndex).toBeGreaterThan(-1);
+    });
+
+    it.each(Object.entries(rateLimiterNeedles))(
+      'mounts %s ahead of mountAuthenticatedAccountAudit(app)',
+      (_needle, index) => {
+        expect(index).toBeGreaterThan(-1);
+        expect(index).toBeLessThan(authenticatedMountIndex);
+      }
+    );
+  });
 });

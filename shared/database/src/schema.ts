@@ -3568,8 +3568,17 @@ export type NewStationSignupAttempt = InferInsertModel<typeof station_signup_att
 // (`ACCOUNT_AUDIT_EVENT_DEFAULT_RETENTION_DAYS`, `account-audit.ts`) is
 // ~9.6k rows/day sustained from a single IP at the cap, before counting a
 // distributed source at all — the "stays in the thousands of rows" premise
-// above is not restored by this limiter, on this surface or the fourteen
-// still-open ones. Revisit if the standalone index is ever needed.
+// above is not restored by this limiter alone. BS#2604 closes the fourteen
+// paths this comment used to call still-open: `/auth/change-password`,
+// `/auth/change-email`, `/auth/update-user`, `/auth/delete-user`, and the
+// ten `/auth/organization/*` mutations each now sit behind their own
+// dedicated `apps/auth/app.ts` limiter (60s/60, 15min/10, and 15min/100
+// respectively) instead of none. Every authenticated flat mount this table
+// audits is now rate-limited; the premise above is still not measured true
+// (these bounds are sized from UI-emittable volume plus margin, not from
+// observed load — see the BS#2604 limiters' own comments), just no longer
+// contradicted by an outright-unbounded surface. Revisit if the standalone
+// index is ever needed.
 export const account_audit_event = pgTable(
   'account_audit_event',
   {
