@@ -3382,16 +3382,29 @@ describe('Library Artist Card (BS#2156)', () => {
    * Seeds `artist`'s five dependent counts to DISTINCT non-zero values --
    * release_count=1, cross_reference_source_count=2,
    * cross_reference_target_count=3, library_cross_reference_count=4,
-   * compilation_credit_count=5 -- the same shape and discipline as "reports
-   * each dependent count independently across all five predicates" below:
-   * distinct rather than equal expected values so a transposition between any
-   * two counts fails a caller's assertions, not just a zero-vs-nonzero
-   * omission. Shared by the PATCH tests that need a non-empty artist to pin
-   * count VALUE provenance, not just field presence. Returns a cleanup
-   * function the caller must invoke (typically in a `finally` block).
+   * compilation_credit_count=5.
+   *
+   * The five values are distinct rather than equal so a caller's assertions are
+   * NOT invariant under a permutation of the five subquery-to-alias mappings --
+   * in particular the `artist_crossreference` source/target transposition the
+   * ticket names as the easy mistake to make. With five equal expected values
+   * (the fixture's original shape), swapping `source_artist_id` and
+   * `target_artist_id` in the service leaves every assertion passing; with
+   * these, transposing ANY two of the five subqueries lands the wrong number on
+   * at least one field and fails.
+   *
+   * Every test needing a non-empty artist shares this one seeding -- the GET
+   * card read and the PATCH post-write body -- so the shape is defined once and
+   * a sixth count added to the endpoint is seeded here rather than in each
+   * test. Returns a cleanup function the caller must invoke (typically in a
+   * `finally` block).
    */
   async function seedDistinctDependentCounts(artist) {
     const sql = getTestDb();
+    // Three distinct "other" artists, reused across both cross-reference
+    // directions -- `(artist, otherB)` and `(otherB, artist)` are different
+    // ordered pairs, so the same artist can sit on both sides without
+    // colliding with the `artist_crossref_source_target` unique index.
     const otherB = await createTestArtist();
     const otherC = await createTestArtist();
     const otherD = await createTestArtist();
@@ -3506,87 +3519,12 @@ describe('Library Artist Card (BS#2156)', () => {
       expect(res.body.compilation_credit_count).toBe(0);
     });
 
-    // Each of the five counts gets a DISTINCT expected value (1/2/3/4/5) so
-    // the test is NOT invariant under a permutation of the five
-    // subquery-to-alias mappings -- in particular the `artist_crossreference`
-    // source/target transposition the ticket names as the easy mistake to
-    // make. With five equal expected values (the fixture's original shape),
-    // swapping `source_artist_id` and `target_artist_id` in the service
-    // leaves every assertion passing; with these five distinct values,
-    // transposing ANY two of the five subqueries lands the wrong number on
-    // at least one field and fails the test.
+    // Seeded by `seedDistinctDependentCounts`, whose docstring records why the
+    // five expected values are distinct rather than equal and what a
+    // permutation of the subquery-to-alias mappings would otherwise slip past.
     test('reports each dependent count independently across all five predicates', async () => {
       const artist = await createTestArtist();
-      // Three distinct "other" artists, reused across both cross-reference
-      // directions -- `(artist, otherB)` and `(otherB, artist)` are different
-      // ordered pairs, so the same artist can sit on both sides without
-      // colliding with the `artist_crossref_source_target` unique index.
-      const otherB = await createTestArtist();
-      const otherC = await createTestArtist();
-      const otherD = await createTestArtist();
-      const sql = getTestDb();
-
-      // release_count: 1 -- the one release actually owned by `artist`.
-      const release = await auth
-        .post('/library')
-        .send({
-          album_title: `Dependent Counts ${Date.now()}`,
-          artist_id: artist.id,
-          label: 'Test Label',
-          genre_id: 11,
-          format_id: 1,
-        })
-        .expect(201);
-
-      // library_cross_reference_count: 4 -- four distinct releases, owned by
-      // `otherB` (not `artist`) so they cannot also inflate release_count,
-      // which counts a different column (`library.artist_id`) entirely.
-      const xrefLibraryIds = [];
-      for (let i = 0; i < 4; i += 1) {
-        const xrefRelease = await auth
-          .post('/library')
-          .send({
-            album_title: `Dependent Counts Xref ${i} ${Date.now()}`,
-            artist_id: otherB.id,
-            label: 'Test Label',
-            genre_id: 11,
-            format_id: 1,
-          })
-          .expect(201);
-        xrefLibraryIds.push(xrefRelease.body.id);
-      }
-      for (const libraryId of xrefLibraryIds) {
-        await sql.unsafe(
-          `INSERT INTO ${SCHEMA}.artist_library_crossreference (artist_id, library_id) VALUES (${artist.id}, ${libraryId})`
-        );
-      }
-
-      // cross_reference_source_count: 2 -- `artist` as SOURCE, two distinct targets.
-      await sql.unsafe(
-        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${artist.id}, ${otherB.id})`
-      );
-      await sql.unsafe(
-        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${artist.id}, ${otherC.id})`
-      );
-      // cross_reference_target_count: 3 -- `artist` as TARGET, three distinct sources.
-      await sql.unsafe(
-        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherB.id}, ${artist.id})`
-      );
-      await sql.unsafe(
-        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherC.id}, ${artist.id})`
-      );
-      await sql.unsafe(
-        `INSERT INTO ${SCHEMA}.artist_crossreference (source_artist_id, target_artist_id) VALUES (${otherD.id}, ${artist.id})`
-      );
-
-      // compilation_credit_count: 5 -- five distinct credit rows naming
-      // `artist` as the resolved track artist.
-      for (let i = 0; i < 5; i += 1) {
-        await sql.unsafe(
-          `INSERT INTO ${SCHEMA}.compilation_track_artist (library_id, artist_name, track_artist_id)
-           VALUES (${release.body.id}, 'Comp Artist ${i}', ${artist.id})`
-        );
-      }
+      const cleanupDependents = await seedDistinctDependentCounts(artist);
 
       try {
         const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
@@ -3596,11 +3534,7 @@ describe('Library Artist Card (BS#2156)', () => {
         expect(res.body.library_cross_reference_count).toBe(4);
         expect(res.body.compilation_credit_count).toBe(5);
       } finally {
-        await sql.unsafe(`DELETE FROM ${SCHEMA}.compilation_track_artist WHERE track_artist_id = ${artist.id}`);
-        await sql.unsafe(`DELETE FROM ${SCHEMA}.artist_library_crossreference WHERE artist_id = ${artist.id}`);
-        await sql.unsafe(
-          `DELETE FROM ${SCHEMA}.artist_crossreference WHERE source_artist_id = ${artist.id} OR target_artist_id = ${artist.id}`
-        );
+        await cleanupDependents();
       }
     });
 
@@ -3736,11 +3670,11 @@ describe('Library Artist Card (BS#2156)', () => {
     // comparison would still pass if `getArtistDependentCounts` (or a caller
     // of it) answered structurally-present-but-WRONG counts, as long as GET
     // and PATCH were wrong the SAME way. This test gives the PATCH post-write
-    // 200 body its own ABSOLUTE, distinct-per-count assertions -- the same
-    // discipline "reports each dependent count independently across all five
-    // predicates" (GET, above) uses -- so a future regression that's wrong on
-    // both endpoints identically, not just a GET/PATCH divergence, still
-    // fails here.
+    // 200 body its own ABSOLUTE, distinct-per-count assertions -- over the same
+    // `seedDistinctDependentCounts` fixture "reports each dependent count
+    // independently across all five predicates" (GET, above) asserts against --
+    // so a future regression that's wrong on both endpoints identically, not
+    // just a GET/PATCH divergence, still fails here.
     test('reports each dependent count independently, with real values, in the post-write PATCH body', async () => {
       const artist = await createTestArtist();
       const cleanupDependents = await seedDistinctDependentCounts(artist);
