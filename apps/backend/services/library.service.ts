@@ -4158,7 +4158,11 @@ export type DeletedArchiveEntity = {
   entity_kind: string;
   table: string;
   row: Record<string, unknown> | null;
-  children: Record<string, unknown[]>;
+  /**
+   * Per-child ROW COUNTS, not the rows (BS#2561 F2a review finding 1) — see
+   * `childCounts` below for why.
+   */
+  children: Record<string, number>;
 };
 
 export type DeletedArchiveBatch = {
@@ -4190,6 +4194,33 @@ const deletedArchiveSearchCondition = (search: string): SQL =>
     ),
     sql` OR `
   )})`;
+
+/**
+ * Projects a captured envelope's `children` from full rows to per-table
+ * COUNTS (BS#2561 F2a review finding 1). `captureCatalogDeleteSnapshot`
+ * reads every child with an UNPROJECTED `tx.select()` — correctly, because a
+ * restore needs every column: `bins.dj_id`/`track_title`, `reviews.author`
+ * plus the full review text, `album_critic_reviews.author`, and so on. That
+ * is the capture's job, not this listing's. `GET /library/deleted` is
+ * gated at `catalog: ['write']` only — the delete's own bar, not anything
+ * that vets a principal to read who binned a release or another DJ's review
+ * authorship — so handing back the envelope wholesale would make every
+ * catalog-write principal a cross-user reader of that content. This is the
+ * ADR-0011 standard `catalog_delete_snapshot`'s own docstring already
+ * applies to `album_review_submissions` ("any second reader must carry the
+ * same exclusion"), applied here to a second READ SURFACE instead of a
+ * second captured table: a librarian sees "this release had 3 bin entries
+ * and 1 review", never the bin entries or the review text themselves. Do
+ * not "simplify" this back to echoing `envelope.children` — the capture
+ * side (`captureCatalogDeleteSnapshot`, `catalog-delete-snapshot.ts`) is what
+ * a future restore (WXYC/Backend-Service#2585) reads, and it stays
+ * unprojected on purpose; only this listing's projection changes here.
+ * `Array.isArray` guards a malformed `children` value the same way
+ * `parseCapturedEnvelope` itself does — a count of 0 rather than a thrown
+ * error for one archive row.
+ */
+const childCounts = (children: Record<string, unknown[]>): Record<string, number> =>
+  Object.fromEntries(Object.entries(children).map(([table, rows]) => [table, Array.isArray(rows) ? rows.length : 0]));
 
 /**
  * One page of `GET /library/deleted`, newest batch first. Rows in
@@ -4268,7 +4299,7 @@ export const getDeletedArchivePage = async (
           entity_kind: row.entity_kind,
           table: envelope.entity.table,
           row: envelope.entity.row,
-          children: envelope.children,
+          children: childCounts(envelope.children),
         };
       }),
       unrecoverable: UNRECOVERABLE_DEPENDENTS,
