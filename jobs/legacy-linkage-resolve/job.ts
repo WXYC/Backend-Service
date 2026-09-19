@@ -267,9 +267,14 @@ export const resolveMaxRunGapHours = (raw: string | undefined = process.env.LINK
  * measurement — on a dry run (which never reaches the UPDATE at all), and on
  * EITHER stand-down kind (BS#2413 lock contention, BS#2594 a retired linkage
  * candidate), both of which abort before the UPDATE commits. `0` would be
- * misread as "cohort is clear" rather than "not measured," so only a real
- * (non-dry), non-stood-down pass that actually ran its UPDATE to completion
- * produces a numeric residual.
+ * misread as "cohort is clear" rather than "not measured" for those three
+ * cases, so they get `null` instead. That does NOT make a numeric residual
+ * proof the UPDATE ran: the `candidates === 0` early return also reports
+ * `residual: 0` on a real, non-dry, non-stood-down pass that issued no
+ * UPDATE at all — zero is the correct, literal answer for an empty cohort,
+ * not a stand-in for "not measured." A numeric residual therefore means
+ * either "nothing to do" (the early return) or "the UPDATE ran and this is
+ * what it left behind"; only `null` means "not measured."
  *
  * `deferred` marks a stand-down specifically — true for EITHER kind, false
  * otherwise. Note a dry run is `deferred: false` even though it ALSO reports
