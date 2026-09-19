@@ -219,4 +219,90 @@ describe('Auth service rate limiting', () => {
       expect(limiterIndex).toBeLessThan(auditMountIndex);
     });
   });
+
+  // BS#2604 (parent epic #2534): the fourteen authenticated flat mounts
+  // (`/auth/change-password`, `/auth/change-email`, `/auth/update-user`,
+  // `/auth/delete-user`, and the ten `/auth/organization/*` mutations) get
+  // THREE dedicated limiters, not one shared bucket — folding a DJ's theme
+  // toggle and a manager's roster work into the same bucket is the same
+  // shared-egress-IP hazard PR #2550 already fixed once in this file.
+  // Source-block extraction throughout, for the same reason the
+  // admin-prefix describe block above gives: a loose `.toMatch` against the
+  // whole file can be satisfied by an unrelated limiter's block ~24k
+  // characters away. Mount-order-relative-to-`mountAuthenticatedAccountAudit`
+  // is pinned separately, in tests/unit/auth/account-audit-mount-order.test.ts.
+  describe('authenticated flat-mount limiters (BS#2604)', () => {
+    it('mounts its own 60s/60 limiter on /auth/update-user, keyed by rateLimitKeyFromRequest', () => {
+      const block = authAppSource.match(/const updateUserRateLimit = rateLimit\(\{([\s\S]*?)\}\);/)?.[1];
+      expect(block).toBeDefined();
+      expect(block).toMatch(/windowMs: 60_000,/);
+      expect(block).toMatch(/limit: 60,/);
+      expect(block).toMatch(/keyGenerator: rateLimitKeyFromRequest,/);
+      expect(authAppSource).toMatch(/app\.use\(\s*['"]\/auth\/update-user['"]\s*,\s*updateUserRateLimit\s*\)/);
+    });
+
+    it('mounts change-password/change-email/delete-user on their own 15min/10 limiter, keyed by rateLimitKeyFromRequest', () => {
+      const block = authAppSource.match(/const sensitiveAuthMutationRateLimit = rateLimit\(\{([\s\S]*?)\}\);/)?.[1];
+      expect(block).toBeDefined();
+      expect(block).toMatch(/windowMs: 15 \* 60 \* 1000,/);
+      expect(block).toMatch(/limit: 10,/);
+      expect(block).toMatch(/keyGenerator: rateLimitKeyFromRequest,/);
+
+      const mountBlock = authAppSource.match(
+        /for \(const path of \[([\s\S]*?)\]\) \{\s*app\.use\(path, sensitiveAuthMutationRateLimit\);\s*\}/
+      )?.[1];
+      expect(mountBlock).toBeDefined();
+      expect(mountBlock).toMatch(/\/auth\/change-password/);
+      expect(mountBlock).toMatch(/\/auth\/change-email/);
+      expect(mountBlock).toMatch(/\/auth\/delete-user/);
+    });
+
+    it('mounts exactly the ten organization mutations, as an explicit list, on their own 15min/100 limiter', () => {
+      const block = authAppSource.match(/const organizationMutationRateLimit = rateLimit\(\{([\s\S]*?)\}\);/)?.[1];
+      expect(block).toBeDefined();
+      expect(block).toMatch(/windowMs: 15 \* 60 \* 1000,/);
+      expect(block).toMatch(/limit: 100,/);
+      expect(block).toMatch(/keyGenerator: rateLimitKeyFromRequest,/);
+
+      const pathListBlock = authAppSource.match(/const organizationMutationPaths = \[([\s\S]*?)\];/)?.[1];
+      expect(pathListBlock).toBeDefined();
+      const paths = [...pathListBlock.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+      expect(paths).toEqual([
+        '/auth/organization/create',
+        '/auth/organization/update',
+        '/auth/organization/delete',
+        '/auth/organization/invite-member',
+        '/auth/organization/cancel-invitation',
+        '/auth/organization/accept-invitation',
+        '/auth/organization/reject-invitation',
+        '/auth/organization/remove-member',
+        '/auth/organization/update-member-role',
+        '/auth/organization/leave',
+      ]);
+
+      expect(authAppSource).toMatch(
+        /for \(const path of organizationMutationPaths\) \{\s*app\.use\(path, organizationMutationRateLimit\);\s*\}/
+      );
+    });
+
+    // Regression guard for the exact mistake the decision comment rejected:
+    // a single `app.use('/auth/organization', ...)` prefix mount would bound
+    // the 25 dj-site `listMembers` read call sites along with the ten
+    // mutations, 429-ing the roster page for the whole control room.
+    it('never mounts the organization limiter on the bare /auth/organization prefix', () => {
+      expect(authAppSource).not.toMatch(
+        /app\.use\(\s*['"]\/auth\/organization['"]\s*,\s*organizationMutationRateLimit\s*\)/
+      );
+    });
+
+    it('keeps all fourteen BS#2604 paths out of the 10/15min rateLimitedPaths tier', () => {
+      const tier = authAppSource.match(/const rateLimitedPaths = \[([\s\S]*?)\n {2}\];/)?.[1];
+      expect(tier).toBeDefined();
+      expect(tier).not.toMatch(/\/auth\/change-password/);
+      expect(tier).not.toMatch(/\/auth\/change-email/);
+      expect(tier).not.toMatch(/\/auth\/update-user/);
+      expect(tier).not.toMatch(/\/auth\/delete-user/);
+      expect(tier).not.toMatch(/\/auth\/organization/);
+    });
+  });
 });
