@@ -24,9 +24,15 @@
  * test reproduces the single MOST COMMON production shape this webhook
  * produces — every play of an in-library, rotating release resolves all
  * three columns in that same INSERT. The sum-invariant test carries a
- * three-column row too, deliberately rather than redundantly: that one
- * exercises the `UNION` dedup path across all three branches at once, so
- * neither row substitutes for the other.
+ * three-column row too, and neither substitutes for the other -- but NOT
+ * because only one of them reaches the `UNION` dedup path. Both rows match
+ * all three branches, so both exercise it. They differ in what a failure
+ * tells you: the dedicated test isolates the shape, so when it goes red it
+ * names which exclusion guard broke, while the sum-invariant row closes a
+ * hole in the six-shape aggregate -- it forces dedup to keep rows apart that
+ * share column values, which no single-shape test asks of it. Delete either
+ * and the suite still catches a misclassified all-three row; you lose the
+ * diagnosis in the first case and the aggregate in the second.
  */
 
 const postgres = require('postgres');
