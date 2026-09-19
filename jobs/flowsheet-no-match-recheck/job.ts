@@ -31,11 +31,15 @@
  *
  * BS#2222 adds a second, independent read: `query.ts`'s `HEAD_SLICE_DEFAULT`
  * rows always read at OFFSET 0, so a row the live worker writes today isn't
- * deferred a full cursor wrap for its first recheck. It runs as a SEPARATE
- * `runNoMatchRecheck` pass so the cursor's advance rule sees the tail run's
- * `Totals` alone (`watermark.ts`'s `nextCursorPosition`) — folding the head
- * slice's dispositions in would advance the cursor past unread tail rows.
- * `excludeCandidateIds` drops any tail row the head read already covered.
+ * deferred a full cursor wrap for its first recheck. Both `loadCandidates`
+ * calls (head + tail) run BEFORE either `runNoMatchRecheck` pass, since the
+ * head pass's writes would otherwise shrink the ordering's front out from
+ * under `cursorOffset` before the tail SELECT issues. The head slice runs
+ * as its own `runNoMatchRecheck` pass so `nextCursorPosition` sees only the
+ * tail run's `Totals` (folding the head's in would over-advance past unread
+ * tail rows — see `watermark.ts`); `excludeCandidateIds` drops any tail row
+ * the head read already covered, and each pass gets its own slice of
+ * `LIVE_ACTIVITY_MAX_PAUSE_MS` so the two together don't double the ceiling.
  *
  * Cursor resolution is fail-fast, not best-effort: a `getCursorPosition` /
  * `countCandidates` failure aborts the run before any lookup (same posture
@@ -63,7 +67,7 @@
 
 import { closeDatabaseConnection, db, requirePositiveInt } from '@wxyc/database';
 
-import { runNoMatchRecheck, mergeTotals, excludeCandidateIds } from './orchestrate.js';
+import { runNoMatchRecheck, mergeTotals, excludeCandidateIds, resolveLiveActivityMaxPauseMs } from './orchestrate.js';
 import {
   loadCandidates,
   countCandidates,
@@ -124,10 +128,38 @@ const main = async (): Promise<void> => {
       note: 'This bounds the LML call volume per run — the whole point of the recurring drip.',
     });
     // BS#2222: rows always read at OFFSET 0 — see query.ts's HEAD_SLICE_DEFAULT derivation.
-    const headSlice = requirePositiveInt(process.env[HEAD_SLICE_ENV], HEAD_SLICE_ENV, HEAD_SLICE_DEFAULT, {
+    const requestedHeadSlice = requirePositiveInt(process.env[HEAD_SLICE_ENV], HEAD_SLICE_ENV, HEAD_SLICE_DEFAULT, {
       context: JOB_NAME,
     });
-    const tailBatchSize = Math.max(batchSize - headSlice, 0);
+    // Clamp so the tail read (and with it the BS#2218 cursor advance) never
+    // drops to zero rows — a HEAD_SLICE >= BATCH_SIZE would otherwise
+    // silently disable the starvation guard.
+    const headSlice = Math.min(requestedHeadSlice, batchSize - 1);
+    const tailBatchSize = batchSize - headSlice;
+    if (headSlice !== requestedHeadSlice) {
+      log(
+        'warn',
+        'head_slice_clamped',
+        `${HEAD_SLICE_ENV} (${requestedHeadSlice}) >= batch size (${batchSize}); clamped to ${headSlice} so the tail read stays non-empty`,
+        {
+          requested_head_slice: requestedHeadSlice,
+          head_slice: headSlice,
+          batch_size: batchSize,
+        }
+      );
+    }
+
+    // Split the cooperative-pause ceiling proportionally across the two
+    // runNoMatchRecheck calls below -- each otherwise resolves and enforces
+    // its own full LIVE_ACTIVITY_MAX_PAUSE_MS budget, which would let one
+    // run pause up to 2x the configured ceiling.
+    const totalLiveActivityMaxPauseMs = resolveLiveActivityMaxPauseMs();
+    const headLiveActivityMaxPauseMs =
+      totalLiveActivityMaxPauseMs > 0
+        ? Math.max(Math.round((totalLiveActivityMaxPauseMs * headSlice) / batchSize), 1)
+        : 0;
+    const tailLiveActivityMaxPauseMs =
+      totalLiveActivityMaxPauseMs > 0 ? Math.max(totalLiveActivityMaxPauseMs - headLiveActivityMaxPauseMs, 0) : 0;
 
     // BS#2218 starvation guard: resolve this run's OFFSET from the stored
     // cursor, clamped into the current candidate count's range (the cohort
@@ -152,8 +184,17 @@ const main = async (): Promise<void> => {
       log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
     };
 
+    // Both reads happen against the SAME pre-write snapshot -- running the
+    // head pass first would shrink the ordering's front before the tail
+    // SELECT issues, landing cursorOffset past unread rows every run.
     const headCandidates = await loadCandidates(noMatchTtlDays, headSlice, 0);
-    const headIds = new Set(headCandidates.map((candidate) => candidate.id));
+    const tailCandidatesRaw =
+      tailBatchSize > 0 ? await loadCandidates(noMatchTtlDays, tailBatchSize, cursorOffset) : [];
+    const tailCandidates = excludeCandidateIds(
+      tailCandidatesRaw,
+      new Set(headCandidates.map((candidate) => candidate.id))
+    );
+
     const { totals: headTotals } = await runNoMatchRecheck({
       loadCandidates: () => Promise.resolve(headCandidates),
       lookup: lookupNoMatchRecheck,
@@ -161,13 +202,8 @@ const main = async (): Promise<void> => {
       markAttempted: markRecheckAttempted,
       dryRun,
       onLivePause,
+      liveActivityMaxPauseMs: headLiveActivityMaxPauseMs,
     });
-
-    // BS#2222: drop any tail row the head read already covered (cursorOffset
-    // inside [0, headSlice) — early in a traversal, or right after a wrap).
-    const tailCandidatesRaw =
-      tailBatchSize > 0 ? await loadCandidates(noMatchTtlDays, tailBatchSize, cursorOffset) : [];
-    const tailCandidates = excludeCandidateIds(tailCandidatesRaw, headIds);
     const { totals: tailTotals } = await runNoMatchRecheck({
       loadCandidates: () => Promise.resolve(tailCandidates),
       lookup: lookupNoMatchRecheck,
@@ -175,6 +211,7 @@ const main = async (): Promise<void> => {
       markAttempted: markRecheckAttempted,
       dryRun,
       onLivePause,
+      liveActivityMaxPauseMs: tailLiveActivityMaxPauseMs,
     });
 
     const totals = mergeTotals(headTotals, tailTotals);
