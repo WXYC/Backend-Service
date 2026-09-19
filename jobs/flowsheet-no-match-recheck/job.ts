@@ -29,6 +29,18 @@
  * zero-arg shape its existing tests already pin — no cursor concept leaks
  * into the orchestrator or its transient-handling contract.
  *
+ * BS#2222 adds a second, independent read: `query.ts`'s `HEAD_SLICE_DEFAULT`
+ * rows always read at OFFSET 0, so a row the live worker writes today isn't
+ * deferred a full cursor wrap for its first recheck. Both `loadCandidates`
+ * calls (head + tail) run BEFORE either `runNoMatchRecheck` pass, since the
+ * head pass's writes would otherwise shrink the ordering's front out from
+ * under `cursorOffset` before the tail SELECT issues. The head slice runs
+ * as its own `runNoMatchRecheck` pass so `nextCursorPosition` sees only the
+ * tail run's `Totals` (folding the head's in would over-advance past unread
+ * tail rows — see `watermark.ts`); `excludeCandidateIds` drops any tail row
+ * the head read already covered, and each pass gets its own slice of
+ * `LIVE_ACTIVITY_MAX_PAUSE_MS` so the two together don't double the ceiling.
+ *
  * Cursor resolution is fail-fast, not best-effort: a `getCursorPosition` /
  * `countCandidates` failure aborts the run before any lookup (same posture
  * as `requireLmlConfigured` below) rather than silently falling back to
@@ -45,6 +57,7 @@
  *   DRY_RUN=true                                    skip all writes; log planned counts
  *   FLOWSHEET_NO_MATCH_RECHECK_TTL_DAYS=N            default 14
  *   FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE=N          default 200 (bounded drip per run)
+ *   FLOWSHEET_NO_MATCH_RECHECK_HEAD_SLICE=N          default 20 (see query.ts HEAD_SLICE_DEFAULT)
  *   BACKFILL_LML_MAX_CONCURRENT=N                    default 1
  *   BACKFILL_LML_RATE_PER_MIN=N                      default 20
  *   FLOWSHEET_NO_MATCH_RECHECK_LML_PER_CALL_TIMEOUT_MS=N   default 35000
@@ -54,12 +67,14 @@
 
 import { closeDatabaseConnection, db, requirePositiveInt } from '@wxyc/database';
 
-import { runNoMatchRecheck } from './orchestrate.js';
+import { runNoMatchRecheck, mergeTotals, excludeCandidateIds, resolveLiveActivityMaxPauseMs } from './orchestrate.js';
 import {
   loadCandidates,
   countCandidates,
   BATCH_SIZE_DEFAULT,
   BATCH_SIZE_ENV,
+  HEAD_SLICE_DEFAULT,
+  HEAD_SLICE_ENV,
   NO_MATCH_TTL_DAYS_DEFAULT,
   NO_MATCH_TTL_DAYS_ENV,
 } from './query.js';
@@ -112,6 +127,39 @@ const main = async (): Promise<void> => {
       context: JOB_NAME,
       note: 'This bounds the LML call volume per run — the whole point of the recurring drip.',
     });
+    // BS#2222: rows always read at OFFSET 0 — see query.ts's HEAD_SLICE_DEFAULT derivation.
+    const requestedHeadSlice = requirePositiveInt(process.env[HEAD_SLICE_ENV], HEAD_SLICE_ENV, HEAD_SLICE_DEFAULT, {
+      context: JOB_NAME,
+    });
+    // Clamp so the tail read (and with it the BS#2218 cursor advance) never
+    // drops to zero rows — a HEAD_SLICE >= BATCH_SIZE would otherwise
+    // silently disable the starvation guard.
+    const headSlice = Math.min(requestedHeadSlice, batchSize - 1);
+    const tailBatchSize = batchSize - headSlice;
+    if (headSlice !== requestedHeadSlice) {
+      log(
+        'warn',
+        'head_slice_clamped',
+        `${HEAD_SLICE_ENV} (${requestedHeadSlice}) >= batch size (${batchSize}); clamped to ${headSlice} so the tail read stays non-empty`,
+        {
+          requested_head_slice: requestedHeadSlice,
+          head_slice: headSlice,
+          batch_size: batchSize,
+        }
+      );
+    }
+
+    // Split the cooperative-pause ceiling proportionally across the two
+    // runNoMatchRecheck calls below -- each otherwise resolves and enforces
+    // its own full LIVE_ACTIVITY_MAX_PAUSE_MS budget, which would let one
+    // run pause up to 2x the configured ceiling.
+    const totalLiveActivityMaxPauseMs = resolveLiveActivityMaxPauseMs();
+    const headLiveActivityMaxPauseMs =
+      totalLiveActivityMaxPauseMs > 0
+        ? Math.max(Math.round((totalLiveActivityMaxPauseMs * headSlice) / batchSize), 1)
+        : 0;
+    const tailLiveActivityMaxPauseMs =
+      totalLiveActivityMaxPauseMs > 0 ? Math.max(totalLiveActivityMaxPauseMs - headLiveActivityMaxPauseMs, 0) : 0;
 
     // BS#2218 starvation guard: resolve this run's OFFSET from the stored
     // cursor, clamped into the current candidate count's range (the cohort
@@ -126,26 +174,54 @@ const main = async (): Promise<void> => {
       dry_run: dryRun,
       no_match_ttl_days: noMatchTtlDays,
       batch_size: batchSize,
+      head_slice: headSlice,
+      tail_batch_size: tailBatchSize,
       total_candidates: totalCandidates,
       cursor_offset: cursorOffset,
     });
-    const { totals } = await runNoMatchRecheck({
-      loadCandidates: () => loadCandidates(noMatchTtlDays, batchSize, cursorOffset),
+
+    const onLivePause = (): void => {
+      log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
+    };
+
+    // Both reads happen against the SAME pre-write snapshot -- running the
+    // head pass first would shrink the ordering's front before the tail
+    // SELECT issues, landing cursorOffset past unread rows every run.
+    const headCandidates = await loadCandidates(noMatchTtlDays, headSlice, 0);
+    const tailCandidatesRaw =
+      tailBatchSize > 0 ? await loadCandidates(noMatchTtlDays, tailBatchSize, cursorOffset) : [];
+    const tailCandidates = excludeCandidateIds(
+      tailCandidatesRaw,
+      new Set(headCandidates.map((candidate) => candidate.id))
+    );
+
+    const { totals: headTotals } = await runNoMatchRecheck({
+      loadCandidates: () => Promise.resolve(headCandidates),
       lookup: lookupNoMatchRecheck,
       write: writeMatch,
       markAttempted: markRecheckAttempted,
       dryRun,
-      onLivePause: () => {
-        log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
-      },
+      onLivePause,
+      liveActivityMaxPauseMs: headLiveActivityMaxPauseMs,
+    });
+    const { totals: tailTotals } = await runNoMatchRecheck({
+      loadCandidates: () => Promise.resolve(tailCandidates),
+      lookup: lookupNoMatchRecheck,
+      write: writeMatch,
+      markAttempted: markRecheckAttempted,
+      dryRun,
+      onLivePause,
+      liveActivityMaxPauseMs: tailLiveActivityMaxPauseMs,
     });
 
-    // Advance past however many of this run's candidates are still
-    // candidates — see `watermark.ts`'s `nextCursorPosition` and module doc
-    // comment. Skipped entirely in dry-run mode: a preview run must stay
-    // side-effect-free, including for the next REAL run's starting offset.
+    const totals = mergeTotals(headTotals, tailTotals);
+
+    // Advance past however many of the TAIL run's candidates are still
+    // candidates — the head slice's totals are deliberately excluded (see
+    // watermark.ts): it never occupied a cursor position, so folding it in
+    // would over-advance past unread tail rows. Skipped in dry-run mode.
     //
-    // Not reached when the run throws (a lookup failure is isolated per-row,
+    // Not reached when a run throws (a lookup failure is isolated per-row,
     // but `orchestrate.ts`'s cooperative-pause ceiling aborts the whole
     // loop). Leaving the cursor unmoved there is the safe direction under
     // this advance rule: the rows the aborted run did dispose of have left
@@ -153,18 +229,18 @@ const main = async (): Promise<void> => {
     // next run should start — it re-reads leftovers, never skips unread
     // rows. The aborted run still exits non-zero and captures to Sentry.
     if (!dryRun) {
-      const nextCursor = nextCursorPosition(cursorOffset, totals, totalCandidates);
+      const nextCursor = nextCursorPosition(cursorOffset, tailTotals, totalCandidates);
       await setCursorPosition(db, nextCursor);
       log('info', 'cursor_advanced', "persisted the next run's OFFSET cursor", {
         cursor_offset: cursorOffset,
         next_cursor: nextCursor,
-        scanned: totals.scanned,
-        still_candidates: stillCandidates(totals),
+        tail_scanned: tailTotals.scanned,
+        still_candidates: stillCandidates(tailTotals),
         total_candidates: totalCandidates,
       });
     }
 
-    log('info', 'finished', `${JOB_NAME} done`, { dry_run: dryRun, ...totals });
+    log('info', 'finished', `${JOB_NAME} done`, { dry_run: dryRun, head_slice: headSlice, ...totals });
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
     captureError(error, 'failed');
