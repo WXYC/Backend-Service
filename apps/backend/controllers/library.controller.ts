@@ -3852,9 +3852,32 @@ export const manualDiscogsRecheck: RequestHandler<{ id: string }> = async (req, 
  * tubafrenzy-keyed permalink front door for external callers (LML, wxyc.info,
  * the request line) — widening its bar to `catalog:['write']` to carry this
  * data would lock those callers out, and gating just this one field to
- * `write` on an otherwise `read` route is its own kind of confusing. This
- * endpoint is gated `catalog:['write']` instead, to match the DELETE it
- * precedes rather than the `catalog:['read']` bar every DJ holds.
+ * `write` on an otherwise `read` route is its own kind of confusing. So it is
+ * a separate endpoint — that argument is about ROUTE SHAPE and is unaffected
+ * by the tier below.
+ *
+ * Gated `catalog:['read']`. An earlier revision used `catalog:['write']` "to
+ * match the DELETE it precedes", which conflated two different questions: the
+ * DELETE is write-gated because it ACTS, and this endpoint only counts. The
+ * house rule, settled against `GET /library/artists/:id` (BS#2597), is that
+ * **cardinality of dependents is `catalog:['read']` and contents of dependents
+ * is `catalog:['write']`** — a caller who learns a number still cannot act on
+ * it without clearing the DELETE's own bar, so the count grants nothing.
+ *
+ * Scope that rule to the CATALOG deliberately; it does not generalize. A count
+ * can itself be the sensitive fact when the relation is a moderation or
+ * identity one ("this DJ has three request-line bans"), which is why
+ * `album_reviews` and `digital_archive` were minted as their own keys rather
+ * than reusing `catalog:['read']` — see `auth.roles.ts`.
+ *
+ * `catalog:['read']` is held by `member`, the pre-DJ tier, not only by `dj`.
+ * That is acceptable here on the narrow ground that these figures are
+ * flowsheet plays, and `app.ts` mounts `/playlists` — including
+ * `/playlists/recentEntries`, which serves flowsheet plays — with NO
+ * authentication at all. A per-release count aggregates data any anonymous
+ * caller can already enumerate, so signing in cannot reveal less. A future
+ * pre-delete read over a relation that is NOT already public should not
+ * inherit this tier by precedent.
  */
 export const getFlowsheetPlayCounts: RequestHandler<{ id: string }> = async (req, res) => {
   const albumId = parseAlbumId(req.params.id);
