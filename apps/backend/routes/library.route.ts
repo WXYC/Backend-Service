@@ -368,6 +368,18 @@ library_route.get('/info', requirePermissions({ catalog: ['read'] }), libraryCon
 
 library_route.patch('/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateAlbum);
 
+// BS#2592: pre-delete read for the DELETE below — the three disjoint
+// flowsheet-play arms a delete would damage, reported separately. Gated
+// catalog:write to match the DELETE it precedes, deliberately NOT the
+// lighter catalog:read bar `GET /library/info` uses. Two-segment path, so it
+// carries none of the bare `/:id` ordering hazards documented throughout
+// this file.
+library_route.get(
+  '/:id/flowsheet-play-counts',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.getFlowsheetPlayCounts
+);
+
 // BS#2112: hard delete, gated to catalog:write (same bar as updateAlbum/
 // addAlbum) — irreversible, so it does not get the lighter catalog:read bar
 // missing/found use below.
