@@ -625,10 +625,11 @@ components:
     ArtistCard:
       type: object
       description: >-
-        The artist-card field set, returned by `GET /library/artists/{id}` and by
-        the `PATCH` 200 on the same path. `artist_id`, not `id` — the two
-        endpoints deliberately agree so a client that PATCHes and a client that
-        re-GETs the URL decode one shape.
+        The base artist-card field set (`artist_id`, not `id`). Not returned
+        directly by either artist-card endpoint — both `GET
+        /library/artists/{id}` and its `PATCH` 200 answer
+        `ArtistCardWithDependentCounts`, which embeds this shape via `allOf`
+        and is where the two endpoints' parity contract is documented.
       properties:
         artist_id:
           type: integer
@@ -646,9 +647,16 @@ components:
     ArtistCardWithDependentCounts:
       description: >-
         `ArtistCard` plus the dependent counts behind `DELETE
-        /library/artists/{id}`'s (BS#2562) refusal, returned only by `GET
-        /library/artists/{id}` — not by the `PATCH` 200 on the same path,
-        which answers the bare `ArtistCard`.
+        /library/artists/{id}`'s (BS#2562) refusal. Returned by BOTH `GET
+        /library/artists/{id}` and the `PATCH` 200 on the same path (BS#2597)
+        — the two endpoints deliberately agree, so a client that PATCHes can
+        refresh its delete-control state straight from the PATCH body instead
+        of re-GETting, and a client that re-GETs the URL decodes the same
+        shape either way. A field added to this schema, or to either 200
+        response's construction in `library.controller.ts`
+        (`updateArtistCard` has TWO 200 sites — the no-op short-circuit and
+        the post-write return — both must stay in step with `getArtistCard`),
+        must be added to all three or the parity contract breaks silently.
       allOf:
         - $ref: '#/components/schemas/ArtistCard'
         - type: object
@@ -3161,15 +3169,17 @@ paths:
       responses:
         '200':
           description: >
-            The refreshed artist card — the bare `ArtistCard` field set, not
-            the `GET`'s `ArtistCardWithDependentCounts` (BS#2597 added the
-            dependent counts to the read path only; this endpoint does not
-            recompute them). Also the answer to a no-op edit (a field
-            resubmitted at its current value), which writes nothing.
+            The refreshed artist card in the same `ArtistCardWithDependentCounts`
+            shape the `GET` on this path returns (BS#2597) — the dependent
+            counts are recomputed and included here too, so a client can
+            refresh its delete-control state from the PATCH body without a
+            follow-up GET. Also the answer to a no-op edit (a field
+            resubmitted at its current value), which writes nothing but still
+            answers with the current counts.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ArtistCard'
+                $ref: '#/components/schemas/ArtistCardWithDependentCounts'
         '400':
           description: >
             Invalid artist id, missing/non-object body, a `genre_id` /
