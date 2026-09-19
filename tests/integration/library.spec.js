@@ -133,6 +133,20 @@ describe('Library Catalog', () => {
     // BS#2587: the server-assigned code_number is scoped to (artist_id,
     // genre_id), not just artist_id -- an artist with releases in two genres
     // has two independently-numbered shelves.
+    //
+    // `insertAlbum` itself never checks `genre_artist_crossreference` (it
+    // will happily insert a `library` row against a genre the artist has no
+    // membership in), but every genre-scoped read (`getArtistCardById`, the
+    // browse routes, `generateAlbumCodeNumber`'s own shelf model) joins
+    // through that crossreference. A library row filed under a genre with no
+    // matching crossreference is therefore a state the real catalog can't
+    // reach through any Backend write path -- the only writer of
+    // `genre_artist_crossreference` is `insertArtistWithGenreCrossreference`,
+    // fired once at artist creation. A multi-genre artist (one `artist_id`,
+    // several crossreference rows) is a real, legacy-imported shape though
+    // (see the `artist_genre_key` uniqueness note a few tests down), so the
+    // fixture seeds the second membership directly, the same way that test
+    // does.
     test('auto-generates code_number scoped to the release genre, not the artist-wide max', async () => {
       const uniq = Date.now();
       const artist = await auth
@@ -145,43 +159,56 @@ describe('Library Catalog', () => {
         })
         .expect(201);
 
-      const rock1 = await auth
-        .post('/library')
-        .send({
-          album_title: `Post Genre Scope Rock 1 ${uniq}`,
-          artist_id: artist.body.id,
-          label: 'Test Label',
-          genre_id: 11,
-          format_id: 1,
-        })
-        .expect(201);
-      expect(rock1.body.code_number).toBe(1);
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.body.id}, 15, ${9000 + (uniq % 500)})`
+      );
 
-      const rock2 = await auth
-        .post('/library')
-        .send({
-          album_title: `Post Genre Scope Rock 2 ${uniq}`,
-          artist_id: artist.body.id,
-          label: 'Test Label',
-          genre_id: 11,
-          format_id: 1,
-        })
-        .expect(201);
-      expect(rock2.body.code_number).toBe(2);
+      try {
+        const rock1 = await auth
+          .post('/library')
+          .send({
+            album_title: `Post Genre Scope Rock 1 ${uniq}`,
+            artist_id: artist.body.id,
+            label: 'Test Label',
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        expect(rock1.body.code_number).toBe(1);
 
-      // Same artist, different genre: the shelf is empty, so this must land
-      // at 1 -- a genre-blind generator would have proposed 3.
-      const electronic1 = await auth
-        .post('/library')
-        .send({
-          album_title: `Post Genre Scope Electronic 1 ${uniq}`,
-          artist_id: artist.body.id,
-          label: 'Test Label',
-          genre_id: 15,
-          format_id: 1,
-        })
-        .expect(201);
-      expect(electronic1.body.code_number).toBe(1);
+        const rock2 = await auth
+          .post('/library')
+          .send({
+            album_title: `Post Genre Scope Rock 2 ${uniq}`,
+            artist_id: artist.body.id,
+            label: 'Test Label',
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        expect(rock2.body.code_number).toBe(2);
+
+        // Same artist, already-established second genre (via the
+        // crossreference seeded above): the shelf is empty, so this must
+        // land at 1 -- a genre-blind generator would have proposed 3.
+        const electronic1 = await auth
+          .post('/library')
+          .send({
+            album_title: `Post Genre Scope Electronic 1 ${uniq}`,
+            artist_id: artist.body.id,
+            label: 'Test Label',
+            genre_id: 15,
+            format_id: 1,
+          })
+          .expect(201);
+        expect(electronic1.body.code_number).toBe(1);
+      } finally {
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.body.id} AND genre_id = 15`
+        );
+      }
     });
 
     // BS#1963: a Backend-sourced catalog add mints its own legacy_release_id

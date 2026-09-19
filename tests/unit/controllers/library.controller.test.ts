@@ -3641,6 +3641,61 @@ describe('library.controller', () => {
       });
     });
 
+    // BS#2587 follow-up: before this PR, code_number shelves were artist-wide,
+    // so a genre-only move (same artist) could never collide -- the number
+    // was already unique across every genre the artist held. Now each genre
+    // restarts its own shelf at 1, so the same move can silently land on a
+    // slot the artist already owns on the destination shelf. This reuses the
+    // artist-move arm's existing collision guard rather than adding a new
+    // predicate.
+    describe('genre-only move regenerates on collision (BS#2587 follow-up)', () => {
+      afterEach(() => {
+        mockAlbumCodeNumberTaken.mockReset();
+        mockGenerateAlbumCodeNumber.mockReset();
+      });
+
+      it('regenerates the code_number when a genre-only move collides on the destination shelf', async () => {
+        mockAlbumCodeNumberTaken.mockResolvedValue(true);
+        mockGenerateAlbumCodeNumber.mockResolvedValue(9);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ genre_id: 15 }), res, next);
+
+        // existingRow.artist_id (7) is unchanged -- only the genre moved.
+        expect(mockAlbumCodeNumberTaken).toHaveBeenCalledWith(7, existingRow.code_number, 42);
+        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(7, 15);
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ genre_id: 15, code_number: 9 }));
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('leaves code_number untouched on a genre-only move with no collision', async () => {
+        mockAlbumCodeNumberTaken.mockResolvedValue(false);
+        mockGenerateAlbumCodeNumber.mockResolvedValue(999);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ genre_id: 15 }), res, next);
+
+        expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+        const updates = mockUpdateAlbumInDB.mock.calls[0][1];
+        expect(updates).toMatchObject({ genre_id: 15 });
+        expect(updates).not.toHaveProperty('code_number');
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('respects an explicit destination code_number on a genre-only move, skipping the collision check', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ genre_id: 15, code_number: 20 }), res, next);
+
+        expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
+        expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ genre_id: 15, code_number: 20 })
+        );
+      });
+    });
+
     // A PATCH omitting `code_volume_letters` leaves the stored value alone
     // (`updateAlbumInDB` only SETs keys `!== undefined`), so clearing it
     // requires a distinct spelling. `Album.code_volume_letters` is
