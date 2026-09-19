@@ -498,6 +498,11 @@ describe('PATCH /library/:id', () => {
         .expect(201);
       // originArtist's first release auto-assigns 1, which collides with
       // destArtist's Rock code_number 1 -- the trigger for the regenerate.
+      // `albumCodeNumberTaken` is artist-wide (WXYC/Backend-Service#2579,
+      // deliberately not fixed here), so it fires on that Rock collision even
+      // though the move is landing in Electronic, where 1 is actually free.
+      // That's the over-eager-but-not-wrong churn documented at the call
+      // site -- this test pins today's actual behavior, not an aspiration.
       expect(moving.body.code_number).toBe(1);
 
       const res = await auth
