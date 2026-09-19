@@ -794,9 +794,12 @@ type ArtistByCodeQuery = {
 };
 
 /**
- * Parses one required integer query parameter for `resolveArtistByCode`,
- * bounded on both ends. The upper bound is the int4 guard described at
- * `INT4_MAX`; the lower bound differs per parameter, so it is passed in.
+ * Parses one required integer query parameter, bounded on both ends. The
+ * upper bound is the int4 guard described at `INT4_MAX`; the lower bound
+ * differs per parameter, so it is passed in.
+ *
+ * Two callers: `resolveArtistByCode` (both `genre_id` and `code_number`) and
+ * `peekArtistReleaseNumber` (`genre_id`, required by BS#2587).
  *
  * `Number('')` is 0 and `Number(' ')` is 0, so a present-but-empty parameter
  * (`?code_number=`) would sail through `Number.isInteger` as a legitimate
@@ -804,6 +807,15 @@ type ArtistByCodeQuery = {
  * blank check before the numeric one.
  */
 const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): number => {
+  // `resolveArtistByCode` pre-filters absence itself (its own "Missing query
+  // parameters" 400) before either of its two call sites here, so this branch
+  // was historically unreachable for `undefined`. `peekArtistReleaseNumber`
+  // has no such pre-check, so an omitted `genre_id` reaches this function
+  // directly -- distinguish that from the repeated-key case below, or an
+  // absent parameter misdiagnoses as a repeated one.
+  if (raw === undefined) {
+    throw new WxycError(`Missing query parameter: ${name}`, 400);
+  }
   // Express's `simple` query parser yields string[] for repeated keys
   // (`?genre_id=1&genre_id=2`), which `Number()` would collapse to NaN with a
   // misleading message; name the real problem instead.
@@ -3766,33 +3778,47 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     }
 
     if (body.genre_id !== undefined) updates.genre_id = body.genre_id;
-    if (body.artist_id !== undefined && body.artist_id !== existing.artist_id) {
+
+    const artistIsMoving = body.artist_id !== undefined && body.artist_id !== existing.artist_id;
+    const genreIsMoving = body.genre_id !== undefined && body.genre_id !== existing.genre_id;
+
+    if (artistIsMoving) {
       updates.artist_id = body.artist_id;
       updates.artist_name = canonical_artist_name;
-      // Re-attribution keeps the album's code_number unless the new artist
-      // already owns it (issue 7) — only on collision do we burn the next
-      // number in the new artist's sequence. A code_number that DIFFERS from
-      // the stored one is the operator deliberately choosing the destination
-      // shelf, so it is written verbatim, uncollision-checked, same as every
-      // other code_number write on this endpoint and on POST /library;
-      // regenerating over it would silently discard that choice (BS#2564).
-      //
-      // The test is "differs", not "present", and the distinction is
-      // load-bearing: a code_number that merely echoes the stored value
-      // expresses no intent about the call number at all. dj-site's album
-      // editor resubmits the whole record on Save (the same client shape the
-      // #1555 short-circuit below exists for) and every read response carries
-      // code_number, so a GET → PATCH round-trip hands this handler the
-      // stored value whether or not the operator touched the field — the very
-      // round-tripping that forces this endpoint to accept an explicit
-      // `code_volume_letters: null` a few lines above. An echo is therefore
-      // indistinguishable from "keep what's there", which is exactly what a
-      // move did before this PR, so it falls through to the regenerate rather
-      // than filing two releases into one (artist, code_number) slot. That
-      // matters more than usual here: there is no application-level collision
-      // check on this path and no DB uniqueness constraint yet (BS#2033), so
-      // this regenerate is the only thing standing between a full-record
-      // resubmit and a silent duplicate shelf slot.
+    }
+
+    // Re-attribution AND a genre-only move (BS#2587 follow-up) both need this
+    // guard now: each genre is its own shelf that restarts at 1, so either
+    // kind of move can land the row's unchanged `code_number` on a slot the
+    // effective artist already owns on the DESTINATION shelf -- a hazard a
+    // genre-only move could not previously cause, back when numbering was
+    // artist-wide. Both arms share one check, scoped by whichever of
+    // artist_id/genre_id actually moved (`effectiveArtistId`/
+    // `effectiveGenreId`, computed above) -- only on collision do we burn the
+    // next number in the destination sequence. A code_number that DIFFERS
+    // from the stored one is the operator deliberately choosing the
+    // destination shelf, so it is written verbatim, uncollision-checked, same
+    // as every other code_number write on this endpoint and on POST /library;
+    // regenerating over it would silently discard that choice (BS#2564).
+    //
+    // The test is "differs", not "present", and the distinction is
+    // load-bearing: a code_number that merely echoes the stored value
+    // expresses no intent about the call number at all. dj-site's album
+    // editor resubmits the whole record on Save (the same client shape the
+    // #1555 short-circuit below exists for) and every read response carries
+    // code_number, so a GET → PATCH round-trip hands this handler the stored
+    // value whether or not the operator touched the field — the very
+    // round-tripping that forces this endpoint to accept an explicit
+    // `code_volume_letters: null` a few lines above. An echo is therefore
+    // indistinguishable from "keep what's there", which is exactly what a
+    // move did before this PR, so it falls through to the regenerate rather
+    // than filing two releases into one (artist, genre, code_number) slot.
+    // That matters more than usual here: there is no application-level
+    // collision check on this path and no DB uniqueness constraint yet
+    // (BS#2033), so this regenerate is the only thing standing between a
+    // full-record resubmit (or a genre-only re-file) and a silent duplicate
+    // shelf slot.
+    if (artistIsMoving || genreIsMoving) {
       const clientChoseDestinationCodeNumber =
         body.code_number !== undefined && body.code_number !== existing.code_number;
       // `albumCodeNumberTaken` is still artist-wide, not genre-scoped -- that
@@ -3808,14 +3834,15 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // avoidable churn until #2579 lands.
       if (
         !clientChoseDestinationCodeNumber &&
-        (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId))
+        (await libraryService.albumCodeNumberTaken(effectiveArtistId, existing.code_number, albumId))
       ) {
         // `effectiveGenreId`, not `existing.genre_id`: `genre_id` is itself in
         // `UPDATABLE_ALBUM_FIELDS`, so a request can move the release to a new
-        // genre in the same PATCH that triggers this regenerate. Reading
-        // `existing.genre_id` alone would re-file the release onto the shelf
-        // it is leaving rather than the one it is landing on (BS#2587).
-        updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id, effectiveGenreId);
+        // genre in the same PATCH that triggers this regenerate (or move only
+        // the genre, with the artist unchanged). Reading `existing.genre_id`
+        // alone would re-file the release onto the shelf it is leaving rather
+        // than the one it is landing on (BS#2587).
+        updates.code_number = await libraryService.generateAlbumCodeNumber(effectiveArtistId, effectiveGenreId);
       }
     }
   }

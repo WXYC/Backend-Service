@@ -417,6 +417,18 @@ describe('PATCH /library/:id', () => {
   // must scope against the DESTINATION genre, not the row's own stored
   // (soon-to-be-stale) genre -- reading `existing.genre_id` would re-file the
   // release onto the shelf it is leaving rather than the one it is landing on.
+  //
+  // The fixture is deliberately shaped so the genre-scoped answer and the OLD
+  // genre-blind answer (MAX(code_number) across every genre the artist is
+  // filed under, not just the destination) DIFFER: destArtist's Rock (11)
+  // shelf sits much higher than its Electronic (15) shelf, and the moving
+  // release lands in Electronic -- the LOW shelf. A genre-blind generator
+  // would still see Rock's high max and answer off it; scoped correctly, the
+  // destination shelf is nearly empty. (An earlier version of this fixture
+  // had it backwards -- destination shelf high, other shelf low -- which
+  // happened to make both answers agree and passed unchanged even with the
+  // pre-#2587 genre-blind generator.) Reverting the service's genre-scoping
+  // fix makes this test's final assertion fail.
   describe('artist move that also changes genre regenerates against the destination genre (BS#2587)', () => {
     let destArtist;
     let originArtist;
@@ -443,9 +455,9 @@ describe('PATCH /library/:id', () => {
          VALUES (${destArtist.id}, 15, ${9450 + (uniq % 500)})`
       );
 
-      // destArtist's Rock (11) shelf tops out at 1 -- if the regenerate reads
-      // the row's OLD genre instead of the destination, it would (wrongly)
-      // answer from this shelf.
+      // destArtist's Rock (11) shelf tops out HIGH -- a genre-blind
+      // MAX(code_number) across every genre the artist is filed under would
+      // answer off this shelf regardless of where the moving release lands.
       await auth
         .post('/library')
         .send({
@@ -454,13 +466,13 @@ describe('PATCH /library/:id', () => {
           label: 'Genre Move Label',
           genre_id: 11,
           format_id: 1,
-          code_number: 1,
+          code_number: 40,
         })
         .expect(201);
 
-      // destArtist's Electronic (15) shelf tops out much higher -- the
-      // regenerate must answer from HERE, because that's the genre the moving
-      // release is landing in.
+      // destArtist's Electronic (15) shelf tops out at 1 -- the DESTINATION
+      // the moving release is landing in. A genre-scoped regenerate must
+      // answer from HERE (2), not from Rock's much higher shelf (41).
       await auth
         .post('/library')
         .send({
@@ -469,7 +481,7 @@ describe('PATCH /library/:id', () => {
           label: 'Genre Move Label',
           genre_id: 15,
           format_id: 1,
-          code_number: 40,
+          code_number: 1,
         })
         .expect(201);
 
@@ -485,7 +497,7 @@ describe('PATCH /library/:id', () => {
       originArtist = origin.body;
     });
 
-    test('regenerates from the destination genre shelf (41), not the origin genre shelf (2)', async () => {
+    test('regenerates from the destination genre shelf (2), not the artist-wide max (41)', async () => {
       const moving = await auth
         .post('/library')
         .send({
@@ -497,12 +509,11 @@ describe('PATCH /library/:id', () => {
         })
         .expect(201);
       // originArtist's first release auto-assigns 1, which collides with
-      // destArtist's Rock code_number 1 -- the trigger for the regenerate.
-      // `albumCodeNumberTaken` is artist-wide (WXYC/Backend-Service#2579,
-      // deliberately not fixed here), so it fires on that Rock collision even
-      // though the move is landing in Electronic, where 1 is actually free.
-      // That's the over-eager-but-not-wrong churn documented at the call
-      // site -- this test pins today's actual behavior, not an aspiration.
+      // destArtist's Electronic code_number 1 -- the trigger for the
+      // regenerate. `albumCodeNumberTaken` is artist-wide
+      // (WXYC/Backend-Service#2579, deliberately not fixed here), so it fires
+      // on that collision regardless of which genre either release is filed
+      // under -- see the module comment above for that known scope gap.
       expect(moving.body.code_number).toBe(1);
 
       const res = await auth
@@ -512,10 +523,13 @@ describe('PATCH /library/:id', () => {
 
       expect(res.body.artist_id).toBe(destArtist.id);
       expect(res.body.genre_id).toBe(15);
-      // 41 = destArtist's Electronic max (40) + 1. A regenerate scoped to the
-      // stale genre_id=11 would have answered 2 (Rock's max, 1, plus one)
-      // instead -- a number that belongs on the shelf the release just left.
-      expect(res.body.code_number).toBe(41);
+      // 2 = destArtist's Electronic max (1) + 1 -- the destination shelf the
+      // release is landing on. A genre-blind regenerate (MAX(code_number)
+      // across every genre the artist is filed under, the pre-#2587
+      // behavior) would instead answer 41, off Rock's much higher shelf --
+      // the exact defect BS#2587 fixed, and the point of shaping the fixture
+      // this way rather than the other way around.
+      expect(res.body.code_number).toBe(2);
     });
   });
 });

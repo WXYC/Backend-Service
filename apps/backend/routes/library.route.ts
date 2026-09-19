@@ -363,13 +363,17 @@ library_route.get(
 );
 
 // BS#2502: previews the next release call number `generateAlbumCodeNumber`
-// would assign this artist (MAX(code_number)+1, 1 when none), so the classic
-// add-release form can prepopulate an editable field. `catalog: ['write']`
-// matches the `/artists/peek-code` sibling — both back the create flow, not a
-// plain lookup. Three literal-plus-templated segments, so it carries none of
-// the `/artists/:id` ordering hazards documented above the `search`/`peek-code`
-// block: a three-segment request can never be captured by the two-segment
-// `/artists/:id` handler or by any one-segment `/artists/<literal>` route.
+// would assign this artist within a given genre (MAX(code_number)+1 for that
+// (artist_id, genre_id) shelf, 1 when none), so the classic add-release form
+// can prepopulate an editable field. BS#2587 made `genre_id` a REQUIRED query
+// parameter -- call numbers are genre-scoped shelves, so a preview that didn't
+// ask which shelf could only ever be a guess; there is no genre-blind fallback.
+// `catalog: ['write']` matches the `/artists/peek-code` sibling — both back the
+// create flow, not a plain lookup. Three literal-plus-templated segments, so it
+// carries none of the `/artists/:id` ordering hazards documented above the
+// `search`/`peek-code` block: a three-segment request can never be captured by
+// the two-segment `/artists/:id` handler or by any one-segment
+// `/artists/<literal>` route.
 library_route.get(
   '/artists/:id/next-release-number',
   requirePermissions({ catalog: ['write'] }),
