@@ -1376,7 +1376,11 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
     (key) => updates[key] !== existing[key as keyof typeof existing]
   );
   if (!effectiveChange) {
-    res.status(200).json(existing);
+    // BS#2597: same dependent counts `getArtistCard` composes onto its GET
+    // response -- see the parity comment below. A no-op edit still answers
+    // in the GET card shape, not just the pre-write `artists` fields.
+    const existingDependentCounts = await libraryService.getArtistDependentCounts(artistId);
+    res.status(200).json({ ...existing, ...existingDependentCounts });
     return;
   }
 
@@ -1384,14 +1388,23 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   if (!updated) {
     throw new WxycError('Artist not found', 404);
   }
-  // Answer with the same card shape `GET /library/artists/:id` serves rather
-  // than the bare `artists` RETURNING row, so a client that PATCHes and a
-  // client that re-GETs the same URL see one field set (`artist_id`, not `id`).
+  // Answer with the same card shape `GET /library/artists/:id` serves --
+  // `ArtistCardRow` fields AND the BS#2597 dependent counts -- rather than the
+  // bare `artists` RETURNING row, so a client that PATCHes and a client that
+  // re-GETs the same URL decode one field set (`artist_id`, not `id`; delete-
+  // refusal counts included either way). This is a DELIBERATE parity
+  // contract, not an accident of both handlers calling the same helpers: a
+  // field added to one of `getArtistCard` / `updateArtistCard`'s two 200
+  // sites (this one and the no-op short-circuit above) must be added to all
+  // three, or the two endpoints answer in different shapes again -- the exact
+  // divergence `tests/integration/library.spec.js` guards
+  // ("PATCH /library/artists/:id ... answering in the GET card shape").
   const refreshed = await libraryService.getArtistCardById(artistId);
   if (!refreshed) {
     throw new WxycError('Artist not found', 404);
   }
-  res.status(200).json(refreshed);
+  const dependentCounts = await libraryService.getArtistDependentCounts(artistId);
+  res.status(200).json({ ...refreshed, ...dependentCounts });
 };
 
 /**
