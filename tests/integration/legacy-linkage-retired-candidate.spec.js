@@ -58,12 +58,24 @@
  * `sqlstate.ts`'s docstring), so `.cause` is where the real SQLSTATE and
  * constraint name live in production, and `error.code`/`error.constraint_name`
  * are `undefined` there. The rotation test below adds one more assertion that
- * re-wraps that SAME real driver error in the `.cause` shape and
- * re-classifies it, so this spec proves both branches against a real error —
- * never a hand-built double asserting the same two fields against itself —
- * and the wrapped-shape gap `sqlstate.ts` warns about (a predicate proven
- * only against hand-built doubles, shipped as dead code against a green
- * suite once already) cannot recur here.
+ * re-wraps that SAME real driver error and re-classifies it — so the
+ * SQLSTATE and constraint name sitting under `.cause` are genuine postgres-js
+ * output, not invented — but the wrapper placed around them
+ * (`{ message, code: undefined, constraint_name: undefined, cause: error }`)
+ * is a hand-built object literal standing in for `DrizzleQueryError`, not a
+ * real one: nothing in this repo constructs a `DrizzleQueryError` directly,
+ * and every one of the ~14 sites that names the type models `.cause` by hand
+ * the same way this assertion does. So what this spec actually exercises is
+ * the real bare driver shape end to end, plus the classifier run against a
+ * hand-built stand-in for drizzle's wrap — never a hand-built double
+ * asserting the same two fields against itself. That is real ground gained
+ * over the unit doubles alone (`tests/unit/jobs/legacy-linkage-resolve/
+ * job.test.ts`, which still cover the wrapped shape otherwise), but it is not
+ * a full closure of the wrapped-shape gap `sqlstate.ts` warns about (a
+ * predicate proven only against hand-built doubles, shipped as dead code
+ * against a green suite once already). A test that drives a real drizzle
+ * instance through this same race, so the wrapper shape itself is observed
+ * rather than assumed, is tracked as a follow-up.
  */
 
 const path = require('path');
