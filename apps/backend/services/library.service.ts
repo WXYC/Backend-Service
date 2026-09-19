@@ -9,13 +9,17 @@ import {
   db,
   captureCatalogDeleteSnapshot,
   type CatalogDeleteActor,
+  type CatalogDeleteSnapshot,
   extractSqlState,
   intArrayLiteral,
   isLockContentionError,
+  orderBatchEntities,
+  parseCapturedEnvelope,
   parseRotationBin,
   rotationActiveSql,
   rotationKilledSql,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
+  UNRECOVERABLE_DEPENDENTS,
   type RotationBin,
 } from '@wxyc/database';
 import {
@@ -33,6 +37,7 @@ import {
   artist_library_crossreference,
   artists,
   bins,
+  catalog_delete_snapshot,
   compilation_track_artist,
   digital_asset,
   digital_asset_file,
@@ -4144,6 +4149,126 @@ export const countReleaseCrossReferences = async (): Promise<number> => {
   const response = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(releaseCrossReferencesQuery().as('release_cross_references'));
+
+  return Number(response[0]?.count ?? 0);
+};
+
+/** One entity captured by a delete, as `GET /library/deleted` (BS#2561) renders it. */
+export type DeletedArchiveEntity = {
+  entity_kind: string;
+  table: string;
+  row: Record<string, unknown> | null;
+  children: Record<string, unknown[]>;
+};
+
+export type DeletedArchiveBatch = {
+  batch_id: string;
+  captured_at: Date;
+  actor: { user_id: string | null; email: string | null; role: string | null };
+  entities: DeletedArchiveEntity[];
+  unrecoverable: readonly string[];
+};
+
+/**
+ * Name fields a librarian would recognize a deleted card by. Not field-scoped
+ * like `GET /library/query`'s `q` — `catalog_delete_snapshot.captured` is
+ * jsonb with no indexed text column, and the volume (a handful of deletes a
+ * week, read a few times a month) doesn't justify extracting and indexing one
+ * (BS#2561 decision comment).
+ */
+const DELETED_ARCHIVE_NAME_FIELDS = ['album_title', 'artist_name', 'alternate_artist_name'] as const;
+
+const deletedArchiveSearchCondition = (search: string): SQL =>
+  sql.join(
+    DELETED_ARCHIVE_NAME_FIELDS.map(
+      (field) => sql`${catalog_delete_snapshot.captured}->'entity'->'row'->>${field} ILIKE ${`%${search}%`}`
+    ),
+    sql` OR `
+  );
+
+/**
+ * One page of `GET /library/deleted`, newest batch first. Rows in
+ * `catalog_delete_snapshot` group by `batch_id`: `captureCatalogDeleteSnapshot`
+ * writes one row per captured entity, and a caller deleting several entities
+ * under one delete (WXYC/Backend-Service#2562's artist delete is the first —
+ * not shipped yet, so every batch today holds exactly one row) passes the
+ * same `batchId` to each call so the rows group together.
+ *
+ * Two queries, not one, so a page boundary can never split a batch across two
+ * pages: the first pages DISTINCT `batch_id`s (`search`, when given, filters
+ * this query — a batch qualifies if any one of its rows' entity matches), the
+ * second fetches every row belonging to just that page's batch ids.
+ */
+export const getDeletedArchivePage = async (
+  page: number,
+  limit: number,
+  search?: string
+): Promise<DeletedArchiveBatch[]> => {
+  const condition = search ? deletedArchiveSearchCondition(search) : undefined;
+
+  const batchPage = await db
+    .select({
+      batch_id: catalog_delete_snapshot.batch_id,
+      captured_at: sql<Date>`max(${catalog_delete_snapshot.captured_at})`,
+    })
+    .from(catalog_delete_snapshot)
+    .where(condition)
+    .groupBy(catalog_delete_snapshot.batch_id)
+    .orderBy(desc(sql`max(${catalog_delete_snapshot.captured_at})`), desc(sql`max(${catalog_delete_snapshot.id})`))
+    .limit(limit)
+    .offset(page * limit);
+
+  if (batchPage.length === 0) {
+    return [];
+  }
+
+  const rows: CatalogDeleteSnapshot[] = await db
+    .select()
+    .from(catalog_delete_snapshot)
+    .where(
+      inArray(
+        catalog_delete_snapshot.batch_id,
+        batchPage.map((batch) => batch.batch_id)
+      )
+    );
+
+  const rowsByBatch = new Map<string, CatalogDeleteSnapshot[]>();
+  for (const row of rows) {
+    rowsByBatch.set(row.batch_id, [...(rowsByBatch.get(row.batch_id) ?? []), row]);
+  }
+
+  return batchPage.map(({ batch_id, captured_at }) => {
+    const ordered = orderBatchEntities(rowsByBatch.get(batch_id) ?? []);
+    const [primary] = ordered;
+    return {
+      batch_id,
+      captured_at,
+      actor: {
+        user_id: primary?.actor_user_id ?? null,
+        email: primary?.actor_email ?? null,
+        role: primary?.actor_role ?? null,
+      },
+      entities: ordered.map((row) => {
+        const envelope = parseCapturedEnvelope(row.captured);
+        return {
+          entity_kind: row.entity_kind,
+          table: envelope.entity.table,
+          row: envelope.entity.row,
+          children: envelope.children,
+        };
+      }),
+      unrecoverable: UNRECOVERABLE_DEPENDENTS,
+    };
+  });
+};
+
+/** Total batch count for `getDeletedArchivePage`'s page envelope (same search scope). */
+export const countDeletedArchiveBatches = async (search?: string): Promise<number> => {
+  const condition = search ? deletedArchiveSearchCondition(search) : undefined;
+  const response = await db
+    .select({ count: sql<number>`count(distinct ${catalog_delete_snapshot.batch_id})::int` })
+    .from(catalog_delete_snapshot)
+    .where(condition);
 
   return Number(response[0]?.count ?? 0);
 };

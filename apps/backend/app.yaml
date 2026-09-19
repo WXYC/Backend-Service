@@ -3522,6 +3522,134 @@ paths:
         '400':
           description: Invalid page or limit
 
+  /library/deleted:
+    get:
+      summary: List the catalog-delete archive
+      description: >
+        BS#2561 (F2a) — the read half of the `catalog_delete_snapshot`
+        archive `DELETE /library/{id}` writes to (BS#2560). Newest batch
+        first (`captured_at DESC`). A "batch" is every row
+        `captureCatalogDeleteSnapshot` wrote under one `batch_id` — today
+        that is always exactly one entity (`entity_kind: 'library'`);
+        WXYC/Backend-Service#2562's artist delete is the first call site that
+        will ever group more than one entity under a batch, and when it
+        ships `entities` orders parent before child (artist before the
+        library rows that reference it).
+
+
+        Enforced by `requirePermissions({ catalog: ['write'] })` — the same
+        bar as the delete that writes these rows, not `catalog:read` like the
+        rest of this router's catalog listings: a batch's `entities[].row`
+        is the deleted card's own content, and `actor` names who deleted it,
+        which `library_delete_denylist`'s docstring treats as audit data
+        rather than a DJ-facing read.
+
+
+        `search`, when given, is a plain substring match (case-insensitive)
+        over the captured entity's name fields (`album_title`, `artist_name`,
+        `alternate_artist_name`) — NOT the field-scoped `artist:`/`album:`
+        syntax `GET /library/query`'s `q` parses. `captured` is `jsonb` with
+        no indexed text column, and the volume (a handful of deletes a week)
+        doesn't justify extracting and indexing one.
+
+
+        `unrecoverable` names five dependents no envelope ever captures and a
+        restore therefore cannot bring back: `album_metadata`,
+        `library_identity`, `library_identity_source`,
+        `uncovered_release_search_markers` (all four rebuilt by their own
+        jobs) and `album_review_submissions` (`ON DELETE SET NULL` — the row
+        survives unlinked, and its `reviewer_raw` is PII behind ADR 0011's
+        projection barrier, so this endpoint never reads that table). It is
+        the same list on every batch, not a per-batch computation.
+      security:
+        - BearerAuth: ['catalog-write']
+      parameters:
+        - in: query
+          name: page
+          required: false
+          description: Zero-based page index.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - in: query
+          name: search
+          required: false
+          description: >
+            Substring match over the captured entity's name fields. Omitted
+            or blank means no filter.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: >
+            One page of delete batches. An empty archive is a 200 with
+            `total: 0`, not a 404.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        batch_id:
+                          type: string
+                          format: uuid
+                        captured_at:
+                          type: string
+                          format: date-time
+                        actor:
+                          type: object
+                          properties:
+                            user_id:
+                              type: string
+                              nullable: true
+                            email:
+                              type: string
+                              nullable: true
+                            role:
+                              type: string
+                              nullable: true
+                        entities:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              entity_kind:
+                                type: string
+                              table:
+                                type: string
+                              row:
+                                type: object
+                                nullable: true
+                                description: The deleted parent row itself, every non-generated column.
+                              children:
+                                type: object
+                                description: Child table name -> every row that referenced the deleted parent.
+                        unrecoverable:
+                          type: array
+                          items:
+                            type: string
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  totalPages:
+                    type: integer
+        '400':
+          description: Invalid page, limit, or search
+
   /library/formats:
     get:
       summary: Get format list
