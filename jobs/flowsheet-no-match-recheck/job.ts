@@ -116,7 +116,7 @@ import {
   JOB_NAME,
   getCursorPosition,
   headCursorWindow,
-  headRotationIsInert,
+  headRotationWarrantsWarning,
   planCursorAdvance,
   setCursorPosition,
   wrapCursor,
@@ -168,8 +168,13 @@ export const resolveHeadSliceConfig = (
   requestedHeadSlice: number,
   batchSize: number
 ): { headSlice: number; tailBatchSize: number; clamped: boolean } => {
-  const ceiling = Math.max(Math.floor(batchSize * HEAD_SLICE_MAX_BATCH_SHARE), 0);
-  const headSlice = Math.max(Math.min(requestedHeadSlice, ceiling), 0);
+  // No `Math.max(…, 0)` on either line: both arguments come from
+  // `requirePositiveInt` (>= 1), and `HEAD_SLICE_MAX_BATCH_SHARE` is a positive
+  // module constant, so neither the ceiling nor the min can go negative. The
+  // clamps were unreachable and implied a negative case that cannot arise
+  // (`/code-review` on PR #2608).
+  const ceiling = Math.floor(batchSize * HEAD_SLICE_MAX_BATCH_SHARE);
+  const headSlice = Math.min(requestedHeadSlice, ceiling);
   return { headSlice, tailBatchSize: batchSize - headSlice, clamped: headSlice !== requestedHeadSlice };
 };
 
@@ -250,9 +255,32 @@ export const runRecheckPasses = async (plan: RecheckPassPlan, deps: RecheckPassD
     });
 
   // Tail FIRST: it is the starvation guard and the historical-cohort drain, so
-  // if the shared pause budget is exhausted mid-run it is the head that loses
-  // its turn, not the drain. The head loses little by yielding -- its cursor
-  // stays put, so the same window is read next run.
+  // it gets first claim on the shared pause budget.
+  //
+  // What that does and does NOT buy, precisely — an earlier revision of this
+  // comment claimed "it is the head that loses its turn, not the drain", which
+  // is backwards in the common case (`/code-review` on PR #2608).
+  // `waitForQuietPeriod` pauses repeatedly INSIDE one call until the show goes
+  // quiet or the budget is gone, so at the 30 s pause / 30 min ceiling defaults
+  // a show already on air when the run starts exhausts the whole budget on the
+  // TAIL pass's first row. The tail is cut at row 1 and the head never gets a
+  // turn at all. Tail-first allocates the budget; it does not guarantee the
+  // tail completes.
+  //
+  // And on exhaustion the closure THROWS (`LiveActivityPauseCeilingExceededError`,
+  // `shared/database/src/live-activity.ts` — deliberately no sticky
+  // give-up-and-proceed state), which propagates out of `runNoMatchRecheck` past
+  // this composition, so NEITHER cursor advances: the BS#1977 safe direction
+  // documented at the cursor block below. Per-row writes already committed are
+  // kept — only the cursor bookkeeping is lost, so the next run re-reads
+  // leftovers rather than skipping unread rows.
+  //
+  // The case that costs something is a show starting mid-run, after the tail
+  // pass finished: the head pass's first probe then burns the budget and throws,
+  // discarding a completed 180-row tail advance. Worth a per-pass catch so the
+  // head can yield without taking the tail's bookkeeping with it — see the PR's
+  // "Deferred" section; it changes an error-handling contract shared with
+  // BS#1977 and wants its own test surface rather than a fourth pass here.
   const { totals: tailTotals } = await runPass('tail', tailCandidates);
   const { totals: headTotals } = await runPass('head', headCandidates);
 
@@ -296,14 +324,29 @@ const main = async (): Promise<void> => {
       // for is disabled". Same rule as the ceiling itself — a misconfiguration
       // that disables the mechanism must not read as healthy.
       const disabled = headSlice === 0;
+      // Which knob to name. A clamp is reachable without anyone having touched
+      // HEAD_SLICE at all — lowering BATCH_SIZE alone (throttling the drip
+      // during an LML incident, say) drops the ceiling under the DEFAULT head
+      // slice. Blaming HEAD_SLICE there names a variable the operator never
+      // set and points them away from the one they did (`/code-review` on
+      // PR #2608). The remedy also differs: raise BATCH_SIZE, or lower an
+      // explicit HEAD_SLICE.
+      const headSliceWasRequested = (process.env[HEAD_SLICE_ENV]?.trim() ?? '') !== '';
+      const source = headSliceWasRequested
+        ? `${HEAD_SLICE_ENV} (${requestedHeadSlice})`
+        : `the default head slice (${requestedHeadSlice})`;
+      const remedy = headSliceWasRequested
+        ? `lower ${HEAD_SLICE_ENV} to ${headSlice} or below, or raise ${BATCH_SIZE_ENV}`
+        : `raise ${BATCH_SIZE_ENV} to at least ${requestedHeadSlice * 2} to keep the full default head slice`;
       log(
         'warn',
         disabled ? 'head_slice_disabled' : 'head_slice_clamped',
         disabled
-          ? `batch size (${batchSize}) is too small to reserve any head slice at ${HEAD_SLICE_MAX_BATCH_SHARE * 100}%, so the BS#2222 head read is DISABLED for this run and the head cursor will not move; raise ${BATCH_SIZE_ENV} to at least 2 (${requestedHeadSlice} was requested)`
-          : `${HEAD_SLICE_ENV} (${requestedHeadSlice}) exceeds ${HEAD_SLICE_MAX_BATCH_SHARE * 100}% of batch size (${batchSize}); clamped to ${headSlice} so the tail read keeps at least half the batch and the BS#2218 cursor keeps traversing`,
+          ? `${BATCH_SIZE_ENV} (${batchSize}) is too small to reserve any head slice at ${HEAD_SLICE_MAX_BATCH_SHARE * 100}%, so the BS#2222 head read is DISABLED for this run and the head cursor will not move; raise ${BATCH_SIZE_ENV} to at least 2 (${source} was requested)`
+          : `${source} exceeds ${HEAD_SLICE_MAX_BATCH_SHARE * 100}% of ${BATCH_SIZE_ENV} (${batchSize}); clamped to ${headSlice} so the tail read keeps at least half the batch and the BS#2218 cursor keeps traversing — ${remedy}`,
         {
           requested_head_slice: requestedHeadSlice,
+          head_slice_was_requested: headSliceWasRequested,
           head_slice: headSlice,
           batch_size: batchSize,
         }
@@ -333,11 +376,12 @@ const main = async (): Promise<void> => {
     // run. Warn rather than clamp: the operator asked for a wide head, and a
     // silently narrowed one would be the same class of surprise.
     //
-    // Gated on the window NOT having been cohort-clamped. On a cohort smaller
-    // than the window `headCursorWindow` shrinks the window to the cohort, and
-    // a head slice covering all of it is correct at that size, not a
-    // misconfiguration — see `headRotationIsInert`.
-    if (headRotationIsInert(headSlice, headWindow) && headWindow === HEAD_CURSOR_WINDOW_DEFAULT) {
+    // `headRotationWarrantsWarning` owns which inert configurations are worth
+    // saying anything about: not a cohort-clamped window (a head slice covering
+    // a small cohort is correct at that size), and not a DISABLED head slice,
+    // which `head_slice_disabled` above already reports — emitting both gave one
+    // condition two contradictory remediations pointing at different knobs.
+    if (headRotationWarrantsWarning(headSlice, headWindow, HEAD_CURSOR_WINDOW_DEFAULT)) {
       log(
         'warn',
         'head_rotation_inert',
