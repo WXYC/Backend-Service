@@ -3534,6 +3534,17 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // resubmit and a silent duplicate shelf slot.
       const clientChoseDestinationCodeNumber =
         body.code_number !== undefined && body.code_number !== existing.code_number;
+      // `albumCodeNumberTaken` is still artist-wide, not genre-scoped -- that
+      // is WXYC/Backend-Service#2579's fix, deliberately not made here (the
+      // issue calls the two functions "same root cause, different function,
+      // different consequence"). So this trigger can fire on a same-number
+      // collision in a genre the release isn't even moving to, while the
+      // regenerate below now answers from the correct (destination) shelf.
+      // That mismatch is over-eager, never under-eager: artist-wide collision
+      // detection is a superset of genre-scoped, so it never treats an
+      // actually-taken slot as free, only occasionally burns a number that a
+      // genre-scoped check would have left alone. No correctness hazard, just
+      // avoidable churn until #2579 lands.
       if (
         !clientChoseDestinationCodeNumber &&
         (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId))
