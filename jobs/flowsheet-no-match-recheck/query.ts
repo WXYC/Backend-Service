@@ -141,36 +141,60 @@ export const BATCH_SIZE_DEFAULT = 200;
  */
 export const CRON_SCHEDULE = '47 */6 * * *';
 
-/** How many distinct values one cron field selects out of `range` (60 minutes / 24 hours). */
-const countCronFieldValues = (field: string, range: number, schedule: string): number => {
+/**
+ * Which values one cron field selects out of `range` (60 minutes / 24 hours).
+ *
+ * Enumerated into a Set rather than counted as spans, so overlapping comma
+ * members collapse: an every-6-hours step plus an explicit hour 0 selects
+ * {0, 6, 12, 18} — four hours, where summing each member's span counted five
+ * and silently UNDER-sized `HEAD_SLICE_DEFAULT` (BS#2222 review). The ranges
+ * here are 24 and 60, so enumeration is free.
+ */
+const cronFieldValues = (field: string, range: number, schedule: string): Set<number> => {
   const unsupported = (): never => {
     throw new Error(`Unsupported cron field '${field}' in schedule '${schedule}'.`);
   };
-  let count = 0;
+  const values = new Set<number>();
   for (const part of field.split(',')) {
-    const [spec = '', stepRaw] = part.split('/');
+    const segments = part.split('/');
+    if (segments.length > 2) unsupported();
+    const spec = segments[0] ?? '';
+    const stepRaw = segments[1];
+    // `Number('')` is 0, so an empty step or an empty spec ('/5', '3,,4') has to
+    // be rejected explicitly or it parses as a valid `0`.
+    if (spec === '' || stepRaw === '') unsupported();
     const step = stepRaw === undefined ? 1 : Number(stepRaw);
     if (!Number.isInteger(step) || step <= 0) unsupported();
-    let span: number;
+    let lo: number;
+    let hi: number;
     if (spec === '*') {
-      span = range;
+      lo = 0;
+      hi = range - 1;
     } else if (spec.includes('-')) {
       const bounds = spec.split('-');
-      const lo = Number(bounds[0]);
-      const hi = Number(bounds[1]);
-      if (bounds.length !== 2 || !Number.isInteger(lo) || !Number.isInteger(hi) || lo < 0 || hi >= range || lo > hi) {
+      lo = Number(bounds[0]);
+      hi = Number(bounds[1]);
+      if (
+        bounds.length !== 2 ||
+        bounds.some((bound) => bound === '') ||
+        !Number.isInteger(lo) ||
+        !Number.isInteger(hi) ||
+        lo < 0 ||
+        hi >= range ||
+        lo > hi
+      ) {
         unsupported();
       }
-      span = hi - lo + 1;
     } else {
-      const value = Number(spec);
-      if (!Number.isInteger(value) || value < 0 || value >= range) unsupported();
+      lo = Number(spec);
+      if (!Number.isInteger(lo) || lo < 0 || lo >= range) unsupported();
       // A bare literal selects one value; `v/step` selects v, v+step, … < range.
-      span = stepRaw === undefined ? 1 : range - value;
+      hi = stepRaw === undefined ? lo : range - 1;
     }
-    count += Math.ceil(span / step);
+    for (let value = lo; value <= hi; value += step) values.add(value);
   }
-  return count;
+  if (values.size === 0) unsupported();
+  return values;
 };
 
 /**
@@ -195,7 +219,7 @@ export const runsPerDayFromCronSchedule = (schedule: string): number => {
         'Re-derive HEAD_SLICE_DEFAULT against the real cadence instead.'
     );
   }
-  return countCronFieldValues(minute, 60, schedule) * countCronFieldValues(hour, 24, schedule);
+  return cronFieldValues(minute, 60, schedule).size * cronFieldValues(hour, 24, schedule).size;
 };
 
 /**

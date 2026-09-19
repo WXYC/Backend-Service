@@ -145,17 +145,33 @@ const resolveDryRun = (): boolean => {
 };
 
 /**
+ * The most of any batch the head slice may take. The tail read — and with it
+ * the BS#2218 cursor's traversal rate — keeps at least the other half.
+ *
+ * `batchSize - 1` was the first spelling and it satisfied "the tail read stays
+ * non-empty" only literally (BS#2222 review): `HEAD_SLICE=200` against the
+ * default `BATCH_SIZE=200` left a ONE-row tail, which advances the cursor one
+ * row per run — a ~94-year wrap on the measured 137k-row cohort — while the
+ * run logged a single `warn` and exited 0. A misconfiguration that disables the
+ * starvation guard in practice must not read as healthy in every counter.
+ * Halving the traversal rate is the worst this ceiling permits.
+ */
+export const HEAD_SLICE_MAX_BATCH_SHARE = 0.5;
+
+/**
  * Split `batchSize` into the head slice and the tail the BS#2218 cursor reads.
  *
- * Clamped so the tail read — and with it the cursor advance — never drops to
- * zero rows: a `HEAD_SLICE >= BATCH_SIZE` would otherwise silently disable the
- * starvation guard. `clamped` is what `main` logs the warning off.
+ * Clamped rather than rejected: this is a cron, and a container that refuses to
+ * start does no work at all, where the clamped shape still drains the cohort at
+ * half rate. `clamped` is what `main` logs the warning off, and the warning
+ * names both the requested and the effective value.
  */
 export const resolveHeadSliceConfig = (
   requestedHeadSlice: number,
   batchSize: number
 ): { headSlice: number; tailBatchSize: number; clamped: boolean } => {
-  const headSlice = Math.max(Math.min(requestedHeadSlice, batchSize - 1), 0);
+  const ceiling = Math.max(Math.floor(batchSize * HEAD_SLICE_MAX_BATCH_SHARE), 0);
+  const headSlice = Math.max(Math.min(requestedHeadSlice, ceiling), 0);
   return { headSlice, tailBatchSize: batchSize - headSlice, clamped: headSlice !== requestedHeadSlice };
 };
 
@@ -199,9 +215,17 @@ export type RecheckPassOutcome = {
  * order).
  */
 export const runRecheckPasses = async (plan: RecheckPassPlan, deps: RecheckPassDeps): Promise<RecheckPassOutcome> => {
-  // Both reads happen against the SAME pre-write snapshot -- running either
-  // pass first would shrink the ordering before the other SELECT issues,
-  // landing its offset past unread rows every run.
+  // Both reads issue BEFORE either pass writes -- running one pass first would
+  // shrink the ordering before the other SELECT issues, landing its offset past
+  // unread rows every run.
+  //
+  // Deliberately NOT stated as "one snapshot": these are two statements, so
+  // each takes its own Postgres snapshot and the live CDC worker's writes can
+  // land between them (docs/ops-cron-scheduling.md, BS#2071). The property this
+  // ordering buys is only that neither PASS's writes intervene. A concurrent
+  // writer moving a row between the two reads costs at most a dropped dedupe or
+  // a slightly-off `headRowsInTailWindow`, both of which land on the
+  // under-advance (re-read) side of the cursor math.
   const headCandidates =
     plan.headSlice > 0 ? await deps.loadCandidates(plan.noMatchTtlDays, plan.headSlice, plan.headCursorOffset) : [];
   const tailCandidatesRaw =
@@ -213,7 +237,7 @@ export const runRecheckPasses = async (plan: RecheckPassPlan, deps: RecheckPassD
     new Set(headCandidates.map((candidate) => candidate.id))
   );
 
-  const runPass = (candidates: Candidate[]): Promise<{ totals: Totals }> =>
+  const runPass = (pass: 'head' | 'tail', candidates: Candidate[]): Promise<{ totals: Totals }> =>
     deps.runRecheck({
       loadCandidates: () => Promise.resolve(candidates),
       lookup: deps.lookup,
@@ -221,14 +245,18 @@ export const runRecheckPasses = async (plan: RecheckPassPlan, deps: RecheckPassD
       markAttempted: deps.markAttempted,
       dryRun: plan.dryRun,
       waitForQuietPeriod: deps.waitForQuietPeriod,
+      // Discriminates the two `candidates_loaded` lines a run now emits --
+      // without it the BS#2176 "report the candidate count / projected LML call
+      // volume" line reads as the whole run's projection when it is one pass's.
+      pass,
     });
 
   // Tail FIRST: it is the starvation guard and the historical-cohort drain, so
   // if the shared pause budget is exhausted mid-run it is the head that loses
   // its turn, not the drain. The head loses little by yielding -- its cursor
   // stays put, so the same window is read next run.
-  const { totals: tailTotals } = await runPass(tailCandidates);
-  const { totals: headTotals } = await runPass(headCandidates);
+  const { totals: tailTotals } = await runPass('tail', tailCandidates);
+  const { totals: headTotals } = await runPass('head', headCandidates);
 
   return {
     headTotals,
@@ -266,7 +294,7 @@ const main = async (): Promise<void> => {
       log(
         'warn',
         'head_slice_clamped',
-        `${HEAD_SLICE_ENV} (${requestedHeadSlice}) >= batch size (${batchSize}); clamped to ${headSlice} so the tail read stays non-empty`,
+        `${HEAD_SLICE_ENV} (${requestedHeadSlice}) exceeds ${HEAD_SLICE_MAX_BATCH_SHARE * 100}% of batch size (${batchSize}); clamped to ${headSlice} so the tail read keeps at least half the batch and the BS#2218 cursor keeps traversing`,
         {
           requested_head_slice: requestedHeadSlice,
           head_slice: headSlice,
@@ -362,7 +390,25 @@ const main = async (): Promise<void> => {
       });
     }
 
-    log('info', 'finished', `${JOB_NAME} done`, { dry_run: dryRun, head_slice: headSlice, ...totals });
+    // The head/tail split is reported alongside the merged totals, and OUTSIDE
+    // the dry-run branch above, because the whole premise of BS#2222 ("~1 in 4
+    // fresh no-match rows resolves cleanly") is only verifiable from a
+    // head-vs-tail resolution rate — including from a dry run, which persists
+    // no cursor and so logs no `cursor_advanced` line at all.
+    log('info', 'finished', `${JOB_NAME} done`, {
+      dry_run: dryRun,
+      head_slice: headSlice,
+      ...totals,
+      head_scanned: headTotals.scanned,
+      head_resolved: headTotals.resolved,
+      head_resolved_dry: headTotals.resolved_dry,
+      head_unresolved: headTotals.unresolved,
+      head_trust_rejected: headTotals.trust_rejected,
+      head_lml_error: headTotals.lml_error,
+      tail_scanned: tailTotals.scanned,
+      tail_resolved: tailTotals.resolved,
+      tail_resolved_dry: tailTotals.resolved_dry,
+    });
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
     captureError(error, 'failed');
