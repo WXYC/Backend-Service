@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, ne, notInArray, or, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, sql, SQL, type Column } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -4431,10 +4431,39 @@ export type FlowsheetPlayImpact =
  * `runDeleteAlbumTransaction`: it exists to inform a confirmation screen the
  * delete transaction has no reason to wait on.
  *
- * `legacyLinked` is best-effort: `flowsheet.legacy_release_id` carries no FK
- * (`flowsheet_legacy_release_id_idx` only), so there is no row for a
- * concurrent webhook INSERT to conflict with. The window is one statement
- * wide and one-sided — it can only undercount.
+ * Two statements, not one, and that is fine: a library existence probe
+ * (needed for the 404 — the legacy arm's predicate depends on
+ * `existing.legacy_release_id`, so the aggregate can't even be built before
+ * this resolves), then a SINGLE `count(*) FILTER (WHERE …)` aggregate over
+ * `flowsheet` that computes all three arms against one row set in one
+ * statement. That second statement is what the atomicity claim below is
+ * about: earlier revisions of this function ran the three counts as three
+ * independent autocommit statements with no shared snapshot, so a row could
+ * move between arms mid-read and be double-counted — collapsing them into
+ * one `FILTER` aggregate closes that window entirely, because Postgres
+ * evaluates every FILTER clause of a single aggregate query against the
+ * same snapshot. The existence probe racing a concurrent delete is just the
+ * ordinary 404-vs-410 race any read-before-write endpoint has; it feeds no
+ * count, so it cannot reintroduce a cross-arm miscount.
+ *
+ * Rotation membership is a correlated subquery (`rotation.album_id = …`),
+ * not a JS-materialized id list: an empty result set makes `IN (…)` false
+ * — never NULL — for every row regardless of `flowsheet.rotation_id`'s own
+ * nullness, which is exactly the "this album has no rotation rows" case a
+ * hand-written short-circuit would otherwise need to special-case.
+ *
+ * `legacyLinked` is still the one arm with residual staleness, and it is
+ * real: `flowsheet.legacy_release_id` carries no FK (only
+ * `flowsheet_legacy_release_id_idx`), so a concurrent tubafrenzy webhook can
+ * INSERT a legacy-linked row after this statement's snapshot is taken and
+ * before the caller reads the response — there is no row yet for it to
+ * conflict with, and the gap is one-sided (it can only undercount, never
+ * overcount, since a row that already existed at snapshot time is counted
+ * exactly once by the FILTER conditions' mutual exclusivity). `direct` and
+ * `rotationLinked` do not share that gap: both are FK-backed
+ * (`flowsheet.album_id`, `flowsheet.rotation_id` → `rotation.album_id`), so
+ * nothing outside this statement's own snapshot can retroactively move a
+ * settled row into either arm.
  */
 export const getFlowsheetPlayImpact = async (album_id: number): Promise<FlowsheetPlayImpact> => {
   const [existing] = await db
@@ -4446,43 +4475,21 @@ export const getFlowsheetPlayImpact = async (album_id: number): Promise<Flowshee
     return { outcome: 'not_found' };
   }
 
-  const rotationRows = await db.select({ id: rotation.id }).from(rotation).where(eq(rotation.album_id, album_id));
-  const rotationIds = rotationRows.map((row) => row.id);
+  const rotationIdsForAlbum = db.select({ id: rotation.id }).from(rotation).where(eq(rotation.album_id, album_id));
 
-  const [directRow] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(flowsheet)
-    .where(eq(flowsheet.album_id, album_id));
-
-  let rotationLinked = 0;
-  if (rotationIds.length > 0) {
-    const [rotationRow] = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(flowsheet)
-      .where(
-        and(inArray(flowsheet.rotation_id, rotationIds), sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`)
-      );
-    rotationLinked = Number(rotationRow?.count ?? 0);
-  }
-
-  const [legacyRow] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(flowsheet)
-    .where(
-      and(
-        eq(flowsheet.legacy_release_id, existing.legacy_release_id),
-        sql`${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int`,
-        rotationIds.length > 0
-          ? or(isNull(flowsheet.rotation_id), notInArray(flowsheet.rotation_id, rotationIds))
-          : undefined
-      )
-    );
+  const [counts] = await db
+    .select({
+      direct: sql<number>`count(*) FILTER (WHERE ${flowsheet.album_id} = ${album_id}::int)::int`,
+      rotationLinked: sql<number>`count(*) FILTER (WHERE ${flowsheet.rotation_id} IN (${rotationIdsForAlbum}) AND ${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int)::int`,
+      legacyLinked: sql<number>`count(*) FILTER (WHERE ${flowsheet.legacy_release_id} = ${existing.legacy_release_id}::int AND ${flowsheet.album_id} IS DISTINCT FROM ${album_id}::int AND (${flowsheet.rotation_id} IS NULL OR ${flowsheet.rotation_id} NOT IN (${rotationIdsForAlbum})))::int`,
+    })
+    .from(flowsheet);
 
   return {
     outcome: 'found',
-    direct: Number(directRow?.count ?? 0),
-    rotationLinked,
-    legacyLinked: Number(legacyRow?.count ?? 0),
+    direct: Number(counts?.direct ?? 0),
+    rotationLinked: Number(counts?.rotationLinked ?? 0),
+    legacyLinked: Number(counts?.legacyLinked ?? 0),
   };
 };
 
