@@ -1650,6 +1650,7 @@ describe('buildNoMatchEvidence (BS#2606)', () => {
 
     expect(evidence).toEqual({
       v: 1,
+      at: expect.any(String),
       search_type: 'none',
       results_count: 0,
       top_library_item_id: null,
@@ -1687,6 +1688,7 @@ describe('buildNoMatchEvidence (BS#2606)', () => {
 
     expect(evidence).toEqual({
       v: 1,
+      at: expect.any(String),
       search_type: 'fallback',
       results_count: 1,
       top_library_item_id: 0,
@@ -1699,6 +1701,34 @@ describe('buildNoMatchEvidence (BS#2606)', () => {
       timeout: false,
       trust_gate: 'rejected_substitution',
     });
+  });
+
+  // `at` is what lets a reader tell this LANDING verdict from a later re-ask
+  // recorded only as a bare `no_match_recheck_attempted_at` marker, so its
+  // FORMAT is load-bearing, not just its presence: the two get compared, and a
+  // non-ISO string compares wrong rather than failing loudly. The two
+  // whole-payload `toEqual`s above deliberately match it as `any(String)` so
+  // they keep policing the field SET; this one polices the value.
+  it('stamps `at` as a parseable ISO-8601 UTC instant', () => {
+    const response = {
+      search_type: 'none',
+      results: [],
+      song_not_found: false,
+      found_on_compilation: false,
+      degraded: false,
+      timeout: false,
+    } as unknown as LookupResponse;
+
+    const before = Date.now();
+    const { at } = buildNoMatchEvidence(response, 'DOGA');
+    const after = Date.now();
+
+    expect(at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    const parsed = Date.parse(at);
+    expect(Number.isNaN(parsed)).toBe(false);
+    // Millisecond precision is exact here, so the bounds are inclusive.
+    expect(parsed).toBeGreaterThanOrEqual(before);
+    expect(parsed).toBeLessThanOrEqual(after);
   });
 
   it('classifies a real-library-id substitution (Vantaa/Animaru shape) as rejected_substitution', () => {
