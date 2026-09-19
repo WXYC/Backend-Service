@@ -58,20 +58,27 @@ export const ADMIN_PREFIX = '/admin';
  */
 export type SubjectStrategy = 'body-user-id' | 'actor' | 'email-lookup' | 'response-user-id';
 
-export interface AdminAction {
+/**
+ * M3 (code review PR #2596): couples `subject` to `responsePath` at compile
+ * time — `'response-user-id'` REQUIRES `responsePath`, every other strategy
+ * FORBIDS it. Previously `responsePath` was independently optional, so a
+ * mount could declare `subject: 'response-user-id'`, forget `responsePath`,
+ * and compile — `subjectFromResponseBody` then walks a zero-length path to
+ * the parsed root (never a `string`) and writes `subjectUserId: null`
+ * forever, no error, no Sentry event. `FlatMount`'s twin,
+ * `FlatMountResponseSubjectSpec` below, differs only in keeping `subject`
+ * REQUIRED (this one keeps it optional, matching `AdminAction`'s existing
+ * default-to-`'body-user-id'` behavior) — same shape as `FlatMount`'s own
+ * `action`-vs-`discriminator` split.
+ */
+export type ResponseSubjectSpec =
+  | { subject?: Exclude<SubjectStrategy, 'response-user-id'>; responsePath?: undefined }
+  | { subject: 'response-user-id'; responsePath: readonly string[] };
+
+export interface AdminActionBase {
   action: string;
   /** True only for the PII-bulk-read GETs (decision 3's explicit include list). Omitted (falsy) for every mutation. */
   includeGet?: true;
-  /**
-   * Subject-resolution strategy (BS#2553). Omitted (defaults to
-   * `'body-user-id'`, the pre-BS#2553 baseline every admin action used) for
-   * every action whose body already carries a plain `userId`. Only
-   * `/admin/create-user` sets this, to `'response-user-id'` — see
-   * `SubjectStrategy`'s doc comment for why.
-   */
-  subject?: SubjectStrategy;
-  /** Path into the parsed 2xx response body, e.g. `['user', 'id']` for admin/create-user. Read only when `subject === 'response-user-id'`. */
-  responsePath?: readonly string[];
   /**
    * MEDIUM 1 (code review BS#2537 PR #2545, second round): true for an
    * action that can DESTROY THE SESSION mid-request on the account it acts
@@ -100,6 +107,15 @@ export interface AdminAction {
    */
   handWritten?: true;
 }
+
+/**
+ * Subject-resolution strategy (BS#2553), coupled to `responsePath` by
+ * `ResponseSubjectSpec` (M3). Omitted defaults to `'body-user-id'`, the
+ * pre-BS#2553 baseline, for every action whose body already carries a plain
+ * `userId`. `/admin/create-user` and `/admin/provision-user` set it to
+ * `'response-user-id'` — see `SubjectStrategy`'s doc comment for why.
+ */
+export type AdminAction = AdminActionBase & ResponseSubjectSpec;
 
 const STATION_SIGNUP_ADMIN_PREFIX = `${ADMIN_PREFIX}/station-signup`;
 
@@ -170,7 +186,18 @@ export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
   // handWritten: true — app.ts's own POST /auth/admin/provision-user
   // handler, registered ahead of the better-auth catch-all, not a
   // better-auth endpoint. See AdminAction.handWritten's doc comment.
-  ['/admin/provision-user', { action: 'admin.provision-user', handWritten: true }],
+  //
+  // M1 (code review PR #2596): this, not create-user above, is the route
+  // dj-site's admin pages actually call to create a DJ (CLAUDE.md). Without
+  // `subject` this defaulted to `'body-user-id'`, but provisionUser()'s
+  // request body carries no `userId` to extract, so every real provisioning
+  // wrote a NULL subject. `provision-user.ts:73-81`'s 2xx body
+  // (`{ user: { id, ... }, ... }`) is byte-identical to create-user's, so
+  // the same strategy applies.
+  [
+    '/admin/provision-user',
+    { action: 'admin.provision-user', handWritten: true, subject: 'response-user-id', responsePath: ['user', 'id'] },
+  ],
   // handWritten: true — the six station-signup ops are app.ts's own
   // stationSignupAdminRouter, not better-auth endpoints. See
   // AdminAction.handWritten's doc comment.
@@ -226,27 +253,20 @@ export interface BodyDiscriminator {
   fallbackAction: string;
 }
 
+/**
+ * `FlatMount`'s required-`subject` twin of `ResponseSubjectSpec` above (M3)
+ * — same coupling, but `subject` stays REQUIRED (never defaults), matching
+ * every `FLAT_MOUNTS` entry, which always sets it explicitly.
+ */
+export type FlatMountResponseSubjectSpec =
+  | { subject: Exclude<SubjectStrategy, 'response-user-id'>; responsePath?: undefined }
+  | { subject: 'response-user-id'; responsePath: readonly string[] };
+
 interface FlatMountFields {
   /** Bare better-auth path, e.g. '/reset-password'. */
   path: string;
   /** False only for the genuinely unauthenticated mounts (no session to resolve). */
   resolveActor: boolean;
-  /**
-   * Which `subjectFrom` strategy this mount uses (simplify pass, code
-   * review BS#2537 PR #2545 follow-up): `'actor'` echoes the resolved
-   * actor id (self-service mounts — the caller's own account is both actor
-   * and subject); `'email-lookup'` is the one DB read this layer performs,
-   * resolving a submitted email to a user id so the email string itself
-   * never lands in the table (AC#3); `'body-user-id'` is the generic
-   * best-effort `body.userId` extractor (decision 12); `'response-user-id'`
-   * (BS#2553) reads the subject out of the operation's own 2xx JSON
-   * response body instead — see `SubjectStrategy`'s doc comment. Selected
-   * once at `flatMountAuditMiddleware(mount)` construction time rather than
-   * re-branching on `mount.action` per request.
-   */
-  subject: SubjectStrategy;
-  /** Path into the parsed 2xx response body — set (and meaningful) only when `subject === 'response-user-id'`. */
-  responsePath?: readonly string[];
   /** Same MEDIUM 1 flag as `AdminAction.serializeSessionRead` (see that doc comment) — set only on `delete-user`, the one FlatMount whose action destroys the caller's own session mid-request. */
   serializeSessionRead?: true;
 }
@@ -258,11 +278,14 @@ interface FlatMountFields {
  * Option A) — never both, never neither. The union (rather than an optional
  * `action` + optional `discriminator` on one interface) makes "exactly one"
  * a compile-time property instead of a runtime invariant some future mount
- * could violate silently.
+ * could violate silently. Independently crossed with
+ * `FlatMountResponseSubjectSpec` (M3) for `subject`/`responsePath` — the two
+ * axes (what selects the action, what resolves the subject) are orthogonal.
+ * See `SubjectStrategy`'s doc comment for what each `subject` value does.
  */
-export type FlatMount =
-  | (FlatMountFields & { action: string; discriminator?: undefined })
-  | (FlatMountFields & { action?: undefined; discriminator: BodyDiscriminator });
+export type FlatMount = FlatMountFields &
+  FlatMountResponseSubjectSpec &
+  ({ action: string; discriminator?: undefined } | { action?: undefined; discriminator: BodyDiscriminator });
 
 /**
  * The one place a `FlatMount`'s runtime action is resolved from a request —

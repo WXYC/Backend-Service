@@ -153,6 +153,13 @@ describe('flat mounts', () => {
     expect(FLAT_MOUNTS.find((m) => m.path === '/organization/update-member-role')?.responsePath).toEqual(['userId']);
     expect(ADMIN_ACTIONS.get('/admin/create-user')?.subject).toBe('response-user-id');
     expect(ADMIN_ACTIONS.get('/admin/create-user')?.responsePath).toEqual(['user', 'id']);
+    // M1 (code review PR #2596): /admin/provision-user — the route dj-site's
+    // admin pages actually call — carries the SAME 2xx response shape as
+    // admin/create-user (`{ user: { id, ... }, ... }`) and used to default to
+    // 'body-user-id' with no `userId` in its request body to extract, so
+    // every real provisioning wrote a NULL subject.
+    expect(ADMIN_ACTIONS.get('/admin/provision-user')?.subject).toBe('response-user-id');
+    expect(ADMIN_ACTIONS.get('/admin/provision-user')?.responsePath).toEqual(['user', 'id']);
   });
 
   it('mounts the three OTP password-reset arms public (resolveActor: false), per BS#2547', () => {
