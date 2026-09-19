@@ -687,6 +687,17 @@ export const gapHours = (lastRunMs: number, startedAtMs: number): number =>
  * measurement either. It must not reach signal (c) — "the UPDATE did not
  * resolve what it found" would be a claim about a cohort the pass never
  * looked at — and gets its own `lock_contention` warning instead.
+ *
+ * BS#2594 adds a fourth: a pass that stood down on a retired linkage
+ * candidate — the `library` row a candidate was about to link to deleted
+ * mid-statement, surfacing as a `23503` `isRetiredLinkageCandidateError`
+ * recognizes — also never ran its UPDATE, for the identical reason. It must
+ * not reach signal (c) either, and gets its own `retired_candidate` warning
+ * instead (`reportRetiredLinkageCandidates`). `PassResult`'s docblock already
+ * names both kinds together as EITHER stand-down; this enumeration is that
+ * same pair, not a narrower one — a future editor tightening this predicate
+ * to an explicit two-case check would leave a retired-candidate stand-down
+ * reaching signal (c) and warning about a cohort it never measured.
  */
 export const hasUnresolvedResidue = ({ residual }: PassResult): boolean => residual !== null && residual > 0;
 

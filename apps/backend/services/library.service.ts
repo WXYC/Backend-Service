@@ -4576,32 +4576,40 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * only a pre-delete read that shows a librarian what the delete would strand
  * can (see the controller docstring).
  *
- * **What the losing side pays, and where that is fixed — not here.** Before
- * BS#2565 a release carrying legacy-linked plays was precisely the case that
- * returned 409, so the delete rolled back, released its locks, and the
- * resolver always won. Now the delete wins and the loser takes a raw
- * SQLSTATE 23503. For `jobs/legacy-linkage-resolve` that is a FAILED RUN, not
- * a stand-down: its drain UPDATE runs inside `runGuardedDrain`, which
- * converts only `LOCK_CONTENTION_SQLSTATES` — exactly {`55P03`, `40P01`}
- * (`shared/database/src/sqlstate.ts`) — into a clean `deferred` and rethrows
- * everything else BY DESIGN, `23503` included (pinned by that job's unit test
- * "does not mistake an unrelated wrapped error for lock contention"). Its
- * cohort spans every release, so one librarian delete can discard that run's
- * linkage repair for all of them and raise a Sentry issue; the next
- * half-hourly run self-heals. The timing split does not favour the graceful
- * branch either: that job's `LINKAGE_LOCK_TIMEOUT_MS` is 750 ms and this
- * transaction normally commits well inside that, so a blocked drain usually
- * survives the wait and then takes the 23503 rather than timing out into
- * `deferred`. `addTrack` is newly exposed the same way — a DJ adding a track
- * to a release being deleted now gets an opaque FK-violation 500 where the
- * base refused the delete instead. Neither is fixable here: this transaction
- * behaves correctly and the delete is the side that should win. The fix
- * belongs in each loser's own error handling — classify `23503` on the
- * resolver's drain as a benign retry-next-run outcome, and map it to a named
- * client error in `addTrack` — as a separate change against those files. Do
- * NOT widen `LOCK_CONTENTION_SQLSTATES` to cover it: that set is shared by
- * every lock-bounded writer in the service, and a real FK bug in any of them
- * would go silent.
+ * **What the losing side pays, and where that is fixed.** Before BS#2565 a
+ * release carrying legacy-linked plays was precisely the case that returned
+ * 409, so the delete rolled back, released its locks, and the resolver
+ * always won. Now the delete wins and the loser takes a raw SQLSTATE 23503.
+ * For `jobs/legacy-linkage-resolve` that is now a STAND-DOWN, not a failed
+ * run (BS#2594): its drain UPDATE runs inside `runGuardedDrain`, which
+ * converts `LOCK_CONTENTION_SQLSTATES` — exactly {`55P03`, `40P01`}
+ * (`shared/database/src/sqlstate.ts`) — into a clean `lock_contention`
+ * stand-down, and separately converts a `23503` against one of the two FK
+ * constraints this exact race can hit (`flowsheet_album_id_library_id_fk` /
+ * `rotation_album_id_library_id_fk`, checked by constraint name via
+ * `isRetiredLinkageCandidateError` in `jobs/legacy-linkage-resolve/
+ * retired-candidate.ts`) into a `retired_candidate` stand-down — a SIBLING
+ * conversion, not a widening of `LOCK_CONTENTION_SQLSTATES` itself, so a
+ * `23503` on any OTHER constraint still rethrows and fails the run (pinned by
+ * that job's unit test "does not mistake an unrelated wrapped error for lock
+ * contention"). Its cohort still spans every release, so one librarian
+ * delete still discards that run's linkage repair for the WHOLE pass —
+ * Postgres reports only the one row it was checking when the delete
+ * committed, not how many others in the cohort also point at a now-deleted
+ * `library` row — and the next half-hourly run self-heals, same as before.
+ * What changed is how that discard is reported: it is a `captureWarning`
+ * under its own fingerprint, `legacy-linkage-resolve.retired_linkage_
+ * candidate` (distinct from `lock_contention`'s), not a Sentry issue, and the
+ * run withholds its heartbeat so a collision that keeps recurring still
+ * escalates via the run-gap warning instead of going quiet. `addTrack` is
+ * newly exposed the same way and is NOT fixed by this change — a DJ adding a
+ * track to a release being deleted still gets an opaque FK-violation 500
+ * where the base refused the delete instead; mapping that to a named client
+ * error remains a separate change against `flowsheet.service.ts`. Do NOT
+ * widen `LOCK_CONTENTION_SQLSTATES` itself to cover `23503`: that set is
+ * shared by every lock-bounded writer in the service, and a real FK bug in
+ * any of them would go silent — the retired-candidate conversion stays
+ * scoped to exactly the two constraints named above.
  *
  * **Lock order, and why it is bounded rather than reasoned about.** This
  * transaction takes library-then-rotation. A single `flowsheet` INSERT
