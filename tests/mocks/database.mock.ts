@@ -439,6 +439,9 @@ export const flowsheet = {
   // BS#2176: retry marker for jobs/flowsheet-no-match-recheck. See
   // shared/database/src/schema.ts + migration 0151.
   no_match_recheck_attempted_at: 'flowsheet.no_match_recheck_attempted_at',
+  // BS#2606: durable evidence of the LML response that produced a terminal
+  // enriched_no_match write. See shared/database/src/schema.ts + migration 0173.
+  no_match_evidence: 'flowsheet.no_match_evidence',
   linkage_source: 'flowsheet.linkage_source',
   linkage_confidence: 'flowsheet.linkage_confidence',
   linked_at: 'flowsheet.linked_at',

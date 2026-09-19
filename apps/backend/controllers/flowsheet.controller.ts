@@ -49,7 +49,10 @@ export interface IFSEntryMetadata {
 // jobs respectively, so they're excluded from the controller-facing entry.
 // `no_match_recheck_attempted_at` (migration 0151, BS#2176) joins them —
 // it is consumed only by `jobs/flowsheet-no-match-recheck`'s own retry-TTL
-// gate and carries no reader-facing meaning.
+// gate and carries no reader-facing meaning. `no_match_evidence` (migration
+// 0173, BS#2606) is the same shape: an internal forensic record written by
+// the enrichment worker's no-match arms, with no reader-facing projection —
+// surfacing it is WXYC/Backend-Service#2607's job, not this one's.
 // `updated_at` (BS#902) is the row-level watermark consumed only by the
 // conditional-GET middleware via `getLastModifiedAt`; it's never projected
 // onto the wire format, so it stays out of IFSEntry alongside the other
@@ -79,6 +82,7 @@ export interface IFSEntry extends Omit<
   | 'legacy_link_attempted_at'
   | 'metadata_attempt_at'
   | 'no_match_recheck_attempted_at'
+  | 'no_match_evidence'
   | 'updated_at'
   | 'composer'
   | 'composer_source'
