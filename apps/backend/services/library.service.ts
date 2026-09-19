@@ -4221,13 +4221,16 @@ export type DeletedArchiveBatch = {
  */
 const DELETED_ARCHIVE_NAME_FIELDS = ['album_title', 'artist_name', 'alternate_artist_name'] as const;
 
+// Parenthesized even though it is used as the sole predicate today: `sql.join`
+// over `OR` composes wrong under a future `and(...)` otherwise (`a OR b AND c`
+// binds tighter than the caller would expect).
 const deletedArchiveSearchCondition = (search: string): SQL =>
-  sql.join(
+  sql`(${sql.join(
     DELETED_ARCHIVE_NAME_FIELDS.map(
       (field) => sql`${catalog_delete_snapshot.captured}->'entity'->'row'->>${field} ILIKE ${`%${search}%`}`
     ),
     sql` OR `
-  );
+  )})`;
 
 /**
  * One page of `GET /library/deleted`, newest batch first. Rows in
@@ -4241,6 +4244,15 @@ const deletedArchiveSearchCondition = (search: string): SQL =>
  * pages: the first pages DISTINCT `batch_id`s (`search`, when given, filters
  * this query — a batch qualifies if any one of its rows' entity matches), the
  * second fetches every row belonging to just that page's batch ids.
+ *
+ * `captured_at` in the first query is `max()` over the rows THIS query saw —
+ * every row when `search` is absent, only the matching ones when it's
+ * present. Harmless while every batch is single-entity (the `max` has one
+ * input either way), but once WXYC/Backend-Service#2562 lands and a batch can
+ * hold several entities, a search matching only one of them would report that
+ * entity's `captured_at` rather than the batch's true (identical, same
+ * transaction) value — still correct today, just not for the reason it looks
+ * like at a glance.
  */
 export const getDeletedArchivePage = async (
   page: number,
