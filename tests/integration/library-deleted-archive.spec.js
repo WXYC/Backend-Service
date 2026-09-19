@@ -102,16 +102,19 @@ describe('GET /library/deleted (BS#2561)', () => {
     expect(entity.table).toBe('library');
     expect(entity.row.id).toBe(album.id);
     expect(entity.row.album_title).toBe(title);
-    // Every one of the eight children captureCatalogDeleteSnapshot declares
-    // for a library delete is a KEY in `children`, even when this album had
-    // no rows in that table -- an absent key vs. an empty array is exactly
-    // the ambiguity `captureCatalogDeleteSnapshot`'s own unit suite pins.
+    // Every one of the ten children `deleteAlbumFromDB` declares to
+    // `captureCatalogDeleteSnapshot` is a KEY in `children`, even when this
+    // album had no rows in that table -- an absent key vs. an empty array is
+    // exactly the ambiguity `captureCatalogDeleteSnapshot`'s own unit suite
+    // pins.
     expect(Object.keys(entity.children).sort()).toEqual(
       [
         'album_critic_reviews',
         'artist_library_crossreference',
         'bins',
         'compilation_track_artist',
+        'digital_asset',
+        'digital_asset_file',
         'library_urls',
         'reviews',
         'rotation',
@@ -132,20 +135,37 @@ describe('GET /library/deleted (BS#2561)', () => {
 
   test('does not read album_review_submissions -- the row is neither captured nor implied recoverable beyond the unrecoverable note', async () => {
     const title = `${marker} Reviewed`;
-    const album = await createAndDeleteAlbum(title, 'BS#2561 Archive Artist');
+    const created = await auth
+      .post('/library')
+      .send({
+        album_title: title,
+        artist_name: 'BS#2561 Archive Artist',
+        label: `BS#2561 Archive Test ${uniq}`,
+        genre_id: GEN,
+        format_id: FMT,
+      })
+      .expect(201);
+    const album = created.body;
+    createdAlbumIds.push(album.id);
+
+    // Inserted BEFORE the delete, like library-delete.spec.js's own snapshot
+    // probe -- a row created AFTER the delete would prove nothing about what
+    // the snapshot captured. `reviewer_raw` carries a distinctive value so
+    // the assertion below can prove the PII never reaches the response.
     const sourceKey = `bs2561:${uniq}`;
     await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".album_review_submissions
-         (source_key, album_id, artist_name, album_title, review, reviewer_raw)
-       VALUES ($1, $2, 'BS#2561 Archive Artist', $3, 'a real review', 'Real Name')`,
-      [sourceKey, album.id, title]
+      `INSERT INTO "${SCHEMA}".album_review_submissions (source, source_key, norm_artist, norm_album, album_id, reviewer_raw)
+       VALUES ('google_form', $1, 'bs#2561 archive artist', $2, $3, 'BS2561-PII-PROBE-REVIEWER')`,
+      [sourceKey, title, album.id]
     );
+
+    await auth.delete(`/library/${album.id}`).expect(204);
 
     const res = await auth.get('/library/deleted').query({ search: title }).expect(200);
     const [batch] = res.body.results;
 
     expect(batch.entities.some((entity) => entity.table === 'album_review_submissions')).toBe(false);
-    expect(JSON.stringify(batch)).not.toContain('Real Name');
+    expect(JSON.stringify(batch)).not.toContain('BS2561-PII-PROBE-REVIEWER');
 
     await sql.unsafe(`DELETE FROM "${SCHEMA}".album_review_submissions WHERE source_key = $1`, [sourceKey]);
   });
