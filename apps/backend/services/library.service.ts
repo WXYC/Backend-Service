@@ -4732,13 +4732,18 @@ export type RestoreBatchOutcome =
  * INSERT raises `23503` and takes the batch down with it. The list is exactly
  * `deleteAlbumFromDB`'s `children` list, re-ordered; keep the two in step.
  *
- * `artists` gets an entry here when WXYC/Backend-Service#2562 ships the artist
- * delete. Two things this block leaves for that issue rather than guessing at
- * now: an artist's slot is `genre_artist_crossreference.artist_genre_code`,
- * not a `library` call number, so it needs its own probe; and a batch holding
- * several `library` entities under ONE artist and genre would need the
- * `next_free_code` arm to arbitrate between them, which the single-entity
- * batches that exist today cannot produce.
+ * `artists` has no entry here, so an `artist` batch is not restorable even
+ * though the artist delete now writes one. Two things it needs that this block
+ * deliberately does not guess at: an artist's slot is
+ * `genre_artist_crossreference.artist_genre_code` rather than a `library` call
+ * number, so it needs its own conflict probe; and the delete frees that code
+ * for immediate MAX+1 reuse with no tombstone, so re-inserting the captured
+ * code verbatim can file two artists at one shelf slot (see
+ * `deleteArtistFromDB`'s own docstring, which records that constraint).
+ *
+ * A batch holding several `library` entities under ONE artist and genre would
+ * additionally need the `next_free_code` arm to arbitrate between them, which
+ * no writer can produce: each delete captures exactly one entity.
  */
 const RESTORE_PLAN: Record<
   string,
