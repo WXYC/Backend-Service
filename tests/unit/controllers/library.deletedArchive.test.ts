@@ -35,6 +35,7 @@ const BATCH: libraryService.DeletedArchiveBatch = {
     'uncovered_release_search_markers',
     'album_review_submissions',
   ],
+  restorable: true,
 };
 
 const mockedService = libraryService as jest.Mocked<typeof libraryService>;

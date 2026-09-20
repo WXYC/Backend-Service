@@ -260,6 +260,45 @@ describe('getDeletedArchivePage (BS#2561 / F2a)', () => {
     expect(batch.unrecoverable).not.toContain('artist_similar_artists');
     expect(batch.restorable).toBe(true);
   });
+
+  // BS#2616 follow-up review finding 6: `[].every(...)` is vacuously true, so
+  // a batch id the page query grouped but whose full-row read came back empty
+  // (the `rowsByBatch.get(batch_id) ?? []` fallback) used to report
+  // `restorable: true` on zero entities -- the opposite of this field's
+  // conservative default.
+  it('reports a batch as not restorable when its rows read back empty, rather than defaulting true', async () => {
+    const captured_at = new Date('2026-09-10T12:00:00Z');
+    primeReads({
+      batchPage: [{ batch_id: 'batch-empty', captured_at }],
+      rows: [], // the full-row read found nothing for this batch id
+    });
+
+    const [batch] = await getDeletedArchivePage(0, 50);
+
+    expect(batch.entities).toEqual([]);
+    expect(batch.restorable).toBe(false);
+  });
+
+  // BS#2616 follow-up review finding 7: `restorable` was decided on
+  // `entity_kind` alone, so a `library` batch whose captured envelope is
+  // corrupt (the same `entity.row === null` shape the restore endpoint's
+  // `!plan || !envelope.entity.row` branch 500s on -- see
+  // `tests/integration/library-restore-deleted.spec.js`'s tamper test) still
+  // listed as restorable, promising a restore the endpoint could not perform.
+  it('reports a library batch as not restorable when its captured row is missing, not merely by entity_kind', async () => {
+    const fixture = snapshotRow({
+      captured: { entity: { table: 'library', row: null }, children: {} },
+    });
+    primeReads({
+      batchPage: [{ batch_id: 'batch-1', captured_at: fixture.captured_at }],
+      rows: [fixture],
+    });
+
+    const [batch] = await getDeletedArchivePage(0, 50);
+
+    expect(batch.entities[0].row).toBeNull();
+    expect(batch.restorable).toBe(false);
+  });
 });
 
 describe('countDeletedArchiveBatches (BS#2561 / F2a)', () => {
