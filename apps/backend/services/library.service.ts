@@ -4977,21 +4977,14 @@ const probeLibrarySlot = async (
 
 /**
  * Real-slot occupancy check for `updateAlbum`'s genre-move guard (BS#2587
- * review, finding 1) -- reuses `librarySlotKey` rather than a third
- * definition of the tuple, and deliberately NOT `albumCodeNumberTaken`,
- * whose genre-blind `(artist_id, code_number)` key is measured against
- * production at 3,308 apparent collisions where this key sees 273.
- *
- * Unlike `probeLibrarySlot`, this does not hold `FOR UPDATE`: that lock
- * exists because a restore replays a whole batch under
- * `RESTORE_BATCH_ADVISORY_LOCK_KEY` and must stop a librarian renumbering a
- * shelf row mid-replay. An ordinary PATCH takes no such lock, so this is a
- * plain read -- a check-then-act race remains (two concurrent PATCHes could
- * both see the slot free), and closing it is WXYC/Backend-Service#2589's
- * unique index, not this function's job.
- *
- * `exclude_library_id` drops the row being edited from its own shelf read,
- * so a no-op re-save onto the row's own slot never refuses against itself.
+ * review, finding 1) -- reuses `librarySlotKey`, not `albumCodeNumberTaken`,
+ * whose genre-blind key sees 3,308 apparent production collisions where this
+ * one sees 273. No `FOR UPDATE`, unlike `probeLibrarySlot`: that lock guards
+ * a restore's whole-batch replay under an advisory lock, which an ordinary
+ * PATCH never takes, so this is a plain read -- a check-then-act race
+ * WXYC/Backend-Service#2589's unique index is what closes, not this
+ * function. `exclude_library_id` drops the row being edited, so a no-op
+ * re-save onto its own slot never refuses against itself.
  */
 export const findLibrarySlotOccupant = async (
   artist_id: number,
