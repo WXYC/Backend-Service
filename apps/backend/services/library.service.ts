@@ -4552,8 +4552,8 @@ const deletedArchiveSearchCondition = (search: string): SQL =>
  * and 1 review", never the bin entries or the review text themselves. Do
  * not "simplify" this back to echoing `envelope.children` — the capture
  * side (`captureCatalogDeleteSnapshot`, `catalog-delete-snapshot.ts`) is what
- * a future restore (WXYC/Backend-Service#2585) reads, and it stays
- * unprojected on purpose; only this listing's projection changes here.
+ * the restore endpoint reads, and it stays unprojected on purpose; only this
+ * listing's projection changes here.
  * `Array.isArray` guards a malformed `children` value the same way
  * `parseCapturedEnvelope` itself does — a count of 0 rather than a thrown
  * error for one archive row.

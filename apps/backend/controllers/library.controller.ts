@@ -1126,7 +1126,7 @@ export const getArtistCard: RequestHandler<{ id: string }> = async (req, res) =>
   if (!artist) {
     throw new WxycError('Artist not found', 404);
   }
-  // BS#2597: the delete-refusal counts BS#2562 will enforce, plus the
+  // BS#2597: the delete-refusal counts the artist delete enforces, plus the
   // informational compilation-credit count. A second statement, not a fifth
   // round trip per dependent -- see getArtistDependentCounts's docstring.
   const dependentCounts = await libraryService.getArtistDependentCounts(artistId);

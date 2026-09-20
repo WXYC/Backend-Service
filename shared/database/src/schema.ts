@@ -2158,9 +2158,9 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *
  * `entity_kind` + `entity_id` name the deleted parent row — `'library'` /
  * `library.id` for the release path this ships with, `'artist'` /
- * `artists.id` once WXYC/Backend-Service#2562 wires the artist delete onto
- * the same `captureCatalogDeleteSnapshot` helper. No FK on `entity_id`: the
- * row it names is gone by the time this table is read, same reasoning as
+ * `artists.id` for the artist delete, which is wired onto the same
+ * `captureCatalogDeleteSnapshot` helper. No FK on `entity_id`: the row it
+ * names is gone by the time this table is read, same reasoning as
  * `library_delete_denylist.library_id` above.
  *
  * **`captured` shape.** Two namespaces, not one flat map:
