@@ -5,10 +5,8 @@
  * so there is nothing to mock.
  */
 import {
-  isRestorableEntityKind,
   orderBatchEntities,
   parseCapturedEnvelope,
-  RESTORABLE_ENTITY_KINDS,
   UNRECOVERABLE_ARTIST_DEPENDENTS,
   UNRECOVERABLE_DEPENDENTS,
   unrecoverableDependentsForKinds,
@@ -186,15 +184,7 @@ describe('unrecoverableDependentsForKinds', () => {
   });
 });
 
-describe('isRestorableEntityKind (BS#2616)', () => {
-  it('is true for every kind RESTORABLE_ENTITY_KINDS names, and false otherwise', () => {
-    for (const kind of RESTORABLE_ENTITY_KINDS) {
-      expect(isRestorableEntityKind(kind)).toBe(true);
-    }
-    expect(isRestorableEntityKind('artist')).toBe(false);
-  });
-
-  it('reads an unrecognized entity_kind as not restorable rather than restorable-by-default', () => {
-    expect(isRestorableEntityKind('something_new')).toBe(false);
-  });
-});
+// `RESTORABLE_ENTITY_KINDS` / `isRestorableEntityKind` moved to
+// `apps/backend/services/library.service.ts` (BS#2616 follow-up review,
+// finding 10) -- see `tests/unit/services/library.restoreDeletedBatch.test.ts`
+// for their coverage.

@@ -13,7 +13,6 @@ import {
   extractSqlState,
   intArrayLiteral,
   isLockContentionError,
-  isRestorableEntityKind,
   orderBatchEntities,
   parseCapturedEnvelope,
   parseRotationBin,
@@ -4494,7 +4493,21 @@ export type DeletedArchiveBatch = {
    * for it (see `RESTORE_PLAN`'s docstring). A multi-entity batch is
    * restorable only if EVERY entity it holds is, since the restore is
    * batch-scoped and refuses the whole batch on the first kind it can't
-   * replay.
+   * replay. Also `false` for a batch whose rows read back empty (a paging
+   * defect, not a real zero-entity batch — `[].every(...)` is vacuously
+   * true, which is the wrong default here) and for a batch whose captured
+   * envelope is missing its entity row — the same corruption the restore
+   * endpoint's `!plan || !envelope.entity.row` branch 500s on.
+   *
+   * **What this does NOT promise:** that a restore attempt will succeed.
+   * `restorable: true` means "this batch's kind has a working replay plan
+   * and a parseable envelope", not "this row will restore" — a restorable
+   * batch can still answer `already_present`, `resolution_required` (a
+   * shelf-slot conflict needing a client decision), or `lock_unavailable`.
+   * An `entity_kind` outside `RESTORABLE_ENTITY_KINDS` IS a hard guarantee
+   * in the other direction: the endpoint refuses every such batch with
+   * `409 unrestorable_kind` before any row lock or write (BS#2616
+   * follow-up review finding 7).
    */
   restorable: boolean;
 };
@@ -4612,6 +4625,13 @@ export const getDeletedArchivePage = async (
   return batchPage.map(({ batch_id, captured_at }) => {
     const ordered = orderBatchEntities(rowsByBatch.get(batch_id) ?? []);
     const [primary] = ordered;
+    // Parsed once per row and reused below for both `entities` and
+    // `restorable` (BS#2616 follow-up review, finding 7) -- the envelope
+    // read was already happening for the `entities` projection, so folding
+    // `restorable` into the same pass costs nothing extra and lets it see
+    // the same `row` a corrupt envelope would leave null, not just the
+    // entity_kind.
+    const parsed = ordered.map((row) => ({ row, envelope: parseCapturedEnvelope(row.captured) }));
     return {
       batch_id,
       captured_at,
@@ -4619,21 +4639,33 @@ export const getDeletedArchivePage = async (
         user_id: primary?.actor_user_id ?? null,
         role: primary?.actor_role ?? null,
       },
-      entities: ordered.map((row) => {
-        const envelope = parseCapturedEnvelope(row.captured);
-        return {
-          entity_kind: row.entity_kind,
-          table: envelope.entity.table,
-          row: envelope.entity.row,
-          children: childCounts(envelope.children),
-        };
-      }),
+      entities: parsed.map(({ row, envelope }) => ({
+        entity_kind: row.entity_kind,
+        table: envelope.entity.table,
+        row: envelope.entity.row,
+        children: childCounts(envelope.children),
+      })),
       // Computed from the kinds this batch actually holds, not a constant:
       // a release and an artist lose entirely different dependents, and
       // handing an artist batch the release list would name five tables the
       // delete never touched while staying silent about the five it did.
       unrecoverable: unrecoverableDependentsForKinds(ordered.map((row) => row.entity_kind)),
-      restorable: ordered.every((row) => isRestorableEntityKind(row.entity_kind)),
+      // Two conservative-default corrections over the original `ordered.every(...)`
+      // (BS#2616 follow-up review, findings 6 & 7):
+      //   - `parsed.length > 0 &&` -- `Array.prototype.every` is vacuously true
+      //     on an empty array, so a batch whose rows read back empty (the
+      //     `rowsByBatch.get(batch_id) ?? []` fallback above) reported
+      //     `restorable: true`, the opposite of this field's conservative
+      //     default.
+      //   - `envelope.entity.row !== null` -- `restorable` was decided on
+      //     `entity_kind` alone, so a `library` batch whose captured envelope
+      //     is corrupt (the same `entity.row === null` shape the restore
+      //     endpoint's `!plan || !envelope.entity.row` branch 500s on) still
+      //     listed as restorable, promising a restore the endpoint could not
+      //     perform. Reuses the envelope already parsed above -- no extra read.
+      restorable:
+        parsed.length > 0 &&
+        parsed.every(({ row, envelope }) => isRestorableEntityKind(row.entity_kind) && envelope.entity.row !== null),
     };
   });
 };
@@ -4805,6 +4837,63 @@ const RESTORE_PLAN: Record<
     ],
   },
 };
+
+/**
+ * `entity_kind` -> the table name its captured envelope stores in
+ * `entity.table` (BS#2616 follow-up review, finding 1). `RESTORE_PLAN` above
+ * is keyed on `entity.table`, not `entity_kind` — see its own docstring for
+ * why — and the two vocabularies genuinely differ:
+ * `captureCatalogDeleteSnapshot` derives `entity.table` from
+ * `getTableName(...)`, the DB table's own name (`artists`, plural), while
+ * `entity_kind` is the caller-supplied label (`artist`, singular) this file
+ * passes at capture time and that `GET /library/deleted` and this endpoint
+ * both key their listing/refusal on. This is the one place that reconciles
+ * the two, kept intentionally tiny: a table's name essentially never
+ * changes, unlike "does this kind have a working restore plan", which is
+ * exactly the question `RESTORABLE_ENTITY_KINDS` below derives instead of
+ * restating.
+ */
+const ENTITY_KIND_TABLE_NAME: Record<string, string> = {
+  library: 'library',
+  artist: 'artists',
+};
+
+/**
+ * `RESTORE_PLAN`'s own key set. Exported only so a test can assert
+ * `RESTORABLE_ENTITY_KINDS` below actually tracks it — see that constant's
+ * docstring — without exporting `RESTORE_PLAN` itself (which would leak live
+ * Drizzle table/column objects past this module for no reader that needs
+ * them).
+ */
+export const RESTORE_PLAN_TABLE_NAMES: readonly string[] = Object.keys(RESTORE_PLAN);
+
+/**
+ * The `entity_kind`s `POST /library/deleted/{batchId}/restore` has a replay
+ * plan for (BS#2616) — DERIVED from `RESTORE_PLAN`'s own key set through
+ * `ENTITY_KIND_TABLE_NAME` above, not hand-copied. A kind whose table gains
+ * an entry in `RESTORE_PLAN` becomes restorable the moment that entry lands,
+ * with nothing else to update; a kind whose table is removed loses
+ * restorability the same way. `GET /library/deleted`'s `restorable` field
+ * and this endpoint's refusal both read this ONE derived set, so they
+ * cannot drift from each other OR from `RESTORE_PLAN` — the axis the BS#2616
+ * follow-up review found the original hand-maintained constant was never
+ * actually closed against. `artist` stays out of it until `RESTORE_PLAN`
+ * gains an `'artists'` entry (see that constant's own docstring for why
+ * that is not a quick addition), and any kind neither
+ * `ENTITY_KIND_TABLE_NAME` nor `RESTORE_PLAN` has met yet is simply absent
+ * rather than needing an explicit "unknown" entry.
+ */
+export const RESTORABLE_ENTITY_KINDS: readonly string[] = Object.keys(ENTITY_KIND_TABLE_NAME).filter((kind) =>
+  RESTORE_PLAN_TABLE_NAMES.includes(ENTITY_KIND_TABLE_NAME[kind])
+);
+
+/**
+ * Whether a batch holding this `entity_kind` can ever be restored. An
+ * unrecognized kind reads as NOT restorable, matching `orderBatchEntities`:
+ * a batch this module has never met sorts last instead of throwing, and here
+ * it renders as unrestorable instead of restorable-by-default.
+ */
+export const isRestorableEntityKind = (kind: string): boolean => RESTORABLE_ENTITY_KINDS.includes(kind);
 
 type LibrarySlot = { artist_id: number; genre_id: number; code_number: number; code_volume_letters: string | null };
 
@@ -5010,12 +5099,14 @@ const runRestoreBatchTransaction = async (
   resolution?: RestoreCodeResolution
 ): Promise<RestoreBatchOutcome> => {
   return db.transaction(async (tx) => {
-    // Bound every lock wait, advisory lock included, below the default 1 s
-    // `deadlock_timeout` — see RESTORE_BATCH_LOCK_TIMEOUT_MS. `SET LOCAL`
-    // scopes to this transaction only.
-    await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${RESTORE_BATCH_LOCK_TIMEOUT_MS}ms'`));
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(${RESTORE_BATCH_ADVISORY_LOCK_KEY}::bigint)`);
-
+    // Read and checked BEFORE the advisory lock below (BS#2616 follow-up
+    // review, finding 8): this SELECT takes no lock of its own, so a batch
+    // this function is about to refuse — permanently, not something a
+    // client can fix by resubmitting or retrying — never queues behind, or
+    // itself holds, the one global restore lock. Without this ordering a
+    // refusal that can never write still contended for that lock and could
+    // itself be preempted into a retryable `lock_unavailable` (503), which
+    // would read as "try again" to a client for whom it never was.
     const snapshotRows: CatalogDeleteSnapshot[] = await tx
       .select()
       .from(catalog_delete_snapshot)
@@ -5027,8 +5118,9 @@ const runRestoreBatchTransaction = async (
     const orderedRows = orderBatchEntities(snapshotRows);
 
     // A named, declared refusal for a batch holding a kind `RESTORE_PLAN`
-    // has no entry for (BS#2616) — checked, and answered, before any row
-    // lock or write below. `isRestorableEntityKind` is the exact set
+    // has no entry for (BS#2616) — checked, and answered, before the
+    // advisory lock (immediately below) and therefore before any row lock
+    // or write in this function. `isRestorableEntityKind` is the exact set
     // `GET /library/deleted`'s `restorable` field reads, so a batch this
     // listing already promised was unrestorable never reaches the
     // `!plan` branch below, which stays reserved for a genuinely corrupt
@@ -5037,6 +5129,14 @@ const runRestoreBatchTransaction = async (
     if (unrestorable) {
       return { outcome: 'unrestorable_kind', entity_kind: unrestorable.entity_kind };
     }
+
+    // Bound every lock wait, advisory lock included, below the default 1 s
+    // `deadlock_timeout` — see RESTORE_BATCH_LOCK_TIMEOUT_MS. `SET LOCAL`
+    // scopes to this transaction only. Reached only past both refusals
+    // above, so a batch that can never write (not found, or an
+    // unrestorable kind) never takes this lock.
+    await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${RESTORE_BATCH_LOCK_TIMEOUT_MS}ms'`));
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${RESTORE_BATCH_ADVISORY_LOCK_KEY}::bigint)`);
 
     const plans = orderedRows.map((row) => {
       const envelope = parseCapturedEnvelope(row.captured);

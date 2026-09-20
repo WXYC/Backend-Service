@@ -462,8 +462,14 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
       [batchId]
     );
 
-    await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(500);
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(500);
 
+    // A bare `.expect(500)` cannot tell this branch from any other 500 --
+    // asserting the message is what pins the corrupt-envelope arm
+    // specifically, distinct from the named `unrestorable_kind` 409 refusal
+    // covered above.
+    expect(res.body.message).toContain(`Cannot restore batch ${batchId}`);
+    expect(res.body.message).toContain("no restorable 'library' row");
     expect(await libraryRow(album.id)).toBeNull();
   });
 

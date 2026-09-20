@@ -3908,7 +3908,20 @@ paths:
         unwired). A `library` batch reads `true`. A batch holding several
         entities is `restorable` only if every one of them is, since the
         restore endpoint refuses the whole batch on the first kind it can't
-        replay.
+        replay. Also `false` if any entity's captured envelope is missing
+        its row — the same corruption the restore endpoint's own 500 guards
+        against — so `restorable` answers for envelope health, not just
+        `entity_kind`.
+
+
+        `restorable: true` is NOT a promise that a restore attempt will
+        succeed — it means this batch's kind has a working replay plan and
+        a parseable envelope, nothing more. A restorable batch can still
+        answer `already_present`, `resolution_required` (a shelf-slot
+        conflict a client must resolve), or `lock_unavailable`.
+        `restorable: false` is the hard guarantee: the endpoint refuses
+        every such batch with `409 unrestorable_kind` before any row lock
+        or write.
 
 
         `entities[].children` is per-child-table ROW COUNTS, not the rows —

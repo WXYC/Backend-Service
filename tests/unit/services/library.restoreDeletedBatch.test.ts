@@ -92,7 +92,13 @@ import {
   rotation_urls,
 } from '../../mocks/database.mock';
 import { renderSql } from '../../utils/render-sql';
-import { restoreDeletedBatch, RESTORE_BATCH_LOCK_TIMEOUT_MS } from '../../../apps/backend/services/library.service';
+import {
+  restoreDeletedBatch,
+  RESTORE_BATCH_LOCK_TIMEOUT_MS,
+  RESTORABLE_ENTITY_KINDS,
+  RESTORE_PLAN_TABLE_NAMES,
+  isRestorableEntityKind,
+} from '../../../apps/backend/services/library.service';
 
 const servicePath = path.resolve(__dirname, '../../../apps/backend/services/library.service.ts');
 const serviceSource = fs.readFileSync(servicePath, 'utf-8');
@@ -516,6 +522,11 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
 
       expect(outcome).toEqual({ outcome: 'not_found' });
       expect(insertStatements(ops)).toHaveLength(0);
+      // BS#2616 follow-up review finding 8: a batch that can never write
+      // must not queue behind, or itself hold, the global restore lock --
+      // `not_found` is exactly such a refusal, so it must never reach the
+      // advisory lock statement either.
+      expect(executedText(ops).some((text) => text.includes('pg_advisory_xact_lock'))).toBe(false);
     });
 
     // BS#2616: `RESTORE_PLAN` has no entry for `artists`, so an `artist`
@@ -536,6 +547,14 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
       expect(outcome).toEqual({ outcome: 'unrestorable_kind', entity_kind: 'artist' });
       expect(insertStatements(ops)).toHaveLength(0);
       expect(selects(ops)).toHaveLength(1);
+      // BS#2616 follow-up review finding 8: this refusal is permanent -- a
+      // client cannot fix it by retrying -- so it must precede the advisory
+      // lock too, not just the write. Before this fix the refusal was
+      // answered from INSIDE the locked section, so a request that could
+      // never write still contended for, and could itself be preempted out
+      // of, the one global restore lock.
+      expect(ops.filter((op) => op.op === 'execute')).toHaveLength(0);
+      expect(executedText(ops).some((text) => text.includes('pg_advisory_xact_lock'))).toBe(false);
     });
 
     // Checked BEFORE the slot probe on purpose: an already-restored batch has
@@ -584,8 +603,12 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
       expect(probe.methods).toContain('for(update)');
     });
 
+    // A `snapshots: []` (`not_found`) run no longer reaches this code at all
+    // (BS#2616 follow-up review, finding 8 — the lock is taken only past
+    // both the `not_found` and `unrestorable_kind` refusals), so this uses
+    // the default restorable batch to actually exercise it.
     it('bounds every lock wait below deadlock_timeout, then takes the restore advisory lock', async () => {
-      const { ops } = await run({ snapshots: [] });
+      const { ops } = await run({});
 
       const statements = executedText(ops);
       expect(RESTORE_BATCH_LOCK_TIMEOUT_MS).toBeLessThan(1000);
@@ -625,6 +648,33 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
           throwOnExecuteIndex: 3,
         })
       ).rejects.toThrow('Failed query');
+    });
+  });
+
+  // BS#2616 follow-up review, findings 1 & 4. The original test iterated
+  // `RESTORABLE_ENTITY_KINDS` and checked membership in that SAME constant via
+  // `isRestorableEntityKind`, which reads that same constant -- self-referential,
+  // so it could not fail no matter what the constant held. This instead
+  // compares against `RESTORE_PLAN`'s own key set (exported only as
+  // `RESTORE_PLAN_TABLE_NAMES`, so `RESTORE_PLAN`'s live Drizzle table objects
+  // stay unexported), which `RESTORABLE_ENTITY_KINDS` is now DERIVED from
+  // rather than a hand-maintained copy of: this assertion fails the moment a
+  // table gains a `RESTORE_PLAN` entry with no `entity_kind` mapped to it in
+  // `ENTITY_KIND_TABLE_NAME` (`library.service.ts`) -- exactly the drift
+  // finding 1 flagged, with nothing before this test able to catch it.
+  describe('RESTORABLE_ENTITY_KINDS (BS#2616 follow-up review)', () => {
+    it('has exactly one restorable kind per RESTORE_PLAN table, derived rather than hand-copied', () => {
+      expect(RESTORE_PLAN_TABLE_NAMES).toEqual(['library']);
+      expect(RESTORABLE_ENTITY_KINDS).toHaveLength(RESTORE_PLAN_TABLE_NAMES.length);
+      expect(isRestorableEntityKind('library')).toBe(true);
+      // `artists` (the table `captureCatalogDeleteSnapshot` stamps for an
+      // artist delete) has no `RESTORE_PLAN` entry yet, so `artist` derives
+      // to not-restorable -- not hand-set to `false`.
+      expect(isRestorableEntityKind('artist')).toBe(false);
+    });
+
+    it('reads an unrecognized entity_kind as not restorable rather than restorable-by-default', () => {
+      expect(isRestorableEntityKind('something_new')).toBe(false);
     });
   });
 });
