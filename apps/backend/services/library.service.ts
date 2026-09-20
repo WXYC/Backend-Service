@@ -4924,8 +4924,18 @@ type LibrarySlot = { artist_id: number; genre_id: number; code_number: number; c
  * UPDATE` on the shelf rows below, and its occupancy match is
  * volume-letter-aware, which a bare `MAX(code_number)` is not.
  */
-const librarySlotKey = (row: LibrarySlot): string =>
+export const librarySlotKey = (row: LibrarySlot): string =>
   `${row.artist_id}/${row.genre_id}/${row.code_number}/${(row.code_volume_letters ?? '').toUpperCase()}`;
+
+/**
+ * THE SLOT KEY's volume-letter fold, spelled once for SQL callers --
+ * `findLibrarySlotOccupant` composes this instead of restating
+ * `UPPER(COALESCE(...))`. `librarySlotKey` above is the JS side of the same
+ * fold; `tests/unit/services/library.slotKey.sql.test.ts` pins the two
+ * together against a case-mixed fixture.
+ */
+export const librarySlotVolumeLetterMatchSql = (column: PgColumn, value: string | null): SQL =>
+  sql`UPPER(COALESCE(${column}, '')) = UPPER(COALESCE(${value}, ''))`;
 
 /**
  * Reads the four slot columns out of a captured `library` row. `captured` is
@@ -4993,12 +5003,12 @@ const probeLibrarySlot = async (
  * `Various Artists` artist (3,113 releases) a single genre shelf is hundreds
  * of rows, read on every genre-changing PATCH.
  *
- * **One definition of the slot key, expressed twice.** This predicate MUST
- * stay byte-identical to `librarySlotKey`'s `UPPER(COALESCE(...,''))` fold --
- * a SQL predicate that regressed to a bare `=` would treat `'d'` and `'D'` as
- * different slots and this function would call a taken slot free.
- * `tests/integration/library-update.spec.js` pins a volume-letters-differ-
- * only-by-case case for exactly that reason.
+ * The volume-letter match below is `librarySlotVolumeLetterMatchSql` -- the
+ * same function `librarySlotKey`'s JS fold is pinned against, so a predicate
+ * that regressed to a bare `=` (treating `'d'` and `'D'` as different slots,
+ * waving a real collision through) fails that pin, not just this function's
+ * own case. `tests/integration/library-update.spec.js` additionally exercises
+ * it end to end.
  */
 export const findLibrarySlotOccupant = async (
   artist_id: number,
@@ -5015,7 +5025,7 @@ export const findLibrarySlotOccupant = async (
         eq(library.artist_id, artist_id),
         eq(library.genre_id, genre_id),
         eq(library.code_number, code_number),
-        sql`UPPER(COALESCE(${library.code_volume_letters}, '')) = UPPER(COALESCE(${code_volume_letters}, ''))`,
+        librarySlotVolumeLetterMatchSql(library.code_volume_letters, code_volume_letters),
         ne(library.id, exclude_library_id)
       )
     )
