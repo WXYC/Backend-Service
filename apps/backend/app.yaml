@@ -622,6 +622,54 @@ components:
         plays:
           type: integer
 
+    RestoreSlotConflicts:
+      type: array
+      description: >-
+        Occupied call-number slots blocking a `POST
+        /library/deleted/{batchId}/restore`. Carried by BOTH refusal arms — the
+        400 `resolution_required` and the 409 `restore_declined` — so the screen
+        that asks the librarian which arm to take (dj-site#1572) renders from
+        either response. Occupancy is decided on the full genre-scoped slot
+        tuple `(artist_id, genre_id, code_number,
+        upper(coalesce(code_volume_letters, '')))`, never on a genre-blind
+        `(artist_id, code_number)`.
+      items:
+        type: object
+        required:
+          [
+            'entity_id',
+            'artist_id',
+            'genre_id',
+            'code_number',
+            'code_volume_letters',
+            'occupied_by_library_id',
+            'next_free_code_number',
+          ]
+        properties:
+          entity_id:
+            type: integer
+            description: >-
+              `catalog_delete_snapshot.entity_id` — the `library.id` the card had
+              when it was deleted, and the id it would come back under.
+          artist_id:
+            type: integer
+          genre_id:
+            type: integer
+            description: In the slot key because code letters are genre-scoped — one artist filed under two genres has two shelves.
+          code_number:
+            type: integer
+            description: The card's ORIGINAL code number, which stays on the archive record whichever arm runs.
+          code_volume_letters:
+            type: string
+            nullable: true
+            description: Compared case-insensitively — `D` and `d` are one slot, not two.
+          occupied_by_library_id:
+            type: integer
+            description: '`library.id` of the release holding that slot today.'
+          next_free_code_number:
+            type: integer
+            description: What the `next_free_code` arm would file the card under — the next free code on that genre-scoped shelf.
+
     ArtistCard:
       type: object
       description: >-
@@ -3958,6 +4006,202 @@ paths:
                     type: integer
         '400':
           description: Invalid page, limit, or search
+
+  /library/deleted/{batchId}/restore:
+    post:
+      summary: Restore a deleted catalog batch (BS#2585)
+      description: >
+        BS#2585 (F2b) — the write half of `GET /library/deleted`. Replays one
+        captured batch out of `catalog_delete_snapshot` back into the catalog in
+        ONE transaction, parent row before any child that references it
+        (`rotation` before `rotation_urls`, `digital_asset` before
+        `digital_asset_file`). Every failure rolls the whole batch back: no
+        partial restore is observable, because a half-restored artist is worse
+        than a declined one.
+
+
+        Restore is BATCH-scoped, not row-scoped. An artist and its releases
+        were deleted together and must come back together, or the releases
+        return orphaned under an artist id that no longer exists. Every batch
+        today holds exactly one `library` entity;
+        WXYC/Backend-Service#2562's artist delete is the first call site that
+        will group more than one.
+
+
+        Rows come back under the primary keys they had before the delete, so
+        every captured FK stays valid with no rewriting. The five dependents no
+        envelope ever captures are NOT synthesized — `album_metadata`,
+        `library_identity`, `library_identity_source` and
+        `uncovered_release_search_markers` are derived and their own jobs
+        rebuild them, and `album_review_submissions` is `ON DELETE SET NULL`, so
+        that submission survived the delete with a NULL `album_id` and there is
+        nothing to replay. This endpoint never reads that table: its
+        `reviewer_raw` column is PII behind ADR 0011's enumerated-projection
+        barrier. The same list is on every listing's `unrecoverable`.
+
+
+        The restore also clears the release's `library_delete_denylist` row, or
+        `jobs/library-etl` would report the restored release as a stranded
+        resurrection and exit non-zero on every run.
+
+
+        **The reissued-code decision is the ordinary path, not an edge case.**
+        Retention is permanent, so a card deleted three years ago usually finds
+        its shelf slot taken. "Taken" means taken on the real slot —
+        `(artist_id, genre_id, code_number,
+        upper(coalesce(code_volume_letters, '')))`, the key
+        `jobs/library-call-number-dedup` merges on. It is deliberately NOT
+        `albumCodeNumberTaken`'s genre-blind `(artist_id, code_number)`:
+        measured against production on 2026-09-18 that predicate sees 3,308
+        apparent collisions where the true slot key sees 273, so using it would
+        decline or relocate restores whose slot was free
+        (WXYC/Backend-Service#2579 owns the fix; this endpoint does not wait on
+        it). When the slot is occupied, the endpoint refuses with `400
+        resolution_required` rather than guessing — silently relocating puts two
+        cards on one shelf slot, silently refusing makes a permanent archive
+        useless. Re-send with `resolution` to pick an arm. A `resolution` sent
+        against a batch with no conflict is moot, not an error. The card's
+        ORIGINAL code stays on the archive record either way; nothing here
+        writes to `catalog_delete_snapshot`.
+      security:
+        - BearerAuth: ['catalog-write']
+      parameters:
+        - in: path
+          name: batchId
+          required: true
+          description: >
+            `catalog_delete_snapshot.batch_id` — a UUID. A non-UUID segment is a
+            400, not a 500.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        description: >
+          Omit entirely (or send `{}`) for a restore into a free slot. `resolution`
+          is consulted ONLY when the slot is occupied.
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resolution:
+                  type: string
+                  enum: ['next_free_code', 'decline']
+                  description: >
+                    `next_free_code` files the card at the conflict's
+                    `next_free_code_number` — the next free code on that
+                    genre-scoped shelf. `decline` leaves it in the archive and
+                    writes nothing, answering 409 `restore_declined`.
+      responses:
+        '200':
+          description: The batch was replayed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['batch_id', 'entities']
+                properties:
+                  batch_id:
+                    type: string
+                    format: uuid
+                  entities:
+                    type: array
+                    description: Replayed entities in the order they were written, parent first.
+                    items:
+                      type: object
+                      required: ['entity_kind', 'entity_id', 'table', 'relocated_code_number', 'children']
+                      properties:
+                        entity_kind:
+                          type: string
+                          example: library
+                        entity_id:
+                          type: integer
+                          description: The `library.id` the card had before the delete, and has again.
+                        table:
+                          type: string
+                          example: library
+                        relocated_code_number:
+                          type: integer
+                          nullable: true
+                          description: >-
+                            The code the card came back under. Non-null ONLY on the
+                            `next_free_code` arm; null means it went back into its own slot.
+                        children:
+                          type: object
+                          additionalProperties:
+                            type: integer
+                          description: Child table name -> rows replayed.
+                          example: { bins: 3, reviews: 1, rotation: 0 }
+        '400':
+          description: >-
+            Either a malformed request (non-UUID `batchId`, non-object body,
+            unrecognized `resolution`) — the service's standard error shape — or
+            the reissued-code refusal below, which carries the conflict instead
+            so the caller can ask the librarian and re-send. The refusal is a
+            400 and not a 409 on purpose: the request was under-specified, not
+            refused on the merits.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: 'Refused: the call code is held by another release and no resolution was given'
+                required: ['message', 'reason', 'conflicts']
+                properties:
+                  message:
+                    type: string
+                  reason:
+                    type: string
+                    enum: ['resolution_required']
+                  conflicts:
+                    $ref: '#/components/schemas/RestoreSlotConflicts'
+        '404':
+          description: No `catalog_delete_snapshot` rows carry this `batch_id`.
+        '409':
+          description: >-
+            Refused on the merits, and nothing was written. `already_restored`
+            means the captured parent id is already present in the catalog —
+            the idempotent answer to a double-click. `restore_declined` is the
+            second arm of the reissued-code decision: the librarian chose to
+            leave the card in the archive. The body is deliberately not this
+            service's standard error shape, for the same reason
+            `DELETE /library/{id}`'s 409 is not: the specifics ARE the refusal.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['message', 'reason']
+                properties:
+                  message:
+                    type: string
+                  reason:
+                    type: string
+                    enum: ['already_restored', 'restore_declined']
+                  entity_ids:
+                    type: array
+                    description: Present on `already_restored` — the parent ids already in the catalog.
+                    items:
+                      type: integer
+                  conflicts:
+                    $ref: '#/components/schemas/RestoreSlotConflicts'
+        '503':
+          description: >-
+            The restore stood down rather than wait on rows (or the restore
+            advisory lock) a live writer holds. Retryable, and says nothing
+            about whether the batch is restorable — the same posture, bound and
+            body as `DELETE /library/{id}`'s 503.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['message', 'reason']
+                properties:
+                  message:
+                    type: string
+                    example: 'Could not restore: the catalog is being written to right now. Try again in a moment.'
+                  reason:
+                    type: string
+                    enum: ['lock_unavailable']
 
   /library/formats:
     get:

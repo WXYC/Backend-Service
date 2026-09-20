@@ -1731,6 +1731,113 @@ export const listDeletedArchive: RequestHandler<object, unknown, unknown, Delete
 };
 
 /**
+ * Restore-batch ids are `catalog_delete_snapshot.batch_id`, a Postgres `uuid`
+ * column. A non-UUID path segment reaching the query raises 22P02 ("invalid
+ * input syntax for type uuid") — a generic 500 plus a Sentry capture — where
+ * the honest answer is a 400. Same shape and reason as
+ * `internal-bans.route.ts`'s and `anonymousDevice.service.ts`'s local copies;
+ * this is a third local constant rather than a shared helper because those two
+ * validate a client fingerprint, not a path param, and neither module is a
+ * natural home for the other's.
+ */
+const BATCH_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The resolution arms `POST /library/deleted/:batchId/restore` accepts, contract-pinned in `app.yaml`. */
+const RESTORE_RESOLUTIONS: readonly libraryService.RestoreCodeResolution[] = ['next_free_code', 'decline'];
+
+/**
+ * POST /library/deleted/:batchId/restore — BS#2585 (F2b): replay one captured
+ * delete batch back into the catalog. Gated `catalog: ['write']`, the same bar
+ * as the delete that wrote the archive row and as the listing that reads it.
+ *
+ * **The interesting status is the 400.** When the card's old call-number slot
+ * is held by someone else — the ORDINARY case, since retention is permanent
+ * and a card deleted three years ago usually finds its slot taken — this
+ * endpoint refuses with `reason: 'resolution_required'` and hands back the
+ * conflict rather than guessing. Silently relocating would put two cards on
+ * one shelf slot; silently refusing would make the permanent archive useless.
+ * The caller then re-issues with `resolution`: `next_free_code` to file the
+ * card at `conflicts[].next_free_code_number`, or `decline` to leave it in the
+ * archive. `decline` is a 409, not a 200: nothing changed, and the request was
+ * refused on the merits. Both refusal bodies carry the conflict array, so the
+ * screen that asks the question (dj-site#1572, mockup screen 6) can render it
+ * from either response.
+ *
+ * A `resolution` on a batch with NO conflict is moot rather than an error —
+ * the restore proceeds as if it were absent.
+ *
+ * `404` (unknown batch) and the retryable `503` with
+ * `reason: 'lock_unavailable'` match `DELETE /library/:id` exactly. The `409`
+ * with `reason: 'already_restored'` is the idempotency answer: the captured
+ * parent id is present in the catalog, so this batch is already back.
+ */
+export const restoreDeletedBatch: RequestHandler<{ batchId: string }, unknown, { resolution?: unknown }> = async (
+  req,
+  res
+) => {
+  const batchId = (req.params.batchId ?? '').trim();
+  if (!BATCH_ID_REGEX.test(batchId)) {
+    throw new WxycError('batchId must be a UUID', 400);
+  }
+
+  // `req.body ?? {}` for the same reason as `addRotationCard`: a body-less POST
+  // must reach the validation below, not a destructure TypeError 500.
+  const body: { resolution?: unknown } = req.body ?? {};
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    throw new WxycError('Bad Request: body must be a JSON object', 400);
+  }
+  const { resolution } = body;
+  if (resolution !== undefined && !RESTORE_RESOLUTIONS.includes(resolution as libraryService.RestoreCodeResolution)) {
+    throw new WxycError(`resolution must be one of: ${RESTORE_RESOLUTIONS.join(', ')}`, 400);
+  }
+
+  const result = await libraryService.restoreDeletedBatch(
+    batchId,
+    resolution as libraryService.RestoreCodeResolution | undefined
+  );
+
+  switch (result.outcome) {
+    case 'not_found':
+      throw new WxycError('Delete batch not found', 404);
+    case 'lock_unavailable':
+      res.status(503).json({
+        message: 'Could not restore: the catalog is being written to right now. Try again in a moment.',
+        reason: 'lock_unavailable',
+      });
+      return;
+    case 'already_present':
+      res.status(409).json({
+        message: `Cannot restore: this batch is already back in the catalog (library ids: ${result.entity_ids.join(', ')})`,
+        reason: 'already_restored',
+        entity_ids: result.entity_ids,
+      });
+      return;
+    case 'resolution_required':
+      res.status(400).json({
+        message:
+          'Cannot restore without a decision: the call code is held by another release. Re-send with resolution=next_free_code or resolution=decline.',
+        reason: 'resolution_required',
+        conflicts: result.conflicts,
+      });
+      return;
+    case 'declined':
+      res.status(409).json({
+        message: 'Restore declined: the card stays in the archive and nothing was written.',
+        reason: 'restore_declined',
+        conflicts: result.conflicts,
+      });
+      return;
+    case 'restored':
+      res.status(200).json({ batch_id: batchId, entities: result.entities });
+      return;
+    default: {
+      const unhandled: never = result;
+      throw new WxycError(`Unhandled restore outcome: ${JSON.stringify(unhandled)}`, 500);
+    }
+  }
+};
+
+/**
  * Validate one optional free-text body field: must be a string, must not be
  * blank after trimming, must fit the column. Returns the trimmed value.
  *

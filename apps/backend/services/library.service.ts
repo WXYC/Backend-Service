@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, isNull, ne, sql, SQL, type Column } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/pg-core';
+import { alias, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
@@ -4633,6 +4633,449 @@ export const countDeletedArchiveBatches = async (search?: string): Promise<numbe
     .where(condition);
 
   return Number(response[0]?.count ?? 0);
+};
+
+// ---------------------------------------------------------------------------
+// POST /library/deleted/:batchId/restore — BS#2585 (F2b), the write half of
+// the archive listing above. The envelope reading is NOT re-implemented here:
+// `parseCapturedEnvelope` and `orderBatchEntities`
+// (`shared/database/src/catalog-delete-envelope.ts`) are the single reader,
+// and this block is that module's second consumer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Serializes one restore against another, database-wide, for the whole
+ * transaction. It is NOT a substitute for the row locks below — it exists for
+ * the one thing a row lock cannot fence: the `next_free_code` arm reads
+ * `MAX(code_number)` off a shelf and then inserts at `MAX + 1`, and Postgres
+ * takes no lock that stops a second transaction reading the same MAX before
+ * either insert lands. Two restores under one artist would then both claim the
+ * same "free" slot — the exact read-then-insert race
+ * `jobs/library-call-number-dedup/README.md` blames for the duplicate slots it
+ * exists to clean up.
+ *
+ * Honest about what it does not cover: `POST /library` does not take this lock
+ * (it calls `generateAlbumCodeNumber` and inserts, unlocked, by design — see
+ * that function), so a librarian filing a new release at the same instant can
+ * still land on the code a restore just picked. Closing that needs the
+ * uniqueness constraint on the slot tuple, which is step 4 of the dedup job's
+ * README, not a lock this endpoint can take unilaterally. Restores are rare
+ * and hand-driven, so serializing all of them behind one key costs nothing.
+ *
+ * MUST stay distinct from the other advisory-lock keys in this codebase —
+ * `pg_advisory_xact_lock` and `pg_try_advisory_lock` share one lock space
+ * database-wide, so a reused number would serialize a restore behind an
+ * unrelated cron. The census is on
+ * `STATION_PASSCODE_ROTATE_ADVISORY_LOCK_KEY` in
+ * `shared/authentication/src/station-passcode.ts`. Value is this key's
+ * allocation date.
+ */
+export const RESTORE_BATCH_ADVISORY_LOCK_KEY = 20260919;
+
+/**
+ * Same sub-`deadlock_timeout` bound, for the same reason, as
+ * {@link DELETE_ALBUM_LOCK_TIMEOUT_MS} — see `SUB_DEADLOCK_LOCK_TIMEOUT_MS`'s
+ * docstring for why the number lives in one place. It bounds the advisory-lock
+ * wait too: `lock_timeout` applies to every lock the lock manager hands out,
+ * advisory locks included, so a restore contending with anything at all gives
+ * up with a retryable `55P03` (→ 503) rather than hanging or aborting the
+ * other side.
+ */
+export const RESTORE_BATCH_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
+
+/** The two real answers to "your call code is taken now" — see `restoreDeletedBatch`. */
+export type RestoreCodeResolution = 'next_free_code' | 'decline';
+
+/** One captured entity whose call-number slot is occupied at restore time. */
+export type RestoreSlotConflict = {
+  /** `catalog_delete_snapshot.entity_id` — the `library.id` the card had when it was deleted. */
+  entity_id: number;
+  artist_id: number;
+  genre_id: number;
+  /** The card's ORIGINAL code number, still on the archive record whichever arm runs. */
+  code_number: number;
+  code_volume_letters: string | null;
+  /** `library.id` of the release holding that slot today. */
+  occupied_by_library_id: number;
+  /** What the `next_free_code` arm would file the card under. */
+  next_free_code_number: number;
+};
+
+export type RestoredEntity = {
+  entity_kind: string;
+  entity_id: number;
+  table: string;
+  /** The code the card came back under, non-null ONLY on the `next_free_code` arm. */
+  relocated_code_number: number | null;
+  /** Child table name -> rows replayed, mirroring the listing's `children` counts. */
+  children: Record<string, number>;
+};
+
+export type RestoreBatchOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'already_present'; entity_ids: number[] }
+  | { outcome: 'resolution_required'; conflicts: RestoreSlotConflict[] }
+  | { outcome: 'declined'; conflicts: RestoreSlotConflict[] }
+  | { outcome: 'lock_unavailable' }
+  | { outcome: 'restored'; entities: RestoredEntity[] };
+
+/**
+ * Replay plan per captured `entity.table`: the parent table, the column its
+ * captured id lands in, and its children in FK order, parents first. Keyed on
+ * the table name the envelope stores rather than on `entity_kind`, because
+ * `entity.table` is what names the rows (`entity_kind` is the queryable label
+ * — see `captureCatalogDeleteSnapshot`).
+ *
+ * The child ORDER is the load-bearing part: `rotation_urls.rotation_id`
+ * references `rotation.id` and `digital_asset_file.asset_id` references
+ * `digital_asset.id`, so each depth-2 table must follow its own parent or the
+ * INSERT raises `23503` and takes the batch down with it. The list is exactly
+ * `deleteAlbumFromDB`'s `children` list, re-ordered; keep the two in step.
+ *
+ * `artists` gets an entry here when WXYC/Backend-Service#2562 ships the artist
+ * delete. Two things this block leaves for that issue rather than guessing at
+ * now: an artist's slot is `genre_artist_crossreference.artist_genre_code`,
+ * not a `library` call number, so it needs its own probe; and a batch holding
+ * several `library` entities under ONE artist and genre would need the
+ * `next_free_code` arm to arbitrate between them, which the single-entity
+ * batches that exist today cannot produce.
+ */
+const RESTORE_PLAN: Record<
+  string,
+  { parent: PgTable; idColumn: PgColumn; children: ReadonlyArray<[string, PgTable]> }
+> = {
+  library: {
+    parent: library,
+    idColumn: library.id,
+    children: [
+      ['rotation', rotation],
+      ['rotation_urls', rotation_urls],
+      ['digital_asset', digital_asset],
+      ['digital_asset_file', digital_asset_file],
+      ['artist_library_crossreference', artist_library_crossreference],
+      ['compilation_track_artist', compilation_track_artist],
+      ['library_urls', library_urls],
+      ['reviews', reviews],
+      ['album_critic_reviews', album_critic_reviews],
+      ['bins', bins],
+    ],
+  },
+};
+
+type LibrarySlot = { artist_id: number; genre_id: number; code_number: number; code_volume_letters: string | null };
+
+/**
+ * THE SLOT KEY: `(artist_id, genre_id, code_number,
+ * upper(coalesce(code_volume_letters, '')))` — the physical shelf slot a call
+ * number addresses, folded to one comparable string so the predicate that
+ * narrows the shelf and the match that decides occupancy cannot drift apart.
+ * Same key `jobs/library-call-number-dedup` merges on; its README carries the
+ * full argument for both load-bearing parts. `genre_id` is in the key because
+ * code letters are genre-scoped — an artist filed under two genres has two
+ * shelves — and the volume letter folds to upper case because `D` and `d` are
+ * one slot.
+ *
+ * **Deliberately NOT `albumCodeNumberTaken`.** That predicate keys on
+ * `(artist_id, code_number)` only and is genre-blind; measured against
+ * production on 2026-09-18 it sees 3,308 apparent collisions where this key
+ * sees 273 — 3,035 false positives out of 64,359 rows. Reaching for it here
+ * would decline or relocate restores whose slot was free.
+ * WXYC/Backend-Service#2579 owns fixing it; this endpoint does not wait on
+ * that. `generateAlbumCodeNumber` is genre-blind in the same way, which is why
+ * `probeLibrarySlot` computes the next free code itself instead of calling it.
+ */
+const librarySlotKey = (row: LibrarySlot): string =>
+  `${row.artist_id}/${row.genre_id}/${row.code_number}/${(row.code_volume_letters ?? '').toUpperCase()}`;
+
+/**
+ * Reads the four slot columns out of a captured `library` row. `captured` is
+ * `jsonb`, so every value arrives as JSON — `Number(...)` rather than a cast,
+ * and a non-string volume letter reads as "no volume letter" rather than
+ * stringifying whatever was there.
+ */
+const capturedLibrarySlot = (row: Record<string, unknown>): LibrarySlot => ({
+  artist_id: Number(row.artist_id),
+  genre_id: Number(row.genre_id),
+  code_number: Number(row.code_number),
+  code_volume_letters: typeof row.code_volume_letters === 'string' ? row.code_volume_letters : null,
+});
+
+/**
+ * Is the card's old slot free, and if not, what is the next free code on that
+ * shelf? One statement: the WHERE clause narrows to the shelf — the
+ * `(artist_id, genre_id)` prefix of the slot key — and `librarySlotKey`
+ * decides occupancy over the rows it returns, so the full genre-scoped tuple
+ * is applied in both places from one definition.
+ *
+ * `FOR UPDATE` on the shelf rows, not on the absent slot: a slot nobody holds
+ * has no row to lock, which is why the advisory lock above and not this lock
+ * is what makes the `MAX + 1` read-then-insert safe. What this lock does buy
+ * is that a librarian cannot RENUMBER a shelf row between the probe and the
+ * replay, which would either hide a collision or invent one.
+ */
+const probeLibrarySlot = async (
+  tx: DbTransaction,
+  slot: LibrarySlot
+): Promise<{ occupant: { id: number } | undefined; next_free_code_number: number }> => {
+  const shelf = await tx
+    .select({
+      id: library.id,
+      artist_id: library.artist_id,
+      genre_id: library.genre_id,
+      code_number: library.code_number,
+      code_volume_letters: library.code_volume_letters,
+    })
+    .from(library)
+    .where(and(eq(library.artist_id, slot.artist_id), eq(library.genre_id, slot.genre_id)))
+    .for('update');
+
+  const key = librarySlotKey(slot);
+  const occupant = shelf.find((row) => librarySlotKey(row) === key);
+  const highest = shelf.reduce((max, row) => Math.max(max, Number(row.code_number)), 0);
+  return { occupant, next_free_code_number: highest + 1 };
+};
+
+/**
+ * Replays captured rows into one table and answers how many went in.
+ *
+ * `jsonb_populate_recordset` does the typing, not TypeScript: `captured` is
+ * `jsonb`, so every timestamp is an ISO string and every smallint a JSON
+ * number, and handing those to a drizzle `.values()` would feed a string to a
+ * column mapper expecting a `Date`. Postgres already knows each column's type
+ * from the table's own composite type, so it coerces the whole recordset in
+ * one statement per table.
+ *
+ * The column list is the captured row's OWN keys, which is exactly the
+ * insertable column set: `captureCatalogDeleteSnapshot` selects every
+ * non-generated column and omits generated ones (`library.search_doc`), which
+ * are recomputed on insert and cannot be written. That symmetry is the
+ * contract between the two halves — a bare `SELECT *` out of
+ * `jsonb_populate_recordset` would try to write `search_doc` and fail. Rows
+ * from one capture share one key set (they came from one `tx.select()`), so
+ * the first row's keys speak for all of them.
+ *
+ * Every id is replayed VERBATIM, under the primary key the row had before the
+ * delete, which is what keeps the children's FK values valid with no
+ * rewriting. Safe because `library.id` and its children's ids are sequences:
+ * a freed id sits below the sequence's high-water mark and is never reissued,
+ * so nothing has taken it (`already_present` below is the check that says so
+ * out loud). The sequences are deliberately NOT advanced — they are already
+ * ahead of every id being replayed.
+ *
+ * A column the schema has since dropped, or gained as NOT NULL with no
+ * default, makes this INSERT fail, which rolls the whole batch back. That is
+ * the right outcome for an envelope that no longer fits the schema: a
+ * half-restored card is worse than a declined one.
+ */
+const replayCapturedRows = async (tx: DbTransaction, table: PgTable, rows: unknown[]): Promise<number> => {
+  const records = rows.filter(
+    (row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row)
+  );
+  if (records.length === 0) return 0;
+  const columns = Object.keys(records[0]);
+  if (columns.length === 0) return 0;
+
+  const columnList = sql.join(
+    columns.map((column) => sql.identifier(column)),
+    sql`, `
+  );
+  await tx.execute(
+    sql`INSERT INTO ${table} (${columnList}) SELECT ${columnList} FROM jsonb_populate_recordset(NULL::${table}, ${JSON.stringify(records)}::jsonb)`
+  );
+  return records.length;
+};
+
+/**
+ * `POST /library/deleted/:batchId/restore` (BS#2585 / F2b) — replays one
+ * captured delete batch back into the catalog.
+ *
+ * **Batch-scoped, not row-scoped.** An artist and its releases were deleted
+ * together and have to come back together, or the releases return orphaned
+ * under an artist id that no longer exists. `batchId` is the unit.
+ *
+ * **One transaction, FK order, parent first.** `orderBatchEntities` puts the
+ * parent entity ahead of its children and {@link RESTORE_PLAN} puts each
+ * depth-1 child ahead of its own grandchildren. Every failure — a conflict
+ * that cannot be resolved, an FK that no longer resolves, a column the schema
+ * has since dropped — rolls the entire batch back. No partial restore is
+ * observable, because a half-restored artist is worse than a declined one.
+ *
+ * **The occupied slot is the ordinary path, not an edge case.** Retention is
+ * permanent, so a card deleted three years ago usually finds its slot taken.
+ * Both answers are real (`resolution`): `next_free_code` files it at the next
+ * free code on that genre-scoped shelf, `decline` leaves it in the archive
+ * untouched. Neither happens by default — a conflict with no `resolution` is
+ * refused as `resolution_required` (400), never guessed at, because silently
+ * relocating puts two cards on one shelf slot and silently refusing makes a
+ * permanent archive useless. The card's original code stays on the archive
+ * record either way: nothing here writes to `catalog_delete_snapshot`.
+ *
+ * `already_present` is checked BEFORE the slot probe, and the order matters:
+ * a batch that was already restored has its own row sitting in its own slot,
+ * so probing first would report the restored card as its own collision and
+ * offer to relocate it.
+ *
+ * **The five excluded dependents are not synthesized.** `album_metadata`,
+ * `library_identity`, `library_identity_source` and
+ * `uncovered_release_search_markers` are derived and their own jobs rebuild
+ * them; `album_review_submissions` is `ON DELETE SET NULL`, so the submission
+ * survived the delete with a NULL `album_id` and there is nothing to replay.
+ * They are absent from {@link RESTORE_PLAN} for that reason and
+ * `UNRECOVERABLE_DEPENDENTS` names them on every listing. Nothing here reads
+ * `album_review_submissions`: its `reviewer_raw` is PII behind ADR 0011's
+ * enumerated-projection barrier, and re-pointing a surviving submission at a
+ * restored release is its own issue with its own PII review — which would not
+ * need to read that column either.
+ *
+ * **The ETL block is lifted.** The delete wrote the release's
+ * `legacy_release_id` into `library_delete_denylist`; leaving that row behind
+ * would make `jobs/library-etl`'s `reconcileDenylistedInserts` report the
+ * restored release as a "stranded" resurrection and exit non-zero on every
+ * run. The delete is keyed off `legacy_release_id`, which only a `library`
+ * envelope carries, so an entity kind without one skips it without needing a
+ * table check.
+ *
+ * `404` and the retryable `503` match `DELETE /library/:id` exactly — see
+ * `deleteAlbumFromDB` for the lock-order argument the `lock_timeout` bound
+ * rests on.
+ */
+export const restoreDeletedBatch = async (
+  batchId: string,
+  resolution?: RestoreCodeResolution
+): Promise<RestoreBatchOutcome> => {
+  try {
+    return await runRestoreBatchTransaction(batchId, resolution);
+  } catch (error) {
+    if (isLockContentionError(error)) {
+      // Same posture as the delete path: a deliberate stand-down, not a
+      // Sentry issue. Breadcrumb only, so it shows as context later.
+      Sentry.addBreadcrumb({
+        category: 'library.restore',
+        level: 'warning',
+        message: 'POST /library/deleted/:batchId/restore stood down on lock contention',
+        data: { batch_id: batchId, code: extractSqlState(error) },
+      });
+      return { outcome: 'lock_unavailable' };
+    }
+    throw error;
+  }
+};
+
+const runRestoreBatchTransaction = async (
+  batchId: string,
+  resolution?: RestoreCodeResolution
+): Promise<RestoreBatchOutcome> => {
+  return db.transaction(async (tx) => {
+    // Bound every lock wait, advisory lock included, below the default 1 s
+    // `deadlock_timeout` — see RESTORE_BATCH_LOCK_TIMEOUT_MS. `SET LOCAL`
+    // scopes to this transaction only.
+    await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${RESTORE_BATCH_LOCK_TIMEOUT_MS}ms'`));
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${RESTORE_BATCH_ADVISORY_LOCK_KEY}::bigint)`);
+
+    const snapshotRows: CatalogDeleteSnapshot[] = await tx
+      .select()
+      .from(catalog_delete_snapshot)
+      .where(eq(catalog_delete_snapshot.batch_id, batchId));
+    if (snapshotRows.length === 0) {
+      return { outcome: 'not_found' };
+    }
+
+    const plans = orderBatchEntities(snapshotRows).map((row) => {
+      const envelope = parseCapturedEnvelope(row.captured);
+      const plan = RESTORE_PLAN[envelope.entity.table];
+      if (!plan || !envelope.entity.row) {
+        // A corrupt or as-yet-unsupported envelope, not a client error: every
+        // row here was written by `captureCatalogDeleteSnapshot`.
+        throw new WxycError(
+          `Cannot restore batch ${batchId}: entity ${row.entity_id} has no restorable '${envelope.entity.table}' row`,
+          500
+        );
+      }
+      return {
+        row,
+        plan,
+        tableName: envelope.entity.table,
+        capturedRow: envelope.entity.row,
+        children: envelope.children,
+      };
+    });
+
+    const alreadyPresent: number[] = [];
+    for (const { row, plan } of plans) {
+      const existing = await tx
+        .select({ id: plan.idColumn })
+        .from(plan.parent)
+        .where(eq(plan.idColumn, row.entity_id))
+        .limit(1)
+        .for('update');
+      if (existing.length > 0) alreadyPresent.push(row.entity_id);
+    }
+    if (alreadyPresent.length > 0) {
+      return { outcome: 'already_present', entity_ids: alreadyPresent };
+    }
+
+    const conflicts: RestoreSlotConflict[] = [];
+    const relocations = new Map<number, number>();
+    for (const { row, capturedRow } of plans) {
+      const slot = capturedLibrarySlot(capturedRow);
+      const { occupant, next_free_code_number } = await probeLibrarySlot(tx, slot);
+      if (!occupant) continue;
+      conflicts.push({
+        entity_id: row.entity_id,
+        ...slot,
+        occupied_by_library_id: occupant.id,
+        next_free_code_number,
+      });
+      relocations.set(row.entity_id, next_free_code_number);
+    }
+    if (conflicts.length > 0) {
+      // Nothing has been written at this point, so both refusals leave the
+      // catalog exactly as they found it.
+      if (resolution === undefined) return { outcome: 'resolution_required', conflicts };
+      if (resolution === 'decline') return { outcome: 'declined', conflicts };
+    }
+
+    const entities: RestoredEntity[] = [];
+    for (const { row, plan, tableName, capturedRow, children } of plans) {
+      const relocated = relocations.get(row.entity_id);
+      await replayCapturedRows(tx, plan.parent, [
+        relocated === undefined ? capturedRow : { ...capturedRow, code_number: relocated },
+      ]);
+
+      const replayed: Record<string, number> = {};
+      for (const [name, table] of plan.children) {
+        replayed[name] = await replayCapturedRows(tx, table, children[name] ?? []);
+      }
+
+      // See the docstring: a surviving denylist row would make the library
+      // ETL report this restore as a stranded resurrection on every run.
+      const legacyReleaseId = Number(capturedRow.legacy_release_id);
+      if (Number.isInteger(legacyReleaseId)) {
+        await tx.delete(library_delete_denylist).where(eq(library_delete_denylist.legacy_release_id, legacyReleaseId));
+      }
+
+      entities.push({
+        entity_kind: row.entity_kind,
+        entity_id: row.entity_id,
+        table: tableName,
+        relocated_code_number: relocated ?? null,
+        children: replayed,
+      });
+    }
+
+    // Same two records as the delete, for the same reason: the archive row is
+    // durable but unwatched, and an incident responder works from a time
+    // window rather than a batch id.
+    console.warn('[Library] restore', JSON.stringify({ batch_id: batchId, resolution: resolution ?? null, entities }));
+    Sentry.addBreadcrumb({
+      category: 'library.restore',
+      level: 'info',
+      message: 'POST /library/deleted/:batchId/restore replayed a batch',
+      data: { batch_id: batchId, entity_ids: entities.map((entity) => entity.entity_id) },
+    });
+
+    return { outcome: 'restored', entities };
+  });
 };
 
 // `tx` (BS#2474): `POST /library/filings` runs this read inside its own
