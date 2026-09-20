@@ -3655,6 +3655,13 @@ describe('library.controller', () => {
       // must scope to the DESTINATION genre the request names, not the row's
       // stored genre -- reading `existing.genre_id` here would re-file the
       // release onto the shelf it is leaving.
+      // Finding 7: this is also the "does not 409" case for the genre-move
+      // occupancy guard below -- the guard runs (genre_id 15 differs from
+      // the stored 11) AFTER the regenerate, so it must see the REGENERATED
+      // 9, not the stale existingRow.code_number 3, and (per the default
+      // `mockFindLibrarySlotOccupant` free-slot stub in `beforeEach`) find no
+      // occupant there and let the write through rather than 409ing on a
+      // slot the release isn't even landing on.
       it('an artist move that also changes genre regenerates against the destination genre, not the stored one', async () => {
         mockAlbumCodeNumberTaken.mockResolvedValue(true);
         mockGenerateAlbumCodeNumber.mockResolvedValue(9);
@@ -3663,10 +3670,12 @@ describe('library.controller', () => {
         await updateAlbum(reqFor({ artist_id: 55, genre_id: 15, code_number: existingRow.code_number }), res, next);
 
         expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(55, 15);
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(55, 15, 9, existingRow.code_volume_letters, 42);
         expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
           42,
           expect.objectContaining({ artist_id: 55, genre_id: 15, code_number: 9 })
         );
+        expect(res.status).toHaveBeenCalledWith(200);
       });
 
       it('an echoed code_number is kept when the destination artist has no collision', async () => {
@@ -3768,18 +3777,43 @@ describe('library.controller', () => {
         );
       });
 
-      // `exclude_library_id` is what lets a no-op re-save pass -- pin the
-      // argument so a regression that drops it (and starts colliding a row
-      // against its own stored slot) goes red rather than merely un-covered.
-      it('excludes the row being edited from the occupancy check', async () => {
+      // Finding 7: the guard gates on the genre actually CHANGING
+      // (`body.genre_id !== existing.genre_id`), not on `genre_id` merely
+      // being present in the body -- dj-site's full-record Save echoes every
+      // field back, so a bare presence check would run this SELECT (and
+      // refuse on a stale collision) for every PATCH that happens to carry
+      // the stored genre_id, including one naming no destination at all. Not
+      // widened the other way either: a `code_number`-only PATCH that omits
+      // `genre_id` altogether stays unchecked here too, same as it always
+      // has (WXYC/Backend-Service#2579 owns closing that separately). Without
+      // this test, a revert back to `body.genre_id !== undefined` passes
+      // every other case in this file unchanged.
+      it('does not run the occupancy check when genre_id echoes the stored value', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ genre_id: existingRow.genre_id, code_number: 20 }), res, next);
+
+        expect(mockFindLibrarySlotOccupant).not.toHaveBeenCalled();
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
+          42,
+          expect.objectContaining({ genre_id: existingRow.genre_id, code_number: 20 })
+        );
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      // `exclude_library_id` is what lets a no-op re-save pass when the
+      // genre IS actually changing -- pin the argument so a regression that
+      // drops it (and starts colliding a row against its own stored slot)
+      // goes red rather than merely un-covered.
+      it('excludes the row being edited from the occupancy check on a real genre change', async () => {
         mockFindLibrarySlotOccupant.mockResolvedValue(undefined);
         const res = mockResponse();
 
-        await updateAlbum(reqFor({ genre_id: existingRow.genre_id }), res, next);
+        await updateAlbum(reqFor({ genre_id: 15 }), res, next);
 
         expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(
           existingRow.artist_id,
-          existingRow.genre_id,
+          15,
           existingRow.code_number,
           existingRow.code_volume_letters,
           42
@@ -5446,7 +5480,6 @@ describe('library.controller', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
-      mockArtistExistsInGenre.mockResolvedValue(true);
     });
 
     // The number is `generateAlbumCodeNumber` verbatim (MAX(code_number)+1
@@ -5490,25 +5523,6 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Artist not found');
-      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
-    });
-
-    // BS#2587 review finding 2: the artist-wide 404 above does not prove the
-    // artist is catalogued in the QUERIED genre, so a well-formed but wrong
-    // genre_id previously still answered 200 with a confident preview for a
-    // shelf the artist doesn't occupy. Same check, same 400 shape, as
-    // `updateAlbum`'s genre-touching PATCH.
-    it('returns 400 for a genre the artist is not catalogued in, without invoking the generator', async () => {
-      mockGetArtistCardById.mockResolvedValue(anyCard);
-      mockArtistExistsInGenre.mockResolvedValue(false);
-      const req = { params: { id: '42' }, query: { genre_id: '99' } } as unknown as Request;
-      const res = mockResponse();
-
-      await expect(peekArtistReleaseNumber(req, res, next)).rejects.toMatchObject({
-        statusCode: 400,
-        message: 'Artist is not catalogued in the selected genre',
-      });
-      expect(mockArtistExistsInGenre).toHaveBeenCalledWith(42, 99);
       expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
     });
 

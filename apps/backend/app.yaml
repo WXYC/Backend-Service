@@ -2071,16 +2071,24 @@ paths:
                   maximum: 32767
                   description: >-
                     Operator-chosen release call number (BS#2564; the PATCH half
-                    of `NewAlbumRequest.code_number`, BS#2410). No
-                    application-level collision check, same as the POST side
-                    (single-librarian decision, rotation-import plan D2); the
-                    eventual DB uniqueness constraint and its 23505 → 409
-                    mapping are tracked on #2033. Alongside an `artist_id`
-                    move, a value that DIFFERS from the stored one is honored
-                    verbatim as the destination shelf; a value that merely
-                    echoes the stored one expresses no choice (a full-record
-                    resubmit carries it either way) and still auto-regenerates
-                    when the destination artist already owns that number.
+                    of `NewAlbumRequest.code_number`, BS#2410). Uncollision-checked
+                    on its own, same as the POST side (single-librarian decision,
+                    rotation-import plan D2) and same as a `code_number`-only or
+                    `artist_id`-only edit; the eventual DB uniqueness constraint
+                    and its 23505 → 409 mapping are tracked on #2033, and the
+                    artist-wide (not genre-scoped) collision check the
+                    `artist_id` auto-regenerate below relies on is tracked on
+                    #2579. Alongside an `artist_id` move, a value that DIFFERS
+                    from the stored one is honored verbatim as the destination
+                    shelf; a value that merely echoes the stored one expresses no
+                    choice (a full-record resubmit carries it either way) and
+                    still auto-regenerates when the destination artist already
+                    owns that number. The one path that IS checked is a PATCH
+                    that changes `genre_id` (BS#2587): the resulting
+                    `(artist_id, genre_id, code_number, code_volume_letters)`
+                    slot is looked up against the real shelf, and an occupied
+                    slot refuses with `409 library_slot_conflict` rather than
+                    silently filing two releases onto it.
                 code_volume_letters:
                   type: string
                   nullable: true
@@ -2107,6 +2115,12 @@ paths:
           description: Invalid field value or no updatable fields provided
         '404':
           description: Album or artist not found
+        '409':
+          description: >-
+            `library_slot_conflict` (BS#2587): the PATCH changes `genre_id`,
+            and the resulting `(artist_id, genre_id, code_number,
+            code_volume_letters)` slot is already occupied by another release.
+            Only a genre CHANGE triggers this check — see `code_number` above.
 
     delete:
       summary: Hard-delete a library release (BS#2112)
