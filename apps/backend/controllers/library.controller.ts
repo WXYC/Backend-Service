@@ -1587,14 +1587,18 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  * existed with no releases. A malformed id is the named 400 from
  * `parseArtistId`, never a 500.
  *
- * That 404 is artist-wide, though: a well-formed `genre_id` the artist isn't
- * catalogued in would otherwise still answer 200 with a confident preview for
- * a shelf the artist doesn't occupy. `artistExistsInGenre` -- the same check
- * `updateAlbum` runs for its own genre-touching PATCH -- gates the genre too,
- * refusing with that path's identical 400 shape. That makes three sequential
- * reads on this path now (card, genre membership, generator); consolidating
- * them is deferred, not forgotten (review finding 13) -- this is a
- * `catalog:['write']`-gated preview, not a hot path.
+ * That artist-wide 404 does not require the artist to be catalogued in the
+ * QUERIED genre. A well-formed `genre_id` naming a shelf this artist has no
+ * releases on still answers 200 with `next_code_number: 1` -- that is not a
+ * leak of another genre's numbering, it is the correct genre-scoped
+ * `MAX + 1`, matching exactly what `addAlbum` would assign a release filed
+ * onto that empty shelf. Gating this on genre membership was tried and
+ * reverted (BS#2587): the create path this endpoint predicts does not itself
+ * require membership -- `artistIdFromName`'s membership-enforcing join runs
+ * only when the request omits `artist_id`, so `POST /library {artist_id,
+ * genre_id}` for an uncatalogued pair succeeds -- and refusing here would
+ * break the "preview and the eventual write agree by construction" guarantee
+ * this docblock promises, not uphold it.
  */
 export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, unknown, { genre_id?: string }> = async (
   req,
@@ -1604,9 +1608,6 @@ export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, un
   const genreId = parseCodeQueryInt(req.query.genre_id, 'genre_id', 1);
   if (!(await libraryService.getArtistCardById(artistId))) {
     throw new WxycError('Artist not found', 404);
-  }
-  if (!(await libraryService.artistExistsInGenre(artistId, genreId))) {
-    throw new WxycError('Artist is not catalogued in the selected genre', 400);
   }
   const next_code_number = await libraryService.generateAlbumCodeNumber(artistId, genreId);
   res.status(200).json({ next_code_number });
@@ -3853,8 +3854,8 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       }
     }
 
-    // A destination genre -- genre-only, or alongside an artist move -- lands
-    // the release on a shelf that restarts numbering at 1 per genre
+    // A destination genre CHANGE -- genre-only, or alongside an artist move --
+    // lands the release on a shelf that restarts numbering at 1 per genre
     // (BS#2587), so its code_number can already name another release's real
     // slot there. Refuse rather than silently double-file two releases onto
     // one call number, keyed on the REAL shelf slot (`librarySlotKey`'s
@@ -3863,26 +3864,38 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     // unchecked entirely.
     //
     // Runs AFTER the arm above, so it sees the FINAL code_number (any
-    // regenerate has already happened), and only when a destination genre is
-    // named -- a pure artist-only move is left to that arm's own genre-blind
-    // check, unwidened here (WXYC/Backend-Service#2579 owns that).
+    // regenerate has already happened), and gates on the genre actually
+    // CHANGING (`body.genre_id !== existing.genre_id`), not merely being
+    // present in the body. dj-site's album editor resubmits the whole record
+    // on Save, so a bare `body.genre_id !== undefined` trigger would run this
+    // check -- and refuse -- on every PATCH that happens to echo the stored
+    // genre_id back, including a `code_number`-only edit that never named a
+    // destination shelf at all. That narrowing is deliberate, not an
+    // oversight it slid past: it does NOT widen this guard to also cover a
+    // `code_number`-only move onto an occupied slot -- that stays unchecked
+    // here, exactly as on `main`, and is WXYC/Backend-Service#2579's fix to
+    // make; this PR is scoped to the genre-move hole specifically. A pure
+    // artist-only move is likewise left to the arm above's own genre-blind
+    // check, unwidened here.
     if (body.genre_id !== undefined) {
-      const effectiveCodeNumber = updates.code_number ?? existing.code_number;
-      const effectiveVolumeLetters =
-        ('code_volume_letters' in updates ? updates.code_volume_letters : existing.code_volume_letters) ?? null;
-      const occupant = await libraryService.findLibrarySlotOccupant(
-        effectiveArtistId,
-        body.genre_id,
-        effectiveCodeNumber,
-        effectiveVolumeLetters,
-        albumId
-      );
-      if (occupant) {
-        throw new WxycError(
-          `Call number ${effectiveCodeNumber}${effectiveVolumeLetters ?? ''} is already taken for artist ${effectiveArtistId} in genre ${body.genre_id}`,
-          409,
-          { code: 'library_slot_conflict' }
+      if (body.genre_id !== existing.genre_id) {
+        const effectiveCodeNumber = updates.code_number ?? existing.code_number;
+        const effectiveVolumeLetters =
+          ('code_volume_letters' in updates ? updates.code_volume_letters : existing.code_volume_letters) ?? null;
+        const occupant = await libraryService.findLibrarySlotOccupant(
+          effectiveArtistId,
+          body.genre_id,
+          effectiveCodeNumber,
+          effectiveVolumeLetters,
+          albumId
         );
+        if (occupant) {
+          throw new WxycError(
+            `Call number ${effectiveCodeNumber}${effectiveVolumeLetters ?? ''} is already taken for artist ${effectiveArtistId} in genre ${body.genre_id}`,
+            409,
+            { code: 'library_slot_conflict' }
+          );
+        }
       }
       updates.genre_id = body.genre_id;
     }

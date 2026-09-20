@@ -616,6 +616,198 @@ describe('PATCH /library/:id', () => {
       expect(info.body.code_number).toBe(1);
     });
   });
+
+  // BS#2587 review finding 7: the guard above must gate on the genre
+  // actually CHANGING, not merely being present in the body -- dj-site's
+  // full-record Save echoes every field back, so a presence-only trigger
+  // would run (and could refuse) on a PATCH that never named a destination
+  // shelf at all.
+  describe('genre-move guard fires on a genre CHANGE, not mere presence (BS#2587 review finding 7)', () => {
+    test('a genre_id equal to the stored value does not 409, even onto an already-occupied slot', async () => {
+      const a = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Genre Echo Artist ${uniq}`,
+          code_letters: 'G7',
+          genre_id: 11,
+          code_number: 9500 + (uniq % 500),
+        })
+        .expect(201);
+      const artist = a.body;
+
+      // Occupies the exact slot the PATCH below will try to write into.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Echo Occupant ${uniq}`,
+          artist_id: artist.id,
+          label: 'Genre Echo Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 30,
+        })
+        .expect(201);
+
+      const moving = await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Echo Target ${uniq}`,
+          artist_id: artist.id,
+          label: 'Genre Echo Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 31,
+        })
+        .expect(201);
+
+      // `genre_id` is present and equal to the row's own stored genre --
+      // under the old presence-based trigger this would run the occupancy
+      // check against `code_number: 30` and 409; the genre isn't actually
+      // moving, so it must not.
+      const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11, code_number: 30 }).expect(200);
+      // Written uncollision-checked, same as any other code_number-only edit
+      // on this endpoint (#2579's gap, not this PR's to close) -- proof the
+      // guard genuinely did not run rather than having run and passed.
+      expect(res.body.code_number).toBe(30);
+    });
+
+    test('an artist+genre move does not 409 when the regenerate already found a free slot', async () => {
+      const origin = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Regen Free Origin Artist ${uniq}`,
+          code_letters: 'F1',
+          genre_id: 11,
+          code_number: 9550 + (uniq % 500),
+        })
+        .expect(201);
+      const originArtist = origin.body;
+
+      const dest = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Regen Free Dest Artist ${uniq}`,
+          code_letters: 'F2',
+          genre_id: 11,
+          code_number: 9560 + (uniq % 500),
+        })
+        .expect(201);
+      const destArtist = dest.body;
+
+      // destArtist is also filed under genre 15 -- the move's destination --
+      // but owns no releases there yet, so the regenerate lands on the empty
+      // shelf's first slot.
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${destArtist.id}, 15, ${9560 + (uniq % 500)})`
+      );
+
+      try {
+        // destArtist already owns code_number 1 in Rock -- the artist-wide
+        // collision that triggers the auto-regenerate.
+        await auth
+          .post('/library')
+          .send({
+            album_title: `Regen Free Dest Rock ${uniq}`,
+            artist_id: destArtist.id,
+            label: 'Regen Free Label',
+            genre_id: 11,
+            format_id: 1,
+            code_number: 1,
+          })
+          .expect(201);
+
+        const moving = await auth
+          .post('/library')
+          .send({
+            album_title: `Regen Free Origin Release ${uniq}`,
+            artist_id: originArtist.id,
+            label: 'Regen Free Label',
+            genre_id: 11,
+            format_id: 1,
+          })
+          .expect(201);
+        expect(moving.body.code_number).toBe(1);
+
+        // artist_id + genre_id move: destArtist already owns 1, so the
+        // regenerate fires and scopes to Electronic (15) -- empty, so it
+        // answers 1. The guard runs (genre 15 differs from the moving
+        // release's stored 11) against that FRESHLY REGENERATED 1, finds
+        // Electronic's shelf empty, and must let the write through.
+        const res = await auth
+          .patch(`/library/${moving.body.id}`)
+          .send({ artist_id: destArtist.id, genre_id: 15 })
+          .expect(200);
+        expect(res.body.artist_id).toBe(destArtist.id);
+        expect(res.body.genre_id).toBe(15);
+        expect(res.body.code_number).toBe(1);
+      } finally {
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${destArtist.id} AND genre_id = 15`
+        );
+      }
+    });
+
+    // BS#2587 review finding 4: `findLibrarySlotOccupant` matches
+    // `code_volume_letters` via `UPPER(COALESCE(...))` in SQL now, mirroring
+    // `librarySlotKey`'s JS fold -- a predicate that regressed to a bare `=`
+    // would treat 'a' and 'A' as different slots and wave a real collision
+    // through.
+    test('volume letters differing only by case are still recognized as the same occupied slot', async () => {
+      const a = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Volume Case Artist ${uniq}`,
+          code_letters: 'F3',
+          genre_id: 11,
+          code_number: 9570 + (uniq % 500),
+        })
+        .expect(201);
+      const artist = a.body;
+
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 15, ${9570 + (uniq % 500)})`
+      );
+
+      try {
+        await auth
+          .post('/library')
+          .send({
+            album_title: `Volume Case Occupant ${uniq}`,
+            artist_id: artist.id,
+            label: 'Volume Case Label',
+            genre_id: 15,
+            format_id: 1,
+            code_number: 70,
+            code_volume_letters: 'a',
+          })
+          .expect(201);
+
+        const moving = await auth
+          .post('/library')
+          .send({
+            album_title: `Volume Case Moving ${uniq}`,
+            artist_id: artist.id,
+            label: 'Volume Case Label',
+            genre_id: 11,
+            format_id: 1,
+            code_number: 70,
+            code_volume_letters: 'A',
+          })
+          .expect(201);
+
+        const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 15 }).expect(409);
+        expectErrorContains(res, 'already taken');
+      } finally {
+        await sql.unsafe(
+          `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 15`
+        );
+      }
+    });
+  });
 });
 
 describe('GET /library/artists/search — review-feedback regressions (PR #1154)', () => {

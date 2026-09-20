@@ -4977,14 +4977,28 @@ const probeLibrarySlot = async (
 
 /**
  * Real-slot occupancy check for `updateAlbum`'s genre-move guard (BS#2587
- * review, finding 1) -- reuses `librarySlotKey`, not `albumCodeNumberTaken`,
- * whose genre-blind key sees 3,308 apparent production collisions where this
- * one sees 273. No `FOR UPDATE`, unlike `probeLibrarySlot`: that lock guards
- * a restore's whole-batch replay under an advisory lock, which an ordinary
- * PATCH never takes, so this is a plain read -- a check-then-act race
- * WXYC/Backend-Service#2589's unique index is what closes, not this
- * function. `exclude_library_id` drops the row being edited, so a no-op
- * re-save onto its own slot never refuses against itself.
+ * review, finding 1) -- reuses `librarySlotKey`'s TUPLE, not
+ * `albumCodeNumberTaken`, whose genre-blind key sees 3,308 apparent
+ * production collisions where this one sees 273. No `FOR UPDATE`, unlike
+ * `probeLibrarySlot`: that lock guards a restore's whole-batch replay under
+ * an advisory lock, which an ordinary PATCH never takes, so this is a plain
+ * read -- a check-then-act race WXYC/Backend-Service#2589's unique index is
+ * what closes, not this function. `exclude_library_id` drops the row being
+ * edited, so a no-op re-save onto its own slot never refuses against itself.
+ *
+ * Unlike `probeLibrarySlot`, which needs every row on the shelf for its
+ * `MAX`, this needs exactly one row, so the match runs in SQL (`code_number`
+ * plus a `code_volume_letters` predicate) instead of pulling the whole
+ * `(artist_id, genre_id)` shelf into JS and scanning it -- for the collapsed
+ * `Various Artists` artist (3,113 releases) a single genre shelf is hundreds
+ * of rows, read on every genre-changing PATCH.
+ *
+ * **One definition of the slot key, expressed twice.** This predicate MUST
+ * stay byte-identical to `librarySlotKey`'s `UPPER(COALESCE(...,''))` fold --
+ * a SQL predicate that regressed to a bare `=` would treat `'d'` and `'D'` as
+ * different slots and this function would call a taken slot free.
+ * `tests/integration/library-update.spec.js` pins a volume-letters-differ-
+ * only-by-case case for exactly that reason.
  */
 export const findLibrarySlotOccupant = async (
   artist_id: number,
@@ -4993,19 +5007,21 @@ export const findLibrarySlotOccupant = async (
   code_volume_letters: string | null,
   exclude_library_id: number
 ): Promise<{ id: number } | undefined> => {
-  const shelf = await db
-    .select({
-      id: library.id,
-      artist_id: library.artist_id,
-      genre_id: library.genre_id,
-      code_number: library.code_number,
-      code_volume_letters: library.code_volume_letters,
-    })
+  const [occupant] = await db
+    .select({ id: library.id })
     .from(library)
-    .where(and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id), ne(library.id, exclude_library_id)));
+    .where(
+      and(
+        eq(library.artist_id, artist_id),
+        eq(library.genre_id, genre_id),
+        eq(library.code_number, code_number),
+        sql`UPPER(COALESCE(${library.code_volume_letters}, '')) = UPPER(COALESCE(${code_volume_letters}, ''))`,
+        ne(library.id, exclude_library_id)
+      )
+    )
+    .limit(1);
 
-  const key = librarySlotKey({ artist_id, genre_id, code_number, code_volume_letters });
-  return shelf.find((row) => librarySlotKey(row) === key);
+  return occupant;
 };
 
 /**
