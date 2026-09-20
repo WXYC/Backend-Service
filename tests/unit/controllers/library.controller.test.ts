@@ -32,6 +32,7 @@ const mockInsertArtistWithGenreCrossreference =
   jest.fn<(artist: Record<string, unknown>, genreId: number, codeNumber: number) => Promise<Record<string, unknown>>>();
 const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number, genreId: number) => Promise<number>>();
+const mockListShelfVolumeLetters = jest.fn<(artistId: number, genreId: number) => Promise<Record<string, string[]>>>();
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
 const mockMapLookupToCanonicalEntity = jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
@@ -248,6 +249,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   genreExists: mockGenreExists,
   getArtistById: mockGetArtistById,
   generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
+  listShelfVolumeLetters: mockListShelfVolumeLetters,
   generateArtistNumber: mockGenerateArtistNumber,
   getGenresFromDB: jest.fn(),
   insertGenre: jest.fn(),
@@ -5485,9 +5487,10 @@ describe('library.controller', () => {
     // The number is `generateAlbumCodeNumber` verbatim (MAX(code_number)+1
     // scoped to the queried genre), so an artist with releases previews
     // max+1 for that genre.
-    it('returns the generator value (max+1) for an artist with releases, scoped to genre_id', async () => {
+    it('returns the generator value (max+1) plus slots_in_use for an artist with releases, scoped to genre_id', async () => {
       mockGetArtistCardById.mockResolvedValue(anyCard);
       mockGenerateAlbumCodeNumber.mockResolvedValue(4);
+      mockListShelfVolumeLetters.mockResolvedValue({ '3': ['', 'A'] });
       const req = { params: { id: '42' }, query: { genre_id: '11' } } as unknown as Request;
       const res = mockResponse();
 
@@ -5495,22 +5498,26 @@ describe('library.controller', () => {
 
       expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
       expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 11);
+      expect(mockListShelfVolumeLetters).toHaveBeenCalledWith(42, 11);
       expect(res.status).toHaveBeenCalledWith(200);
-      expect(res.json).toHaveBeenCalledWith({ next_code_number: 4 });
+      expect(res.json).toHaveBeenCalledWith({ next_code_number: 4, slots_in_use: { '3': ['', 'A'] } });
     });
 
     // `generateAlbumCodeNumber` returns 1 when the artist has no releases in
-    // that genre, and this endpoint passes it straight through.
-    it('returns 1 for an artist with no releases in the queried genre', async () => {
+    // that genre, and `listShelfVolumeLetters` answers an empty shelf with an
+    // empty object, not an omitted field.
+    it('returns 1 and an empty slots_in_use for an artist with no releases in the queried genre', async () => {
       mockGetArtistCardById.mockResolvedValue(anyCard);
       mockGenerateAlbumCodeNumber.mockResolvedValue(1);
+      mockListShelfVolumeLetters.mockResolvedValue({});
       const req = { params: { id: '42' }, query: { genre_id: '15' } } as unknown as Request;
       const res = mockResponse();
 
       await peekArtistReleaseNumber(req, res, next);
 
       expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 15);
-      expect(res.json).toHaveBeenCalledWith({ next_code_number: 1 });
+      expect(mockListShelfVolumeLetters).toHaveBeenCalledWith(42, 15);
+      expect(res.json).toHaveBeenCalledWith({ next_code_number: 1, slots_in_use: {} });
     });
 
     // Existence is resolved through `getArtistCardById` — the same 404
@@ -5524,6 +5531,7 @@ describe('library.controller', () => {
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Artist not found');
       expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+      expect(mockListShelfVolumeLetters).not.toHaveBeenCalled();
     });
 
     // A malformed id is the named 400 from `parseArtistId`, never a 500, and it

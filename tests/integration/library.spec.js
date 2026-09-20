@@ -4435,7 +4435,7 @@ describe('Library Artist Card (BS#2156)', () => {
 
       const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
 
-      expect(res.body).toEqual({ next_code_number: 1 });
+      expect(res.body).toEqual({ next_code_number: 1, slots_in_use: {} });
     });
 
     // The preview must agree with the number the create path actually assigns:
@@ -4446,10 +4446,114 @@ describe('Library Artist Card (BS#2156)', () => {
       await addRelease(artist.id, `Next Number Two ${Date.now()}`);
 
       const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
-      expect(res.body).toEqual({ next_code_number: 3 });
+      expect(res.body).toEqual({ next_code_number: 3, slots_in_use: { 1: [''], 2: [''] } });
 
       const third = await addRelease(artist.id, `Next Number Three ${Date.now()}`);
       expect(third.code_number).toBe(3);
+    });
+
+    // BS#2588: the unlettered volume ("") is a member of the set beside its
+    // lettered siblings, not an absence -- a shelf holding 7, 7A, 7B reports
+    // all three, and the next free letter (C) is left for the client to
+    // compute, not asserted here. Supplied in two different creation orders
+    // (B before A here; the reverse in the next test) so the response can't
+    // depend on server row ordering -- the exact defect WXYC/dj-site#1581
+    // found in a removed client-side `reduce`-with-strict-`>` helper.
+    test('reports the unlettered volume plus its lettered siblings, set-valued not maxed', async () => {
+      const artist = await createTestArtist();
+      await addRelease(artist.id, `Sibling Unlettered ${Date.now()}`);
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Sibling B ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+          code_volume_letters: 'b',
+        })
+        .expect(201);
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Sibling A ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+          code_volume_letters: 'A',
+        })
+        .expect(201);
+
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
+
+      expect(res.body.slots_in_use).toEqual({ 1: ['', 'A', 'B'] });
+    });
+
+    // Same three siblings as above, created in the reverse order, to
+    // tamper-verify order-independence rather than assume it: flip the seed
+    // order and the answer must not change.
+    test('reports the same slots_in_use regardless of creation order', async () => {
+      const artist = await createTestArtist();
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Reversed A ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+          code_volume_letters: 'A',
+        })
+        .expect(201);
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Reversed B ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+          code_volume_letters: 'b',
+        })
+        .expect(201);
+      await addRelease(artist.id, `Reversed Unlettered ${Date.now()}`);
+
+      const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
+
+      expect(res.body.slots_in_use).toEqual({ 1: ['', 'A', 'B'] });
+    });
+
+    // BS#2588 acceptance criterion: a test that goes RED if letters are
+    // unioned across genres. Same artist, same code_number (1), filed under
+    // two genres with DIFFERENT letters on each shelf -- if the read ever
+    // dropped its genre_id predicate, this would union to ['', 'A'] on both
+    // sides instead of reporting each shelf's own letter alone.
+    test('scopes slots_in_use to the queried genre -- does not union sibling genres', async () => {
+      const artist = await createTestArtist();
+      await addRelease(artist.id, `Cross Genre Rock Unlettered ${Date.now()}`, 11);
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Cross Genre Electronic A ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 15,
+          format_id: 1,
+          code_number: 1,
+          code_volume_letters: 'A',
+        })
+        .expect(201);
+
+      const rockRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
+      expect(rockRes.body.slots_in_use).toEqual({ 1: [''] });
+
+      const electronicRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=15`).expect(200);
+      expect(electronicRes.body.slots_in_use).toEqual({ 1: ['A'] });
     });
 
     // The regression case BS#2587 exists for: an artist with releases in two
@@ -4479,15 +4583,15 @@ describe('Library Artist Card (BS#2156)', () => {
         .expect(201);
 
       const rockRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
-      expect(rockRes.body).toEqual({ next_code_number: 3 });
+      expect(rockRes.body).toEqual({ next_code_number: 3, slots_in_use: { 1: [''], 2: [''] } });
 
       const electronicRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=15`).expect(200);
-      expect(electronicRes.body).toEqual({ next_code_number: 51 });
+      expect(electronicRes.body).toEqual({ next_code_number: 51, slots_in_use: { 50: [''] } });
 
       // A genre the artist has no releases in previews 1, not an error and not
       // a leak of another genre's numbering.
       const jazzRes = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=7`).expect(200);
-      expect(jazzRes.body).toEqual({ next_code_number: 1 });
+      expect(jazzRes.body).toEqual({ next_code_number: 1, slots_in_use: {} });
     });
 
     test('404s on an unknown artist id', async () => {

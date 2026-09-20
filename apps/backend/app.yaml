@@ -3587,6 +3587,17 @@ paths:
         above — matching the `/library/artists/peek-code` sibling it mirrors: both
         back the create flow, and the `{ next_code_number }` response is internal
         with no wxyc-shared contract schema.
+
+
+        The response also carries `slots_in_use` (BS#2588): every occupied
+        volume-letter slot on this artist's shelf IN THIS GENRE, keyed by
+        `code_number` (as a string) to the UPPER-CASED letters present there.
+        `""` denotes the unlettered volume as a MEMBER of the set, not an
+        absence — a shelf holding `7` and `7A` reports `"7": ["", "A"]`, so the
+        next free letter is `B`. This widens ONLY this operation's own inline
+        response schema, never the `NextCodeNumberResponse` shape
+        `/library/artists/peek-code` shares with it — artist codes have no
+        volume dimension, so that sibling's declared body is unchanged.
       security:
         - BearerAuth: ['station-management']
       parameters:
@@ -3612,6 +3623,17 @@ paths:
                 properties:
                   next_code_number:
                     type: integer
+                  slots_in_use:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: string
+                    description: >-
+                      Occupied volume letters per `code_number` on this
+                      artist's shelf in the queried genre. Keys are
+                      `code_number` as strings; values are the UPPER-CASED
+                      letters present, with `""` for the unlettered volume.
         '400':
           description: Malformed artist id, or missing/malformed genre_id
         '404':

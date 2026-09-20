@@ -1580,7 +1580,17 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  *
  * Mirrors the `/artists/peek-code` sibling: both share `NextCodeNumberResponse`
  * (`wxyc-shared/api.yaml`), gated at `catalog: ['write']` because both back
- * the create flow. Existence is resolved through `getArtistCardById`, the
+ * the create flow. This response carries one field beyond that shared shape,
+ * `slots_in_use` (BS#2588) -- the UPPER-CASED volume letters occupied at each
+ * `code_number` on this artist's shelf IN THIS GENRE, `""` denoting the
+ * unlettered volume as a member rather than an absence, so the client can
+ * offer the next free letter for a call number without a second round trip.
+ * Deliberately NOT added to `NextCodeNumberResponse`: that schema is also
+ * `$ref`'d from `/artists/peek-code`, where volume letters are meaningless
+ * (artist codes have no volume dimension), so widening it there would
+ * declare a field that operation never returns. `slots_in_use` is declared
+ * only on this operation's own response schema in `apps/backend/app.yaml`.
+ * Existence is resolved through `getArtistCardById`, the
  * same 404 predicate GET/PATCH `/artists/:id` and `/artists/:id/releases`
  * use — so an unknown id (or an artist row with no
  * `genre_artist_crossreference`) 404s rather than previewing 1 as if the artist
@@ -1609,8 +1619,11 @@ export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, un
   if (!(await libraryService.getArtistCardById(artistId))) {
     throw new WxycError('Artist not found', 404);
   }
-  const next_code_number = await libraryService.generateAlbumCodeNumber(artistId, genreId);
-  res.status(200).json({ next_code_number });
+  const [next_code_number, slots_in_use] = await Promise.all([
+    libraryService.generateAlbumCodeNumber(artistId, genreId),
+    libraryService.listShelfVolumeLetters(artistId, genreId),
+  ]);
+  res.status(200).json({ next_code_number, slots_in_use });
 };
 
 /**
