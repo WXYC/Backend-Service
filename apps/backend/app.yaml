@@ -3965,8 +3965,8 @@ paths:
         sets for `album_review_submissions` — "any second reader must carry
         the same exclusion" — to this second READ SURFACE: a librarian sees
         `{ "bins": 3, "reviews": 1 }`, never the rows themselves. The capture
-        side is unaffected; a future restore (WXYC/Backend-Service#2585)
-        reads the envelope directly.
+        side is unaffected; the restore endpoint reads the envelope
+        directly.
       security:
         - BearerAuth: ['catalog-write']
       parameters:
@@ -4083,21 +4083,23 @@ paths:
         Restore is BATCH-scoped, not row-scoped. An artist and its releases
         were deleted together and must come back together, or the releases
         return orphaned under an artist id that no longer exists. Every batch
-        today holds exactly one `library` entity;
-        WXYC/Backend-Service#2562's artist delete is the first call site that
-        will group more than one.
+        holds exactly one entity — the artist delete refuses outright when
+        the artist holds any release, so it captures the artist alone, and no
+        call site groups more than one.
 
 
         Rows come back under the primary keys they had before the delete, so
-        every captured FK stays valid with no rewriting. The five dependents no
-        envelope ever captures are NOT synthesized — `album_metadata`,
-        `library_identity`, `library_identity_source` and
-        `uncovered_release_search_markers` are derived and their own jobs
-        rebuild them, and `album_review_submissions` is `ON DELETE SET NULL`, so
-        that submission survived the delete with a NULL `album_id` and there is
-        nothing to replay. This endpoint never reads that table: its
-        `reviewer_raw` column is PII behind ADR 0011's enumerated-projection
-        barrier. The same list is on every listing's `unrecoverable`.
+        every captured FK stays valid with no rewriting. `unrecoverable`
+        depends on the batch's `entity_kind`: a `library` batch's dependents
+        are NOT synthesized — `album_metadata`, `library_identity`,
+        `library_identity_source` and `uncovered_release_search_markers` are
+        derived and their own jobs rebuild them, and `album_review_submissions`
+        is `ON DELETE SET NULL`, so that submission survived the delete with a
+        NULL `album_id` and there is nothing to replay. This endpoint never
+        reads that table: its `reviewer_raw` column is PII behind ADR 0011's
+        enumerated-projection barrier. An `artist` batch's dependents are a
+        different set entirely; see the listing's `unrecoverable` description
+        above for both lists.
 
 
         The restore also clears the release's `library_delete_denylist` row, or
