@@ -330,9 +330,7 @@ describe('DELETE /library/artists/:id (BS#2562)', () => {
     );
     const capturedGenres = snapshot.captured.children.genre_artist_crossreference;
     expect(capturedGenres).toHaveLength(2);
-    expect(capturedGenres.map((row) => row.genre_id).sort((a, b) => a - b)).toEqual(
-      [GEN, GEN2].sort((a, b) => a - b)
-    );
+    expect(capturedGenres.map((row) => row.genre_id).sort((a, b) => a - b)).toEqual([GEN, GEN2].sort((a, b) => a - b));
     // Each membership carries its own shelf code, and a restore needs both:
     // one code cannot stand in for the other.
     for (const row of capturedGenres) {
