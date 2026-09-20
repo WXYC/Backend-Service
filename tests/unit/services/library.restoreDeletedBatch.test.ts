@@ -45,7 +45,14 @@
  *     future `RESTORE_PLAN` entry cannot add one quietly.
  *  5. **The ETL block is lifted.** A surviving `library_delete_denylist` row
  *     makes `jobs/library-etl` report the restore as a stranded resurrection
- *     and exit non-zero on every run.
+ *     and exit non-zero on every run. It is not a free clear, and the
+ *     counterweight is deliberately recorded at the call site rather than
+ *     implied here: the denylist row is the only thing keeping that job off the
+ *     `legacy_release_id`, and its refresh set includes `code_number` and
+ *     `code_volume_letters` — so after a RELOCATED restore, a run that
+ *     re-selects the release would put the card back on the occupied slot.
+ *     Nothing here can stop that job, so the relocation is logged loudly
+ *     instead of silently.
  *  6. **Lock waits are bounded and the restore is the side that yields**, same
  *     as the delete path, and a contention SQLSTATE becomes
  *     `lock_unavailable` (503) rather than a 500. The rejection double builds
@@ -223,6 +230,13 @@ type RunOptions = {
   snapshots?: Row[];
   /** Rows the parent-existence probe answers with. Non-empty means already restored. */
   present?: Row[];
+  /**
+   * Rows the `legacy_release_id` probe answers with. Non-empty also means
+   * already restored — a release re-imported after its delete comes back under
+   * a NEW `library.id` keeping its legacy id, so the primary-key probe misses
+   * it and only this one catches the unique-index collision.
+   */
+  legacyPresent?: Row[];
   shelf?: Row[];
   resolution?: 'next_free_code' | 'decline';
   throwOnExecuteIndex?: number;
@@ -233,7 +247,10 @@ const run = async (options: RunOptions = {}) => {
   const selectResults: unknown[][] = [snapshots];
   if (snapshots.length > 0) {
     selectResults.push(options.present ?? []);
-    if ((options.present ?? []).length === 0) selectResults.push(options.shelf ?? []);
+    if ((options.present ?? []).length === 0) {
+      selectResults.push(options.legacyPresent ?? []);
+      if ((options.legacyPresent ?? []).length === 0) selectResults.push(options.shelf ?? []);
+    }
   }
   const { ops, tx } = makeTx(selectResults, options.throwOnExecuteIndex);
   (db as unknown as { transaction: unknown }).transaction = jest
@@ -249,8 +266,12 @@ const run = async (options: RunOptions = {}) => {
  * `library`, so filtering by table would conflate them.
  *
  *   0 — the batch's `catalog_delete_snapshot` rows
- *   1 — the parent-existence probe (`already_present`)
- *   2 — the shelf probe (`probeLibrarySlot`), reached only when 1 is empty
+ *   1 — the parent-existence probe on the primary key (`already_present`)
+ *   2 — the parent-existence probe on `legacy_release_id`, reached only when 1
+ *       is empty; a unique index makes it a second way the parent INSERT can
+ *       collide, so it answers `already_present` too
+ *   3 — the shelf probe (`probeLibrarySlot`), reached only when 1 and 2 are both
+ *       empty
  */
 const selects = (ops: RecordedOp[]): RecordedOp[] => ops.filter((op) => op.op === 'select');
 
@@ -285,7 +306,9 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
     it('narrows the shelf on artist AND genre, never on artist alone', async () => {
       const { ops } = await run({ shelf: [] });
 
-      const probe = selects(ops)[2];
+      // Index 3, not 2: the shelf probe now follows BOTH parent-existence
+      // probes (primary key, then `legacy_release_id`).
+      const probe = selects(ops)[3];
       expect(probe.table).toBe(library);
       expect(probe.args.where).toEqual(and(eq(library.artist_id, 7), eq(library.genre_id, 3)));
       // Locked, so a librarian cannot renumber a shelf row between the probe
@@ -502,8 +525,43 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
       const { outcome, ops } = await run({ present: [{ id: 42 }] });
 
       expect(outcome).toEqual({ outcome: 'already_present', entity_ids: [42] });
+      // Two, not three: a primary-key hit short-circuits, so the
+      // `legacy_release_id` probe never runs and neither does the shelf probe.
       expect(selects(ops)).toHaveLength(2);
       expect(insertStatements(ops)).toHaveLength(0);
+    });
+
+    // The primary key is NOT the only way the parent INSERT can collide, and
+    // this is the shape that actually occurs: `jobs/library-etl`'s documented
+    // recovery (clear the denylist row, force a full re-sync) brings a deleted
+    // release back under a NEW `library.id` while keeping its
+    // `legacy_release_id`, which carries a unique index. Probing only the id
+    // reports absent, the restore proceeds, and the parent INSERT raises 23505
+    // — not a lock-contention SQLSTATE, so it escapes as an uncaught 500 with
+    // nothing said to the librarian, and it aborts before any child replay, so
+    // the batch is left permanently unrestorable by this endpoint.
+    it('answers already_present when the release came back under a new id keeping its legacy_release_id', async () => {
+      const { outcome, ops } = await run({ present: [], legacyPresent: [{ id: 88888 }] });
+
+      expect(outcome).toEqual({ outcome: 'already_present', entity_ids: [42] });
+      // The reported id is the ARCHIVED entity's, not the squatter's: the
+      // caller asked about this batch, and 88888 is not in it.
+      expect((outcome as { entity_ids: number[] }).entity_ids).not.toContain(88888);
+      // Snapshots, id probe, legacy probe — and it stops there rather than
+      // probing the shelf and offering to relocate onto a slot it cannot take.
+      expect(selects(ops)).toHaveLength(3);
+      expect(insertStatements(ops)).toHaveLength(0);
+    });
+
+    it('probes legacy_release_id on the library table, locked, and only when the id probe missed', async () => {
+      const { ops } = await run({ present: [], legacyPresent: [{ id: 88888 }] });
+
+      const probe = selects(ops)[2];
+      expect(probe.table).toBe(library);
+      expect(probe.args.where).toEqual(eq(library.legacy_release_id, 71234));
+      // Locked for the same reason the id probe is: without it a concurrent
+      // re-import could land between this probe and the parent INSERT.
+      expect(probe.methods).toContain('for(update)');
     });
 
     it('bounds every lock wait below deadlock_timeout, then takes the restore advisory lock', async () => {

@@ -4742,11 +4742,35 @@ export type RestoreBatchOutcome =
  */
 const RESTORE_PLAN: Record<
   string,
-  { parent: PgTable; idColumn: PgColumn; children: ReadonlyArray<[string, PgTable]> }
+  {
+    parent: PgTable;
+    idColumn: PgColumn;
+    /**
+     * Every OTHER uniquely-indexed column the replay writes. Probed alongside
+     * `idColumn` when deciding `already_present`, because the primary key is
+     * not the only way the parent INSERT can collide.
+     *
+     * `library.legacy_release_id` is the case that makes this load-bearing:
+     * `jobs/library-etl/README.md`'s documented recovery (clear the denylist
+     * row, force a full re-sync) brings a deleted release back under a NEW
+     * `library.id` while keeping its legacy id, so an id-only probe reports
+     * absent, the restore proceeds, and the parent INSERT violates
+     * `library_legacy_release_id_idx`. `23505` is not a lock-contention
+     * SQLSTATE, so it escapes as an uncaught 500 with no explanation for the
+     * librarian, and because it aborts before any child replay the batch is
+     * left permanently unrestorable by this endpoint. Probing the column
+     * instead answers the `409 already_restored` this endpoint already owns.
+     *
+     * A captured NULL is not probed: NULL never collides under a unique index.
+     */
+    uniqueKeys: ReadonlyArray<{ column: PgColumn; capturedField: string }>;
+    children: ReadonlyArray<[string, PgTable]>;
+  }
 > = {
   library: {
     parent: library,
     idColumn: library.id,
+    uniqueKeys: [{ column: library.legacy_release_id, capturedField: 'legacy_release_id' }],
     children: [
       ['rotation', rotation],
       ['rotation_urls', rotation_urls],
@@ -5001,14 +5025,36 @@ const runRestoreBatchTransaction = async (
     });
 
     const alreadyPresent: number[] = [];
-    for (const { row, plan } of plans) {
+    for (const { row, plan, capturedRow } of plans) {
       const existing = await tx
         .select({ id: plan.idColumn })
         .from(plan.parent)
         .where(eq(plan.idColumn, row.entity_id))
         .limit(1)
         .for('update');
-      if (existing.length > 0) alreadyPresent.push(row.entity_id);
+      if (existing.length > 0) {
+        alreadyPresent.push(row.entity_id);
+        continue;
+      }
+      // The primary key is not the only way the parent INSERT can collide: a
+      // release re-imported after its delete returns under a NEW `library.id`
+      // keeping its `legacy_release_id`, which is uniquely indexed. Probing
+      // only the id would let the restore proceed and 500 on a 23505. See
+      // `RESTORE_PLAN.uniqueKeys`.
+      for (const { column, capturedField } of plan.uniqueKeys) {
+        const captured = capturedRow[capturedField];
+        if (captured === null || captured === undefined) continue;
+        const collision = await tx
+          .select({ id: plan.idColumn })
+          .from(plan.parent)
+          .where(eq(column, captured))
+          .limit(1)
+          .for('update');
+        if (collision.length > 0) {
+          alreadyPresent.push(row.entity_id);
+          break;
+        }
+      }
     }
     if (alreadyPresent.length > 0) {
       return { outcome: 'already_present', entity_ids: alreadyPresent };
@@ -5047,11 +5093,42 @@ const runRestoreBatchTransaction = async (
         replayed[name] = await replayCapturedRows(tx, table, children[name] ?? []);
       }
 
-      // See the docstring: a surviving denylist row would make the library
-      // ETL report this restore as a stranded resurrection on every run.
+      // A surviving denylist row would make `jobs/library-etl`'s
+      // `reconcileDenylistedInserts` report this restore as a stranded
+      // resurrection and exit non-zero on every run, so the row has to go.
+      //
+      // It is not a free clear, and this is the counterweight the first draft
+      // of this function omitted. The denylist row is the ONLY thing keeping
+      // `jobs/library-etl` off this `legacy_release_id`, and that job's
+      // `LEGACY_SOURCED_LIBRARY_COLUMNS` refresh set includes BOTH
+      // `code_number` and `code_volume_letters`. So once cleared, any later run
+      // that re-selects the release upserts those columns from upstream —
+      // `jobs/library-call-number-dedup/README.md` states the mechanism
+      // outright: while that ETL is live it will overwrite a renumber.
+      //
+      // For a relocated restore that is a silent revert ONTO THE OCCUPIED SLOT
+      // — two cards on one shelf slot, the exact outcome the two-armed
+      // resolution exists to prevent. It is latent rather than active only
+      // because the job is unscheduled and refuses to run without
+      // `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`; the forced full re-sync its own
+      // README documents is the live path that would trip it. Nothing here can
+      // stop that job, so the relocation is made LOUD instead of silent: a
+      // relocated card is the one state where a subsequent re-sync is
+      // destructive, and an operator who reads this warning before running one
+      // can re-check the slot afterwards.
       const legacyReleaseId = Number(capturedRow.legacy_release_id);
       if (Number.isInteger(legacyReleaseId)) {
         await tx.delete(library_delete_denylist).where(eq(library_delete_denylist.legacy_release_id, legacyReleaseId));
+        if (relocated != null) {
+          console.warn(
+            '[Library] restore relocated library_id=%d to code_number=%d and cleared its delete-denylist row; ' +
+              'a library-etl run that re-selects legacy_release_id=%d would overwrite code_number/code_volume_letters ' +
+              'from upstream and return it to the occupied slot',
+            row.entity_id,
+            relocated,
+            legacyReleaseId
+          );
+        }
       }
 
       entities.push({

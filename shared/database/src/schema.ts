@@ -2090,23 +2090,35 @@ export const library_watermark = wxyc_schema.table(
  * DELETE FROM wxyc_schema.library_delete_denylist WHERE legacy_release_id = <id>;
  * ```
  *
- * That alone lifts the block on re-import; it does not by itself get the
- * release re-selected, and it does not restore any of the dependents that
- * cascade-destroyed against the old id — those live in
- * `catalog_delete_snapshot` now (written in the same transaction as the
- * delete), keyed on the OLD `library.id`, and are restored from there under
- * the release's NEW `library.id` once it comes back, not re-derived. That row
- * also holds the deleted `library` row itself (`captured -> 'entity'`), which
- * is what makes a restore possible at all for a release Backend minted rather
- * than imported: there is no upstream row to re-select for those, so the ETL
- * recipe below cannot bring one back. Which
- * re-sync path actually gets the release re-selected is moving faster than
- * this docstring: the upstream-edit branch (saving the release in
- * tubafrenzy's `/wxycdb`) went dark when Tomcat stopped and may or may not
- * have a replacement by the time this is read. Rather than a second copy of
- * that procedure here, see "Restoring a release" in
- * `jobs/library-etl/README.md` for the current one, including how to pull
- * the dependents back out of `catalog_delete_snapshot`.
+ * **Do not hand-roll a restore. `POST /library/deleted/:batchId/restore` is
+ * the supported path** (BS#2585) and it does the whole job in one transaction:
+ * it replays the deleted `library` row under ITS ORIGINAL `library.id` — not a
+ * fresh one — then every captured dependent, then deletes this denylist row
+ * itself. Because the parent id is preserved, the captured children's FKs are
+ * still valid and need no rewriting.
+ *
+ * The manual recipe that used to live here described a genuinely different
+ * world and is gone rather than amended: it restored under a NEW `library.id`,
+ * required each child to be re-inserted by hand against that new id, and got
+ * the release re-selected by forcing a full `library-etl` re-sync — which, as
+ * that job's README warns, REVERTS every dj-site catalog edit made since the
+ * Phase 3.5 freeze, across the whole catalog. Paying a catalog-wide revert to
+ * recover one card is no longer a trade anyone has to make, so leaving the
+ * recipe readable was the dangerous option.
+ *
+ * Two things the endpoint deliberately does not do. It does not re-link
+ * `flowsheet` plays: the delete blanks `flowsheet.album_id` (and
+ * `flowsheet.rotation_id` via the rotation cascade) on every play of the
+ * release, `flowsheet` is not captured, and the restore leaves those NULL — so
+ * the card returns without its play history. And it does not recreate the five
+ * dependents the capture excludes by design (`album_metadata`,
+ * `library_identity`, `library_identity_source`,
+ * `uncovered_release_search_markers`, `album_review_submissions`).
+ *
+ * The snapshot row holds the deleted `library` row itself
+ * (`captured -> 'entity'`), which is what makes a restore possible for a
+ * release Backend minted rather than imported: there is no upstream row to
+ * re-select for those at all.
  *
  * **Who deleted it.** `deleted_by_*` records the authenticated subject at
  * delete time — this is the most destructive operation in the service and

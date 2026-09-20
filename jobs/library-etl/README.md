@@ -107,6 +107,16 @@ Denylisted releases are counted separately in the completion log (`skipped as de
 
 ### Restoring a release
 
+> **Use `POST /library/deleted/:batchId/restore` (BS#2585). Do not use the procedure below.**
+>
+> The endpoint replays the deleted `library` row under **its original `library.id`** and every captured dependent, in one transaction, and clears the denylist row itself. Because the parent id is preserved, the children's foreign keys are still valid and nothing needs re-inserting by hand. Find the batch with `GET /library/deleted`.
+>
+> Two things it does not do. It does not re-link `flowsheet` plays — the delete blanks `flowsheet.album_id` and `flowsheet.rotation_id` on every play of the release, `flowsheet` is not captured, and they stay NULL — so the card returns without its play history. And it does not recreate the five dependents the capture excludes by design.
+>
+> **If the restore relocated the call number** (you answered `next_free_code` because the original slot was taken), do not then force a full re-sync: `LEGACY_SOURCED_LIBRARY_COLUMNS` includes `code_number` and `code_volume_letters`, so a run that re-selects the release overwrites the relocation from upstream and puts the card back on the occupied slot — two cards, one shelf slot. The restore logs a warning naming exactly this. See `jobs/library-call-number-dedup/README.md`.
+>
+> The manual procedure below is retained only for a release whose batch predates `catalog_delete_snapshot`, or whose snapshot row has been pruned. It restores under a **fresh** `library.id` and requires every child to be re-inserted by hand, and its only live re-selection path is a forced full re-sync that reverts every dj-site catalog edit since the Phase 3.5 freeze — a catalog-wide cost to recover one card. Prefer the endpoint.
+
 Clearing the denylist row is necessary but **not sufficient**. This job only looks at releases whose upstream `TIME_LAST_MODIFIED` is newer than its `cronjob_runs` watermark, and the Backend-side delete never touched that timestamp — it is older than every subsequent watermark, so the release is never re-selected and never comes back. The release has to be pushed back into the candidate set as well.
 
 ```sql
@@ -152,7 +162,7 @@ SELECT captured -> 'children' FROM wxyc_schema.catalog_delete_snapshot
  WHERE entity_kind = 'library' AND entity_id = <old id>;
 ```
 
-Each child needs re-inserting by hand under the release's new id, since nothing does that automatically.
+Each child needs re-inserting by hand under the release's new id, since nothing does that automatically — which is the whole reason `POST /library/deleted/:batchId/restore` exists and should be used instead wherever the snapshot row is still present.
 
 Two groups are deliberately absent from that snapshot (see the `catalog_delete_snapshot` docstring in `schema.ts`), for different reasons:
 

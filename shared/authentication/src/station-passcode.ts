@@ -218,14 +218,24 @@ export const STATION_PASSCODE_DEFAULT_MAX_USES = 25;
  * issue body's "Rotation and the two-row cap" section for the full argument
  * against `SELECT ... FOR UPDATE` as a substitute.
  *
- * MUST stay distinct from the two other advisory locks in this codebase:
- * the `ADVISORY_LOCK_KEY = 17071707` formerly held by
- * `jobs/legacy-mirror-reconcile/job.ts` (removed in BS#2403, key not reused) and
- * `apps/backend/routes/internal-slack-moderators.route.ts`'s
- * `SLACK_MODERATORS_ADVISORY_LOCK_KEY = 20260808`. `pg_try_advisory_lock`
- * and `pg_advisory_xact_lock` share one lock space database-wide, so
- * reusing either number would serialize passcode rotation behind an
- * unrelated cron or roster save. Value is this key's allocation date.
+ * MUST stay distinct from every other advisory lock in this codebase. This
+ * comment is the census — a new key is allocated by adding it here, so keep the
+ * list complete or the next author reads a short one and picks a live number:
+ *
+ *   - `17071707` — `ADVISORY_LOCK_KEY`, formerly `jobs/legacy-mirror-reconcile/job.ts`
+ *     (removed in BS#2403; key deliberately not reused)
+ *   - `20260808` — `SLACK_MODERATORS_ADVISORY_LOCK_KEY`,
+ *     `apps/backend/routes/internal-slack-moderators.route.ts`
+ *   - `20260905` — this key
+ *   - `20260919` — `RESTORE_BATCH_ADVISORY_LOCK_KEY`,
+ *     `apps/backend/services/library.service.ts`, fencing the catalog restore's
+ *     next-free-code read-then-insert
+ *
+ * `pg_try_advisory_lock` and `pg_advisory_xact_lock` share one lock space
+ * database-wide, so reusing any of these numbers would serialize unrelated
+ * writers behind one another — each then standing down at its own
+ * `lock_timeout` and answering 503. Values are allocation dates, which makes a
+ * nearby date the likeliest accidental collision.
  */
 export const STATION_PASSCODE_ROTATE_ADVISORY_LOCK_KEY = 20260905;
 
