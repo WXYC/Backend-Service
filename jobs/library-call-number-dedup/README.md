@@ -23,9 +23,7 @@ It deliberately does **not** strip volume or part numbers. `Ethiopiques vol. 21`
 
 ## The slot key
 
-```
-(artist_id, genre_id, code_number, upper(coalesce(code_volume_letters, '')))
-```
+The canonical definition -- `(artist_id, genre_id, code_number, upper(coalesce(code_volume_letters, '')))` -- lives in `apps/backend/services/library.service.ts`, at `librarySlotKey` (the JS fold) and `librarySlotVolumeLetterMatchSql` (the SQL fold `findLibrarySlotOccupant` composes); the "THE SLOT KEY" doc comment above `librarySlotKey` is the authority, not this file. This job's own SQL (`merge.ts`) restates the fold in raw SQL rather than importing it -- it runs in a separate workspace `npm run typecheck` doesn't cover -- so a change to the canonical fold has to be hand-carried here too.
 
 Two parts of that are load-bearing and easy to get wrong:
 
