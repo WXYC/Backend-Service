@@ -3850,23 +3850,19 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       }
     }
 
-    // A destination genre -- genre-only, or riding alongside the artist move
-    // above -- lands the release on a shelf that restarts numbering at 1 per
-    // genre (BS#2587), so the code_number it carries onto that shelf
-    // (unchanged, client-chosen, or just regenerated above) can already name
-    // another release's real slot there. Refuse rather than silently
-    // double-file two releases under one call number, keyed on the REAL shelf
-    // slot (`librarySlotKey`'s tuple) rather than `albumCodeNumberTaken`,
-    // whose genre-blind false positives are exactly why an earlier revision
-    // of this fix left genre-only moves unchecked altogether.
+    // A destination genre -- genre-only, or alongside an artist move -- lands
+    // the release on a shelf that restarts numbering at 1 per genre
+    // (BS#2587), so its code_number can already name another release's real
+    // slot there. Refuse rather than silently double-file two releases onto
+    // one call number, keyed on the REAL shelf slot (`librarySlotKey`'s
+    // tuple), not `albumCodeNumberTaken` -- whose genre-blind false positives
+    // are why an earlier revision of this fix left genre-only moves
+    // unchecked entirely.
     //
-    // Division of labour with the arm above: this runs AFTER it, so it sees
-    // the FINAL code_number about to be written rather than one about to be
-    // superseded, and it only runs when the request names a destination
-    // genre at all. A pure artist-only move (genre unchanged) is left
-    // entirely to the arm above, whose genre-blind collision check predates
-    // this PR and is not being widened here (WXYC/Backend-Service#2579 owns
-    // that).
+    // Runs AFTER the arm above, so it sees the FINAL code_number (any
+    // regenerate has already happened), and only when a destination genre is
+    // named -- a pure artist-only move is left to that arm's own genre-blind
+    // check, unwidened here (WXYC/Backend-Service#2579 owns that).
     if (body.genre_id !== undefined) {
       const effectiveCodeNumber = updates.code_number ?? existing.code_number;
       const effectiveVolumeLetters =
