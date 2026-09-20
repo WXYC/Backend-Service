@@ -193,10 +193,23 @@ type RouteLayer = { route?: { path: string; methods: Record<string, boolean> } }
  * `/artists/:id` (BS#2156) predates `/rotation/:id` (BS#2410) and carries
  * three literals to the rotation block's two — `/rotation/cards` (BS#2472)
  * joined `/rotation/uncatalogued` as a second shadowable literal.
+ *
+ * `expectedMethods` is the per-family answer to "which verbs does `param`
+ * itself register" (sorted), consumed by the "registers exactly one handler
+ * per method" test below. The two families diverge here: `/rotation/:id` is
+ * GET + PATCH, `/artists/:id` grew a third verb, DELETE (BS#2562).
  */
 const PARAM_FAMILIES = [
-  { param: '/rotation/:id', literals: ['/rotation/uncatalogued', '/rotation/cards'] },
-  { param: '/artists/:id', literals: ['/artists/search', '/artists/peek-code', '/artists/by-code'] },
+  {
+    param: '/rotation/:id',
+    literals: ['/rotation/uncatalogued', '/rotation/cards'],
+    expectedMethods: ['get', 'patch'],
+  },
+  {
+    param: '/artists/:id',
+    literals: ['/artists/search', '/artists/peek-code', '/artists/by-code'],
+    expectedMethods: ['delete', 'get', 'patch'],
+  },
 ];
 
 /** `/rotation/:id` -> `/rotation`. */
@@ -255,61 +268,64 @@ describe.each(PARAM_FAMILIES)('$param shadowing classifier (BS#2113)', ({ param,
   });
 });
 
-describe.each(PARAM_FAMILIES)('library.route $param ordering (BS#2113, BS#2156, BS#2410)', ({ param, literals }) => {
-  // Scoped by method: a Layer whose Route does not handle the request method
-  // never matches, so `/rotation/uncatalogued` (GET) is shadowable by
-  // `/rotation/:id`'s GET registration and untouchable by its PATCH one.
-  // Asserting across all methods at once would have flagged the pre-#2410
-  // rotation block — where the only parameterized registration was a PATCH —
-  // as a defect it did not have.
-  test.each([['get'], ['patch']])(
-    `every literal one-segment ${familyPrefix(param)}/<name> %s route is registered before the same-method ${param}`,
-    (method) => {
-      const layers = familyLayers(param).filter((l) => l.methods.includes(method));
-      const paramLayerIndex = layers.findIndex((l) => l.path === param);
+describe.each(PARAM_FAMILIES)(
+  'library.route $param ordering (BS#2113, BS#2156, BS#2410)',
+  ({ param, literals, expectedMethods }) => {
+    // Scoped by method: a Layer whose Route does not handle the request method
+    // never matches, so `/rotation/uncatalogued` (GET) is shadowable by
+    // `/rotation/:id`'s GET registration and untouchable by its PATCH one.
+    // Asserting across all methods at once would have flagged the pre-#2410
+    // rotation block — where the only parameterized registration was a PATCH —
+    // as a defect it did not have.
+    test.each([['get'], ['patch']])(
+      `every literal one-segment ${familyPrefix(param)}/<name> %s route is registered before the same-method ${param}`,
+      (method) => {
+        const layers = familyLayers(param).filter((l) => l.methods.includes(method));
+        const paramLayerIndex = layers.findIndex((l) => l.path === param);
 
-      expect(paramLayerIndex).toBeGreaterThan(-1);
+        expect(paramLayerIndex).toBeGreaterThan(-1);
 
-      const shadowableIndices = layers
-        .map((l, i) => ({ i, path: l.path }))
-        .filter((l) => isShadowableByParam(param, l.path))
-        .map((l) => l.i);
+        const shadowableIndices = layers
+          .map((l, i) => ({ i, path: l.path }))
+          .filter((l) => isShadowableByParam(param, l.path))
+          .map((l) => l.i);
 
-      for (const index of shadowableIndices) {
-        expect(index).toBeLessThan(paramLayerIndex);
+        for (const index of shadowableIndices) {
+          expect(index).toBeLessThan(paramLayerIndex);
+        }
       }
-    }
-  );
+    );
 
-  // The GET arm above is only load-bearing while a shadowable literal exists
-  // to order against. Before #2410 the rotation block had none and its
-  // assertion was vacuous; this pins that every named same-method literal is
-  // still present, so a router that lost `/rotation/uncatalogued` (or
-  // `/artists/by-code`) can't quietly satisfy the ordering test by having
-  // nothing left to shadow.
-  test('the GET pair is a real same-method hazard, not a vacuous assertion', () => {
-    const getLayers = familyLayers(param).filter((l) => l.methods.includes('get'));
-    const shadowable = getLayers.filter((l) => isShadowableByParam(param, l.path)).map((l) => l.path);
+    // The GET arm above is only load-bearing while a shadowable literal exists
+    // to order against. Before #2410 the rotation block had none and its
+    // assertion was vacuous; this pins that every named same-method literal is
+    // still present, so a router that lost `/rotation/uncatalogued` (or
+    // `/artists/by-code`) can't quietly satisfy the ordering test by having
+    // nothing left to shadow.
+    test('the GET pair is a real same-method hazard, not a vacuous assertion', () => {
+      const getLayers = familyLayers(param).filter((l) => l.methods.includes('get'));
+      const shadowable = getLayers.filter((l) => isShadowableByParam(param, l.path)).map((l) => l.path);
 
-    for (const literal of literals) {
-      expect(shadowable).toContain(literal);
-    }
-    expect(getLayers.some((l) => l.path === param)).toBe(true);
-  });
+      for (const literal of literals) {
+        expect(shadowable).toContain(literal);
+      }
+      expect(getLayers.some((l) => l.path === param)).toBe(true);
+    });
 
-  test(`registers exactly one handler per method on ${param} (GET read, PATCH write)`, () => {
-    const paramLayers = familyLayers(param).filter((l) => l.path === param);
+    test(`registers exactly one handler per method on ${param} (${expectedMethods.join(', ')})`, () => {
+      const paramLayers = familyLayers(param).filter((l) => l.path === param);
 
-    // One Layer per `library_route.<method>()` call, so the two registrations
-    // are two entries rather than one entry with two methods.
-    expect(
-      paramLayers
-        .map((l) => l.methods)
-        .flat()
-        .sort()
-    ).toEqual(['get', 'patch']);
-  });
-});
+      // One Layer per `library_route.<method>()` call, so N registrations are
+      // N entries rather than one entry with N methods.
+      expect(
+        paramLayers
+          .map((l) => l.methods)
+          .flat()
+          .sort()
+      ).toEqual(expectedMethods);
+    });
+  }
+);
 
 describe('library.route rotation behavior (BS#2113, BS#2410)', () => {
   test('a request to the literal /rotation/:rotation_id/tracks path still reaches its own handler', async () => {

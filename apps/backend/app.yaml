@@ -3327,6 +3327,94 @@ paths:
                       code_letters:
                         type: string
 
+    delete:
+      summary: Hard-delete an artist (BS#2562)
+      description: >-
+        Irreversible. Reproduces `/wxycdb`'s `ArtistAdminServlet.
+        processDeleteArtist` refusals, in the servlet's own order, keyed on
+        the same four dependent counts `GET`/`PATCH` on this path already
+        expose (`ArtistCardWithDependentCounts`, BS#2597) — this endpoint and
+        the artist card can never disagree about what blocks a delete. Every
+        `genre_artist_crossreference` row is deleted in the same transaction
+        (a multi-genre artist holds more than one — `artist_genre_key` is
+        unique on `(artist_id, genre_id)`, not `artist_id` alone);
+        `compilation_track_artist.track_artist_id` is left to its own
+        `ON DELETE set null` and is reported by the GET/PATCH response, never
+        a refusal reason here. Migration `0155`'s cascade invitation for the
+        two `NO ACTION` FKs (`genre_artist_crossreference.artist_id`,
+        `artist_library_crossreference.artist_id`) is deliberately declined —
+        dependents are resolved explicitly inside the transaction, mirroring
+        `DELETE /library/{id}`. The artist row plus its resolved dependents
+        are captured via the BS#2560 snapshot mechanism before any delete
+        statement runs, in the same transaction.
+      security:
+        - BearerAuth: ['catalog-write']
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Deleted; no body
+        '400':
+          description: Invalid artist ID
+        '404':
+          description: Artist not found
+        '409':
+          description: >-
+            Refused on the merits — `reason` names which of the four
+            dependent counts blocked the delete, checked in the servlet's
+            order (releases, then cross-reference-as-source, then
+            cross-reference-as-target, then library cross-reference). The
+            same non-zero count is also visible ahead of time on `GET`/`PATCH
+            /library/artists/{id}`'s `ArtistCardWithDependentCounts`
+            response, so a client can grey out the delete control rather than
+            eat this 409 blind.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['message', 'reason', 'count']
+                properties:
+                  message:
+                    type: string
+                    example: >-
+                      Cannot delete: artist has 3 releases on file. Delete or
+                      move those releases first.
+                  reason:
+                    type: string
+                    enum:
+                      - artist_has_releases
+                      - artist_crossreference_source
+                      - artist_crossreference_target
+                      - artist_library_crossreference
+                  count:
+                    type: integer
+                    description: The blocking dependent count named by `reason`
+        '503':
+          description: >-
+            The delete stood down rather than wait on rows a live writer
+            holds. Retryable, and says nothing about whether the artist is
+            deletable — deliberately not a 409, which on this endpoint means
+            "refused on the merits". Same `lock_timeout`-below-
+            `deadlock_timeout` mechanism as `DELETE /library/{id}`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: ['message', 'reason']
+                properties:
+                  message:
+                    type: string
+                    example: >-
+                      Could not delete: the artist is being written to right
+                      now. Try again in a moment.
+                  reason:
+                    type: string
+                    enum: ['lock_unavailable']
+
   /library/artists/{id}/releases:
     get:
       summary: List an artist's releases (BS#2156)

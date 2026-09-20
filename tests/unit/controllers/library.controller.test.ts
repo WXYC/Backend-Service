@@ -166,6 +166,23 @@ const mockDeleteAlbumFromDB =
     ) => Promise<{ outcome: 'deleted' } | { outcome: 'not_found' } | { outcome: 'lock_unavailable' }>
   >();
 
+// DELETE /library/artists/:id (BS#2562).
+type DeleteArtistOutcomeMock =
+  | { outcome: 'deleted' }
+  | { outcome: 'not_found' }
+  | { outcome: 'lock_unavailable' }
+  | { outcome: 'has_releases'; count: number }
+  | { outcome: 'has_crossreference_as_source'; count: number }
+  | { outcome: 'has_crossreference_as_target'; count: number }
+  | { outcome: 'has_library_crossreference'; count: number };
+const mockDeleteArtistFromDB =
+  jest.fn<
+    (
+      artistId: number,
+      actor?: { userId?: string | null; email?: string | null; role?: string | null }
+    ) => Promise<DeleteArtistOutcomeMock>
+  >();
+
 jest.mock('../../../apps/backend/services/library.service', () => ({
   getAlbumFromDB: mockGetAlbumFromDB,
   getAlbumByLegacyId: mockGetAlbumByLegacyId,
@@ -234,6 +251,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   albumCodeNumberTaken: mockAlbumCodeNumberTaken,
   recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
+  deleteArtistFromDB: mockDeleteArtistFromDB,
   getArtistCardById: mockGetArtistCardById,
   getArtistCardByIdInGenre: mockGetArtistCardByIdInGenre,
   getArtistDependentCounts: mockGetArtistDependentCounts,
@@ -341,6 +359,7 @@ import {
   getArtistCard,
   updateArtistCard,
   getArtistReleases,
+  deleteArtist,
   peekArtistReleaseNumber,
   updateRotation,
   getRotationCards,
@@ -4186,6 +4205,152 @@ describe('library.controller', () => {
       await deleteAlbum(req, res, next);
 
       expect(mockDeleteAlbumFromDB).toHaveBeenCalledWith(42, { userId: null, email: null, role: null });
+      expect(res.status).toHaveBeenCalledWith(204);
+    });
+  });
+
+  describe('deleteArtist (BS#2562)', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('returns 400 for a non-numeric id', async () => {
+      const req = { params: { id: 'abc' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(deleteArtist(req, res, next)).rejects.toThrow('Invalid artist ID');
+      expect(mockDeleteArtistFromDB).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the artist does not exist', async () => {
+      mockDeleteArtistFromDB.mockResolvedValue({ outcome: 'not_found' });
+      const req = { params: { id: '999' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(deleteArtist(req, res, next)).rejects.toThrow('Artist not found');
+      expect(mockDeleteArtistFromDB).toHaveBeenCalledWith(999, expect.any(Object));
+    });
+
+    // `.end()`, not `.send()` -- matching `deleteAlbum`'s spelling for a
+    // bodiless 204.
+    it('deletes a clean artist and returns a bodiless 204', async () => {
+      mockDeleteArtistFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteArtist(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(204);
+      expect(res.end).toHaveBeenCalled();
+      expect(res.json).not.toHaveBeenCalled();
+      expect(res.send).not.toHaveBeenCalled();
+    });
+
+    it('returns a retryable 503 when the delete stood down on lock contention', async () => {
+      mockDeleteArtistFromDB.mockResolvedValue({ outcome: 'lock_unavailable' });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteArtist(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith({
+        message: expect.stringContaining('Try again'),
+        reason: 'lock_unavailable',
+      });
+    });
+
+    // The four refusals, each with its own reason and message -- BS#2562's
+    // whole point. `count` rides on every one so the client can render the
+    // same number `GET`/`PATCH /library/artists/:id` already exposed.
+    describe('the four dependent-count refusals', () => {
+      it.each([
+        [
+          'has_releases' as const,
+          'artist_has_releases',
+          'Cannot delete: artist has 3 releases on file. Delete or move those releases first.',
+        ],
+        [
+          'has_crossreference_as_source' as const,
+          'artist_crossreference_source',
+          'Cannot delete: artist is the source of 3 cross-references to other artists.',
+        ],
+        [
+          'has_crossreference_as_target' as const,
+          'artist_crossreference_target',
+          'Cannot delete: artist is the target of 3 cross-references from other artists.',
+        ],
+        [
+          'has_library_crossreference' as const,
+          'artist_library_crossreference',
+          'Cannot delete: artist has 3 release cross-references on file.',
+        ],
+      ])('maps %s to a 409 with reason %s', async (outcome, reason, message) => {
+        mockDeleteArtistFromDB.mockResolvedValue({ outcome, count: 3 });
+        const req = { params: { id: '42' } } as unknown as Request;
+        const res = mockResponse();
+
+        await deleteArtist(req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith({ message, reason, count: 3 });
+      });
+
+      it('singularizes the message body at a count of exactly one', async () => {
+        mockDeleteArtistFromDB.mockResolvedValue({ outcome: 'has_releases', count: 1 });
+        const req = { params: { id: '42' } } as unknown as Request;
+        const res = mockResponse();
+
+        await deleteArtist(req, res, next);
+
+        expect(res.json).toHaveBeenCalledWith({
+          message: 'Cannot delete: artist has 1 release on file. Delete or move those releases first.',
+          reason: 'artist_has_releases',
+          count: 1,
+        });
+      });
+    });
+
+    // Same audit-trail rationale as deleteAlbum's finding 5/6: `catalog:write`
+    // is held by two roles, so incident response needs the actor.
+    it('threads the authenticated subject through to the service', async () => {
+      mockDeleteArtistFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = {
+        params: { id: '42' },
+        auth: { id: 'user-abc', email: 'md@wxyc.org', role: 'musicDirector' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteArtist(req, res, next);
+
+      expect(mockDeleteArtistFromDB).toHaveBeenCalledWith(42, {
+        userId: 'user-abc',
+        email: 'md@wxyc.org',
+        role: 'musicDirector',
+      });
+    });
+
+    it('falls back to the JWT `sub` claim when `id` is absent', async () => {
+      mockDeleteArtistFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = {
+        params: { id: '42' },
+        auth: { sub: 'subject-xyz', email: 'sm@wxyc.org', role: 'stationManager' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteArtist(req, res, next);
+
+      expect(mockDeleteArtistFromDB).toHaveBeenCalledWith(42, expect.objectContaining({ userId: 'subject-xyz' }));
+    });
+
+    it('still deletes when no auth payload is present, recording nulls', async () => {
+      mockDeleteArtistFromDB.mockResolvedValue({ outcome: 'deleted' });
+      const req = { params: { id: '42' } } as unknown as Request;
+      const res = mockResponse();
+
+      await deleteArtist(req, res, next);
+
+      expect(mockDeleteArtistFromDB).toHaveBeenCalledWith(42, { userId: null, email: null, role: null });
       expect(res.status).toHaveBeenCalledWith(204);
     });
   });
