@@ -1589,7 +1589,14 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  * `$ref`'d from `/artists/peek-code`, where volume letters are meaningless
  * (artist codes have no volume dimension), so widening it there would
  * declare a field that operation never returns. `slots_in_use` is declared
- * only on this operation's own response schema in `apps/backend/app.yaml`.
+ * only on this operation's own response schema in `apps/backend/app.yaml` --
+ * `app.yaml` feeds no generator, so the field is tracked separately as an
+ * additive follow-up against `wxyc-shared/api.yaml`, the actual codegen
+ * source. `next_code_number` and `slots_in_use` are two independent reads run
+ * under one `Promise.all`, not one snapshot -- a release filed concurrently
+ * between them could in principle make the two disagree. Harmless here: this
+ * is a preview, and the create path it predicts re-validates the slot itself
+ * rather than trusting this response.
  * Existence is resolved through `getArtistCardById`, the
  * same 404 predicate GET/PATCH `/artists/:id` and `/artists/:id/releases`
  * use — so an unknown id (or an artist row with no
