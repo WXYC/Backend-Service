@@ -4521,7 +4521,20 @@ describe('Library Artist Card (BS#2156)', () => {
           code_volume_letters: 'b',
         })
         .expect(201);
-      await addRelease(artist.id, `Reversed Unlettered ${Date.now()}`);
+      // Explicit code_number: 1, not the addRelease helper -- with 1 already
+      // occupied by the A/B siblings above, auto-assignment would land this
+      // at 2 instead of joining the same slot the forward-order test fills.
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Reversed Unlettered ${Date.now()}`,
+          artist_id: artist.id,
+          label: 'Test Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
 
       const res = await auth.get(`/library/artists/${artist.id}/next-release-number?genre_id=11`).expect(200);
 
