@@ -1591,7 +1591,10 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  * catalogued in would otherwise still answer 200 with a confident preview for
  * a shelf the artist doesn't occupy. `artistExistsInGenre` -- the same check
  * `updateAlbum` runs for its own genre-touching PATCH -- gates the genre too,
- * refusing with that path's identical 400 shape.
+ * refusing with that path's identical 400 shape. That makes three sequential
+ * reads on this path now (card, genre membership, generator); consolidating
+ * them is deferred, not forgotten (review finding 13) -- this is a
+ * `catalog:['write']`-gated preview, not a hot path.
  */
 export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, unknown, { genre_id?: string }> = async (
   req,
