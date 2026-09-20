@@ -3585,8 +3585,8 @@ paths:
 
         Gated at `requirePermissions({ catalog: ['write'] })` — musicDirector or
         above — matching the `/library/artists/peek-code` sibling it mirrors: both
-        back the create flow, and the `{ next_code_number }` response is internal
-        with no wxyc-shared contract schema.
+        back the create flow, and both `$ref` the shared `NextCodeNumberResponse`
+        in `wxyc-shared/api.yaml` for `next_code_number`.
 
 
         The response also carries `slots_in_use` (BS#2588): every occupied
@@ -3595,9 +3595,13 @@ paths:
         `""` denotes the unlettered volume as a MEMBER of the set, not an
         absence — a shelf holding `7` and `7A` reports `"7": ["", "A"]`, so the
         next free letter is `B`. This widens ONLY this operation's own inline
-        response schema, never the `NextCodeNumberResponse` shape
-        `/library/artists/peek-code` shares with it — artist codes have no
-        volume dimension, so that sibling's declared body is unchanged.
+        response schema below, never the shared `NextCodeNumberResponse` shape
+        `/library/artists/peek-code` also uses — artist codes have no volume
+        dimension, so that sibling's declared body is unchanged. `app.yaml` is
+        Swagger-UI documentation only, not a codegen source, so `slots_in_use`
+        is additionally tracked as its own follow-up in `wxyc-shared/api.yaml`
+        (see the companion issue linked from BS#2588) rather than declared here
+        alone.
       security:
         - BearerAuth: ['station-management']
       parameters:
