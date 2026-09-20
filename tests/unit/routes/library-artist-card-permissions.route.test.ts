@@ -111,7 +111,11 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getRotationTracksFromRelease: jest.fn(),
   getLibraryRowById: jest.fn(),
   updateAlbumInDB: jest.fn(),
-  artistExistsInGenre: jest.fn(),
+  // BS#2587 review finding 2: `peekArtistReleaseNumber` now gates on genre
+  // membership too. Not exercised by permission-tier assertions in this
+  // file, so a fixed `true` keeps every existing case on its happy path
+  // (`clearMocks`, not `resetMocks`, so this survives every test).
+  artistExistsInGenre: jest.fn().mockResolvedValue(true),
   albumCodeNumberTaken: jest.fn(),
   recheckDiscogsAvailability: jest.fn(),
   getArtistCardById: mockGetArtistCardById,

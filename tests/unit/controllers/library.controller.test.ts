@@ -84,6 +84,17 @@ const mockUpdateAlbumInDB =
 const mockGetFormatById = jest.fn<(id: number) => Promise<{ id: number; format_name: string } | undefined>>();
 const mockArtistExistsInGenre = jest.fn<(artistId: number, genreId: number) => Promise<boolean>>();
 const mockAlbumCodeNumberTaken = jest.fn<(artistId: number, code: number, exclude: number) => Promise<boolean>>();
+// BS#2587 review finding 1: the genre-move real-slot occupancy guard.
+const mockFindLibrarySlotOccupant =
+  jest.fn<
+    (
+      artistId: number,
+      genreId: number,
+      codeNumber: number,
+      codeVolumeLetters: string | null,
+      excludeId: number
+    ) => Promise<{ id: number } | undefined>
+  >();
 const mockUpdateOnStreaming = jest.fn<() => Promise<unknown>>();
 const mockUpdateArtworkUrl = jest.fn<() => Promise<unknown>>();
 const mockGetLabelById = jest.fn<(id: number) => Promise<{ id: number; label_name: string } | undefined>>();
@@ -249,6 +260,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   updateAlbumInDB: mockUpdateAlbumInDB,
   artistExistsInGenre: mockArtistExistsInGenre,
   albumCodeNumberTaken: mockAlbumCodeNumberTaken,
+  findLibrarySlotOccupant: mockFindLibrarySlotOccupant,
   recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
   deleteAlbumFromDB: mockDeleteAlbumFromDB,
   deleteArtistFromDB: mockDeleteArtistFromDB,
@@ -3293,6 +3305,9 @@ describe('library.controller', () => {
       mockGetAlbumFromDB.mockResolvedValue(fullAlbum);
       mockGetArtistNameById.mockResolvedValue('Juana Molina');
       mockArtistExistsInGenre.mockResolvedValue(true);
+      // Default: the destination slot is free, so tests that touch genre_id
+      // only incidentally don't have to mock this themselves.
+      mockFindLibrarySlotOccupant.mockResolvedValue(undefined);
     });
 
     describe('format_id existence guard (#1550)', () => {
@@ -3670,32 +3685,67 @@ describe('library.controller', () => {
       });
     });
 
-    // BS#2587 follow-up, corrected: a genre-only move (same artist) does NOT
-    // run the collision/regenerate guard. An earlier revision of this fix
-    // routed genre-only moves through it anyway, but the guard's collision
-    // check (`albumCodeNumberTaken`) is artist-wide, not genre-scoped
-    // (#2579), so it can fire on a same-number collision in some OTHER genre
-    // the artist holds and burn a code_number that was actually free on the
-    // destination shelf -- renumbering a physical disc for no reason. That
-    // is new exposure a genre-only move never had before this PR, since
-    // numbering used to be artist-wide and a genre-only move never touched
-    // code_number at all. Until `albumCodeNumberTaken` is genre-scoped
-    // (#2579), the correct behavior is to leave code_number exactly as
-    // stored on a genre-only move and accept that an actual destination-shelf
-    // collision goes uncaught, same as the pre-#2587 status quo.
-    describe('genre-only move leaves code_number untouched (BS#2587 follow-up)', () => {
+    // BS#2587 review finding 1: a genre-touching move (genre-only, or riding
+    // alongside an artist move) now refuses when the destination shelf slot
+    // -- the REAL tuple `(artist_id, genre_id, code_number,
+    // code_volume_letters)` -- is already occupied, instead of silently
+    // filing a second release into the same physical slot. An earlier
+    // revision of this fix left genre-only moves unchecked entirely, on the
+    // (correct, but not the whole story) observation that
+    // `albumCodeNumberTaken` is genre-blind; the fix is a real-slot check via
+    // `findLibrarySlotOccupant`, not skipping the check.
+    describe('genre-move real-slot occupancy guard (BS#2587 review finding 1)', () => {
       afterEach(() => {
         mockAlbumCodeNumberTaken.mockReset();
         mockGenerateAlbumCodeNumber.mockReset();
+        mockFindLibrarySlotOccupant.mockReset();
       });
 
-      it('does not consult the collision guard or regenerate on a genre-only move', async () => {
+      it('refuses a genre-only move onto an already-occupied destination slot (409)', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ genre_id: 15 }), res, next)).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'library_slot_conflict',
+        });
+
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(
+          existingRow.artist_id,
+          15,
+          existingRow.code_number,
+          existingRow.code_volume_letters,
+          42
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      // The hole finding 1 closes: an explicit code_number in the body must
+      // be checked too, not special-cased through because it was "chosen".
+      it('refuses an explicit colliding code_number on a genre-only move', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ genre_id: 15, code_number: 20 }), res, next)).rejects.toMatchObject({
+          statusCode: 409,
+        });
+
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(
+          existingRow.artist_id,
+          15,
+          20,
+          existingRow.code_volume_letters,
+          42
+        );
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('passes a genre-only move through unchanged when the destination slot is free', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue(undefined);
         const res = mockResponse();
 
         await updateAlbum(reqFor({ genre_id: 15 }), res, next);
 
-        // existingRow.artist_id (7) is unchanged -- only the genre moved, so
-        // the artist-move guard never runs.
         expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
         expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
         const updates = mockUpdateAlbumInDB.mock.calls[0][1];
@@ -3704,7 +3754,8 @@ describe('library.controller', () => {
         expect(res.status).toHaveBeenCalledWith(200);
       });
 
-      it('still writes an explicit destination code_number verbatim on a genre-only move', async () => {
+      it('writes an explicit destination code_number verbatim on a free genre-only move', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue(undefined);
         const res = mockResponse();
 
         await updateAlbum(reqFor({ genre_id: 15, code_number: 20 }), res, next);
@@ -3715,6 +3766,25 @@ describe('library.controller', () => {
           42,
           expect.objectContaining({ genre_id: 15, code_number: 20 })
         );
+      });
+
+      // `exclude_library_id` is what lets a no-op re-save pass -- pin the
+      // argument so a regression that drops it (and starts colliding a row
+      // against its own stored slot) goes red rather than merely un-covered.
+      it('excludes the row being edited from the occupancy check', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ genre_id: existingRow.genre_id }), res, next);
+
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(
+          existingRow.artist_id,
+          existingRow.genre_id,
+          existingRow.code_number,
+          existingRow.code_volume_letters,
+          42
+        );
+        expect(res.status).toHaveBeenCalledWith(200);
       });
     });
 
@@ -5376,6 +5446,7 @@ describe('library.controller', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      mockArtistExistsInGenre.mockResolvedValue(true);
     });
 
     // The number is `generateAlbumCodeNumber` verbatim (MAX(code_number)+1
@@ -5422,6 +5493,25 @@ describe('library.controller', () => {
       expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
     });
 
+    // BS#2587 review finding 2: the artist-wide 404 above does not prove the
+    // artist is catalogued in the QUERIED genre, so a well-formed but wrong
+    // genre_id previously still answered 200 with a confident preview for a
+    // shelf the artist doesn't occupy. Same check, same 400 shape, as
+    // `updateAlbum`'s genre-touching PATCH.
+    it('returns 400 for a genre the artist is not catalogued in, without invoking the generator', async () => {
+      mockGetArtistCardById.mockResolvedValue(anyCard);
+      mockArtistExistsInGenre.mockResolvedValue(false);
+      const req = { params: { id: '42' }, query: { genre_id: '99' } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(peekArtistReleaseNumber(req, res, next)).rejects.toMatchObject({
+        statusCode: 400,
+        message: 'Artist is not catalogued in the selected genre',
+      });
+      expect(mockArtistExistsInGenre).toHaveBeenCalledWith(42, 99);
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+    });
+
     // A malformed id is the named 400 from `parseArtistId`, never a 500, and it
     // reaches neither the existence read nor the generator.
     it.each([
@@ -5447,17 +5537,29 @@ describe('library.controller', () => {
     // own required `genre_id`, and it must reach neither the existence read
     // nor the generator.
     it.each([
-      ['missing', undefined],
       ['non-numeric', 'abc'],
       ['zero', '0'],
       ['negative', '-11'],
       ['repeated', ['11', '15']],
     ])('rejects a genre_id that is %s with 400', async (_label, rawGenreId) => {
-      const query = rawGenreId === undefined ? {} : { genre_id: rawGenreId };
-      const req = { params: { id: '42' }, query } as unknown as Request;
+      const req = { params: { id: '42' }, query: { genre_id: rawGenreId } } as unknown as Request;
       const res = mockResponse();
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('genre_id');
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+    });
+
+    // Finding 12: the generic 'genre_id' substring above is satisfied by
+    // EITHER `parseCodeQueryInt` branch, so it cannot tell "the parameter was
+    // never sent" from "a value was sent and failed the range check" --
+    // pinning the distinguishable "Missing query parameter" message is what
+    // makes deleting the `raw === undefined` branch go red.
+    it('rejects a missing genre_id with the distinct "missing" message, not the range message', async () => {
+      const req = { params: { id: '42' }, query: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Missing query parameter: genre_id');
       expect(mockGetArtistCardById).not.toHaveBeenCalled();
       expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
     });

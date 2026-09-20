@@ -4703,10 +4703,14 @@ export const countDeletedArchiveBatches = async (search?: string): Promise<numbe
  * Honest about what it does not cover: `POST /library` does not take this lock
  * (it calls `generateAlbumCodeNumber` and inserts, unlocked, by design — see
  * that function), so a librarian filing a new release at the same instant can
- * still land on the code a restore just picked. Closing that needs the
- * uniqueness constraint on the slot tuple, which is step 4 of the dedup job's
- * README, not a lock this endpoint can take unilaterally. Restores are rare
- * and hand-driven, so serializing all of them behind one key costs nothing.
+ * still land on the code a restore just picked. `generateAlbumCodeNumber`
+ * becoming genre-scoped (BS#2587) widened this from a collision reachable
+ * only for a single-genre artist to one reachable for any artist, since both
+ * computations now key the same `(artist_id, genre_id)` shelf. Closing that
+ * needs the uniqueness constraint on the slot tuple, which is step 4 of the
+ * dedup job's README, not a lock this endpoint can take unilaterally.
+ * Restores are rare and hand-driven, so serializing all of them behind one
+ * key costs nothing.
  *
  * MUST stay distinct from the other advisory-lock keys in this codebase —
  * `pg_advisory_xact_lock` and `pg_try_advisory_lock` share one lock space
@@ -4914,8 +4918,11 @@ type LibrarySlot = { artist_id: number; genre_id: number; code_number: number; c
  * sees 273 — 3,035 false positives out of 64,359 rows. Reaching for it here
  * would decline or relocate restores whose slot was free.
  * WXYC/Backend-Service#2579 owns fixing it; this endpoint does not wait on
- * that. `generateAlbumCodeNumber` is genre-blind in the same way, which is why
- * `probeLibrarySlot` computes the next free code itself instead of calling it.
+ * that. `generateAlbumCodeNumber` is genre-scoped too now (BS#2587), but
+ * `probeLibrarySlot` still computes its own next-free code rather than
+ * calling it, for two reasons that survive that change: it holds `FOR
+ * UPDATE` on the shelf rows below, and its occupancy match is
+ * volume-letter-aware, which a bare `MAX(code_number)` is not.
  */
 const librarySlotKey = (row: LibrarySlot): string =>
   `${row.artist_id}/${row.genre_id}/${row.code_number}/${(row.code_volume_letters ?? '').toUpperCase()}`;
@@ -4966,6 +4973,46 @@ const probeLibrarySlot = async (
   const occupant = shelf.find((row) => librarySlotKey(row) === key);
   const highest = shelf.reduce((max, row) => Math.max(max, Number(row.code_number)), 0);
   return { occupant, next_free_code_number: highest + 1 };
+};
+
+/**
+ * Real-slot occupancy check for `updateAlbum`'s genre-move guard (BS#2587
+ * review, finding 1) -- reuses `librarySlotKey` rather than a third
+ * definition of the tuple, and deliberately NOT `albumCodeNumberTaken`,
+ * whose genre-blind `(artist_id, code_number)` key is measured against
+ * production at 3,308 apparent collisions where this key sees 273.
+ *
+ * Unlike `probeLibrarySlot`, this does not hold `FOR UPDATE`: that lock
+ * exists because a restore replays a whole batch under
+ * `RESTORE_BATCH_ADVISORY_LOCK_KEY` and must stop a librarian renumbering a
+ * shelf row mid-replay. An ordinary PATCH takes no such lock, so this is a
+ * plain read -- a check-then-act race remains (two concurrent PATCHes could
+ * both see the slot free), and closing it is WXYC/Backend-Service#2589's
+ * unique index, not this function's job.
+ *
+ * `exclude_library_id` drops the row being edited from its own shelf read,
+ * so a no-op re-save onto the row's own slot never refuses against itself.
+ */
+export const findLibrarySlotOccupant = async (
+  artist_id: number,
+  genre_id: number,
+  code_number: number,
+  code_volume_letters: string | null,
+  exclude_library_id: number
+): Promise<{ id: number } | undefined> => {
+  const shelf = await db
+    .select({
+      id: library.id,
+      artist_id: library.artist_id,
+      genre_id: library.genre_id,
+      code_number: library.code_number,
+      code_volume_letters: library.code_volume_letters,
+    })
+    .from(library)
+    .where(and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id), ne(library.id, exclude_library_id)));
+
+  const key = librarySlotKey({ artist_id, genre_id, code_number, code_volume_letters });
+  return shelf.find((row) => librarySlotKey(row) === key);
 };
 
 /**

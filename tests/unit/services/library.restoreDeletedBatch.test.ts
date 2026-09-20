@@ -385,8 +385,10 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
       expect(ops.filter((op) => op.op === 'delete')).toHaveLength(0);
     });
 
-    // MAX(code_number) + 1 over the GENRE-SCOPED shelf, not
-    // `generateAlbumCodeNumber`'s artist-wide max.
+    // MAX(code_number) + 1 over the GENRE-SCOPED shelf via `probeLibrarySlot`
+    // -- computed separately from `generateAlbumCodeNumber` (genre-scoped too
+    // since BS#2587) because this one holds `FOR UPDATE` on the shelf rows
+    // and its occupancy match is volume-letter-aware.
     it('files the card at the next free code on that shelf when asked to', async () => {
       const { outcome, ops } = await run({
         shelf: [shelfRow({ id: 500, code_number: 7 }), shelfRow({ id: 501, code_number: 11 })],

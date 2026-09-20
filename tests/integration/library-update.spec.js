@@ -497,6 +497,18 @@ describe('PATCH /library/:id', () => {
       originArtist = origin.body;
     });
 
+    // Finding 10 (review): the sibling direct-insert fixture in
+    // `library.spec.js` ("auto-generates code_number scoped to the release
+    // genre") cleans up its seeded crossreference in a `finally`; this one
+    // must match, or destArtist keeps a second-genre membership no other
+    // fixture in this file expects.
+    afterAll(async () => {
+      const sql = getTestDb();
+      await sql.unsafe(
+        `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${destArtist.id} AND genre_id = 15`
+      );
+    });
+
     test('regenerates from the destination genre shelf (2), not the artist-wide max (41)', async () => {
       const moving = await auth
         .post('/library')
@@ -530,6 +542,78 @@ describe('PATCH /library/:id', () => {
       // the exact defect BS#2587 fixed, and the point of shaping the fixture
       // this way rather than the other way around.
       expect(res.body.code_number).toBe(2);
+    });
+  });
+
+  // BS#2587 review finding 1: the exact sequence that produced the
+  // duplicate-slot hole -- an artist catalogued in two genres, holding
+  // code_number 1 in each (numbering restarts at 1 per genre since #2587),
+  // moved from one genre to the other -- must now refuse rather than
+  // silently file two releases onto one physical shelf slot.
+  describe('genre-only move onto an occupied destination slot refuses (BS#2587 review finding 1)', () => {
+    let artist;
+    let movingAlbum;
+
+    beforeAll(async () => {
+      const a = await auth
+        .post('/library/artists')
+        .send({
+          artist_name: `Patch Genre Collision Artist ${uniq}`,
+          code_letters: 'GC',
+          genre_id: 11,
+          code_number: 9470 + (uniq % 500),
+        })
+        .expect(201);
+      artist = a.body;
+
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 15, ${9470 + (uniq % 500)})`
+      );
+
+      const rock = await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Collision Rock 1 ${uniq}`,
+          artist_id: artist.id,
+          label: 'Genre Collision Label',
+          genre_id: 11,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+      movingAlbum = rock.body;
+
+      await auth
+        .post('/library')
+        .send({
+          album_title: `Genre Collision Electronic 1 ${uniq}`,
+          artist_id: artist.id,
+          label: 'Genre Collision Label',
+          genre_id: 15,
+          format_id: 1,
+          code_number: 1,
+        })
+        .expect(201);
+    });
+
+    afterAll(async () => {
+      const sql = getTestDb();
+      await sql.unsafe(
+        `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 15`
+      );
+    });
+
+    test('refuses to move the Rock release onto the Electronic shelf when code_number 1 is already there', async () => {
+      const res = await auth.patch(`/library/${movingAlbum.id}`).send({ genre_id: 15 }).expect(409);
+      expectErrorContains(res, 'already taken');
+
+      // Refused, not silently relocated: the release stayed on its
+      // original shelf.
+      const info = await auth.get('/library/info').query({ album_id: movingAlbum.id }).expect(200);
+      expect(info.body.genre_id).toBe(11);
+      expect(info.body.code_number).toBe(1);
     });
   });
 });
