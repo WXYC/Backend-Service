@@ -4989,6 +4989,42 @@ const probeLibrarySlot = async (
 };
 
 /**
+ * The occupied volume-letter slots on an artist's genre-scoped shelf, keyed
+ * by `code_number` (as a string) to the UPPER-CASED letters present there --
+ * `""` for the unlettered volume, a MEMBER of the set, not an absence. Backs
+ * `peekArtistReleaseNumber`'s `slots_in_use`, so the client can answer "which
+ * letter is free at number N" without a second round trip.
+ *
+ * Reads the same shelf `probeLibrarySlot` locks for a write -- every row at
+ * `(artist_id, genre_id)` -- but takes no `FOR UPDATE`, since this is a plain
+ * preview, not a replay. Each row's letter folds through the SAME
+ * `UPPER(COALESCE(...,''))` `librarySlotKey` applies, so a slot this reports
+ * occupied can never disagree with what `librarySlotKey` would match as
+ * taken. Letters are de-duplicated per number into a SORTED array, never
+ * reduced to a max, so the shape cannot depend on the order Postgres happens
+ * to return rows in -- the defect WXYC/dj-site#1581 found in a removed
+ * client-side helper.
+ */
+export const listShelfVolumeLetters = async (
+  artist_id: number,
+  genre_id: number
+): Promise<Record<string, string[]>> => {
+  const shelf = await db
+    .select({ code_number: library.code_number, code_volume_letters: library.code_volume_letters })
+    .from(library)
+    .where(and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id)));
+
+  const byNumber = new Map<string, Set<string>>();
+  for (const row of shelf) {
+    const letters = byNumber.get(String(row.code_number)) ?? new Set<string>();
+    letters.add((row.code_volume_letters ?? '').toUpperCase());
+    byNumber.set(String(row.code_number), letters);
+  }
+
+  return Object.fromEntries([...byNumber].map(([code_number, letters]) => [code_number, [...letters].sort()]));
+};
+
+/**
  * Real-slot occupancy check for `updateAlbum`'s genre-move guard (BS#2587
  * review, finding 1) -- reuses `librarySlotKey`'s TUPLE, not
  * `albumCodeNumberTaken`, whose genre-blind key sees 3,308 apparent

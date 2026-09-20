@@ -71,6 +71,7 @@ const mockGetArtistNameById = jestGlobals.fn<() => Promise<string | null>>();
 const mockGetReleasesForArtist = jestGlobals.fn<() => Promise<unknown[]>>();
 const mockCountReleasesForArtist = jestGlobals.fn<() => Promise<number>>();
 const mockGenerateAlbumCodeNumber = jestGlobals.fn<() => Promise<number>>();
+const mockListShelfVolumeLetters = jestGlobals.fn<() => Promise<Record<string, string[]>>>();
 // DELETE /library/artists/:id (BS#2562).
 const mockDeleteArtistFromDB = jestGlobals.fn<() => Promise<{ outcome: string }>>();
 
@@ -101,6 +102,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getArtistByCode: jest.fn(),
   getArtistById: jest.fn(),
   generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
+  listShelfVolumeLetters: mockListShelfVolumeLetters,
   generateArtistNumber: jest.fn(),
   getGenresFromDB: jest.fn(),
   insertGenre: jest.fn(),
@@ -190,6 +192,7 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
     mockGetReleasesForArtist.mockReset().mockResolvedValue([]);
     mockCountReleasesForArtist.mockReset().mockResolvedValue(0);
     mockGenerateAlbumCodeNumber.mockReset().mockResolvedValue(1);
+    mockListShelfVolumeLetters.mockReset().mockResolvedValue({});
     mockDeleteArtistFromDB.mockReset().mockResolvedValue({ outcome: 'deleted' });
   });
 
@@ -298,7 +301,7 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
         .get('/library/artists/1/next-release-number?genre_id=11')
         .set('Authorization', 'Bearer test-token');
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ next_code_number: 1 });
+      expect(res.body).toEqual({ next_code_number: 1, slots_in_use: {} });
       expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(1, 11);
     });
 
