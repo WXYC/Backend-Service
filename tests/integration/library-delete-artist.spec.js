@@ -182,6 +182,48 @@ describe('DELETE /library/artists/:id (BS#2562)', () => {
     expect(captured.children.compilation_track_artist).toEqual([]);
   });
 
+  // Closes the loop the snapshot assertions above stop short of: the archive
+  // listing has to describe an ARTIST batch, and the `unrecoverable` list is
+  // the field that can get this wrong silently. It was a single constant for
+  // every batch, so an artist batch was handed the five RELEASE tables -- none
+  // of which an artist delete touches -- while saying nothing about the five it
+  // does. The restore consumer is the reader that would be misled.
+  test('lists the artist batch with the ARTIST unrecoverable dependents, not the release ones', async () => {
+    const artist = await createArtist();
+    await auth.delete(`/library/artists/${artist.id}`).expect(204);
+
+    const res = await auth.get('/library/deleted').query({ search: artist.artist_name }).expect(200);
+
+    // Located by entity id rather than by taking `results[0]`. `search` is a
+    // substring match, and these fixtures end in a sequence number, so
+    // `... Artist X-1` is a prefix of `... Artist X-10` -- picking the first
+    // result would make this test's correctness depend on where it sits in the
+    // file.
+    const batch = res.body.results.find((candidate) =>
+      candidate.entities.some((entity) => entity.row?.id === artist.id)
+    );
+    expect(batch).toBeDefined();
+    expect(batch.entities).toHaveLength(1);
+    expect(batch.entities[0].entity_kind).toBe('artist');
+    expect(batch.entities[0].table).toBe('artists');
+
+    expect([...batch.unrecoverable].sort()).toEqual(
+      ['artist_search_alias', 'artist_similar_artists', 'artist_station_plays', 'concerts', 'concert_performers'].sort()
+    );
+    // Named explicitly rather than left to the equality above: these are the
+    // five the defect put here, and a future change that re-broadened the list
+    // should fail on the reason, not just on the shape.
+    for (const releaseTable of [
+      'album_metadata',
+      'library_identity',
+      'library_identity_source',
+      'uncovered_release_search_markers',
+      'album_review_submissions',
+    ]) {
+      expect(batch.unrecoverable).not.toContain(releaseTable);
+    }
+  });
+
   test('returns 404 for an unknown id', async () => {
     await auth.delete('/library/artists/999999999').expect(404);
   });
@@ -275,6 +317,27 @@ describe('DELETE /library/artists/:id (BS#2562)', () => {
     );
     expect(after).toHaveLength(0);
     await auth.get(`/library/artists/${artist.id}`).expect(404);
+
+    // The snapshot has to carry BOTH memberships, and this is the one
+    // population where that can fail silently: `getArtistCardById` reports a
+    // multi-genre artist under its lowest `genre_id` alone, so a capture built
+    // from a card-shaped read would store one row here and every other
+    // assertion in this test would stay green while the snapshot lost the only
+    // record of the artist's second shelf section.
+    const [snapshot] = await sql.unsafe(
+      `SELECT captured FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'artist' AND entity_id = $1`,
+      [artist.id]
+    );
+    const capturedGenres = snapshot.captured.children.genre_artist_crossreference;
+    expect(capturedGenres).toHaveLength(2);
+    expect(capturedGenres.map((row) => row.genre_id).sort((a, b) => a - b)).toEqual(
+      [GEN, GEN2].sort((a, b) => a - b)
+    );
+    // Each membership carries its own shelf code, and a restore needs both:
+    // one code cannot stand in for the other.
+    for (const row of capturedGenres) {
+      expect(typeof row.artist_genre_code).toBe('number');
+    }
   });
 
   test('deletes through a compilation_track_artist credit, nulling track_artist_id rather than refusing', async () => {
@@ -299,5 +362,20 @@ describe('DELETE /library/artists/:id (BS#2562)', () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0].track_artist_id).toBeNull();
+
+    // And the snapshot holds the credit as it stood BEFORE the null, which is
+    // the only surviving record of which artist that track was canonicalized
+    // to. `track_artist_id` is the field that matters: the live row's copy is
+    // now NULL, so a capture that read after the delete — or that stored an
+    // empty array for an artist that has credits — would leave the link
+    // unrecoverable with every other assertion here still green.
+    const [snapshot] = await sql.unsafe(
+      `SELECT captured FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'artist' AND entity_id = $1`,
+      [artist.id]
+    );
+    const capturedCredits = snapshot.captured.children.compilation_track_artist;
+    expect(capturedCredits).toHaveLength(1);
+    expect(capturedCredits[0].id).toBe(cta.id);
+    expect(capturedCredits[0].track_artist_id).toBe(artist.id);
   });
 });

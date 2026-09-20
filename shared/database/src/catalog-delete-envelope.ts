@@ -61,11 +61,18 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Parent-before-child precedence for the entities in one batch. `library`
- * references `artists.id`, so an artist entity (WXYC/Backend-Service#2562 —
- * not shipped yet, every batch today holds exactly one `library` entity)
- * orders ahead of a library one. A kind absent from this list sorts last
- * rather than throwing, so an entity_kind this module doesn't yet know about
- * still renders (at the end) instead of dropping the batch.
+ * references `artists.id`, so an artist entity orders ahead of a library one.
+ *
+ * No call site produces a mixed batch today and none is planned: the artist
+ * delete refuses outright when the artist holds any release, so it captures
+ * the artist alone, and the release delete captures one release alone. The
+ * ordering is kept because the precedence is a property of the FK direction
+ * rather than of the current call sites, and a future call site that does
+ * group both must not have to rediscover which way round they go.
+ *
+ * A kind absent from this list sorts last rather than throwing, so an
+ * entity_kind this module doesn't yet know about still renders (at the end)
+ * instead of dropping the batch.
  */
 const ENTITY_KIND_PRECEDENCE = ['artist', 'library'];
 
@@ -86,12 +93,12 @@ export function orderBatchEntities<T extends { entity_kind: string; id: number }
 }
 
 /**
- * The five dependents no envelope ever captures (BS#2561 issue body): four
- * are derived and rebuilt by their own jobs, and `album_review_submissions`
- * is `ON DELETE SET NULL` (nothing was lost) with a `reviewer_raw` column
- * that is PII behind ADR 0011's projection barrier. A restore of a batch
- * cannot bring these back, and a listing that stayed silent about them would
- * read as a lossless-restore promise it can't keep.
+ * The five dependents a RELEASE envelope never captures (BS#2561 issue body):
+ * four are derived and rebuilt by their own jobs, and
+ * `album_review_submissions` is `ON DELETE SET NULL` (nothing was lost) with
+ * a `reviewer_raw` column that is PII behind ADR 0011's projection barrier. A
+ * restore of a batch cannot bring these back, and a listing that stayed
+ * silent about them would read as a lossless-restore promise it can't keep.
  */
 export const UNRECOVERABLE_DEPENDENTS = [
   'album_metadata',
@@ -100,3 +107,63 @@ export const UNRECOVERABLE_DEPENDENTS = [
   'uncovered_release_search_markers',
   'album_review_submissions',
 ] as const;
+
+/**
+ * The five dependents an ARTIST envelope never captures. Derived from the
+ * twelve FKs targeting `artists.id`: four are covered by the delete's own
+ * refusals (`library.artist_id`, `artist_library_crossreference.artist_id`,
+ * `artist_crossreference.source/target_artist_id`) so nothing is lost there,
+ * two are captured (`genre_artist_crossreference`,
+ * `compilation_track_artist`), and these are the tables behind the remaining
+ * six FK columns:
+ *
+ * - `artist_search_alias` — two FKs. `artist_id` is `ON DELETE cascade`, so
+ *   the alias rows go; `related_artist_id` is `ON DELETE set null`, so an
+ *   alias pointing AT the deleted artist survives unlinked.
+ * - `artist_similar_artists`, `artist_station_plays` — both `ON DELETE
+ *   cascade`, both rebuilt by their own jobs, so the same "derived" case the
+ *   release list's first four are.
+ * - `concerts` (`headlining_artist_id`), `concert_performers` (`artist_id`) —
+ *   both `ON DELETE set null`: the rows survive with the link gone, the same
+ *   case as `album_review_submissions` above.
+ *
+ * `artist_similar_artists` earns its place twice over. Its own row cascades
+ * away, and the deleted id also stays embedded in OTHER artists' rows: that
+ * table's `neighbors` jsonb (and `discogs_artist_similar_artists.neighbors`)
+ * holds `{ artist_id, weight }` objects with no FK to enforce, and that
+ * stored jsonb IS the `Concert.similar_artists` wire shape. So `GET
+ * /concerts` keeps serving a deleted artist's id until the nightly enrichment
+ * overwrite clears it. No restore can undo that window either.
+ */
+export const UNRECOVERABLE_ARTIST_DEPENDENTS = [
+  'artist_search_alias',
+  'artist_similar_artists',
+  'artist_station_plays',
+  'concerts',
+  'concert_performers',
+] as const;
+
+/**
+ * The dependents a restore cannot bring back for one batch — the union across
+ * the entity kinds the batch actually holds, deduped and stably ordered.
+ *
+ * A constant per-batch list was correct only while every batch was a release.
+ * Handing an artist batch the release list names five tables the delete never
+ * touched and says nothing about the five it did, which is precisely the
+ * lossless-restore promise `UNRECOVERABLE_DEPENDENTS`' own docstring says the
+ * field exists to avoid — and the restore consumer is the reader being
+ * misled. An unrecognized `entity_kind` contributes nothing rather than
+ * throwing, matching `orderBatchEntities`: a batch renders with an
+ * understated list instead of failing the whole listing.
+ */
+export function unrecoverableDependentsForKinds(kinds: Iterable<string>): string[] {
+  const byKind: Record<string, readonly string[]> = {
+    library: UNRECOVERABLE_DEPENDENTS,
+    artist: UNRECOVERABLE_ARTIST_DEPENDENTS,
+  };
+  const seen = new Set<string>();
+  for (const kind of kinds) {
+    for (const table of byKind[kind] ?? []) seen.add(table);
+  }
+  return [...seen];
+}

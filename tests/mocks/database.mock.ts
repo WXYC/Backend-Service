@@ -209,6 +209,21 @@ export const UNRECOVERABLE_DEPENDENTS = [
   'uncovered_release_search_markers',
   'album_review_submissions',
 ];
+export const UNRECOVERABLE_ARTIST_DEPENDENTS = [
+  'artist_search_alias',
+  'artist_similar_artists',
+  'artist_station_plays',
+  'concerts',
+  'concert_performers',
+];
+// The one envelope export this double forwards to the REAL implementation
+// rather than stubbing. The two above are stubbed as literals because they are
+// data a fixture compares against; this is a per-`entity_kind` LOOKUP, and a
+// stub returning a fixed list would make every service-level assertion about
+// `unrecoverable` green regardless of which kind the batch holds -- which is
+// the exact defect the function was added to fix. Safe to import for real: the
+// module is pure, with no DB dependency of its own.
+export { unrecoverableDependentsForKinds } from '../../shared/database/src/catalog-delete-envelope';
 export const album_popularity = {
   logical_album_key: 'album_popularity.logical_album_key',
   plays: 'album_popularity.plays',

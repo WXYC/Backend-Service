@@ -3790,12 +3790,16 @@ paths:
         BS#2561 (F2a) — the read half of the `catalog_delete_snapshot`
         archive `DELETE /library/{id}` writes to (BS#2560). Newest batch
         first (`captured_at DESC`). A "batch" is every row
-        `captureCatalogDeleteSnapshot` wrote under one `batch_id` — today
-        that is always exactly one entity (`entity_kind: 'library'`);
-        WXYC/Backend-Service#2562's artist delete is the first call site that
-        will ever group more than one entity under a batch, and when it
-        ships `entities` orders parent before child (artist before the
-        library rows that reference it).
+        `captureCatalogDeleteSnapshot` wrote under one `batch_id`, and every
+        batch holds exactly one entity — `entity_kind: 'library'` from
+        `DELETE /library/{id}` or `'artist'` from `DELETE
+        /library/artists/{id}`. Neither writer can produce a mixed batch: the
+        artist delete refuses outright when the artist holds any release, so
+        it never captures an artist together with its releases. Clients must
+        still read `entities` as a list — it is ordered parent before child
+        (artist before any library rows that reference it) should a future
+        writer group both — but must not code for a multi-entity batch
+        arriving today.
 
 
         Enforced by `requirePermissions({ catalog: ['write'] })` — the same
@@ -3814,14 +3818,34 @@ paths:
         doesn't justify extracting and indexing one.
 
 
-        `unrecoverable` names five dependents no envelope ever captures and a
-        restore therefore cannot bring back: `album_metadata`,
-        `library_identity`, `library_identity_source`,
-        `uncovered_release_search_markers` (all four rebuilt by their own
-        jobs) and `album_review_submissions` (`ON DELETE SET NULL` — the row
-        survives unlinked, and its `reviewer_raw` is PII behind ADR 0011's
-        projection barrier, so this endpoint never reads that table). It is
-        the same list on every batch, not a per-batch computation.
+        `unrecoverable` names the dependents no envelope captures and a restore
+        therefore cannot bring back. **It depends on the batch's
+        `entity_kind`** — a release and an artist lose entirely different
+        tables, so this is not a constant.
+
+
+        For a `library` batch: `album_metadata`, `library_identity`,
+        `library_identity_source`, `uncovered_release_search_markers` (all
+        four rebuilt by their own jobs) and `album_review_submissions` (`ON
+        DELETE SET NULL` — the row survives unlinked, and its `reviewer_raw`
+        is PII behind ADR 0011's projection barrier, so this endpoint never
+        reads that table).
+
+
+        For an `artist` batch: `artist_search_alias`,
+        `artist_similar_artists`, `artist_station_plays` (the first three
+        cascade away; the latter two are rebuilt by their own jobs) plus
+        `concerts` and `concert_performers` (`ON DELETE SET NULL` — those rows
+        survive with the artist link cleared). `artist_similar_artists` also
+        covers a pointer no FK protects: other artists'
+        `neighbors` jsonb keeps the deleted `artist_id`, and that jsonb is the
+        `Concert.similar_artists` wire shape, so `GET /concerts` can serve a
+        deleted artist's id until the nightly enrichment overwrite clears it.
+
+
+        A batch's value is the union over the kinds it holds, so a client
+        should treat it as an unordered set of table names rather than a fixed
+        list.
 
 
         `entities[].children` is per-child-table ROW COUNTS, not the rows —
