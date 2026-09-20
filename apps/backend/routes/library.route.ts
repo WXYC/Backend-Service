@@ -102,6 +102,22 @@ library_route.get(
 // with. That would change if a `GET '/:id'` is ever added to this router.
 library_route.get('/deleted', requirePermissions({ catalog: ['write'] }), libraryController.listDeletedArchive);
 
+// BS#2585 (F2b): the write half of the archive above — replay one captured
+// batch back into the catalog. Same `catalog: ['write']` bar as the listing and
+// as the `DELETE /library/:id` that wrote the row.
+//
+// Registered next to its sibling for locality, not for precedence: at three
+// segments with a literal head and a literal tail it cannot be shadowed by, nor
+// shadow, any route this router declares (the only templated POST that shares a
+// head is `POST '/:id/compilation-tracks'`, which is two segments). The
+// registration-order trap documented above `/catalog/compilation-tracks` does
+// not apply here; it would if a `POST '/:a/:b/:c'` were ever added.
+library_route.post(
+  '/deleted/:batchId/restore',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.restoreDeletedBatch
+);
+
 // The two legacy cross-reference listings — successors to `/wxycdb`'s
 // `xrefsToLibraryCodes.jsp` and `xrefsToLibraryReleases.jsp`. Read-only: both
 // sets are frozen (artist codes) or dropped (releases) by WXYC/wiki#89's

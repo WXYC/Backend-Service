@@ -154,6 +154,14 @@ export const labels = {
 export const library = {
   id: 'library.id',
   artist_id: 'library.artist_id',
+  // BS#2585: the genre-scoped call-number slot key
+  // `(artist_id, genre_id, code_number, upper(coalesce(code_volume_letters, '')))`
+  // that `restoreDeletedBatch`'s conflict probe keys on. Present so an assertion
+  // over that predicate compares real sentinels rather than three `undefined`s,
+  // which would match a genre-blind predicate just as happily.
+  genre_id: 'library.genre_id',
+  code_number: 'library.code_number',
+  code_volume_letters: 'library.code_volume_letters',
   legacy_release_id: 'library.legacy_release_id',
   on_streaming: 'library.on_streaming',
   artwork_url: 'library.artwork_url',

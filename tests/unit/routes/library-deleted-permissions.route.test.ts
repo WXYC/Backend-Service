@@ -26,7 +26,7 @@ import { jest as jestGlobals } from '@jest/globals';
 import { jwtVerify } from 'jose';
 import express from 'express';
 import request from 'supertest';
-import type { DeletedArchiveBatch } from '../../../apps/backend/services/library.service';
+import type { DeletedArchiveBatch, RestoreBatchOutcome } from '../../../apps/backend/services/library.service';
 
 const mockedJwtVerify = jwtVerify as jest.MockedFunction<typeof jwtVerify>;
 
@@ -40,6 +40,7 @@ function mockRole(role: string) {
 
 const mockGetDeletedArchivePage = jestGlobals.fn<() => Promise<DeletedArchiveBatch[]>>();
 const mockCountDeletedArchiveBatches = jestGlobals.fn<() => Promise<number>>();
+const mockRestoreDeletedBatch = jestGlobals.fn<() => Promise<RestoreBatchOutcome>>();
 
 // Collaborator mocks below mirror library-crossreferences-permissions.route.test.ts
 // -- only enough is stubbed here to let library.route's import chain resolve
@@ -91,6 +92,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   countReleaseCrossReferences: jest.fn(),
   getDeletedArchivePage: mockGetDeletedArchivePage,
   countDeletedArchiveBatches: mockCountDeletedArchiveBatches,
+  restoreDeletedBatch: mockRestoreDeletedBatch,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -166,5 +168,59 @@ describe('GET /library/deleted -- permission tier', () => {
     const res = await request(app).get('/library/deleted').set('Authorization', 'Bearer test-token');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ results: [], total: 0, page: 0, totalPages: 0 });
+  });
+});
+
+/**
+ * POST /library/deleted/:batchId/restore (BS#2585 / F2b) shares this file
+ * rather than starting a second one: the ~130 lines of collaborator mocks above
+ * exist so `library.route.ts`'s import chain resolves without a DB, and the
+ * restore is the write half of the same `/library/deleted` family, at the same
+ * `catalog: ['write']` bar. A second file would fork that scaffolding, and the
+ * two copies would drift the first time the route module grows an import.
+ *
+ * The tier argument is stronger here than for the listing, and the same: this
+ * verb writes catalog rows back, so `catalog: ['read']` would put a catalog
+ * mutation in front of every DJ.
+ */
+describe('POST /library/deleted/:batchId/restore -- permission tier', () => {
+  const BATCH_ID = '11111111-2222-4333-8444-555555555555';
+  const url = `/library/deleted/${BATCH_ID}/restore`;
+
+  beforeEach(() => {
+    mockRestoreDeletedBatch.mockReset().mockResolvedValue({ outcome: 'restored', entities: [] });
+  });
+
+  test.each(['stationManager', 'musicDirector'])('a %s-role token is authorized', async (role) => {
+    mockRole(role);
+    const res = await request(app).post(url).set('Authorization', 'Bearer test-token').send({});
+    expect(res.status).toBe(200);
+    expect(mockRestoreDeletedBatch).toHaveBeenCalled();
+  });
+
+  test.each(['dj', 'member'])('a %s-role token (catalog:read only) is rejected', async (role) => {
+    mockRole(role);
+    const res = await request(app).post(url).set('Authorization', 'Bearer test-token').send({});
+    expect(res.status).toBe(403);
+    expect(mockRestoreDeletedBatch).not.toHaveBeenCalled();
+  });
+
+  test('a request with no Authorization header is rejected', async () => {
+    const res = await request(app).post(url).send({});
+    expect(res.status).toBe(401);
+    expect(mockRestoreDeletedBatch).not.toHaveBeenCalled();
+  });
+
+  // The literal `/deleted` head and literal `/restore` tail mean no templated
+  // route on this router can swallow this URL, but the resolution arm still has
+  // to survive Express's body parsing to reach the service.
+  test('carries the resolution arm through to the service', async () => {
+    mockRole('musicDirector');
+    const res = await request(app)
+      .post(url)
+      .set('Authorization', 'Bearer test-token')
+      .send({ resolution: 'next_free_code' });
+    expect(res.status).toBe(200);
+    expect(mockRestoreDeletedBatch).toHaveBeenCalledWith(BATCH_ID, 'next_free_code');
   });
 });
