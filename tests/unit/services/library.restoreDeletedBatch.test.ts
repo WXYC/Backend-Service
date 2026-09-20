@@ -651,17 +651,17 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
     });
   });
 
-  // BS#2616 follow-up review, findings 1 & 4. The original test iterated
+  // BS#2616 follow-up review, findings 3 & 4. The original test iterated
   // `RESTORABLE_ENTITY_KINDS` and checked membership in that SAME constant via
   // `isRestorableEntityKind`, which reads that same constant -- self-referential,
-  // so it could not fail no matter what the constant held. This instead
-  // compares against `RESTORE_PLAN`'s own key set (exported only as
+  // so it could not fail no matter what the constant held (finding 4). This
+  // instead compares against `RESTORE_PLAN`'s own key set (exported only as
   // `RESTORE_PLAN_TABLE_NAMES`, so `RESTORE_PLAN`'s live Drizzle table objects
   // stay unexported), which `RESTORABLE_ENTITY_KINDS` is now DERIVED from
   // rather than a hand-maintained copy of: this assertion fails the moment a
   // table gains a `RESTORE_PLAN` entry with no `entity_kind` mapped to it in
   // `ENTITY_KIND_TABLE_NAME` (`library.service.ts`) -- exactly the drift
-  // finding 1 flagged, with nothing before this test able to catch it.
+  // finding 3 flagged, with nothing before this test able to catch it.
   describe('RESTORABLE_ENTITY_KINDS (BS#2616 follow-up review)', () => {
     it('has exactly one restorable kind per RESTORE_PLAN table, derived rather than hand-copied', () => {
       expect(RESTORE_PLAN_TABLE_NAMES).toEqual(['library']);

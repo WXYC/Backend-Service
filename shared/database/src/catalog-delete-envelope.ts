@@ -175,5 +175,5 @@ export function unrecoverableDependentsForKinds(kinds: Iterable<string>): string
 // in it anyway contradicted that. `library.service.ts` is also where
 // `RESTORE_PLAN` — the restore endpoint's actual replay plan — already lives,
 // which lets `RESTORABLE_ENTITY_KINDS` be DERIVED from `RESTORE_PLAN`'s own
-// key set (finding 1) instead of hand-copied in a different vocabulary with
+// key set (finding 3) instead of hand-copied in a different vocabulary with
 // nothing tying the two together. See that file for both.
