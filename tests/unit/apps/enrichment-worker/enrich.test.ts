@@ -1808,19 +1808,6 @@ describe('buildNoMatchEvidence (BS#2606)', () => {
  * the worker's auto-persist rule NEVER produces an `enriched_no_match` write
  * — covering all three satisfying shapes named in the issue.
  */
-// The production call under test and this assertion's own `buildNoMatchEvidence(...)`
-// call each stamp `at` from `new Date().toISOString()` independently, so a millisecond
-// tick between the two makes a plain `toEqual` flake (BS#2615). Compare `at` by shape
-// and every other field by value instead of comparing the two full objects.
-function assertNoMatchEvidenceMatches(actual: unknown, expectedWithOwnClockRead: Record<string, unknown>): void {
-  const { at, ...expectedRest } = expectedWithOwnClockRead;
-  expect(actual).toMatchObject(expectedRest);
-  const actualAt = (actual as { at?: unknown })?.at;
-  expect(actualAt).toEqual(expect.any(String));
-  expect(actualAt as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-  expect(Number.isNaN(Date.parse(actualAt as string))).toBe(false);
-}
-
 describe('finalizeRow (BS#2606) — no_match_evidence on the no-match arms', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -1832,7 +1819,13 @@ describe('finalizeRow (BS#2606) — no_match_evidence on the no-match arms', () 
     await finalizeRow(ROW, noMatchResponse);
 
     const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
-    assertNoMatchEvidenceMatches(setCall.no_match_evidence, buildNoMatchEvidence(noMatchResponse, ROW.album_title));
+    // Both sides stamp `at` from their own `new Date()` read, so a millisecond tick
+    // between them would flake a bare `toEqual` of the two objects. Overriding `at`
+    // keeps the field SET exhaustively pinned, which a subset match would not.
+    expect(setCall.no_match_evidence).toEqual({
+      ...buildNoMatchEvidence(noMatchResponse, ROW.album_title),
+      at: expect.any(String),
+    });
     expect((setCall.no_match_evidence as { trust_gate: string }).trust_gate).toBe('no_results');
   });
 
@@ -1842,10 +1835,10 @@ describe('finalizeRow (BS#2606) — no_match_evidence on the no-match arms', () 
     await finalizeRow(LINKED_ROW, noMatchResponse);
 
     const setCall = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
-    assertNoMatchEvidenceMatches(
-      setCall.no_match_evidence,
-      buildNoMatchEvidence(noMatchResponse, LINKED_ROW.album_title)
-    );
+    expect(setCall.no_match_evidence).toEqual({
+      ...buildNoMatchEvidence(noMatchResponse, LINKED_ROW.album_title),
+      at: expect.any(String),
+    });
 
     const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(insertPayload).not.toHaveProperty('no_match_evidence');
