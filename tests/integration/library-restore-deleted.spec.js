@@ -197,9 +197,13 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
       [album.id]
     );
     const rotationId = rotation[0].id;
-    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation_urls (rotation_id, url) VALUES ($1, $2)`, [
+    // `position` is NOT NULL with no default and carries a unique index with
+    // `rotation_id`; production writes it as the array index (`urls.map((url,
+    // position) => ...)`), so a lone URL is 0.
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".rotation_urls (rotation_id, url, position) VALUES ($1, $2, $3)`, [
       rotationId,
       `https://example.test/${uniq}`,
+      0,
     ]);
     await sql.unsafe(`INSERT INTO "${SCHEMA}".artist_library_crossreference (artist_id, library_id) VALUES ($1, $2)`, [
       artistId,
