@@ -209,6 +209,53 @@ describe('getDeletedArchivePage (BS#2561 / F2a)', () => {
     expect(batch.actor).toEqual({ user_id: 'librarian-1', role: 'musicDirector' });
     expect(batch.actor).not.toHaveProperty('email');
   });
+
+  // `unrecoverable` was one constant attached to every batch, which was only
+  // ever right while every batch was a release. An artist batch got handed the
+  // five RELEASE tables -- none of which an artist delete touches -- and
+  // nothing about the five it does, which is precisely the lossless-restore
+  // promise the field exists to avoid making. The restore consumer is the
+  // reader that would act on it.
+  //
+  // `unrecoverableDependentsForKinds` is the one envelope export
+  // `database.mock.ts` forwards to the real implementation, so these assert
+  // the routing rather than a stub (see that comment).
+  it('gives an artist batch the artist dependents, not the release ones', async () => {
+    const fixture = snapshotRow({
+      entity_kind: 'artist',
+      entity_id: 4211,
+      captured: {
+        entity: { table: 'artists', row: { id: 4211, artist_name: 'Chuquimamani-Condori' } },
+        children: { genre_artist_crossreference: [{ genre_id: 11 }], compilation_track_artist: [] },
+      },
+    });
+    primeReads({
+      batchPage: [{ batch_id: 'batch-1', captured_at: fixture.captured_at }],
+      rows: [fixture],
+    });
+
+    const [batch] = await getDeletedArchivePage(0, 50);
+
+    expect([...batch.unrecoverable].sort()).toEqual(
+      ['artist_search_alias', 'artist_similar_artists', 'artist_station_plays', 'concerts', 'concert_performers'].sort()
+    );
+    expect(batch.unrecoverable).not.toContain('album_metadata');
+    expect(batch.unrecoverable).not.toContain('album_review_submissions');
+  });
+
+  it('still gives a release batch the release dependents', async () => {
+    const fixture = snapshotRow({});
+    primeReads({
+      batchPage: [{ batch_id: 'batch-1', captured_at: fixture.captured_at }],
+      rows: [fixture],
+    });
+
+    const [batch] = await getDeletedArchivePage(0, 50);
+
+    expect(batch.unrecoverable).toContain('album_metadata');
+    expect(batch.unrecoverable).toContain('album_review_submissions');
+    expect(batch.unrecoverable).not.toContain('artist_similar_artists');
+  });
 });
 
 describe('countDeletedArchiveBatches (BS#2561 / F2a)', () => {

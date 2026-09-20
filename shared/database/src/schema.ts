@@ -2264,8 +2264,12 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * neither belongs in BS#2560.
  *
  * `batch_id` groups every snapshot row written by one delete request — the
- * legacy `ChangeLogEntry.batchId` field, carried forward: an artist delete
- * under #2562 that also captures each of its releases writes one batch.
+ * legacy `ChangeLogEntry.batchId` field, carried forward. Every writer today
+ * captures exactly one entity per batch: the release delete captures one
+ * release, and the artist delete refuses on any release the artist holds, so
+ * it captures the artist alone. The column is one-to-many because a delete
+ * that did cascade across entities would have to group them, not because one
+ * does.
  *
  * **Known tradeoff, recorded rather than silently accepted (BS#2560
  * review):** `bins` rows are copied whole, including `dj_id` — an FK to

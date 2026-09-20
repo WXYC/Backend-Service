@@ -19,7 +19,7 @@ import {
   rotationActiveSql,
   rotationKilledSql,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
-  UNRECOVERABLE_DEPENDENTS,
+  unrecoverableDependentsForKinds,
   type RotationBin,
 } from '@wxyc/database';
 import {
@@ -3858,9 +3858,23 @@ export type DeleteArtistOutcome =
 export type DeleteArtistActor = CatalogDeleteActor;
 
 /**
- * Same rationale as `DELETE_ALBUM_LOCK_TIMEOUT_MS`: below Postgres's default
- * 1s `deadlock_timeout`, so a librarian's delete is always the side that
- * yields to a live DJ writer rather than the other way around.
+ * Same value and the same reason as `DELETE_ALBUM_LOCK_TIMEOUT_MS` -- below
+ * Postgres's default 1s `deadlock_timeout`, so this delete is always the side
+ * that stands down rather than the side that wins a deadlock arbitration --
+ * but NOT against the same writer, and the difference matters to anyone asked
+ * to raise the bound.
+ *
+ * The release delete yields to a live DJ. This one cannot: `flowsheet` stores
+ * `artist_name` as a varchar and carries FKs to `shows`, `library`, `rotation`
+ * and `labels` only, so a play insert never takes `FOR KEY SHARE` on an
+ * `artists` row and can never contend with the `FOR UPDATE` below. The
+ * contenders here are all machinery: `jobs/library-etl`'s `ensureArtist`
+ * insert, `jobs/artist-identity-etl`'s artist UPDATE,
+ * `jobs/artist-unicode-dedup`'s merge, and a concurrent `PATCH
+ * /library/artists/:id`. Standing down to a batch job is still the right way
+ * round -- a librarian can retry a click in a second, and a job that loses a
+ * row mid-pass may skip it until its next scheduled run -- so the bound
+ * stays; only the sentence justifying it needed to name a path that exists.
  */
 export const DELETE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 
@@ -3868,9 +3882,28 @@ export const DELETE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * BS#2562: `DELETE /library/artists/:id`. Mirrors `deleteAlbumFromDB`'s
  * transaction shape -- bounded `lock_timeout`, `FOR UPDATE` on the row being
  * deleted, a snapshot captured before any delete statement runs -- over a
- * much smaller dependent set: no digital assets, no second table to lock, no
- * denylist (an artist carries no `legacy_release_id`-shaped resurrection
- * risk).
+ * much smaller dependent set: no digital assets, no second table to lock, and
+ * no denylist.
+ *
+ * **No denylist, and the reason is narrower than it looks.** The release
+ * denylist exists against RESURRECTION: `library-etl` re-selects upstream by
+ * `legacy_release_id` and would re-create a row the librarian deleted. An
+ * artist has no such upstream key, so nothing re-creates it, and a tombstone
+ * would guard nothing.
+ *
+ * It does NOT follow that the delete leaves no trace worth keeping, and one
+ * consequence lands on the restore. Deleting the artist frees its
+ * `(code_letters, genre_id, artist_genre_code)` filing code immediately, and
+ * `generateArtistNumber` assigns the next artist in that bucket by MAX+1 --
+ * so the very next create can be handed the freed number. `artist_genre_key`
+ * is unique on `(artist_id, genre_id)`, not on the code, so nothing at the
+ * database level rejects the duplicate; `getArtistsByCode` exists precisely
+ * because one code can have several owners. A restore that re-inserts the
+ * captured `artist_genre_code` verbatim would therefore file two artists at
+ * one shelf code, and with no tombstone there is no record from which to
+ * detect it. **An artist restore must re-check the code before re-inserting
+ * it** -- relocate and say so, the way the release restore relocates a
+ * `code_number` whose slot was taken -- rather than trusting the snapshot.
  *
  * **Why one lock is enough.** Every FK that targets `artists.id` -- all
  * twelve of them, cascade and set-null dependents included -- fires its own
@@ -3982,12 +4015,36 @@ const runDeleteArtistTransaction = async (
     // artist row plus the two dependents this transaction actually resolves:
     // every `genre_artist_crossreference` row (deleted explicitly below) and
     // every `compilation_track_artist` row this artist's own FK is about to
-    // null out. The other seven FKs targeting `artists.id`
-    // (`artist_search_alias` x2, `artist_similar_artists`,
-    // `artist_station_plays`, `concerts.headlining_artist_id`,
-    // `concert_performers.artist_id`) are excluded for the same reason F1
-    // (BS#2560) excludes its own derived four -- see
-    // `captureCatalogDeleteSnapshot`'s doc comment.
+    // null out.
+    //
+    // That accounts for six of the twelve FKs targeting `artists.id`: four are
+    // covered by the refusals above (`library.artist_id`,
+    // `artist_library_crossreference.artist_id`,
+    // `artist_crossreference.source/target_artist_id`) and these two are
+    // captured. The remaining SIX columns are excluded, and they split two
+    // ways rather than one:
+    //
+    //   - `artist_search_alias.artist_id`, `artist_similar_artists.artist_id`,
+    //     `artist_station_plays.artist_id` are `ON DELETE cascade` -- the rows
+    //     go, and each table is rebuilt by its own job. This is F1's
+    //     (BS#2560) derived-four case.
+    //   - `artist_search_alias.related_artist_id`,
+    //     `concerts.headlining_artist_id`, `concert_performers.artist_id` are
+    //     `ON DELETE set null` -- the rows SURVIVE with the link gone, which
+    //     is F1's `album_review_submissions` case, not its derived one.
+    //
+    // Two pointers at `artists.id` carry no FK at all and so appear in no
+    // census of the twelve: `artist_similar_artists.neighbors` and
+    // `discogs_artist_similar_artists.neighbors` store
+    // `{ artist_id, weight }` jsonb, and that stored jsonb IS the
+    // `Concert.similar_artists` wire shape. Deleting an artist that appears as
+    // someone else's neighbor leaves the dead id being served by `GET
+    // /concerts` until the nightly enrichment overwrite clears it. Left
+    // dangling deliberately -- rewriting every neighbor array would widen this
+    // transaction across an unbounded row set for a value a scheduled job
+    // recomputes anyway -- and recorded here so the next reader knows it was
+    // considered. `UNRECOVERABLE_ARTIST_DEPENDENTS` is what tells the archive
+    // reader the same thing.
     await captureCatalogDeleteSnapshot(tx, {
       entityKind: 'artist',
       entityId: artist_id,
@@ -3999,10 +4056,18 @@ const runDeleteArtistTransaction = async (
     await tx.delete(genre_artist_crossreference).where(eq(genre_artist_crossreference.artist_id, artist_id));
     await tx.delete(artists).where(eq(artists.id, artist_id));
 
-    // Same second, independent record `deleteAlbumFromDB` writes -- the
-    // denylist table doesn't apply here (an artist carries no
-    // `legacy_release_id`), so this request-log line is the only durable
-    // trace of who deleted this artist and when.
+    // The same second, independent record `deleteAlbumFromDB` writes, and it
+    // is the WEAKER of the two records here, not the only one: the
+    // `catalog_delete_snapshot` row captured three statements above already
+    // carries `actor_user_id`, `actor_email`, `actor_role` and `captured_at`,
+    // and `GET /library/deleted` serves them. That row is the durable trace.
+    //
+    // This line is emitted INSIDE the transaction, so a rollback can leave a
+    // log line behind with no deletion to match it -- the wrong way round for
+    // an audit trail to fail, and the reason it must not be read as
+    // authoritative on its own. It is kept because it lands in the request log
+    // with the surrounding request context, which the snapshot row has no
+    // column for.
     console.warn(
       '[Library] artist hard delete',
       JSON.stringify({
@@ -4474,9 +4539,8 @@ const childCounts = (children: Record<string, unknown[]>): Record<string, number
  * One page of `GET /library/deleted`, newest batch first. Rows in
  * `catalog_delete_snapshot` group by `batch_id`: `captureCatalogDeleteSnapshot`
  * writes one row per captured entity, and a caller deleting several entities
- * under one delete (WXYC/Backend-Service#2562's artist delete is the first —
- * not shipped yet, so every batch today holds exactly one row) passes the
- * same `batchId` to each call so the rows group together.
+ * under one delete passes the same `batchId` to each call so the rows group
+ * together.
  *
  * Two queries, not one, so a page boundary can never split a batch across two
  * pages: the first pages DISTINCT `batch_id`s (`search`, when given, filters
@@ -4485,12 +4549,14 @@ const childCounts = (children: Record<string, unknown[]>): Record<string, number
  *
  * `captured_at` in the first query is `max()` over the rows THIS query saw —
  * every row when `search` is absent, only the matching ones when it's
- * present. Harmless while every batch is single-entity (the `max` has one
- * input either way), but once WXYC/Backend-Service#2562 lands and a batch can
- * hold several entities, a search matching only one of them would report that
- * entity's `captured_at` rather than the batch's true (identical, same
- * transaction) value — still correct today, just not for the reason it looks
- * like at a glance.
+ * present. **No writer produces a multi-entity batch, so the `max` has one
+ * input either way.** Both deletes capture exactly one entity: the release
+ * delete captures one release, and the artist delete refuses outright on any
+ * release the artist holds, so it can never capture the artist together with
+ * its releases. A writer that did group several would make this read report
+ * the matching entity's `captured_at` under a `search` rather than the batch's
+ * own — the rows all being written in one transaction, the values are
+ * identical anyway, so the difference is in the reasoning, not the result.
  */
 export const getDeletedArchivePage = async (
   page: number,
@@ -4549,7 +4615,11 @@ export const getDeletedArchivePage = async (
           children: childCounts(envelope.children),
         };
       }),
-      unrecoverable: UNRECOVERABLE_DEPENDENTS,
+      // Computed from the kinds this batch actually holds, not a constant:
+      // a release and an artist lose entirely different dependents, and
+      // handing an artist batch the release list would name five tables the
+      // delete never touched while staying silent about the five it did.
+      unrecoverable: unrecoverableDependentsForKinds(ordered.map((row) => row.entity_kind)),
     };
   });
 };

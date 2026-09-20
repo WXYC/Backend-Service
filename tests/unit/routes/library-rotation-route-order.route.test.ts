@@ -277,7 +277,14 @@ describe.each(PARAM_FAMILIES)(
     // Asserting across all methods at once would have flagged the pre-#2410
     // rotation block — where the only parameterized registration was a PATCH —
     // as a defect it did not have.
-    test.each([['get'], ['patch']])(
+    // Derived from `expectedMethods` rather than hard-coded, so a family that
+    // gains a verb gains its ordering guard with it. `delete` is why: the
+    // artist delete registers `/artists/:id`, and a later
+    // `/artists/orphans` DELETE would be swallowed by it and reach the handler
+    // with `req.params.id === 'orphans'`. The exact-equality assertion below
+    // catches a wrong method SET; only this sweep catches wrong ORDER, and it
+    // covered neither verb it was not literally listed for.
+    test.each(expectedMethods.map((method) => [method]))(
       `every literal one-segment ${familyPrefix(param)}/<name> %s route is registered before the same-method ${param}`,
       (method) => {
         const layers = familyLayers(param).filter((l) => l.methods.includes(method));

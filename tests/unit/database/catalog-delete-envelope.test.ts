@@ -7,7 +7,9 @@
 import {
   orderBatchEntities,
   parseCapturedEnvelope,
+  UNRECOVERABLE_ARTIST_DEPENDENTS,
   UNRECOVERABLE_DEPENDENTS,
+  unrecoverableDependentsForKinds,
 } from '../../../shared/database/src/catalog-delete-envelope';
 
 describe('parseCapturedEnvelope', () => {
@@ -104,5 +106,84 @@ describe('UNRECOVERABLE_DEPENDENTS', () => {
       'uncovered_release_search_markers',
       'album_review_submissions',
     ]);
+  });
+});
+
+describe('UNRECOVERABLE_ARTIST_DEPENDENTS', () => {
+  // Derived from the six FK columns an artist delete neither refuses on nor
+  // captures, deduped to five tables (`artist_search_alias` carries two of
+  // those columns).
+  it('names the five tables an artist delete loses, and nothing else', () => {
+    expect(UNRECOVERABLE_ARTIST_DEPENDENTS).toEqual([
+      'artist_search_alias',
+      'artist_similar_artists',
+      'artist_station_plays',
+      'concerts',
+      'concert_performers',
+    ]);
+  });
+
+  // The two lists must stay disjoint, because the batch value is their union
+  // and an overlap would make an artist batch's list read as though a release
+  // table were involved.
+  it('shares no table with the release list', () => {
+    const release = new Set<string>(UNRECOVERABLE_DEPENDENTS);
+    for (const table of UNRECOVERABLE_ARTIST_DEPENDENTS) {
+      expect(release.has(table)).toBe(false);
+    }
+  });
+});
+
+describe('unrecoverableDependentsForKinds', () => {
+  // The defect this replaced: one constant list, attached to every batch. An
+  // artist batch was handed the five RELEASE tables -- none of which an artist
+  // delete touches -- while saying nothing about the five it does, which is
+  // exactly the lossless-restore promise the field exists to avoid making.
+  it('gives an artist batch the artist tables and none of the release ones', () => {
+    const answer = unrecoverableDependentsForKinds(['artist']);
+
+    expect(answer.sort()).toEqual([...UNRECOVERABLE_ARTIST_DEPENDENTS].sort());
+    for (const releaseTable of UNRECOVERABLE_DEPENDENTS) {
+      expect(answer).not.toContain(releaseTable);
+    }
+  });
+
+  it('gives a release batch the release tables and none of the artist ones', () => {
+    const answer = unrecoverableDependentsForKinds(['library']);
+
+    expect(answer.sort()).toEqual([...UNRECOVERABLE_DEPENDENTS].sort());
+    for (const artistTable of UNRECOVERABLE_ARTIST_DEPENDENTS) {
+      expect(answer).not.toContain(artistTable);
+    }
+  });
+
+  // No writer produces a mixed batch today, so this is the contract for one
+  // that might rather than a case under test in production.
+  it('unions both lists for a batch holding both kinds', () => {
+    const answer = unrecoverableDependentsForKinds(['artist', 'library']);
+
+    expect(answer.sort()).toEqual(
+      [...UNRECOVERABLE_DEPENDENTS, ...UNRECOVERABLE_ARTIST_DEPENDENTS].sort()
+    );
+  });
+
+  it('dedupes a kind repeated across a batch\'s entities', () => {
+    expect(unrecoverableDependentsForKinds(['library', 'library', 'library'])).toEqual([
+      ...UNRECOVERABLE_DEPENDENTS,
+    ]);
+  });
+
+  // Understate rather than throw, matching `orderBatchEntities`: a listing
+  // that 500s on one unfamiliar row is worse than one that renders it with a
+  // short list.
+  it('contributes nothing for an unrecognized entity_kind rather than throwing', () => {
+    expect(unrecoverableDependentsForKinds(['something_new'])).toEqual([]);
+    expect(unrecoverableDependentsForKinds(['artist', 'something_new']).sort()).toEqual(
+      [...UNRECOVERABLE_ARTIST_DEPENDENTS].sort()
+    );
+  });
+
+  it('answers an empty batch with an empty list', () => {
+    expect(unrecoverableDependentsForKinds([])).toEqual([]);
   });
 });
