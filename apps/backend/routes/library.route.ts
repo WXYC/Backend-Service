@@ -333,6 +333,13 @@ library_route.get('/artists/:id', requirePermissions({ catalog: ['read'] }), lib
 
 library_route.patch('/artists/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateArtistCard);
 
+// BS#2562: hard delete, mirroring DELETE /library/:id's gate and taxonomy
+// (204 / 409 refused-on-the-merits / 503 retryable / 404). No ordering
+// hazard against the GET/PATCH above -- Express matches method as well as
+// path, so a DELETE can't be shadowed by either -- registered here only to
+// keep every verb on this path together.
+library_route.delete('/artists/:id', requirePermissions({ catalog: ['write'] }), libraryController.deleteArtist);
+
 library_route.get(
   '/artists/:id/releases',
   requirePermissions({ catalog: ['read'] }),

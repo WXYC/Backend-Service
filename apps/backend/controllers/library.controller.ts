@@ -1458,6 +1458,86 @@ export const getArtistReleases: RequestHandler<
 };
 
 /**
+ * DELETE /library/artists/:id (BS#2562). Mirrors `DELETE /library/:id`
+ * (BS#2112)'s four-outcome taxonomy -- `204` success / `409` refused on the
+ * merits / `503` retryable lock stand-down / `404` unknown artist -- gated
+ * `catalog: ['write']`, the same bar as the release delete and as `PATCH
+ * /library/artists/:id`, not the lighter `catalog: ['read']` bar the
+ * dependent counts on the GET/PATCH response sit behind: irreversible.
+ *
+ * The four `409` bodies are non-standard for this service, same reasoning as
+ * `deleteAlbum`'s digital-asset refusal: the count IS the refusal, so the
+ * client needs it to tell the librarian what to clear first. Each `reason`
+ * maps 1:1 to one of `getArtistDependentCounts`'s four refusal fields
+ * (BS#2597) and to the order `libraryService.deleteArtistFromDB` checks them
+ * in -- see that function's docstring for why. Documented in
+ * `apps/backend/app.yaml`.
+ */
+export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => {
+  const artistId = parseArtistId(req.params.id);
+
+  const result = await libraryService.deleteArtistFromDB(artistId, {
+    userId: req.auth?.id ?? req.auth?.sub ?? null,
+    email: req.auth?.email ?? null,
+    role: req.auth?.role ?? null,
+  });
+
+  if (result.outcome === 'not_found') {
+    throw new WxycError('Artist not found', 404);
+  }
+
+  if (result.outcome === 'lock_unavailable') {
+    res.status(503).json({
+      message: 'Could not delete: the artist is being written to right now. Try again in a moment.',
+      reason: 'lock_unavailable',
+    });
+    return;
+  }
+
+  if (result.outcome === 'has_releases') {
+    const { count } = result;
+    res.status(409).json({
+      message: `Cannot delete: artist has ${count} release${count === 1 ? '' : 's'} on file. Delete or move those releases first.`,
+      reason: 'artist_has_releases',
+      count,
+    });
+    return;
+  }
+
+  if (result.outcome === 'has_crossreference_as_source') {
+    const { count } = result;
+    res.status(409).json({
+      message: `Cannot delete: artist is the source of ${count} cross-reference${count === 1 ? '' : 's'} to other artists.`,
+      reason: 'artist_crossreference_source',
+      count,
+    });
+    return;
+  }
+
+  if (result.outcome === 'has_crossreference_as_target') {
+    const { count } = result;
+    res.status(409).json({
+      message: `Cannot delete: artist is the target of ${count} cross-reference${count === 1 ? '' : 's'} from other artists.`,
+      reason: 'artist_crossreference_target',
+      count,
+    });
+    return;
+  }
+
+  if (result.outcome === 'has_library_crossreference') {
+    const { count } = result;
+    res.status(409).json({
+      message: `Cannot delete: artist has ${count} release cross-reference${count === 1 ? '' : 's'} on file.`,
+      reason: 'artist_library_crossreference',
+      count,
+    });
+    return;
+  }
+
+  res.status(204).end();
+};
+
+/**
  * GET /library/artists/:id/next-release-number — previews the release
  * `code_number` a `POST /library` would assign this artist, so the classic
  * add-release form can prepopulate an EDITABLE field with the authoritative

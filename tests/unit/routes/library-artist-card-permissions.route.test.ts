@@ -71,6 +71,8 @@ const mockGetArtistNameById = jestGlobals.fn<() => Promise<string | null>>();
 const mockGetReleasesForArtist = jestGlobals.fn<() => Promise<unknown[]>>();
 const mockCountReleasesForArtist = jestGlobals.fn<() => Promise<number>>();
 const mockGenerateAlbumCodeNumber = jestGlobals.fn<() => Promise<number>>();
+// DELETE /library/artists/:id (BS#2562).
+const mockDeleteArtistFromDB = jestGlobals.fn<() => Promise<{ outcome: string }>>();
 
 // Collaborator mocks below mirror the discogs-recheck route-permission test —
 // only enough is stubbed here to let library.route's import chain resolve
@@ -117,6 +119,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   updateArtistInDB: mockUpdateArtistInDB,
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
+  deleteArtistFromDB: mockDeleteArtistFromDB,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -155,13 +158,16 @@ app.use('/library', library_route);
 /**
  * BS#2156 artist-card routes: the two GETs are `catalog:['read']` (DJ and
  * above) and the PATCH is `catalog:['write']` (musicDirector and above).
+ * `DELETE` (BS#2562) sits on the same path at the same `catalog:['write']`
+ * bar as the PATCH.
  *
  * Without these, every artist-card test drives the routes through the
  * privileged integration token or calls the controller directly, so relaxing
  * the PATCH to `catalog:['read']` — letting any DJ edit a catalog artist's
  * `alphabetical_name` or `artist_name` (the two writable fields; see
  * `library.controller.ts`'s `updateArtistCard` doc comment) — would leave the
- * whole suite green.
+ * whole suite green. Same argument for the DELETE: relaxing it would let any
+ * DJ destroy a catalog artist.
  */
 describe('BS#2156 artist-card routes — permission tiers', () => {
   beforeEach(() => {
@@ -180,6 +186,7 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
     mockGetReleasesForArtist.mockReset().mockResolvedValue([]);
     mockCountReleasesForArtist.mockReset().mockResolvedValue(0);
     mockGenerateAlbumCodeNumber.mockReset().mockResolvedValue(1);
+    mockDeleteArtistFromDB.mockReset().mockResolvedValue({ outcome: 'deleted' });
   });
 
   describe('GET /library/artists/:id (catalog:read)', () => {
@@ -245,6 +252,33 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
       const res = await request(app).patch('/library/artists/1').send({ alphabetical_name: 'Renamed Anonymously' });
       expect(res.status).toBe(401);
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
+    });
+  });
+
+  // BS#2562: hard delete, gated to the same `catalog:['write']` bar as the
+  // PATCH above -- irreversible, so it does not get the lighter
+  // `catalog:['read']` bar the two GETs use. Without this, relaxing it to
+  // `read` (letting any DJ destroy a catalog artist) would leave the suite
+  // green.
+  describe('DELETE /library/artists/:id (catalog:write)', () => {
+    test.each(['stationManager', 'musicDirector'])('a %s-role token is authorized', async (role) => {
+      mockRole(role);
+      const res = await request(app).delete('/library/artists/1').set('Authorization', 'Bearer test-token');
+      expect(res.status).toBe(204);
+      expect(mockDeleteArtistFromDB).toHaveBeenCalledWith(1, expect.objectContaining({ role }));
+    });
+
+    test.each(['dj', 'member'])('a %s-role token (catalog:read only) is rejected', async (role) => {
+      mockRole(role);
+      const res = await request(app).delete('/library/artists/1').set('Authorization', 'Bearer test-token');
+      expect(res.status).toBe(403);
+      expect(mockDeleteArtistFromDB).not.toHaveBeenCalled();
+    });
+
+    test('a request with no Authorization header is rejected', async () => {
+      const res = await request(app).delete('/library/artists/1');
+      expect(res.status).toBe(401);
+      expect(mockDeleteArtistFromDB).not.toHaveBeenCalled();
     });
   });
 

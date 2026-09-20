@@ -3781,9 +3781,18 @@ export type ArtistDependentCounts = {
  * WXYC/wiki#89 -- see the doc comment above `sourceArtist` further down this
  * file, which cites the same measurement) and unindexed cost is currently
  * negligible.
+ *
+ * Optional `tx` (BS#2562): `deleteArtistFromDB`'s transaction calls this with
+ * its own `tx` so the four refusal predicates are read against the SAME
+ * locked snapshot the delete is about to act on, not a separate pre-lock
+ * round trip against a row a concurrent writer could still change out from
+ * under it. Same `(tx ?? db)` idiom as `generateAlbumCodeNumber` above.
  */
-export const getArtistDependentCounts = async (artist_id: number): Promise<ArtistDependentCounts> => {
-  const rows = (await db.execute(sql`
+export const getArtistDependentCounts = async (
+  artist_id: number,
+  tx?: DbTransaction
+): Promise<ArtistDependentCounts> => {
+  const rows = (await (tx ?? db).execute(sql`
     SELECT
       (SELECT count(*)::int FROM ${library} WHERE ${library.artist_id} = ${artist_id}) AS release_count,
       (SELECT count(*)::int FROM ${artist_crossreference} WHERE ${artist_crossreference.source_artist_id} = ${artist_id}) AS cross_reference_source_count,
@@ -3827,6 +3836,191 @@ export const updateArtistInDB = async (
     .where(eq(artists.id, artist_id))
     .returning({ id: artists.id, artist_name: artists.artist_name, alphabetical_name: artists.alphabetical_name });
   return response[0];
+};
+
+export type DeleteArtistOutcome =
+  | { outcome: 'deleted' }
+  | { outcome: 'not_found' }
+  | { outcome: 'lock_unavailable' }
+  // The four refusals, in `/wxycdb`'s `ArtistAdminServlet.processDeleteArtist`
+  // order (`ArtistAdminServlet.java:211-255`) -- refused rather than
+  // cascaded, per the decision recorded on WXYC/dj-site#1571, mirroring
+  // `deleteAlbumFromDB`'s own refuse-don't-cascade precedent.
+  | { outcome: 'has_releases'; count: number }
+  | { outcome: 'has_crossreference_as_source'; count: number }
+  | { outcome: 'has_crossreference_as_target'; count: number }
+  | { outcome: 'has_library_crossreference'; count: number };
+
+/**
+ * Structurally identical to `DeleteAlbumActor` -- see that alias's doc
+ * comment for why this is an alias rather than a second declaration.
+ */
+export type DeleteArtistActor = CatalogDeleteActor;
+
+/**
+ * Same rationale as `DELETE_ALBUM_LOCK_TIMEOUT_MS`: below Postgres's default
+ * 1s `deadlock_timeout`, so a librarian's delete is always the side that
+ * yields to a live DJ writer rather than the other way around.
+ */
+export const DELETE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
+
+/**
+ * BS#2562: `DELETE /library/artists/:id`. Mirrors `deleteAlbumFromDB`'s
+ * transaction shape -- bounded `lock_timeout`, `FOR UPDATE` on the row being
+ * deleted, a snapshot captured before any delete statement runs -- over a
+ * much smaller dependent set: no digital assets, no second table to lock, no
+ * denylist (an artist carries no `legacy_release_id`-shaped resurrection
+ * risk).
+ *
+ * **Why one lock is enough.** Every FK that targets `artists.id` -- all
+ * twelve of them, cascade and set-null dependents included -- fires its own
+ * insert-side check by taking `FOR KEY SHARE` on the referenced `artists`
+ * row. Holding `FOR UPDATE` on that one row for the whole transaction
+ * therefore fences every concurrent INSERT that would create a NEW dependent
+ * (a fresh `library` row, a fresh `artist_crossreference`, and so on)
+ * against the count check below, the same way `deleteAlbumFromDB`'s
+ * `library`-row lock fences a concurrent `digital_asset` INSERT. Unlike that
+ * function, no SECOND lock is needed here: both snapshot children
+ * (`genre_artist_crossreference`, `compilation_track_artist`) are depth-1 --
+ * their own FK points straight at `artists.id` -- so there is no
+ * intermediate table whose row needs locking the way `rotation` does for the
+ * release delete's `rotation_urls` grandchild capture.
+ *
+ * **Migration `0155`'s cascade invitation is declined on purpose** (see that
+ * migration's own comment, and WXYC/Backend-Service#2239/#2562): `schema.ts`
+ * once declared `onDelete: 'cascade'` on `genre_artist_crossreference.artist_id`
+ * and `artist_library_crossreference.artist_id`, but the deployed
+ * constraints have been plain `NO ACTION` since migration 0022, and #2239
+ * corrected the schema to match rather than arming a cascade the database
+ * never had. Re-declaring it here would let a future change silently widen
+ * this delete's blast radius; `deleteAlbumFromDB` set the precedent of
+ * resolving dependents explicitly instead, and the refusals below mean this
+ * endpoint gains nothing from a cascade even for the two FKs that already
+ * have one (`artist_crossreference.source_artist_id` /
+ * `.target_artist_id`) -- by the time the DELETE runs, both counted
+ * predicates are zero, so there is nothing left for that CASCADE to do.
+ *
+ * **`genre_artist_crossreference` is deleted explicitly, in full**, before
+ * the artist row: `artist_genre_key` is unique on `(artist_id, genre_id)`,
+ * not on `artist_id` alone, so a legacy-imported multi-genre artist holds
+ * more than one row, and this FK carries no `onDelete` at all -- a
+ * single-row (or zero-row) delete would leave the rest to raise a raw
+ * FK-violation 500 on the artist DELETE below.
+ * `compilation_track_artist.track_artist_id` needs no explicit delete: it is
+ * `ON DELETE set null` (see that column's schema comment, and
+ * `ArtistDependentCounts.compilation_credit_count`'s doc comment above) and
+ * resolves itself.
+ */
+export const deleteArtistFromDB = async (
+  artist_id: number,
+  actor: DeleteArtistActor = {}
+): Promise<DeleteArtistOutcome> => {
+  try {
+    return await runDeleteArtistTransaction(artist_id, actor);
+  } catch (error) {
+    if (isLockContentionError(error)) {
+      // Not an error condition worth a Sentry issue, matching
+      // `deleteAlbumFromDB` -- a live writer held the row and this
+      // transaction stood down on purpose. Breadcrumb only.
+      Sentry.addBreadcrumb({
+        category: 'library.delete',
+        level: 'warning',
+        message: 'DELETE /library/artists/:id stood down on lock contention',
+        data: { artist_id, code: extractSqlState(error) },
+      });
+      return { outcome: 'lock_unavailable' };
+    }
+    throw error;
+  }
+};
+
+const runDeleteArtistTransaction = async (
+  artist_id: number,
+  actor: DeleteArtistActor
+): Promise<DeleteArtistOutcome> => {
+  return db.transaction(async (tx) => {
+    // Deliberately below the default 1s `deadlock_timeout` -- see
+    // `DELETE_ARTIST_LOCK_TIMEOUT_MS`. `SET LOCAL` only scopes inside an
+    // explicit transaction under the postgres-js driver, which is where this
+    // runs.
+    await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${DELETE_ARTIST_LOCK_TIMEOUT_MS}ms'`));
+
+    const existing = await tx
+      .select({ id: artists.id })
+      .from(artists)
+      .where(eq(artists.id, artist_id))
+      .limit(1)
+      .for('update');
+    if (existing.length === 0) {
+      return { outcome: 'not_found' };
+    }
+
+    // The four refusal predicates, in the servlet's own order -- run inside
+    // this transaction, after the FOR UPDATE above, so they see the same
+    // locked snapshot the delete below acts on rather than a separate
+    // pre-lock read a concurrent writer could have raced. Reuses
+    // `getArtistDependentCounts` (BS#2597) rather than reimplementing its
+    // predicates -- see this function's docstring for why one lock covers
+    // all four. `compilation_credit_count` is deliberately not consulted
+    // here: it never refuses (see `ArtistDependentCounts`'s doc comment).
+    const counts = await getArtistDependentCounts(artist_id, tx);
+    if (counts.release_count > 0) {
+      return { outcome: 'has_releases', count: counts.release_count };
+    }
+    if (counts.cross_reference_source_count > 0) {
+      return { outcome: 'has_crossreference_as_source', count: counts.cross_reference_source_count };
+    }
+    if (counts.cross_reference_target_count > 0) {
+      return { outcome: 'has_crossreference_as_target', count: counts.cross_reference_target_count };
+    }
+    if (counts.library_cross_reference_count > 0) {
+      return { outcome: 'has_library_crossreference', count: counts.library_cross_reference_count };
+    }
+
+    // Capture BEFORE any delete runs, per `captureCatalogDeleteSnapshot`'s own
+    // contract -- a failed capture rolls the whole delete back with it. The
+    // artist row plus the two dependents this transaction actually resolves:
+    // every `genre_artist_crossreference` row (deleted explicitly below) and
+    // every `compilation_track_artist` row this artist's own FK is about to
+    // null out. The other seven FKs targeting `artists.id`
+    // (`artist_search_alias` x2, `artist_similar_artists`,
+    // `artist_station_plays`, `concerts.headlining_artist_id`,
+    // `concert_performers.artist_id`) are excluded for the same reason F1
+    // (BS#2560) excludes its own derived four -- see
+    // `captureCatalogDeleteSnapshot`'s doc comment.
+    await captureCatalogDeleteSnapshot(tx, {
+      entityKind: 'artist',
+      entityId: artist_id,
+      entityIdColumn: artists.id,
+      children: [genre_artist_crossreference.artist_id, compilation_track_artist.track_artist_id],
+      actor,
+    });
+
+    await tx.delete(genre_artist_crossreference).where(eq(genre_artist_crossreference.artist_id, artist_id));
+    await tx.delete(artists).where(eq(artists.id, artist_id));
+
+    // Same second, independent record `deleteAlbumFromDB` writes -- the
+    // denylist table doesn't apply here (an artist carries no
+    // `legacy_release_id`), so this request-log line is the only durable
+    // trace of who deleted this artist and when.
+    console.warn(
+      '[Library] artist hard delete',
+      JSON.stringify({
+        artist_id,
+        actor_user_id: actor.userId ?? null,
+        actor_email: actor.email ?? null,
+        actor_role: actor.role ?? null,
+      })
+    );
+    Sentry.addBreadcrumb({
+      category: 'library.delete',
+      level: 'warning',
+      message: 'DELETE /library/artists/:id hard-deleted an artist',
+      data: { artist_id, actor_user_id: actor.userId ?? null },
+    });
+
+    return { outcome: 'deleted' };
+  });
 };
 
 export type ArtistReleaseRow = {
