@@ -4840,7 +4840,7 @@ const RESTORE_PLAN: Record<
 
 /**
  * `entity_kind` -> the table name its captured envelope stores in
- * `entity.table` (BS#2616 follow-up review, finding 1). `RESTORE_PLAN` above
+ * `entity.table` (BS#2616 follow-up review, finding 3). `RESTORE_PLAN` above
  * is keyed on `entity.table`, not `entity_kind` — see its own docstring for
  * why — and the two vocabularies genuinely differ:
  * `captureCatalogDeleteSnapshot` derives `entity.table` from
