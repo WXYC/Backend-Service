@@ -222,6 +222,9 @@ describe('DELETE /library/artists/:id (BS#2562)', () => {
     ]) {
       expect(batch.unrecoverable).not.toContain(releaseTable);
     }
+    // No replay plan exists for an `artist` batch (BS#2616) -- the listing
+    // must not promise a restore the endpoint will refuse.
+    expect(batch.restorable).toBe(false);
   });
 
   test('returns 404 for an unknown id', async () => {

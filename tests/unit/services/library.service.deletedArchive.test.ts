@@ -241,6 +241,9 @@ describe('getDeletedArchivePage (BS#2561 / F2a)', () => {
     );
     expect(batch.unrecoverable).not.toContain('album_metadata');
     expect(batch.unrecoverable).not.toContain('album_review_submissions');
+    // No replay plan exists for `artist` (BS#2616) -- the listing must not
+    // promise a restore the endpoint will refuse.
+    expect(batch.restorable).toBe(false);
   });
 
   it('still gives a release batch the release dependents', async () => {
@@ -255,6 +258,7 @@ describe('getDeletedArchivePage (BS#2561 / F2a)', () => {
     expect(batch.unrecoverable).toContain('album_metadata');
     expect(batch.unrecoverable).toContain('album_review_submissions');
     expect(batch.unrecoverable).not.toContain('artist_similar_artists');
+    expect(batch.restorable).toBe(true);
   });
 });
 

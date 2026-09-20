@@ -111,6 +111,20 @@ describe('POST /library/deleted/:batchId/restore', () => {
     expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({ reason: 'already_restored', entity_ids: [42] }));
   });
 
+  // BS#2616: a batch holding a kind `RESTORE_PLAN` has no entry for (an
+  // `artist` batch, today) is a named, permanent refusal -- never a 500.
+  it('answers an unrestorable kind with a 409 naming it', async () => {
+    mockedService.restoreDeletedBatch.mockResolvedValue({ outcome: 'unrestorable_kind', entity_kind: 'artist' });
+
+    const { req, res, next, statusMock, jsonMock } = mockReqResNext({ params: { batchId: BATCH_ID } });
+    await restoreDeletedBatch(req, res, next);
+
+    expect(statusMock).toHaveBeenCalledWith(409);
+    expect(jsonMock).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'unrestorable_kind', entity_kind: 'artist' })
+    );
+  });
+
   // Matches `DELETE /library/:id`: retryable, and deliberately not a 409.
   it('answers a stand-down with the same retryable 503 shape as the delete path', async () => {
     mockedService.restoreDeletedBatch.mockResolvedValue({ outcome: 'lock_unavailable' });

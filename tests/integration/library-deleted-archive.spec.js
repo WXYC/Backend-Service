@@ -153,6 +153,9 @@ describe('GET /library/deleted (BS#2561)', () => {
         'album_review_submissions',
       ])
     );
+    // A `library` batch has a replay plan (BS#2616) -- the restore endpoint
+    // can actually bring this one back.
+    expect(batch.restorable).toBe(true);
   });
 
   test('does not read album_review_submissions -- the row is neither captured nor implied recoverable beyond the unrecoverable note', async () => {

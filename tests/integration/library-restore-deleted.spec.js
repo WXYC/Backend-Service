@@ -52,7 +52,34 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
   const marker = `BS#2585 Restore ${uniq}`;
   const artistName = `${marker} Artist`;
   const touchedAlbumIds = [];
+  const deletedArtistIds = [];
   let artistId;
+  let unrestorableSeq = 0;
+
+  /**
+   * Creates and immediately deletes a fresh artist so its
+   * `catalog_delete_snapshot` row is `entity_kind = 'artist'` -- a genuine
+   * batch BS#2616's replay plan has no entry for, sourced the same way
+   * `library-delete-artist.spec.js` does rather than hand-inserted.
+   */
+  const createAndDeleteArtistBatch = async () => {
+    unrestorableSeq += 1;
+    const codeLetters = `${uniq.toString(36).toUpperCase().slice(-2)}Z${unrestorableSeq}`.slice(0, 4);
+    const created = await auth
+      .post('/library/artists')
+      .send({ artist_name: `${marker} Unrestorable ${unrestorableSeq}`, code_letters: codeLetters, genre_id: ROCK })
+      .expect(201);
+    deletedArtistIds.push(created.body.id);
+    await auth.delete(`/library/artists/${created.body.id}`).expect(204);
+    const rows = await sql.unsafe(
+      `SELECT batch_id FROM "${SCHEMA}".catalog_delete_snapshot
+        WHERE entity_kind = 'artist' AND entity_id = $1
+        ORDER BY id DESC LIMIT 1`,
+      [created.body.id]
+    );
+    expect(rows).toHaveLength(1);
+    return { artistId: created.body.id, batchId: rows[0].batch_id };
+  };
 
   /** The batch id the delete of `albumId` wrote, read straight out of the archive table. */
   const batchIdFor = async (albumId) => {
@@ -130,6 +157,14 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".library_delete_denylist WHERE library_id = ANY($1::int[])`, [
           touchedAlbumIds,
         ]);
+      }
+      if (deletedArtistIds.length > 0) {
+        // These artists are already hard-deleted by their own DELETE call --
+        // only their archive rows need cleaning up.
+        await sql.unsafe(
+          `DELETE FROM "${SCHEMA}".catalog_delete_snapshot WHERE entity_kind = 'artist' AND entity_id = ANY($1::int[])`,
+          [deletedArtistIds]
+        );
       }
     } finally {
       await sql.end();
@@ -377,6 +412,59 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
     expect(await libraryRow(album.id)).toBeNull();
     const bins = await sql.unsafe(`SELECT 1 FROM "${SCHEMA}".bins WHERE album_id = $1`, [album.id]);
     expect(bins).toHaveLength(0);
+  });
+
+  test('refuses an artist batch with a named 409 refusal, agreeing with the listing, and writes nothing', async () => {
+    const { artistId: deletedArtistId, batchId } = await createAndDeleteArtistBatch();
+
+    // The listing already said this batch was not restorable, off the same
+    // exported set the refusal below reads.
+    const listed = await auth
+      .get('/library/deleted')
+      .query({ search: `Unrestorable ${unrestorableSeq}` })
+      .expect(200);
+    const batch = listed.body.results.find((candidate) => candidate.batch_id === batchId);
+    expect(batch).toBeDefined();
+    expect(batch.restorable).toBe(false);
+
+    const snapshotBefore = await sql.unsafe(
+      `SELECT count(*)::int AS n FROM "${SCHEMA}".catalog_delete_snapshot WHERE batch_id = $1`,
+      [batchId]
+    );
+
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(409);
+
+    expect(res.body.reason).toBe('unrestorable_kind');
+    expect(res.body.entity_kind).toBe('artist');
+
+    // A named refusal, not a 500 -- and it left both the catalog and the
+    // archive byte-identical: the artist stays gone, and the snapshot row
+    // it never touched is still there for a future reader.
+    await auth.get(`/library/artists/${deletedArtistId}`).expect(404);
+    const snapshotAfter = await sql.unsafe(
+      `SELECT count(*)::int AS n FROM "${SCHEMA}".catalog_delete_snapshot WHERE batch_id = $1`,
+      [batchId]
+    );
+    expect(snapshotAfter[0].n).toBe(snapshotBefore[0].n);
+  });
+
+  test('still raises a 500 for a known-table batch whose captured row is missing, not the named refusal', async () => {
+    const album = await createAlbum({ album_title: `${marker} Tampered` });
+    const batchId = await deleteAlbum(album.id);
+
+    // `library` passes the restorability check -- this tampers the envelope
+    // AFTER that check to prove the two conditions stay distinct: an
+    // unsupported kind refuses cleanly, but a supported kind with no
+    // captured row is a corrupt envelope and still a bug worth a 500.
+    await sql.unsafe(
+      `UPDATE "${SCHEMA}".catalog_delete_snapshot SET captured = jsonb_set(captured, '{entity,row}', 'null'::jsonb)
+        WHERE batch_id = $1`,
+      [batchId]
+    );
+
+    await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(500);
+
+    expect(await libraryRow(album.id)).toBeNull();
   });
 
   test('answers 409 already_restored on a second restore of the same batch', async () => {

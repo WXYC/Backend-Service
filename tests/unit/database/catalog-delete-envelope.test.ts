@@ -5,8 +5,10 @@
  * so there is nothing to mock.
  */
 import {
+  isRestorableEntityKind,
   orderBatchEntities,
   parseCapturedEnvelope,
+  RESTORABLE_ENTITY_KINDS,
   UNRECOVERABLE_ARTIST_DEPENDENTS,
   UNRECOVERABLE_DEPENDENTS,
   unrecoverableDependentsForKinds,
@@ -181,5 +183,18 @@ describe('unrecoverableDependentsForKinds', () => {
 
   it('answers an empty batch with an empty list', () => {
     expect(unrecoverableDependentsForKinds([])).toEqual([]);
+  });
+});
+
+describe('isRestorableEntityKind (BS#2616)', () => {
+  it('is true for every kind RESTORABLE_ENTITY_KINDS names, and false otherwise', () => {
+    for (const kind of RESTORABLE_ENTITY_KINDS) {
+      expect(isRestorableEntityKind(kind)).toBe(true);
+    }
+    expect(isRestorableEntityKind('artist')).toBe(false);
+  });
+
+  it('reads an unrecognized entity_kind as not restorable rather than restorable-by-default', () => {
+    expect(isRestorableEntityKind('something_new')).toBe(false);
   });
 });

@@ -167,3 +167,28 @@ export function unrecoverableDependentsForKinds(kinds: Iterable<string>): string
   }
   return [...seen];
 }
+
+/**
+ * The `entity_kind`s `POST /library/deleted/{batchId}/restore` has a replay
+ * plan for (BS#2616). `library.service.ts`'s `RESTORE_PLAN` is the actual
+ * plan — keyed on `entity.table`, and holding Drizzle table objects this
+ * module cannot import without pulling `schema.ts` into a package that reads
+ * nothing but jsonb — but restorability itself is decided on `entity_kind`,
+ * the same field `GET /library/deleted` already keys its listing on. This is
+ * the ONE set both endpoints read, so a kind added to one side without the
+ * other cannot happen: `artist` stays out of it until an artist replay plan
+ * exists (see `RESTORE_PLAN`'s own docstring for why that is not a quick
+ * addition), and any kind neither endpoint has met yet is simply absent
+ * rather than needing an explicit "unknown" entry.
+ */
+export const RESTORABLE_ENTITY_KINDS = ['library'] as const;
+
+/**
+ * Whether a batch holding this `entity_kind` can ever be restored. An
+ * unrecognized kind reads as NOT restorable, matching `orderBatchEntities`:
+ * a batch this module has never met sorts last instead of throwing, and here
+ * it renders as unrestorable instead of restorable-by-default.
+ */
+export function isRestorableEntityKind(kind: string): boolean {
+  return (RESTORABLE_ENTITY_KINDS as readonly string[]).includes(kind);
+}

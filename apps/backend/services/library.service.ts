@@ -13,6 +13,7 @@ import {
   extractSqlState,
   intArrayLiteral,
   isLockContentionError,
+  isRestorableEntityKind,
   orderBatchEntities,
   parseCapturedEnvelope,
   parseRotationBin,
@@ -4484,6 +4485,18 @@ export type DeletedArchiveBatch = {
   actor: { user_id: string | null; role: string | null };
   entities: DeletedArchiveEntity[];
   unrecoverable: readonly string[];
+  /**
+   * Whether `POST /library/deleted/{batchId}/restore` can ever bring this
+   * batch back (BS#2616) — `false` for a batch holding any `entity_kind`
+   * outside `RESTORABLE_ENTITY_KINDS`, the same set the restore endpoint
+   * refuses against, so the two cannot drift. An `artist` batch reads
+   * `false` today: the artist delete writes one, but no replay plan exists
+   * for it (see `RESTORE_PLAN`'s docstring). A multi-entity batch is
+   * restorable only if EVERY entity it holds is, since the restore is
+   * batch-scoped and refuses the whole batch on the first kind it can't
+   * replay.
+   */
+  restorable: boolean;
 };
 
 /**
@@ -4620,6 +4633,7 @@ export const getDeletedArchivePage = async (
       // handing an artist batch the release list would name five tables the
       // delete never touched while staying silent about the five it did.
       unrecoverable: unrecoverableDependentsForKinds(ordered.map((row) => row.entity_kind)),
+      restorable: ordered.every((row) => isRestorableEntityKind(row.entity_kind)),
     };
   });
 };
@@ -4713,6 +4727,7 @@ export type RestoredEntity = {
 
 export type RestoreBatchOutcome =
   | { outcome: 'not_found' }
+  | { outcome: 'unrestorable_kind'; entity_kind: string }
   | { outcome: 'already_present'; entity_ids: number[] }
   | { outcome: 'resolution_required'; conflicts: RestoreSlotConflict[] }
   | { outcome: 'declined'; conflicts: RestoreSlotConflict[] }
@@ -5009,12 +5024,29 @@ const runRestoreBatchTransaction = async (
       return { outcome: 'not_found' };
     }
 
-    const plans = orderBatchEntities(snapshotRows).map((row) => {
+    const orderedRows = orderBatchEntities(snapshotRows);
+
+    // A named, declared refusal for a batch holding a kind `RESTORE_PLAN`
+    // has no entry for (BS#2616) — checked, and answered, before any row
+    // lock or write below. `isRestorableEntityKind` is the exact set
+    // `GET /library/deleted`'s `restorable` field reads, so a batch this
+    // listing already promised was unrestorable never reaches the
+    // `!plan` branch below, which stays reserved for a genuinely corrupt
+    // envelope.
+    const unrestorable = orderedRows.find((row) => !isRestorableEntityKind(row.entity_kind));
+    if (unrestorable) {
+      return { outcome: 'unrestorable_kind', entity_kind: unrestorable.entity_kind };
+    }
+
+    const plans = orderedRows.map((row) => {
       const envelope = parseCapturedEnvelope(row.captured);
       const plan = RESTORE_PLAN[envelope.entity.table];
       if (!plan || !envelope.entity.row) {
-        // A corrupt or as-yet-unsupported envelope, not a client error: every
-        // row here was written by `captureCatalogDeleteSnapshot`.
+        // A corrupt envelope, not a client error: every row here was written
+        // by `captureCatalogDeleteSnapshot`, and its `entity_kind` already
+        // passed the restorability check above, so a missing plan or row
+        // here means the captured data itself is broken, not merely
+        // unsupported.
         throw new WxycError(
           `Cannot restore batch ${batchId}: entity ${row.entity_id} has no restorable '${envelope.entity.table}' row`,
           500

@@ -518,6 +518,26 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
       expect(insertStatements(ops)).toHaveLength(0);
     });
 
+    // BS#2616: `RESTORE_PLAN` has no entry for `artists`, so an `artist`
+    // batch answers a named refusal rather than the corrupt-envelope 500 --
+    // and it does so BEFORE the parent-existence probe or any write, not
+    // merely before the INSERT.
+    it('answers unrestorable_kind for a batch RESTORE_PLAN has no entry for, before any probe or write', async () => {
+      const { outcome, ops } = await run({
+        snapshots: [
+          snapshotRow({
+            entity_kind: 'artist',
+            entity_id: 4211,
+            captured: { entity: { table: 'artists', row: { id: 4211 } }, children: {} },
+          }),
+        ],
+      });
+
+      expect(outcome).toEqual({ outcome: 'unrestorable_kind', entity_kind: 'artist' });
+      expect(insertStatements(ops)).toHaveLength(0);
+      expect(selects(ops)).toHaveLength(1);
+    });
+
     // Checked BEFORE the slot probe on purpose: an already-restored batch has
     // its own row sitting in its own slot, so probing first would report the
     // restored card as its own collision and offer to relocate it.
