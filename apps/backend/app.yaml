@@ -4090,16 +4090,24 @@ paths:
 
         Rows come back under the primary keys they had before the delete, so
         every captured FK stays valid with no rewriting. `unrecoverable`
-        depends on the batch's `entity_kind`: a `library` batch's dependents
+        depends on the batch's `entity_kind`.
+
+
+        For a `library` batch, the five dependents no envelope ever captures
         are NOT synthesized — `album_metadata`, `library_identity`,
         `library_identity_source` and `uncovered_release_search_markers` are
         derived and their own jobs rebuild them, and `album_review_submissions`
         is `ON DELETE SET NULL`, so that submission survived the delete with a
         NULL `album_id` and there is nothing to replay. This endpoint never
         reads that table: its `reviewer_raw` column is PII behind ADR 0011's
-        enumerated-projection barrier. An `artist` batch's dependents are a
-        different set entirely; see the listing's `unrecoverable` description
-        above for both lists.
+        enumerated-projection barrier.
+
+
+        An `artist` batch is not restorable through this endpoint. Its
+        `unrecoverable` list — `artist_search_alias`, `artist_similar_artists`,
+        `artist_station_plays`, `concerts` and `concert_performers` —
+        describes what the delete itself could not capture, not what a
+        restore would drop, since no restore of an artist batch happens.
 
 
         The restore also clears the release's `library_delete_denylist` row, or

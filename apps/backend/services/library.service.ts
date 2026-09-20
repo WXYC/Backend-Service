@@ -5109,8 +5109,12 @@ const replayCapturedRows = async (tx: DbTransaction, table: PgTable, rows: unkno
  * `uncovered_release_search_markers` are derived and their own jobs rebuild
  * them; `album_review_submissions` is `ON DELETE SET NULL`, so the submission
  * survived the delete with a NULL `album_id` and there is nothing to replay.
- * They are absent from {@link RESTORE_PLAN} for that reason and
- * `UNRECOVERABLE_DEPENDENTS` names them on every listing. Nothing here reads
+ * They are absent from {@link RESTORE_PLAN} for that reason.
+ * `unrecoverableDependentsForKinds` (`@wxyc/database`) is what names this
+ * five-table list on a `library` batch's listing; it dispatches a disjoint
+ * five-table list for an `artist` batch instead, keyed on `entity_kind` — not
+ * this list, and {@link RESTORE_PLAN} has no `artist` entry, so an artist
+ * batch is never restored here. Nothing here reads
  * `album_review_submissions`: its `reviewer_raw` is PII behind ADR 0011's
  * enumerated-projection barrier, and re-pointing a surviving submission at a
  * restored release is its own issue with its own PII review — which would not

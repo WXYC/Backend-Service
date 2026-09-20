@@ -38,6 +38,30 @@ const BATCH: libraryService.DeletedArchiveBatch = {
   restorable: true,
 };
 
+const ARTIST_BATCH: libraryService.DeletedArchiveBatch = {
+  batch_id: '22222222-2222-2222-2222-222222222222',
+  captured_at: new Date('2026-09-10T12:00:00Z'),
+  actor: { user_id: 'librarian-1', role: 'musicDirector' },
+  entities: [
+    {
+      entity_kind: 'artist',
+      table: 'artists',
+      row: { id: 7, name: 'Chuquimamani-Condori' },
+      children: { genre_artist_crossreference: 1, compilation_track_artist: 0 },
+    },
+  ],
+  // Disjoint from `BATCH`'s five above: `unrecoverableDependentsForKinds`
+  // (`@wxyc/database`) dispatches by `entity_kind`, so an `artist` batch never
+  // carries the `library` list, or vice versa.
+  unrecoverable: [
+    'artist_search_alias',
+    'artist_similar_artists',
+    'artist_station_plays',
+    'concerts',
+    'concert_performers',
+  ],
+};
+
 const mockedService = libraryService as jest.Mocked<typeof libraryService>;
 
 beforeEach(() => {
@@ -74,7 +98,7 @@ describe('GET /library/deleted', () => {
     expect(jsonMock).toHaveBeenCalledWith({ results: [], total: 0, page: 0, totalPages: 0 });
   });
 
-  it('names every batch as carrying five unrecoverable dependents, never album_review_submissions data', async () => {
+  it('names five unrecoverable dependents on a `library` batch, never album_review_submissions data', async () => {
     mockedService.getDeletedArchivePage.mockResolvedValue([BATCH]);
     mockedService.countDeletedArchiveBatches.mockResolvedValue(1);
 
@@ -84,6 +108,24 @@ describe('GET /library/deleted', () => {
     const [batch] = jsonMock.mock.calls[0][0].results;
     expect(batch.unrecoverable).toContain('album_review_submissions');
     expect(batch.entities.every((entity: { table: string }) => entity.table !== 'album_review_submissions')).toBe(true);
+  });
+
+  it('names an `artist` batch a disjoint five unrecoverable dependents from a `library` batch', async () => {
+    mockedService.getDeletedArchivePage.mockResolvedValue([ARTIST_BATCH]);
+    mockedService.countDeletedArchiveBatches.mockResolvedValue(1);
+
+    const { req, res, next, jsonMock } = mockReqResNext();
+    await listDeletedArchive(req, res, next);
+
+    const [batch] = jsonMock.mock.calls[0][0].results;
+    expect(batch.unrecoverable).toEqual([
+      'artist_search_alias',
+      'artist_similar_artists',
+      'artist_station_plays',
+      'concerts',
+      'concert_performers',
+    ]);
+    expect(batch.unrecoverable).not.toEqual(expect.arrayContaining(['album_metadata', 'album_review_submissions']));
   });
 
   it('passes page and limit through to the service', async () => {
