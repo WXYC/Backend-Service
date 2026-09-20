@@ -63,7 +63,8 @@ type NewAlbumRequest = {
   disc_quantity?: number;
   // BS#2410 (rotation-import plan D2): the release call code, operator-chosen
   // rather than server-assigned. Both optional; omitting them reproduces the
-  // pre-2410 behavior exactly (MAX+1 for the artist, NULL volume letters).
+  // pre-2410 behavior exactly (MAX+1 for the artist within its genre —
+  // BS#2587 — NULL volume letters).
   code_number?: number;
   code_volume_letters?: string;
 };
@@ -1577,14 +1578,20 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  * that genre, 1 when none) — so the preview and the eventual write agree by
  * construction. Pure read, no side effects.
  *
- * Mirrors the `/artists/peek-code` sibling: an internal `{ next_code_number }`
- * shape with no wxyc-shared contract schema, gated at `catalog: ['write']`
- * because both back the create flow. Existence is resolved through
- * `getArtistCardById`, the same 404 predicate GET/PATCH `/artists/:id` and
- * `/artists/:id/releases` use — so an unknown id (or an artist row with no
+ * Mirrors the `/artists/peek-code` sibling: both share `NextCodeNumberResponse`
+ * (`wxyc-shared/api.yaml`), gated at `catalog: ['write']` because both back
+ * the create flow. Existence is resolved through `getArtistCardById`, the
+ * same 404 predicate GET/PATCH `/artists/:id` and `/artists/:id/releases`
+ * use — so an unknown id (or an artist row with no
  * `genre_artist_crossreference`) 404s rather than previewing 1 as if the artist
  * existed with no releases. A malformed id is the named 400 from
  * `parseArtistId`, never a 500.
+ *
+ * That 404 is artist-wide, though: a well-formed `genre_id` the artist isn't
+ * catalogued in would otherwise still answer 200 with a confident preview for
+ * a shelf the artist doesn't occupy. `artistExistsInGenre` -- the same check
+ * `updateAlbum` runs for its own genre-touching PATCH -- gates the genre too,
+ * refusing with that path's identical 400 shape.
  */
 export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, unknown, { genre_id?: string }> = async (
   req,
@@ -1594,6 +1601,9 @@ export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, un
   const genreId = parseCodeQueryInt(req.query.genre_id, 'genre_id', 1);
   if (!(await libraryService.getArtistCardById(artistId))) {
     throw new WxycError('Artist not found', 404);
+  }
+  if (!(await libraryService.artistExistsInGenre(artistId, genreId))) {
+    throw new WxycError('Artist is not catalogued in the selected genre', 400);
   }
   const next_code_number = await libraryService.generateAlbumCodeNumber(artistId, genreId);
   res.status(200).json({ next_code_number });
@@ -3781,32 +3791,6 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       throw new WxycError('Artist is not catalogued in the selected genre', 400);
     }
 
-    if (body.genre_id !== undefined) updates.genre_id = body.genre_id;
-
-    // A genre-only move (artist unchanged) deliberately does NOT get the
-    // collision/regenerate guard below. A prior revision of this fix widened
-    // the guard to `artistIsMoving || genreIsMoving`, reasoning that each
-    // genre is now its own shelf restarting at 1, so a genre-only move could
-    // land the row's unchanged `code_number` on a slot the artist already
-    // owns on the destination shelf. That reasoning was correct about the
-    // hazard but wrong about the fix: the guard's collision check,
-    // `albumCodeNumberTaken`, is artist-wide, not genre-scoped (see the
-    // comment on it below), so a genre-only arm asks "does this artist hold
-    // this number in ANY genre" and, on a same-number hit in some unrelated
-    // genre, regenerates the code_number even when the destination shelf had
-    // that slot free the whole time -- a physical disc's call number
-    // changing for no reason. That is new exposure a genre-only move never
-    // had before this PR (numbering used to be artist-wide, so a genre-only
-    // move never touched code_number at all), and it is not a rare case:
-    // WXYC/Backend-Service#2579's production measurement found 3,035
-    // cross-genre (artist, code_number) duplicates that the genre-blind
-    // predicate miscalls. So a genre-only move leaves code_number exactly as
-    // stored and does not consult `albumCodeNumberTaken` at all -- an actual
-    // destination-shelf collision on that path goes uncaught (no worse than
-    // the pre-#2587 status quo, which never checked genre-only moves either)
-    // until `albumCodeNumberTaken` is genre-scoped. Do not re-widen this
-    // guard to cover genre-only moves without that fix landing first.
-    //
     // Written as the inline condition (not a boolean extracted to a named
     // const) so TypeScript narrows `body.artist_id` to `number` for the rest
     // of this block -- narrowing does not follow through an intermediate
@@ -3864,6 +3848,44 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
         // it is leaving rather than the one it is landing on (BS#2587).
         updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id, effectiveGenreId);
       }
+    }
+
+    // A destination genre -- genre-only, or riding alongside the artist move
+    // above -- lands the release on a shelf that restarts numbering at 1 per
+    // genre (BS#2587), so the code_number it carries onto that shelf
+    // (unchanged, client-chosen, or just regenerated above) can already name
+    // another release's real slot there. Refuse rather than silently
+    // double-file two releases under one call number, keyed on the REAL shelf
+    // slot (`librarySlotKey`'s tuple) rather than `albumCodeNumberTaken`,
+    // whose genre-blind false positives are exactly why an earlier revision
+    // of this fix left genre-only moves unchecked altogether.
+    //
+    // Division of labour with the arm above: this runs AFTER it, so it sees
+    // the FINAL code_number about to be written rather than one about to be
+    // superseded, and it only runs when the request names a destination
+    // genre at all. A pure artist-only move (genre unchanged) is left
+    // entirely to the arm above, whose genre-blind collision check predates
+    // this PR and is not being widened here (WXYC/Backend-Service#2579 owns
+    // that).
+    if (body.genre_id !== undefined) {
+      const effectiveCodeNumber = updates.code_number ?? existing.code_number;
+      const effectiveVolumeLetters =
+        ('code_volume_letters' in updates ? updates.code_volume_letters : existing.code_volume_letters) ?? null;
+      const occupant = await libraryService.findLibrarySlotOccupant(
+        effectiveArtistId,
+        body.genre_id,
+        effectiveCodeNumber,
+        effectiveVolumeLetters,
+        albumId
+      );
+      if (occupant) {
+        throw new WxycError(
+          `Call number ${effectiveCodeNumber}${effectiveVolumeLetters ?? ''} is already taken for artist ${effectiveArtistId} in genre ${body.genre_id}`,
+          409,
+          { code: 'library_slot_conflict' }
+        );
+      }
+      updates.genre_id = body.genre_id;
     }
   }
 
