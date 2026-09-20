@@ -3896,6 +3896,21 @@ paths:
         list.
 
 
+        `restorable` (BS#2616) says whether `POST
+        /library/deleted/{batchId}/restore` can EVER bring this batch back —
+        `false` for a batch holding any `entity_kind` the restore endpoint has
+        no replay plan for, computed from the exact same exported set the
+        restore's `409 unrestorable_kind` refusal reads, so the two cannot
+        drift. An `artist` batch reads `false` today: the artist delete
+        writes a `catalog_delete_snapshot` row, but no replay plan exists for
+        it (an artist's shelf slot has no tombstone and needs its own
+        conflict probe — full artist restore is unbuilt, not merely
+        unwired). A `library` batch reads `true`. A batch holding several
+        entities is `restorable` only if every one of them is, since the
+        restore endpoint refuses the whole batch on the first kind it can't
+        replay.
+
+
         `entities[].children` is per-child-table ROW COUNTS, not the rows —
         `catalog_delete_snapshot.captured` holds full, unprojected child rows
         (`bins.dj_id`/`track_title`, `reviews.author` plus the full review
@@ -3998,6 +4013,8 @@ paths:
                           type: array
                           items:
                             type: string
+                        restorable:
+                          type: boolean
                   total:
                     type: integer
                   page:
@@ -4163,9 +4180,18 @@ paths:
             means the captured parent id is already present in the catalog —
             the idempotent answer to a double-click. `restore_declined` is the
             second arm of the reissued-code decision: the librarian chose to
-            leave the card in the archive. The body is deliberately not this
-            service's standard error shape, for the same reason
-            `DELETE /library/{id}`'s 409 is not: the specifics ARE the refusal.
+            leave the card in the archive. `unrestorable_kind` (BS#2616) is a
+            PERMANENT refusal, not a retryable one: this batch holds an
+            `entity_kind` — an `artist` batch, today — that has no replay plan
+            at all, answered before any row lock or write. `GET
+            /library/deleted`'s `restorable` field says the same thing about
+            the same batch off the identical exported set, so a client can
+            render this without pressing the button first. `409`, not `404`,
+            because the batch exists and the request is well-formed — this is
+            a refusal on the merits, same posture as the other two reasons
+            here. The body is deliberately not this service's standard error
+            shape, for the same reason `DELETE /library/{id}`'s 409 is not:
+            the specifics ARE the refusal.
           content:
             application/json:
               schema:
@@ -4176,7 +4202,7 @@ paths:
                     type: string
                   reason:
                     type: string
-                    enum: ['already_restored', 'restore_declined']
+                    enum: ['already_restored', 'restore_declined', 'unrestorable_kind']
                   entity_ids:
                     type: array
                     description: Present on `already_restored` — the parent ids already in the catalog.
@@ -4184,6 +4210,9 @@ paths:
                       type: integer
                   conflicts:
                     $ref: '#/components/schemas/RestoreSlotConflicts'
+                  entity_kind:
+                    type: string
+                    description: Present on `unrestorable_kind` — the kind this batch holds that has no replay plan.
         '503':
           description: >-
             The restore stood down rather than wait on rows (or the restore

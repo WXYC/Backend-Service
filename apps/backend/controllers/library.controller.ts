@@ -1770,6 +1770,13 @@ const RESTORE_RESOLUTIONS: readonly libraryService.RestoreCodeResolution[] = ['n
  * `reason: 'lock_unavailable'` match `DELETE /library/:id` exactly. The `409`
  * with `reason: 'already_restored'` is the idempotency answer: the captured
  * parent id is present in the catalog, so this batch is already back.
+ *
+ * `409 unrestorable_kind` (BS#2616) answers a batch holding an `entity_kind`
+ * `RESTORE_PLAN` has no replay for — an `artist` batch today — instead of
+ * falling through to a raw 500. It is permanent, not retryable: `GET
+ * /library/deleted`'s `restorable` field reads `false` for the exact same
+ * batch, off the same exported set, so a client never has to press the button
+ * to learn this.
  */
 export const restoreDeletedBatch: RequestHandler<{ batchId: string }, unknown, { resolution?: unknown }> = async (
   req,
@@ -1799,6 +1806,13 @@ export const restoreDeletedBatch: RequestHandler<{ batchId: string }, unknown, {
   switch (result.outcome) {
     case 'not_found':
       throw new WxycError('Delete batch not found', 404);
+    case 'unrestorable_kind':
+      res.status(409).json({
+        message: `Cannot restore: this batch holds a '${result.entity_kind}' entity, which has no restore plan. This is permanent, not retryable.`,
+        reason: 'unrestorable_kind',
+        entity_kind: result.entity_kind,
+      });
+      return;
     case 'lock_unavailable':
       res.status(503).json({
         message: 'Could not restore: the catalog is being written to right now. Try again in a moment.',

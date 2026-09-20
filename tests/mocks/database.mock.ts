@@ -231,7 +231,10 @@ export const UNRECOVERABLE_ARTIST_DEPENDENTS = [
 // `unrecoverable` green regardless of which kind the batch holds -- which is
 // the exact defect the function was added to fix. Safe to import for real: the
 // module is pure, with no DB dependency of its own.
-export { unrecoverableDependentsForKinds } from '../../shared/database/src/catalog-delete-envelope';
+export {
+  unrecoverableDependentsForKinds,
+  isRestorableEntityKind,
+} from '../../shared/database/src/catalog-delete-envelope';
 export const album_popularity = {
   logical_album_key: 'album_popularity.logical_album_key',
   plays: 'album_popularity.plays',
