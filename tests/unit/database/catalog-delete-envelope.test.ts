@@ -162,15 +162,11 @@ describe('unrecoverableDependentsForKinds', () => {
   it('unions both lists for a batch holding both kinds', () => {
     const answer = unrecoverableDependentsForKinds(['artist', 'library']);
 
-    expect(answer.sort()).toEqual(
-      [...UNRECOVERABLE_DEPENDENTS, ...UNRECOVERABLE_ARTIST_DEPENDENTS].sort()
-    );
+    expect(answer.sort()).toEqual([...UNRECOVERABLE_DEPENDENTS, ...UNRECOVERABLE_ARTIST_DEPENDENTS].sort());
   });
 
-  it('dedupes a kind repeated across a batch\'s entities', () => {
-    expect(unrecoverableDependentsForKinds(['library', 'library', 'library'])).toEqual([
-      ...UNRECOVERABLE_DEPENDENTS,
-    ]);
+  it("dedupes a kind repeated across a batch's entities", () => {
+    expect(unrecoverableDependentsForKinds(['library', 'library', 'library'])).toEqual([...UNRECOVERABLE_DEPENDENTS]);
   });
 
   // Understate rather than throw, matching `orderBatchEntities`: a listing
