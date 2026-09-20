@@ -193,7 +193,7 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
     // directly so the fixture does not depend on the rotation write path's own
     // validation rules.
     const rotation = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".rotation (album_id, play_freq, add_date) VALUES ($1, 'H', now()) RETURNING id`,
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date) VALUES ($1, 'H', now()) RETURNING id`,
       [album.id]
     );
     const rotationId = rotation[0].id;
