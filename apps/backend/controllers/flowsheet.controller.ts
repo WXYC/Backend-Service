@@ -638,6 +638,16 @@ const sendProjectedEntry = async (res: Response, statusCode: number, entry: FSEn
  * `broadcast` cannot throw into the handler: per-client write failures are
  * caught inside it and recorded via sse-metrics.
  *
+ * "At most one emit per request" bounds THIS function, not the CDC event
+ * riding alongside it. On a track add whose fill wrote markers, the
+ * `hourly-fill` refetch goes out while the same row's `NOTIFY` is still in
+ * flight to `filterMetadataInsert`, so a client can see the full fetch
+ * (already containing the row) and then the `liveFs:insert` for it, in either
+ * order. That is safe for a consumer keying by `id` and duplicates a row for
+ * one that blindly appends — the same exposure the ETL `refetch` emitters in
+ * routes/internal.route.ts already carry, at roughly one occurrence per hour
+ * per station rather than per add.
+ *
  * Instance-local by construction, unlike the CDC bridges it compensates for:
  * those reach every BS instance because each holds its own PG `LISTEN` (see
  * services/metadata-broadcast), whereas this fans out only to the clients
@@ -1555,22 +1565,6 @@ export const getRecentShows: RequestHandler<object, unknown, unknown, { window_h
  * rejection names the floor, because "too early" without "earlier than what"
  * leaves the operator bisecting.
  */
-/**
- * How recent a force-end's resolved instant has to be for the `show_end`
- * marker it writes to land where connected clients are looking, and so to be
- * worth a live-fs push (BS#2621).
- *
- * The flowsheet feed is global and ordered by `add_time DESC`, so a marker
- * stamped an hour ago is on every client's first page while one stamped in
- * 2006 is thousands of rows down. 24 h is the same horizon the CDC update
- * bridge's `LIVE_FS_UPDATE_MAX_AGE_HOURS` uses for the same judgement.
- * Deliberately a local constant rather than that env var: reading it would
- * mean importing `services/metadata-broadcast`, which pulls the CDC listener
- * into every controller unit test, and this is a notification heuristic that
- * nobody needs to tune per environment.
- */
-const FORCE_END_LIVE_PUSH_WINDOW_MS = 24 * 60 * 60 * 1000;
-
 const resolveForceEndInstant = async (raw: unknown, show: Show): Promise<Date> => {
   if (raw === undefined || raw === null) {
     return flowsheet_service.resolveShowEndInstant(show);
@@ -1599,6 +1593,22 @@ const resolveForceEndInstant = async (raw: unknown, show: Show): Promise<Date> =
   }
   return endedAt;
 };
+
+/**
+ * How recent a force-end's resolved instant has to be for the `show_end`
+ * marker it writes to land where connected clients are looking, and so to be
+ * worth a live-fs push (BS#2621).
+ *
+ * The flowsheet feed is global and ordered by `add_time DESC`, so a marker
+ * stamped an hour ago is on every client's first page while one stamped in
+ * 2006 is thousands of rows down. 24 h is the same horizon the CDC update
+ * bridge's `LIVE_FS_UPDATE_MAX_AGE_HOURS` uses for the same judgement.
+ * Deliberately a local constant rather than that env var: reading it would
+ * mean importing `services/metadata-broadcast`, which pulls the CDC listener
+ * into every controller unit test, and this is a notification heuristic that
+ * nobody needs to tune per environment.
+ */
+const FORCE_END_LIVE_PUSH_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export const forceEndShow: RequestHandler<
   { id: string },
@@ -1646,6 +1656,14 @@ export const forceEndShow: RequestHandler<
   // Deliberate: the alternative to knowing is emitting blind, and one indexed
   // `ORDER BY id DESC LIMIT 1` per drained show is orders of magnitude
   // cheaper than a station-wide full-flowsheet fetch per drained show.
+  //
+  // And it stays a hard precondition rather than a swallowed best-effort
+  // read, unlike the notification decisions elsewhere in this file. The same
+  // answer arms the 409 below, which is the guard that stops an operator
+  // ending a live broadcast by mistyping an id; degrading it to `false` on a
+  // failed read would silently disarm that. A rejection here costs a
+  // retryable 500 BEFORE anything commits — `getShowById` above is already a
+  // precondition of the same kind — so it can never leave a close half-done.
   const isCurrentShow = showId === (await flowsheet_service.getLatestShow())?.id;
 
   if (req.query.force !== 'true' && isCurrentShow) {
