@@ -1572,11 +1572,15 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  * site. Missing or malformed is the same named 400 `parseArtistId` gives a
  * malformed id, never a silent fallback.
  *
- * The value is `generateAlbumCodeNumber(artist_id, genre_id)` — the SAME
- * server-side generator `addAlbum` and `createLibraryFiling` fall back to
- * when `code_number` is omitted (MAX(code_number)+1 for the artist within
- * that genre, 1 when none) — so the preview and the eventual write agree by
- * construction. Pure read, no side effects.
+ * The value is MAX(code_number)+1 for the artist within that genre (1 when
+ * none) — the SAME rule `generateAlbumCodeNumber` applies, the generator
+ * `addAlbum` and `createLibraryFiling` fall back to when `code_number` is
+ * omitted — so the preview and the eventual write agree by construction.
+ * `peekArtistShelf` derives it from the shelf rows it reads for
+ * `slots_in_use` instead of issuing the generator's own query over the
+ * identical predicate; the two are held to the same answer by the
+ * integration case that POSTs the next release and asserts it lands on the
+ * number this predicted. Pure read, no side effects.
  *
  * Mirrors the `/artists/peek-code` sibling: both share `NextCodeNumberResponse`
  * (`wxyc-shared/api.yaml`), gated at `catalog: ['write']` because both back
@@ -1592,11 +1596,10 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  * only on this operation's own response schema in `apps/backend/app.yaml` --
  * `app.yaml` feeds no generator, so the field is tracked separately as an
  * additive follow-up against `wxyc-shared/api.yaml`, the actual codegen
- * source. `next_code_number` and `slots_in_use` are two independent reads run
- * under one `Promise.all`, not one snapshot -- a release filed concurrently
- * between them could in principle make the two disagree. Harmless here: this
- * is a preview, and the create path it predicts re-validates the slot itself
- * rather than trusting this response.
+ * source. Both fields come out of `peekArtistShelf`'s SINGLE shelf read, not
+ * a `Promise.all` over two: the shelf rows that carry the volume letters are
+ * the same rows `MAX(code_number)` is taken over, so one statement answers
+ * both halves and they cannot disagree across a concurrent insert.
  * Existence is resolved through `getArtistCardById`, the
  * same 404 predicate GET/PATCH `/artists/:id` and `/artists/:id/releases`
  * use — so an unknown id (or an artist row with no
@@ -1626,10 +1629,7 @@ export const peekArtistReleaseNumber: RequestHandler<{ id: string }, unknown, un
   if (!(await libraryService.getArtistCardById(artistId))) {
     throw new WxycError('Artist not found', 404);
   }
-  const [next_code_number, slots_in_use] = await Promise.all([
-    libraryService.generateAlbumCodeNumber(artistId, genreId),
-    libraryService.listShelfVolumeLetters(artistId, genreId),
-  ]);
+  const { next_code_number, slots_in_use } = await libraryService.peekArtistShelf(artistId, genreId);
   res.status(200).json({ next_code_number, slots_in_use });
 };
 

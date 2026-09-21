@@ -4902,6 +4902,20 @@ export const isRestorableEntityKind = (kind: string): boolean => RESTORABLE_ENTI
 type LibrarySlot = { artist_id: number; genre_id: number; code_number: number; code_volume_letters: string | null };
 
 /**
+ * THE SLOT KEY's volume-letter fold, in JS: `upper(coalesce(letters, ''))`.
+ * One expression, because two callers now need it -- `librarySlotKey` below
+ * folds a whole slot tuple, and `peekArtistShelf` (BS#2588) folds one column
+ * per shelf row. `librarySlotVolumeLetterMatchSql` below is the same rule in
+ * SQL, which `findLibrarySlotOccupant` composes. A slot the peek reports
+ * occupied therefore cannot disagree with what `librarySlotKey` matches as
+ * taken, because both read the letter through here rather than through their
+ * own copy of the fold; extend this and both follow.
+ * `tests/unit/services/library.peekArtistShelf.test.ts` pins the peek side
+ * against a case-mixed fixture.
+ */
+const foldVolumeLetters = (code_volume_letters: string | null): string => (code_volume_letters ?? '').toUpperCase();
+
+/**
  * THE SLOT KEY: `(artist_id, genre_id, code_number,
  * upper(coalesce(code_volume_letters, '')))` — the physical shelf slot a call
  * number addresses, folded to one comparable string so the predicate that
@@ -4925,7 +4939,7 @@ type LibrarySlot = { artist_id: number; genre_id: number; code_number: number; c
  * volume-letter-aware, which a bare `MAX(code_number)` is not.
  */
 export const librarySlotKey = (row: LibrarySlot): string =>
-  `${row.artist_id}/${row.genre_id}/${row.code_number}/${(row.code_volume_letters ?? '').toUpperCase()}`;
+  `${row.artist_id}/${row.genre_id}/${row.code_number}/${foldVolumeLetters(row.code_volume_letters)}`;
 
 /**
  * THE SLOT KEY's volume-letter fold, spelled once for SQL callers --
@@ -4989,39 +5003,76 @@ const probeLibrarySlot = async (
 };
 
 /**
- * The occupied volume-letter slots on an artist's genre-scoped shelf, keyed
- * by `code_number` (as a string) to the UPPER-CASED letters present there --
- * `""` for the unlettered volume, a MEMBER of the set, not an absence. Backs
- * `peekArtistReleaseNumber`'s `slots_in_use`, so the client can answer "which
- * letter is free at number N" without a second round trip.
+ * ONE READ of an artist's genre-scoped shelf, answering both halves of
+ * `peekArtistReleaseNumber`'s response (BS#2588):
+ *
+ *   - `next_code_number` -- the call number `POST /library` would assign,
+ *     `MAX(code_number) + 1`, 1 on an empty shelf.
+ *   - `slots_in_use` -- the occupied volume letters at each `code_number`,
+ *     keyed by the number as a string, `""` for the unlettered volume, a
+ *     MEMBER of the set rather than an absence, so the client can answer
+ *     "which letter is free at number N" without a second round trip.
+ *
+ * **One statement, not two.** `generateAlbumCodeNumber` computes the same
+ * `MAX(code_number) + 1` with its own `ORDER BY code_number DESC LIMIT 1`
+ * over the IDENTICAL predicate -- `(artist_id, genre_id)`, no other filter,
+ * against a table with no soft-delete column -- so running both would fetch
+ * one row this shelf read already holds, borrow a second pool connection per
+ * peek, and leave the two halves free to disagree across a concurrent insert.
+ * The derivation below is `generateAlbumCodeNumber`'s semantics exactly, not
+ * `probeLibrarySlot`'s seed-0 reduce: the maximum of the rows in hand, or 1
+ * when there are none, which is what `ORDER BY ... DESC LIMIT 1` returns for
+ * a `NOT NULL smallint`. That the two agree is pinned end to end by
+ * `tests/integration/library.spec.js`'s "previews MAX(code_number)+1 and
+ * agrees with the next assignment", which POSTs the next release and asserts
+ * the create path lands on the number this predicted.
  *
  * Reads the same shelf `probeLibrarySlot` locks for a write -- every row at
  * `(artist_id, genre_id)` -- but takes no `FOR UPDATE`, since this is a plain
- * preview, not a replay. Each row's letter folds through the SAME
- * `UPPER(COALESCE(...,''))` `librarySlotKey` applies, so a slot this reports
- * occupied can never disagree with what `librarySlotKey` would match as
- * taken. Letters are de-duplicated per number into a SORTED array, never
- * reduced to a max, so the shape cannot depend on the order Postgres happens
- * to return rows in -- the defect WXYC/dj-site#1581 found in a removed
- * client-side helper.
+ * preview, not a replay. Each row's letter folds through
+ * `foldVolumeLetters`, the SAME expression `librarySlotKey` applies, so a
+ * slot this reports occupied can never disagree with what `librarySlotKey`
+ * would match as taken. Letters are de-duplicated per number into a SORTED
+ * array, never reduced to a max, so the shape cannot depend on the order
+ * Postgres happens to return rows in -- the defect WXYC/dj-site#1581 found in
+ * a removed client-side helper.
+ *
+ * Cost note: `library` carries single-column `artist_id_idx` and
+ * `genre_id_idx` and NO composite `(artist_id, genre_id)` index, so the rows
+ * this examines are bounded by the artist's whole catalog across every genre,
+ * not by the one shelf it returns. For the collapsed `Various Artists` artist
+ * (3,113 releases) that is thousands of tuples to emit a few KB. The one
+ * index would also serve `probeLibrarySlot` and `generateAlbumCodeNumber`,
+ * which share the predicate; adding it is follow-up work, not this function's.
  */
-export const listShelfVolumeLetters = async (
+export const peekArtistShelf = async (
   artist_id: number,
   genre_id: number
-): Promise<Record<string, string[]>> => {
+): Promise<{ next_code_number: number; slots_in_use: Record<string, string[]> }> => {
   const shelf = await db
     .select({ code_number: library.code_number, code_volume_letters: library.code_volume_letters })
     .from(library)
     .where(and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id)));
 
   const byNumber = new Map<string, Set<string>>();
+  // `undefined`, not 0: an empty shelf previews 1, and a seeded 0 would also
+  // swallow a non-positive `code_number` that `generateAlbumCodeNumber`'s
+  // `ORDER BY ... DESC LIMIT 1` would have reported.
+  let highest: number | undefined;
   for (const row of shelf) {
+    const code_number = Number(row.code_number);
+    if (highest === undefined || code_number > highest) {
+      highest = code_number;
+    }
     const letters = byNumber.get(String(row.code_number)) ?? new Set<string>();
-    letters.add((row.code_volume_letters ?? '').toUpperCase());
+    letters.add(foldVolumeLetters(row.code_volume_letters));
     byNumber.set(String(row.code_number), letters);
   }
 
-  return Object.fromEntries([...byNumber].map(([code_number, letters]) => [code_number, [...letters].sort()]));
+  return {
+    next_code_number: highest === undefined ? 1 : highest + 1,
+    slots_in_use: Object.fromEntries([...byNumber].map(([code_number, letters]) => [code_number, [...letters].sort()])),
+  };
 };
 
 /**

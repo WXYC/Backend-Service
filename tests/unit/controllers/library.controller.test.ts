@@ -32,7 +32,10 @@ const mockInsertArtistWithGenreCrossreference =
   jest.fn<(artist: Record<string, unknown>, genreId: number, codeNumber: number) => Promise<Record<string, unknown>>>();
 const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number, genreId: number) => Promise<number>>();
-const mockListShelfVolumeLetters = jest.fn<(artistId: number, genreId: number) => Promise<Record<string, string[]>>>();
+const mockPeekArtistShelf =
+  jest.fn<
+    (artistId: number, genreId: number) => Promise<{ next_code_number: number; slots_in_use: Record<string, string[]> }>
+  >();
 const mockCreateLabel = jest.fn<(label: string) => Promise<{ id: number }>>();
 const mockUpdateCanonicalEntity = jest.fn<(id: number, entityId: string, confidence: number) => Promise<unknown>>();
 const mockMapLookupToCanonicalEntity = jest.fn<(response: unknown) => { id: string; confidence: number } | null>();
@@ -249,7 +252,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   genreExists: mockGenreExists,
   getArtistById: mockGetArtistById,
   generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
-  listShelfVolumeLetters: mockListShelfVolumeLetters,
+  peekArtistShelf: mockPeekArtistShelf,
   generateArtistNumber: mockGenerateArtistNumber,
   getGenresFromDB: jest.fn(),
   insertGenre: jest.fn(),
@@ -5484,39 +5487,39 @@ describe('library.controller', () => {
       jest.clearAllMocks();
     });
 
-    // The number is `generateAlbumCodeNumber` verbatim (MAX(code_number)+1
-    // scoped to the queried genre), so an artist with releases previews
-    // max+1 for that genre.
-    it('returns the generator value (max+1) plus slots_in_use for an artist with releases, scoped to genre_id', async () => {
+    // Both fields come out of ONE service call -- `peekArtistShelf`'s single
+    // genre-scoped shelf read (BS#2588 review, finding 2) -- and the handler
+    // must NOT also invoke `generateAlbumCodeNumber`, whose separate
+    // `MAX(code_number)` query runs the identical predicate over the same
+    // rows. Pinning the negative here is what keeps the second read from
+    // drifting back in.
+    it('returns next_code_number plus slots_in_use from one shelf read, scoped to genre_id', async () => {
       mockGetArtistCardById.mockResolvedValue(anyCard);
-      mockGenerateAlbumCodeNumber.mockResolvedValue(4);
-      mockListShelfVolumeLetters.mockResolvedValue({ '3': ['', 'A'] });
+      mockPeekArtistShelf.mockResolvedValue({ next_code_number: 4, slots_in_use: { '3': ['', 'A'] } });
       const req = { params: { id: '42' }, query: { genre_id: '11' } } as unknown as Request;
       const res = mockResponse();
 
       await peekArtistReleaseNumber(req, res, next);
 
       expect(mockGetArtistCardById).toHaveBeenCalledWith(42);
-      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 11);
-      expect(mockListShelfVolumeLetters).toHaveBeenCalledWith(42, 11);
+      expect(mockPeekArtistShelf).toHaveBeenCalledWith(42, 11);
+      expect(mockPeekArtistShelf).toHaveBeenCalledTimes(1);
+      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({ next_code_number: 4, slots_in_use: { '3': ['', 'A'] } });
     });
 
-    // `generateAlbumCodeNumber` returns 1 when the artist has no releases in
-    // that genre, and `listShelfVolumeLetters` answers an empty shelf with an
-    // empty object, not an omitted field.
+    // An empty shelf previews 1 and answers `slots_in_use` with an empty
+    // object, not an omitted field.
     it('returns 1 and an empty slots_in_use for an artist with no releases in the queried genre', async () => {
       mockGetArtistCardById.mockResolvedValue(anyCard);
-      mockGenerateAlbumCodeNumber.mockResolvedValue(1);
-      mockListShelfVolumeLetters.mockResolvedValue({});
+      mockPeekArtistShelf.mockResolvedValue({ next_code_number: 1, slots_in_use: {} });
       const req = { params: { id: '42' }, query: { genre_id: '15' } } as unknown as Request;
       const res = mockResponse();
 
       await peekArtistReleaseNumber(req, res, next);
 
-      expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 15);
-      expect(mockListShelfVolumeLetters).toHaveBeenCalledWith(42, 15);
+      expect(mockPeekArtistShelf).toHaveBeenCalledWith(42, 15);
       expect(res.json).toHaveBeenCalledWith({ next_code_number: 1, slots_in_use: {} });
     });
 
@@ -5524,18 +5527,17 @@ describe('library.controller', () => {
     // predicate GET/PATCH /artists/:id and /artists/:id/releases use — so an
     // unknown id (or an artist row with no genre crossreference) 404s rather
     // than previewing 1 as if the artist existed with no releases.
-    it('returns 404 for an unknown artist id, without invoking the generator', async () => {
+    it('returns 404 for an unknown artist id, without reading the shelf', async () => {
       mockGetArtistCardById.mockResolvedValue(null);
       const req = { params: { id: '999' }, query: { genre_id: '11' } } as unknown as Request;
       const res = mockResponse();
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Artist not found');
-      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
-      expect(mockListShelfVolumeLetters).not.toHaveBeenCalled();
+      expect(mockPeekArtistShelf).not.toHaveBeenCalled();
     });
 
     // A malformed id is the named 400 from `parseArtistId`, never a 500, and it
-    // reaches neither the existence read nor the generator.
+    // reaches neither the existence read nor the shelf read.
     it.each([
       ['non-numeric', 'abc'],
       ['above INT4_MAX', '2147483648'],
@@ -5550,14 +5552,14 @@ describe('library.controller', () => {
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Invalid artist ID');
       expect(mockGetArtistCardById).not.toHaveBeenCalled();
-      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+      expect(mockPeekArtistShelf).not.toHaveBeenCalled();
     });
 
     // BS#2587: genre_id is a required query parameter, not an optional one
     // that falls back to genre-blind behaviour -- an omitted or malformed
     // value is the same named 400 shape `resolveArtistByCode` uses for its
     // own required `genre_id`, and it must reach neither the existence read
-    // nor the generator.
+    // nor the shelf read.
     it.each([
       ['non-numeric', 'abc'],
       ['zero', '0'],
@@ -5569,7 +5571,7 @@ describe('library.controller', () => {
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('genre_id');
       expect(mockGetArtistCardById).not.toHaveBeenCalled();
-      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+      expect(mockPeekArtistShelf).not.toHaveBeenCalled();
     });
 
     // Finding 12: the generic 'genre_id' substring above is satisfied by
@@ -5583,7 +5585,7 @@ describe('library.controller', () => {
 
       await expect(peekArtistReleaseNumber(req, res, next)).rejects.toThrow('Missing query parameter: genre_id');
       expect(mockGetArtistCardById).not.toHaveBeenCalled();
-      expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+      expect(mockPeekArtistShelf).not.toHaveBeenCalled();
     });
   });
 

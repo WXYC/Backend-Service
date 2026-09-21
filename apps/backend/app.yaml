@@ -3567,10 +3567,10 @@ paths:
       summary: Peek the next release call number for an artist in a genre (BS#2502, BS#2587)
       description: >-
         Previews the release `code_number` a `POST /library` would assign this
-        artist in the given genre — `generateAlbumCodeNumber(artist_id, genre_id)`,
-        MAX(`code_number`) + 1 for that artist's releases WITHIN that genre, and 1
-        when it has none there, the same server-side value the create path falls
-        back to when `code_number` is omitted. Lets the classic add-release form
+        artist in the given genre — MAX(`code_number`) + 1 for that artist's
+        releases WITHIN that genre, and 1 when it has none there, the same
+        server-side rule the create path falls back to when `code_number` is
+        omitted. Lets the classic add-release form
         prepopulate an editable field with the authoritative next value instead of
         a client-side `max+1`, which the paginated releases list can get wrong.
         Pure read, no side effects.
@@ -3601,7 +3601,9 @@ paths:
         Swagger-UI documentation only, not a codegen source, so `slots_in_use`
         is additionally tracked as its own follow-up in `wxyc-shared/api.yaml`
         (see the companion issue linked from BS#2588) rather than declared here
-        alone.
+        alone. Both fields come out of ONE shelf read -- the volume letters and
+        the MAX(`code_number`) are taken over the same rows -- so they cannot
+        disagree with each other across a concurrent filing.
       security:
         - BearerAuth: ['station-management']
       parameters:
