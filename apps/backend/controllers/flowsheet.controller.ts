@@ -750,6 +750,29 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   };
 
   /**
+   * The one push rule for all four insert paths, decided by the row that
+   * actually committed rather than by the shape of the request (BS#2621).
+   *
+   * Request shape is the wrong signal in both directions, because
+   * `entry_type` is not runtime-validated on the body. A `message` row typed
+   * `track` is a genuine track and rides the CDC insert bridge, so pushing
+   * for it would broadcast one row twice. A track-shaped body carrying
+   * `entry_type: 'talkset'` and no `message` commits a marker through
+   * `buildSnapshotFieldsEntry`, which satisfies neither bridge — the insert
+   * bridge is track-scoped and a marker never reaches a terminal
+   * `metadata_status` — so NOT pushing for it would leave it invisible until
+   * the reconciliation poll. Reading `entry_type` off the committed row
+   * answers both, and matches how `updateEntry` decides.
+   *
+   * Either way the fill's own markers still get their push, and only one
+   * refetch leaves the request.
+   */
+  const pushRefetchForCommittedRow = (entry: FSEntry): void => {
+    if (entry.entry_type !== 'track') broadcastFlowsheetRefetch('marker-add');
+    else pushRefetchForCommittedFill();
+  };
+
+  /**
    * `buildSnapshotFieldsEntry` raises the missing-field 400 from inside, at
    * both of its call sites below. Route both through the refusal push rather
    * than repeat the try/catch.
@@ -805,15 +828,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     // Marker rows never reach the CDC bridges (BS#2621). One emit covers the
     // hourly fill's rows too — never a second `hourly-fill` on this branch.
-    //
-    // `entry_type` is not runtime-validated on the request body, so a caller
-    // can post a message row typed `track`. That row is a genuine track and
-    // rides the insert bridge on its own, which would make it the one row
-    // broadcast twice — so it falls back to the fill-only push, keeping "a
-    // plain track add stays silent" true by construction rather than by
-    // client good behavior.
-    if (requestedEntryType !== 'track') broadcastFlowsheetRefetch('marker-add');
-    else pushRefetchForCommittedFill();
+    pushRefetchForCommittedRow(completedEntry);
     await sendProjectedEntry(res, 201, completedEntry);
     return;
   }
@@ -861,7 +876,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
         extra: { album_id: body.album_id, show_id: latestShow.id },
       });
       const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-      pushRefetchForCommittedFill();
+      pushRefetchForCommittedRow(completedEntry);
       await sendProjectedEntry(res, 201, completedEntry);
       return;
     }
@@ -883,7 +898,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    pushRefetchForCommittedFill();
+    pushRefetchForCommittedRow(completedEntry);
     await sendProjectedEntry(res, 201, completedEntry);
   } else {
     // No album_id (explicit null from the dj-site rotation snapshot, BS#933,
@@ -892,7 +907,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     // fallback above (BS#1680) so both routes into this shape stay identical.
     const fsEntry = buildSnapshotEntryOrRefuse();
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    pushRefetchForCommittedFill();
+    pushRefetchForCommittedRow(completedEntry);
     await sendProjectedEntry(res, 201, completedEntry);
   }
 };
@@ -1540,6 +1555,22 @@ export const getRecentShows: RequestHandler<object, unknown, unknown, { window_h
  * rejection names the floor, because "too early" without "earlier than what"
  * leaves the operator bisecting.
  */
+/**
+ * How recent a force-end's resolved instant has to be for the `show_end`
+ * marker it writes to land where connected clients are looking, and so to be
+ * worth a live-fs push (BS#2621).
+ *
+ * The flowsheet feed is global and ordered by `add_time DESC`, so a marker
+ * stamped an hour ago is on every client's first page while one stamped in
+ * 2006 is thousands of rows down. 24 h is the same horizon the CDC update
+ * bridge's `LIVE_FS_UPDATE_MAX_AGE_HOURS` uses for the same judgement.
+ * Deliberately a local constant rather than that env var: reading it would
+ * mean importing `services/metadata-broadcast`, which pulls the CDC listener
+ * into every controller unit test, and this is a notification heuristic that
+ * nobody needs to tune per environment.
+ */
+const FORCE_END_LIVE_PUSH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 const resolveForceEndInstant = async (raw: unknown, show: Show): Promise<Date> => {
   if (raw === undefined || raw === null) {
     return flowsheet_service.resolveShowEndInstant(show);
@@ -1632,29 +1663,32 @@ export const forceEndShow: RequestHandler<
   // `endShow` has committed a `show_end` marker plus a `dj_leave` per
   // remaining co-host — none of which the CDC bridges carry (BS#2621).
   //
-  // Scoped to the current show, which is both the case worth pushing and the
-  // rare one. Worth pushing: afterwards `POST /flowsheet` fails for whoever
-  // is on air, so a client still rendering the show as live is actively
-  // misleading. Rare: this endpoint exists to drain an open-show backlog
-  // reaching back to 2006 (see `endShow` — 2,813 of production's 2,814 open
-  // shows), and closing a 2006 show changes nothing on any live view, so an
-  // ungated emit would fan one full-flowsheet fetch per drained show to every
-  // connected client — the amplification every other emit site here avoids by
-  // being a hand-speed DJ action, and the one `LIVE_FS_UPDATE_MAX_AGE_HOURS`
-  // guards against on the CDC update bridge.
+  // Scoped, because this is the one emit site whose endpoint exists to be
+  // driven in bulk. The current show is the case most worth pushing:
+  // afterwards `POST /flowsheet` fails for whoever is on air, so a client
+  // still rendering the show as live is actively misleading. The scoping is
+  // what keeps the bulk case quiet — the endpoint exists to drain an open-show
+  // backlog reaching back to 2006 (see `endShow`: 2,813 of production's 2,814
+  // open shows), and closing a 2006 show changes nothing on any live view, so
+  // an ungated emit would fan one full-flowsheet fetch per drained show to
+  // every connected client. That is the amplification every other emit site
+  // here avoids by being a hand-speed DJ action, and the one
+  // `LIVE_FS_UPDATE_MAX_AGE_HOURS` guards against on the CDC update bridge.
   //
-  // Known gap, left as one: an operator who closes a NON-current show with an
-  // explicit `ended_at` near now writes a `show_end` marker whose `add_time`
-  // sorts to the head of the global feed, and this stays silent for it. That
-  // input is already a data-corruption hazard for its own reasons — it is
-  // what `resolveForceEndInstant`'s derived instant exists to avoid, and it
-  // makes `GET /flowsheet/range` admit the show on every day since its start
-  // (see `endShow`) — so the answer is not to widen the push.
+  // "Not the current show" is not the same as "not visible", which is why the
+  // second arm is here. Post-BS#2233 the shape this endpoint was built for —
+  // a show hangs open, the next DJ goes live and starts a NEW show — leaves
+  // the abandoned show off `max(shows.id)` while its entries are still an
+  // hour old, so the `show_end` marker this close writes lands near the head
+  // of the global `add_time DESC, id DESC` feed and on every client's first
+  // page. The same arm covers an explicit `ended_at` near now on a
+  // non-current show.
   //
   // Every refusal above (400 id, 404 no show, 400 already ended, 409 unforced
   // current, 400 out-of-range ended_at) returns before this line, and
   // `endShow`'s own compare-and-set 400 rejects through it.
-  if (isCurrentShow) broadcastFlowsheetRefetch('show-transition');
+  const landsInLiveFeed = Date.now() - endedAt.getTime() < FORCE_END_LIVE_PUSH_WINDOW_MS;
+  if (isCurrentShow || landsInLiveFeed) broadcastFlowsheetRefetch('show-transition');
   res.status(200).json(finalizedShow);
 };
 

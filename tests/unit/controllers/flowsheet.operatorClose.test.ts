@@ -335,6 +335,33 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
       expect(mockBroadcast).not.toHaveBeenCalled();
     });
 
+    // The shape this endpoint was built for, post-BS#2233: a show hangs open,
+    // the next DJ goes live and starts a NEW show, so the abandoned one is no
+    // longer `max(shows.id)` — but its entries are an hour old, so the
+    // `show_end` marker the close writes lands near the head of the global
+    // `add_time DESC` feed and therefore on every client's first page. "Not
+    // current" is not the same as "not visible".
+    it.each<[string, number]>([
+      ['an hour ago', 60 * 60 * 1000],
+      ['twenty-three hours ago', 23 * 60 * 60 * 1000],
+    ])('broadcasts when a non-current abandoned show is closed at an instant %s', async (_name, agoMs) => {
+      const abandoned = { id: 1951160, primary_dj_id: 'dj-9', end_time: null };
+      const recentInstant = new Date(Date.now() - agoMs);
+      mockGetShowById.mockResolvedValue(abandoned);
+      mockGetLatestShow.mockResolvedValue({ id: 1951164, primary_dj_id: 'dj-1', end_time: null });
+      mockResolveShowEndInstant.mockResolvedValue(recentInstant);
+      mockEndShow.mockResolvedValue({ ...abandoned, end_time: recentInstant });
+
+      const { res } = createMockRes();
+      await forceEndShow(makeReq({}, { id: '1951160' }), res, next);
+
+      expect(mockBroadcast).toHaveBeenCalledTimes(1);
+      expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+        type: 'refetch',
+        payload: { source: 'show-transition' },
+      });
+    });
+
     // Every refusal path: nothing committed, so nothing to reconcile. The
     // `endShow`-throws case needs no arrangement of its own — the emit sits
     // after that await, so a rejection skips it by construction.

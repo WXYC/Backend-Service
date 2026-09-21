@@ -2256,6 +2256,49 @@ describe('flowsheet.controller', () => {
       expect(mockBroadcast).not.toHaveBeenCalled();
     });
 
+    // The mirror of the case above, and the reason the gate reads the
+    // COMMITTED row rather than the request shape: `buildSnapshotFieldsEntry`
+    // copies `body.entry_type` into the INSERT, so a track-shaped body with no
+    // `message` can still commit a marker row. That row satisfies neither CDC
+    // bridge — `matchTrackInsert` drops it, and it is permanently `pending` —
+    // so routing on `body.message !== undefined` would leave it invisible.
+    it.each<[string, Record<string, unknown>, () => void]>([
+      [
+        'no album_id (BS#933 snapshot route)',
+        {
+          artist_name: 'Jessica Pratt',
+          album_title: 'On Your Own Love Again',
+          track_title: 'Back, Baby',
+          record_label: 'Drag City',
+          entry_type: 'talkset',
+        },
+        () => {},
+      ],
+      [
+        'an album_id that misses in library (BS#1680 degrade)',
+        {
+          album_id: 404,
+          artist_name: 'Jessica Pratt',
+          album_title: 'On Your Own Love Again',
+          track_title: 'Back, Baby',
+          record_label: 'Drag City',
+          entry_type: 'talkset',
+        },
+        () => {
+          mockGetAlbumFromDB.mockResolvedValue(undefined);
+        },
+      ],
+    ])('addEntry broadcasts a marker-add for a messageless marker row committed via %s', async (_n, body, arrange) => {
+      arrange();
+      mockAddTrack.mockResolvedValue({ ...currentShowEntry(18), entry_type: 'talkset' });
+
+      const req = { body } as unknown as Request;
+
+      await addEntry(req, createMockRes() as Response, mockNext);
+
+      expectSingleRefetch('marker-add');
+    });
+
     it('addEntry still pushes the fill on a message row the caller typed as a track', async () => {
       mockFillMissingHourlyBreakpoints.mockResolvedValueOnce(2);
       mockAddTrack.mockResolvedValue({ ...createMockEntry(17), entry_type: 'track', message: 'Talkset' });
