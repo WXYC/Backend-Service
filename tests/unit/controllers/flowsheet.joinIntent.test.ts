@@ -199,17 +199,23 @@ describe('joinShow — an open show the caller does not belong to', () => {
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
-  // BS#2621 scopes the refetch push to paths that provably committed a
-  // flowsheet row. `addDJToShow` writes a dj_join marker only on first join or
-  // reactivation — a retried press commits nothing — and doesn't report which
-  // happened, so the co-host path stays silent rather than emit for writes
-  // that may not exist.
-  it('does not broadcast a live-fs refetch on intent="join"', async () => {
+  // `addDJToShow` writes a dj_join marker on a first join or a reactivation
+  // and nothing on a retried press, and its bare `ShowDJ` return doesn't say
+  // which happened (BS#2633). The tie breaks the same way `leaveShow` breaks
+  // it: one spurious idempotent fetch on a retry is cheaper than leaving every
+  // genuine co-host join invisible until the poll — and a join whose marker
+  // never broadcasts while the matching `dj_leave` does is the asymmetry
+  // BS#2621 exists to remove.
+  it('broadcasts one live-fs refetch on intent="join"', async () => {
     const res = createMockRes();
 
     await joinShow(makeReq({ intent: 'join' }), res, next);
 
-    expect(mockBroadcast).not.toHaveBeenCalled();
+    expect(mockBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+      type: 'refetch',
+      payload: { source: 'show-transition' },
+    });
   });
 
   // A JSON `null` is what an unset optional serializes to from several of this

@@ -2133,10 +2133,10 @@ describe('flowsheet.controller', () => {
   describe('live-fs refetch push coverage (BS#2621 / BS#2515)', () => {
     const activeShow = { id: 42, end_time: null };
 
-    /** A row on the show live reads resolve to — the only rows worth pushing for. */
+    /** A row on the show live reads resolve to. */
     const currentShowEntry = (id: number) => ({ ...createMockEntry(id), show_id: activeShow.id });
-    /** A row on an archived show. Nothing rendered live changes when it does. */
-    const archivedEntry = (id: number) => ({ ...createMockEntry(id), show_id: 1906 });
+    /** A row on the show that just ended — still on screen, because the feed is global. */
+    const previousShowEntry = (id: number) => ({ ...createMockEntry(id), show_id: 41 });
 
     const expectSingleRefetch = (source: string) => {
       expect(mockBroadcast).toHaveBeenCalledTimes(1);
@@ -2161,55 +2161,51 @@ describe('flowsheet.controller', () => {
       expectSingleRefetch('delete');
     });
 
-    // The row-keyed handlers take a bare `entry_id`, so they reach archived
-    // shows as readily as the live one — an MD correcting last spring's
-    // flowsheet is the case. Nothing any connected client renders changes when
-    // such a row does, so a station-wide full fetch per edit is pure cost.
-    // Same predicate `forceEndShow` uses for the same reason.
+    // The row-keyed handlers are NOT scoped by show, and these pin why. The
+    // flowsheet is a global chronological feed — `getEntriesByPage` orders by
+    // `add_time DESC, id DESC` with no show filter — so right after a
+    // handover a client still renders the outgoing show's trailing rows above
+    // the new `show_start` marker. Scoping to the latest show would go silent
+    // for rows visibly on screen, in the very window divergence is likeliest.
     it.each<[string, () => Promise<void>]>([
       [
-        'deleteEntry on an archived show',
+        'deleteEntry on the outgoing show’s row',
         async () => {
-          mockRemoveTrack.mockResolvedValue(archivedEntry(20));
+          mockRemoveTrack.mockResolvedValue(previousShowEntry(20));
           const req = { body: { entry_id: 20 } } as unknown as Request;
           await deleteEntry(req, createMockRes() as Response, mockNext);
-          expect(mockRemoveTrack).toHaveBeenCalled();
         },
       ],
       [
-        'changeOrder on an archived show',
+        'changeOrder on the outgoing show’s row',
         async () => {
-          mockChangeOrder.mockResolvedValue(archivedEntry(21));
+          mockChangeOrder.mockResolvedValue(previousShowEntry(21));
           const req = { body: { entry_id: 21, new_position: 2 } } as unknown as Request;
           await changeOrder(req, createMockRes() as Response, mockNext);
-          expect(mockChangeOrder).toHaveBeenCalled();
         },
       ],
       [
-        'updateEntry on an archived show’s marker row',
+        'updateEntry on the outgoing show’s marker row',
         async () => {
-          mockUpdateEntry.mockResolvedValue({ ...archivedEntry(22), entry_type: 'talkset' });
+          mockUpdateEntry.mockResolvedValue({ ...previousShowEntry(22), entry_type: 'talkset' });
           const req = { body: { entry_id: 22, data: { message: 'fixed' } } } as unknown as Request;
           await updateEntry(req, createMockRes() as Response, mockNext);
-          expect(mockUpdateEntry).toHaveBeenCalled();
         },
       ],
-    ])('does not broadcast for %s', async (_name, run) => {
+    ])('still broadcasts for %s', async (_name, run) => {
       await run();
-      expect(mockBroadcast).not.toHaveBeenCalled();
+      expect(mockBroadcast).toHaveBeenCalledTimes(1);
     });
 
-    // `flowsheet.show_id` is nullable (`onDelete: 'set null'`, plus rows that
-    // pre-date shows), so the scoping can't always answer. It fails open: a
-    // spurious idempotent fetch is cheaper than silently dropping a push a
-    // live client needed.
-    it('broadcasts when the deleted row has no show_id to scope on', async () => {
-      mockRemoveTrack.mockResolvedValue({ ...createMockEntry(23), show_id: null });
+    // No post-commit read stands between the mutation and the emit on any of
+    // the three, so a `shows` blip cannot turn a committed delete into a 500
+    // the DJ retries into a 404.
+    it('deleteEntry reads nothing further after the row is removed', async () => {
+      mockRemoveTrack.mockResolvedValue(currentShowEntry(24));
 
-      const req = { body: { entry_id: 23 } } as unknown as Request;
+      await deleteEntry({ body: { entry_id: 24 } } as unknown as Request, createMockRes() as Response, mockNext);
 
-      await deleteEntry(req, createMockRes() as Response, mockNext);
-
+      expect(mockGetLatestShow).not.toHaveBeenCalled();
       expectSingleRefetch('delete');
     });
 
@@ -2385,6 +2381,22 @@ describe('flowsheet.controller', () => {
       }
     );
 
+    // A co-host join commits a `dj_join` marker on a first join or a
+    // reactivation and nothing on a retried press, and `addDJToShow` doesn't
+    // report which (BS#2633). Same tie-break `leaveShow` takes: one spurious
+    // idempotent fetch beats leaving every genuine join invisible while the
+    // matching `dj_leave` broadcasts.
+    it('joinShow broadcasts one refetch on the co-host path', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 8, end_time: null, primary_dj_id: 'someone-else' });
+      mockAddDJToShow.mockResolvedValue({ show_id: 8, dj_id: 'caller-dj', active: true });
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+
+      await joinShow(req, createMockRes() as Response, mockNext);
+
+      expectSingleRefetch('show-transition');
+    });
+
     it('joinShow broadcasts one refetch when starting a new show (show_start marker committed)', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
       mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
@@ -2517,15 +2529,6 @@ describe('flowsheet.controller', () => {
         'joinShow owner retry no-op (zero writes, BS#1861 arm c)',
         async () => {
           mockGetLatestShow.mockResolvedValue({ id: 7, end_time: null, primary_dj_id: 'caller-dj' });
-          const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
-          await joinShow(req, createMockRes() as Response, mockNext);
-        },
-      ],
-      [
-        'joinShow co-host join (dj_join write unobservable at the controller)',
-        async () => {
-          mockGetLatestShow.mockResolvedValue({ id: 8, end_time: null, primary_dj_id: 'someone-else' });
-          mockAddDJToShow.mockResolvedValue({ show_id: 8, dj_id: 'caller-dj', active: true });
           const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
           await joinShow(req, createMockRes() as Response, mockNext);
         },

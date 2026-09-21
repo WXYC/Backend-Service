@@ -622,11 +622,18 @@ const sendProjectedEntry = async (res: Response, statusCode: number, entry: FSEn
  *    every connected client to issue a full fetch is the worst thing to do to
  *    a database that just failed a write. Clients converge at their
  *    reconciliation poll instead — slower, but it cannot amplify an incident.
- * 3. Emit only for rows a connected client is actually rendering. The
- *    row-keyed handlers take a bare `entry_id` and so reach archived shows,
- *    and `forceEndShow` exists to drain a backlog of them; a full fetch for a
- *    row no live view shows is pure fan-out. Scope with
- *    `isCurrentShowId`, which fails open when it cannot tell.
+ * 3. Do NOT scope the row-keyed handlers by show. It is tempting —
+ *    `deleteEntry`, `updateEntry` and `changeOrder` take a bare `entry_id`,
+ *    so they can name a row on any show — but both halves of the argument
+ *    fail. `GET /flowsheet` is a GLOBAL chronological feed
+ *    (`getEntriesByPage` orders by `add_time DESC, id DESC` with no show
+ *    filter), so a client renders the outgoing show's trailing rows above the
+ *    new `show_start` marker; scoping to the latest show would go silent for
+ *    rows visibly on screen, in exactly the show-transition window where
+ *    divergence is most likely. And the abuse it would guard against can't
+ *    happen: all three routes sit behind `showMemberMiddleware`, so the
+ *    caller is a member of the CURRENT show. `forceEndShow` is the one site
+ *    that does scope, and the one route with no member middleware.
  *
  * `broadcast` cannot throw into the handler: per-client write failures are
  * caught inside it and recorded via sse-metrics.
@@ -645,20 +652,6 @@ const broadcastFlowsheetRefetch = (source: string): void => {
     type: FsEvents.refetch,
     payload: { source },
   });
-};
-
-/**
- * Is `show_id` the show that live reads resolve to — the one every connected
- * client is rendering?
- *
- * Fails open on a null `show_id`: the column is nullable (`onDelete: 'set
- * null'`, plus rows that pre-date shows entirely), and when the scoping can't
- * answer, one spurious idempotent fetch is cheaper than silently dropping a
- * push a live client needed.
- */
-const isCurrentShowId = async (show_id: number | null): Promise<boolean> => {
-  if (show_id === null) return true;
-  return show_id === (await flowsheet_service.getLatestShow())?.id;
 };
 
 /**
@@ -927,10 +920,13 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   // event; worth knowing for #2515's typed `LiveFsDeleteEvent`, whose natural
   // home is that CDC route rather than this handler. Until then the refetch
   // is the push, and only for a row that actually existed (the 404 above
-  // already returned otherwise) on the show clients are rendering — an MD
-  // clearing stray rows out of last spring's flowsheet changes nothing any
-  // connected client shows.
-  if (await isCurrentShowId(removedEntry.show_id)) broadcastFlowsheetRefetch('delete');
+  // already returned otherwise).
+  //
+  // Not scoped by show, deliberately: the feed is global and the route is
+  // member-gated — see rule 3 on `broadcastFlowsheetRefetch`. Nothing else
+  // runs between the commit and here, so the delete cannot 500 after the row
+  // is already gone.
+  broadcastFlowsheetRefetch('delete');
   await sendProjectedEntry(res, 200, removedEntry);
 };
 
@@ -1021,9 +1017,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
   //
   // The returned row's own `entry_type`, not a re-read: it is the post-UPDATE
   // truth and the column is not client-writable (see `pickUpdateEntryFields`).
-  if (updatedEntry.entry_type !== 'track' && (await isCurrentShowId(updatedEntry.show_id))) {
-    broadcastFlowsheetRefetch('marker-update');
-  }
+  if (updatedEntry.entry_type !== 'track') broadcastFlowsheetRefetch('marker-update');
   await sendProjectedEntry(res, 200, updatedEntry);
 };
 
@@ -1250,14 +1244,17 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     // `join()` throws on a body with no show id, so a 400 here would crash
     // that daemon at activation. See config/flowsheetTakeover.ts.
     if (!flowsheetTakeoverConfig.getConfig().enabled) {
-      // No refetch on this or the intent-'join' co-host path below (BS#2621):
-      // addDJToShow writes a dj_join marker only on first join or reactivation
-      // — a retried press commits nothing — and it doesn't report which
-      // happened, so an emit here couldn't honor "only after a row committed".
-      // Widening its return to say which it did is BS#2633; until then a
-      // genuine first co-host join stays invisible until the next poll, which
-      // is the one member of this defect class left open.
+      // `addDJToShow` writes a `dj_join` marker on a first join or a
+      // reactivation and nothing on a retried press, and its bare `ShowDJ`
+      // return doesn't say which happened — so this is the one emit site that
+      // can't prove a row committed (BS#2621). It breaks the tie the way
+      // `leaveShow` breaks the identical one: one spurious idempotent fetch on
+      // a retried press is cheaper than leaving every genuine co-host join
+      // invisible until the poll, and a join whose marker never broadcasts
+      // while the matching `dj_leave` does is precisely the asymmetry this is
+      // meant to remove. BS#2633 widens the return so it can be exact.
       const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      broadcastFlowsheetRefetch('show-transition');
       res.status(200).json(show_dj_instance);
       return;
     }
@@ -1283,6 +1280,8 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
       // Override is only consumed on the new-show path. Co-host join uses the
       // auth_user.dj_name resolution unchanged.
       const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      // Same `dj_join` push, and same tie-break, as the flag-OFF branch above.
+      broadcastFlowsheetRefetch('show-transition');
       // Only under the flag: this is a DJ's deliberate choice. The flag-OFF
       // branch above reaches the same call by silently co-hosting every
       // collision, which is the bug, not an outcome anyone chose.
@@ -1644,6 +1643,14 @@ export const forceEndShow: RequestHandler<
   // being a hand-speed DJ action, and the one `LIVE_FS_UPDATE_MAX_AGE_HOURS`
   // guards against on the CDC update bridge.
   //
+  // Known gap, left as one: an operator who closes a NON-current show with an
+  // explicit `ended_at` near now writes a `show_end` marker whose `add_time`
+  // sorts to the head of the global feed, and this stays silent for it. That
+  // input is already a data-corruption hazard for its own reasons — it is
+  // what `resolveForceEndInstant`'s derived instant exists to avoid, and it
+  // makes `GET /flowsheet/range` admit the show on every day since its start
+  // (see `endShow`) — so the answer is not to widen the push.
+  //
   // Every refusal above (400 id, 404 no show, 400 already ended, 409 unforced
   // current, 400 out-of-range ended_at) returns before this line, and
   // `endShow`'s own compare-and-set 400 rejects through it.
@@ -1702,9 +1709,9 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   // A reorder shifts a contiguous play_order range in one transaction, but the
   // CDC update bridge broadcasts only the enriched-track subset of it (BS#2621)
   // — shifted markers and pending/enriching tracks never. Push a refetch so
-  // every connected client converges on the whole range, scoped to the show
-  // they are rendering (an archived show's reorder reaches no live view).
-  if (await isCurrentShowId(updatedEntry.show_id)) broadcastFlowsheetRefetch('reorder');
+  // every connected client converges on the whole range. Not scoped by show —
+  // see rule 3 on `broadcastFlowsheetRefetch`.
+  broadcastFlowsheetRefetch('reorder');
   await sendProjectedEntry(res, 200, updatedEntry);
 };
 
