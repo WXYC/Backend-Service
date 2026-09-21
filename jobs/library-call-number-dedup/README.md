@@ -23,9 +23,15 @@ It deliberately does **not** strip volume or part numbers. `Ethiopiques vol. 21`
 
 ## The slot key
 
-The canonical definition -- `(artist_id, genre_id, code_number, upper(coalesce(code_volume_letters, '')))` -- lives in `apps/backend/services/library.service.ts`, at `librarySlotKey` (the JS fold) and `librarySlotVolumeLetterMatchSql` (the SQL fold `findLibrarySlotOccupant` composes); the "THE SLOT KEY" doc comment above `librarySlotKey` is the authority, not this file. This job's own SQL (`merge.ts`) restates the fold in raw SQL rather than importing it -- it runs in a separate workspace `npm run typecheck` doesn't cover -- so a change to the canonical fold has to be hand-carried here too.
+The definition lives in `apps/backend/services/library.service.ts`: `librarySlotKey` (the JS fold) and `librarySlotVolumeLetterMatchSql` (the SQL fold `findLibrarySlotOccupant` composes), under the "THE SLOT KEY" doc comment that argues for it. Read it there — that comment is the authority, and the tuple is reproduced below only as a reading convenience so the next two paragraphs have something to point at. If the two ever disagree, the service wins and this file is stale.
 
-Two parts of that are load-bearing and easy to get wrong:
+```
+(artist_id, genre_id, code_number, upper(coalesce(code_volume_letters, '')))
+```
+
+**`merge.ts` does not import that definition, and nothing pins its copies against it.** It spells the fold out in raw SQL four times — three in `findCollisionSlots`' duplicate-slot query (the `slot` CTE's `vol` projection, the rejoin's, and the `s.vol = ...` comparison) and once more in the renumber guard's `WHERE` — plus a fifth restatement in that module's own docblock. `grep -n code_volume_letters jobs/library-call-number-dedup/merge.ts` lists all five. It cannot import the service's fold: this job is a separate workspace that the root `npm run typecheck` doesn't cover, and there is no test comparing the two spellings either, so **a change to the canonical fold has to be hand-carried into each of those five sites, and a miss fails silently** — the job would simply partition slots differently from the API, with no error to read. That gap is known and deliberate for now; the unique index in [#2589](https://github.com/WXYC/Backend-Service/issues/2589), which must use this same fold, is where it gets closed.
+
+Two parts of the key are load-bearing and easy to get wrong:
 
 **`genre_id` is in the key** because code letters are genre-scoped — an artist filed under two genres has two shelves, and `BO 3` (Electronic) and `Bo 3` (Rock) are different slots holding different discs. That used to be implicit in there being two `artists` rows. It isn't any more: `jobs/artist-unicode-dedup` merges artist rows **globally across genres**, deliberately, so after it ran the genre is the only thing distinguishing the two shelves. A key of `(artist_id, code_number)` would call those a collision and destroy a correct filing.
 

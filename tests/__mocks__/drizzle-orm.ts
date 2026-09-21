@@ -1,5 +1,11 @@
 // Mock drizzle-orm for unit tests
 export const eq = jest.fn((a, b) => ({ eq: [a, b] }));
+// `ne` was missing until a unit test first drove production code that uses it
+// (`findLibrarySlotOccupant`'s `exclude_library_id` clause). An absent operator
+// here is not an inert gap: the import resolves to `undefined` and the call
+// fails as "ne is not a function" from inside the service, so add the operator
+// rather than routing a suite around it.
+export const ne = jest.fn((a, b) => ({ ne: [a, b] }));
 export const and = jest.fn((...conditions: unknown[]) => ({ and: conditions }));
 export const or = jest.fn((...conditions: unknown[]) => ({ or: conditions }));
 
