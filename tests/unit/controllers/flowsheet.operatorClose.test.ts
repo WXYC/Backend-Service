@@ -21,6 +21,15 @@ jest.mock('async-mutex', () => ({
   })),
 }));
 
+// SSE broadcast seam (BS#2621): a completed force-end pushes a liveFs
+// `refetch`. Same mock shape as tests/unit/routes/internal.route.test.ts.
+const mockBroadcast = jest.fn();
+jest.mock('../../../apps/backend/utils/serverEvents', () => ({
+  Topics: { liveFs: 'live-fs-topic' },
+  FsEvents: { refetch: 'refetch' },
+  serverEventsMgr: { broadcast: mockBroadcast },
+}));
+
 import { resetFlowsheetServiceMock } from '../../mocks/flowsheet-service.mock';
 import * as flowsheetService from '../../../apps/backend/services/flowsheet.service';
 import { getOpenShows, forceEndShow } from '../../../apps/backend/controllers/flowsheet.controller';
@@ -262,6 +271,91 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
 
     await expect(forceEndShow(makeReq({}, { id }), res, next)).rejects.toThrow('show id must be a positive integer');
     expect(mockGetShowById).not.toHaveBeenCalled();
+  });
+
+  /**
+   * `endShow` commits a `show_end` marker (plus a `dj_leave` per remaining
+   * co-host), none of which the CDC bridges carry — the insert bridge is
+   * track-scoped and a marker row is permanently `pending`, so it can never
+   * satisfy the update bridge's terminal-status gate (BS#2621). This is the
+   * show transition most worth pushing: it closes the show every on-air read
+   * resolves to, and afterwards `POST /flowsheet` starts failing for whoever
+   * is on air, so a stale client is actively misleading.
+   */
+  describe('live-fs refetch (BS#2621)', () => {
+    it('broadcasts exactly one refetch after the close commits', async () => {
+      const openShow = { id: 1951164, primary_dj_id: 'dj-1', end_time: null };
+      mockGetShowById.mockResolvedValue(openShow);
+      mockEndShow.mockResolvedValue({ ...openShow, end_time: endInstant });
+
+      const { res } = createMockRes();
+      await forceEndShow(makeReq({}, { id: '1951164' }), res, next);
+
+      expect(mockBroadcast).toHaveBeenCalledTimes(1);
+      expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+        type: 'refetch',
+        payload: { source: 'show-transition' },
+      });
+    });
+
+    // Every refusal path: nothing committed, so nothing to reconcile. The
+    // `endShow`-throws case needs no arrangement of its own — the emit sits
+    // after that await, so a rejection skips it by construction.
+    it.each<[string, () => void, Record<string, string>, Record<string, string>, unknown]>([
+      ['a non-integer id (400)', () => {}, {}, { id: 'abc' }, undefined],
+      [
+        'an id matching no show (404)',
+        () => {
+          mockGetShowById.mockResolvedValue(undefined);
+        },
+        {},
+        { id: '999999999' },
+        undefined,
+      ],
+      [
+        'an already-ended show (400)',
+        () => {
+          mockGetShowById.mockResolvedValue({ id: 5, primary_dj_id: 'dj-1', end_time: new Date() });
+        },
+        {},
+        { id: '5' },
+        undefined,
+      ],
+      [
+        'the unforced current on-air show (409)',
+        () => {
+          const live = { id: 1951168, primary_dj_id: 'dj-1', end_time: null };
+          mockGetShowById.mockResolvedValue(live);
+          mockGetLatestShow.mockResolvedValue(live);
+        },
+        {},
+        { id: '1951168' },
+        undefined,
+      ],
+      [
+        'an ended_at below the floor (400)',
+        () => {
+          const openShow = {
+            id: 1951164,
+            primary_dj_id: 'dj-1',
+            start_time: new Date('2026-08-20T18:00:00.000Z'),
+            end_time: null,
+          };
+          mockGetShowById.mockResolvedValue(openShow);
+        },
+        {},
+        { id: '1951164' },
+        { ended_at: '2026-08-20T18:10:00.000Z' },
+      ],
+    ])('broadcasts nothing on %s', async (_name, arrange, query, params, body) => {
+      arrange();
+      const { res } = createMockRes();
+
+      await expect(forceEndShow(makeReq(query, params, body), res, next)).rejects.toBeInstanceOf(WxycError);
+
+      expect(mockEndShow).not.toHaveBeenCalled();
+      expect(mockBroadcast).not.toHaveBeenCalled();
+    });
   });
 });
 

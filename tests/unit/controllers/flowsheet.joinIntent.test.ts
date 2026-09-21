@@ -57,6 +57,16 @@ jest.mock('../../../apps/backend/services/flowsheet/go-live-handoff-signal', () 
   recordGoLiveHandoff: mockRecordGoLiveHandoff,
 }));
 
+// SSE broadcast seam (BS#2621): the takeover path pushes a liveFs `refetch`
+// once its marker rows have committed. Same mock shape as
+// tests/unit/routes/internal.route.test.ts.
+const mockBroadcast = jest.fn();
+jest.mock('../../../apps/backend/utils/serverEvents', () => ({
+  Topics: { liveFs: 'live-fs-topic' },
+  FsEvents: { refetch: 'refetch' },
+  serverEventsMgr: { broadcast: mockBroadcast },
+}));
+
 import { joinShow } from '../../../apps/backend/controllers/flowsheet.controller';
 import { resetConfig } from '../../../apps/backend/config/flowsheetTakeover';
 import WxycError from '../../../apps/backend/utils/error';
@@ -189,6 +199,19 @@ describe('joinShow — an open show the caller does not belong to', () => {
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
+  // BS#2621 scopes the refetch push to paths that provably committed a
+  // flowsheet row. `addDJToShow` writes a dj_join marker only on first join or
+  // reactivation — a retried press commits nothing — and doesn't report which
+  // happened, so the co-host path stays silent rather than emit for writes
+  // that may not exist.
+  it('does not broadcast a live-fs refetch on intent="join"', async () => {
+    const res = createMockRes();
+
+    await joinShow(makeReq({ intent: 'join' }), res, next);
+
+    expect(mockBroadcast).not.toHaveBeenCalled();
+  });
+
   // A JSON `null` is what an unset optional serializes to from several of this
   // epic's clients, and it says the same thing an absent field says. Answering
   // it with a 400 would tell a caller who has not chosen that their choice is
@@ -313,6 +336,45 @@ describe('joinShow — takeover', () => {
     });
     expect(mockEndShow).not.toHaveBeenCalled();
     expect(mockStartShow).not.toHaveBeenCalled();
+  });
+
+  // BS#2621: by the time the takeover responds, endShow has committed a
+  // show_end (plus any co-host dj_leave) marker and startShow a show_start —
+  // all invisible to the CDC bridges. One refetch covers every row the
+  // handoff wrote, because a refetch is a full reconciliation fetch; a
+  // per-write emit would be pure duplication.
+  it('broadcasts exactly one live-fs refetch after the completed takeover', async () => {
+    const res = createMockRes();
+
+    await joinShow(makeReq({ intent: 'takeover', expected_show_id: OPEN_SHOW.id }), res, next);
+
+    expect(mockBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+      type: 'refetch',
+      payload: { source: 'show-transition' },
+    });
+  });
+
+  it('broadcasts nothing when the takeover is refused (stale expected_show_id)', async () => {
+    const res = createMockRes();
+
+    await joinShow(makeReq({ intent: 'takeover', expected_show_id: 1951220 }), res, next).catch(() => undefined);
+
+    expect(mockBroadcast).not.toHaveBeenCalled();
+  });
+
+  // The emit rides strictly after startShow: a handoff that closed the open
+  // show but failed to open the new one is an error path, and error paths
+  // never broadcast (the clients converge at their reconciliation poll).
+  it('broadcasts nothing when startShow fails after endShow committed', async () => {
+    mockStartShow.mockRejectedValueOnce(new Error('insert failed'));
+    const res = createMockRes();
+
+    await expect(joinShow(makeReq({ intent: 'takeover', expected_show_id: OPEN_SHOW.id }), res, next)).rejects.toThrow(
+      'insert failed'
+    );
+
+    expect(mockBroadcast).not.toHaveBeenCalled();
   });
 
   // The stale-snapshot case that is NOT an error: the DJ asked for "my own
