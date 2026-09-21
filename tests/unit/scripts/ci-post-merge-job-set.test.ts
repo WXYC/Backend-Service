@@ -22,14 +22,22 @@
  *
  * # Why text, not a YAML parse
  *
- * Neither `yaml` nor `js-yaml` is a declared dependency, and adding one for
- * a spec would move `package-lock.json` -- which rekeys the `node_modules`
- * cache for every job in every workflow (BS#2256). The sibling workflow
- * guards (`ci-unit-tests-full-suite`, `ci-node-modules-cache`,
- * `latest-tag-fetch`, `deploy-timeouts`) all read the YAML as text for the
- * same reason, and they rely on the same indentation invariant this file
- * does: a job key sits at two spaces, and every line of a job's own body is
- * indented four or more.
+ * The reason this file used to give -- that neither `yaml` nor `js-yaml` was
+ * a declared dependency, and adding one would move `package-lock.json`,
+ * which rekeys the `node_modules` cache for every job in every workflow
+ * (BS#2256) -- no longer holds. `yaml` became a root devDependency in
+ * BS#2624 (`tests/unit/apps/backend/app-yaml-unrecoverable-dependents.test.ts`
+ * parses `app.yaml` with it), so a new document-pinning spec must NOT be
+ * told from here that a parser is unavailable.
+ *
+ * What remains is narrower: a text read is sufficient for what this file
+ * asserts, and the four sibling workflow guards
+ * (`ci-unit-tests-full-suite`, `ci-node-modules-cache`, `latest-tag-fetch`,
+ * `deploy-timeouts`) all read the YAML as text and rely on the same
+ * indentation invariant this file does -- a job key sits at two spaces, and
+ * every line of a job's own body is indented four or more. Converting the
+ * five together is its own change; parsing here alone would just fork the
+ * convention.
  *
  * Reading workflow YAML as text means Jest's dependency graph has no edge
  * from `test.yml` to this spec, so `detect-changes`'s `src` filter globbing
