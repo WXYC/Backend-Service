@@ -2186,6 +2186,66 @@ describe('flowsheet.controller', () => {
       expectSingleRefetch('marker-add');
     });
 
+    // `entry_type` on the request body is not runtime-validated, so a
+    // `flowsheet:write` caller can post a message row typed `track`. That row
+    // is a genuine track and rides the CDC insert bridge on its own, so the
+    // marker push would make it the one row broadcast twice — the case "a
+    // plain track add stays silent" exists to prevent. It falls back to the
+    // fill-only push, which still owes the fill's markers their refetch.
+    it('addEntry does not broadcast a marker-add for a message row the caller typed as a track', async () => {
+      mockAddTrack.mockResolvedValue({ ...createMockEntry(16), entry_type: 'track', message: 'Talkset' });
+
+      const req = { body: { message: 'Talkset', entry_type: 'track' } } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expect(mockBroadcast).not.toHaveBeenCalled();
+    });
+
+    it('addEntry still pushes the fill on a message row the caller typed as a track', async () => {
+      mockFillMissingHourlyBreakpoints.mockResolvedValueOnce(2);
+      mockAddTrack.mockResolvedValue({ ...createMockEntry(17), entry_type: 'track', message: 'Talkset' });
+
+      const req = { body: { message: 'Talkset', entry_type: 'track' } } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expectSingleRefetch('hourly-fill');
+    });
+
+    // The rule at every emit site is "after a commit", not "after a 2xx". The
+    // hourly fill commits its markers ahead of the body-shape checks — it
+    // annotates the show, not this request — so a 400 on the caller's own row
+    // leaves real rows written. Without a push they sit invisible until the
+    // reconciliation poll, which is the divergence BS#2621 exists to close.
+    it.each<[string, Record<string, unknown>, () => void]>([
+      ['a missing track_title', {}, () => {}],
+      [
+        'a snapshot row missing album_title on the album_id-miss degrade (BS#1680)',
+        { album_id: 404, artist_name: 'Jessica Pratt', track_title: 'Back, Baby', record_label: 'Drag City' },
+        () => {
+          mockGetAlbumFromDB.mockResolvedValue(undefined);
+        },
+      ],
+      [
+        'a snapshot row missing artist_name with no album_id (BS#933)',
+        { album_title: 'On Your Own Love Again', track_title: 'Back, Baby', record_label: 'Drag City' },
+        () => {},
+      ],
+    ])('addEntry pushes the committed fill when the request is then refused for %s', async (_name, body, arrange) => {
+      arrange();
+      mockFillMissingHourlyBreakpoints.mockResolvedValueOnce(2);
+
+      const req = { body } as unknown as Request;
+
+      await expect(addEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({ statusCode: 400 });
+
+      expectSingleRefetch('hourly-fill');
+      expect(mockAddTrack).not.toHaveBeenCalled();
+    });
+
     // The track row itself rides the CDC insert bridge; the refetch on a track
     // add exists only for the fill's auto-inserted markers, which that bridge
     // never carries. All three routes into the track insert behave alike.
@@ -2371,6 +2431,26 @@ describe('flowsheet.controller', () => {
         async () => {
           mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
           const req = { body: { message: 'Talkset' } } as unknown as Request;
+          await expect(addEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 400,
+          });
+        },
+      ],
+      // The refusal paths above the fill's counterpart: the same 400s, but
+      // with nothing filled there is nothing committed to push for either.
+      [
+        'addEntry 400 (missing track_title) when the fill inserted zero markers',
+        async () => {
+          const req = { body: {} } as unknown as Request;
+          await expect(addEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 400,
+          });
+        },
+      ],
+      [
+        'addEntry 400 (missing snapshot fields) when the fill inserted zero markers',
+        async () => {
+          const req = { body: { track_title: 'Back, Baby' } } as unknown as Request;
           await expect(addEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
             statusCode: 400,
           });

@@ -698,6 +698,39 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     callerMarksCurrentHour,
   });
 
+  /**
+   * Push for the markers the fill committed, and only those (BS#2621). The
+   * caller's own track row rides the CDC insert bridge, so a refetch for it
+   * would double-broadcast; the fill's markers ride nothing.
+   *
+   * Called on the refusal paths as well as the success ones. The fill runs
+   * ahead of the body-shape checks below because it annotates the show, not
+   * this request — so by the time a 400 fires its markers are already
+   * written, and refusing the caller's row does not un-write them. The rule
+   * at every emit site is "after a commit", not "after a 2xx"; these are the
+   * paths where the two differ, and without the push the fill's markers would
+   * sit invisible to every connected client until its reconciliation poll. A
+   * refusal never also reaches a success emit, so at most one refetch still
+   * leaves the request either way.
+   */
+  const pushRefetchForCommittedFill = (): void => {
+    if (filledBreakpoints > 0) broadcastFlowsheetRefetch('hourly-fill');
+  };
+
+  /**
+   * `buildSnapshotFieldsEntry` raises the missing-field 400 from inside, at
+   * both of its call sites below. Route both through the refusal push rather
+   * than repeat the try/catch.
+   */
+  const buildSnapshotEntryOrRefuse = (): NewFSEntry => {
+    try {
+      return buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
+    } catch (err) {
+      pushRefetchForCommittedFill();
+      throw err;
+    }
+  };
+
   if (body.message !== undefined) {
     //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
     const fsEntry: NewFSEntry = {
@@ -740,13 +773,22 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     // Marker rows never reach the CDC bridges (BS#2621). One emit covers the
     // hourly fill's rows too — never a second `hourly-fill` on this branch.
-    broadcastFlowsheetRefetch('marker-add');
+    //
+    // `entry_type` is not runtime-validated on the request body, so a caller
+    // can post a message row typed `track`. That row is a genuine track and
+    // rides the insert bridge on its own, which would make it the one row
+    // broadcast twice — so it falls back to the fill-only push, keeping "a
+    // plain track add stays silent" true by construction rather than by
+    // client good behavior.
+    if (requestedEntryType !== 'track') broadcastFlowsheetRefetch('marker-add');
+    else pushRefetchForCommittedFill();
     await sendProjectedEntry(res, 201, completedEntry);
     return;
   }
 
   // no message passed, so we assume we're adding a track to the flowsheet
   if (body.track_title === undefined) {
+    pushRefetchForCommittedFill();
     throw new WxycError('Bad Request, Missing query parameter: track_title', 400);
   }
 
@@ -780,16 +822,14 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       // artist_name / track_title and throws on the reject path (BS#1680
       // review: the Sentry warning must not fire when the entry was rejected,
       // not recorded).
-      const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
+      const fsEntry = buildSnapshotEntryOrRefuse();
       Sentry.captureMessage('Flowsheet album_id not found in library — degrading to snapshot fields', {
         level: 'warning',
         tags: { tool: 'flowsheet' },
         extra: { album_id: body.album_id, show_id: latestShow.id },
       });
       const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-      // The track row itself rides the CDC insert bridge — a refetch for it
-      // would double-broadcast. Only the fill's markers need the push.
-      if (filledBreakpoints > 0) broadcastFlowsheetRefetch('hourly-fill');
+      pushRefetchForCommittedFill();
       await sendProjectedEntry(res, 201, completedEntry);
       return;
     }
@@ -811,16 +851,16 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    if (filledBreakpoints > 0) broadcastFlowsheetRefetch('hourly-fill');
+    pushRefetchForCommittedFill();
     await sendProjectedEntry(res, 201, completedEntry);
   } else {
     // No album_id (explicit null from the dj-site rotation snapshot, BS#933,
     // or simply omitted): insert the request's own snapshot fields with
     // album_id: null. Shares `buildSnapshotFieldsEntry` with the lookup-miss
     // fallback above (BS#1680) so both routes into this shape stay identical.
-    const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
+    const fsEntry = buildSnapshotEntryOrRefuse();
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
-    if (filledBreakpoints > 0) broadcastFlowsheetRefetch('hourly-fill');
+    pushRefetchForCommittedFill();
     await sendProjectedEntry(res, 201, completedEntry);
   }
 };
@@ -839,8 +879,16 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   if (!removedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
-  // No CDC event carries a DELETE (BS#2515) — push the refetch, and only for
-  // a row that actually existed (the 404 above already returned otherwise).
+  // Nothing bridges a flowsheet DELETE onto the liveFs topic (BS#2515). The
+  // CDC *event* exists — migration 0046's `cdc_flowsheet` trigger fires AFTER
+  // DELETE and `cdc_notify` emits `to_jsonb(OLD)`, which the library-cache
+  // invalidation in services/metadata-broadcast already consumes — but the
+  // only liveFs broadcasters registered there are the track INSERT and the
+  // terminal UPDATE. So the gap is a missing broadcaster, not a missing
+  // event; worth knowing for #2515's typed `LiveFsDeleteEvent`, whose natural
+  // home is that CDC route rather than this handler. Until then the refetch
+  // is the push, and only for a row that actually existed (the 404 above
+  // already returned otherwise).
   broadcastFlowsheetRefetch('delete');
   await sendProjectedEntry(res, 200, removedEntry);
 };
@@ -912,15 +960,26 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
   if (!updatedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
-  // Non-track rows only (BS#2621). A track PATCH already propagates without
+  // Non-track rows only (BS#2621). A track PATCH usually propagates without
   // help: the CDC trigger notifies the whole NEW row, so an already-terminal
   // track's UPDATE carries the edited columns through `filterMetadataUpdate`,
   // and a `pending`/`enriching` track's edit rides the enrichment's own
   // terminal UPDATE that follows. A marker row can satisfy neither bridge —
   // the enrichment worker claims only tracks, so it stays `pending` forever —
-  // which today makes editing a talkset's message reach nobody. The returned
-  // row's own `entry_type`, not a re-read: it is the post-UPDATE truth and the
-  // column is not client-writable (see `pickUpdateEntryFields`).
+  // which today makes editing a talkset's message reach nobody.
+  //
+  // "Usually", not always: two track rows fall through this gate and reach no
+  // client either, both pre-existing and both tracked separately rather than
+  // papered over here. A row inserted with `artist_name: ''` never enrolls in
+  // enrichment (BS#2636), so no terminal UPDATE ever follows it; and
+  // `filterMetadataUpdate`'s BS#2281 age guard drops a PATCH on any track
+  // older than LIVE_FS_UPDATE_MAX_AGE_HOURS, so an MD correcting last week's
+  // flowsheet is invisible. Widening the gate to cover them would broadcast a
+  // full fetch for every ordinary track edit, which is the cost that gate
+  // exists to avoid.
+  //
+  // The returned row's own `entry_type`, not a re-read: it is the post-UPDATE
+  // truth and the column is not client-writable (see `pickUpdateEntryFields`).
   if (updatedEntry.entry_type !== 'track') broadcastFlowsheetRefetch('marker-update');
   await sendProjectedEntry(res, 200, updatedEntry);
 };
@@ -1496,7 +1555,13 @@ export const forceEndShow: RequestHandler<
   // exactly: a show whose `show_end` marker landed but whose `end_time` was
   // never stamped (the lost-webhook cohort BS#2065 detects) holds
   // `max(shows.id)` while being demonstrably over, and must not be gated.
-  if (req.query.force !== 'true' && showId === (await flowsheet_service.getLatestShow())?.id) {
+  //
+  // Read once, ahead of the close, because "the show live reads resolve to"
+  // is a fact about the moment before this endpoint changes it. The same
+  // answer gates the confirmation below and the live-fs push at the end.
+  const isCurrentShow = showId === (await flowsheet_service.getLatestShow())?.id;
+
+  if (req.query.force !== 'true' && isCurrentShow) {
     if (!(await flowsheet_service.isLatestEntryShowEnd(showId))) {
       throw new WxycError('Conflict: this is the current on-air show. Re-send with ?force=true to end it anyway.', 409);
     }
@@ -1509,14 +1574,23 @@ export const forceEndShow: RequestHandler<
 
   const finalizedShow: Show = await flowsheet_service.endShow(show, endedAt);
   // `endShow` has committed a `show_end` marker plus a `dj_leave` per
-  // remaining co-host — none of which the CDC bridges carry (BS#2621). The
-  // highest-value transition to push: this closes the show every on-air read
-  // resolves to, and afterwards `POST /flowsheet` fails for whoever is on air,
-  // so a client still rendering the show as live is actively misleading. Every
-  // refusal above (400 id, 404 no show, 400 already ended, 409 unforced
+  // remaining co-host — none of which the CDC bridges carry (BS#2621).
+  //
+  // Scoped to the current show, which is both the case worth pushing and the
+  // rare one. Worth pushing: afterwards `POST /flowsheet` fails for whoever
+  // is on air, so a client still rendering the show as live is actively
+  // misleading. Rare: this endpoint exists to drain an open-show backlog
+  // reaching back to 2006 (see `endShow` — 2,813 of production's 2,814 open
+  // shows), and closing a 2006 show changes nothing on any live view, so an
+  // ungated emit would fan one full-flowsheet fetch per drained show to every
+  // connected client. That is the amplification the PR's cost argument rests
+  // on not existing, and `LIVE_FS_UPDATE_MAX_AGE_HOURS` is its analogue on
+  // the CDC update bridge.
+  //
+  // Every refusal above (400 id, 404 no show, 400 already ended, 409 unforced
   // current, 400 out-of-range ended_at) returns before this line, and
   // `endShow`'s own compare-and-set 400 rejects through it.
-  broadcastFlowsheetRefetch('show-transition');
+  if (isCurrentShow) broadcastFlowsheetRefetch('show-transition');
   res.status(200).json(finalizedShow);
 };
 

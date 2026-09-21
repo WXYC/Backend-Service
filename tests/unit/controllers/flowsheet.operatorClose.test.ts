@@ -277,25 +277,62 @@ describe('POST /flowsheet/shows/:id/force-end', () => {
    * `endShow` commits a `show_end` marker (plus a `dj_leave` per remaining
    * co-host), none of which the CDC bridges carry — the insert bridge is
    * track-scoped and a marker row is permanently `pending`, so it can never
-   * satisfy the update bridge's terminal-status gate (BS#2621). This is the
-   * show transition most worth pushing: it closes the show every on-air read
-   * resolves to, and afterwards `POST /flowsheet` starts failing for whoever
-   * is on air, so a stale client is actively misleading.
+   * satisfy the update bridge's terminal-status gate (BS#2621).
+   *
+   * Scoped to the show live reads resolve to. That is the case worth pushing:
+   * afterwards `POST /flowsheet` starts failing for whoever is on air, so a
+   * stale client is actively misleading. It is also the rare one — this
+   * endpoint exists (BS#2235) to drain an open-show backlog reaching back to
+   * 2006, and closing a 2006 show changes nothing on any live view. An
+   * ungated emit would fan a full-flowsheet fetch to every connected client
+   * once per drained show.
    */
   describe('live-fs refetch (BS#2621)', () => {
-    it('broadcasts exactly one refetch after the close commits', async () => {
+    it('broadcasts exactly one refetch when the forced close is the current on-air show', async () => {
       const openShow = { id: 1951164, primary_dj_id: 'dj-1', end_time: null };
       mockGetShowById.mockResolvedValue(openShow);
+      mockGetLatestShow.mockResolvedValue(openShow);
       mockEndShow.mockResolvedValue({ ...openShow, end_time: endInstant });
 
       const { res } = createMockRes();
-      await forceEndShow(makeReq({}, { id: '1951164' }), res, next);
+      await forceEndShow(makeReq({ force: 'true' }, { id: '1951164' }), res, next);
 
       expect(mockBroadcast).toHaveBeenCalledTimes(1);
       expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
         type: 'refetch',
         payload: { source: 'show-transition' },
       });
+    });
+
+    // The terminal-marker carve-out reaches the same close without `?force`
+    // (the lost-webhook cohort BS#2065 detects): still the current show, so
+    // still worth pushing.
+    it('broadcasts when the current show is closed through the terminal-marker carve-out', async () => {
+      const openShow = { id: 1951164, primary_dj_id: 'dj-1', end_time: null };
+      mockGetShowById.mockResolvedValue(openShow);
+      mockGetLatestShow.mockResolvedValue(openShow);
+      mockIsLatestEntryShowEnd.mockResolvedValue(true);
+      mockEndShow.mockResolvedValue({ ...openShow, end_time: endInstant });
+
+      const { res } = createMockRes();
+      await forceEndShow(makeReq({}, { id: '1951164' }), res, next);
+
+      expect(mockBroadcast).toHaveBeenCalledTimes(1);
+    });
+
+    // The backlog-drain case. The close commits, but no live view renders a
+    // show that stopped in 2006, so no client is asked to re-fetch.
+    it('broadcasts nothing when the forced close is a historical show, not the current one', async () => {
+      const staleShow = { id: 1234, primary_dj_id: null, end_time: null };
+      mockGetShowById.mockResolvedValue(staleShow);
+      mockGetLatestShow.mockResolvedValue({ id: 1951164, primary_dj_id: 'dj-1', end_time: null });
+      mockEndShow.mockResolvedValue({ ...staleShow, end_time: endInstant });
+
+      const { res } = createMockRes();
+      await forceEndShow(makeReq({}, { id: '1234' }), res, next);
+
+      expect(mockEndShow).toHaveBeenCalled();
+      expect(mockBroadcast).not.toHaveBeenCalled();
     });
 
     // Every refusal path: nothing committed, so nothing to reconcile. The
