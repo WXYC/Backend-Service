@@ -4924,8 +4924,21 @@ type LibrarySlot = { artist_id: number; genre_id: number; code_number: number; c
  * UPDATE` on the shelf rows below, and its occupancy match is
  * volume-letter-aware, which a bare `MAX(code_number)` is not.
  */
-const librarySlotKey = (row: LibrarySlot): string =>
+export const librarySlotKey = (row: LibrarySlot): string =>
   `${row.artist_id}/${row.genre_id}/${row.code_number}/${(row.code_volume_letters ?? '').toUpperCase()}`;
+
+/**
+ * THE SLOT KEY's volume-letter fold, spelled once for SQL callers --
+ * `findLibrarySlotOccupant` composes this instead of restating
+ * `UPPER(COALESCE(...))`. `librarySlotKey` above is the JS side of the same
+ * fold. `tests/unit/services/library.slotKey.sql.test.ts` pins each side
+ * against its own literal -- this fragment's rendered text, and
+ * `librarySlotKey`'s keys -- so changing one without the other goes red; that
+ * the two agree *semantically* is the integration tier's job, not that
+ * suite's.
+ */
+export const librarySlotVolumeLetterMatchSql = (column: PgColumn, value: string | null): SQL =>
+  sql`UPPER(COALESCE(${column}, '')) = UPPER(COALESCE(${value}, ''))`;
 
 /**
  * Reads the four slot columns out of a captured `library` row. `captured` is
@@ -4993,12 +5006,17 @@ const probeLibrarySlot = async (
  * `Various Artists` artist (3,113 releases) a single genre shelf is hundreds
  * of rows, read on every genre-changing PATCH.
  *
- * **One definition of the slot key, expressed twice.** This predicate MUST
- * stay byte-identical to `librarySlotKey`'s `UPPER(COALESCE(...,''))` fold --
- * a SQL predicate that regressed to a bare `=` would treat `'d'` and `'D'` as
- * different slots and this function would call a taken slot free.
- * `tests/integration/library-update.spec.js` pins a volume-letters-differ-
- * only-by-case case for exactly that reason.
+ * The volume-letter match below is `librarySlotVolumeLetterMatchSql`, the SQL
+ * side of `librarySlotKey`'s fold, and two guards cover it because they catch
+ * different regressions. `tests/unit/services/library.slotKey.sql.test.ts`
+ * renders THIS function's WHERE clause and requires that helper's text to
+ * appear in it, so re-inlining the predicate here -- as a bare `=`, or with
+ * `UPPER`/`COALESCE` dropped -- goes red with no database (tamper-verified in
+ * both spellings). What the unit tier cannot do is execute SQL: that the fold
+ * means the same thing in Postgres as in V8 is pinned by the integration case
+ * at `tests/integration/library-update.spec.js` ("volume letters differing
+ * only by case are still recognized as the same occupied slot"), which drives
+ * a stored `'a'` against an incoming `'A'`.
  */
 export const findLibrarySlotOccupant = async (
   artist_id: number,
@@ -5015,7 +5033,7 @@ export const findLibrarySlotOccupant = async (
         eq(library.artist_id, artist_id),
         eq(library.genre_id, genre_id),
         eq(library.code_number, code_number),
-        sql`UPPER(COALESCE(${library.code_volume_letters}, '')) = UPPER(COALESCE(${code_volume_letters}, ''))`,
+        librarySlotVolumeLetterMatchSql(library.code_volume_letters, code_volume_letters),
         ne(library.id, exclude_library_id)
       )
     )
