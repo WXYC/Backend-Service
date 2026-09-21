@@ -11,10 +11,12 @@ const mockGetLatestShow = jest.fn<() => Promise<any>>();
 const mockResolveDjNameForShow = jest.fn<(show: unknown) => Promise<string | null>>();
 const mockAddTrack = jest.fn<(entry: any) => Promise<any>>();
 const mockGetAlbumFromDB = jest.fn<(id: number) => Promise<any>>();
-// Auto-create hour breakpoints: no-op default so this file's tests keep
-// observing exactly one addTrack call (their own entry) unless a test says
-// otherwise.
-const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
+// Auto-create hour breakpoints: "nothing filled" default so this file's tests
+// keep observing exactly one addTrack call (their own entry) unless a test
+// says otherwise. The resolved count is the row count the fill landed
+// (BS#2621) — typed, so a future contract change fails here rather than
+// coercing `undefined > 0` to a silent `false`.
+const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<number>>().mockResolvedValue(0);
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: mockGetLatestShow,
@@ -22,6 +24,16 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addTrack: mockAddTrack,
   getAlbumFromDB: mockGetAlbumFromDB,
   fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
+}));
+
+// SSE broadcast seam (BS#2621): `addEntry`'s marker branch pushes a liveFs
+// `refetch`. Mocked so this suite doesn't drive the real ServerEventsManager
+// and its CloudWatch metric buffer. Same shape as
+// tests/unit/routes/internal.route.test.ts.
+jest.mock('../../../apps/backend/utils/serverEvents', () => ({
+  Topics: { liveFs: 'live-fs-topic' },
+  FsEvents: { refetch: 'refetch' },
+  serverEventsMgr: { broadcast: jest.fn() },
 }));
 
 import { addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
