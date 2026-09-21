@@ -3238,11 +3238,23 @@ paths:
 
   /library/artists/{id}:
     get:
-      summary: Get an artist's card (BS#2156)
+      summary: Get an artist's card (BS#2156, BS#2637)
       description: >
         Enforced by `requirePermissions({ catalog: ['read'] })` — DJ role or
         above, the same tier as the other catalog reads documented with the
         `catalog-read` scope.
+
+
+        `genre_id` is optional and names WHICH shelf to answer for an artist
+        filed under more than one genre (BS#2637). `genre_artist_crossreference`
+        is unique on `(artist_id, genre_id)`, so `code_artist_number` is
+        genre-scoped and the artist id alone does not identify a card — artist
+        431 ('Isis') is two unrelated bands on one row, `IS 1` under Hiphop and
+        `IS 13` under Rock. Omitted, the response collapses onto the artist's
+        lowest `genre_id`, which is what this endpoint has always returned; a
+        genre-aware client should send the parameter. The dependent counts are
+        artist-wide either way and are deliberately NOT genre-scoped: they
+        report what a delete would have to clear.
       security:
         - BearerAuth: ['catalog-read']
       parameters:
@@ -3251,6 +3263,15 @@ paths:
           required: true
           schema:
             type: integer
+        - in: query
+          name: genre_id
+          required: false
+          description: >-
+            Answer this artist's card for one genre membership instead of the
+            lowest. Absent, the lowest-`genre_id` collapse applies.
+          schema:
+            type: integer
+            minimum: 1
       responses:
         '200':
           description: >-
@@ -3261,9 +3282,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/ArtistCardWithDependentCounts'
         '400':
-          description: Invalid artist id
+          description: Invalid artist id or genre_id
         '404':
-          description: Artist not found
+          description: >-
+            `Artist not found` for an unknown id (or an artist row carrying no
+            genre crossreference at all). A well-formed `genre_id` the artist
+            has no membership in answers the distinct `Artist not filed under
+            genre {genre_id}` — the record exists and the caller is one query
+            parameter away from a 200.
 
     patch:
       summary: Update an artist's name or alphabetical_name (BS#2156, BS#2563)
@@ -3480,7 +3506,7 @@ paths:
 
   /library/artists/{id}/releases:
     get:
-      summary: List an artist's releases (BS#2156)
+      summary: List an artist's releases (BS#2156, BS#2637)
       description: >
         Enforced by `requirePermissions({ catalog: ['read'] })` — DJ role or
         above. Offset-paginated in the same `page`/`limit` shape as `GET
@@ -3489,6 +3515,13 @@ paths:
         `code_volume_letters`); `code_artist_number` is genre-scoped, hence the
         per-row `genre_id`. Ordered by shelf order — `code_number`, then
         `code_volume_letters`, then `id` as a total order.
+
+
+        `genre_id` is optional and restricts the rows to one of a multi-genre
+        artist's shelves (BS#2637). Absent, the page spans every genre the
+        artist is filed under — which for artist 431 ('Isis') means one page
+        listing a hip-hop act's release beside a metal band's. `total` is
+        scoped with the page, never independently of it.
       security:
         - BearerAuth: ['catalog-read']
       parameters:
@@ -3513,6 +3546,15 @@ paths:
             minimum: 1
             maximum: 100
             default: 50
+        - in: query
+          name: genre_id
+          required: false
+          description: >-
+            Restrict to the releases filed under one genre. Absent, the page
+            spans every genre this artist is filed under.
+          schema:
+            type: integer
+            minimum: 1
       responses:
         '200':
           description: One page of the artist's releases, in shelf order
@@ -3558,9 +3600,14 @@ paths:
                   totalPages:
                     type: integer
         '400':
-          description: Invalid artist id, page, or limit
+          description: Invalid artist id, page, limit, or genre_id
         '404':
-          description: Artist not found
+          description: >-
+            `Artist not found` for an unknown id (or an artist row carrying no
+            genre crossreference at all). A well-formed `genre_id` the artist
+            has no membership in answers the distinct `Artist not filed under
+            genre {genre_id}` rather than an empty page, which would be
+            indistinguishable from a membership holding no releases.
 
   /library/artists/{id}/next-release-number:
     get:

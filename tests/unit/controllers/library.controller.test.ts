@@ -4580,7 +4580,7 @@ describe('library.controller', () => {
 
     it('accepts an id exactly at INT4_MAX', async () => {
       mockGetArtistCardById.mockReset().mockResolvedValue(null);
-      const req = { params: { id: '2147483647' } } as unknown as Request;
+      const req = { params: { id: '2147483647' }, query: {} } as unknown as Request;
 
       await expect(getArtistCard(req, mockResponse(), next)).rejects.toThrow('Artist not found');
       expect(mockGetArtistCardById).toHaveBeenCalledWith(2147483647);
@@ -4671,7 +4671,7 @@ describe('library.controller', () => {
 
     it('returns 404 when the artist does not exist', async () => {
       mockGetArtistCardById.mockResolvedValue(null);
-      const req = { params: { id: '999' } } as unknown as Request;
+      const req = { params: { id: '999' }, query: {} } as unknown as Request;
       const res = mockResponse();
 
       await expect(getArtistCard(req, res, next)).rejects.toThrow('Artist not found');
@@ -4695,7 +4695,7 @@ describe('library.controller', () => {
       };
       mockGetArtistCardById.mockResolvedValue(card);
       mockGetArtistDependentCounts.mockResolvedValue(counts);
-      const req = { params: { id: '42' } } as unknown as Request;
+      const req = { params: { id: '42' }, query: {} } as unknown as Request;
       const res = mockResponse();
 
       await getArtistCard(req, res, next);
@@ -4726,7 +4726,7 @@ describe('library.controller', () => {
       };
       mockGetArtistCardById.mockResolvedValue(card);
       mockGetArtistDependentCounts.mockResolvedValue(zeroCounts);
-      const req = { params: { id: '43' } } as unknown as Request;
+      const req = { params: { id: '43' }, query: {} } as unknown as Request;
       const res = mockResponse();
 
       await getArtistCard(req, res, next);
@@ -4744,7 +4744,7 @@ describe('library.controller', () => {
 
     it('does not fetch the dependent counts when the artist does not exist', async () => {
       mockGetArtistCardById.mockResolvedValue(null);
-      const req = { params: { id: '999' } } as unknown as Request;
+      const req = { params: { id: '999' }, query: {} } as unknown as Request;
       const res = mockResponse();
 
       await expect(getArtistCard(req, res, next)).rejects.toThrow('Artist not found');
@@ -5376,7 +5376,7 @@ describe('library.controller', () => {
 
       await getArtistReleases(req, res, next);
 
-      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(42, 0, 50);
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(42, 0, 50, undefined);
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({ artist_id: 42, releases, total: 1, page: 0, totalPages: 1 });
     });
@@ -5390,7 +5390,7 @@ describe('library.controller', () => {
 
       await getArtistReleases(req, res, next);
 
-      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1087, 2, 100);
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1087, 2, 100, undefined);
       expect(res.json).toHaveBeenCalledWith({
         artist_id: 1087,
         releases,
@@ -5467,7 +5467,150 @@ describe('library.controller', () => {
 
       await getArtistReleases(req, res, next);
 
-      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1087, maxPage, 50);
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1087, maxPage, 50, undefined);
+    });
+  });
+
+  // BS#2637. Artist 431 ('Isis') is two unrelated bands sharing one artist
+  // row: a hip-hop act filed `IS 1` under Hiphop (6) and a metal band filed
+  // `IS 13` under Rock (11). Genre-blind, the card collapses onto the lowest
+  // `genre_id` and the release table lists both bands' records, so a
+  // librarian who asked for `Rock IS 13` gets a page headed `Hiphop IS 1`.
+  describe('artist card and releases genre scope (BS#2637)', () => {
+    const hiphopIsis: ArtistCardMock = {
+      artist_id: 431,
+      artist_name: 'Isis',
+      alphabetical_name: 'Isis',
+      genre_id: 6,
+      code_letters: 'IS',
+      code_artist_number: 1,
+    };
+    const rockIsis: ArtistCardMock = { ...hiphopIsis, genre_id: 11, code_artist_number: 13 };
+
+    const counts = {
+      release_count: 1,
+      cross_reference_source_count: 0,
+      cross_reference_target_count: 0,
+      library_cross_reference_count: 0,
+      compilation_credit_count: 0,
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockGetArtistDependentCounts.mockResolvedValue(counts);
+      mockGetReleasesForArtist.mockResolvedValue([]);
+      mockCountReleasesForArtist.mockResolvedValue(0);
+    });
+
+    it.each([
+      ['Rock', '11', 11, rockIsis],
+      ['Hiphop', '6', 6, hiphopIsis],
+    ])('answers the card for the %s membership rather than the lowest', async (_label, raw, genreId, card) => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue(card);
+      const req = { params: { id: '431' }, query: { genre_id: raw } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistCard(req, res, next);
+
+      expect(mockGetArtistCardByIdInGenre).toHaveBeenCalledWith(431, genreId);
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith({ ...card, ...counts });
+    });
+
+    // Every deployed client omits `genre_id`, so the unscoped path must keep
+    // resolving exactly the collapse it resolved before the parameter existed.
+    it('keeps collapsing to the lowest membership when no genre is named', async () => {
+      mockGetArtistCardById.mockResolvedValue(hiphopIsis);
+      const req = { params: { id: '431' }, query: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistCard(req, res, next);
+
+      expect(mockGetArtistCardById).toHaveBeenCalledWith(431);
+      expect(mockGetArtistCardByIdInGenre).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith({ ...hiphopIsis, ...counts });
+    });
+
+    // The page and its `total` must be scoped together: a filtered page under
+    // an unfiltered count overstates `totalPages` and pages into nothing.
+    it('scopes the release page AND its count to the named genre', async () => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue(rockIsis);
+      const req = { params: { id: '431' }, query: { genre_id: '11' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistReleases(req, res, next);
+
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(431, 0, 50, 11);
+      expect(mockCountReleasesForArtist).toHaveBeenCalledWith(431, 11);
+    });
+
+    it('leaves the release page artist-wide when no genre is named', async () => {
+      mockGetArtistCardById.mockResolvedValue(hiphopIsis);
+      const req = { params: { id: '431' }, query: {} } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistReleases(req, res, next);
+
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(431, 0, 50, undefined);
+      expect(mockCountReleasesForArtist).toHaveBeenCalledWith(431, undefined);
+    });
+
+    it('resolves the release-page existence check in the named genre', async () => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue(rockIsis);
+      const req = { params: { id: '431' }, query: { genre_id: '11' } } as unknown as Request;
+      const res = mockResponse();
+
+      await getArtistReleases(req, res, next);
+
+      expect(mockGetArtistCardByIdInGenre).toHaveBeenCalledWith(431, 11);
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+    });
+
+    // A real id plus a genre it is not filed under is one query parameter away
+    // from a 200, so it must not read as 'Artist not found' -- the librarian is
+    // looking at the record that answer denies exists.
+    it.each([
+      ['the card', (req: Request, res: Response) => getArtistCard(req, res, next)],
+      ['the release page', (req: Request, res: Response) => getArtistReleases(req, res, next)],
+    ])('404s %s distinguishably when the artist has no membership in the named genre', async (_label, call) => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue(null);
+      mockGetArtistById.mockResolvedValue({ artist_id: 431, artist_name: 'Isis', code_letters: 'IS' });
+      const req = { params: { id: '431' }, query: { genre_id: '4' } } as unknown as Request;
+
+      await expect(call(req, mockResponse())).rejects.toThrow('Artist not filed under genre 4');
+      expect(mockGetArtistDependentCounts).not.toHaveBeenCalled();
+      expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the card', (req: Request, res: Response) => getArtistCard(req, res, next)],
+      ['the release page', (req: Request, res: Response) => getArtistReleases(req, res, next)],
+    ])('404s %s as not-found for an unknown id even when a genre is named', async (_label, call) => {
+      mockGetArtistCardByIdInGenre.mockResolvedValue(null);
+      mockGetArtistById.mockResolvedValue(null);
+      const req = { params: { id: '999' }, query: { genre_id: '11' } } as unknown as Request;
+
+      await expect(call(req, mockResponse())).rejects.toThrow('Artist not found');
+    });
+
+    // The int4 guard the other genre parameters carry: out of range parses as
+    // a fine JS integer and blows up in Postgres as SQLSTATE 22003, a 500.
+    it.each([
+      ['non-numeric', { genre_id: 'rock' }],
+      ['blank', { genre_id: '' }],
+      ['zero', { genre_id: '0' }],
+      ['negative', { genre_id: '-11' }],
+      ['fractional', { genre_id: '11.5' }],
+      ['above INT4_MAX', { genre_id: '2147483648' }],
+      ['repeated', { genre_id: ['6', '11'] }],
+    ])('rejects a genre_id that is %s with 400, reading nothing', async (_label, query) => {
+      const req = { params: { id: '431' }, query } as unknown as Request;
+
+      await expect(getArtistCard(req, mockResponse(), next)).rejects.toThrow(/genre_id/);
+      await expect(getArtistReleases(req, mockResponse(), next)).rejects.toThrow(/genre_id/);
+      expect(mockGetArtistCardById).not.toHaveBeenCalled();
+      expect(mockGetArtistCardByIdInGenre).not.toHaveBeenCalled();
+      expect(mockGetReleasesForArtist).not.toHaveBeenCalled();
     });
   });
 
@@ -5523,10 +5666,12 @@ describe('library.controller', () => {
       expect(res.json).toHaveBeenCalledWith({ next_code_number: 1, slots_in_use: {} });
     });
 
-    // Existence is resolved through `getArtistCardById` — the same 404
-    // predicate GET/PATCH /artists/:id and /artists/:id/releases use — so an
-    // unknown id (or an artist row with no genre crossreference) 404s rather
-    // than previewing 1 as if the artist existed with no releases.
+    // Existence is resolved through `getArtistCardById` — the artist-wide 404
+    // predicate GET/PATCH /artists/:id and /artists/:id/releases resolve when
+    // no genre is named — so an unknown id (or an artist row with no genre
+    // crossreference) 404s rather than previewing 1 as if the artist existed
+    // with no releases. This endpoint takes no genre scope of its own; see
+    // `peekArtistReleaseNumber`'s docblock.
     it('returns 404 for an unknown artist id, without reading the shelf', async () => {
       mockGetArtistCardById.mockResolvedValue(null);
       const req = { params: { id: '999' }, query: { genre_id: '11' } } as unknown as Request;

@@ -4414,6 +4414,171 @@ describe('Library Artist Card (BS#2156)', () => {
     });
   });
 
+  // BS#2637. `artist_genre_key` is unique on `(artist_id, genre_id)`, so one
+  // artist row can carry several memberships with a different
+  // `artist_genre_code` -- a different call number -- in each. On prod that is
+  // 204 artists, 201 of them with releases spanning genres, and artist 431
+  // ('Isis') is the case the librarian reported: a hip-hop act filed `IS 1`
+  // under Hiphop (6) and a metal band filed `IS 13` under Rock (11), two
+  // unrelated bands reachable only as one page.
+  //
+  // Genre 6 and 11 are the real ids (`dev_env/seed_db.sql` pins them to
+  // production's), and 6 < 11 deliberately: the unscoped read collapses onto
+  // the LOWEST membership, so Hiphop is what a genre-blind request answers for
+  // a librarian who asked for Rock.
+  //
+  // `POST /library/artists` writes exactly one crossreference row and there is
+  // no multi-genre write path, so the second membership is straight SQL --
+  // the same shape the legacy tubafrenzy import left behind.
+  describe('genre-scoped artist card and releases (BS#2637)', () => {
+    const HIPHOP = 6;
+    const ROCK = 11;
+    // A genre the fixture artist is deliberately never filed under.
+    const CLASSICAL = 4;
+
+    async function addRelease(artistId, title, genreId) {
+      const res = await auth
+        .post('/library')
+        .send({ album_title: title, artist_id: artistId, label: 'Test Label', genre_id: genreId, format_id: 1 })
+        .expect(201);
+      return res.body;
+    }
+
+    /**
+     * A fixture artist filed under both Rock (by `createTestArtist`) and
+     * Hiphop, with one release on each shelf. Returns the two call numbers so
+     * a test can assert the card reports the one it asked for.
+     */
+    async function createTwoGenreArtist() {
+      const artist = await createTestArtist();
+      // `POST /library/artists` echoes the artist_genre_code it wrote as
+      // `code_number`; the card read publishes the same value as
+      // `code_artist_number`.
+      const rockCode = artist.code_number;
+      const hiphopCode = rockCode + 500;
+      const sql = getTestDb();
+      await sql.unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, ${HIPHOP}, ${hiphopCode})`
+      );
+      const stamp = Date.now();
+      const rockRelease = await addRelease(artist.id, `Genre Scope Rock ${stamp}`, ROCK);
+      const hiphopRelease = await addRelease(artist.id, `Genre Scope Hiphop ${stamp}`, HIPHOP);
+      return { artist, rockCode, hiphopCode, rockRelease, hiphopRelease };
+    }
+
+    test('answers the card for the genre asked for, not the lowest membership', async () => {
+      const { artist, rockCode, hiphopCode } = await createTwoGenreArtist();
+
+      const rock = await auth.get(`/library/artists/${artist.id}`).query({ genre_id: ROCK }).expect(200);
+      expect(rock.body.genre_id).toBe(ROCK);
+      expect(rock.body.code_artist_number).toBe(rockCode);
+
+      const hiphop = await auth.get(`/library/artists/${artist.id}`).query({ genre_id: HIPHOP }).expect(200);
+      expect(hiphop.body.genre_id).toBe(HIPHOP);
+      expect(hiphop.body.code_artist_number).toBe(hiphopCode);
+    });
+
+    // Every client deployed before this parameter existed omits it, so the
+    // unscoped read must keep answering the lowest-membership collapse.
+    test('still collapses onto the lowest membership when no genre is named', async () => {
+      const { artist, hiphopCode } = await createTwoGenreArtist();
+
+      const res = await auth.get(`/library/artists/${artist.id}`).expect(200);
+
+      expect(res.body.genre_id).toBe(HIPHOP);
+      expect(res.body.code_artist_number).toBe(hiphopCode);
+    });
+
+    // The dependent counts stay artist-wide: they report what a delete would
+    // have to clear, and one genre's share of them would understate it.
+    test('reports artist-wide dependent counts on a genre-scoped card', async () => {
+      const { artist } = await createTwoGenreArtist();
+
+      const scoped = await auth.get(`/library/artists/${artist.id}`).query({ genre_id: ROCK }).expect(200);
+
+      expect(scoped.body.release_count).toBe(2);
+    });
+
+    test('partitions the release page by genre, with total scoped to match', async () => {
+      const { artist, rockRelease, hiphopRelease } = await createTwoGenreArtist();
+
+      const rock = await auth.get(`/library/artists/${artist.id}/releases`).query({ genre_id: ROCK }).expect(200);
+      expect(rock.body.releases.map((r) => r.id)).toEqual([rockRelease.id]);
+      expect(rock.body.total).toBe(1);
+      expect(rock.body.totalPages).toBe(1);
+
+      const hiphop = await auth.get(`/library/artists/${artist.id}/releases`).query({ genre_id: HIPHOP }).expect(200);
+      expect(hiphop.body.releases.map((r) => r.id)).toEqual([hiphopRelease.id]);
+      expect(hiphop.body.total).toBe(1);
+    });
+
+    // Each row must carry ITS OWN genre's call number -- the crossreference
+    // join is genre-matched, so a row can never borrow the other shelf's
+    // `code_artist_number`.
+    test('gives each partition its own genre call number', async () => {
+      const { artist, rockCode, hiphopCode } = await createTwoGenreArtist();
+
+      const rock = await auth.get(`/library/artists/${artist.id}/releases`).query({ genre_id: ROCK }).expect(200);
+      expect(rock.body.releases[0].code_artist_number).toBe(rockCode);
+
+      const hiphop = await auth.get(`/library/artists/${artist.id}/releases`).query({ genre_id: HIPHOP }).expect(200);
+      expect(hiphop.body.releases[0].code_artist_number).toBe(hiphopCode);
+    });
+
+    // The genre-blind page is what the librarian reported: both bands' records
+    // on one page. It stays that way unscoped -- and, critically, each release
+    // appears ONCE despite the artist having two crossreference rows.
+    test('spans both genres unscoped, without duplicating a row per membership', async () => {
+      const { artist, rockRelease, hiphopRelease } = await createTwoGenreArtist();
+
+      const res = await auth.get(`/library/artists/${artist.id}/releases`).expect(200);
+
+      const ids = res.body.releases.map((r) => r.id);
+      expect(ids).toHaveLength(2);
+      expect(new Set(ids).size).toBe(2);
+      expect(ids.sort()).toEqual([rockRelease.id, hiphopRelease.id].sort());
+      expect(res.body.total).toBe(2);
+    });
+
+    // A real id plus a genre it is not filed under is one query parameter away
+    // from a 200, so 'not found' would send a librarian hunting for a record
+    // that is on their screen. The releases half must not answer an empty page
+    // either: that is indistinguishable from a membership holding no releases.
+    test('404s distinguishably for a genre the artist is not filed under', async () => {
+      const { artist } = await createTwoGenreArtist();
+
+      const card = await auth.get(`/library/artists/${artist.id}`).query({ genre_id: CLASSICAL }).expect(404);
+      expectErrorContains(card, `not filed under genre ${CLASSICAL}`);
+
+      const releases = await auth
+        .get(`/library/artists/${artist.id}/releases`)
+        .query({ genre_id: CLASSICAL })
+        .expect(404);
+      expectErrorContains(releases, `not filed under genre ${CLASSICAL}`);
+    });
+
+    test('404s as not-found for an unknown artist id even when a genre is named', async () => {
+      const card = await auth.get('/library/artists/99999999').query({ genre_id: ROCK }).expect(404);
+      expectErrorContains(card, 'not found');
+
+      const releases = await auth.get('/library/artists/99999999/releases').query({ genre_id: ROCK }).expect(404);
+      expectErrorContains(releases, 'not found');
+    });
+
+    // The int4 guard the sibling genre parameters carry: out of range parses
+    // as a fine JS integer and surfaces as SQLSTATE 22003, a 500.
+    test.each([['rock'], [''], ['0'], ['-11'], ['11.5'], ['2147483648']])(
+      'rejects genre_id=%p with 400 on both reads',
+      async (genreId) => {
+        const artist = await createTestArtist();
+
+        await auth.get(`/library/artists/${artist.id}`).query({ genre_id: genreId }).expect(400);
+        await auth.get(`/library/artists/${artist.id}/releases`).query({ genre_id: genreId }).expect(400);
+      }
+    );
+  });
+
   // BS#2502: previews the release call number `POST /library` would assign —
   // `generateAlbumCodeNumber` (MAX(code_number)+1, 1 when none) — so the classic
   // add-release form can prepopulate an editable field. The unit suite mocks the

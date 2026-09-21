@@ -217,7 +217,7 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
       mockRole(role);
       const res = await request(app).get('/library/artists/1/releases').set('Authorization', 'Bearer test-token');
       expect(res.status).toBe(200);
-      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1, 0, 50);
+      expect(mockGetReleasesForArtist).toHaveBeenCalledWith(1, 0, 50, undefined);
     });
 
     test('a request with no Authorization header is rejected', async () => {
