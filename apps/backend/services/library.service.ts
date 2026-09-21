@@ -4117,8 +4117,19 @@ export type ArtistReleaseRow = {
  * share a `code_number` with a sibling. `getArtistCardById` cannot supply the
  * missing piece either: it deliberately collapses to the lowest-`genre_id`
  * crossreference row.
+ *
+ * `genre_id` is OPTIONAL and scopes the row SET as well (BS#2637). Omitted,
+ * the predicate is `artist_id` alone -- exactly what it was before the
+ * parameter existed, not an `and()` of one condition, so a caller that does
+ * not ask for a genre gets the same rows it got before. Supplied, it answers
+ * ONE of a multi-genre artist's shelves: artist 431 ('Isis') is two unrelated
+ * bands, a hip-hop act filed `IS 1` under Hiphop and a metal band filed
+ * `IS 13` under Rock, and an `artist_id`-only page lists both on whichever
+ * card the librarian opened. Filtering `library.genre_id` is sufficient
+ * because the crossreference join above already keys on it, so the scope
+ * cannot reintroduce a row from the other genre through that join.
  */
-const artistReleasesQuery = (artist_id: number) =>
+const artistReleasesQuery = (artist_id: number, genre_id?: number) =>
   db
     .select({
       id: library.id,
@@ -4142,7 +4153,11 @@ const artistReleasesQuery = (artist_id: number) =>
         eq(genre_artist_crossreference.genre_id, library.genre_id)
       )
     )
-    .where(eq(library.artist_id, artist_id));
+    .where(
+      genre_id === undefined
+        ? eq(library.artist_id, artist_id)
+        : and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id))
+    );
 
 /**
  * BS#2156: the release table on `/wxycdb`'s artist card
@@ -4175,19 +4190,26 @@ const artistReleasesQuery = (artist_id: number) =>
 export const getReleasesForArtist = async (
   artist_id: number,
   page: number,
-  limit: number
+  limit: number,
+  genre_id?: number
 ): Promise<ArtistReleaseRow[]> => {
-  return artistReleasesQuery(artist_id)
+  return artistReleasesQuery(artist_id, genre_id)
     .orderBy(asc(library.code_number), sql`${library.code_volume_letters} ASC NULLS FIRST`, asc(library.id))
     .limit(limit)
     .offset(page * limit);
 };
 
-/** Total release count for `getReleasesForArtist`'s page envelope (same join scope). */
-export const countReleasesForArtist = async (artist_id: number): Promise<number> => {
+/**
+ * Total release count for `getReleasesForArtist`'s page envelope (same join
+ * scope). `genre_id` must be passed through whenever the page was scoped:
+ * both read `artistReleasesQuery` so the predicate cannot drift, but a caller
+ * that scopes only one of the two serves a filtered page under an unfiltered
+ * `total` and a `totalPages` that overstates it.
+ */
+export const countReleasesForArtist = async (artist_id: number, genre_id?: number): Promise<number> => {
   const response = await db
     .select({ count: sql<number>`count(*)::int` })
-    .from(artistReleasesQuery(artist_id).as('artist_releases'));
+    .from(artistReleasesQuery(artist_id, genre_id).as('artist_releases'));
 
   return Number(response[0]?.count ?? 0);
 };

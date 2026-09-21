@@ -1115,17 +1115,77 @@ const parseResourceId = (rawId: string, resource: string): number => {
 const parseArtistId = (rawId: string): number => parseResourceId(rawId, 'artist');
 
 /**
+ * `parseCodeQueryInt` for a parameter that may be absent (BS#2637). Delegates
+ * rather than re-deriving the checks, so the int4 guard, the repeated-key
+ * message and the blank-is-not-zero rule stay in one place; only genuine
+ * absence short-circuits.
+ *
+ * `?genre_id=` (present but empty) is NOT absence -- it is a malformed value,
+ * and falling back to the genre-blind read there would answer 200 with the
+ * lowest-membership collapse for a caller that plainly meant to name a genre.
+ */
+const parseOptionalCodeQueryInt = (raw: string | undefined, name: string, min: number): number | undefined =>
+  raw === undefined ? undefined : parseCodeQueryInt(raw, name, min);
+
+/**
+ * The artist-card existence predicate `GET /library/artists/:id` and
+ * `GET /library/artists/:id/releases` share, genre-scoped when the caller
+ * named a genre (BS#2637). Unscoped it stays `getArtistCardById` -- the
+ * lowest-`genre_id` collapse both endpoints have always resolved -- so a
+ * client that sends no `genre_id` is served exactly what it was served before
+ * the parameter existed.
+ *
+ * The two 404s are DELIBERATELY distinguishable. 'Artist not found' keeps
+ * meaning no such artist (or an artist row carrying no crossreference at all,
+ * which both endpoints have always 404'd). A well-formed id plus a genre the
+ * artist is not filed under is a different mistake: the record exists and the
+ * caller is one query parameter away from a 200, so answering 'not found' for
+ * a card the librarian is looking at would send them hunting for a row that is
+ * there. `getArtistById` -- the plain `artists` lookup, no crossreference join
+ * -- is what separates the two, and it is only ever reached on the failure
+ * path.
+ */
+const resolveArtistCardOr404 = async (
+  artistId: number,
+  genreId: number | undefined
+): Promise<libraryService.ArtistCardRow> => {
+  const card =
+    genreId === undefined
+      ? await libraryService.getArtistCardById(artistId)
+      : await libraryService.getArtistCardByIdInGenre(artistId, genreId);
+  if (card) {
+    return card;
+  }
+  if (genreId !== undefined && (await libraryService.getArtistById(artistId))) {
+    throw new WxycError(`Artist not filed under genre ${genreId}`, 404);
+  }
+  throw new WxycError('Artist not found', 404);
+};
+
+/**
  * GET /library/artists/:id -- BS#2156 artist-card lookup: the field set
  * `/wxycdb`'s `artistCardModify.jsp` displays. Registered after the literal
  * `/artists/search` and `/artists/peek-code` routes -- see the route-ordering
  * comment in library.route.ts.
+ *
+ * `?genre_id=` is optional and names WHICH shelf to answer for a multi-genre
+ * artist (BS#2637) -- `(artist_id, genre_id)` is what the crossreference is
+ * unique on, so the artist id alone does not identify a card. Artist 431
+ * ('Isis') is two unrelated bands on one row, `IS 1` under Hiphop and `IS 13`
+ * under Rock, and the unscoped read reports the lower of the two whichever one
+ * the librarian asked for. Omitted, that collapse is still what answers --
+ * this is additive, not a cutover -- but a genre-aware client should send it.
+ * The dependent counts are NOT genre-scoped and do not become so: all five
+ * count what is filed under the ARTIST, which is what a delete would have to
+ * clear, and narrowing them to one genre would understate the refusal.
  */
-export const getArtistCard: RequestHandler<{ id: string }> = async (req, res) => {
+export const getArtistCard: RequestHandler<{ id: string }, unknown, unknown, { genre_id?: string }> = async (
+  req,
+  res
+) => {
   const artistId = parseArtistId(req.params.id);
-  const artist = await libraryService.getArtistCardById(artistId);
-  if (!artist) {
-    throw new WxycError('Artist not found', 404);
-  }
+  const genreId = parseOptionalCodeQueryInt(req.query.genre_id, 'genre_id', 1);
+  const artist = await resolveArtistCardOr404(artistId, genreId);
   // BS#2597: the delete-refusal counts the artist delete enforces, plus the
   // informational compilation-credit count. A second statement, not a fifth
   // round trip per dependent -- see getArtistDependentCounts's docstring.
@@ -1447,9 +1507,10 @@ export const getArtistReleases: RequestHandler<
   { id: string },
   unknown,
   unknown,
-  { page?: string; limit?: string }
+  { page?: string; limit?: string; genre_id?: string }
 > = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
+  const genreId = parseOptionalCodeQueryInt(req.query.genre_id, 'genre_id', 1);
 
   // Shared with the two cross-reference listings (`parsePageParams`, declared
   // below); this endpoint's own inline copy accepted `?limit=7abc` as 7 and
@@ -1458,19 +1519,21 @@ export const getArtistReleases: RequestHandler<
   const { page, limit } = parsePageParams(req.query, DEFAULT_LIMIT, MAX_LIMIT);
 
   // Same existence predicate GET/PATCH /library/artists/:id use
-  // (`getArtistCardById`'s INNER JOIN to `genre_artist_crossreference`), not
-  // the plain `artists` lookup `getArtistNameById` did before -- an artist
-  // row with no crossreference must 404 the same way here it already does on
-  // the card and the PATCH, not silently 200 with an empty release page. Also
-  // sidesteps the `!name` falsy-check trap: a legacy empty-string
-  // `artist_name` would read as "missing" under that check even though the
-  // row exists.
-  if (!(await libraryService.getArtistCardById(artistId))) {
-    throw new WxycError('Artist not found', 404);
-  }
+  // (`resolveArtistCardOr404`, an INNER JOIN to
+  // `genre_artist_crossreference`), not the plain `artists` lookup
+  // `getArtistNameById` did before -- an artist row with no crossreference
+  // must 404 the same way here it already does on the card and the PATCH, not
+  // silently 200 with an empty release page. Also sidesteps the `!name`
+  // falsy-check trap: a legacy empty-string `artist_name` would read as
+  // "missing" under that check even though the row exists.
+  //
+  // Scoped, that predicate is also what makes a genre the artist is not filed
+  // under a 404 rather than an empty page -- an empty page would be
+  // indistinguishable from a membership that genuinely holds no releases.
+  await resolveArtistCardOr404(artistId, genreId);
   const [releases, total] = await Promise.all([
-    libraryService.getReleasesForArtist(artistId, page, limit),
-    libraryService.countReleasesForArtist(artistId),
+    libraryService.getReleasesForArtist(artistId, page, limit, genreId),
+    libraryService.countReleasesForArtist(artistId, genreId),
   ]);
   res.status(200).json({ artist_id: artistId, releases, total, page, totalPages: Math.ceil(total / limit) });
 };
@@ -1600,12 +1663,14 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
  * a `Promise.all` over two: the shelf rows that carry the volume letters are
  * the same rows `MAX(code_number)` is taken over, so one statement answers
  * both halves and they cannot disagree across a concurrent insert.
- * Existence is resolved through `getArtistCardById`, the
- * same 404 predicate GET/PATCH `/artists/:id` and `/artists/:id/releases`
- * use — so an unknown id (or an artist row with no
+ * Existence is resolved through `getArtistCardById`, the artist-wide 404
+ * predicate GET/PATCH `/artists/:id` and `/artists/:id/releases` resolve when
+ * no genre is named — so an unknown id (or an artist row with no
  * `genre_artist_crossreference`) 404s rather than previewing 1 as if the artist
- * existed with no releases. A malformed id is the named 400 from
- * `parseArtistId`, never a 500.
+ * existed with no releases. Those two now also accept an optional `genre_id`
+ * that narrows the predicate to one membership (BS#2637); this endpoint
+ * deliberately does NOT, for the reason spelled out in the paragraph below.
+ * A malformed id is the named 400 from `parseArtistId`, never a 500.
  *
  * That artist-wide 404 does not require the artist to be catalogued in the
  * QUERIED genre. A well-formed `genre_id` naming a shelf this artist has no
