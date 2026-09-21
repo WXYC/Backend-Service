@@ -2133,6 +2133,11 @@ describe('flowsheet.controller', () => {
   describe('live-fs refetch push coverage (BS#2621 / BS#2515)', () => {
     const activeShow = { id: 42, end_time: null };
 
+    /** A row on the show live reads resolve to — the only rows worth pushing for. */
+    const currentShowEntry = (id: number) => ({ ...createMockEntry(id), show_id: activeShow.id });
+    /** A row on an archived show. Nothing rendered live changes when it does. */
+    const archivedEntry = (id: number) => ({ ...createMockEntry(id), show_id: 1906 });
+
     const expectSingleRefetch = (source: string) => {
       expect(mockBroadcast).toHaveBeenCalledTimes(1);
       expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
@@ -2146,12 +2151,64 @@ describe('flowsheet.controller', () => {
     });
 
     it('deleteEntry broadcasts one refetch after a committed delete', async () => {
-      mockRemoveTrack.mockResolvedValue(createMockEntry(7));
+      mockRemoveTrack.mockResolvedValue(currentShowEntry(7));
 
       const req = { body: { entry_id: 7 } } as unknown as Request;
       const res = createMockRes();
 
       await deleteEntry(req, res as Response, mockNext);
+
+      expectSingleRefetch('delete');
+    });
+
+    // The row-keyed handlers take a bare `entry_id`, so they reach archived
+    // shows as readily as the live one — an MD correcting last spring's
+    // flowsheet is the case. Nothing any connected client renders changes when
+    // such a row does, so a station-wide full fetch per edit is pure cost.
+    // Same predicate `forceEndShow` uses for the same reason.
+    it.each<[string, () => Promise<void>]>([
+      [
+        'deleteEntry on an archived show',
+        async () => {
+          mockRemoveTrack.mockResolvedValue(archivedEntry(20));
+          const req = { body: { entry_id: 20 } } as unknown as Request;
+          await deleteEntry(req, createMockRes() as Response, mockNext);
+          expect(mockRemoveTrack).toHaveBeenCalled();
+        },
+      ],
+      [
+        'changeOrder on an archived show',
+        async () => {
+          mockChangeOrder.mockResolvedValue(archivedEntry(21));
+          const req = { body: { entry_id: 21, new_position: 2 } } as unknown as Request;
+          await changeOrder(req, createMockRes() as Response, mockNext);
+          expect(mockChangeOrder).toHaveBeenCalled();
+        },
+      ],
+      [
+        'updateEntry on an archived show’s marker row',
+        async () => {
+          mockUpdateEntry.mockResolvedValue({ ...archivedEntry(22), entry_type: 'talkset' });
+          const req = { body: { entry_id: 22, data: { message: 'fixed' } } } as unknown as Request;
+          await updateEntry(req, createMockRes() as Response, mockNext);
+          expect(mockUpdateEntry).toHaveBeenCalled();
+        },
+      ],
+    ])('does not broadcast for %s', async (_name, run) => {
+      await run();
+      expect(mockBroadcast).not.toHaveBeenCalled();
+    });
+
+    // `flowsheet.show_id` is nullable (`onDelete: 'set null'`, plus rows that
+    // pre-date shows), so the scoping can't always answer. It fails open: a
+    // spurious idempotent fetch is cheaper than silently dropping a push a
+    // live client needed.
+    it('broadcasts when the deleted row has no show_id to scope on', async () => {
+      mockRemoveTrack.mockResolvedValue({ ...createMockEntry(23), show_id: null });
+
+      const req = { body: { entry_id: 23 } } as unknown as Request;
+
+      await deleteEntry(req, createMockRes() as Response, mockNext);
 
       expectSingleRefetch('delete');
     });
@@ -2301,7 +2358,7 @@ describe('flowsheet.controller', () => {
     );
 
     it('changeOrder broadcasts one refetch after a committed reorder', async () => {
-      mockChangeOrder.mockResolvedValue(createMockEntry(11));
+      mockChangeOrder.mockResolvedValue(currentShowEntry(11));
 
       const req = { body: { entry_id: 11, new_position: 2 } } as unknown as Request;
       const res = createMockRes();
@@ -2317,7 +2374,7 @@ describe('flowsheet.controller', () => {
     it.each(['talkset', 'breakpoint', 'message', 'show_start', 'dj_join'])(
       'updateEntry broadcasts one refetch when the updated row is a %s marker',
       async (entryType) => {
-        mockUpdateEntry.mockResolvedValue({ ...createMockEntry(13), entry_type: entryType });
+        mockUpdateEntry.mockResolvedValue({ ...currentShowEntry(13), entry_type: entryType });
 
         const req = { body: { entry_id: 13, data: { message: 'Talkset — corrected' } } } as unknown as Request;
         const res = createMockRes();

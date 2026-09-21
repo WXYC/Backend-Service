@@ -609,17 +609,56 @@ const sendProjectedEntry = async (res: Response, statusCode: number, entry: FSEn
  * label per the LiveFsRefetchEvent contract ("clients must not branch on it"),
  * so new sources are in-contract.
  *
- * Call-site discipline: emit only after the mutation has committed — never on
- * a 400/404/error path — and at most once per request, because a refetch is a
- * full fetch and one emit already covers every row the request wrote.
+ * Call-site discipline, in three parts.
+ *
+ * 1. Emit only after the mutation has committed, and at most once per
+ *    request, because a refetch is a full fetch and one emit already covers
+ *    every row the request wrote. "After a commit" is the rule, not "after a
+ *    2xx" — see `addEntry`, where a 400 on the caller's row can follow
+ *    markers the hourly fill already wrote.
+ * 2. Nothing broadcasts off a thrown error, even one that follows a commit
+ *    (an `addTrack` failure after a fill, a `startShow` failure after the
+ *    takeover's `endShow`). Those are DB-degradation signatures, and telling
+ *    every connected client to issue a full fetch is the worst thing to do to
+ *    a database that just failed a write. Clients converge at their
+ *    reconciliation poll instead — slower, but it cannot amplify an incident.
+ * 3. Emit only for rows a connected client is actually rendering. The
+ *    row-keyed handlers take a bare `entry_id` and so reach archived shows,
+ *    and `forceEndShow` exists to drain a backlog of them; a full fetch for a
+ *    row no live view shows is pure fan-out. Scope with
+ *    `isCurrentShowId`, which fails open when it cannot tell.
+ *
  * `broadcast` cannot throw into the handler: per-client write failures are
  * caught inside it and recorded via sse-metrics.
+ *
+ * Instance-local by construction, unlike the CDC bridges it compensates for:
+ * those reach every BS instance because each holds its own PG `LISTEN` (see
+ * services/metadata-broadcast), whereas this fans out only to the clients
+ * attached to the process that handled the request. Inert on today's
+ * single-container deploy, and the reason #2515's typed `LiveFsDeleteEvent`
+ * belongs on the CDC route rather than here — but a second replica makes this
+ * reach a minority of clients, so horizontal scaling has to move these emits,
+ * not just add instances.
  */
 const broadcastFlowsheetRefetch = (source: string): void => {
   serverEventsMgr.broadcast(Topics.liveFs, {
     type: FsEvents.refetch,
     payload: { source },
   });
+};
+
+/**
+ * Is `show_id` the show that live reads resolve to — the one every connected
+ * client is rendering?
+ *
+ * Fails open on a null `show_id`: the column is nullable (`onDelete: 'set
+ * null'`, plus rows that pre-date shows entirely), and when the scoping can't
+ * answer, one spurious idempotent fetch is cheaper than silently dropping a
+ * push a live client needed.
+ */
+const isCurrentShowId = async (show_id: number | null): Promise<boolean> => {
+  if (show_id === null) return true;
+  return show_id === (await flowsheet_service.getLatestShow())?.id;
 };
 
 /**
@@ -888,8 +927,10 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   // event; worth knowing for #2515's typed `LiveFsDeleteEvent`, whose natural
   // home is that CDC route rather than this handler. Until then the refetch
   // is the push, and only for a row that actually existed (the 404 above
-  // already returned otherwise).
-  broadcastFlowsheetRefetch('delete');
+  // already returned otherwise) on the show clients are rendering — an MD
+  // clearing stray rows out of last spring's flowsheet changes nothing any
+  // connected client shows.
+  if (await isCurrentShowId(removedEntry.show_id)) broadcastFlowsheetRefetch('delete');
   await sendProjectedEntry(res, 200, removedEntry);
 };
 
@@ -980,7 +1021,9 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
   //
   // The returned row's own `entry_type`, not a re-read: it is the post-UPDATE
   // truth and the column is not client-writable (see `pickUpdateEntryFields`).
-  if (updatedEntry.entry_type !== 'track') broadcastFlowsheetRefetch('marker-update');
+  if (updatedEntry.entry_type !== 'track' && (await isCurrentShowId(updatedEntry.show_id))) {
+    broadcastFlowsheetRefetch('marker-update');
+  }
   await sendProjectedEntry(res, 200, updatedEntry);
 };
 
@@ -1211,6 +1254,9 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
       // addDJToShow writes a dj_join marker only on first join or reactivation
       // — a retried press commits nothing — and it doesn't report which
       // happened, so an emit here couldn't honor "only after a row committed".
+      // Widening its return to say which it did is BS#2633; until then a
+      // genuine first co-host join stays invisible until the next poll, which
+      // is the one member of this defect class left open.
       const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
       res.status(200).json(show_dj_instance);
       return;
@@ -1297,9 +1343,14 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     //
     // One refetch for the whole handoff, strictly after `startShow`: endShow's
     // show_end (+ any co-host dj_leave) markers and startShow's show_start have
-    // all committed by now, and a full fetch covers them together (BS#2621). A
-    // handoff that fails between the two writes is an error path and never
-    // broadcasts.
+    // all committed by now, and a full fetch covers them together (BS#2621).
+    //
+    // A handoff that fails between the two writes leaves the outgoing show
+    // closed with nobody on air — a committed change this deliberately does
+    // not broadcast, per rule 2 on `broadcastFlowsheetRefetch`: a `startShow`
+    // failure is a DB-degradation signature, and a station-wide full fetch is
+    // the worst response to a database that just failed a write. Those
+    // clients converge at their reconciliation poll.
     broadcastFlowsheetRefetch('show-transition');
     res.status(200).json(show_session);
   }
@@ -1559,6 +1610,12 @@ export const forceEndShow: RequestHandler<
   // Read once, ahead of the close, because "the show live reads resolve to"
   // is a fact about the moment before this endpoint changes it. The same
   // answer gates the confirmation below and the live-fs push at the end.
+  //
+  // This costs the `?force=true` path one `getLatestShow()` it used to
+  // short-circuit past, and a scripted backlog drain pays it per show.
+  // Deliberate: the alternative to knowing is emitting blind, and one indexed
+  // `ORDER BY id DESC LIMIT 1` per drained show is orders of magnitude
+  // cheaper than a station-wide full-flowsheet fetch per drained show.
   const isCurrentShow = showId === (await flowsheet_service.getLatestShow())?.id;
 
   if (req.query.force !== 'true' && isCurrentShow) {
@@ -1583,9 +1640,9 @@ export const forceEndShow: RequestHandler<
   // reaching back to 2006 (see `endShow` — 2,813 of production's 2,814 open
   // shows), and closing a 2006 show changes nothing on any live view, so an
   // ungated emit would fan one full-flowsheet fetch per drained show to every
-  // connected client. That is the amplification the PR's cost argument rests
-  // on not existing, and `LIVE_FS_UPDATE_MAX_AGE_HOURS` is its analogue on
-  // the CDC update bridge.
+  // connected client — the amplification every other emit site here avoids by
+  // being a hand-speed DJ action, and the one `LIVE_FS_UPDATE_MAX_AGE_HOURS`
+  // guards against on the CDC update bridge.
   //
   // Every refusal above (400 id, 404 no show, 400 already ended, 409 unforced
   // current, 400 out-of-range ended_at) returns before this line, and
@@ -1645,8 +1702,9 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   // A reorder shifts a contiguous play_order range in one transaction, but the
   // CDC update bridge broadcasts only the enriched-track subset of it (BS#2621)
   // — shifted markers and pending/enriching tracks never. Push a refetch so
-  // every connected client converges on the whole range.
-  broadcastFlowsheetRefetch('reorder');
+  // every connected client converges on the whole range, scoped to the show
+  // they are rendering (an archived show's reorder reaches no live view).
+  if (await isCurrentShowId(updatedEntry.show_id)) broadcastFlowsheetRefetch('reorder');
   await sendProjectedEntry(res, 200, updatedEntry);
 };
 
