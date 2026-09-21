@@ -120,7 +120,9 @@ describe('fillMissingHourlyBreakpoints', () => {
     db.select.mockReturnValue(playOrderChain());
     db.insert.mockReturnValue(createMockQueryChain());
 
-    await fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') });
+    await expect(
+      fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') })
+    ).resolves.toBe(0);
 
     expectQuietNoOp();
   });
@@ -151,8 +153,11 @@ describe('fillMissingHourlyBreakpoints', () => {
     const insertChain = createMockQueryChain();
     db.insert.mockReturnValueOnce(insertChain);
 
-    // 23:05Z floors to 23:00Z.
-    await fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') });
+    // 23:05Z floors to 23:00Z. The resolved count is the number of rows the
+    // single INSERT landed — it feeds addEntry's live-fs refetch (BS#2621).
+    await expect(
+      fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') })
+    ).resolves.toBe(1);
 
     expect(db.insert).toHaveBeenCalledTimes(1);
     expect(insertedRows(insertChain)).toEqual([
@@ -214,15 +219,38 @@ describe('fillMissingHourlyBreakpoints', () => {
     });
   });
 
-  it('reports to Sentry and inserts nothing when the watermark read fails', async () => {
+  it('reports to Sentry, inserts nothing and reports zero rows when the watermark read fails', async () => {
     // An hour marker annotates the show; it is not a precondition for
     // recording a play. A DB blip here must degrade to a missing marker, never
-    // to a DJ who cannot log their track.
+    // to a DJ who cannot log their track. The swallow path resolves 0, never
+    // throws — the count is a fact about rows that landed (BS#2621).
     stubWatermarkSelect().limit.mockRejectedValueOnce(new Error('connection terminated'));
 
-    await expect(fillMissingHourlyBreakpoints(show, 'DJ Stardust')).resolves.toBeUndefined();
+    await expect(fillMissingHourlyBreakpoints(show, 'DJ Stardust')).resolves.toBe(0);
 
     expect(db.insert).not.toHaveBeenCalled();
+    expect(mockCaptureException).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ tags: { subsystem: 'auto-hour-breakpoints' } })
+    );
+  });
+
+  it('reports zero rows, not the would-be count, when the INSERT itself fails', async () => {
+    // The count feeds addEntry's live-fs refetch (BS#2621): a swallowed insert
+    // failure wrote nothing for clients to fetch, so it must read as 0 markers
+    // rather than the number the fill attempted.
+    stubWatermarkSelect().limit.mockResolvedValueOnce([
+      { radio_hour: new Date('2026-09-16T22:00:00.000Z'), add_time: null },
+    ]);
+    db.select.mockReturnValue(playOrderChain());
+    const insertChain = createMockQueryChain();
+    insertChain.values.mockImplementationOnce(() => Promise.reject(new Error('insert failed')));
+    db.insert.mockReturnValueOnce(insertChain);
+
+    await expect(
+      fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') })
+    ).resolves.toBe(0);
+
     expect(mockCaptureException).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ tags: { subsystem: 'auto-hour-breakpoints' } })
@@ -240,7 +268,9 @@ describe('fillMissingHourlyBreakpoints', () => {
     const insertChain = createMockQueryChain();
     db.insert.mockReturnValue(insertChain);
 
-    await fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') });
+    await expect(
+      fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') })
+    ).resolves.toBe(MAX_AUTO_BREAKPOINTS);
 
     // One statement, not one per marker — see the docstring on the
     // flowsheet_watermark trigger.
@@ -264,7 +294,9 @@ describe('fillMissingHourlyBreakpoints', () => {
     const insertChain = createMockQueryChain();
     db.insert.mockReturnValue(insertChain);
 
-    await fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') });
+    await expect(
+      fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') })
+    ).resolves.toBe(expectedRows);
 
     expect(insertedRows(insertChain)).toHaveLength(expectedRows);
     expect(mockCaptureMessage).not.toHaveBeenCalled();

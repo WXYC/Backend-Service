@@ -15,6 +15,7 @@ import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signa
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
 import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
+import { FsEvents, Topics, serverEventsMgr } from '../utils/serverEvents.js';
 
 export type QueryParams = {
   page?: string;
@@ -596,6 +597,32 @@ const sendProjectedEntry = async (res: Response, statusCode: number, entry: FSEn
 };
 
 /**
+ * Push a `refetch` on the live flowsheet SSE topic (BS#2621, and the delete
+ * half of BS#2515, interim shape): the CDC insert bridge is scoped to track
+ * rows and the update bridge to terminal `metadata_status`, so deletes, marker
+ * rows (talkset/breakpoint/show markers never reach a terminal status),
+ * auto-filled hourly breakpoints, reorders and show transitions reach no
+ * connected client until its reconciliation poll — up to five minutes of two
+ * devices showing different playlists. Both deployed consumers answer
+ * `refetch` with a full reconciliation fetch (same event the ETL routes in
+ * routes/internal.route.ts rely on), and `payload.source` is a telemetry-only
+ * label per the LiveFsRefetchEvent contract ("clients must not branch on it"),
+ * so new sources are in-contract.
+ *
+ * Call-site discipline: emit only after the mutation has committed — never on
+ * a 400/404/error path — and at most once per request, because a refetch is a
+ * full fetch and one emit already covers every row the request wrote.
+ * `broadcast` cannot throw into the handler: per-client write failures are
+ * caught inside it and recorded via sse-metrics.
+ */
+const broadcastFlowsheetRefetch = (source: string): void => {
+  serverEventsMgr.broadcast(Topics.liveFs, {
+    type: FsEvents.refetch,
+    payload: { source },
+  });
+};
+
+/**
  * Build a track row from the request's own snapshot fields, with
  * `album_id: null`. Shared by both routes that land here: an explicit
  * `album_id: null` (BS#933) and a positive `album_id` that misses in
@@ -664,7 +691,12 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
   // hand. Awaited but never a precondition — `fillMissingHourlyBreakpoints`
   // swallows its own failures on purpose (see its docstring), so this call
   // cannot turn a DB blip on an annotation into a DJ who can't log a play.
-  await flowsheet_service.fillMissingHourlyBreakpoints(latestShow, dj_name, { now, callerMarksCurrentHour });
+  // The count feeds the track path's refetch below (BS#2621); the swallow
+  // path reports 0, so a failed fill never broadcasts.
+  const filledBreakpoints = await flowsheet_service.fillMissingHourlyBreakpoints(latestShow, dj_name, {
+    now,
+    callerMarksCurrentHour,
+  });
 
   if (body.message !== undefined) {
     //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point
@@ -706,6 +738,9 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       dj_name,
     };
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+    // Marker rows never reach the CDC bridges (BS#2621). One emit covers the
+    // hourly fill's rows too — never a second `hourly-fill` on this branch.
+    broadcastFlowsheetRefetch('marker-add');
     await sendProjectedEntry(res, 201, completedEntry);
     return;
   }
@@ -752,6 +787,9 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
         extra: { album_id: body.album_id, show_id: latestShow.id },
       });
       const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+      // The track row itself rides the CDC insert bridge — a refetch for it
+      // would double-broadcast. Only the fill's markers need the push.
+      if (filledBreakpoints > 0) broadcastFlowsheetRefetch('hourly-fill');
       await sendProjectedEntry(res, 201, completedEntry);
       return;
     }
@@ -773,6 +811,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+    if (filledBreakpoints > 0) broadcastFlowsheetRefetch('hourly-fill');
     await sendProjectedEntry(res, 201, completedEntry);
   } else {
     // No album_id (explicit null from the dj-site rotation snapshot, BS#933,
@@ -781,6 +820,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     // fallback above (BS#1680) so both routes into this shape stay identical.
     const fsEntry = buildSnapshotFieldsEntry(body, latestShow.id, dj_name);
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+    if (filledBreakpoints > 0) broadcastFlowsheetRefetch('hourly-fill');
     await sendProjectedEntry(res, 201, completedEntry);
   }
 };
@@ -799,6 +839,9 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   if (!removedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
+  // No CDC event carries a DELETE (BS#2515) — push the refetch, and only for
+  // a row that actually existed (the 404 above already returned otherwise).
+  broadcastFlowsheetRefetch('delete');
   await sendProjectedEntry(res, 200, removedEntry);
 };
 
@@ -869,6 +912,16 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
   if (!updatedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
+  // Non-track rows only (BS#2621). A track PATCH already propagates without
+  // help: the CDC trigger notifies the whole NEW row, so an already-terminal
+  // track's UPDATE carries the edited columns through `filterMetadataUpdate`,
+  // and a `pending`/`enriching` track's edit rides the enrichment's own
+  // terminal UPDATE that follows. A marker row can satisfy neither bridge —
+  // the enrichment worker claims only tracks, so it stays `pending` forever —
+  // which today makes editing a talkset's message reach nobody. The returned
+  // row's own `entry_type`, not a re-read: it is the post-UPDATE truth and the
+  // column is not client-writable (see `pickUpdateEntryFields`).
+  if (updatedEntry.entry_type !== 'track') broadcastFlowsheetRefetch('marker-update');
   await sendProjectedEntry(res, 200, updatedEntry);
 };
 
@@ -1037,6 +1090,9 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
       dj_name_override
     );
 
+    // startShow committed a show_start marker, which the CDC bridges never
+    // carry (BS#2621).
+    broadcastFlowsheetRefetch('show-transition');
     res.status(200).json(show_session);
   } else if (req.body.dj_id === current_show.primary_dj_id) {
     // (c) No-op duplicate dj_join (BS#1861): the requesting DJ OWNS this show,
@@ -1092,6 +1148,10 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     // `join()` throws on a body with no show id, so a 400 here would crash
     // that daemon at activation. See config/flowsheetTakeover.ts.
     if (!flowsheetTakeoverConfig.getConfig().enabled) {
+      // No refetch on this or the intent-'join' co-host path below (BS#2621):
+      // addDJToShow writes a dj_join marker only on first join or reactivation
+      // — a retried press commits nothing — and it doesn't report which
+      // happened, so an emit here couldn't honor "only after a row committed".
       const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
       res.status(200).json(show_dj_instance);
       return;
@@ -1175,6 +1235,13 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     // the destructive half: if `startShow` had failed, a DJ's show would have
     // been terminated with nobody on air, which is the case most worth knowing
     // about. See the `recordGoLiveHandoff` call above `startShow`.
+    //
+    // One refetch for the whole handoff, strictly after `startShow`: endShow's
+    // show_end (+ any co-host dj_leave) markers and startShow's show_start have
+    // all committed by now, and a full fetch covers them together (BS#2621). A
+    // handoff that fails between the two writes is an error path and never
+    // broadcasts.
+    broadcastFlowsheetRefetch('show-transition');
     res.status(200).json(show_session);
   }
 };
@@ -1194,11 +1261,20 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
   }
 
   // Show membership is verified by showMemberMiddleware on the route
+  //
+  // Both branches commit marker rows the CDC bridges never carry (BS#2621):
+  // endShow writes a show_end (+ a dj_leave per remaining co-host), the guest
+  // path a dj_leave. The guest marker is suppressed only in the nameless-DJ
+  // degraded state (already Sentry-warned in createLeaveNotification); the
+  // spurious refetch there is one harmless idempotent fetch, cheaper than
+  // leaving every normal leave invisible until the poll.
   if (req.body.dj_id === currentShow.primary_dj_id) {
     const finalizedShow: Show = await flowsheet_service.endShow(currentShow);
+    broadcastFlowsheetRefetch('show-transition');
     res.status(200).json(finalizedShow);
   } else {
     const showDJ: ShowDJ = await flowsheet_service.leaveShow(req.body.dj_id, currentShow);
+    broadcastFlowsheetRefetch('show-transition');
     res.status(200).json(showDJ);
   }
 };
@@ -1432,6 +1508,15 @@ export const forceEndShow: RequestHandler<
   const endedAt = await resolveForceEndInstant(req.body?.ended_at, show);
 
   const finalizedShow: Show = await flowsheet_service.endShow(show, endedAt);
+  // `endShow` has committed a `show_end` marker plus a `dj_leave` per
+  // remaining co-host — none of which the CDC bridges carry (BS#2621). The
+  // highest-value transition to push: this closes the show every on-air read
+  // resolves to, and afterwards `POST /flowsheet` fails for whoever is on air,
+  // so a client still rendering the show as live is actively misleading. Every
+  // refusal above (400 id, 404 no show, 400 already ended, 409 unforced
+  // current, 400 out-of-range ended_at) returns before this line, and
+  // `endShow`'s own compare-and-set 400 rejects through it.
+  broadcastFlowsheetRefetch('show-transition');
   res.status(200).json(finalizedShow);
 };
 
@@ -1483,6 +1568,11 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   if (!updatedEntry) {
     throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
   }
+  // A reorder shifts a contiguous play_order range in one transaction, but the
+  // CDC update bridge broadcasts only the enriched-track subset of it (BS#2621)
+  // — shifted markers and pending/enriching tracks never. Push a refetch so
+  // every connected client converges on the whole range.
+  broadcastFlowsheetRefetch('reorder');
   await sendProjectedEntry(res, 200, updatedEntry);
 };
 

@@ -1126,12 +1126,18 @@ const LONG_CATCH_UP_WARN_THRESHOLD = 3;
  * the 6:00 PM marker unwritten by either. Whoever passes it, the instant is
  * always read from the server's own clock; a client-supplied hour is the
  * #2516 defect and never reaches here.
+ *
+ * Resolves to the number of marker rows the INSERT landed, so `addEntry` can
+ * push a live-fs `refetch` when the fill wrote markers the CDC bridges never
+ * broadcast (BS#2621). The swallow-failures contract above is unchanged: the
+ * catch path resolves 0 — a failed fill wrote nothing for clients to fetch —
+ * and callers still must not treat the fill as a precondition.
  */
 export const fillMissingHourlyBreakpoints = async (
   show: Show,
   dj_name: string | null,
   { now = new Date(), callerMarksCurrentHour = false }: { now?: Date; callerMarksCurrentHour?: boolean } = {}
-): Promise<void> => {
+): Promise<number> => {
   try {
     const watermark = await getBreakpointWatermark(show);
     const ceiling = callerMarksCurrentHour ? new Date(nearestStationHour(now).getTime() - 1) : now;
@@ -1150,7 +1156,7 @@ export const fillMissingHourlyBreakpoints = async (
       });
     }
 
-    if (missing.length === 0) return;
+    if (missing.length === 0) return 0;
 
     // `play_order` collides freely within a show by design (no per-show UNIQUE
     // — see schema.ts), and reads tie-break on `flowsheet.id`, so walking one
@@ -1169,11 +1175,13 @@ export const fillMissingHourlyBreakpoints = async (
         play_order: basePlayOrder + index,
       }))
     );
+    return missing.length;
   } catch (err) {
     Sentry.captureException(err, {
       tags: { subsystem: 'auto-hour-breakpoints' },
       extra: { show_id: show.id },
     });
+    return 0;
   }
 };
 

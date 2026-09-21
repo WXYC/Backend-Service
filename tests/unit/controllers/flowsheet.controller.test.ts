@@ -6,6 +6,16 @@ const mockCaptureException = jest.fn();
 const mockCaptureMessage = jest.fn();
 jest.mock('@sentry/node', () => ({ captureException: mockCaptureException, captureMessage: mockCaptureMessage }));
 
+// SSE broadcast seam (BS#2621 / BS#2515): the mutation handlers push a liveFs
+// `refetch` after commits the CDC insert/update bridges don't carry. Same mock
+// shape as tests/unit/routes/internal.route.test.ts.
+const mockBroadcast = jest.fn();
+jest.mock('../../../apps/backend/utils/serverEvents', () => ({
+  Topics: { liveFs: 'live-fs-topic' },
+  FsEvents: { refetch: 'refetch' },
+  serverEventsMgr: { broadcast: mockBroadcast },
+}));
+
 // Mock the service module
 const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>();
 const mockGetEntryCount = jest.fn<() => Promise<number>>();
@@ -32,9 +42,10 @@ const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(
 // tests/unit/services/flowsheet.attachCriticReviews.test.ts.
 const mockAttachCriticReviews = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
-// Auto-create hour breakpoints: no-op default so every addEntry test not
-// specifically about the fill behavior sees today's single-insert shape.
-const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<void>>().mockResolvedValue(undefined);
+// Auto-create hour breakpoints: "nothing filled" default so every addEntry
+// test not specifically about the fill behavior sees today's single-insert
+// shape — and, since BS#2621, no fill-triggered refetch broadcast.
+const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<number>>().mockResolvedValue(0);
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
 const mockGetOnAirDJs = jest.fn<() => Promise<Array<{ id: string | null; dj_name: string | null }>>>();
@@ -2111,6 +2122,328 @@ describe('flowsheet.controller', () => {
       expect(mockServiceLeaveShow).toHaveBeenCalledWith('guest-dj', expect.objectContaining({ id: 1 }));
       expect(mockEndShow).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  // Three mutation classes bypass the CDC insert/update bridges entirely —
+  // deletes (BS#2515), marker rows and reorders (BS#2621) — so the handlers
+  // push a liveFs `refetch` after the mutation commits. `payload.source` is a
+  // telemetry-only label per the LiveFsRefetchEvent contract (clients must not
+  // branch on it), so the exact strings here pin telemetry, not behavior.
+  describe('live-fs refetch push coverage (BS#2621 / BS#2515)', () => {
+    const activeShow = { id: 42, end_time: null };
+
+    const expectSingleRefetch = (source: string) => {
+      expect(mockBroadcast).toHaveBeenCalledTimes(1);
+      expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+        type: 'refetch',
+        payload: { source },
+      });
+    };
+
+    beforeEach(() => {
+      mockGetLatestShow.mockResolvedValue(activeShow);
+    });
+
+    it('deleteEntry broadcasts one refetch after a committed delete', async () => {
+      mockRemoveTrack.mockResolvedValue(createMockEntry(7));
+
+      const req = { body: { entry_id: 7 } } as unknown as Request;
+      const res = createMockRes();
+
+      await deleteEntry(req, res as Response, mockNext);
+
+      expectSingleRefetch('delete');
+    });
+
+    it('addEntry broadcasts one refetch for a marker row (message branch)', async () => {
+      mockAddTrack.mockResolvedValue({ ...createMockEntry(8), entry_type: 'talkset', message: 'Talkset' });
+
+      const req = { body: { message: 'Talkset' } } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expectSingleRefetch('marker-add');
+    });
+
+    // At most one refetch per request: a refetch is a full reconciliation
+    // fetch, so the marker emit already covers the fill's rows and the fill
+    // must not add a second.
+    it('addEntry emits exactly one refetch when a marker add also triggered the hourly fill', async () => {
+      mockFillMissingHourlyBreakpoints.mockResolvedValueOnce(3);
+      mockAddTrack.mockResolvedValue({
+        ...createMockEntry(9),
+        entry_type: 'breakpoint',
+        message: '7:00 PM Breakpoint',
+      });
+
+      const req = { body: { message: '7:00 PM Breakpoint', entry_type: 'breakpoint' } } as unknown as Request;
+      const res = createMockRes();
+
+      await addEntry(req, res as Response, mockNext);
+
+      expectSingleRefetch('marker-add');
+    });
+
+    // The track row itself rides the CDC insert bridge; the refetch on a track
+    // add exists only for the fill's auto-inserted markers, which that bridge
+    // never carries. All three routes into the track insert behave alike.
+    it.each<[string, Record<string, unknown>, () => void]>([
+      [
+        'free-form (no album_id)',
+        {
+          artist_name: 'Jessica Pratt',
+          album_title: 'On Your Own Love Again',
+          track_title: 'Back, Baby',
+          record_label: 'Drag City',
+        },
+        () => {},
+      ],
+      [
+        'library-linked (album_id found)',
+        { album_id: 5, track_title: 'Back, Baby' },
+        () => {
+          mockGetAlbumFromDB.mockResolvedValue({
+            artist_name: 'Jessica Pratt',
+            album_title: 'On Your Own Love Again',
+            record_label: 'Drag City',
+          });
+        },
+      ],
+      [
+        'album_id-miss snapshot degrade (BS#1680)',
+        {
+          album_id: 404,
+          artist_name: 'Jessica Pratt',
+          album_title: 'On Your Own Love Again',
+          track_title: 'Back, Baby',
+          record_label: 'Drag City',
+        },
+        () => {
+          mockGetAlbumFromDB.mockResolvedValue(undefined);
+        },
+      ],
+    ])(
+      'addEntry broadcasts one hourly-fill refetch on the %s track path when the fill inserted markers',
+      async (_name, body, arrange) => {
+        arrange();
+        mockFillMissingHourlyBreakpoints.mockResolvedValueOnce(2);
+        mockAddTrack.mockResolvedValue(createMockEntry(10));
+
+        const req = { body } as unknown as Request;
+        const res = createMockRes();
+
+        await addEntry(req, res as Response, mockNext);
+
+        expectSingleRefetch('hourly-fill');
+      }
+    );
+
+    it('changeOrder broadcasts one refetch after a committed reorder', async () => {
+      mockChangeOrder.mockResolvedValue(createMockEntry(11));
+
+      const req = { body: { entry_id: 11, new_position: 2 } } as unknown as Request;
+      const res = createMockRes();
+
+      await changeOrder(req, res as Response, mockNext);
+
+      expectSingleRefetch('reorder');
+    });
+
+    // A marker row is permanently `pending` (the enrichment worker claims only
+    // tracks), so it can never satisfy the update bridge's terminal-status
+    // gate — editing a talkset's message reaches no client at all today.
+    it.each(['talkset', 'breakpoint', 'message', 'show_start', 'dj_join'])(
+      'updateEntry broadcasts one refetch when the updated row is a %s marker',
+      async (entryType) => {
+        mockUpdateEntry.mockResolvedValue({ ...createMockEntry(13), entry_type: entryType });
+
+        const req = { body: { entry_id: 13, data: { message: 'Talkset — corrected' } } } as unknown as Request;
+        const res = createMockRes();
+
+        await updateEntry(req, res as Response, mockNext);
+
+        expectSingleRefetch('marker-update');
+      }
+    );
+
+    it('joinShow broadcasts one refetch when starting a new show (show_start marker committed)', async () => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+
+      const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+      const res = createMockRes();
+
+      await joinShow(req, res as Response, mockNext);
+
+      expectSingleRefetch('show-transition');
+    });
+
+    it.each<[string, string, () => void]>([
+      [
+        'primary DJ (endShow commits show_end + co-host dj_leave markers)',
+        'primary-dj',
+        () => {
+          mockEndShow.mockResolvedValue({ id: 1, end_time: new Date() });
+        },
+      ],
+      [
+        'guest DJ (dj_leave marker committed)',
+        'guest-dj',
+        () => {
+          mockServiceLeaveShow.mockResolvedValue({ id: 99, dj_id: 'guest-dj' });
+        },
+      ],
+    ])('leaveShow broadcasts one refetch when the caller is the %s', async (_name, djId, arrange) => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null, primary_dj_id: 'primary-dj' });
+      arrange();
+
+      const req = { auth: { id: djId }, body: { dj_id: djId } } as unknown as Request;
+      const res = createMockRes();
+
+      await leaveShow(req, res as Response, mockNext);
+
+      expectSingleRefetch('show-transition');
+    });
+
+    // The negative half: nothing committed (or nothing this channel needs), so
+    // nothing broadcasts. `not.toHaveBeenCalled()` asserts no REFETCH
+    // specifically — the CDC insert/update bridges live out of band in
+    // services/metadata-broadcast, not behind this mock, so a track add's own
+    // insert event is invisible here by construction.
+    it.each<[string, () => Promise<void>]>([
+      [
+        'deleteEntry 404 (no row matched)',
+        async () => {
+          mockRemoveTrack.mockResolvedValue(undefined);
+          const req = { body: { entry_id: 424242 } } as unknown as Request;
+          await expect(deleteEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 404,
+          });
+        },
+      ],
+      [
+        'deleteEntry 400 (entry_id missing)',
+        async () => {
+          const req = { body: {} } as unknown as Request;
+          await expect(deleteEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 400,
+          });
+        },
+      ],
+      [
+        'changeOrder 404 (row deleted mid-flight)',
+        async () => {
+          mockChangeOrder.mockResolvedValue(undefined);
+          const req = { body: { entry_id: 424242, new_position: 2 } } as unknown as Request;
+          await expect(changeOrder(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 404,
+          });
+        },
+      ],
+      [
+        'changeOrder 400 (params missing)',
+        async () => {
+          const req = { body: {} } as unknown as Request;
+          await expect(changeOrder(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 400,
+          });
+        },
+      ],
+      [
+        'a track-only addEntry whose fill inserted zero markers',
+        async () => {
+          mockAddTrack.mockResolvedValue(createMockEntry(12));
+          const req = {
+            body: {
+              artist_name: 'Stereolab',
+              album_title: 'Aluminum Tunes',
+              track_title: 'Pop Quiz',
+              record_label: 'Drag City',
+            },
+          } as unknown as Request;
+          await addEntry(req, createMockRes() as Response, mockNext);
+        },
+      ],
+      [
+        'addEntry 400 (no active show)',
+        async () => {
+          mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+          const req = { body: { message: 'Talkset' } } as unknown as Request;
+          await expect(addEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 400,
+          });
+        },
+      ],
+      [
+        'joinShow owner retry no-op (zero writes, BS#1861 arm c)',
+        async () => {
+          mockGetLatestShow.mockResolvedValue({ id: 7, end_time: null, primary_dj_id: 'caller-dj' });
+          const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+          await joinShow(req, createMockRes() as Response, mockNext);
+        },
+      ],
+      [
+        'joinShow co-host join (dj_join write unobservable at the controller)',
+        async () => {
+          mockGetLatestShow.mockResolvedValue({ id: 8, end_time: null, primary_dj_id: 'someone-else' });
+          mockAddDJToShow.mockResolvedValue({ show_id: 8, dj_id: 'caller-dj', active: true });
+          const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+          await joinShow(req, createMockRes() as Response, mockNext);
+        },
+      ],
+      // A track PATCH stays silent for the same reason a track add does: an
+      // already-terminal row's UPDATE rides the CDC update bridge carrying the
+      // edited columns (the trigger notifies the whole NEW row), and a
+      // pending/enriching row's edit is carried by the enrichment's own
+      // terminal UPDATE that follows.
+      [
+        'updateEntry on an enriched track row (rides the CDC update bridge)',
+        async () => {
+          mockUpdateEntry.mockResolvedValue({
+            ...createMockEntry(14),
+            entry_type: 'track',
+            metadata_status: 'enriched_match',
+          });
+          const req = { body: { entry_id: 14, data: { track_title: 'la paradoja' } } } as unknown as Request;
+          await updateEntry(req, createMockRes() as Response, mockNext);
+        },
+      ],
+      [
+        'updateEntry on a pending track row (the enrichment terminal update carries it)',
+        async () => {
+          mockUpdateEntry.mockResolvedValue({
+            ...createMockEntry(15),
+            entry_type: 'track',
+            metadata_status: 'pending',
+          });
+          const req = { body: { entry_id: 15, data: { track_title: 'la paradoja' } } } as unknown as Request;
+          await updateEntry(req, createMockRes() as Response, mockNext);
+        },
+      ],
+      [
+        'updateEntry 404 (UPDATE matched no row)',
+        async () => {
+          mockUpdateEntry.mockResolvedValue(undefined);
+          const req = { body: { entry_id: 424242, data: { track_title: 'x' } } } as unknown as Request;
+          await expect(updateEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 404,
+          });
+        },
+      ],
+      [
+        'updateEntry 400 (empty patch, rejected before the service runs)',
+        async () => {
+          const req = { body: { entry_id: 42, data: {} } } as unknown as Request;
+          await expect(updateEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+            statusCode: 400,
+          });
+        },
+      ],
+    ])('does not broadcast on %s', async (_name, run) => {
+      await run();
+      expect(mockBroadcast).not.toHaveBeenCalled();
     });
   });
 
