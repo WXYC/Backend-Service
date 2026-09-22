@@ -29,6 +29,8 @@ export type SyncResult = {
   columnsWritten: number;
   /** LML rows where at least one matching artist row had a populated, differing value */
   conflicts: number;
+  /** LML rows skipped because their name matches MORE than one artist row */
+  ambiguous: number;
 };
 
 export const runIncremental = async (): Promise<SyncResult> => {
@@ -40,7 +42,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
   if (identities.length === 0) {
     await updateLastRun(JOB_NAME, runStartedAt);
     console.log(`[${JOB_NAME}] Scanned 0 LML rows; nothing to do.`);
-    return { scanned: 0, matched: 0, updated: 0, columnsWritten: 0, conflicts: 0 };
+    return { scanned: 0, matched: 0, updated: 0, columnsWritten: 0, conflicts: 0, ambiguous: 0 };
   }
 
   // One round-trip: load every artist row whose name is in this LML batch.
@@ -80,8 +82,10 @@ export const runIncremental = async (): Promise<SyncResult> => {
     .where(inArray(sql`normalize(${artists.artist_name}, NFC)`, names));
 
   const firstByName = new Map<string, ExistingArtistIdentity>();
+  const rowsPerName = new Map<string, number>();
   for (const row of existingRows) {
     const key = row.artist_name.normalize('NFC');
+    rowsPerName.set(key, (rowsPerName.get(key) ?? 0) + 1);
     if (!firstByName.has(key)) {
       firstByName.set(key, row);
     }
@@ -90,12 +94,33 @@ export const runIncremental = async (): Promise<SyncResult> => {
   let matched = 0;
   let conflicts = 0;
   let columnsWritten = 0;
+  let ambiguous = 0;
   const fillCandidates: LmlIdentity[] = [];
 
   for (const lml of identities) {
-    const existing = firstByName.get(lml.library_name.normalize('NFC'));
+    const key = lml.library_name.normalize('NFC');
+    const existing = firstByName.get(key);
     if (!existing) continue;
     matched++;
+
+    // entity.identity is keyed on the bare name, so when that name matches
+    // more than one artists row -- two acts a conflation split has separated
+    // (BS#2637), or rows a human is deliberately keeping distinct -- its
+    // single id cannot say which row it belongs to. Filling both would stamp
+    // one act's identity onto the other, so an ambiguous name gets no fill
+    // and no conflict scan: any comparison against an arbitrary one of the
+    // rows would be meaningless. Correct ids for split rows are set by
+    // staff (or the split tooling), and those non-null values already win
+    // over this ETL by the COALESCE rule.
+    const shareCount = rowsPerName.get(key) ?? 0;
+    if (shareCount > 1) {
+      ambiguous++;
+      console.warn(
+        `[${JOB_NAME}] Ambiguous name ${JSON.stringify(lml.library_name)}: ` +
+          `${shareCount} artist rows share it (skipped)`
+      );
+      continue;
+    }
 
     const conflicting = columnsInConflict(existing, lml);
     if (conflicting.length > 0) {
@@ -118,9 +143,9 @@ export const runIncremental = async (): Promise<SyncResult> => {
     await updateLastRun(JOB_NAME, runStartedAt);
     console.log(
       `[${JOB_NAME}] Scanned ${identities.length} LML rows; ` +
-        `matched ${matched}; updated 0 artists; conflicts=${conflicts}.`
+        `matched ${matched}; updated 0 artists; conflicts=${conflicts}; ambiguous=${ambiguous}.`
     );
-    return { scanned: identities.length, matched, updated: 0, columnsWritten: 0, conflicts };
+    return { scanned: identities.length, matched, updated: 0, columnsWritten: 0, conflicts, ambiguous };
   }
 
   // Single bulk UPDATE … FROM (VALUES …). COALESCE-in-SET preserves any
@@ -177,7 +202,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
     `[${JOB_NAME}] Scanned ${identities.length} LML rows; ` +
       `matched ${matched}; updated ${updatedRowCount} artist rows ` +
       `(${columnsWritten} columns filled across ${fillCandidates.length} LML rows); ` +
-      `conflicts=${conflicts}.`
+      `conflicts=${conflicts}; ambiguous=${ambiguous}.`
   );
 
   return {
@@ -186,5 +211,6 @@ export const runIncremental = async (): Promise<SyncResult> => {
     updated: updatedRowCount,
     columnsWritten,
     conflicts,
+    ambiguous,
   };
 };

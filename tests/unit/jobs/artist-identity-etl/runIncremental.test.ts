@@ -122,7 +122,7 @@ describe('runIncremental', () => {
 
     const result = await runIncremental();
 
-    expect(result).toEqual({ scanned: 0, matched: 0, updated: 0, columnsWritten: 0, conflicts: 0 });
+    expect(result).toEqual({ scanned: 0, matched: 0, updated: 0, columnsWritten: 0, conflicts: 0, ambiguous: 0 });
     expect(selectChain.select).not.toHaveBeenCalled();
     expect(mockExecuteUpdate).not.toHaveBeenCalled();
     expect(mockUpdateLastRun).toHaveBeenCalledTimes(1);
@@ -258,6 +258,78 @@ describe('runIncremental', () => {
     expect(result.matched).toBe(0);
     expect(result.updated).toBe(0);
     expect(mockExecuteUpdate).not.toHaveBeenCalled();
+  });
+
+  test('skips a name matched by more than one artists row (BS#2637 split safety)', async () => {
+    // Post-split, two artists rows legitimately share one name -- the two
+    // acts the name-keyed ETL had merged. entity.identity is keyed on the
+    // bare name, so its single id cannot name which row it belongs to;
+    // filling both rows would stamp one act's identity onto the other,
+    // recreating the conflation the split removed. An ambiguous name gets
+    // no fill at all.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockFetchLml.mockResolvedValue([lmlRow('Isis', { discogs_artist_id: 225447 })]);
+    mockSelectExisting.mockReturnValue([existingRow('Isis'), existingRow('Isis')]);
+
+    const result = await runIncremental();
+
+    expect(result.matched).toBe(1);
+    expect(result.ambiguous).toBe(1);
+    expect(result.updated).toBe(0);
+    expect(result.columnsWritten).toBe(0);
+    expect(mockExecuteUpdate).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('[artist-identity-etl] Ambiguous name "Isis": 2 artist rows share it (skipped)')
+    );
+    warn.mockRestore();
+  });
+
+  test('an ambiguous name does not block other names in the same batch', async () => {
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockFetchLml.mockResolvedValue([
+      lmlRow('Isis', { discogs_artist_id: 225447 }),
+      lmlRow('Stereolab', { discogs_artist_id: 5371 }),
+    ]);
+    mockSelectExisting.mockReturnValue([existingRow('Isis'), existingRow('Isis'), existingRow('Stereolab')]);
+    mockExecuteUpdate.mockResolvedValue([{ id: 3 }]);
+
+    const result = await runIncremental();
+
+    expect(result.matched).toBe(2);
+    expect(result.ambiguous).toBe(1);
+    expect(result.updated).toBe(1);
+    expect(result.columnsWritten).toBe(1);
+    expect(mockExecuteUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test('counts NFC-variant duplicates as one ambiguous name', async () => {
+    // Two rows byte-distinct only in composition form are the same name
+    // under the join predicate, so they are the same ambiguity.
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const nfcName = 'Nilüfer Yanya';
+    mockFetchLml.mockResolvedValue([lmlRow(nfcName, { discogs_artist_id: 42 })]);
+    mockSelectExisting.mockReturnValue([existingRow(nfcName), existingRow(nfcName.normalize('NFD'))]);
+
+    const result = await runIncremental();
+
+    expect(result.ambiguous).toBe(1);
+    expect(result.updated).toBe(0);
+    expect(mockExecuteUpdate).not.toHaveBeenCalled();
+  });
+
+  test('an ambiguous name is not scanned for conflicts', async () => {
+    // A conflict warning against an arbitrary one of the duplicate rows
+    // would assert a comparison the guard just declared meaningless.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockFetchLml.mockResolvedValue([lmlRow('Isis', { discogs_artist_id: 999 })]);
+    mockSelectExisting.mockReturnValue([existingRow('Isis', { discogs_artist_id: 225447 }), existingRow('Isis')]);
+
+    const result = await runIncremental();
+
+    expect(result.conflicts).toBe(0);
+    expect(result.ambiguous).toBe(1);
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('Conflict'));
+    warn.mockRestore();
   });
 
   test('updates the last-run timestamp on every successful path', async () => {
