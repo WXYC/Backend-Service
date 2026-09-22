@@ -27,6 +27,13 @@
  * wins over an LML-derived one), and conflicts are logged but not
  * applied. This matches #506's "never overwrite human edits" requirement.
  *
+ * A name matching MORE than one artists row is skipped entirely
+ * (logged, counted as `ambiguous`): `entity.identity`'s bare-name key
+ * cannot say which row its id belongs to, and the rows most likely to
+ * share a name are two acts a conflation split has just separated
+ * (BS#2637) -- filling both would re-merge their identities. Ids for
+ * such rows are set by staff or the split tooling and win by COALESCE.
+ *
  * The per-run loop body lives in `./runIncremental.ts` so unit tests can
  * import and exercise it without spinning up the run() shell below.
  */
