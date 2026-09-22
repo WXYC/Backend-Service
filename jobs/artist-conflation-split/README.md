@@ -14,9 +14,11 @@ Per directive, in one transaction: for each split genre, INSERT a new `artists` 
 
 Manual Build & Deploy with `target=artist-conflation-split`, then SSH to EC2 and:
 
-    docker run --rm --env-file .env -v /path/to/directives:/directives <image> --directives /directives/split-directives.tsv            2>&1 | tee log-dry
-    docker run --rm --env-file .env -v /path/to/directives:/directives <image> --directives /directives/split-directives.tsv --execute  2>&1 | tee log-exec
+    docker run --rm --env-file .env -v /path/to/directives:/directives <image> --directives /directives/split-directives.tsv                                2>&1 | tee log-dry
+    docker run --rm --env-file .env -v /path/to/directives:/directives <image> --directives /directives/split-directives.tsv --execute --identity-guard-live  2>&1 | tee log-exec
 
-**Deploy order**: BS#2644's identity-ETL ambiguity guard must be live before the first `--execute`, or the next hourly ETL run stamps the same name-keyed id onto both rows, silently re-merging the identities this job separated.
+**Deploy order**: BS#2644's identity-ETL ambiguity guard must be live before the first `--execute`, or the next hourly ETL run stamps the same name-keyed id onto both rows, silently re-merging the identities this job separated. `--execute` refuses to run without `--identity-guard-live` — an operator attestation that the guard is deployed, since its presence is not observable from this database.
+
+**Exit codes**: 0 = clean (including dry-run refusals — surfacing those is the dry-run's job); 2 = an `--execute` run refused or failed at least one directive; 1 = fatal. Re-running a finished file is safe: a completed directive refuses with `already split: artists row #N holds it`.
 
 Dry-run by default; validation refuses (never guesses) on a directive whose artist is missing a named filing — which is also what makes a completed run idempotent.

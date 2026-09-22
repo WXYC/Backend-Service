@@ -17,10 +17,11 @@ type Row = Record<string, unknown>;
 /** A tx whose execute() answers from a queue, in planDirective's query order:
  *  artists row, gac rows, one library count per split genre, then one count
  *  per REPORTED_SITES entry. */
-const scriptedTx = (artist: Row[], gac: Row[], libraryCounts: number[]) => {
+const scriptedTx = (artist: Row[], gac: Row[], libraryCounts: number[], fingerprints: Row[][] = []) => {
   const responses: Row[][] = [
     artist,
     gac,
+    ...fingerprints,
     ...libraryCounts.map((n) => [{ n }]),
     ...REPORTED_SITES.map(() => [{ n: 0 }]),
   ];
@@ -54,13 +55,23 @@ describe('planDirective refusal arithmetic', () => {
     expect(plan.perGenre).toEqual([{ genreId: 11, artistGenreCode: 13, libraryRows: 1 }]);
   });
 
-  test('an idempotent re-run refuses ONLY for the missing filing', async () => {
-    // The split genre's crossreference row is gone; the kept filing remains.
-    const tx = scriptedTx([{ artist_name: 'Isis' }], [{ genre_id: 6, artist_genre_code: 1 }], [0]);
+  test('an idempotent re-run refuses ONLY for the missing filing, naming the holder', async () => {
+    // The split genre's crossreference row is gone because a prior run moved
+    // it to row #9001; the kept filing remains. One refusal, saying which
+    // case this is.
+    const tx = scriptedTx([{ artist_name: 'Isis' }], [{ genre_id: 6, artist_genre_code: 1 }], [0], [[{ id: 9001 }]]);
 
     const plan = await planDirective(directive(), tx as never);
 
-    expect(plan.refusals).toEqual([expect.stringContaining('not filed under split genre 11')]);
+    expect(plan.refusals).toEqual([expect.stringContaining('already split: artists row #9001 holds it')]);
+  });
+
+  test('a missing filing no other same-named row holds reads as wrong input', async () => {
+    const tx = scriptedTx([{ artist_name: 'Isis' }], [{ genre_id: 6, artist_genre_code: 1 }], [0], [[]]);
+
+    const plan = await planDirective(directive(), tx as never);
+
+    expect(plan.refusals).toEqual([expect.stringContaining('no same-named row holds it — wrong input?')]);
   });
 
   test('splitting every filed genre refuses for the emptied kept row', async () => {

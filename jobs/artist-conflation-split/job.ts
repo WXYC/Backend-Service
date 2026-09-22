@@ -37,6 +37,16 @@ const main = async () => {
     if (!path) {
       throw new Error('Usage: job.js --directives <split-directives.tsv> [--execute]');
     }
+    if (args.includes('--execute') && !args.includes('--identity-guard-live')) {
+      // The README's deploy-order gate, made mechanical: running --execute
+      // before the identity ETL's ambiguity guard is deployed lets the next
+      // hourly run stamp one name-keyed id onto both split rows, silently
+      // re-merging them. The flag is an operator's attestation, not a probe
+      // -- the guard's presence is not observable from this database.
+      throw new Error(
+        '--execute requires --identity-guard-live: deploy the artist-identity-etl ambiguity guard first (see README)'
+      );
+    }
     const directives = parseDirectives(readFileSync(path, 'utf8'));
     await runSplit(directives);
   } finally {
