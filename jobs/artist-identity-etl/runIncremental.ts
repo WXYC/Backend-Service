@@ -29,7 +29,11 @@ export type SyncResult = {
   columnsWritten: number;
   /** LML rows where at least one matching artist row had a populated, differing value */
   conflicts: number;
-  /** LML rows skipped because their name matches MORE than one artist row */
+  /**
+   * LML rows skipped because their name is ambiguous on either side of the
+   * NFC join: it matches more than one artists row, or several LML rows
+   * normalize to it.
+   */
   ambiguous: number;
 };
 
@@ -47,9 +51,9 @@ export const runIncremental = async (): Promise<SyncResult> => {
 
   // One round-trip: load every artist row whose name is in this LML batch.
   // artist_name has no unique constraint, so a single name can map to
-  // multiple rows. We keep the first match per name for conflict
-  // detection (preserving the previous loadExisting semantic), but the
-  // bulk UPDATE below applies COALESCE across every matching row.
+  // multiple rows; both sides of the join are therefore grouped by the
+  // same NFC key below, and only names that are one LML row to one artist
+  // row go on to conflict detection and fill.
   //
   // Both sides of the name match are NFC-normalized (BS#521): an LML
   // `library_name` and the corresponding `artists.artist_name` can be
@@ -67,7 +71,7 @@ export const runIncremental = async (): Promise<SyncResult> => {
   // byte-distinct encodings of the identical character sequence -- so
   // it's provably collision-free while still fixing the dominant
   // NFC/NFD-drift defect.
-  const names = identities.map((i) => i.library_name.normalize('NFC'));
+  const names = [...new Set(identities.map((i) => i.library_name.normalize('NFC')))];
   const existingRows = await db
     .select({
       artist_name: artists.artist_name,
@@ -81,14 +85,19 @@ export const runIncremental = async (): Promise<SyncResult> => {
     .from(artists)
     .where(inArray(sql`normalize(${artists.artist_name}, NFC)`, names));
 
-  const firstByName = new Map<string, ExistingArtistIdentity>();
-  const rowsPerName = new Map<string, number>();
+  const rowsByName = new Map<string, ExistingArtistIdentity[]>();
   for (const row of existingRows) {
     const key = row.artist_name.normalize('NFC');
-    rowsPerName.set(key, (rowsPerName.get(key) ?? 0) + 1);
-    if (!firstByName.has(key)) {
-      firstByName.set(key, row);
-    }
+    const group = rowsByName.get(key);
+    if (group) group.push(row);
+    else rowsByName.set(key, [row]);
+  }
+  const lmlByName = new Map<string, LmlIdentity[]>();
+  for (const lml of identities) {
+    const key = lml.library_name.normalize('NFC');
+    const group = lmlByName.get(key);
+    if (group) group.push(lml);
+    else lmlByName.set(key, [lml]);
   }
 
   let matched = 0;
@@ -97,38 +106,55 @@ export const runIncremental = async (): Promise<SyncResult> => {
   let ambiguous = 0;
   const fillCandidates: LmlIdentity[] = [];
 
-  for (const lml of identities) {
-    const key = lml.library_name.normalize('NFC');
-    const existing = firstByName.get(key);
-    if (!existing) continue;
-    matched++;
+  for (const [, lmlGroup] of lmlByName) {
+    const key = lmlGroup[0].library_name.normalize('NFC');
+    const rows = rowsByName.get(key);
+    if (!rows) continue;
+    matched += lmlGroup.length;
 
-    // entity.identity is keyed on the bare name, so when that name matches
-    // more than one artists row -- two acts a conflation split has separated
-    // (BS#2637), or rows a human is deliberately keeping distinct -- its
-    // single id cannot say which row it belongs to. Filling both would stamp
-    // one act's identity onto the other, so an ambiguous name gets no fill
-    // and no conflict scan: any comparison against an arbitrary one of the
-    // rows would be meaningless. Correct ids for split rows are set by
-    // staff (or the split tooling), and those non-null values already win
-    // over this ETL by the COALESCE rule.
-    const shareCount = rowsPerName.get(key) ?? 0;
-    if (shareCount > 1) {
-      ambiguous++;
+    // Ambiguity has two directions, and both get the same answer: skip.
+    //
+    // Many ARTISTS rows, one name: entity.identity is keyed on the bare
+    // name, so its single id cannot say which row it belongs to -- and the
+    // rows most likely to share a name are two acts a conflation split has
+    // separated (BS#2637). Filling both would stamp one act's identity onto
+    // the other. No conflict scan either: a comparison against an arbitrary
+    // one of the rows would be meaningless.
+    //
+    // Many LML rows, one NFC key: byte-distinct composition forms of one
+    // name (the BS#521 NFC/NFD drift) can coexist as separate
+    // entity.identity rows. Two VALUES rows joining one artist row would
+    // make Postgres pick an unspecified winner -- a silent, nondeterministic
+    // identity stamp, the same defect class in the other direction.
+    //
+    // Correct ids for skipped rows are set by staff (or the split tooling),
+    // and those non-null values already win over this ETL by COALESCE.
+    if (rows.length > 1) {
+      ambiguous += lmlGroup.length;
       console.warn(
-        `[${JOB_NAME}] Ambiguous name ${JSON.stringify(lml.library_name)}: ` +
-          `${shareCount} artist rows share it (skipped)`
+        `[${JOB_NAME}] Ambiguous name ${JSON.stringify(lmlGroup[0].library_name)}: ` +
+          `${rows.length} artist rows share it (skipped)`
+      );
+      continue;
+    }
+    if (lmlGroup.length > 1) {
+      ambiguous += lmlGroup.length;
+      console.warn(
+        `[${JOB_NAME}] Ambiguous name ${JSON.stringify(lmlGroup[0].library_name)}: ` +
+          `${lmlGroup.length} LML rows share it (skipped)`
       );
       continue;
     }
 
+    const existing = rows[0];
+    const lml = lmlGroup[0];
     const conflicting = columnsInConflict(existing, lml);
     if (conflicting.length > 0) {
       conflicts++;
-      for (const key of conflicting) {
+      for (const column of conflicting) {
         console.warn(
-          `[${JOB_NAME}] Conflict on ${lml.library_name}.${key}: ` +
-            `existing=${JSON.stringify(existing[key])} lml=${JSON.stringify(lml[key])} (skipped)`
+          `[${JOB_NAME}] Conflict on ${lml.library_name}.${column}: ` +
+            `existing=${JSON.stringify(existing[column])} lml=${JSON.stringify(lml[column])} (skipped)`
         );
       }
     }
@@ -149,9 +175,13 @@ export const runIncremental = async (): Promise<SyncResult> => {
   }
 
   // Single bulk UPDATE … FROM (VALUES …). COALESCE-in-SET preserves any
-  // existing non-null value across every matching row, so duplicate
-  // artist_names share the same correctness guarantee as the per-row
-  // path: staff edits always win.
+  // existing non-null value, so staff edits always win. Only names the
+  // grouping above passed as one-LML-row-to-one-artist-row reach this
+  // statement -- and the NOT EXISTS in the WHERE re-checks the artists
+  // side against LIVE state, because the snapshot cannot see a same-named
+  // row inserted between the SELECT and this write, and a conflation
+  // split creating its second row is exactly that moment. The snapshot
+  // guard is bookkeeping and logging; the predicate is the enforcement.
   //
   // Per-cell type casts are required because postgres-js infers VALUES
   // column types from the first row and several columns can legitimately
@@ -185,6 +215,11 @@ export const runIncremental = async (): Promise<SyncResult> => {
       bandcamp_id
     )
     WHERE normalize(a.artist_name, NFC) = v.library_name
+      AND NOT EXISTS (
+        SELECT 1 FROM ${artists} a2
+        WHERE normalize(a2.artist_name, NFC) = v.library_name
+          AND a2.id <> a.id
+      )
       AND (
         (a.discogs_artist_id     IS NULL AND v.discogs_artist_id     IS NOT NULL) OR
         (a.musicbrainz_artist_id IS NULL AND v.musicbrainz_artist_id IS NOT NULL) OR
