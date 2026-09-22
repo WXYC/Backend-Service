@@ -6,8 +6,9 @@ import { db } from '../../mocks/database.mock';
  * produces one, so a search result can link to the shelf it actually names.
  *
  * `artists` rows are not one band each. Artist 431 is two unrelated acts
- * sharing a name -- a hip-hop act filed `IS 1` under Hiphop and a rock band
- * filed `IS 13` under Rock -- and `genre_artist_crossreference` is unique on
+ * sharing a name -- a hip-hop act filed `IS 1` under Hiphop (genre 6) and a
+ * rock band filed `IS 13` under Rock (genre 11) -- and
+ * `genre_artist_crossreference` is unique on
  * `(artist_id, genre_id)`, so the pair, not the artist id, is what identifies
  * a card. A row carrying only `genre_name` forces its consumer to fall back
  * to the lowest-`genre_id` collapse, which is how both Isises end up on one
@@ -49,7 +50,7 @@ const PARAMS = {
   order: 'asc' as const,
 };
 
-/** The hip-hop Isis: artist 431, filed `IS 1` under Hiphop (genre 4). */
+/** The hip-hop Isis: artist 431, filed `IS 1` under Hiphop (genre 6). */
 function hiphopIsis(overrides: Record<string, unknown> = {}) {
   return {
     id: 7100,
@@ -61,7 +62,7 @@ function hiphopIsis(overrides: Record<string, unknown> = {}) {
     code_artist_number: 1,
     format_name: 'CD',
     genre_name: 'Hiphop',
-    genre_id: 4,
+    genre_id: 6,
     label: 'Ruffhouse',
     label_id: 10,
     rotation_bin: null,
@@ -113,7 +114,7 @@ describe('searchLibrary: genre_id on AlbumSearchResultRow (BS#2639)', () => {
     const { results } = await searchLibrary(PARAMS);
 
     expect(results).toHaveLength(1);
-    expect(results[0].genre_id).toBe(4);
+    expect(results[0].genre_id).toBe(6);
   });
 
   /**
@@ -129,7 +130,7 @@ describe('searchLibrary: genre_id on AlbumSearchResultRow (BS#2639)', () => {
 
     expect(results).toHaveLength(2);
     expect(results.map((r) => r.artist_id)).toEqual([431, 431]);
-    expect(results.map((r) => r.genre_id)).toEqual([4, 11]);
+    expect(results.map((r) => r.genre_id)).toEqual([6, 11]);
     // The call numbers the two rows display are the crossreference rows those
     // genre ids key, which is what makes the pairing load-bearing rather than
     // decorative.
