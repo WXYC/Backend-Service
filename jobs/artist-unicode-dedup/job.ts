@@ -18,6 +18,12 @@
  *   - **Dry-run by default; pass `--execute` to write.** Dry-run SELECTs and
  *     logs the affected set (survivor, duplicates, per-FK repoint counts, plus
  *     the MED-2 multi-genre / not-form-only risk flags) with zero writes.
+ *   - **`--execute` refuses risky groups** (BS#2648): byte-identical member
+ *     names (deliberately distinct rows -- above all a conflation split's
+ *     output, BS#2645), multi-genre spans, and accent/case-only folds are
+ *     skipped with a ✗ line and exit code 2. `--include-risky` merges them
+ *     too, for an operator who has eyeballed the dry-run list. Pure
+ *     Unicode-form duplicates (the job's mission) merge as before.
  *   - Idempotent: a completed run leaves one row per fold-group, so a re-run
  *     finds no groups (`HAVING count(*) > 1`) and is a no-op.
  *   - Each group's repoints + delete + normalize run in a single transaction —
