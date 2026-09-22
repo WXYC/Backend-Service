@@ -25,6 +25,9 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 /** Default is dry-run; `--execute` opts into writes. */
 export const EXECUTE = process.argv.includes('--execute');
 
+/** Merge risky groups too (BS#2648). Without it, `--execute` refuses them. */
+export const INCLUDE_RISKY = process.argv.includes('--include-risky');
+
 /**
  * Schema-qualifier for raw SQL. `WXYC_SCHEMA_NAME` defaults to 'wxyc_schema';
  * `"`-escaped for the quoted-identifier case (mirrors the other job builders).
@@ -162,8 +165,8 @@ export interface GroupRisk {
 
 /**
  * Compute the operator-facing risk signal for a group (MED-2). Genre span is a
- * DB read; `formOnly` is derived from the member names in-process. Dry-run only
- * — pure reads, no writes.
+ * DB read; `formOnly` is derived from the member names in-process. Pure reads,
+ * no writes; `--execute` consults it too (BS#2648) via `mergeRefusal` below.
  */
 export const describeGroupRisk = async (group: DuplicateGroup): Promise<GroupRisk> => {
   const ids = memberIds(group);
@@ -180,6 +183,37 @@ export const describeGroupRisk = async (group: DuplicateGroup): Promise<GroupRis
   const formOnly = nfc.every((n) => n === nfc[0]);
 
   return { genreIds, multiGenre: genreIds.length > 1, formOnly };
+};
+
+/**
+ * Why `--execute` must refuse this group, or null when the merge is safe
+ * (BS#2648). The job's mission is byte-DISTINCT spellings of one name that
+ * fold together -- NFC/NFD forms, accent/case drift. Everything else a fold
+ * group can contain is a decision, not a duplicate:
+ *
+ * - Byte-IDENTICAL member names are two rows someone kept apart on purpose
+ *   -- above all a conflation split's output (BS#2645: Isis the hip-hop act
+ *   and Isis the post-metal band are byte-identical rows by design), and the
+ *   four such twins measured on prod 2026-09-22. `formOnly` alone would
+ *   bless exactly these, which is why identical-bytes is its own refusal.
+ * - A multi-genre span or an accent/case difference is the
+ *   genuinely-distinct-artist risk MED-2 flags; flagging without refusing
+ *   left `--execute` free to merge what the dry-run warned about.
+ *
+ * `--include-risky` overrides for an operator who has eyeballed the list.
+ */
+export const mergeRefusal = (group: DuplicateGroup, risk: GroupRisk): string | null => {
+  const names = [group.survivorName, ...group.duplicates.map((d) => d.name)];
+  if (new Set(names).size < names.length) {
+    return 'byte-identical member names — deliberately distinct rows (e.g. a conflation split, BS#2645)';
+  }
+  if (risk.multiGenre) {
+    return `spans genres [${risk.genreIds.join(', ')}] — verify same artist`;
+  }
+  if (!risk.formOnly) {
+    return 'members differ by accent or case, not Unicode form — verify same artist';
+  }
+  return null;
 };
 
 /**
@@ -342,12 +376,22 @@ export const runDedup = async (): Promise<void> => {
   let mergedGroups = 0;
   let totalFkRepointed = 0;
   let riskyGroups = 0;
+  let refusedGroups = 0;
 
   for (const group of groups) {
     const dupDescr = group.duplicates.map((d) => `#${d.id} ${JSON.stringify(d.name)}`).join(', ');
     console.log(
       `[artist-dedup] group "${group.foldKey}": survivor #${group.survivorId} ${JSON.stringify(group.survivorName)} <- ${dupDescr}`
     );
+
+    if (EXECUTE && !INCLUDE_RISKY) {
+      const refusal = mergeRefusal(group, await describeGroupRisk(group));
+      if (refusal !== null) {
+        refusedGroups += 1;
+        console.log(`[artist-dedup]   ✗ REFUSED: ${refusal} (re-run with --include-risky after review)`);
+        continue;
+      }
+    }
 
     if (!EXECUTE) {
       // MED-2: flag the risky-to-eyeball merges. `multiGenre` = the global group
@@ -382,9 +426,16 @@ export const runDedup = async (): Promise<void> => {
   }
 
   if (EXECUTE) {
-    console.log(`[artist-dedup] Merged ${mergedGroups} group(s); repointed ${totalFkRepointed} FK row(s) total.`);
+    console.log(
+      `[artist-dedup] Merged ${mergedGroups} group(s) (${refusedGroups} refused as risky); repointed ${totalFkRepointed} FK row(s) total.`
+    );
     await analyzeTables();
     console.log('[artist-dedup] ANALYZE complete on rewritten tables.');
+    if (refusedGroups > 0) {
+      // Refused groups must not look green: exit 2 tells the operator's
+      // post-run check that rows the run saw were left unmerged on purpose.
+      process.exitCode = 2;
+    }
   } else {
     console.log(
       `[artist-dedup] DRY-RUN complete — ${riskyGroups} group(s) flagged for eyeball review (⚠). ` +

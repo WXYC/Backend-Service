@@ -357,6 +357,50 @@ describe('artist-unicode-dedup mergeGroup — REAL functions (real PG, BS#1897 M
     });
   });
 
+  describe('mergeRefusal — execute-time risky-group refusal (BS#2648)', () => {
+    test('a byte-identical same-name pair refuses: a conflation split must survive a dedup run', async () => {
+      // The BS#2645 split's output shape: two rows, identical bytes,
+      // different genres. formOnly alone would bless exactly this.
+      const name = 'ZZMERGER Isis';
+      const A = await insertArtist(name, 'ZR1');
+      const B = await insertArtist(name, 'ZR2');
+      await insertGenreCrossref(A, 95101, 6);
+      await insertGenreCrossref(B, 95102, 11);
+
+      const group = await groupFor(A);
+      expect(group).not.toBeNull();
+      const refusal = merge.mergeRefusal(group, await merge.describeGroupRisk(group));
+      expect(refusal).toContain('byte-identical');
+      expect([A, B]).toContain(group.survivorId);
+    });
+
+    test("an NFC/NFD-variant pair still merges: the job's actual mission is untouched", async () => {
+      const { nfc, nfd } = forms('ZZMERGER2');
+      const S = await insertArtist(nfc, 'ZR3');
+      const D = await insertArtist(nfd, 'ZR4');
+      await insertGenreCrossref(S, 95103);
+      await insertGenreCrossref(D, 95104);
+
+      const group = await groupFor(S);
+      expect(group).not.toBeNull();
+      expect(merge.mergeRefusal(group, await merge.describeGroupRisk(group))).toBeNull();
+    });
+
+    test('an accent-fold pair refuses without --include-risky', async () => {
+      const base = 'ZZMERGER3 Nilüfer';
+      const folded = 'ZZMERGER3 Nilufer';
+      const S = await insertArtist(base.normalize('NFC'), 'ZR5');
+      const D = await insertArtist(folded, 'ZR6');
+      await insertGenreCrossref(S, 95105);
+      await insertGenreCrossref(D, 95106);
+
+      const group = await groupFor(S);
+      expect(group).not.toBeNull();
+      const refusal = merge.mergeRefusal(group, await merge.describeGroupRisk(group));
+      expect(refusal).toContain('accent or case');
+    });
+  });
+
   test('idempotency: a merged group drops out of findDuplicateGroups (re-scan)', async () => {
     const { nfc, nfd } = forms('ZZMERGEI');
     const S = await insertArtist(nfc, 'ZI1');

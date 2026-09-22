@@ -40,3 +40,7 @@ docker run --rm --env-file .env <image> --execute  2>&1 | tee log-exec
 ## Environment
 
 Standard `DB_*` connection variables (same as the other one-shot jobs). See `docs/env-vars.md`.
+
+## Execute-time refusals (BS#2648)
+
+`--execute` refuses groups the dry-run flags as risky — and, above those, any group whose member names are **byte-identical**: identical bytes are two rows someone kept apart on purpose (a conflation split's output, or the four such twins measured on prod 2026-09-22), not an encoding accident this job exists to fix. Refused groups get a `✗ REFUSED` line and the run exits **2** so a wrapper can tell "merged everything" from "left risky groups on the table". Re-run with `--include-risky` after reviewing the list to merge them anyway. NFC/NFD byte-distinct pairs — the job's actual mission — merge exactly as before.
