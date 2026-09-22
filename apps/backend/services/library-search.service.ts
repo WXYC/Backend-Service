@@ -72,6 +72,12 @@ export type AlbumSearchResultRow = {
   code_artist_number: number;
   format_name: string;
   genre_name: string;
+  // BS#2639: the shelf, so a result row can link to the card it names rather
+  // than to whichever of the artist's memberships sorts lowest. Paired with
+  // `artist_id` above, not a substitute for it: `genre_artist_crossreference`
+  // is unique on the PAIR, and `code_artist_number` on this row is the code
+  // in THIS genre.
+  genre_id: number;
   label: string;
   label_id: number | null;
   rotation_bin: string | null;
@@ -159,6 +165,7 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
   code_artist_number: library_artist_view.code_artist_number,
   format_name: library_artist_view.format_name,
   genre_name: library_artist_view.genre_name,
+  genre_id: library_artist_view.genre_id,
   label: library_artist_view.label,
   label_id: library_artist_view.label_id,
   rotation_bin: library_artist_view.rotation_bin,
@@ -620,6 +627,7 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     code_artist_number: row.code_artist_number,
     format_name: row.format_name,
     genre_name: row.genre_name,
+    genre_id: row.genre_id,
     label: row.label ?? '',
     label_id: row.label_id,
     rotation_bin: row.rotation_bin,
@@ -652,6 +660,7 @@ type RawRow = {
   code_artist_number: number;
   format_name: string;
   genre_name: string;
+  genre_id: number;
   alias_max_sim?: number | null;
   alias_matched_variant?: string | null;
   alias_matched_source?: string | null;
@@ -692,6 +701,7 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     code_artist_number: row.code_artist_number,
     format_name: row.format_name,
     genre_name: row.genre_name,
+    genre_id: row.genre_id,
     label: row.label ?? '',
     label_id: row.label_id,
     rotation_bin: row.rotation_bin,
