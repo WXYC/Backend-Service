@@ -159,7 +159,11 @@ export const planDirective = async (d: SplitDirective, tx: Tx | typeof db = db):
       refusals.push(`artist ${d.artistId} is not filed under split genre ${g} (already split, or wrong input)`);
     }
   }
-  if (artistName !== null && filed.size - dupes.size < 1) {
+  // Count what would REMAIN: filings not being split away. Subtracting the
+  // requested split genres would conflate requested with present and misfire
+  // on the idempotent re-run, where the split genre is already gone.
+  const remaining = [...filed.keys()].filter((g) => !dupes.has(g)).length;
+  if (artistName !== null && remaining < 1) {
     refusals.push('split would leave the kept row with no genre membership');
   }
 
