@@ -1,0 +1,24 @@
+{
+  "name": "@wxyc/artist-conflation-split",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot split: restore a confirmed-distinct act merged onto a shared artists row (BS#2637) to its own row, moving its genre filing and repointing its releases. Dry-run by default; --execute to write.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "dev": "tsup --watch"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
