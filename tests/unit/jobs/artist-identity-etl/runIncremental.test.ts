@@ -285,7 +285,7 @@ describe('runIncremental', () => {
   });
 
   test('an ambiguous name does not block other names in the same batch', async () => {
-    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     mockFetchLml.mockResolvedValue([
       lmlRow('Isis', { discogs_artist_id: 225447 }),
       lmlRow('Stereolab', { discogs_artist_id: 5371 }),
@@ -300,12 +300,13 @@ describe('runIncremental', () => {
     expect(result.updated).toBe(1);
     expect(result.columnsWritten).toBe(1);
     expect(mockExecuteUpdate).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   test('counts NFC-variant duplicates as one ambiguous name', async () => {
     // Two rows byte-distinct only in composition form are the same name
     // under the join predicate, so they are the same ambiguity.
-    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const nfcName = 'Nilüfer Yanya';
     mockFetchLml.mockResolvedValue([lmlRow(nfcName, { discogs_artist_id: 42 })]);
     mockSelectExisting.mockReturnValue([existingRow(nfcName), existingRow(nfcName.normalize('NFD'))]);
@@ -315,6 +316,32 @@ describe('runIncremental', () => {
     expect(result.ambiguous).toBe(1);
     expect(result.updated).toBe(0);
     expect(mockExecuteUpdate).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  test('skips a name shared by several LML rows in one batch (BS#521 NFC/NFD drift)', async () => {
+    // entity.identity keys on the bare byte-level name, so NFC and NFD
+    // spellings of one name can coexist as two rows carrying different
+    // ids. Both normalize to the same join key and would produce two
+    // VALUES rows joining one artists row -- Postgres picks an unspecified
+    // winner. Same defect class as the artists-side ambiguity, other
+    // direction, same answer: no fill.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const nfcName = 'Csillagrablók';
+    mockFetchLml.mockResolvedValue([
+      lmlRow(nfcName, { discogs_artist_id: 111 }),
+      lmlRow(nfcName.normalize('NFD'), { discogs_artist_id: 222 }),
+    ]);
+    mockSelectExisting.mockReturnValue([existingRow(nfcName)]);
+
+    const result = await runIncremental();
+
+    expect(result.matched).toBe(2);
+    expect(result.ambiguous).toBe(2);
+    expect(result.updated).toBe(0);
+    expect(mockExecuteUpdate).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('2 LML rows share it (skipped)'));
+    warn.mockRestore();
   });
 
   test('an ambiguous name is not scanned for conflicts', async () => {
