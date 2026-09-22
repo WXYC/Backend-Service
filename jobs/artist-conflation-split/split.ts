@@ -24,7 +24,7 @@
  */
 
 import { sql, type SQL } from 'drizzle-orm';
-import { db } from '@wxyc/database';
+import { db, RECONCILED_IDENTITY_COLUMNS } from '@wxyc/database';
 
 /** The transaction handle Drizzle passes to a `db.transaction` callback. */
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -35,16 +35,6 @@ export const EXECUTE = process.argv.includes('--execute');
 export const schemaName = (): string => (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 
 const qualified = (table: string): SQL => sql.raw(`"${schemaName()}"."${table.replace(/"/g, '""')}"`);
-
-/** The 6 nullable reconciled-identity columns carried ON the artists row. */
-const IDENTITY_COLUMNS = [
-  'discogs_artist_id',
-  'musicbrainz_artist_id',
-  'wikidata_qid',
-  'spotify_artist_id',
-  'apple_music_artist_id',
-  'bandcamp_id',
-] as const;
 
 /**
  * FK sites deliberately NOT repointed, counted for the operator instead.
@@ -93,6 +83,15 @@ export const parseDirectives = (tsv: string): SplitDirective[] => {
       throw new Error(`Directive line ${i + 2}: expected 5 columns, got ${cols.length}`);
     }
     const [artistId, , keepGenreId, splitGenreIds, clearIdentity] = cols;
+    for (const [label, value] of [
+      ['artist_id', artistId],
+      ['keep_genre_id', keepGenreId],
+    ] as const) {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n <= 0) {
+        throw new Error(`Directive line ${i + 2}: malformed ${label} ${JSON.stringify(value)}`);
+      }
+    }
     if (clearIdentity !== 'true' && clearIdentity !== 'false') {
       throw new Error(
         `Directive line ${i + 2}: clear_identity must be true|false, got ${JSON.stringify(clearIdentity)}`
@@ -156,7 +155,20 @@ export const planDirective = async (d: SplitDirective, tx: Tx | typeof db = db):
   }
   for (const g of d.splitGenreIds) {
     if (artistName !== null && !filed.has(g)) {
-      refusals.push(`artist ${d.artistId} is not filed under split genre ${g} (already split, or wrong input)`);
+      // Positive fingerprint over inference-from-absence: a completed split
+      // leaves a same-named row OWNING the filing, so a re-run's refusal can
+      // say which case this is and a long triage doesn't have to.
+      const holder = (await tx.execute(sql`
+        SELECT a.id FROM ${qualified('artists')} a
+        JOIN ${qualified('genre_artist_crossreference')} gac ON gac.artist_id = a.id
+        WHERE gac.genre_id = ${g} AND a.artist_name = ${artistName} AND a.id <> ${d.artistId}
+        LIMIT 1
+      `)) as unknown as Array<{ id: number }>;
+      refusals.push(
+        holder.length > 0
+          ? `artist ${d.artistId} is not filed under split genre ${g} — already split: artists row #${Number(holder[0].id)} holds it`
+          : `artist ${d.artistId} is not filed under split genre ${g} and no same-named row holds it — wrong input?`
+      );
     }
   }
   // Count what would REMAIN: filings not being split away. Subtracting the
@@ -226,6 +238,14 @@ export const executeDirective = async (d: SplitDirective): Promise<SplitResult> 
         SELECT artist_name, alphabetical_name, code_letters FROM ${artistsTable} WHERE id = ${d.artistId}
         RETURNING id
       `)) as unknown as Array<{ id: number }>;
+      if (inserted.length !== 1) {
+        // planDirective saw the source row inside this same transaction, so
+        // an empty RETURNING means the row vanished under us -- name it,
+        // rather than dying on an undefined property read.
+        throw new Error(
+          `artist ${d.artistId} vanished before the split copy (INSERT returned ${inserted.length} rows)`
+        );
+      }
       const newId = Number(inserted[0].id);
       result.newArtistIds[g] = newId;
 
@@ -250,7 +270,11 @@ export const executeDirective = async (d: SplitDirective): Promise<SplitResult> 
     }
 
     if (d.clearIdentity) {
-      const clearSet = sql.raw(IDENTITY_COLUMNS.map((c) => `"${c}" = NULL`).join(', '));
+      // last_modified bumps with the clear, matching every other write path
+      // to this row, so per-row freshness consumers see the stamp change.
+      const clearSet = sql.raw(
+        RECONCILED_IDENTITY_COLUMNS.map((c) => `"${c}" = NULL`).join(', ') + ', last_modified = NOW()'
+      );
       await tx.execute(sql`UPDATE ${artistsTable} SET ${clearSet} WHERE id = ${d.artistId}`);
       result.identityCleared = true;
     }
@@ -276,6 +300,7 @@ export const runSplit = async (directives: SplitDirective[]): Promise<void> => {
 
   let executed = 0;
   let refused = 0;
+  let failed = 0;
   let libraryRows = 0;
 
   for (const d of directives) {
@@ -306,22 +331,38 @@ export const runSplit = async (directives: SplitDirective[]): Promise<void> => {
 
     if (!EXECUTE) continue;
 
-    const result = await executeDirective(d);
-    executed += 1;
-    libraryRows += result.libraryRowsRepointed;
-    const created = Object.entries(result.newArtistIds)
-      .map(([g, id]) => `genre ${g} -> #${id}`)
-      .join(', ');
-    console.log(`[artist-split]   ✓ split: ${created}; ${result.libraryRowsRepointed} library row(s) repointed.`);
+    // Per-directive isolation: a refusal that first appears inside the
+    // transaction's re-plan (state drifted since the outer plan) fails THIS
+    // directive and moves on, the same way an outer-plan refusal does -- and
+    // the committed splits still get their ANALYZE below.
+    try {
+      const result = await executeDirective(d);
+      executed += 1;
+      libraryRows += result.libraryRowsRepointed;
+      const created = Object.entries(result.newArtistIds)
+        .map(([g, id]) => `genre ${g} -> #${id}`)
+        .join(', ');
+      console.log(`[artist-split]   ✓ split: ${created}; ${result.libraryRowsRepointed} library row(s) repointed.`);
+    } catch (err) {
+      failed += 1;
+      console.error(`[artist-split]   ✗ failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   if (EXECUTE) {
     console.log(
-      `[artist-split] Executed ${executed} directive(s) (${refused} refused); ${libraryRows} library row(s) repointed.`
+      `[artist-split] Executed ${executed} directive(s) (${refused} refused, ${failed} failed); ${libraryRows} library row(s) repointed.`
     );
     if (executed > 0) {
       await analyzeTables();
       console.log('[artist-split] ANALYZE complete on rewritten tables.');
+    }
+    if (refused + failed > 0) {
+      // An execute run that could not apply everything must not look green:
+      // exit 2 distinguishes "ran, with directives left on the table" from a
+      // fatal crash (1) in the operator's post-run check. Dry-run refusals
+      // stay exit 0 -- surfacing them is the dry-run's whole job.
+      process.exitCode = 2;
     }
   } else {
     console.log(

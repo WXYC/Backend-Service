@@ -42,6 +42,16 @@ describe('parseDirectives', () => {
     expect(() => parseDirectives(file('431\tIsis\t6\t11\tyes'))).toThrow(/clear_identity/);
   });
 
+  test.each([
+    ['artist_id', 'x431\tIsis\t6\t11\tfalse'],
+    ['keep_genre_id', '431\tIsis\tsix\t11\tfalse'],
+  ])('rejects a malformed %s instead of passing NaN to the database', (_label, row) => {
+    // The directives file is another repo's output; a garbled cell must be
+    // a loud parse failure, not an invalid-integer error mid-run from
+    // Postgres after earlier directives already executed.
+    expect(() => parseDirectives(file(row))).toThrow(/malformed/);
+  });
+
   test('rejects malformed split genre ids', () => {
     expect(() => parseDirectives(file('431\tIsis\t6\t11,x\tfalse'))).toThrow(/malformed split_genre_ids/);
     expect(() => parseDirectives(file('431\tIsis\t6\t\tfalse'))).toThrow(/malformed split_genre_ids/);

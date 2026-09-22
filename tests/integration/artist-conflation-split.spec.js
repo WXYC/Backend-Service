@@ -218,7 +218,7 @@ describe('artist-conflation-split — REAL functions (real PG, BS#2645)', () => 
     // idempotency contract: re-running a finished directives file is a no-op.
     await split.executeDirective(directive(id));
     const rerun = await split.planDirective(directive(id));
-    expect(rerun.refusals).toEqual([expect.stringContaining(`not filed under split genre ${SPLIT_GENRE}`)]);
+    expect(rerun.refusals).toEqual([expect.stringContaining('already split: artists row #')]);
     await expect(split.executeDirective(directive(id))).rejects.toThrow(/refused/);
   });
 

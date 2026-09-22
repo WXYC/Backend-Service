@@ -486,6 +486,24 @@ export const cronjob_runs = wxyc_schema.table('cronjob_runs', {
 
 export type NewArtist = InferInsertModel<typeof artists>;
 export type Artist = InferSelectModel<typeof artists>;
+
+/**
+ * The six nullable reconciled-identity columns on `artists`, in one place so
+ * every job that fills, clears, or preserves them works from the same list.
+ * `jobs/artist-unicode-dedup` and `jobs/artist-identity-etl` still carry
+ * private copies (BS#2645 review); migrate them here when next touched --
+ * a seventh identity column added to the table below must be added here in
+ * the same change.
+ */
+export const RECONCILED_IDENTITY_COLUMNS = [
+  'discogs_artist_id',
+  'musicbrainz_artist_id',
+  'wikidata_qid',
+  'spotify_artist_id',
+  'apple_music_artist_id',
+  'bandcamp_id',
+] as const;
+
 export const artists = wxyc_schema.table(
   'artists',
   {
