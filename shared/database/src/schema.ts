@@ -3128,6 +3128,12 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
         album_title: library.album_title,
         format_name: format.format_name,
         genre_name: genres.genre_name,
+        // BS#2639: the id behind `genre_name`. The crossreference join below
+        // already keys on `library.genre_id`, so `code_artist_number` above is
+        // the artist's code IN this genre -- exposing the id is what lets a
+        // consumer link a row to the card it names instead of collapsing a
+        // multi-genre artist onto its lowest membership (BS#2637).
+        genre_id: library.genre_id,
         rotation_bin: rotation.rotation_bin,
         add_date: library.add_date,
         label: library.label,
@@ -3210,6 +3216,16 @@ export type LibraryArtistViewEntry = {
   album_title: string;
   format_name: string;
   genre_name: string;
+  /**
+   * BS#2639: the shelf this row is filed on, not decoration alongside
+   * `genre_name`. `genre_artist_crossreference` is unique on
+   * `(artist_id, genre_id)`, so this is half of what identifies the artist
+   * card -- and it is the same `library.genre_id` the crossreference join
+   * above keys on to produce `code_artist_number`, which is why the two
+   * cannot disagree. Non-nullable: the row reached this projection through
+   * an INNER JOIN to `genres` on that column.
+   */
+  genre_id: number;
   rotation_bin: string | null;
   add_date: Date;
   label: string | null;

@@ -321,6 +321,18 @@ components:
           type: string
         genre_name:
           type: string
+        genre_id:
+          type: integer
+          description: >-
+            BS#2639. The shelf this row is filed on, and the only field that
+            separates two shelves of one `artists` row — artist 431 is a
+            hip-hop act filed `IS 1` and a rock band filed `IS 13`, so
+            `artist_id` and `code_letters` are identical on both. Pair it with
+            the artist id when linking to `GET /library/artists/{id}`, whose
+            `genre_id` query parameter (BS#2637) it is the source for; the
+            artist id alone answers whichever membership sorts lowest.
+            `code_artist_number` on this row is the artist's code IN this
+            genre, keyed on the same column.
         rotation_bin:
           type: string
           nullable: true

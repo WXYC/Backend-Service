@@ -2837,6 +2837,14 @@ const LIBRARY_VIEW_PROJECTION = {
   album_title: library.album_title,
   format_name: format.format_name,
   genre_name: genres.genre_name,
+  // BS#2639: the id behind `genre_name`, and the only thing that tells two
+  // shelves of one `artists` row apart -- artist 431 is a hip-hop act filed
+  // `IS 1` and a rock band filed `IS 13`. Free: `LIBRARY_VIEW_JOINS_RAW`
+  // already keys the `genre_artist_crossreference` join on this exact column,
+  // so the row's `code_artist_number` above is the code IN this genre.
+  // Without it a consumer can only send the artist id and gets whichever
+  // membership sorts lowest (BS#2637).
+  genre_id: library.genre_id,
   rotation_bin: rotation.rotation_bin,
   add_date: library.add_date,
   label: library.label,

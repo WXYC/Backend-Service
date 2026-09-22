@@ -307,6 +307,10 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     // discriminates, not the value alone. The CTA fixture is unflagged, hence
     // `false`; `flowsheet.spec.js` covers a flagged row on the mutation echo.
     expect(typeof hit.artist_id).toBe('number');
+    // BS#2639, and the same class of defect as `artist_id` one line up: without
+    // it a consumer holding two rows for one multi-genre artist cannot tell the
+    // shelves apart, and the artist card falls back to the lowest membership.
+    expect(typeof hit.genre_id).toBe('number');
     // Cascade rows reach the wire through `taggedRowToAlbumSearchResultRow` over
     // `LIBRARY_VIEW_PROJECTION_RAW`, NOT through `CATALOG_ROW_PROJECTION_COLUMNS`
     // — so this pins the cascade arm only. The primary SQL path has its own
@@ -348,6 +352,13 @@ describe('GET /library/query cascade — modern Card Catalog serves matched_via 
     for (const row of res.body.results) {
       expect(row).toHaveProperty('artwork_url');
       expect(row.artwork_url === null || typeof row.artwork_url === 'string').toBe(true);
+      // BS#2639. Value, not just presence: `genre_id` is the search row's only
+      // way to name which of a multi-genre artist's shelves it belongs to, and
+      // it travels a longer path than the other columns here -- it has to be
+      // projected by `library_artist_view` itself (migration 0174) before
+      // `CATALOG_ROW_PROJECTION_COLUMNS` can select it, so a dropped view
+      // column and a dropped projection entry both land here as `undefined`.
+      expect(typeof row.genre_id).toBe('number');
     }
   });
 
