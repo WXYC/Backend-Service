@@ -17,6 +17,11 @@
  *       the idempotency they buy: a completed directive re-plans as refused;
  *   (d) the operator report: `artist_crossreference` rows touching the split
  *       artist are counted, never repointed.
+ * Plus the catalog→code completeness guard inherited from the dedup spec:
+ * every FK the database declares against `artists.id` must be either MOVED
+ * by the split (library, genre_artist_crossreference) or REPORTED to the
+ * operator (REPORTED_SITES), so a newly-added reference site cannot be
+ * silently neither.
  *
  * The split functions use the `@wxyc/database` `db` singleton (its own pool,
  * DB_* env); this spec seeds + asserts via `getTestDb()` (a separate pool on
@@ -215,6 +220,35 @@ describe('artist-conflation-split — REAL functions (real PG, BS#2645)', () => 
     const rerun = await split.planDirective(directive(id));
     expect(rerun.refusals).toEqual([expect.stringContaining(`not filed under split genre ${SPLIT_GENRE}`)]);
     await expect(split.executeDirective(directive(id))).rejects.toThrow(/refused/);
+  });
+
+  describe('moved + reported completeness (catalog → code)', () => {
+    it('finds no FK on artists.id the split neither moves nor reports', async () => {
+      const rows = await sql`
+        SELECT tc.table_name, kcu.column_name
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu
+            ON kcu.constraint_name = tc.constraint_name
+           AND kcu.constraint_schema = tc.table_schema
+          JOIN information_schema.constraint_column_usage ccu
+            ON ccu.constraint_name = tc.constraint_name
+           AND ccu.constraint_schema = tc.table_schema
+         WHERE tc.constraint_type = 'FOREIGN KEY'
+           AND tc.table_schema = ${SCHEMA}
+           AND ccu.table_name = 'artists'
+           AND ccu.column_name = 'id'
+      `;
+      // Sanity floor: an empty catalog read would make the assertion below
+      // vacuously green — the failure mode an introspection guard rots into.
+      expect(rows.length).toBeGreaterThan(0);
+
+      const moved = new Set(['library.artist_id', 'genre_artist_crossreference.artist_id']);
+      const reported = new Set(split.REPORTED_SITES.map((t) => `${t.table}.${t.column}`));
+      const missing = [...new Set(rows.map((r) => `${r.table_name}.${r.column_name}`))]
+        .filter((site) => !moved.has(site) && !reported.has(site))
+        .sort();
+      expect(missing).toEqual([]);
+    });
   });
 
   test('(d) artist_crossreference rows are reported for the operator, never repointed', async () => {
