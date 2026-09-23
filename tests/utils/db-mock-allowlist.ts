@@ -82,7 +82,6 @@ export const DB_MOCK_ALLOWLIST: DbMockAllowlist = {
     artist_metadata: ['artist_bio'],
     artists: [
       'alphabetical_name',
-      'code_letters',
       'add_date',
       'last_modified',
       'musicbrainz_artist_id',
