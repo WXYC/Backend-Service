@@ -962,6 +962,77 @@ export const addTrack = async (entry: Omit<NewFSEntry, 'play_order'>): Promise<F
   return response[0];
 };
 
+/**
+ * Insert the breakpoint a DJ pressed for the current hour, tolerating the case
+ * where that hour is already marked.
+ *
+ * BS#2569 put a partial unique index on `(show_id, radio_hour)` for breakpoint
+ * rows. This path was the one writer that did not tolerate it, and the
+ * collision is ordinary rather than exotic because the two hour-resolvers
+ * disagree by construction: `generateMissingBreakpoints` FLOORS while
+ * `nearestStationHour` ROUNDS. A track logged at 2:05 PM makes the fill write
+ * the 2:00 PM marker, and a DJ pressing Breakpoint any time before 2:30 PM
+ * rounds onto the same hour. Through `addTrack` — a plain insert — that raised
+ * 23505, and since a postgres error carries no `status`, `errorHandler`
+ * answered a bare 500 for an hour that was in fact already marked.
+ *
+ * Idempotence is the correct outcome, not an error: the DJ asked for the hour
+ * to be marked, and it is. So the conflict is tolerated and the marker that
+ * already stands is returned.
+ *
+ * `created` exists so the caller can keep the BS#2621 rule — broadcast a
+ * refetch for rows that actually committed, and only those. A suppressed
+ * insert committed nothing, so it must not push a `marker-add`.
+ *
+ * The conflict clause is deliberately UNTARGETED. The only other unique index
+ * this row could collide on is `flowsheet_legacy_entry_id_idx`, and a
+ * dj-site-originated marker leaves `legacy_entry_id` NULL, which never
+ * conflicts. Naming a target would mean restating the partial index's
+ * predicate here, a second copy to drift from `schema.ts`.
+ *
+ * Not folded into `addTrack`: that helper serves every insert path, and a
+ * blanket `onConflictDoNothing()` there would silently swallow conflicts this
+ * reasoning does not cover and hand back `undefined` typed as an entry.
+ */
+export const addHourlyBreakpoint = async (
+  entry: Omit<NewFSEntry, 'play_order'>
+): Promise<{ entry: FSEntry; created: boolean }> => {
+  if (entry.show_id == null) {
+    throw new WxycError('Cannot add flowsheet entry without show_id', 400);
+  }
+  const play_order = await nextPlayOrder(entry.show_id);
+  const inserted = await db
+    .insert(flowsheet)
+    .values({ ...entry, play_order })
+    .onConflictDoNothing()
+    .returning();
+  if (inserted[0]) {
+    return { entry: inserted[0], created: true };
+  }
+
+  // Suppressed: another writer (the hourly fill, a co-host's tab, or a
+  // tubafrenzy delivery) already owns this hour. Hand back its row.
+  const existing = await db
+    .select()
+    .from(flowsheet)
+    .where(
+      and(
+        eq(flowsheet.show_id, entry.show_id),
+        eq(flowsheet.entry_type, 'breakpoint'),
+        entry.radio_hour == null ? isNull(flowsheet.radio_hour) : eq(flowsheet.radio_hour, entry.radio_hour)
+      )
+    )
+    .limit(1);
+  if (existing[0]) {
+    return { entry: existing[0], created: false };
+  }
+
+  // Only reachable if the row that won the conflict was deleted between the
+  // INSERT and this lookup. Raise rather than return `undefined` typed as an
+  // entry, which would surface further downstream and far less legibly.
+  throw new WxycError('Breakpoint for this hour was removed while it was being added; retry.', 409);
+};
+
 // Returns undefined when no row matches entry_id (double delete / stale id);
 // the controller maps that to a 404 (PR #1532 review).
 export const removeTrack = async (entry_id: number): Promise<FSEntry | undefined> => {
