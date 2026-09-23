@@ -42,6 +42,7 @@ const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(
 // tests/unit/services/flowsheet.attachCriticReviews.test.ts.
 const mockAttachCriticReviews = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockAddHourlyBreakpoint = jest.fn<() => Promise<{ entry: Record<string, unknown>; created: boolean }>>();
 // Auto-create hour breakpoints: "nothing filled" default so every addEntry
 // test not specifically about the fill behavior sees today's single-insert
 // shape — and, since BS#2621, no fill-triggered refetch broadcast.
@@ -81,6 +82,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   attachUpcomingShows: mockAttachUpcomingShows,
   attachCriticReviews: mockAttachCriticReviews,
   addTrack: mockAddTrack,
+  addHourlyBreakpoint: mockAddHourlyBreakpoint,
   fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
   getLatestShow: mockGetLatestShow,
   getOnAirDJName: mockGetOnAirDJName,
@@ -147,6 +149,16 @@ describe('flowsheet.controller', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockNext = jest.fn();
+    // `clearAllMocks` clears calls but keeps implementations, so a default set
+    // at declaration would leak the last test's override forward. Re-arming it
+    // here gives every test the ordinary "the hour was not yet marked" outcome
+    // and keeps per-test overrides local. Without it, any test that merely
+    // posts a breakpoint to exercise something else (entry-type inference,
+    // `callerMarksCurrentHour`) would destructure `undefined`.
+    mockAddHourlyBreakpoint.mockResolvedValue({
+      entry: { id: 1, show_id: 1, entry_type: 'breakpoint', add_time: new Date() },
+      created: true,
+    });
   });
 
   describe('getEntries', () => {
@@ -977,6 +989,12 @@ describe('flowsheet.controller', () => {
         add_time: new Date(),
       };
       mockAddTrack.mockResolvedValue(completedEntry);
+      mockAddHourlyBreakpoint.mockResolvedValue({ entry: completedEntry, created: true });
+      // A breakpoint claims an hour, so it routes through `addHourlyBreakpoint`
+      // (BS#2569) while every other marker type keeps `addTrack`. The
+      // inference under test here is identical either way — assert against
+      // whichever writer the resolved type implies.
+      const writer = expectedType === 'breakpoint' ? mockAddHourlyBreakpoint : mockAddTrack;
 
       const body: Record<string, unknown> = { message };
       if (entryType !== undefined) body.entry_type = entryType;
@@ -985,7 +1003,7 @@ describe('flowsheet.controller', () => {
 
       await addEntry(req as Request, res as Response, mockNext);
 
-      expect(mockAddTrack).toHaveBeenCalledWith(
+      expect(writer).toHaveBeenCalledWith(
         expect.objectContaining({
           entry_type: expectedType,
           message,
@@ -1456,12 +1474,15 @@ describe('flowsheet.controller', () => {
       it('sets radio_hour to the nearest station hour for a resolved breakpoint entry_type', async () => {
         jest.useFakeTimers();
         jest.setSystemTime(new Date('2026-09-16T23:58:00.000Z'));
-        mockAddTrack.mockResolvedValue({ id: 5, show_id: activeShow.id, add_time: new Date() });
+        mockAddHourlyBreakpoint.mockResolvedValue({
+          entry: { id: 5, show_id: activeShow.id, add_time: new Date() },
+          created: true,
+        });
 
         const req = createMockBodyReq({ message: '12:00 AM Breakpoint', entry_type: 'breakpoint' });
         await addEntry(req as Request, createMockRes() as Response, mockNext);
 
-        expect(mockAddTrack).toHaveBeenCalledWith(
+        expect(mockAddHourlyBreakpoint).toHaveBeenCalledWith(
           expect.objectContaining({ radio_hour: new Date('2026-09-17T00:00:00.000Z') })
         );
       });
@@ -1475,7 +1496,10 @@ describe('flowsheet.controller', () => {
       ])('a breakpoint logged at %s resolves to the hour it marks', async (_label, loggedAt, expectedHour) => {
         jest.useFakeTimers();
         jest.setSystemTime(new Date(loggedAt));
-        mockAddTrack.mockResolvedValue({ id: 6, show_id: activeShow.id, add_time: new Date() });
+        mockAddHourlyBreakpoint.mockResolvedValue({
+          entry: { id: 6, show_id: activeShow.id, add_time: new Date() },
+          created: true,
+        });
 
         await addEntry(
           createMockBodyReq({ message: '7:00 PM Breakpoint', entry_type: 'breakpoint' }) as Request,
@@ -1483,7 +1507,9 @@ describe('flowsheet.controller', () => {
           mockNext
         );
 
-        expect(mockAddTrack).toHaveBeenCalledWith(expect.objectContaining({ radio_hour: new Date(expectedHour) }));
+        expect(mockAddHourlyBreakpoint).toHaveBeenCalledWith(
+          expect.objectContaining({ radio_hour: new Date(expectedHour) })
+        );
       });
 
       it.each([
@@ -1505,7 +1531,10 @@ describe('flowsheet.controller', () => {
       it('ignores a client-supplied radio_hour and derives the hour from the server clock', async () => {
         jest.useFakeTimers();
         jest.setSystemTime(new Date('2026-09-16T19:00:10.000Z'));
-        mockAddTrack.mockResolvedValue({ id: 8, show_id: activeShow.id, add_time: new Date() });
+        mockAddHourlyBreakpoint.mockResolvedValue({
+          entry: { id: 8, show_id: activeShow.id, add_time: new Date() },
+          created: true,
+        });
 
         const staleClientHour = '2026-08-01T00:00:00.000Z';
         const req = createMockBodyReq({
@@ -1516,10 +1545,10 @@ describe('flowsheet.controller', () => {
 
         await addEntry(req as Request, createMockRes() as Response, mockNext);
 
-        expect(mockAddTrack).toHaveBeenCalledWith(
+        expect(mockAddHourlyBreakpoint).toHaveBeenCalledWith(
           expect.objectContaining({ radio_hour: new Date('2026-09-16T19:00:00.000Z') })
         );
-        const [insertedEntry] = mockAddTrack.mock.calls[0] as [Record<string, unknown>];
+        const [insertedEntry] = mockAddHourlyBreakpoint.mock.calls[0] as [Record<string, unknown>];
         expect(insertedEntry.radio_hour).not.toEqual(new Date(staleClientHour));
       });
 
@@ -1543,7 +1572,10 @@ describe('flowsheet.controller', () => {
           jest.advanceTimersByTime(10);
           return Promise.resolve();
         });
-        mockAddTrack.mockResolvedValue({ id: 9, show_id: activeShow.id, add_time: new Date() });
+        mockAddHourlyBreakpoint.mockResolvedValue({
+          entry: { id: 9, show_id: activeShow.id, add_time: new Date() },
+          created: true,
+        });
 
         await addEntry(
           createMockBodyReq({ message: '7:00 PM Breakpoint', entry_type: 'breakpoint' }) as Request,
@@ -1556,11 +1588,76 @@ describe('flowsheet.controller', () => {
           unknown,
           { now: Date; callerMarksCurrentHour: boolean },
         ];
-        const [insertedEntry] = mockAddTrack.mock.calls[0] as [Record<string, unknown>];
+        const [insertedEntry] = mockAddHourlyBreakpoint.mock.calls[0] as [Record<string, unknown>];
 
         expect(fillOptions.callerMarksCurrentHour).toBe(true);
         expect(insertedEntry.radio_hour).toEqual(nearestStationHour(fillOptions.now));
         expect(insertedEntry.radio_hour).toEqual(new Date('2026-09-16T19:00:00.000Z'));
+      });
+
+      // BS#2569 follow-up. The index made an already-marked hour a 23505, and
+      // a postgres error carries no `status`, so `errorHandler` answered a
+      // bare 500 for an hour that was in fact already marked. The collision is
+      // ordinary: the fill FLOORS, `nearestStationHour` ROUNDS, so a 2:05 PM
+      // track and a 2:20 PM press land on the same hour.
+      it('answers with the marker that already stands instead of failing the request', async () => {
+        const existing = { id: 42, show_id: activeShow.id, entry_type: 'breakpoint', add_time: new Date() };
+        mockAddHourlyBreakpoint.mockResolvedValue({ entry: existing, created: false });
+        const res = createMockRes();
+
+        await addEntry(
+          createMockBodyReq({ message: '2:00 PM Breakpoint', entry_type: 'breakpoint' }) as Request,
+          res as Response,
+          mockNext
+        );
+
+        expect(mockNext).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      // BS#2621's rule is "broadcast for the rows that committed, and only
+      // those". A suppressed insert committed nothing, so it must not push a
+      // `marker-add` — but the fill's own markers, written earlier in this
+      // same request, still need theirs.
+      it('pushes no marker-add for a row it did not commit, but still pushes the fill it did', async () => {
+        mockFillMissingHourlyBreakpoints.mockResolvedValue(3);
+        mockAddHourlyBreakpoint.mockResolvedValue({
+          entry: { id: 42, show_id: activeShow.id, entry_type: 'breakpoint', add_time: new Date() },
+          created: false,
+        });
+
+        await addEntry(
+          createMockBodyReq({ message: '2:00 PM Breakpoint', entry_type: 'breakpoint' }) as Request,
+          createMockRes() as Response,
+          mockNext
+        );
+
+        expect(mockBroadcast).toHaveBeenCalledTimes(1);
+        expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+          type: 'refetch',
+          payload: { source: 'hourly-fill' },
+        });
+      });
+
+      it('pushes a single marker-add when the breakpoint really is new', async () => {
+        mockFillMissingHourlyBreakpoints.mockResolvedValue(2);
+        mockAddHourlyBreakpoint.mockResolvedValue({
+          entry: { id: 43, show_id: activeShow.id, entry_type: 'breakpoint', add_time: new Date() },
+          created: true,
+        });
+
+        await addEntry(
+          createMockBodyReq({ message: '2:00 PM Breakpoint', entry_type: 'breakpoint' }) as Request,
+          createMockRes() as Response,
+          mockNext
+        );
+
+        // One emit covers the fill's rows too — never also an `hourly-fill`.
+        expect(mockBroadcast).toHaveBeenCalledTimes(1);
+        expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', {
+          type: 'refetch',
+          payload: { source: 'marker-add' },
+        });
       });
     });
   });

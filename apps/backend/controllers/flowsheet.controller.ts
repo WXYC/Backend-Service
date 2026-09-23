@@ -835,10 +835,32 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       show_id: latestShow.id,
       dj_name,
     };
-    const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
+    // A breakpoint claims an hour, and BS#2569's partial unique index makes
+    // at most one row per (show, hour). That hour may already be marked --
+    // most often by the fill a few lines above, in this very request -- and
+    // the two resolvers disagree by construction: the fill FLOORS, while
+    // `nearestStationHour` ROUNDS. So a track logged at 2:05 PM has the fill
+    // write the 2:00 PM marker, and a DJ pressing Breakpoint any time before
+    // 2:30 PM rounds onto the same hour. Through `addTrack` that raised 23505
+    // and reached the DJ as a bare 500 (a postgres error carries no `status`,
+    // so `errorHandler` cannot echo anything better) for an hour that was
+    // already marked. `addHourlyBreakpoint` tolerates the conflict and hands
+    // back the marker that stands, which is what the DJ asked for.
+    //
+    // Every other marker type keeps `addTrack`: none of them claims an hour,
+    // so none can collide with this index.
+    const { entry: completedEntry, created } = callerMarksCurrentHour
+      ? await flowsheet_service.addHourlyBreakpoint(fsEntry)
+      : { entry: await flowsheet_service.addTrack(fsEntry), created: true };
     // Marker rows never reach the CDC bridges (BS#2621). One emit covers the
     // hourly fill's rows too — never a second `hourly-fill` on this branch.
-    pushRefetchForCommittedRow(completedEntry);
+    //
+    // A suppressed insert committed nothing, so it gets no `marker-add` --
+    // but the fill's own markers, written earlier in this same request, still
+    // need their push, and `pushRefetchForCommittedFill` is the one that
+    // carries them. Still at most one refetch out of the request either way.
+    if (created) pushRefetchForCommittedRow(completedEntry);
+    else pushRefetchForCommittedFill();
     await sendProjectedEntry(res, 201, completedEntry);
     return;
   }
