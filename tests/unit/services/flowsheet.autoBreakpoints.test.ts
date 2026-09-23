@@ -35,6 +35,13 @@ const insertedRows = (chain: ReturnType<typeof createMockQueryChain>) =>
   chain.values.mock.calls[0]?.[0] as Record<string, unknown>[];
 
 /**
+ * An insert chain reporting `n` rows actually committed. The fill counts what
+ * `RETURNING` hands back rather than what it attempted, so a row dropped by
+ * `ON CONFLICT DO NOTHING` is never broadcast as a marker that landed.
+ */
+const insertChainLanding = (n: number) => createMockQueryChain(Array.from({ length: n }, (_, i) => ({ id: i + 1 })));
+
+/**
  * "The fill decided there was nothing to write" — as distinct from "the fill
  * threw and swallowed it", which also leaves `db.insert` untouched. Every
  * no-write case has to assert both halves, or removing a guard makes the test
@@ -150,7 +157,7 @@ describe('fillMissingHourlyBreakpoints', () => {
       { radio_hour: new Date('2026-09-16T22:00:00.000Z'), add_time: null },
     ]);
     db.select.mockReturnValueOnce(playOrderChain(4));
-    const insertChain = createMockQueryChain();
+    const insertChain = insertChainLanding(1);
     db.insert.mockReturnValueOnce(insertChain);
 
     // 23:05Z floors to 23:00Z. The resolved count is the number of rows the
@@ -244,7 +251,10 @@ describe('fillMissingHourlyBreakpoints', () => {
     ]);
     db.select.mockReturnValue(playOrderChain());
     const insertChain = createMockQueryChain();
-    insertChain.values.mockImplementationOnce(() => Promise.reject(new Error('insert failed')));
+    // Rejected at the terminal call: the statement is
+    // `.values(...).onConflictDoNothing().returning(...)`, so `values` is a
+    // builder step and only the last link settles.
+    insertChain.returning.mockImplementationOnce(() => Promise.reject(new Error('insert failed')));
     db.insert.mockReturnValueOnce(insertChain);
 
     await expect(
@@ -265,7 +275,7 @@ describe('fillMissingHourlyBreakpoints', () => {
       { radio_hour: new Date('2026-09-01T00:00:00.000Z'), add_time: null },
     ]);
     db.select.mockReturnValue(playOrderChain());
-    const insertChain = createMockQueryChain();
+    const insertChain = insertChainLanding(MAX_AUTO_BREAKPOINTS);
     db.insert.mockReturnValue(insertChain);
 
     await expect(
@@ -291,7 +301,7 @@ describe('fillMissingHourlyBreakpoints', () => {
   ])('does not warn on an ordinary %s-hour catch-up', async (_label, watermarkIso, expectedRows) => {
     stubWatermarkSelect().limit.mockResolvedValueOnce([{ radio_hour: new Date(watermarkIso), add_time: null }]);
     db.select.mockReturnValue(playOrderChain());
-    const insertChain = createMockQueryChain();
+    const insertChain = insertChainLanding(expectedRows);
     db.insert.mockReturnValue(insertChain);
 
     await expect(
@@ -300,5 +310,44 @@ describe('fillMissingHourlyBreakpoints', () => {
 
     expect(insertedRows(insertChain)).toHaveLength(expectedRows);
     expect(mockCaptureMessage).not.toHaveBeenCalled();
+  });
+
+  // BS#2569. The fill re-derives its watermark per request, which makes a
+  // *stale* watermark impossible but not a *concurrent* one: two requests on
+  // one show can both read the same last breakpoint and generate the same
+  // hour. Once the partial unique index lands, the loser's INSERT raises. An
+  // unhandled raise is caught by this function's own swallow, but that
+  // reports 0 and loses every marker in the batch, including the ones that
+  // did not collide -- so the conflict is tolerated per row instead.
+  it('tolerates a concurrent fill via ON CONFLICT DO NOTHING rather than raising', async () => {
+    stubWatermarkSelect().limit.mockResolvedValueOnce([
+      { radio_hour: new Date('2026-09-16T22:00:00.000Z'), add_time: null },
+    ]);
+    db.select.mockReturnValueOnce(playOrderChain(4));
+    const insertChain = insertChainLanding(1);
+    db.insert.mockReturnValueOnce(insertChain);
+
+    await fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') });
+
+    expect(insertChain.onConflictDoNothing).toHaveBeenCalled();
+  });
+
+  it('reports only the markers that landed when a concurrent fill won the race', async () => {
+    // Two hours generated; a request that committed first already holds one of
+    // them, so the conflict drops that row. The count gates the live-flowsheet
+    // refetch (BS#2621) and is documented as the markers the fill *committed*,
+    // so it must read 1 -- not the 2 the statement attempted.
+    stubWatermarkSelect().limit.mockResolvedValueOnce([
+      { radio_hour: new Date('2026-09-16T21:00:00.000Z'), add_time: null },
+    ]);
+    db.select.mockReturnValue(playOrderChain());
+    const insertChain = insertChainLanding(1);
+    db.insert.mockReturnValue(insertChain);
+
+    await expect(
+      fillMissingHourlyBreakpoints(show, 'DJ Stardust', { now: new Date('2026-09-16T23:05:00.000Z') })
+    ).resolves.toBe(1);
+
+    expect(insertedRows(insertChain)).toHaveLength(2);
   });
 });

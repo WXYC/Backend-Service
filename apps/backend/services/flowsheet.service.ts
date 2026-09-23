@@ -1162,20 +1162,37 @@ export const fillMissingHourlyBreakpoints = async (
     // — see schema.ts), and reads tie-break on `flowsheet.id`, so walking one
     // base is no more collision-prone than re-reading MAX per row would be.
     const basePlayOrder = await nextPlayOrder(show.id);
-    await db.insert(flowsheet).values(
-      missing.map(({ radio_hour, message }, index) => ({
-        artist_name: '',
-        album_title: '',
-        track_title: '',
-        entry_type: 'breakpoint' as const,
-        message,
-        radio_hour,
-        show_id: show.id,
-        dj_name,
-        play_order: basePlayOrder + index,
-      }))
-    );
-    return missing.length;
+    // BS#2569: the watermark is re-derived per request, so a *stale* one is
+    // impossible but a *concurrent* one is not -- two requests on the same
+    // show can both read the last breakpoint before either has inserted, and
+    // both then generate the same hour. Against the partial unique index on
+    // (show_id, radio_hour) the loser's INSERT raises, and while the catch
+    // below would swallow it, that discards the whole batch: the markers that
+    // did NOT collide are lost with it, and the show keeps the hole this fill
+    // exists to close. Per-row conflict tolerance is the correct outcome
+    // instead -- the other request already wrote that marker.
+    //
+    // The count is what RETURNING hands back, not `missing.length`: the
+    // caller broadcasts a refetch for "the markers the fill committed"
+    // (BS#2621), and a row dropped by the conflict was not committed.
+    const inserted = await db
+      .insert(flowsheet)
+      .values(
+        missing.map(({ radio_hour, message }, index) => ({
+          artist_name: '',
+          album_title: '',
+          track_title: '',
+          entry_type: 'breakpoint' as const,
+          message,
+          radio_hour,
+          show_id: show.id,
+          dj_name,
+          play_order: basePlayOrder + index,
+        }))
+      )
+      .onConflictDoNothing()
+      .returning({ id: flowsheet.id });
+    return inserted.length;
   } catch (err) {
     Sentry.captureException(err, {
       tags: { subsystem: 'auto-hour-breakpoints' },
