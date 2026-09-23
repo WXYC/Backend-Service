@@ -676,6 +676,41 @@ export const slack_ban_moderators = {
   added_at: 'slack_ban_moderators.added_at',
   added_by_slack_user_id: 'slack_ban_moderators.added_by_slack_user_id',
 };
+export const listener_requests = {
+  id: 'listener_requests.id',
+  fingerprint: 'listener_requests.fingerprint',
+  anonymous_user_id: 'listener_requests.anonymous_user_id',
+  slack_channel_id: 'listener_requests.slack_channel_id',
+  slack_ts: 'listener_requests.slack_ts',
+  created_at: 'listener_requests.created_at',
+  expires_at: 'listener_requests.expires_at',
+  status: 'listener_requests.status',
+  anonymized_at: 'listener_requests.anonymized_at',
+};
+export const listener_request_replies = {
+  id: 'listener_request_replies.id',
+  request_id: 'listener_request_replies.request_id',
+  body: 'listener_request_replies.body',
+  sender_kind: 'listener_request_replies.sender_kind',
+  sent_by_slack_user_id: 'listener_request_replies.sent_by_slack_user_id',
+  on_air_dj_name: 'listener_request_replies.on_air_dj_name',
+  created_at: 'listener_request_replies.created_at',
+  retracted_at: 'listener_request_replies.retracted_at',
+  retracted_by_slack_user_id: 'listener_request_replies.retracted_by_slack_user_id',
+  push_state: 'listener_request_replies.push_state',
+};
+export const listener_push_tokens = {
+  provider: 'listener_push_tokens.provider',
+  token: 'listener_push_tokens.token',
+  user_id: 'listener_push_tokens.user_id',
+  environment: 'listener_push_tokens.environment',
+  bundle_id: 'listener_push_tokens.bundle_id',
+  created_at: 'listener_push_tokens.created_at',
+  updated_at: 'listener_push_tokens.updated_at',
+  last_delivered_at: 'listener_push_tokens.last_delivered_at',
+  invalidated_at: 'listener_push_tokens.invalidated_at',
+  invalidation_reason: 'listener_push_tokens.invalidation_reason',
+};
 export const account_audit_event = {
   id: 'account_audit_event.id',
   occurredAt: 'account_audit_event.occurred_at',

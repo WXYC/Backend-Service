@@ -4301,3 +4301,107 @@ export const catalog_export_flag_state = wxyc_schema.table('catalog_export_flag_
 
 export type CatalogExportFlagState = InferSelectModel<typeof catalog_export_flag_state>;
 export type NewCatalogExportFlagState = InferInsertModel<typeof catalog_export_flag_state>;
+
+// DJ-replies storage (WXYC/wiki#148). Backend keeps no listener message text --
+// Slack is the record of what a listener said; this table holds only addressing
+// and moderation state. `fingerprint` is the ban/anonymization key, never an
+// authorization input; `anonymous_user_id` (the JWT `sub`) is the reply address.
+// `fingerprint`/`anonymous_user_id`/`slack_ts` are nullable because
+// WXYC/Backend-Service#2668 nulls them (and stamps `anonymized_at`) at 30 days,
+// despite being non-null at creation.
+export type NewListenerRequest = InferInsertModel<typeof listener_requests>;
+export type ListenerRequest = InferSelectModel<typeof listener_requests>;
+export const listener_requests = wxyc_schema.table(
+  'listener_requests',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    fingerprint: uuid('fingerprint'),
+    anonymous_user_id: varchar('anonymous_user_id', { length: 255 }).references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    slack_channel_id: varchar('slack_channel_id', { length: 64 }).notNull(),
+    slack_ts: varchar('slack_ts', { length: 32 }),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    // now() + LISTENER_REPLY_WINDOW_MINUTES at creation; bounds on-air sends only, never reads.
+    expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+    status: text('status').notNull().default('posted'),
+    anonymized_at: timestamp('anonymized_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('listener_requests_channel_created_idx').on(table.slack_channel_id, table.created_at.desc()),
+    index('listener_requests_fingerprint_idx')
+      .on(table.fingerprint)
+      .where(sql`${table.fingerprint} IS NOT NULL`),
+    index('listener_requests_unanonymized_idx')
+      .on(table.created_at)
+      .where(sql`${table.anonymized_at} IS NULL`),
+    check('listener_requests_status_ck', sql`${table.status} IN ('posted', 'hidden', 'held')`),
+  ]
+);
+
+// A DJ's (or moderator's) reply to a `listener_requests` row. `sent_by_slack_user_id`
+// / `retracted_by_slack_user_id` are audit trails, NOT foreign keys -- a Slack user
+// has no `auth_user` row (same reasoning as `slack_ban_moderators.added_by_slack_user_id`).
+// Never deleted; a mistaken reply is soft-retracted. The partial unique index on
+// `request_id` is the send path's idempotency guarantee: one active reply per
+// request, so a duplicate Slack submission lands on it as a 409.
+export type NewListenerRequestReply = InferInsertModel<typeof listener_request_replies>;
+export type ListenerRequestReply = InferSelectModel<typeof listener_request_replies>;
+export const listener_request_replies = wxyc_schema.table(
+  'listener_request_replies',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    request_id: uuid('request_id')
+      .notNull()
+      .references(() => listener_requests.id, { onDelete: 'cascade' }),
+    body: text('body').notNull(),
+    sender_kind: text('sender_kind').notNull(),
+    sent_by_slack_user_id: varchar('sent_by_slack_user_id', { length: 64 }).notNull(),
+    on_air_dj_name: text('on_air_dj_name'),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    retracted_at: timestamp('retracted_at', { withTimezone: true }),
+    retracted_by_slack_user_id: varchar('retracted_by_slack_user_id', { length: 64 }),
+    push_state: text('push_state').notNull().default('pending'),
+  },
+  (table) => [
+    uniqueIndex('listener_request_replies_active_request_idx')
+      .on(table.request_id)
+      .where(sql`${table.retracted_at} IS NULL`),
+    check('listener_request_replies_body_length_ck', sql`char_length(${table.body}) BETWEEN 1 AND 500`),
+    check('listener_request_replies_sender_kind_ck', sql`${table.sender_kind} IN ('on_air', 'moderator')`),
+    check(
+      'listener_request_replies_push_state_ck',
+      sql`${table.push_state} IN ('pending', 'sent', 'no_token', 'failed', 'skipped')`
+    ),
+  ]
+);
+
+// APNs (and, once the Android fast-follow lands, FCM) device tokens for a listener's
+// reply push. `user_id` is a real FK, `ON DELETE CASCADE` -- a token whose owner is
+// gone is dead (WXYC/Backend-Service#275: anonymous rows aren't pruned by anything
+// today). `updated_at` is the eviction key for WXYC/Backend-Service#2667's cap.
+export type NewListenerPushToken = InferInsertModel<typeof listener_push_tokens>;
+export type ListenerPushToken = InferSelectModel<typeof listener_push_tokens>;
+export const listener_push_tokens = wxyc_schema.table(
+  'listener_push_tokens',
+  {
+    provider: text('provider').notNull(),
+    token: text('token').notNull(),
+    user_id: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    environment: text('environment').notNull(),
+    bundle_id: text('bundle_id').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    last_delivered_at: timestamp('last_delivered_at', { withTimezone: true }),
+    invalidated_at: timestamp('invalidated_at', { withTimezone: true }),
+    invalidation_reason: text('invalidation_reason'),
+  },
+  (table) => [
+    primaryKey({ columns: [table.provider, table.token] }),
+    index('listener_push_tokens_user_id_idx').on(table.user_id),
+    check('listener_push_tokens_provider_ck', sql`${table.provider} IN ('apns', 'fcm')`),
+    check('listener_push_tokens_environment_ck', sql`${table.environment} IN ('production', 'sandbox')`),
+  ]
+);
