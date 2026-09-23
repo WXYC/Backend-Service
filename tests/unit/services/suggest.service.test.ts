@@ -6,6 +6,7 @@ jest.unmock('drizzle-orm');
 
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db } from '../../mocks/database.mock';
+import { statementIndex } from '../../utils/statement-index';
 
 const dialect = new PgDialect();
 
@@ -68,6 +69,45 @@ describe('suggest.service', () => {
 
       const { params } = compiledExecuteCall();
       expect(params).toContain('Hot\\_%');
+    });
+
+    it('excludes the V/A compilation-shelf bucket and its two named residue rows, without joining or reordering', async () => {
+      (db.execute as jest.Mock).mockResolvedValue([]);
+
+      await suggestArtists('So');
+
+      const { sql: text, params } = compiledExecuteCall();
+      // Line-anchored, never a bare substring scan. The compiled SQL carries
+      // the `--` warning block verbatim, and that block quotes
+      // `NOT IN ('V/A', 'VA', 'UNK')` -- so `toContain('NOT IN')` passes even
+      // with both predicates deleted, and passes again if `NOT IN` is flipped
+      // to `IN` (which would make the endpoint return ONLY shelf labels).
+      // `statementIndex` anchors at the start of a line, which a `--` comment
+      // line cannot satisfy. Same hazard it was extracted for in BS#2537.
+      expect(statementIndex(text, String.raw`AND \$\d+ <> \$\d+`)).toBeGreaterThan(-1);
+      expect(statementIndex(text, String.raw`AND \$\d+ NOT IN \(\$\d+, \$\d+\)`)).toBeGreaterThan(-1);
+
+      // The mock `artists` table stringifies columns, so a column binds as a
+      // *param* rather than appearing in the SQL text. Assert ADJACENCY, not
+      // membership: each column marker must be followed by its own value.
+      // `arrayContaining` is not enough -- 'V/A' is supplied independently by
+      // the artist_name list, so a membership check stays green on
+      // `code_letters <> 'VA'`, the regression that drops 124 real performers
+      // filed under the alphabetical "Va..." shelf bucket. Slicing states the
+      // adjacency directly and prints an actual-vs-expected diff on failure.
+      const codeLettersAt = params.indexOf('artists.code_letters');
+      expect(params.slice(codeLettersAt, codeLettersAt + 2)).toEqual(['artists.code_letters', 'V/A']);
+
+      const residueAt = params.findIndex((p, i) => p === 'artists.artist_name' && params[i + 1] === 'V/A');
+      expect(params.slice(residueAt, residueAt + 3)).toEqual(['artists.artist_name', 'V/A', 'Various Artists [group]']);
+      // The exclusion must stay a bare WHERE on artists: no new join, and
+      // ORDER BY total_plays must be untouched -- a join here would fan out
+      // rows and silently reorder suggestions by SUM(library.plays).
+      // Keyword-scoped and case-sensitive: the compiled text includes the `--`
+      // comment block verbatim, so a case-insensitive match would also count
+      // the word "join" if it ever appears in that prose.
+      expect(text.match(/\bJOIN\b/g)).toHaveLength(1);
+      expect(text).toContain('ORDER BY total_plays DESC');
     });
   });
 

@@ -17,6 +17,13 @@ export type TrackDetailsResult = {
  * Suggest artist names matching a prefix, ordered by total plays descending.
  *
  * Queries the library `artists` table (canonical catalog) using prefix ILIKE.
+ *
+ * The compilation-shelf exclusion below must stay a bare `WHERE` on `artists`,
+ * never a join. `artist_genre_code` lives on `genre_artist_crossreference`,
+ * not `artists`, and joining it fans out one row per genre membership --
+ * inflating the `SUM(library.plays)` that `ORDER BY total_plays` depends on
+ * and silently reordering every suggestion. See BS#2652 for the production
+ * measurement behind the specific values excluded.
  */
 export async function suggestArtists(prefix: string, limit = 5): Promise<string[]> {
   const query = sql`
@@ -24,6 +31,21 @@ export async function suggestArtists(prefix: string, limit = 5): Promise<string[
     FROM ${artists}
     JOIN ${library} ON ${library.artist_id} = ${artists.id}
     WHERE ${ilikeEscaped(artists.artist_name, prefix, 'prefix')}
+      -- 'V/A' is the pure compilation-shelf code_letters bucket: 26
+      -- Soundtracks - A..Z, 26 Various Artists - Rock - A..Z, and plain
+      -- Various Artists, for 53 rows and zero real performers. Rock is the
+      -- only genre form here -- library-etl collapses the other genre
+      -- buckets into plain Various Artists -- so excluding the bucket
+      -- wholesale costs nothing. 'VA', by contrast, is the
+      -- ordinary alphabetical shelf bucket for real performers sorting under
+      -- "Va..." (Armand Van Helden, Sharon Van Etten, etc.) and must NOT be
+      -- excluded wholesale -- do not "simplify" this back to
+      -- code_letters NOT IN ('V/A', 'VA', 'UNK'). The only two compilation
+      -- rows that land in 'VA' are named explicitly below: they fall through
+      -- to that bucket because the ETL's normalizeArtistName does not
+      -- recognise either spelling as a compilation name.
+      AND ${artists.code_letters} <> ${'V/A'}
+      AND ${artists.artist_name} NOT IN (${'V/A'}, ${'Various Artists [group]'})
     GROUP BY ${artists.artist_name}
     ORDER BY total_plays DESC
     LIMIT ${limit}

@@ -248,6 +248,7 @@ export const artists = {
   id: 'artists.id',
   artist_name: 'artists.artist_name',
   discogs_artist_id: 'artists.discogs_artist_id',
+  code_letters: 'artists.code_letters',
 };
 export const genres = {
   id: 'genres.id',
