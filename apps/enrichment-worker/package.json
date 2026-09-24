@@ -14,12 +14,12 @@
   },
   "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
-    "@sentry/node": "^10.73.0",
+    "@sentry/node": "^10.75.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/lml-client": "^1.0.0",
     "@wxyc/metadata": "^1.0.0",
     "@wxyc/observability": "^1.0.0",
-    "dotenv": "^17.4.2"
+    "dotenv": "^18.0.1"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
