@@ -38,6 +38,7 @@ import { isBetterCallJsonRequest } from './json-content-type';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
 import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
+import { UpdateIdentityError, updateIdentityFromRequest } from './update-identity';
 import { fallbackErrorHandler } from './fallback-error-handler';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
@@ -758,6 +759,24 @@ const completeOnboardingHandler = async (req: Request, res: Response) => {
   }
 };
 
+// Self-service identity edit. The DJ's own `realName`/`djName`, and nothing
+// else — see apps/auth/update-identity.ts for why this route exists rather
+// than the `input: false` lock on those two fields being relaxed.
+const updateIdentityHandler = async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const result = await updateIdentityFromRequest(body, fromNodeHeaders(req.headers));
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof UpdateIdentityError) {
+      return res.status(error.statusCode).json({ error: error.message, code: error.code });
+    }
+    console.error('[UPDATE IDENTITY] Unexpected error:', error);
+    Sentry.captureException(error, { tags: { subsystem: 'update-identity' } });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 // Passcode-gated self-signup (BS#2361). Public — no session, no JWT. The
 // dedicated rate limiter below (not `rateLimitedPaths`) is what bounds
 // abuse here; see its own comment for why the brute-force tier is wrong for
@@ -1130,6 +1149,17 @@ if (!isTestEnv) {
     keyGenerator: rateLimitKeyFromRequest,
   });
   app.use('/auth/update-user', updateUserRateLimit);
+  // Same bucket, deliberately: `/auth/wxyc/update-identity` is the same
+  // operation class — a signed-in DJ writing their own `auth_user` row — and
+  // is strictly RARER than the toggle traffic this limit is sized for (a
+  // settings-form save, not an `onClick`), so it fits under a ceiling built
+  // for toggle bursts with room to spare. It is NOT in `rateLimitedPaths`'s
+  // 10/15min brute-force tier: that bucket is keyed on the shared Cloudflare
+  // edge (see the block comment above), so 10/15min across every DJ on one
+  // edge bucket would lock the settings form for a quarter hour the moment a
+  // few people edit their profile at the start of a semester — the exact
+  // mis-sizing `sensitiveAuthMutationRateLimit` was corrected for.
+  app.use('/auth/wxyc/update-identity', updateUserRateLimit);
 
   // `/auth/change-password`, `/auth/change-email`, `/auth/delete-user` —
   // rare, deliberate, security-sensitive operations, not UI chrome.
@@ -1248,6 +1278,7 @@ mountAuthenticatedAccountAudit(app);
 
 app.post('/auth/wxyc/lookup-email', lookupEmailHandler);
 app.post('/auth/wxyc/complete-onboarding', completeOnboardingHandler);
+app.post('/auth/wxyc/update-identity', updateIdentityHandler);
 
 // BS#2361 — mounted only when STATION_SIGNUP_ENABLED is on. Not a
 // convenience: with the flag off the path falls through to the better-auth
