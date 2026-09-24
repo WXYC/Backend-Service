@@ -253,6 +253,10 @@ components:
           type: integer
         alternate_artist_name:
           type: string
+        album_artist:
+          type: string
+          nullable: true
+          description: Credited album artist on a compilation card (BS#2004). Null or empty clears it. Mirrors AddAlbumRequest in the wxyc-shared SSOT.
         label:
           type: string
         label_id:
@@ -2073,6 +2077,10 @@ paths:
                 alternate_artist_name:
                   type: string
                   nullable: true
+                album_artist:
+                  type: string
+                  nullable: true
+                  description: Credited album artist on a compilation card (BS#2004). Null or empty clears it.
                 disc_quantity:
                   type: integer
                   minimum: 1

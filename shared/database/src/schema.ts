@@ -599,9 +599,17 @@ export const libraryLegacyReleaseIdSeq = wxyc_schema.sequence('library_legacy_re
  *
  *   - NULL `artist_name` until the A.2 backfill / A.3 live-cascade has run
  *     for that row. Code paths reading `artist_name` must tolerate NULL.
- *   - NULL `album_artist`, `label`, `label_id`, `alternate_artist_name`,
- *     `artwork_url`, `on_streaming`, `code_volume_letters` (genuine library
- *     metadata gaps).
+ *   - NULL `label`, `label_id`, `alternate_artist_name`, `artwork_url`,
+ *     `on_streaming`, `code_volume_letters` (genuine library metadata gaps).
+ *   - NULL `album_artist` on EVERY row, not just some: the legacy source
+ *     column was never populated (0 non-NULL of ~64,300, confirmed by the
+ *     catalog parity harness against the frozen tubafrenzy MySQL on
+ *     2026-09-16), so the ETL only ever mirrored NULL and no other writer
+ *     existed until BS#2004 opened it on POST/PATCH /library. Kept
+ *     deliberately for a future backfill from the Discogs release pins.
+ *     Never gate behaviour on it — it is `false` for exactly the
+ *     compilation shelf it was meant to select; use the V/A code-letters
+ *     rule for "is this a compilation".
  *   - Multiple `library` rows pointing at the same `(artists.id,
  *     album_title)` — the legacy library is per-physical-format, so a CD
  *     and an LP issue of the same album are distinct rows.
