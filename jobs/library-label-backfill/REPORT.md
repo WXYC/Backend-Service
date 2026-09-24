@@ -10,252 +10,224 @@ mapping is [BS#2672](https://github.com/WXYC/Backend-Service/issues/2672).
 |---|---|
 | artefact read | `wxycmusic-backup-2026-09-21-214033.sql.gz` |
 | sha256 | `aa289593f7652e77c2e83e5ce81a70c44ebe9ca1a04cd0da64a89e835fbfb95e` |
-| `FLOWSHEET_ENTRY_PROD` rows | 2,643,453 |
 
 > **This is not the authoritative capture.** BS#2669 names
 > `s3://wxyc-archive/legacy/tubafrenzy/2026-09-16/wxycmusic-backup-2026-09-16-135233.sql.gz`
 > (sha256 `533bb48da9dc89aa354849a6eebe8ab348da67e0ffc9e5a3941607925d46bad1`) as the
-> authoritative final dump. That object was unreachable when this ran — the
-> `wxyc-api` AWS SSO session had expired — so the figures here come from a later
-> re-dump of the same database, which has been frozen since 2026-09-16 13:09 PDT.
-> The two files are the same length (142,256,283 bytes) and differ in sha256,
-> consistent with differing only in the dump-timestamp bytes mysqldump and gzip
-> write into the header and footer. **That is corroboration, not proof.**
-> Regenerate this mapping from the S3 object and diff it before BS#2672 applies
-> anything to production.
+> authoritative final dump. That object is unreachable — the `wxyc-api` AWS SSO
+> session has expired — so the figures here come from a later re-dump of the
+> same database, which has been frozen since 2026-09-16 13:09 PDT. The two files
+> are the same length (142,256,283 bytes) and differ in sha256, consistent with
+> differing only in the dump-timestamp bytes mysqldump and gzip write into the
+> header and footer. **That is corroboration, not proof.** Regenerate this
+> mapping from the S3 object and diff it before BS#2672 applies anything to
+> production.
 
-## Coverage
+## Source: the acquisition record
+
+`ROTATION_RELEASE` records something the station acquired. It carries
+`LIBRARY_RELEASE_ID` directly and a `COMPANY_ID` foreign key into `COMPANY`,
+whose `NAME` is the label. The flowsheet is not an input to this mapping.
 
 | | count | |
 |---|---:|---|
-| `FLOWSHEET_ENTRY_PROD` rows | 2,643,453 | |
-| plays linked to a card (`LIBRARY_RELEASE_ID > 0`) | 1,081,412 | |
-| …carrying a non-empty `LABEL_NAME` | 1,009,419 | 93.3% |
-| distinct cards with at least one label | 37,741 | |
-| …single-valued on the raw string | 12,522 | 33.2% |
-| distinct cards surviving normalization | 37,740 | |
-| **…resolved (one normalized label)** | **22,215** | **58.9%** |
-| …left conflicted | 15,525 | 41.1% |
+| `ROTATION_RELEASE` rows | 21,641 | |
+| …with `LIBRARY_RELEASE_ID > 0` | 17,795 | 82.2% |
+| …and a resolvable `COMPANY_ID` | 17,636 | 99.1% of linked |
+| `COMPANY` rows | 7,246 | |
+| **distinct library cards covered** | **17,175** | |
+| **…resolved (one label)** | **17,088** | **99.5%** |
+| …conflicted (two or more labels) | 87 | 0.5% |
+| distinct label names emitted | 4,535 | |
 
-1 card dropped out at normalization: every spelling it carried consisted only of punctuation and corporate-suffix tokens, so it holds no label information to resolve.
+Against `dev_env/seed-clone.sql` (64,193 `library` rows): **17,167** carry a `legacy_release_id` this mapping covers (26.7% of the catalog). Informational only — BS#2672 must re-derive the join against production.
 
-Against `dev_env/seed-clone.sql` (64,193 `library` rows): **37,533** carry a `legacy_release_id` this mapping covers (58.5% of the catalog). Informational only — BS#2672 must re-derive the join against production.
+## No normalization, no vote
 
-## Cross-check against the prior audit
+The label arrives as a **foreign key, not as text**, so this route needs no
+spelling normalization, no modal vote and no unanimity rule. A card resolves
+when its rotation rows name one label. The 87 cards whose re-adds name
+two different labels are genuine multi-label cases and are emitted as conflicts
+with no value.
 
-BS#2669 quotes figures from an earlier audit whose code was not published. Each
-countable quantity reproduces **exactly**, which is what validates the dump
-parser and the linked/labelled predicates:
+**One exception, and it is about `COMPANY`, not about labels.** That table holds
+7,246 rows but only 5,964 distinct names: a label acquired
+again years later was often entered as a fresh row, so "atlantic" exists as ids
+123, 6446 and 6486. Grouping a card's rotation rows by raw `COMPANY_ID` would
+call 51 cards conflicted when every id names the same label. This job
+therefore compares **case-folded `COMPANY.NAME`** (trim + lowercase, nothing
+else — these are curated rows, not typed-per-play free text), which resolves
+those cards. Seven of them differ only in letter case, which is why the fold is
+case-insensitive rather than exact.
 
-| quantity | BS#2669 | measured here | |
-|---|---:|---:|---|
-| `FLOWSHEET_ENTRY_PROD` rows | 2,643,453 | 2,643,453 | exact |
-| plays linked to a card | 1,081,412 | 1,081,412 | exact |
-| …labelled | 1,009,419 | 1,009,419 | exact |
-| distinct cards with a label | 37,741 | 37,741 | exact |
-| single-valued raw | 12,522 (33.2%) | 12,522 (33.2%) | exact |
-| cards after normalization | 37,739 | 37,740 | +1 |
-| single-valued after normalization | 22,295 (59.1%) | 22,215 (58.9%) | -80 |
+**BS#2672 must collapse that duplication rather than carry it across**: three
+"Atlantic" rows in `wxyc_schema.labels` would reintroduce the same problem on
+the Backend side. `label-mapping.tsv` carries a `company_ids` column listing
+every id behind each resolved name so the write side can see exactly what it is
+collapsing; `company_id` is the most-used of them (lowest id breaking a tie).
 
-The two normalization rows are the only ones that move, and they are the only
-two that depend on a rule BS#2669 states in prose rather than code — "strip
-punctuation" does not say whether punctuation becomes a space or nothing, and
-the two readings differ by hundreds of cards. The rule below was chosen on
-measured evidence rather than to hit the quoted number, and lands within 0.4%
-of it. Nothing here suggests a parsing discrepancy.
+## `ALTERNATE_LABEL_NAME`
 
-## The normalization rule
+**Ignored, and it costs nothing.** Of the 17,795 card-linked rotation rows,
+13 carry an `ALTERNATE_LABEL_NAME` — and **0** of those lack a
+resolvable `COMPANY_ID`. Every row that has an alternate name also has a real
+company FK, so using it as a fallback would add **0 cards**. It is free
+text rather than an identity, so on the same provenance reasoning applied to
+DJ-typed labels below, it is not worth reintroducing text handling for zero
+additional coverage.
 
-Applied to every raw `LABEL_NAME` before the vote, in order:
+## The excluded DJ-typed population
 
-1. Unicode **NFKC**, then **lowercase**.
-2. **Decompose and drop combining marks**, so `Barbès` and `Barbes` are one
-   label. DJs routinely omit an accent they cannot type quickly; every accent
-   merge in the corpus is one label typed two ways (Cómeme/Comeme,
-   Naïve/Naive, Crónica/Cronica, Häpna/Hapna).
-3. **Split** on every character that is not a letter or digit
-   (Unicode-aware `\p{L}`/`\p{N}`). Punctuation and spaces are separators.
-4. **Drop** these whole tokens wherever they appear: `records`, `recordings`, `music`, `ltd`, `inc`, `llc`.
-   Whole tokens only, so `Musicians` and `Incendiary` survive intact.
-5. **Concatenate** the surviving tokens with no separator.
+`FLOWSHEET_ENTRY_PROD.LABEL_NAME` pools two provenances under one column name:
 
-Step 5 is the one that looks wrong and is not. Space-joining would keep
-`Sub Pop` and `SubPop` apart, and word-boundary noise is most of what DJs
-actually vary. Measured over this corpus, concatenating resolves **618 more
-cards** than space-joining, and all 233 distinct merges it creates are one
-label typed two ways — `A&M`/`AM` (78 cards), `Sub Pop`/`SubPop` (61),
-`I.R.S.`/`IRS`, `4 AD`/`4AD`, `Stone's Throw`/`Stones Throw`,
-`Roc-A-Fella`/`Rocafella`, `Collector's Choice`/`Collectors Choice`. Not one
-conflates two different labels. The key is for comparison only: the value
-written to the mapping is the most-played **raw** spelling, which keeps its
-spaces, punctuation and accents.
+| source | labelled plays | | fill rate | origin |
+|---|---:|---:|---:|---|
+| rotation entries (`ROTATION_RELEASE_ID > 0`) | 632,835 | 62.7% | **100.0%** | copied from the `ROTATION_RELEASE` record |
+| everything else | 376,584 | 37.3% | 84.0% | typed by the DJ, per play |
 
-A result of `''` means the entry carried no label information and is dropped.
-The rule is stated once, in `normalize.ts`, and is covered by
-`tests/unit/jobs/library-label-backfill/normalize.test.ts`.
+A 100.0% fill rate is not diligence, it is a system copy — the same acquisition
+record this mapping already reads, arriving second-hand as text.
 
-**The rule settles spelling, never substance.** A card is resolved only when
-*every* play agrees after normalization. Cards whose plays disagree are emitted
-as conflicts with **no** candidate value, because `library.label` feeds
-discogs-etl's `label_match` dedup ranking key — a wrong label there promotes
-the wrong pressing for the whole station, and a reissue legitimately carries
-different labels across plays, so disagreement is not always error.
+**The size of what is excluded:** 34,754 cards carry at least one
+DJ-typed label, and **22,820** of them are not covered by the
+rotation route. Taking them would roughly 2.3× the card count.
 
-## Variant-count distributions
+They are excluded anyway, and the reason is provenance rather than volume. A
+DJ-typed label describes whatever object was in that DJ's hands; nothing in the
+flowsheet records whether that was the library's copy, and `library.label`
+exists to answer "which pressing does WXYC hold". So an unverifiable label is
+not weak evidence — it is the wrong kind of evidence.
 
-Raw spellings per card, before normalization:
+The cost asymmetry settles it. A **missing** label makes discogs-etl's
+`label_match` key abstain, which is the status quo for 100% of cards today and
+costs nothing. A **wrong** label promotes the wrong pressing for that release
+station-wide, and is indistinguishable from a right one downstream.
 
-| raw variants | cards |
-|---:|---:|
-| 1 | 12,522 |
-| 2 | 8,408 |
-| 3 | 5,868 |
-| 4 | 3,793 |
-| 5 | 2,387 |
-| 6 | 1,576 |
-| 7 | 948 |
-| 8 | 662 |
-| 9 | 444 |
-| 10 | 325 |
-| 11 | 214 |
-| 12 | 149 |
-| 13 | 111 |
-| 14 | 81 |
-| 15 | 59 |
-| 16 | 44 |
-| 17 | 44 |
-| 18 | 24 |
-| 19 | 15 |
-| 20 | 16 |
-| 21 | 13 |
-| 22 | 11 |
-| 23 | 7 |
-| 24 | 8 |
-| 26 | 2 |
-| 27 | 3 |
-| 28 | 1 |
-| 29 | 2 |
-| 30 | 1 |
-| 32 | 1 |
-| 33 | 1 |
-| 48 | 1 |
+If that trade is ever revisited, the DJ-typed route should be a separate,
+separately-reviewed mapping with its own confidence column — not merged into
+this one, where it would be indistinguishable from an acquisition record.
 
-Surviving normalized labels per card (1 = resolved; 2+ = conflict):
+## Conflicts — in full
 
-| normalized labels | cards |
-|---:|---:|
-| 1 | 22,215 |
-| 2 | 8,455 |
-| 3 | 3,548 |
-| 4 | 1,625 |
-| 5 | 850 |
-| 6 | 421 |
-| 7 | 273 |
-| 8 | 144 |
-| 9 | 64 |
-| 10 | 55 |
-| 11 | 29 |
-| 12 | 18 |
-| 13 | 21 |
-| 14 | 8 |
-| 15 | 6 |
-| 16 | 3 |
-| 17 | 2 |
-| 18 | 1 |
-| 19 | 1 |
-| 21 | 1 |
+All 87 conflicted cards, largest first. They are also in
+`label-conflicts.tsv`.
 
-## Conflicts — what the residue is made of
-
-The 15,525 conflicted cards are **not** 15,525 cards with two
-real labels. Three overlapping shapes dominate, measured over the whole residue:
-
-| shape | cards | |
-|---|---:|---:|
-| every minority group has exactly **one** play | 9,100 | 58.6% |
-| the leading group holds **≥90%** of the card's plays | 4,988 | 32.1% |
-| a minority group is the leading label **plus a 4-digit year** (`4AD` vs `4AD (2012)`) | 1,909 | 12.3% |
-
-So most of the residue is one-off typing noise against a clear leader —
-`"Tow Dawg Entertainment" ×1` beside `"Top Dawg Entertainment" ×338` — not a
-reissue with two genuine labels. **This job still refuses to guess on any of
-them**, because the shapes above are a description of the data, not a decision
-rule, and separating "typo" from "co-release on a second label" needs judgment
-this job does not have. They are quantified here so BS#2672 can decide whether
-to adjudicate a subset (a play-share floor, or stripping parenthetical years)
-rather than treating all 15,525 as equally uncertain.
-
-### Verbatim sample
-
-The conflicted cards are listed in full in `label-conflicts.tsv`. The 25
-most-played:
-
-| legacy_release_id | labels | plays | normalized groups (raw spellings ×plays) |
+| legacy_release_id | labels | rotation rows | labels (COMPANY ids, rows) |
 |---:|---:|---:|---|
-| 67043 | 8 | 656 | `topdawgentertainment` ("Top Dawg Entertainment" ×338, "top dawg entertainment" ×3, "Top dawg Entertainment" ×1) · `topdawg` ("TOP DAWG" ×238, "top dawg" ×15, "Top Dawg" ×6) · `tde` ("TDE" ×49) · `rca` ("rca" ×1, "RCA Records" ×1) · `sza` ("SZA" ×1) · `topdawg2017` ("TOP DAWG (2017)" ×1) · `topdogentertainment` ("Top Dog Entertainment" ×1) · `towdawgentertainment` ("Tow Dawg Entertainment" ×1) |
-| 61462 | 9 | 577 | `4ad` ("4AD" ×522, "4ad" ×35, "4 AD" ×1, "4Ad" ×1, "4AD Records" ×1) · `arbutus` ("Arbutus" ×5, "arbutus" ×1, "Arbutus Records" ×1) · `4ad2012` ("4AD (2012)" ×3) · `4d` ("4D" ×2) · `4` ("4" ×1) · `4am` ("4am" ×1) · `ad` ("AD" ×1) · `sacredbones` ("Sacred Bones" ×1) · `selfreleased` ("Self-Released" ×1) |
-| 61255 | 4 | 422 | `bfinderskeepers` ("B MUSIC/FINDERS KEEPERS" ×215, "B-Music/Finders Keepers" ×13, "B-Music/ Finders Keepers" ×1, "b-music/finders keepers" ×1) · `finderskeepers` ("FINDERS KEEPERS" ×165, "Finders Keepers" ×19, "finders keepers" ×3, "Finder's Keepers" ×1) · `finderskeepersb` ("Finders Keepers/B-Music" ×3) · `b` ("B-Music" ×1) |
-| 58158 | 3 | 411 | `sorrystate` ("SORRY STATE" ×341, "Sorry State" ×38, "Sorry State Records" ×23, "sorry state" ×5, "SORRY STATE RECORDS" ×1) · `sorrystate2011` ("Sorry State (2011)" ×2) · `sorrystate2013` ("sorry state (2013)" ×1) |
-| 54475 | 6 | 400 | `audika` ("Audika" ×183, "AUDIKA" ×135, "audika" ×41, "Audika Records" ×28, "audika records" ×3) · `roughtrade` ("Rough Trade" ×4, "ROUGH TRADE" ×1) · `audika20081975` ("audika (2008, 1975)" ×1, "audika (2008,1975)" ×1) · `audika2008` ("audika (2008)" ×1) · `aukida` ("Aukida Records" ×1) · `kranky` ("Kranky" ×1) |
-| 57714 | 4 | 399 | `jagjaguwar` ("JAGJAGUWAR" ×256, "Jagjaguwar" ×131, "jagjaguwar" ×9) · `jagjaguar` ("Jagjaguar" ×1) · `jagjaguwar2010` ("JAGJAGUWAR (2010)" ×1) · `jagjaguwar2011` ("Jagjaguwar (2011)" ×1) |
-| 66070 | 7 | 388 | `selfreleased` ("self-released" ×239, "(self-released)" ×51, "Self-Released" ×32, "self released" ×13, "Self-released" ×2, "self - released" ×1, "Self Released" ×1) · `sr` ("s/r" ×31, "S/R" ×12) · `noname` ("Noname" ×2) · `na` ("n/a" ×1) · `savemoney` ("SAVEMONEY" ×1) · `slefreleased` ("slef-released" ×1) · `wb` ("WB" ×1) |
-| 69704 | 3 | 372 | `sonymexico` ("Sony Music México" ×307, "Sony Music Mexico" ×29, "sony music mexico" ×2) · `sony` ("Sony" ×25, "Sony Music" ×3, "sony music" ×1) · `sonyentertainment` ("Sony Music Entertainment" ×5) |
-| 18581 | 7 | 365 | `capitol` ("Capitol Records" ×164, "Capitol" ×40, "capitol" ×4, "CAPITOL" ×1, "capitol records" ×1) · `4ad` ("4AD" ×131, "4ad" ×14, "4AD Ltd" ×1) · `4adcapitol` ("4 AD / Capitol" ×1, "4ad/capitol" ×1, "4AD/Capitol" ×1) · `capitolcompactdisc` ("Capitol Compact Disc" ×3) · `4ad1990` ("4AD (1990)" ×1) · `capit` ("Capit" ×1) · `capital` ("Capital" ×1) |
-| 57590 | 11 | 365 | `qdkmedia` ("QDK MEDIA" ×193, "QDK Media" ×5) · `normal` ("Normal Records" ×48, "normal records" ×18, "Normal" ×16, "normal" ×5, "Normal records" ×1) · `qdk` ("QDK" ×28) · `normalqdkmedia` ("Normal/QDK Media" ×24, "normal/qdk media" ×2, "Normal Records / QDK Media" ×1) · `normalqdk` ("Normal/QDK" ×5, "normal/qdk" ×2) · `qdknormal` ("QDK/Normal" ×4, "QDK/ Normal" ×2) · `nowagain` ("Now Again Records" ×2, "Now-Again" ×2, "Now-Again Records" ×1) · `shadoks` ("Shadoks" ×1, "SHADOKS MUSIC" ×1) · `zambiaparlour` ("zambia music parlour" ×2) · `normalusa` ("Normal Records USA" ×1) · `nromal` ("nromal" ×1) |
-| 67617 | 5 | 359 | `selfreleased` ("(self-released)" ×245, "self-released" ×79, "self released" ×6, "Self-Released" ×5, "Self-released" ×2, "Self Released" ×1, "Self-Released`" ×1) · `sr` ("s/r" ×13, "S/R" ×4) · `lastgang` ("last gang" ×1) · `sekfreleased` ("sekf-released" ×1) · `selfreleased2018` ("(self-released) (2018)" ×1) |
-| 70313 | 3 | 356 | `hallogallotapes` ("HALLOGALLO Tapes" ×338, "Hallogallo Tapes" ×13) · `hallogallo` ("hallogallo" ×4) · `selfreleased` ("self-released" ×1) |
-| 69835 | 2 | 350 | `ato` ("ATO Records" ×346, "ATO" ×3) · `sr` ("SR" ×1) |
-| 71341 | 2 | 349 | `mrbongo` ("Mr. Bongo" ×345, "Mr Bongo" ×2, "Mr.Bongo" ×1) · `coala` ("Coala Records" ×1) |
-| 50057 | 8 | 340 | `pawtracks` ("Paw Tracks" ×187, "PAW TRACKS" ×119, "paw tracks" ×17, "Paw tracks" ×1, "PAW Tracks" ×1, "Paw-Tracks" ×1) · `domino` ("Domino" ×4, "domino" ×1) · `cppawtracks` ("C & P Paw Tracks" ×2, "C&P Paw Tracks" ×1) · `pawtracks2007` ("paw tracks (2007)" ×1, "Paw Tracks (2007)" ×1) · `cpawtracks` ("C & Paw Tracks" ×1) · `cpcarpark` ("C + P Carpark Records" ×1) · `cpskam` ("C&P Skam Records" ×1) · `pawtricks` ("paw tricks" ×1) |
-| 68591 | 7 | 340 | `faderlabel` ("Fader Label" ×280, "fader label" ×3, "FADER Label" ×2) · `fader` ("Fader" ×19, "FADER" ×19, "fader" ×5) · `bandcamp` ("Bandcamp" ×4) · `selfreleased` ("self-released" ×3, "Self Released" ×1) · `sr` ("s/r" ×2) · `columbia` ("Columbia" ×1) · `subpop` ("Sub Pop" ×1) |
-| 70379 | 2 | 340 | `k` ("K" ×314, "K Records" ×23, "k" ×1, "k records" ×1) · `perennial` ("perennial" ×1) |
-| 69721 | 3 | 338 | `forager` ("Forager Records" ×334, "forager records" ×1, "Forager REcords" ×1) · `foragedsounds` ("Foraged Sounds" ×1) · `listenrecord` ("Listen Record" ×1) |
-| 65754 | 3 | 336 | `xl` ("XL" ×223, "XL Recordings" ×98, "xl" ×4, "xl recordings" ×4, "Xl" ×1, "Xl Recordings" ×1, "XL recordings" ×1, "xl records" ×1, "XL Records" ×1) · `sony` ("Sony" ×1) · `soulection` ("soulection" ×1) |
-| 67751 | 2 | 336 | `subpop` ("SUB POP" ×264, "Sub Pop" ×48, "Sub Pop Records" ×18, "sub pop" ×2, "sub pop records" ×1, "Sub-Pop" ×1, "Subpop Records" ×1) · `emi` ("EMI" ×1) |
-| 65969 | 13 | 333 | `warp` ("WARP" ×132, "Warp" ×91, "Warp Records" ×42, "warp" ×10, "warp records" ×6, "Warp records" ×1, "WARP RECORDS" ×1) · `brainfeeder` ("Brainfeeder" ×14, "Brain Feeder" ×1, "brainfeeder" ×1) · `warped` ("Warped" ×6, "warped" ×3, "Warped Records" ×2) · `warpcd` ("Warpcd" ×4, "Warp CD" ×2, "warp cd" ×1, "warpcd" ×1) · `beat` ("Beat Records" ×3) · `stonesthrow` ("Stones Throw" ×3) · `warp2010` ("Warp (2010)" ×2) · `warpcd195` ("warpcd195" ×2) · `rhymesayers` ("Rhymesayers" ×1) · `selfreleased` ("self-released" ×1) · `sr` ("s/r" ×1) · `subpop` ("Sub Pop" ×1) · `warpod` ("Warpod" ×1) |
-| 62904 | 7 | 330 | `mrbongo` ("Mr. Bongo" ×271) · `4ad` ("4AD" ×49, "4ad" ×2) · `domino` ("Domino" ×2, "Domino Music" ×1) · `4ad2013` ("4AD (2013)" ×2) · `darkentries` ("Dark Entries" ×1) · `dominopublishing` ("Domino Music Publishing" ×1) · `smithsonianfolkways` ("Smithsonian Folkways Recordings" ×1) |
-| 64394 | 3 | 327 | `roughtrade` ("Rough Trade" ×201, "ROUGH TRADE" ×94, "Rough Trade Records" ×14, "rough trade" ×9, "rough trade records" ×3, "Rough trade" ×2, "rough Trade" ×1) · `roughtrade2014` ("rough trade (2014)" ×2) · `hipposintanks` ("Hippos in Tanks" ×1) |
-| 64989 | 14 | 326 | `topdawgentertainment` ("Top Dawg Entertainment" ×115) · `topdawg` ("TOP DAWG" ×51, "Top Dawg" ×49, "top dawg" ×9) · `tde` ("TDE" ×42, "tde" ×2) · `topdawgaftermath` ("Top Dawg / Aftermath" ×18, "Top Dawg // Aftermath" ×13, "Top Dawg//Aftermath" ×1, "Top Dawg/Aftermath" ×1) · `topdawgaftermathentertainmentinterscope` ("Top Dawg, Aftermath Entertainment, Interscope Records" ×6, "Top Dawg/Aftermath Entertainment/Interscope Records" ×5) · `topdawgentertainmentandaftermath` ("Top Dawg Entertainment and Aftermath" ×4) · `interscope` ("Interscope" ×2, "Interscope Records" ×1) · `tdeaftermath` ("TDE/Aftermath" ×1) · `tdeinterscope` ("TDE / Interscope" ×1) · `togdawg` ("Tog Dawg" ×1) · `tomdawg2015` ("tom dawg (2015)" ×1) · `topdawg2015` ("top dawg (2015)" ×1) · `topdawgandaftermath` ("Top Dawg and Aftermath" ×1) · `veryspecial` ("Very Special Recordings" ×1) |
-| 67942 | 2 | 323 | `deadoceans` ("DEAD OCEANS" ×245, "Dead Oceans" ×67, "dead oceans" ×10) · `deepocean` ("Deep Ocean" ×1) |
+| 59096 | 2 | 7 | NORMAL/QDK MEDIA (id 1181, 5×) · QDK MEDIA (id 1665, 2×) |
+| 8501 | 3 | 4 | 130701/FAT CAT (id 2639, 2×) · 100% BREAKFAST (id 1100, 1×) · AUM FIDELITY (id 1046, 1×) |
+| 53537 | 4 | 4 | (self-released) (id 2782, 1×) · ABSOLUTELY KOSHER (id 1487, 1×) · GRAVITATION (id 2349, 1×) · M (id 1248, 1×) |
+| 56632 | 4 | 4 | KELIPPAH (id 4132, 1×) · LOAD (id 539, 1×) · NEGATIVE JAZZ (id 4777, 1×) · Numero Group (id 6664, 1×) |
+| 14116 | 2 | 3 | PHILLY ARCHIVES (id 1912, 2×) · STAY FREE! (id 2777, 1×) |
+| 54931 | 2 | 3 | DUNYA/FELMAY (id 1519, 2×) · FELMAY (id 2117, 1×) |
+| 65234 | 2 | 3 | HOT RELEASES (id 3508, 2×) · BLACKEST EVER BLACK (id 4291, 1×) |
+| 71431 | 2 | 3 | SICKROOM (id 2347, 2×) · wherethetimegoes (id 7016, 1×) |
+| 71682 | 3 | 3 | Honest Jon's Records (id 7145, 1×) · NUMERO GROUP (id 2709, 1×) · TAL (id 7321, 1×) |
+| 768 | 2 | 2 | ABB (id 1416, 1×) · CAPITOL (id 494, 1×) |
+| 1608 | 2 | 2 | BRONX SCIENCE (id 1624, 1×) · GIEGLING (id 5229, 1×) |
+| 7392 | 2 | 2 | ANTIGONOWHERE (id 1873, 1×) · TEMPEL (id 5450, 1×) |
+| 9730 | 2 | 2 | ROUNDER (id 283, 1×) · RYKODISC (id 285, 1×) |
+| 9824 | 2 | 2 | COPPER CREEK (id 712, 1×) · CROOKED (id 2026, 1×) |
+| 13170 | 2 | 2 | HEARTBEAT (id 399, 1×) · MOTION (id 1800, 1×) |
+| 16677 | 2 | 2 | self-released (id 853, 1×) · THIS RECORD LABEL (id 1632, 1×) |
+| 16736 | 2 | 2 | WARP (id 733, 1×) · WARP/TOMMY BOY (id 1718, 1×) |
+| 19307 | 2 | 2 | WARM (id 1670, 1×) · WORDSOUND (id 666, 1×) |
+| 21086 | 2 | 2 | HEARTBEAT (id 399, 1×) · SOUL JAZZ (id 1936, 1×) |
+| 22304 | 2 | 2 | DEMONBEACH (id 1840, 1×) · self-released (id 853, 1×) |
+| 29681 | 2 | 2 | KUFALA (id 2905, 1×) · self-released (id 853, 1×) |
+| 29752 | 2 | 2 | K (id 373, 1×) · ROUNDER (id 283, 1×) |
+| 30870 | 2 | 2 | ALIVE (id 110, 1×) · TRIAD (id 1507, 1×) |
+| 32646 | 2 | 2 | BAR/NONE (id 128, 1×) · M21 (id 1802, 1×) |
+| 36542 | 2 | 2 | OLD GOLD (id 962, 1×) · STRCTR (id 5353, 1×) |
+| 37025 | 2 | 2 | SIX (id 2435, 1×) · SPACE FOUNDATION (id 2434, 1×) |
+| 37867 | 2 | 2 | MERGE (id 337, 1×) · self-released (id 853, 1×) |
+| 38225 | 2 | 2 | UNCLE HOWIE (id 2580, 1×) · VIPER (id 2621, 1×) |
+| 38336 | 2 | 2 | ACUARELA (id 1959, 1×) · BETTER LOOKING (id 1867, 1×) |
+| 39962 | 2 | 2 | GENTLE GIANT (id 242, 1×) · PUBLIC EYESORE (id 2250, 1×) |
+| 40912 | 2 | 2 | DEAD TEENAGER/WITCH DOCTOR (id 2544, 1×) · ENJA (id 1615, 1×) |
+| 42353 | 2 | 2 | 5 RUE CHRISTINE (id 1125, 1×) · I AND EAR (id 2949, 1×) |
+| 42738 | 2 | 2 | Maitreya Apache Music (id 5992, 1×) · NORMAL/QDK MEDIA (id 1181, 1×) |
+| 45722 | 2 | 2 | Numero Group (id 7014, 1×) · PEEK-A-BOO (id 528, 1×) |
+| 46045 | 2 | 2 | Biophilia (id 7297, 1×) · BLUEBIRD/RCA (id 2399, 1×) |
+| 46861 | 2 | 2 | BC (id 2898, 1×) · self-released (id 853, 1×) |
+| 49505 | 2 | 2 | ALULA (id 845, 1×) · Analog Africa (id 6027, 1×) |
+| 49719 | 2 | 2 | TEQUILA SUNRISE (id 3090, 1×) · VHF (id 801, 1×) |
+| 50118 | 2 | 2 | BROKEN FADER CARTEL (id 2923, 1×) · MERCK (id 1824, 1×) |
+| 50598 | 2 | 2 | FALLOUT (id 3287, 1×) · FAR EASTERN SUNSHINE (id 4775, 1×) |
+| 51107 | 2 | 2 | DEAF, DUMB AND BLIND (id 3395, 1×) · DEAF, DUMB, AND BLIND (id 3394, 1×) |
+| 52523 | 2 | 2 | Lusafrica (id 6994, 1×) · TINDER (id 583, 1×) |
+| 55240 | 2 | 2 | COLOR WHEEL (id 3592, 1×) · HOLIDAYS FOR QUINCE (id 3238, 1×) |
+| 55242 | 2 | 2 | B MUSIC/FINDERS KEEPERS (id 3605, 1×) · Finders Keepers (id 5971, 1×) |
+| 55260 | 2 | 2 | B MUSIC/FINDERS KEEPERS (id 3605, 1×) · Love International Recordings (id 7215, 1×) |
+| 55438 | 2 | 2 | 482 MUSIC (id 1958, 1×) · JAGJAGUWAR (id 1217, 1×) |
+| 55753 | 2 | 2 | LOYAL LABEL (id 3698, 1×) · Nefarious Industries (id 5342, 1×) |
+| 56113 | 2 | 2 | ASPHODEL (id 502, 1×) · WARP (id 733, 1×) |
+| 56368 | 2 | 2 | ALIEN8 (id 1546, 1×) · SOLEILMOON (id 251, 1×) |
+| 57094 | 2 | 2 | PHILIPS/POLYGRAM (id 1555, 1×) · POLYGRAM (id 308, 1×) |
+| 57685 | 2 | 2 | ROB'S HOUSE (id 3434, 1×) · WANTAGE (id 530, 1×) |
+| 58300 | 2 | 2 | DISTORTIONS/WATERPIPE (id 1944, 1×) · POSITIVELY (id 2972, 1×) |
+| 58513 | 2 | 2 | FAMILY (id 2707, 1×) · LO (id 2014, 1×) |
+| 61240 | 2 | 2 | NOSMOKE (id 3927, 1×) · STICK IT TO THE MAN (id 1796, 1×) |
+| 61255 | 2 | 2 | B MUSIC/FINDERS KEEPERS (id 3605, 1×) · FINDERS KEEPERS (id 2878, 1×) |
+| 61714 | 2 | 2 | ALL DAY (id 4164, 1×) · OUTER BATTERY (id 4021, 1×) |
+| 62222 | 2 | 2 | DE STIJL (id 3123, 1×) · NOTENUF (id 2480, 1×) |
+| 62904 | 2 | 2 | 4AD (id 3778, 1×) · Mr. Bongo (id 6542, 1×) |
+| 63293 | 2 | 2 | IN THE RED (id 960, 1×) · MUNSTER (id 2002, 1×) |
+| 64111 | 2 | 2 | (self-released) (id 4552, 1×) · HOT RELEASES (id 3508, 1×) |
+| 64170 | 2 | 2 | (self-released) (id 3853, 1×) · NIGHT SLUGS (id 3868, 1×) |
+| 64359 | 2 | 2 | NO BUSINESS (id 4018, 1×) · NOBUSINESS (id 4027, 1×) |
+| 65239 | 2 | 2 | STONE'S THROW (id 1153, 1×) · STONES THROW (id 3777, 1×) |
+| 65296 | 2 | 2 | THIRD MAN (id 4518, 1×) · THIRD MAN RECORDS (id 4914, 1×) |
+| 65862 | 2 | 2 | DIAGONAL RECORDINGS (id 4735, 1×) · ORDINAL RECORDS (id 4622, 1×) |
+| 66152 | 2 | 2 | KIT (id 5151, 1×) · KITE (id 5097, 1×) |
+| 66284 | 2 | 2 | WASP VIDEO ROADHOUSE (id 4984, 1×) · WHARF CAT (id 4756, 1×) |
+| 66400 | 2 | 2 | WAAAW (id 5195, 1×) · WAAW (id 5183, 1×) |
+| 66707 | 2 | 2 | OOdiscs (id 620, 1×) · XI (id 1904, 1×) |
+| 66909 | 2 | 2 | COMMONS (id 5276, 1×) · MILAN (id 340, 1×) |
+| 66994 | 2 | 2 | DUG OUT (id 3872, 1×) · Wildflower (id 5280, 1×) |
+| 67188 | 2 | 2 | SUBLIMINAL SOUNDS (id 2585, 1×) · Subliminal Sounds/Gashud (id 5325, 1×) |
+| 67229 | 2 | 2 | ALIEN TRANSISTOR (id 3576, 1×) · Majikick Records (id 5340, 1×) |
+| 67335 | 2 | 2 | FAMOUS CLASS (id 3189, 1×) · OUT-SIDER (id 4718, 1×) |
+| 67857 | 2 | 2 | AMBIANCES MAGNETIQUES (id 3174, 1×) · Noton (id 5435, 1×) |
+| 67909 | 2 | 2 | (self-released) (id 4459, 1×) · Attenuation Circuit (id 5458, 1×) |
+| 68136 | 2 | 2 | W. 25TH/SUPERIOR VIADUCT (id 5528, 1×) · W.25TH (id 5712, 1×) |
+| 68196 | 2 | 2 | NEUROT (id 2197, 1×) · PRESTO!? (id 5545, 1×) |
+| 68197 | 2 | 2 | Royal Potato Family (id 5512, 1×) · THE ROYAL POTATO FAMILY (id 5540, 1×) |
+| 68664 | 2 | 2 | Intergalactic Mantra (id 5735, 1×) · INTERNATIONAL ANTHEM RECORDING COMPANY (id 4917, 1×) |
+| 69151 | 2 | 2 | Stone Woman Music (id 6187, 1×) · The Orchard (id 6186, 1×) |
+| 69354 | 2 | 2 | Far Out Recording (id 6258, 1×) · Far Out Recordings (id 6259, 1×) |
+| 69785 | 2 | 2 | Domino (id 6480, 1×) · RCA (id 6467, 1×) |
+| 70837 | 2 | 2 | Death Is Not The End (id 6819, 1×) · Soundway Records (id 6825, 1×) |
+| 71854 | 2 | 2 | TraTraTrax (id 7174, 1×) · TraTraTrax/Ambie--Ton (id 7206, 1×) |
+| 71963 | 2 | 2 | CHARM OF SOUND (id 1594, 1×) · Dear Life Records (id 7248, 1×) |
+| 71977 | 2 | 2 | Mr Bongo (id 7151, 1×) · Mr. Bongo (id 6713, 1×) |
 
-## Labels absent from `wxyc_schema.labels`
+## Pin-corpus overlap
 
-**Not measurable offline.** `wxyc_schema.labels` is in neither
-`dev_env/seed-clone.sql` (which carries only `format`, `artists`,
-`genre_artist_crossreference`, `library`, `rotation`) nor any other fixture in
-this repo, and this ticket contacts no database.
-
-What is measurable: this mapping resolves **7,806 distinct label
-names**, listed with their card counts in `resolved-label-names.tsv`. That is
-the **upper bound** on `labels` rows BS#2672 would need to create. The exact
-figure is one query against production, using the emitted file:
+**Not measurable offline.** The override-pin corpus lives in the discogs-cache
+PostgreSQL, which is not part of this dump and is not running locally (ports
+5434/5435 refuse connections; 5433 holds a Backend `wxyc_db`, not the cache).
+This ticket contacts no database, so the overlap has to be measured where the
+pins are. The query, once `label-mapping.tsv` is loaded as
+`tmp_label_mapping(legacy_release_id, …)`:
 
 ```sql
--- load resolved-label-names.tsv into a temp table as (resolved_label, cards)
-SELECT count(*) FROM tmp_resolved_labels t
-WHERE NOT EXISTS (
-  SELECT 1 FROM wxyc_schema.labels l WHERE lower(l.label_name) = lower(t.resolved_label)
-);
+SELECT count(*) FROM tmp_label_mapping m
+WHERE EXISTS (SELECT 1 FROM <pin table> p WHERE p.library_release_id = m.legacy_release_id);
 ```
 
-The expected answer is close to the full 7,806:
-`library.label_id` is 100% NULL across all 64,193 rows, and the only writer of
-`labels` is the forward-looking librarian edit path in
-`library.controller.ts`, so the table has only ever accumulated labels typed
-since that path shipped.
-
-Note the length constraint: `labels.label_name` is `varchar(128)` and
-`library.label` is `varchar(128)`. 0 resolved
-label(s) exceed 128 characters and would need truncation or exclusion by BS#2672.
+BS#2669 reports 15,771 of the resolved cards as pinned — 25.8% of a
+61,046-pin corpus — measured where that table is reachable.
 
 ## Files
 
 | file | rows | contents |
 |---|---:|---|
-| `label-mapping.tsv` | 22,215 | the mapping: `legacy_release_id` → resolved label, with every raw spelling and its play count |
-| `label-conflicts.tsv` | 15,525 | cards with two or more genuinely distinct labels; no candidate value |
-| `resolved-label-names.tsv` | 7,806 | distinct resolved labels and how many cards each covers |
+| `label-mapping.tsv` | 17,088 | the mapping: `legacy_release_id` → `label_name` + `company_id`, with every duplicate `COMPANY` id and the rotation-row count |
+| `label-conflicts.tsv` | 87 | cards whose re-adds name two or more different labels; no value |
 
 Keys are `legacy_release_id` (tubafrenzy `LIBRARY_RELEASE_ID`), never
 `library.id` — resolving to `library.id` needs production and belongs to
-BS#2672.
+BS#2672. Because `company_id` is carried through, BS#2672 can populate
+`library.label_id` directly rather than matching label strings against
+`wxyc_schema.labels`.

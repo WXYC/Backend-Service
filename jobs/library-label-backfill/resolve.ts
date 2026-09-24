@@ -1,175 +1,234 @@
 /**
- * Modal-vote resolution of a card's typed labels into one canonical value
+ * Resolve one label per library card from tubafrenzy's acquisition record
  * (BS#2669).
  *
- * The input for one card is the multiset of raw `LABEL_NAME` strings its plays
- * carry. {@link resolveCard} groups those by {@link normalizeLabel}, and the
- * card is **resolved** only when exactly one non-empty normalized group
- * survives. A card with two or more surviving groups is emitted as a
- * **conflict** with no resolved value.
+ * The input for a card is every `ROTATION_RELEASE` row that names it, each
+ * carrying a `COMPANY_ID` foreign key. The label therefore arrives as an
+ * **identity, not as text** — there is no spelling to normalize, nothing to
+ * vote on, and no unanimity rule to apply. A card resolves when its rotation
+ * rows name one label; a card whose re-adds name two different labels is a
+ * genuine multi-label case and is emitted as a conflict with no value.
  *
- * That asymmetry is the whole design. A wrong label is worse than a missing
- * one here: `library.label` feeds discogs-etl's `label_match` dedup ranking
- * key, which decides which pressing the entire station sees for a release. A
- * modal vote over genuinely disagreeing labels would manufacture confidence
- * the data does not contain — and a reissue legitimately carries different
- * labels across plays, so disagreement is not always error. The modal vote
- * therefore settles *spelling*, never *substance*: it picks the display form
- * within an already-unanimous group and abstains everywhere else.
+ * ## Why identity beats the free-text route
+ *
+ * The first implementation of this ticket read `FLOWSHEET_ENTRY_PROD.LABEL_NAME`
+ * and resolved it by modal vote. That column pools two provenances under one
+ * name: rotation-linked plays carry a label the system copied off the
+ * `ROTATION_RELEASE` record (100.0% fill), and everything else is free text a
+ * DJ typed per play (84.0% fill) describing whatever object was in their hands
+ * — which nothing records as being the library's copy. `library.label` exists
+ * to answer "which pressing does WXYC hold", so an unverifiable label is not
+ * weak evidence, it is the wrong kind of evidence. The cost is asymmetric: a
+ * missing label makes discogs-etl's `label_match` key abstain, which is the
+ * status quo for every card today and costs nothing, while a wrong one
+ * promotes the wrong pressing station-wide and is indistinguishable from a
+ * right one downstream.
+ *
+ * ## Comparison is by name, not by id
+ *
+ * `COMPANY` holds 7,246 rows but only 5,964 distinct names: 520 names sit on
+ * two or more ids ("atlantic" is 123, 6446 and 6486), because the table
+ * accumulated a fresh row each time someone re-entered a label over ~20 years.
+ * Grouping a card's rotation rows by raw `COMPANY_ID` would call 51 such cards
+ * conflicted when every id names the same label. Grouping by case-folded name
+ * resolves them — 17,088 cards rather than 17,037 — and 7 of those cards
+ * differ only in letter case ("Atlantic" vs "atlantic"), which is why the fold
+ * is case-insensitive rather than exact.
+ *
+ * That fold is the *only* text handling in this module, and it is a
+ * case-insensitive comparison of curated foreign-key targets — not the
+ * punctuation-stripping, suffix-dropping, diacritic-folding rule the free-text
+ * route needed. The duplication is tubafrenzy's, and BS#2672 must collapse it
+ * to one `wxyc_schema.labels` row per name rather than carrying three
+ * "Atlantic" rows across: {@link CardLabel.companyIds} lists every id behind a
+ * resolved name so the write side can see what it is collapsing.
  */
 
-import { normalizeLabel } from './normalize';
-
-/** One raw spelling and how many plays used it. */
-export interface RawVariant {
-  /** The label exactly as typed. */
-  raw: string;
-  /** Plays on this card carrying this exact spelling. */
-  plays: number;
+/** A `COMPANY` row, reduced to what this job needs. */
+export interface Company {
+  id: number;
+  /** `COMPANY.NAME`, trimmed. Never empty — empty names are not loaded. */
+  name: string;
 }
 
-/** Raw spellings that share a normalized form. */
-export interface LabelGroup {
-  /** The shared {@link normalizeLabel} output. Never empty. */
-  normalized: string;
-  /** Total plays across every spelling in the group. */
-  plays: number;
-  /** Spellings, most-played first; ties broken lexicographically. */
-  variants: RawVariant[];
+/** One `ROTATION_RELEASE` row that names a library card. */
+export interface RotationRow {
+  /** `ROTATION_RELEASE.LIBRARY_RELEASE_ID`. Always > 0. */
+  legacyReleaseId: number;
+  /** `ROTATION_RELEASE.COMPANY_ID`, or `null` when absent/unresolvable. */
+  companyId: number | null;
+  /** `ROTATION_RELEASE.ALTERNATE_LABEL_NAME`, trimmed; `''` when absent. */
+  alternateLabelName: string;
+}
+
+/** The label candidates sharing one case-folded name, on one card. */
+export interface NameGroup {
+  /** The case-folded comparison key. */
+  folded: string;
+  /** The exact `COMPANY.NAME` to display — the most-seen spelling. */
+  name: string;
+  /** Every `COMPANY_ID` on this card whose name folds here, ascending. */
+  companyIds: number[];
+  /** `ROTATION_RELEASE` rows on this card naming this label. */
+  rotationRows: number;
 }
 
 /** The verdict for one library card. */
-export interface CardResolution {
+export interface CardLabel {
   /** Tubafrenzy `LIBRARY_RELEASE_ID`. Never resolved to `library.id` here. */
   legacyReleaseId: number;
-  /** `resolved` iff exactly one non-empty normalized group survived. */
+  /** `resolved` iff the card's rotation rows name exactly one label. */
   status: 'resolved' | 'conflict';
+  /** `COMPANY.NAME` to write, or `null` for a conflict. */
+  labelName: string | null;
   /**
-   * The display spelling to write, or `null` for a conflict. Conflicts carry
-   * no candidate on purpose — see this module's header.
+   * The `COMPANY_ID` to write to `library.label_id`, or `null` for a conflict.
+   * When one name sits on several ids this is the most-used of them, lowest id
+   * breaking a tie — see {@link companyIds} for the full set.
    */
-  resolvedLabel: string | null;
-  /** The normalized key behind {@link resolvedLabel}, or `null`. */
-  normalizedLabel: string | null;
-  /** Labelled plays on this card that survived normalization. */
-  plays: number;
-  /** Every surviving group, most-played first. */
-  groups: LabelGroup[];
+  companyId: number | null;
+  /** Every id behind the resolved name, ascending; empty for a conflict. */
+  companyIds: number[];
+  /** `ROTATION_RELEASE` rows naming this card. */
+  rotationRows: number;
+  /** Every distinct label on the card, most-used first. */
+  groups: NameGroup[];
 }
 
 /**
- * Deterministic ordering for anything the mapping file prints: most plays
- * first, then lexicographic. Without the second key the output would reorder
- * between runs on ties and the committed file would churn.
+ * Case-fold a `COMPANY.NAME` for comparison.
+ *
+ * Trim plus lowercase, and nothing else. These are curated table rows, not
+ * typed-per-play free text, so the only variation worth absorbing is the
+ * duplicate-row-with-different-capitalisation case the `COMPANY` table
+ * actually contains.
+ *
+ * @param name - a `COMPANY.NAME`
+ * @returns the comparison key
  */
-const byPlaysThenName = <T extends { plays: number }>(key: (t: T) => string) => {
-  return (a: T, b: T): number => b.plays - a.plays || key(a).localeCompare(key(b), 'en');
-};
+export function foldCompanyName(name: string): string {
+  return name.trim().toLowerCase();
+}
 
 /**
- * Resolve one card's typed labels.
+ * Resolve one card's label from its rotation rows.
  *
  * @param legacyReleaseId - the card's tubafrenzy `LIBRARY_RELEASE_ID`
- * @param rawCounts - raw `LABEL_NAME` → play count, for this card only
- * @returns the verdict, or `null` when every spelling normalized away to
- *          nothing (the card carried no label information)
+ * @param rows - every `ROTATION_RELEASE` row naming this card
+ * @param companies - `COMPANY_ID` → row, for id resolution
+ * @returns the verdict, or `null` when no row carried a resolvable
+ *          `COMPANY_ID` (the card is simply not covered by this route)
  */
-export function resolveCard(legacyReleaseId: number, rawCounts: ReadonlyMap<string, number>): CardResolution | null {
-  const byNormalized = new Map<string, RawVariant[]>();
+export function resolveCardLabel(
+  legacyReleaseId: number,
+  rows: readonly RotationRow[],
+  companies: ReadonlyMap<number, Company>
+): CardLabel | null {
+  /** folded name → id → rows using that id */
+  const byFolded = new Map<string, Map<number, number>>();
 
-  for (const [raw, plays] of rawCounts) {
-    const normalized = normalizeLabel(raw);
-    if (normalized === '') continue;
-    const bucket = byNormalized.get(normalized);
-    if (bucket) bucket.push({ raw, plays });
-    else byNormalized.set(normalized, [{ raw, plays }]);
+  for (const row of rows) {
+    if (row.companyId === null) continue;
+    const company = companies.get(row.companyId);
+    if (company === undefined || company.name === '') continue;
+    const folded = foldCompanyName(company.name);
+    let ids = byFolded.get(folded);
+    if (!ids) {
+      ids = new Map<number, number>();
+      byFolded.set(folded, ids);
+    }
+    ids.set(row.companyId, (ids.get(row.companyId) ?? 0) + 1);
   }
 
-  if (byNormalized.size === 0) return null;
+  if (byFolded.size === 0) return null;
 
-  const groups: LabelGroup[] = [];
-  for (const [normalized, variants] of byNormalized) {
-    variants.sort(byPlaysThenName<RawVariant>((v) => v.raw));
-    groups.push({ normalized, plays: variants.reduce((s, v) => s + v.plays, 0), variants });
+  const groups: NameGroup[] = [];
+  for (const [folded, ids] of byFolded) {
+    // Most-used id wins the display spelling and the emitted label_id; lowest
+    // id breaks a tie so the committed file is byte-stable across runs.
+    const ranked = [...ids.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+    const rotationRows = ranked.reduce((sum, [, n]) => sum + n, 0);
+    groups.push({
+      folded,
+      name: companies.get(ranked[0][0])?.name ?? '',
+      companyIds: [...ids.keys()].sort((a, b) => a - b),
+      rotationRows,
+    });
   }
-  groups.sort(byPlaysThenName<LabelGroup>((g) => g.normalized));
+  groups.sort((a, b) => b.rotationRows - a.rotationRows || a.folded.localeCompare(b.folded, 'en'));
 
-  const plays = groups.reduce((s, g) => s + g.plays, 0);
+  const rotationRows = groups.reduce((sum, g) => sum + g.rotationRows, 0);
 
   if (groups.length > 1) {
-    return { legacyReleaseId, status: 'conflict', resolvedLabel: null, normalizedLabel: null, plays, groups };
+    return {
+      legacyReleaseId,
+      status: 'conflict',
+      labelName: null,
+      companyId: null,
+      companyIds: [],
+      rotationRows,
+      groups,
+    };
   }
 
   const only = groups[0];
+  const ids = byFolded.get(only.folded) as Map<number, number>;
+  const winner = [...ids.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
   return {
     legacyReleaseId,
     status: 'resolved',
-    // Most-played spelling within the unanimous group is the display value.
-    resolvedLabel: only.variants[0].raw,
-    normalizedLabel: only.normalized,
-    plays,
+    labelName: only.name,
+    companyId: winner,
+    companyIds: only.companyIds,
+    rotationRows,
     groups,
   };
 }
 
 /** Aggregate figures for the report. */
-export interface ResolutionSummary {
-  /** Cards with at least one non-empty raw `LABEL_NAME`. */
-  cardsWithAnyRawLabel: number;
-  /** Of those, cards where every play typed the same raw string. */
-  cardsSingleValuedRaw: number;
-  /** Cards surviving normalization (at least one non-empty normalized form). */
-  cardsAfterNormalization: number;
-  /** Cards resolved — exactly one surviving normalized group. */
+export interface LabelSummary {
+  /** Distinct cards named by a rotation row with a resolvable `COMPANY_ID`. */
+  cardsCovered: number;
+  /** Cards whose rotation rows name exactly one label. */
   cardsResolved: number;
-  /** Cards left conflicted. */
+  /** Cards naming two or more different labels across re-adds. */
   cardsConflicted: number;
-  /** Surviving-group count → how many cards had that many. */
-  groupCountDistribution: Map<number, number>;
-  /** Raw-variant count → how many cards had that many, before normalization. */
-  rawVariantDistribution: Map<number, number>;
-  /** Distinct resolved display labels across every resolved card. */
-  distinctResolvedLabels: number;
+  /** Distinct `COMPANY.NAME` values across every resolved card. */
+  distinctLabels: number;
+  /** Distinct `COMPANY_ID` values emitted across every resolved card. */
+  distinctCompanyIds: number;
+  /**
+   * Resolved cards whose single label sits on more than one `COMPANY_ID` —
+   * the duplicate-`COMPANY`-row population BS#2672 must collapse.
+   */
+  cardsWithDuplicateCompanyRows: number;
 }
 
 /**
  * Fold per-card verdicts into the figures the report prints.
  *
- * @param rawCountsByCard - raw `LABEL_NAME` → plays, per card, pre-resolution
- * @param resolutions - the surviving verdicts, in any order
+ * @param labels - every verdict, in any order
  */
-export function summarize(
-  rawCountsByCard: ReadonlyMap<number, ReadonlyMap<string, number>>,
-  resolutions: readonly CardResolution[]
-): ResolutionSummary {
-  const rawVariantDistribution = new Map<number, number>();
-  let cardsSingleValuedRaw = 0;
-  for (const counts of rawCountsByCard.values()) {
-    const n = counts.size;
-    rawVariantDistribution.set(n, (rawVariantDistribution.get(n) ?? 0) + 1);
-    if (n === 1) cardsSingleValuedRaw++;
-  }
-
-  const groupCountDistribution = new Map<number, number>();
-  const distinct = new Set<string>();
+export function summarize(labels: readonly CardLabel[]): LabelSummary {
+  const names = new Set<string>();
+  const ids = new Set<number>();
   let cardsResolved = 0;
-  for (const r of resolutions) {
-    const n = r.groups.length;
-    groupCountDistribution.set(n, (groupCountDistribution.get(n) ?? 0) + 1);
-    if (r.status === 'resolved') {
-      cardsResolved++;
-      if (r.resolvedLabel !== null) distinct.add(r.resolvedLabel);
-    }
+  let cardsWithDuplicateCompanyRows = 0;
+
+  for (const l of labels) {
+    if (l.status !== 'resolved') continue;
+    cardsResolved++;
+    if (l.labelName !== null) names.add(foldCompanyName(l.labelName));
+    if (l.companyId !== null) ids.add(l.companyId);
+    if (l.companyIds.length > 1) cardsWithDuplicateCompanyRows++;
   }
 
   return {
-    cardsWithAnyRawLabel: rawCountsByCard.size,
-    cardsSingleValuedRaw,
-    cardsAfterNormalization: resolutions.length,
+    cardsCovered: labels.length,
     cardsResolved,
-    cardsConflicted: resolutions.length - cardsResolved,
-    groupCountDistribution,
-    rawVariantDistribution,
-    distinctResolvedLabels: distinct.size,
+    cardsConflicted: labels.length - cardsResolved,
+    distinctLabels: names.size,
+    distinctCompanyIds: ids.size,
+    cardsWithDuplicateCompanyRows,
   };
 }
