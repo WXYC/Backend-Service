@@ -64,7 +64,9 @@
  * predicate — only requests that reach better-auth's router go through it
  * at all. `/auth/wxyc/station-signup` (public, creates an account),
  * `/auth/wxyc/complete-onboarding` (public, sets a password from an invite
- * token), `/auth/wxyc/lookup-email`, `/auth/check-request-ban`,
+ * token), `/auth/wxyc/lookup-email`, `/auth/wxyc/update-identity`
+ * (session-authenticated, writes the caller's own legal name and handle),
+ * `/auth/check-request-ban`,
  * `/auth/admin/provision-user`, the six `/auth/admin/station-signup/*` ops,
  * and three non-production test endpoints are hand-written Express routes
  * in `apps/auth` that read `req.body` directly and never reach better-call

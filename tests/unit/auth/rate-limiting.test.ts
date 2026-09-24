@@ -3,6 +3,8 @@ import { resolve } from 'path';
 import { FLAT_MOUNTS } from '../../../apps/auth/audit-coverage';
 import { statementIndex } from '../../utils/statement-index';
 
+const EXPLICITLY_AUDITED_RATE_LIMITED_PATHS = ['/auth/wxyc/update-identity'];
+
 describe('Auth service rate limiting', () => {
   const authAppSource = readFileSync(resolve(__dirname, '../../../apps/auth/app.ts'), 'utf-8');
 
@@ -313,29 +315,45 @@ describe('Auth service rate limiting', () => {
     // this is the one assertion that can catch drift in EITHER direction:
     // a FLAT_MOUNTS addition with no limiter, or a limiter mounting a path
     // FLAT_MOUNTS no longer lists.
-    it('rate-limits exactly the union of the fourteen resolveActor FLAT_MOUNTS paths — no more, no fewer', () => {
+    it('rate-limits exactly the union of the fourteen resolveActor FLAT_MOUNTS paths plus the explicitly-audited extras — no more, no fewer', () => {
       const expectedPaths = new Set(
         FLAT_MOUNTS.filter((mount) => mount.resolveActor).map((mount) => `/auth${mount.path}`)
       );
       expect(expectedPaths.size).toBe(14);
 
-      const updateUserMatch = authAppSource.match(
-        /app\.use\(\s*'(\/auth\/update-user)'\s*,\s*updateUserRateLimit\s*\)/
-      );
+      // Harvest EVERY `updateUserRateLimit` mount, not just `/auth/update-user`.
+      // A regex pinned to that one literal path made this assertion blind to a
+      // second mount on the same limiter: BS#2681 added
+      // `/auth/wxyc/update-identity` and nothing here noticed, while the
+      // comment above still promised to catch "a limiter mounting a path
+      // FLAT_MOUNTS no longer lists".
+      const updateUserMounts = [
+        ...authAppSource.matchAll(/app\.use\(\s*'([^']+)'\s*,\s*updateUserRateLimit\s*\)/g),
+      ].map((m) => m[1]);
       const sensitiveBlock = authAppSource.match(
         /for \(const path of \[([^\]]*)\]\) \{\s*app\.use\(path, sensitiveAuthMutationRateLimit\);\s*\}/
       )?.[1];
       const organizationBlock = authAppSource.match(/const organizationMutationPaths = \[([^\]]*)\];/)?.[1];
 
-      expect(updateUserMatch).not.toBeNull();
+      expect(updateUserMounts.length).toBeGreaterThan(0);
       expect(sensitiveBlock).toBeDefined();
       expect(organizationBlock).toBeDefined();
 
       const mountedPaths = new Set<string>([
-        updateUserMatch[1],
+        ...updateUserMounts,
         ...[...sensitiveBlock.matchAll(/'([^']+)'/g)].map((m) => m[1]),
         ...[...organizationBlock.matchAll(/'([^']+)'/g)].map((m) => m[1]),
       ]);
+
+      // Rate-limited but deliberately NOT a FLAT_MOUNT: this route's write
+      // goes straight to `internalAdapter`, so it is audited through
+      // EXPLICIT_CALL_SITES and can never appear in FLAT_MOUNTS. Naming it
+      // here is what keeps the set equality exact in both directions instead
+      // of loosening it to a subset check.
+      for (const path of EXPLICITLY_AUDITED_RATE_LIMITED_PATHS) {
+        expect(mountedPaths).toContain(path);
+        expectedPaths.add(path);
+      }
 
       expect(mountedPaths).toEqual(expectedPaths);
     });

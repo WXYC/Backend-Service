@@ -23,9 +23,16 @@ jest.mock('@wxyc/authentication', () => ({
 }));
 jest.mock('@wxyc/database', () => ({
   recordAccountAuditEvent: (...args: unknown[]) => mockRecordAccountAuditEvent(...args),
+  // Real implementation, same reason as deriveStationSignupIpHash above: it is
+  // pure (dj-name.ts imports nothing) and it is the canonical rule the route
+  // delegates its handle check to. Stubbing it would let the route's guard
+  // pass a test while disagreeing with the predicate production uses.
+  resolveDjDisplayName: jest.requireActual<typeof import('../../../shared/database/src/dj-name')>(
+    '../../../shared/database/src/dj-name'
+  ).resolveDjDisplayName,
 }));
 
-import { UpdateIdentityError, updateIdentityFromRequest } from '../../../apps/auth/update-identity';
+import { EDITABLE_FIELDS, UpdateIdentityError, updateIdentityFromRequest } from '../../../apps/auth/update-identity';
 
 const emptyHeaders = new Headers();
 
@@ -36,7 +43,9 @@ const signedInAs = (user: Record<string, unknown>): void => {
 beforeEach(() => {
   jest.clearAllMocks();
   signedInAs({});
-  mockUpdateUser.mockResolvedValue(undefined as never);
+  // Truthy: the route now treats a null/undefined return as a write that
+  // did not land. The real adapter returns the updated row.
+  mockUpdateUser.mockResolvedValue({ id: 'user-id-001' } as never);
   mockRecordAccountAuditEvent.mockResolvedValue(undefined as never);
 });
 
@@ -122,6 +131,18 @@ describe('updateIdentityFromRequest', () => {
 
       expect(mockUpdateUser).toHaveBeenCalledWith('user-id-001', { djName: 'DJ spacetime' });
     });
+
+    // The table above is a hand-written list of field names, which is exactly
+    // the shape BS#2358 inverted `pii-additional-fields-input.test.ts` away
+    // from: such a list "structurally could not catch the failure it exists to
+    // prevent -- a field nobody remembers to add to the list", and
+    // `capabilities` and `hasCompletedOnboarding` are the two it named as
+    // having slipped through one. So pin the allowlist ITSELF by value.
+    // Widening it then has to be a deliberate, reviewable edit here, on the
+    // one route that by its own docblock has no `parseUserInput` behind it.
+    it('admits exactly two fields, so a third cannot be added silently', () => {
+      expect([...EDITABLE_FIELDS]).toEqual(['realName', 'djName']);
+    });
   });
 
   describe('validation', () => {
@@ -159,6 +180,18 @@ describe('updateIdentityFromRequest', () => {
         statusCode: 400,
         code: 'INVALID_REQUEST',
       });
+      expect(mockUpdateUser).not.toHaveBeenCalled();
+    });
+
+    // Only an ABSENT key means "leave unchanged". Paired with a valid field so
+    // the emptiness check can't be what rejects it -- that is the shape where
+    // treating null as absent would return 200 having written only half of
+    // what was sent.
+    it.each([['realName'], ['djName']])('rejects an explicit null %s rather than ignoring it', async (field) => {
+      const other = field === 'realName' ? 'djName' : 'realName';
+      await expect(
+        updateIdentityFromRequest({ [other]: 'Juana Molina', [field]: null }, emptyHeaders)
+      ).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_REQUEST' });
       expect(mockUpdateUser).not.toHaveBeenCalled();
     });
 
@@ -200,6 +233,54 @@ describe('updateIdentityFromRequest', () => {
       );
     });
 
+    // Every outcome but the 401 has a resolved session. An unattributable row
+    // is the failure mode here: a DJ retrying a rejected handle would fill the
+    // table with NULL-actor rows nobody can trace.
+    it.each([
+      ['a validation rejection', { djName: 'x'.repeat(256) }],
+      ['a reserved-handle rejection', { djName: 'Anonymous' }],
+    ])('names the actor on %s, not just on success', async (_label, body) => {
+      await expect(updateIdentityFromRequest(body, emptyHeaders)).rejects.toBeInstanceOf(UpdateIdentityError);
+
+      expect(mockRecordAccountAuditEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ actorUserId: 'user-id-001', subjectUserId: 'user-id-001' }),
+        expect.anything()
+      );
+    });
+
+    it('leaves the actor unset when there is no session to attribute to', async () => {
+      mockGetSession.mockResolvedValue(null as never);
+
+      await expect(updateIdentityFromRequest({ djName: 'DJ spacetime' }, emptyHeaders)).rejects.toBeInstanceOf(
+        UpdateIdentityError
+      );
+
+      const [event] = mockRecordAccountAuditEvent.mock.calls[0] as [Record<string, unknown>];
+      expect(event.actorUserId).toBeUndefined();
+      expect(event.outcome).toBe(401);
+    });
+
+    // Without this the row names the impersonated DJ as sole actor, so a
+    // manager renaming someone while impersonating them is indistinguishable
+    // from the DJ doing it themselves.
+    it('records the impersonator when the session is an impersonation', async () => {
+      mockGetSession.mockResolvedValue({
+        user: { id: 'user-id-001' },
+        session: { impersonatedBy: 'manager-id-009' },
+      } as never);
+
+      await updateIdentityFromRequest({ djName: 'DJ spacetime' }, emptyHeaders);
+
+      expect(mockRecordAccountAuditEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actorUserId: 'user-id-001',
+          subjectUserId: 'user-id-001',
+          impersonatorUserId: 'manager-id-009',
+        }),
+        expect.anything()
+      );
+    });
+
     // The audit row must never carry the new or old name — this is the PII
     // column pair, and account_audit_event has no field for a value anyway.
     it('records no field values', async () => {
@@ -216,6 +297,24 @@ describe('updateIdentityFromRequest', () => {
 
     await expect(updateIdentityFromRequest({ djName: 'DJ spacetime' }, emptyHeaders)).rejects.toThrow(
       'connection terminated'
+    );
+  });
+
+  // `updateWithHooks` answers null on a vetoed write, and the drizzle adapter
+  // answers null when the WHERE matched no row -- an account deleted between
+  // the session check and the write. Discarding that return is the only way
+  // this route could report a write that never landed.
+  it('does not report success when the adapter reports no row updated', async () => {
+    mockUpdateUser.mockResolvedValue(null as never);
+
+    await expect(updateIdentityFromRequest({ djName: 'DJ spacetime' }, emptyHeaders)).rejects.toMatchObject({
+      statusCode: 500,
+      code: 'UPDATE_FAILED',
+    });
+
+    expect(mockRecordAccountAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 500, errorCode: 'UPDATE_FAILED' }),
+      expect.anything()
     );
   });
 });

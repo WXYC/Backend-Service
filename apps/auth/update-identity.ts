@@ -36,14 +36,16 @@
  *      same row.
  *
  * `internalAdapter.updateUser` still runs `databaseHooks.user.update.before`
- * — `deriveOrRejectUserNameOnUpdate` — so `auth_user.name` is re-derived
- * from the new handle at its single choke point exactly as it is for
- * onboarding and provisioning. This route deliberately does NOT send a
- * `name` key; the hook derives it.
+ * — `deriveOrRejectUserNameOnUpdate` — so the hook, not this route, owns
+ * `auth_user.name`. Precisely: a payload carrying `djName` re-derives `name`
+ * from the new handle; a `realName`-only payload carries no `djName` key, so
+ * the hook no-ops and `name` is left alone. Both are correct, and they are
+ * not the same behaviour — do not read this as "every write re-derives".
+ * This route deliberately never sends a `name` key; the hook derives it.
  */
 
 import { auth, deriveStationSignupIpHash } from '@wxyc/authentication';
-import { recordAccountAuditEvent } from '@wxyc/database';
+import { recordAccountAuditEvent, resolveDjDisplayName } from '@wxyc/database';
 import { onAccountAuditError } from './account-audit-error.js';
 
 export class UpdateIdentityError extends Error {
@@ -72,7 +74,7 @@ const MAX_IDENTITY_FIELD_LENGTH = 255;
  * reviewable edit — the same posture as `WRITABLE_FIELDS` in
  * `tests/unit/authentication/pii-additional-fields-input.test.ts`.
  */
-const EDITABLE_FIELDS = ['realName', 'djName'] as const;
+export const EDITABLE_FIELDS = ['realName', 'djName'] as const;
 type EditableField = (typeof EDITABLE_FIELDS)[number];
 
 /**
@@ -86,7 +88,14 @@ type EditableField = (typeof EDITABLE_FIELDS)[number];
  * rather than empty.
  */
 function parseField(raw: unknown, field: EditableField): string | undefined {
-  if (raw === undefined || raw === null) return undefined;
+  // Only an ABSENT key means "leave unchanged". `null` is a supplied value
+  // and falls through to the type check below — it must not join `undefined`
+  // in this early return. A client sending `{realName: 'X', djName: null}`
+  // would otherwise get a 200 echoing `{realName}` with the handle silently
+  // untouched: the precise "told it succeeded" failure this function's
+  // contract above forbids, one JSON value over from the blank that IS
+  // rejected.
+  if (raw === undefined) return undefined;
   if (typeof raw !== 'string') {
     throw new UpdateIdentityError(400, `${field} must be a string`, 'INVALID_REQUEST');
   }
@@ -105,15 +114,26 @@ function parseField(raw: unknown, field: EditableField): string | undefined {
 }
 
 /**
- * `resolveDjDisplayName` treats the literal "Anonymous" as unusable, so
- * accepting one here would write `dj_name = 'Anonymous'` while
+ * A handle `resolveDjDisplayName` would reject is refused at the door rather
+ * than written: it would leave `dj_name = 'Anonymous'` while
  * `deriveOrRejectUserNameOnUpdate` left `auth_user.name` at its prior value
  * — the split state behind the 2026-06-02 on-air incident (BS#1286, epic
- * #1288). Refuse it at the door, with a message that says why, rather than
- * saving a handle that will never render.
+ * #1288).
+ *
+ * Calls the canonical predicate rather than restating `=== 'anonymous'`.
+ * `dj-name.ts`'s own header is a cautionary tale about exactly that move (a
+ * copy in `jobs/flowsheet-april-gap-import` omitted the literal-"Anonymous"
+ * filter), and `@wxyc/database` is imported here anyway. `parseField` has
+ * already trimmed and rejected blank, so today only the "Anonymous" arm can
+ * fire — routing through the helper is what keeps that true if the rule ever
+ * grows a third case.
+ *
+ * This closes the door for THIS route only. The admin roster path can still
+ * write `dj_name = 'Anonymous'` and produce the same split state; bounding
+ * that is a separate change, not something this guard reaches.
  */
 function assertUsableHandle(djName: string): void {
-  if (djName.toLowerCase() === 'anonymous') {
+  if (resolveDjDisplayName(djName) === null) {
     throw new UpdateIdentityError(400, '"Anonymous" is reserved and cannot be used as a DJ name', 'INVALID_DJ_NAME');
   }
 }
@@ -135,7 +155,18 @@ function buildUpdate(body: Record<string, unknown>): Partial<Record<EditableFiel
   return update;
 }
 
-async function resolveIdentityUpdate(body: Record<string, unknown>, headers: Headers): Promise<UpdateIdentityResult> {
+interface ResolvedActor {
+  userId: string;
+  /** `auth_session.impersonated_by` — set only under admin impersonation. */
+  impersonatorUserId?: string;
+}
+
+/**
+ * Split out from the write so the audit wrapper can learn the actor BEFORE
+ * body validation runs. Every 400 this route can throw happens with a
+ * resolved session; only the 401 genuinely has no actor.
+ */
+async function resolveActor(headers: Headers): Promise<ResolvedActor> {
   const session = await auth.api.getSession({ headers });
   if (!session?.user) {
     throw new UpdateIdentityError(401, 'Sign in to update your profile', 'UNAUTHORIZED');
@@ -144,14 +175,32 @@ async function resolveIdentityUpdate(body: Record<string, unknown>, headers: Hea
     throw new UpdateIdentityError(403, 'Anonymous sessions cannot update a profile', 'FORBIDDEN');
   }
 
+  return {
+    userId: session.user.id,
+    impersonatorUserId:
+      (session.session as { impersonatedBy?: string | null } | undefined)?.impersonatedBy ?? undefined,
+  };
+}
+
+async function applyIdentityUpdate(userId: string, body: Record<string, unknown>): Promise<UpdateIdentityResult> {
   // Shape is validated AFTER the session so an unauthenticated prober learns
   // nothing about the accepted body from the error it gets back.
   const update = buildUpdate(body);
 
   const context = await auth.$context;
-  await context.internalAdapter.updateUser(session.user.id, update);
+  // `updateWithHooks` answers `null` when a before-hook vetoes the write, and
+  // the drizzle adapter answers `null` when the WHERE matched no row (the
+  // account was deleted between the session check and here). Neither is
+  // reachable on today's payloads — this route never sends `name`, the only
+  // key the hook vetoes — but discarding the return is the one way this
+  // function could report a write that did not happen, and the check is a
+  // line.
+  const updated = await context.internalAdapter.updateUser(userId, update);
+  if (!updated) {
+    throw new UpdateIdentityError(500, 'Profile update did not apply', 'UPDATE_FAILED');
+  }
 
-  return { status: true, userId: session.user.id, ...update };
+  return { status: true, userId, ...update };
 }
 
 /**
@@ -159,33 +208,50 @@ async function resolveIdentityUpdate(body: Record<string, unknown>, headers: Hea
  * partial application fixes action/ipHash/source, and the error is narrowed
  * once.
  *
- * Unlike onboarding, this route always has a session, so the actor is known
- * — and actor and subject are necessarily the same row (property 1 in the
- * module docblock). Both are recorded so a reader of `account_audit_event`
- * can tell a self-service edit from the admin roster path without joining
- * anything. Only ids are recorded: the values being written are the PII name
- * pair, and `account_audit_event` has no column for a value.
+ * Unlike onboarding, every outcome but the 401 has a resolved session, so the
+ * actor is known on FAILURES too — not just on the 200. `actor` is captured
+ * into the closure the moment it resolves and before any body validation, so
+ * a rejected save (an over-length handle, a reserved "Anonymous") records who
+ * attempted it rather than a NULL row nobody can attribute. Actor and subject
+ * are the same id whenever one exists: property 1 in the module docblock
+ * makes that structural, and recording both is what lets a reader of
+ * `account_audit_event` tell a self-service edit from the admin roster path
+ * without joining anything.
+ *
+ * `impersonatorUserId` is carried for the same reason the generic
+ * `account-audit-middleware` carries it: under admin impersonation the actor
+ * id alone names the impersonated DJ, so a station manager renaming someone
+ * while impersonating them would otherwise be indistinguishable from the DJ
+ * doing it themselves.
+ *
+ * Only ids are recorded — the values being written are the PII name pair, and
+ * `account_audit_event` has no column for a value.
  */
 export async function updateIdentityFromRequest(
   body: Record<string, unknown>,
   headers: Headers
 ): Promise<UpdateIdentityResult> {
   const ipHash = deriveStationSignupIpHash(headers.get('x-real-ip') ?? undefined);
-  const audit = (fields: {
-    actorUserId?: string;
-    subjectUserId?: string;
-    outcome: number;
-    errorCode?: string | null;
-  }): void => {
+  let actor: ResolvedActor | undefined;
+  const audit = (fields: { outcome: number; errorCode?: string | null }): void => {
     void recordAccountAuditEvent(
-      { action: 'wxyc.update-identity', ipHash, source: 'http', ...fields },
+      {
+        action: 'wxyc.update-identity',
+        ipHash,
+        source: 'http',
+        actorUserId: actor?.userId,
+        subjectUserId: actor?.userId,
+        impersonatorUserId: actor?.impersonatorUserId,
+        ...fields,
+      },
       { onError: onAccountAuditError }
     );
   };
 
   try {
-    const result = await resolveIdentityUpdate(body, headers);
-    audit({ actorUserId: result.userId, subjectUserId: result.userId, outcome: 200 });
+    actor = await resolveActor(headers);
+    const result = await applyIdentityUpdate(actor.userId, body);
+    audit({ outcome: 200 });
     return result;
   } catch (error) {
     const known = error instanceof UpdateIdentityError ? error : null;
