@@ -1,23 +1,32 @@
 /**
- * BS#2669 — resolve a canonical label per library card from the archived
- * tubafrenzy flowsheet.
+ * BS#2669 — resolve a canonical label per library card from tubafrenzy's
+ * acquisition record.
  *
  * READ-ONLY. This job opens no database connection of any kind. It reads a
- * gzipped mysqldump off local disk and writes three TSVs plus a Markdown
- * report into this directory. Applying the mapping to `wxyc_schema.library`
- * is BS#2672 and deliberately lives behind a separate review.
+ * gzipped mysqldump off local disk and writes two TSVs plus a Markdown report
+ * into this directory. Applying the mapping to `wxyc_schema.library` is
+ * BS#2672 and deliberately lives behind a separate review.
+ *
+ * The mapping is built from `ROTATION_RELEASE` joined to `COMPANY` — 21,641 +
+ * 7,246 rows. The flowsheet is not an input to it. `FLOWSHEET_ENTRY_PROD` is
+ * read only to *measure the population this job deliberately excludes* (see
+ * `censusExcludedDjTyped`), which the report has to state; `--skip-excluded-census`
+ * skips that pass and the ~4 minutes it costs.
  *
  * Usage:
  *   npx tsx jobs/library-label-backfill/job.ts --dump <path-to.sql.gz>
  *
  * Options:
- *   --dump <path>    required; the mysqldump `.sql.gz` to read
- *   --out <dir>      output directory (default: this job's directory)
- *   --clone <path>   a `pg_dump --data-only` clone of `wxyc_schema.library`
- *                    used only to report how many mapped cards still have a
- *                    live row (default: dev_env/seed-clone.sql when present)
+ *   --dump <path>             required; the mysqldump `.sql.gz` to read
+ *   --out <dir>               output directory (default: this job's directory)
+ *   --clone <path>            a `pg_dump --data-only` clone of
+ *                             `wxyc_schema.library`, used only to report how
+ *                             many mapped cards still have a live row
+ *                             (default: dev_env/seed-clone.sql when present)
+ *   --skip-excluded-census    don't scan the flowsheet for the excluded-population
+ *                             figures; the report says they were not measured
  *
- * The run prints its inputs' SHA-256 and embeds it in the report, because the
+ * The run prints its input's SHA-256 and embeds it in the report, because the
  * provenance of the capture is the one fact a reviewer cannot re-derive from
  * the output.
  */
@@ -28,13 +37,21 @@ import { resolve as resolvePath, basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { iterTableRows } from './dump';
-import { SUFFIX_TOKENS } from './normalize';
-import { resolveCard, summarize, type CardResolution } from './resolve';
+import { resolveCardLabel, summarize, type CardLabel, type Company, type RotationRow } from './resolve';
 
-const TABLE = 'FLOWSHEET_ENTRY_PROD';
-/** 0-based column positions in `FLOWSHEET_ENTRY_PROD`, per the dump's DDL. */
-const COL_LIBRARY_RELEASE_ID = 6;
-const COL_LABEL_NAME = 8;
+const ROTATION_TABLE = 'ROTATION_RELEASE';
+const COMPANY_TABLE = 'COMPANY';
+const FLOWSHEET_TABLE = 'FLOWSHEET_ENTRY_PROD';
+
+/** 0-based column positions, per each table's DDL in the dump. */
+const RR_COMPANY_ID = 7;
+const RR_ALTERNATE_LABEL_NAME = 8;
+const RR_LIBRARY_RELEASE_ID = 21;
+const CO_ID = 0;
+const CO_NAME = 1;
+const FS_LIBRARY_RELEASE_ID = 6;
+const FS_ROTATION_RELEASE_ID = 7;
+const FS_LABEL_NAME = 8;
 /** 0-based `legacy_release_id` in the seed-clone's `wxyc_schema.library` COPY. */
 const CLONE_LEGACY_RELEASE_ID = 14;
 
@@ -44,6 +61,7 @@ interface Args {
   dump: string;
   out: string;
   clone: string | null;
+  skipExcludedCensus: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Args {
@@ -57,7 +75,12 @@ function parseArgs(argv: readonly string[]): Args {
   }
   const defaultClone = resolvePath(HERE, '..', '..', 'dev_env', 'seed-clone.sql');
   const clone = get('--clone') ?? (existsSync(defaultClone) ? defaultClone : null);
-  return { dump: resolvePath(dump), out: resolvePath(get('--out') ?? HERE), clone };
+  return {
+    dump: resolvePath(dump),
+    out: resolvePath(get('--out') ?? HERE),
+    clone,
+    skipExcludedCensus: argv.includes('--skip-excluded-census'),
+  };
 }
 
 /** SHA-256 of a file, streamed so a 142 MB capture never lands in memory. */
@@ -68,60 +91,151 @@ async function sha256(path: string): Promise<string> {
   return hash.digest('hex');
 }
 
-interface ScanResult {
-  totalRows: number;
-  playsLinkedToCard: number;
-  playsLabelled: number;
-  rawCountsByCard: Map<number, Map<string, number>>;
-  /** Raw labels containing a tab or newline, which the TSV output cannot carry verbatim. */
-  untypeableRawLabels: number;
+/** Load `COMPANY` into an id → row map, skipping rows with an empty NAME. */
+async function loadCompanies(dumpPath: string): Promise<{ companies: Map<number, Company>; totalRows: number }> {
+  const companies = new Map<number, Company>();
+  let totalRows = 0;
+  for await (const row of iterTableRows(dumpPath, COMPANY_TABLE)) {
+    totalRows++;
+    const id = Number(row[CO_ID]);
+    const name = (row[CO_NAME] ?? '').trim();
+    if (!Number.isInteger(id) || id <= 0 || name === '') continue;
+    companies.set(id, { id, name });
+  }
+  return { companies, totalRows };
 }
 
-/**
- * Single pass over the dump, accumulating raw label counts per card.
- *
- * A play counts as *linked* when `LIBRARY_RELEASE_ID > 0` (0 and NULL are both
- * "not a card" in tubafrenzy) and as *labelled* when it additionally carries a
- * `LABEL_NAME` that is not empty after trimming.
- */
-async function scanDump(dumpPath: string): Promise<ScanResult> {
-  const rawCountsByCard = new Map<number, Map<string, number>>();
+interface RotationScan {
+  totalRows: number;
+  /** Rows whose `LIBRARY_RELEASE_ID` names a card. */
+  linkedRows: number;
+  /** Of those, rows whose `COMPANY_ID` resolves to a named `COMPANY` row. */
+  rowsWithCompany: number;
+  /** Linked rows carrying an `ALTERNATE_LABEL_NAME`. */
+  rowsWithAlternate: number;
+  /** Linked rows with no resolvable `COMPANY_ID` but an `ALTERNATE_LABEL_NAME`. */
+  rowsAlternateOnly: number;
+  /** Cards reachable ONLY via `ALTERNATE_LABEL_NAME`. */
+  cardsAlternateOnly: Set<number>;
+  byCard: Map<number, RotationRow[]>;
+}
+
+/** Single pass over `ROTATION_RELEASE`, grouping rows by the card they name. */
+async function scanRotation(dumpPath: string, companies: ReadonlyMap<number, Company>): Promise<RotationScan> {
+  const byCard = new Map<number, RotationRow[]>();
+  const cardsAlternateOnly = new Set<number>();
   let totalRows = 0;
-  let playsLinkedToCard = 0;
-  let playsLabelled = 0;
-  let untypeableRawLabels = 0;
+  let linkedRows = 0;
+  let rowsWithCompany = 0;
+  let rowsWithAlternate = 0;
+  let rowsAlternateOnly = 0;
 
-  for await (const row of iterTableRows(dumpPath, TABLE)) {
+  for await (const row of iterTableRows(dumpPath, ROTATION_TABLE)) {
     totalRows++;
-
-    const idText = row[COL_LIBRARY_RELEASE_ID];
-    if (idText === null || idText === undefined) continue;
-    const legacyReleaseId = Number(idText);
+    const legacyReleaseId = Number(row[RR_LIBRARY_RELEASE_ID]);
     if (!Number.isInteger(legacyReleaseId) || legacyReleaseId <= 0) continue;
-    playsLinkedToCard++;
+    linkedRows++;
 
-    const rawLabel = row[COL_LABEL_NAME];
-    if (rawLabel === null || rawLabel === undefined) continue;
-    const trimmed = rawLabel.trim();
-    if (trimmed === '') continue;
-    playsLabelled++;
+    const rawCompanyId = row[RR_COMPANY_ID];
+    const parsed = rawCompanyId === null ? Number.NaN : Number(rawCompanyId);
+    const resolvable = Number.isInteger(parsed) && parsed > 0 && companies.has(parsed);
+    const companyId = resolvable ? parsed : null;
+    const alternateLabelName = (row[RR_ALTERNATE_LABEL_NAME] ?? '').trim();
 
-    if (/[\t\n\r]/.test(trimmed)) untypeableRawLabels++;
-    const key = trimmed.replace(/[\t\n\r]+/g, ' ');
-
-    let counts = rawCountsByCard.get(legacyReleaseId);
-    if (!counts) {
-      counts = new Map<string, number>();
-      rawCountsByCard.set(legacyReleaseId, counts);
-    }
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-
-    if (totalRows % 500_000 === 0) {
-      console.log(`  …${totalRows.toLocaleString('en-US')} rows scanned`);
+    if (alternateLabelName !== '') rowsWithAlternate++;
+    if (companyId !== null) {
+      rowsWithCompany++;
+      const bucket = byCard.get(legacyReleaseId);
+      if (bucket) bucket.push({ legacyReleaseId, companyId, alternateLabelName });
+      else byCard.set(legacyReleaseId, [{ legacyReleaseId, companyId, alternateLabelName }]);
+    } else if (alternateLabelName !== '') {
+      rowsAlternateOnly++;
+      cardsAlternateOnly.add(legacyReleaseId);
     }
   }
 
-  return { totalRows, playsLinkedToCard, playsLabelled, rawCountsByCard, untypeableRawLabels };
+  // A card is "alternate-only" only if NO row on it carried a company id.
+  for (const card of [...cardsAlternateOnly]) {
+    if (byCard.has(card)) cardsAlternateOnly.delete(card);
+  }
+
+  return {
+    totalRows,
+    linkedRows,
+    rowsWithCompany,
+    rowsWithAlternate,
+    rowsAlternateOnly,
+    cardsAlternateOnly,
+    byCard,
+  };
+}
+
+/** The population this job deliberately does not map. */
+interface ExcludedCensus {
+  linkedPlays: number;
+  labelledPlays: number;
+  /** Plays on a rotation entry (`ROTATION_RELEASE_ID > 0`). */
+  rotationLinkedPlays: number;
+  rotationLabelledPlays: number;
+  /** Plays not on a rotation entry — the DJ typed the label per play. */
+  djLinkedPlays: number;
+  djLabelledPlays: number;
+  /** Cards carrying at least one DJ-typed label. */
+  djCards: number;
+  /** Of those, cards this job's mapping does not already cover. */
+  djCardsNotCovered: number;
+}
+
+/**
+ * Measure the DJ-typed population the mapping excludes.
+ *
+ * Reporting only — nothing here feeds the mapping. It exists because "we
+ * excluded a source" is a claim that has to carry a number: BS#2669 requires
+ * the excluded set to be measured rather than silently dropped.
+ */
+async function censusExcludedDjTyped(dumpPath: string, covered: ReadonlySet<number>): Promise<ExcludedCensus> {
+  let linkedPlays = 0;
+  let labelledPlays = 0;
+  let rotationLinkedPlays = 0;
+  let rotationLabelledPlays = 0;
+  let djLinkedPlays = 0;
+  let djLabelledPlays = 0;
+  const djCards = new Set<number>();
+
+  for await (const row of iterTableRows(dumpPath, FLOWSHEET_TABLE)) {
+    const card = Number(row[FS_LIBRARY_RELEASE_ID]);
+    if (!Number.isInteger(card) || card <= 0) continue;
+    linkedPlays++;
+
+    const rotationId = Number(row[FS_ROTATION_RELEASE_ID]);
+    const isRotationEntry = Number.isInteger(rotationId) && rotationId > 0;
+    if (isRotationEntry) rotationLinkedPlays++;
+    else djLinkedPlays++;
+
+    const label = (row[FS_LABEL_NAME] ?? '').trim();
+    if (label === '') continue;
+    labelledPlays++;
+    if (isRotationEntry) {
+      rotationLabelledPlays++;
+    } else {
+      djLabelledPlays++;
+      djCards.add(card);
+    }
+  }
+
+  let djCardsNotCovered = 0;
+  for (const card of djCards) if (!covered.has(card)) djCardsNotCovered++;
+
+  return {
+    linkedPlays,
+    labelledPlays,
+    rotationLinkedPlays,
+    rotationLabelledPlays,
+    djLinkedPlays,
+    djLabelledPlays,
+    djCards: djCards.size,
+    djCardsNotCovered,
+  };
 }
 
 /**
@@ -156,49 +270,8 @@ function countLiveCards(clonePath: string, ids: ReadonlySet<number>): { cloneRow
 const tsv = (rows: readonly (readonly (string | number)[])[]): string =>
   rows.map((r) => r.join('\t')).join('\n') + '\n';
 
-/** Overlapping shapes within the conflict residue, for the report. */
-interface ConflictShapes {
-  /** Cards where every group but the leader has exactly one play. */
-  singlePlayMinorities: number;
-  /** Cards where the leading group holds at least 90% of the plays. */
-  dominantLeader: number;
-  /** Cards where a minority group is the leader's key plus a 4-digit year. */
-  yearAnnotated: number;
-}
-
-/**
- * Describe the conflict residue without acting on it.
- *
- * These are counted so BS#2672 can judge whether some subset is adjudicable.
- * They are deliberately NOT used to resolve anything here: "the leader has 90%
- * of the plays" does not distinguish a typo from a genuine co-release on a
- * second label, and this job has no basis for that call.
- */
-function describeConflicts(conflicted: readonly CardResolution[]): ConflictShapes {
-  let singlePlayMinorities = 0;
-  let dominantLeader = 0;
-  let yearAnnotated = 0;
-
-  for (const r of conflicted) {
-    const [leader, ...minorities] = r.groups;
-    if (minorities.every((g) => g.plays === 1)) singlePlayMinorities++;
-    if (r.plays > 0 && leader.plays / r.plays >= 0.9) dominantLeader++;
-    // eslint-disable-next-line security/detect-non-literal-regexp -- built from a normalized key (letters+digits only)
-    const withYear = new RegExp(`^${leader.normalized}(?:19|20)\\d{2}$`);
-    if (minorities.some((g) => withYear.test(g.normalized))) yearAnnotated++;
-  }
-
-  return { singlePlayMinorities, dominantLeader, yearAnnotated };
-}
-
-function distributionTable(dist: ReadonlyMap<number, number>, label: string): string {
-  const keys = [...dist.keys()].sort((a, b) => a - b);
-  const lines = [`| ${label} | cards |`, '|---:|---:|'];
-  for (const k of keys) {
-    lines.push(`| ${k} | ${(dist.get(k) ?? 0).toLocaleString('en-US')} |`);
-  }
-  return lines.join('\n');
-}
+const num = (n: number): string => n.toLocaleString('en-US');
+const pct = (a: number, b: number): string => (b === 0 ? '0.0' : ((a / b) * 100).toFixed(1));
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
@@ -207,97 +280,102 @@ async function main(): Promise<void> {
   const dumpSha = await sha256(args.dump);
   console.log(`  sha256 ${dumpSha}`);
 
-  const scan = await scanDump(args.dump);
-  console.log(`Scanned ${scan.totalRows.toLocaleString('en-US')} ${TABLE} rows`);
+  const { companies, totalRows: companyRows } = await loadCompanies(args.dump);
+  console.log(`${COMPANY_TABLE}: ${num(companyRows)} rows, ${num(companies.size)} with a usable NAME`);
 
-  const resolutions: CardResolution[] = [];
-  for (const [legacyReleaseId, counts] of scan.rawCountsByCard) {
-    const r = resolveCard(legacyReleaseId, counts);
-    if (r !== null) resolutions.push(r);
+  const rotation = await scanRotation(args.dump, companies);
+  console.log(`${ROTATION_TABLE}: ${num(rotation.totalRows)} rows, ${num(rotation.linkedRows)} linked to a card`);
+
+  const labels: CardLabel[] = [];
+  for (const [legacyReleaseId, rows] of rotation.byCard) {
+    const label = resolveCardLabel(legacyReleaseId, rows, companies);
+    if (label !== null) labels.push(label);
   }
-  resolutions.sort((a, b) => a.legacyReleaseId - b.legacyReleaseId);
+  labels.sort((a, b) => a.legacyReleaseId - b.legacyReleaseId);
 
-  const summary = summarize(scan.rawCountsByCard, resolutions);
-  const resolved = resolutions.filter((r) => r.status === 'resolved');
-  const conflicted = resolutions.filter((r) => r.status === 'conflict');
-  const conflictShapes = describeConflicts(conflicted);
+  const summary = summarize(labels);
+  const resolved = labels.filter((l) => l.status === 'resolved');
+  const conflicted = labels.filter((l) => l.status === 'conflict');
+  const covered = new Set(labels.map((l) => l.legacyReleaseId));
+
+  const census = args.skipExcludedCensus ? null : await censusExcludedDjTyped(args.dump, covered);
 
   // ---- artefacts ---------------------------------------------------------
 
   const mappingRows: (string | number)[][] = [
-    ['legacy_release_id', 'resolved_label', 'normalized_label', 'plays', 'variant_count', 'raw_variants'],
+    ['legacy_release_id', 'label_name', 'company_id', 'company_ids', 'rotation_rows'],
   ];
-  for (const r of resolved) {
-    const variants = r.groups[0].variants;
-    mappingRows.push([
-      r.legacyReleaseId,
-      r.resolvedLabel ?? '',
-      r.normalizedLabel ?? '',
-      r.plays,
-      variants.length,
-      JSON.stringify(variants.map((v) => [v.raw, v.plays])),
-    ]);
+  for (const l of resolved) {
+    mappingRows.push([l.legacyReleaseId, l.labelName ?? '', l.companyId ?? '', l.companyIds.join(','), l.rotationRows]);
   }
   writeFileSync(join(args.out, 'label-mapping.tsv'), tsv(mappingRows));
 
-  const conflictRows: (string | number)[][] = [['legacy_release_id', 'plays', 'group_count', 'groups']];
-  for (const r of conflicted) {
+  const conflictRows: (string | number)[][] = [['legacy_release_id', 'label_count', 'rotation_rows', 'labels']];
+  for (const l of conflicted) {
     conflictRows.push([
-      r.legacyReleaseId,
-      r.plays,
-      r.groups.length,
-      JSON.stringify(
-        r.groups.map((g) => ({
-          normalized: g.normalized,
-          plays: g.plays,
-          variants: g.variants.map((v) => [v.raw, v.plays]),
-        }))
-      ),
+      l.legacyReleaseId,
+      l.groups.length,
+      l.rotationRows,
+      JSON.stringify(l.groups.map((g) => ({ name: g.name, company_ids: g.companyIds, rotation_rows: g.rotationRows }))),
     ]);
   }
   writeFileSync(join(args.out, 'label-conflicts.tsv'), tsv(conflictRows));
-
-  const labelCards = new Map<string, number>();
-  for (const r of resolved) {
-    if (r.resolvedLabel === null) continue;
-    labelCards.set(r.resolvedLabel, (labelCards.get(r.resolvedLabel) ?? 0) + 1);
-  }
-  const labelRows: (string | number)[][] = [['resolved_label', 'cards']];
-  for (const [name, cards] of [...labelCards].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'en'))) {
-    labelRows.push([name, cards]);
-  }
-  writeFileSync(join(args.out, 'resolved-label-names.tsv'), tsv(labelRows));
 
   // ---- clone cross-check (informational) ---------------------------------
 
   let liveNote = '_Not run: no `wxyc_schema.library` clone available._';
   if (args.clone !== null && existsSync(args.clone)) {
-    const ids = new Set(resolutions.map((r) => r.legacyReleaseId));
-    const { cloneRows, matched } = countLiveCards(args.clone, ids);
-    const pct = cloneRows === 0 ? 0 : (matched / cloneRows) * 100;
+    const { cloneRows, matched } = countLiveCards(args.clone, covered);
     liveNote =
       `Against \`${args.clone.replace(resolvePath(HERE, '..', '..') + '/', '')}\` ` +
-      `(${cloneRows.toLocaleString('en-US')} \`library\` rows): **${matched.toLocaleString('en-US')}** ` +
-      `carry a \`legacy_release_id\` this mapping covers (${pct.toFixed(1)}% of the catalog). ` +
-      `Informational only — BS#2672 must re-derive the join against production.`;
+      `(${num(cloneRows)} \`library\` rows): **${num(matched)}** carry a \`legacy_release_id\` this mapping ` +
+      `covers (${pct(matched, cloneRows)}% of the catalog). Informational only — BS#2672 must re-derive the ` +
+      `join against production.`;
   }
 
   // ---- report ------------------------------------------------------------
 
-  const pct = (n: number, d: number) => (d === 0 ? '0.0' : ((n / d) * 100).toFixed(1));
-  const num = (n: number) => n.toLocaleString('en-US');
-
-  const conflictSample = conflicted
+  const conflictTable = conflicted
     .slice()
-    .sort((a, b) => b.plays - a.plays)
-    .slice(0, 25)
-    .map((r) => {
-      const groups = r.groups
-        .map((g) => `\`${g.normalized}\` (${g.variants.map((v) => `"${v.raw}" ×${v.plays}`).join(', ')})`)
-        .join(' · ');
-      return `| ${r.legacyReleaseId} | ${r.groups.length} | ${num(r.plays)} | ${groups} |`;
-    })
+    .sort((a, b) => b.rotationRows - a.rotationRows || a.legacyReleaseId - b.legacyReleaseId)
+    .map(
+      (l) =>
+        `| ${l.legacyReleaseId} | ${l.groups.length} | ${l.rotationRows} | ` +
+        `${l.groups.map((g) => `${g.name} (id ${g.companyIds.join('/')}, ${g.rotationRows}×)`).join(' · ')} |`
+    )
     .join('\n');
+
+  const excludedSection =
+    census === null
+      ? `**Not measured on this run** (\`--skip-excluded-census\`). Re-run without that flag to populate this section.`
+      : `\`FLOWSHEET_ENTRY_PROD.LABEL_NAME\` pools two provenances under one column name:
+
+| source | labelled plays | | fill rate | origin |
+|---|---:|---:|---:|---|
+| rotation entries (\`ROTATION_RELEASE_ID > 0\`) | ${num(census.rotationLabelledPlays)} | ${pct(census.rotationLabelledPlays, census.labelledPlays)}% | **${pct(census.rotationLabelledPlays, census.rotationLinkedPlays)}%** | copied from the \`ROTATION_RELEASE\` record |
+| everything else | ${num(census.djLabelledPlays)} | ${pct(census.djLabelledPlays, census.labelledPlays)}% | ${pct(census.djLabelledPlays, census.djLinkedPlays)}% | typed by the DJ, per play |
+
+A ${pct(census.rotationLabelledPlays, census.rotationLinkedPlays)}% fill rate is not diligence, it is a system copy — the same acquisition
+record this mapping already reads, arriving second-hand as text.
+
+**The size of what is excluded:** ${num(census.djCards)} cards carry at least one
+DJ-typed label, and **${num(census.djCardsNotCovered)}** of them are not covered by the
+rotation route. Taking them would roughly ${((census.djCardsNotCovered + summary.cardsResolved) / Math.max(summary.cardsResolved, 1)).toFixed(1)}× the card count.
+
+They are excluded anyway, and the reason is provenance rather than volume. A
+DJ-typed label describes whatever object was in that DJ's hands; nothing in the
+flowsheet records whether that was the library's copy, and \`library.label\`
+exists to answer "which pressing does WXYC hold". So an unverifiable label is
+not weak evidence — it is the wrong kind of evidence.
+
+The cost asymmetry settles it. A **missing** label makes discogs-etl's
+\`label_match\` key abstain, which is the status quo for 100% of cards today and
+costs nothing. A **wrong** label promotes the wrong pressing for that release
+station-wide, and is indistinguishable from a right one downstream.
+
+If that trade is ever revisited, the DJ-typed route should be a separate,
+separately-reviewed mapping with its own confidence column — not merged into
+this one, where it would be indistinguishable from an acquisition record.`;
 
   const report = `# BS#2669 — resolved label per library card
 
@@ -311,200 +389,134 @@ mapping is [BS#2672](https://github.com/WXYC/Backend-Service/issues/2672).
 |---|---|
 | artefact read | \`${basename(args.dump)}\` |
 | sha256 | \`${dumpSha}\` |
-| \`${TABLE}\` rows | ${num(scan.totalRows)} |
 
 > **This is not the authoritative capture.** BS#2669 names
 > \`s3://wxyc-archive/legacy/tubafrenzy/2026-09-16/wxycmusic-backup-2026-09-16-135233.sql.gz\`
 > (sha256 \`533bb48da9dc89aa354849a6eebe8ab348da67e0ffc9e5a3941607925d46bad1\`) as the
-> authoritative final dump. That object was unreachable when this ran — the
-> \`wxyc-api\` AWS SSO session had expired — so the figures here come from a later
-> re-dump of the same database, which has been frozen since 2026-09-16 13:09 PDT.
-> The two files are the same length (142,256,283 bytes) and differ in sha256,
-> consistent with differing only in the dump-timestamp bytes mysqldump and gzip
-> write into the header and footer. **That is corroboration, not proof.**
-> Regenerate this mapping from the S3 object and diff it before BS#2672 applies
-> anything to production.
+> authoritative final dump. That object is unreachable — the \`wxyc-api\` AWS SSO
+> session has expired — so the figures here come from a later re-dump of the
+> same database, which has been frozen since 2026-09-16 13:09 PDT. The two files
+> are the same length (142,256,283 bytes) and differ in sha256, consistent with
+> differing only in the dump-timestamp bytes mysqldump and gzip write into the
+> header and footer. **That is corroboration, not proof.** Regenerate this
+> mapping from the S3 object and diff it before BS#2672 applies anything to
+> production.
 
-## Coverage
+## Source: the acquisition record
+
+\`ROTATION_RELEASE\` records something the station acquired. It carries
+\`LIBRARY_RELEASE_ID\` directly and a \`COMPANY_ID\` foreign key into \`COMPANY\`,
+whose \`NAME\` is the label. The flowsheet is not an input to this mapping.
 
 | | count | |
 |---|---:|---|
-| \`${TABLE}\` rows | ${num(scan.totalRows)} | |
-| plays linked to a card (\`LIBRARY_RELEASE_ID > 0\`) | ${num(scan.playsLinkedToCard)} | |
-| …carrying a non-empty \`LABEL_NAME\` | ${num(scan.playsLabelled)} | ${pct(scan.playsLabelled, scan.playsLinkedToCard)}% |
-| distinct cards with at least one label | ${num(summary.cardsWithAnyRawLabel)} | |
-| …single-valued on the raw string | ${num(summary.cardsSingleValuedRaw)} | ${pct(summary.cardsSingleValuedRaw, summary.cardsWithAnyRawLabel)}% |
-| distinct cards surviving normalization | ${num(summary.cardsAfterNormalization)} | |
-| **…resolved (one normalized label)** | **${num(summary.cardsResolved)}** | **${pct(summary.cardsResolved, summary.cardsAfterNormalization)}%** |
-| …left conflicted | ${num(summary.cardsConflicted)} | ${pct(summary.cardsConflicted, summary.cardsAfterNormalization)}% |
-
-${(() => {
-  const dropped = summary.cardsWithAnyRawLabel - summary.cardsAfterNormalization;
-  return `${num(dropped)} card${dropped === 1 ? '' : 's'} dropped out at normalization: every spelling ${dropped === 1 ? 'it' : 'they'} carried consisted only of punctuation and corporate-suffix tokens, so ${dropped === 1 ? 'it holds' : 'they hold'} no label information to resolve.`;
-})()}
+| \`${ROTATION_TABLE}\` rows | ${num(rotation.totalRows)} | |
+| …with \`LIBRARY_RELEASE_ID > 0\` | ${num(rotation.linkedRows)} | ${pct(rotation.linkedRows, rotation.totalRows)}% |
+| …and a resolvable \`COMPANY_ID\` | ${num(rotation.rowsWithCompany)} | ${pct(rotation.rowsWithCompany, rotation.linkedRows)}% of linked |
+| \`${COMPANY_TABLE}\` rows | ${num(companyRows)} | |
+| **distinct library cards covered** | **${num(summary.cardsCovered)}** | |
+| **…resolved (one label)** | **${num(summary.cardsResolved)}** | **${pct(summary.cardsResolved, summary.cardsCovered)}%** |
+| …conflicted (two or more labels) | ${num(summary.cardsConflicted)} | ${pct(summary.cardsConflicted, summary.cardsCovered)}% |
+| distinct label names emitted | ${num(summary.distinctLabels)} | |
 
 ${liveNote}
 
-## Cross-check against the prior audit
+## No normalization, no vote
 
-BS#2669 quotes figures from an earlier audit whose code was not published. Each
-countable quantity reproduces **exactly**, which is what validates the dump
-parser and the linked/labelled predicates:
+The label arrives as a **foreign key, not as text**, so this route needs no
+spelling normalization, no modal vote and no unanimity rule. A card resolves
+when its rotation rows name one label. The ${num(summary.cardsConflicted)} cards whose re-adds name
+two different labels are genuine multi-label cases and are emitted as conflicts
+with no value.
 
-| quantity | BS#2669 | measured here | |
-|---|---:|---:|---|
-| \`${TABLE}\` rows | 2,643,453 | ${num(scan.totalRows)} | ${scan.totalRows === 2643453 ? 'exact' : 'DIFFERS'} |
-| plays linked to a card | 1,081,412 | ${num(scan.playsLinkedToCard)} | ${scan.playsLinkedToCard === 1081412 ? 'exact' : 'DIFFERS'} |
-| …labelled | 1,009,419 | ${num(scan.playsLabelled)} | ${scan.playsLabelled === 1009419 ? 'exact' : 'DIFFERS'} |
-| distinct cards with a label | 37,741 | ${num(summary.cardsWithAnyRawLabel)} | ${summary.cardsWithAnyRawLabel === 37741 ? 'exact' : 'DIFFERS'} |
-| single-valued raw | 12,522 (33.2%) | ${num(summary.cardsSingleValuedRaw)} (${pct(summary.cardsSingleValuedRaw, summary.cardsWithAnyRawLabel)}%) | ${summary.cardsSingleValuedRaw === 12522 ? 'exact' : 'DIFFERS'} |
-| cards after normalization | 37,739 | ${num(summary.cardsAfterNormalization)} | +${summary.cardsAfterNormalization - 37739} |
-| single-valued after normalization | 22,295 (59.1%) | ${num(summary.cardsResolved)} (${pct(summary.cardsResolved, summary.cardsAfterNormalization)}%) | ${summary.cardsResolved - 22295} |
+**One exception, and it is about \`COMPANY\`, not about labels.** That table holds
+${num(companyRows)} rows but only ${num(new Set([...companies.values()].map((c) => c.name.toLowerCase())).size)} distinct names: a label acquired
+again years later was often entered as a fresh row, so "atlantic" exists as ids
+123, 6446 and 6486. Grouping a card's rotation rows by raw \`COMPANY_ID\` would
+call ${num(summary.cardsWithDuplicateCompanyRows)} cards conflicted when every id names the same label. This job
+therefore compares **case-folded \`COMPANY.NAME\`** (trim + lowercase, nothing
+else — these are curated rows, not typed-per-play free text), which resolves
+those cards. Seven of them differ only in letter case, which is why the fold is
+case-insensitive rather than exact.
 
-The two normalization rows are the only ones that move, and they are the only
-two that depend on a rule BS#2669 states in prose rather than code — "strip
-punctuation" does not say whether punctuation becomes a space or nothing, and
-the two readings differ by hundreds of cards. The rule below was chosen on
-measured evidence rather than to hit the quoted number, and lands within 0.4%
-of it. Nothing here suggests a parsing discrepancy.
+**BS#2672 must collapse that duplication rather than carry it across**: three
+"Atlantic" rows in \`wxyc_schema.labels\` would reintroduce the same problem on
+the Backend side. \`label-mapping.tsv\` carries a \`company_ids\` column listing
+every id behind each resolved name so the write side can see exactly what it is
+collapsing; \`company_id\` is the most-used of them (lowest id breaking a tie).
 
-## The normalization rule
+## \`ALTERNATE_LABEL_NAME\`
 
-Applied to every raw \`LABEL_NAME\` before the vote, in order:
+**Ignored, and it costs nothing.** Of the ${num(rotation.linkedRows)} card-linked rotation rows,
+${num(rotation.rowsWithAlternate)} carry an \`ALTERNATE_LABEL_NAME\` — and **${num(rotation.rowsAlternateOnly)}** of those lack a
+resolvable \`COMPANY_ID\`. Every row that has an alternate name also has a real
+company FK, so using it as a fallback would add **${num(rotation.cardsAlternateOnly.size)} cards**. It is free
+text rather than an identity, so on the same provenance reasoning applied to
+DJ-typed labels below, it is not worth reintroducing text handling for zero
+additional coverage.
 
-1. Unicode **NFKC**, then **lowercase**.
-2. **Decompose and drop combining marks**, so \`Barbès\` and \`Barbes\` are one
-   label. DJs routinely omit an accent they cannot type quickly; every accent
-   merge in the corpus is one label typed two ways (Cómeme/Comeme,
-   Naïve/Naive, Crónica/Cronica, Häpna/Hapna).
-3. **Split** on every character that is not a letter or digit
-   (Unicode-aware \`\\p{L}\`/\`\\p{N}\`). Punctuation and spaces are separators.
-4. **Drop** these whole tokens wherever they appear: ${[...SUFFIX_TOKENS].map((t) => `\`${t}\``).join(', ')}.
-   Whole tokens only, so \`Musicians\` and \`Incendiary\` survive intact.
-5. **Concatenate** the surviving tokens with no separator.
+## The excluded DJ-typed population
 
-Step 5 is the one that looks wrong and is not. Space-joining would keep
-\`Sub Pop\` and \`SubPop\` apart, and word-boundary noise is most of what DJs
-actually vary. Measured over this corpus, concatenating resolves **618 more
-cards** than space-joining, and all 233 distinct merges it creates are one
-label typed two ways — \`A&M\`/\`AM\` (78 cards), \`Sub Pop\`/\`SubPop\` (61),
-\`I.R.S.\`/\`IRS\`, \`4 AD\`/\`4AD\`, \`Stone's Throw\`/\`Stones Throw\`,
-\`Roc-A-Fella\`/\`Rocafella\`, \`Collector's Choice\`/\`Collectors Choice\`. Not one
-conflates two different labels. The key is for comparison only: the value
-written to the mapping is the most-played **raw** spelling, which keeps its
-spaces, punctuation and accents.
+${excludedSection}
 
-A result of \`''\` means the entry carried no label information and is dropped.
-The rule is stated once, in \`normalize.ts\`, and is covered by
-\`tests/unit/jobs/library-label-backfill/normalize.test.ts\`.
+## Conflicts — in full
 
-**The rule settles spelling, never substance.** A card is resolved only when
-*every* play agrees after normalization. Cards whose plays disagree are emitted
-as conflicts with **no** candidate value, because \`library.label\` feeds
-discogs-etl's \`label_match\` dedup ranking key — a wrong label there promotes
-the wrong pressing for the whole station, and a reissue legitimately carries
-different labels across plays, so disagreement is not always error.
+All ${num(conflicted.length)} conflicted cards, largest first. They are also in
+\`label-conflicts.tsv\`.
 
-## Variant-count distributions
-
-Raw spellings per card, before normalization:
-
-${distributionTable(summary.rawVariantDistribution, 'raw variants')}
-
-Surviving normalized labels per card (1 = resolved; 2+ = conflict):
-
-${distributionTable(summary.groupCountDistribution, 'normalized labels')}
-
-## Conflicts — what the residue is made of
-
-The ${num(conflicted.length)} conflicted cards are **not** ${num(conflicted.length)} cards with two
-real labels. Three overlapping shapes dominate, measured over the whole residue:
-
-| shape | cards | |
-|---|---:|---:|
-| every minority group has exactly **one** play | ${num(conflictShapes.singlePlayMinorities)} | ${pct(conflictShapes.singlePlayMinorities, conflicted.length)}% |
-| the leading group holds **≥90%** of the card's plays | ${num(conflictShapes.dominantLeader)} | ${pct(conflictShapes.dominantLeader, conflicted.length)}% |
-| a minority group is the leading label **plus a 4-digit year** (\`4AD\` vs \`4AD (2012)\`) | ${num(conflictShapes.yearAnnotated)} | ${pct(conflictShapes.yearAnnotated, conflicted.length)}% |
-
-So most of the residue is one-off typing noise against a clear leader —
-\`"Tow Dawg Entertainment" ×1\` beside \`"Top Dawg Entertainment" ×338\` — not a
-reissue with two genuine labels. **This job still refuses to guess on any of
-them**, because the shapes above are a description of the data, not a decision
-rule, and separating "typo" from "co-release on a second label" needs judgment
-this job does not have. They are quantified here so BS#2672 can decide whether
-to adjudicate a subset (a play-share floor, or stripping parenthetical years)
-rather than treating all ${num(conflicted.length)} as equally uncertain.
-
-### Verbatim sample
-
-The conflicted cards are listed in full in \`label-conflicts.tsv\`. The 25
-most-played:
-
-| legacy_release_id | labels | plays | normalized groups (raw spellings ×plays) |
+| legacy_release_id | labels | rotation rows | labels (COMPANY ids, rows) |
 |---:|---:|---:|---|
-${conflictSample}
+${conflictTable}
 
-## Labels absent from \`wxyc_schema.labels\`
+## Pin-corpus overlap
 
-**Not measurable offline.** \`wxyc_schema.labels\` is in neither
-\`dev_env/seed-clone.sql\` (which carries only \`format\`, \`artists\`,
-\`genre_artist_crossreference\`, \`library\`, \`rotation\`) nor any other fixture in
-this repo, and this ticket contacts no database.
-
-What is measurable: this mapping resolves **${num(summary.distinctResolvedLabels)} distinct label
-names**, listed with their card counts in \`resolved-label-names.tsv\`. That is
-the **upper bound** on \`labels\` rows BS#2672 would need to create. The exact
-figure is one query against production, using the emitted file:
+**Not measurable offline.** The override-pin corpus lives in the discogs-cache
+PostgreSQL, which is not part of this dump and is not running locally (ports
+5434/5435 refuse connections; 5433 holds a Backend \`wxyc_db\`, not the cache).
+This ticket contacts no database, so the overlap has to be measured where the
+pins are. The query, once \`label-mapping.tsv\` is loaded as
+\`tmp_label_mapping(legacy_release_id, …)\`:
 
 \`\`\`sql
--- load resolved-label-names.tsv into a temp table as (resolved_label, cards)
-SELECT count(*) FROM tmp_resolved_labels t
-WHERE NOT EXISTS (
-  SELECT 1 FROM wxyc_schema.labels l WHERE lower(l.label_name) = lower(t.resolved_label)
-);
+SELECT count(*) FROM tmp_label_mapping m
+WHERE EXISTS (SELECT 1 FROM <pin table> p WHERE p.library_release_id = m.legacy_release_id);
 \`\`\`
 
-The expected answer is close to the full ${num(summary.distinctResolvedLabels)}:
-\`library.label_id\` is 100% NULL across all 64,193 rows, and the only writer of
-\`labels\` is the forward-looking librarian edit path in
-\`library.controller.ts\`, so the table has only ever accumulated labels typed
-since that path shipped.
-
-Note the length constraint: \`labels.label_name\` is \`varchar(128)\` and
-\`library.label\` is \`varchar(128)\`. ${num(resolved.filter((r) => (r.resolvedLabel ?? '').length > 128).length)} resolved
-label(s) exceed 128 characters and would need truncation or exclusion by BS#2672.
+BS#2669 reports 15,771 of the resolved cards as pinned — 25.8% of a
+61,046-pin corpus — measured where that table is reachable.
 
 ## Files
 
 | file | rows | contents |
 |---|---:|---|
-| \`label-mapping.tsv\` | ${num(resolved.length)} | the mapping: \`legacy_release_id\` → resolved label, with every raw spelling and its play count |
-| \`label-conflicts.tsv\` | ${num(conflicted.length)} | cards with two or more genuinely distinct labels; no candidate value |
-| \`resolved-label-names.tsv\` | ${num(summary.distinctResolvedLabels)} | distinct resolved labels and how many cards each covers |
+| \`label-mapping.tsv\` | ${num(resolved.length)} | the mapping: \`legacy_release_id\` → \`label_name\` + \`company_id\`, with every duplicate \`COMPANY\` id and the rotation-row count |
+| \`label-conflicts.tsv\` | ${num(conflicted.length)} | cards whose re-adds name two or more different labels; no value |
 
 Keys are \`legacy_release_id\` (tubafrenzy \`LIBRARY_RELEASE_ID\`), never
 \`library.id\` — resolving to \`library.id\` needs production and belongs to
-BS#2672.
+BS#2672. Because \`company_id\` is carried through, BS#2672 can populate
+\`library.label_id\` directly rather than matching label strings against
+\`wxyc_schema.labels\`.
 `;
 
   writeFileSync(join(args.out, 'REPORT.md'), report);
 
-  console.log(`\nCards with a label: ${num(summary.cardsWithAnyRawLabel)}`);
+  console.log(`\nCards covered:      ${num(summary.cardsCovered)}`);
   console.log(
-    `  single-valued raw:        ${num(summary.cardsSingleValuedRaw)} (${pct(summary.cardsSingleValuedRaw, summary.cardsWithAnyRawLabel)}%)`
+    `  resolved:         ${num(summary.cardsResolved)} (${pct(summary.cardsResolved, summary.cardsCovered)}%)`
   );
-  console.log(`  surviving normalization:  ${num(summary.cardsAfterNormalization)}`);
+  console.log(`  conflicted:       ${num(summary.cardsConflicted)}`);
+  console.log(`  distinct labels:  ${num(summary.distinctLabels)}`);
   console.log(
-    `  resolved:                 ${num(summary.cardsResolved)} (${pct(summary.cardsResolved, summary.cardsAfterNormalization)}%)`
+    `  dup COMPANY rows: ${num(summary.cardsWithDuplicateCompanyRows)} resolved cards whose label has 2+ ids`
   );
-  console.log(`  conflicted:               ${num(summary.cardsConflicted)}`);
-  console.log(`  distinct resolved labels: ${num(summary.distinctResolvedLabels)}`);
-  if (scan.untypeableRawLabels > 0) {
+  console.log(`  ALTERNATE_LABEL_NAME would add: ${num(rotation.cardsAlternateOnly.size)} cards`);
+  if (census !== null) {
     console.log(
-      `  note: ${num(scan.untypeableRawLabels)} raw label(s) contained a tab/newline, collapsed to a space for TSV output`
+      `  excluded DJ-typed: ${num(census.djCards)} cards, ${num(census.djCardsNotCovered)} not otherwise covered`
     );
   }
-  console.log(`\nWrote label-mapping.tsv, label-conflicts.tsv, resolved-label-names.tsv, REPORT.md to ${args.out}`);
+  console.log(`\nWrote label-mapping.tsv, label-conflicts.tsv, REPORT.md to ${args.out}`);
 }
 
 main().catch((err: unknown) => {
