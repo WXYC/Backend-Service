@@ -86,6 +86,7 @@ const ALLOW_LIST = [
   'apps/auth/provision-user.ts',
   'apps/auth/create-default-user.ts',
   'apps/auth/complete-onboarding.ts',
+  'apps/auth/update-identity.ts',
   'apps/auth/create-auto-dj-user.ts',
   // Station signup (BS#2361, blocked by BS#2360/#2359). Lands ahead of the
   // endpoint file itself, which will construct `provisionUser({ realName,
