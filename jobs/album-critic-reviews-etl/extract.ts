@@ -49,10 +49,14 @@ export const EXTRACTION_SYSTEM = [
   '- Recover the byline (author) and the printed score (rating) only if they appear in the text; otherwise null.',
 ].join('\n');
 
-/** JSON-schema tool the model is forced to call, so output is structured. */
+/** JSON-schema tool the model is forced to call, so output is structured.
+ *  `strict: true` makes the API validate `input` against `input_schema`
+ *  server-side, so a malformed tool call is a 400 rather than a row this
+ *  file has to defend against downstream. */
 export const EXTRACTION_TOOL = {
   name: 'record_snippet',
   description: 'Record the extracted pull-quote and attribution.',
+  strict: true,
   input_schema: {
     type: 'object',
     properties: {

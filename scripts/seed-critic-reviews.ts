@@ -144,6 +144,7 @@ const EXTRACTION_SYSTEM = [
 const EXTRACTION_TOOL = {
   name: 'record_snippet',
   description: 'Record the extracted pull-quote and attribution.',
+  strict: true,
   input_schema: {
     type: 'object',
     properties: {
