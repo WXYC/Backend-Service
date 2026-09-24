@@ -1,0 +1,17 @@
+{
+  "name": "@wxyc/library-label-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "BS#2669 analysis (read-only, no database): resolve a canonical label per library card from the archived tubafrenzy flowsheet dump, keyed on legacy_release_id. Emits the mapping, the conflict residue and a report. Applying the mapping is BS#2672.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "echo 'analysis job: run with tsx, no compile step'",
+    "start": "tsx job.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
