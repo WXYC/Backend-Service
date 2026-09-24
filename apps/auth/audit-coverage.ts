@@ -542,7 +542,14 @@ export const FLAT_MOUNTS: readonly FlatMount[] = [
  * explicit `recordAccountAuditEvent` call inside the handler — a decorator
  * can't reach `POST /auth/wxyc/complete-onboarding`'s internal
  * `auth.api.resetPassword` call, which never crosses an audited HTTP mount. */
-export const EXPLICIT_CALL_SITES: ReadonlySet<string> = new Set(['/wxyc/complete-onboarding']);
+export const EXPLICIT_CALL_SITES: ReadonlySet<string> = new Set([
+  '/wxyc/complete-onboarding',
+  // `/wxyc/update-identity` writes `realName`/`djName` through
+  // `internalAdapter.updateUser` directly, so — like onboarding — the write
+  // never crosses an audited HTTP mount a decorator could sit on. Its
+  // `recordAccountAuditEvent` call lives in `updateIdentityFromRequest`.
+  '/wxyc/update-identity',
+]);
 
 /**
  * Every skip, named so both drift-check arms treat it as reviewed (Scope +
