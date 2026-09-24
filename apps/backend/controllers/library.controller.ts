@@ -50,6 +50,10 @@ type NewAlbumRequest = {
   artist_name?: string;
   artist_id?: number;
   alternate_artist_name?: string;
+  // BS#2004: credited album artist on a compilation card. Optional and
+  // nullable; `normalizeOptionalAlbumText` (below) owns the trim/bounds
+  // rules for both write verbs.
+  album_artist?: string | null;
   // BS#2410: `label` is no longer required on its own — see the either-or
   // guard in `addAlbum` and `resolveNewAlbumLabel` below. `label_id` admits
   // `null` (the `selected?.id ?? null` wire shape) and treats it as absent;
@@ -270,6 +274,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id, body.genre_id)),
     code_volume_letters: code_volume_letters,
     alternate_artist_name: body.alternate_artist_name,
+    album_artist: normalizeOptionalAlbumText(body.album_artist, 'album_artist'),
     disc_quantity: body.disc_quantity,
   };
 
@@ -3731,6 +3736,8 @@ type UpdateAlbumRequest = {
   format_id?: number;
   artist_id?: number;
   alternate_artist_name?: string | null;
+  // BS#2004: see `NewAlbumRequest.album_artist`. `null` clears it.
+  album_artist?: string | null;
   disc_quantity?: number;
   // BS#1281 (Not-on-Discogs 1a): the music director's write surface for
   // suppressing false LML fuzzy matches. camelCase per the issue spec; the DB
@@ -3760,6 +3767,7 @@ const UPDATABLE_ALBUM_FIELDS = [
   'format_id',
   'artist_id',
   'alternate_artist_name',
+  'album_artist',
   'disc_quantity',
   'discogsUnavailable',
   'discogsUnavailableNote',
@@ -3767,10 +3775,41 @@ const UPDATABLE_ALBUM_FIELDS = [
   'code_volume_letters',
 ] as const;
 
-// `album_title`, `alternate_artist_name`, and `label` are all `varchar(128)`
-// in the library schema. Reject over-length input as a 400 rather than letting
-// it reach the UPDATE and trip PG 22001 ("value too long") → 500 (#1551).
+// `album_title`, `alternate_artist_name`, `album_artist`, and `label` are all
+// `varchar(128)` in the library schema. Reject over-length input as a 400
+// rather than letting it reach the UPDATE and trip PG 22001 ("value too
+// long") → 500 (#1551).
 const MAX_ALBUM_TEXT_LENGTH = 128;
+
+/**
+ * BS#2004: `album_artist` is the credited artist on a compilation card
+ * ("Kruder & Dorfmeister" on a DJ-Kicks release filed under Various Artists).
+ * Nullable, optional, `varchar(128)`. Shared by POST and PATCH so the two
+ * write verbs cannot disagree on trimming or bounds.
+ *
+ * Also backs `alternate_artist_name`'s PATCH bound (BS#2004 review): that
+ * field measured length with `.length` (UTF-16 units) while the rest of this
+ * file uses `codePointLength` — the unit Postgres `varchar(n)` actually counts
+ * — so an astral-heavy value Postgres would store was wrongly rejected.
+ * Routing it here removes the divergence. (POST still writes
+ * `alternate_artist_name` raw; that pre-existing gap is separate.)
+ *
+ * `undefined` means "not supplied": on a create the column takes its default,
+ * on a PATCH the stored value is left alone (`updateAlbumInDB` only SETs keys
+ * `!== undefined`). `null` and `''` both mean "clear it" and normalize to
+ * `null`, so a client round-tripping a GET body can send back what it got.
+ */
+const normalizeOptionalAlbumText = (value: unknown, field: string): string | null | undefined => {
+  if (value === undefined) return undefined;
+  if (value !== null && typeof value !== 'string') {
+    throw new WxycError(`${field} must be a string or null`, 400);
+  }
+  const trimmed = value?.trim() || null;
+  if (trimmed !== null && codePointLength(trimmed) > MAX_ALBUM_TEXT_LENGTH) {
+    throw new WxycError(`${field} must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+  }
+  return trimmed;
+};
 
 /**
  * PATCH /library/:id with true partial semantics (PR #1154 review issues
@@ -3800,14 +3839,11 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   }
 
   if ('alternate_artist_name' in body) {
-    if (body.alternate_artist_name !== null && typeof body.alternate_artist_name !== 'string') {
-      throw new WxycError('alternate_artist_name must be a string or null', 400);
-    }
-    const trimmedAlternate = body.alternate_artist_name?.trim() || null;
-    if (trimmedAlternate !== null && trimmedAlternate.length > MAX_ALBUM_TEXT_LENGTH) {
-      throw new WxycError(`alternate_artist_name must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
-    }
-    updates.alternate_artist_name = trimmedAlternate;
+    updates.alternate_artist_name = normalizeOptionalAlbumText(body.alternate_artist_name, 'alternate_artist_name');
+  }
+
+  if ('album_artist' in body) {
+    updates.album_artist = normalizeOptionalAlbumText(body.album_artist, 'album_artist');
   }
 
   if (body.disc_quantity !== undefined) {

@@ -5549,6 +5549,8 @@ export type UpdateAlbumRow = {
   artist_id?: number;
   artist_name?: string;
   alternate_artist_name?: string | null;
+  // BS#2004: nullable credited album artist; null clears it.
+  album_artist?: string | null;
   disc_quantity?: number;
   code_number?: number;
   code_volume_letters?: string | null;
@@ -5570,6 +5572,7 @@ export const updateAlbumInDB = async (album_id: number, updates: UpdateAlbumRow)
     'artist_id',
     'artist_name',
     'alternate_artist_name',
+    'album_artist',
     'disc_quantity',
     'code_number',
     'code_volume_letters',
@@ -5620,6 +5623,9 @@ export const getLibraryRowById = async (album_id: number) => {
       label: library.label,
       label_id: library.label_id,
       alternate_artist_name: library.alternate_artist_name,
+      // BS#2004: projected so the #1555 no-op guard can see it — without
+      // this, `null !== undefined` reads every album_artist PATCH as a change.
+      album_artist: library.album_artist,
       disc_quantity: library.disc_quantity,
       code_number: library.code_number,
       // BS#2564: the PATCH handler's no-op short-circuit (#1555) compares

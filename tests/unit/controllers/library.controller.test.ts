@@ -621,6 +621,55 @@ describe('library.controller', () => {
       mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 1, ...album }));
     });
 
+    describe('album_artist (BS#2004)', () => {
+      const bodyWith = (album_artist: unknown) =>
+        ({
+          body: { album_title: 'DJ-Kicks', artist_id: 42, label: 'Sonamos', genre_id: 11, format_id: 1, album_artist },
+        }) as unknown as Request;
+
+      it.each([
+        ['passes a credited album artist through to the insert', 'Kruder & Dorfmeister', 'Kruder & Dorfmeister'],
+        ['trims surrounding whitespace', '  Kruder & Dorfmeister  ', 'Kruder & Dorfmeister'],
+        ['stores an explicit null as null', null, null],
+        ['stores an empty string as null', '', null],
+      ])('%s', async (_label, album_artist, expected) => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+        const res = mockResponse();
+
+        await addAlbum(bodyWith(album_artist), res, next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ album_artist: expected }));
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it('leaves album_artist undefined when omitted, so the column default applies', async () => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+        const req = {
+          body: { album_title: 'DOGA', artist_id: 42, label: 'Sonamos', genre_id: 11, format_id: 1 },
+        } as unknown as Request;
+        const res = mockResponse();
+
+        await addAlbum(req, res, next);
+
+        expect(mockInsertAlbum.mock.calls[0][0].album_artist).toBeUndefined();
+      });
+
+      it.each([
+        [
+          'rejects an over-length album_artist (>128 chars)',
+          'a'.repeat(129),
+          'album_artist must be 128 characters or fewer',
+        ],
+        ['rejects a non-string album_artist', 42, 'album_artist must be a string or null'],
+      ])('%s', async (_label, album_artist, message) => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+        const res = mockResponse();
+
+        await expect(addAlbum(bodyWith(album_artist), res, next)).rejects.toThrow(message);
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+    });
+
     it('writes the canonical artist_name from the artists table when artist_id is supplied', async () => {
       mockGetArtistNameById.mockResolvedValue('Juana Molina');
 
@@ -3291,6 +3340,7 @@ describe('library.controller', () => {
       label: 'Sonamos',
       label_id: 10,
       alternate_artist_name: null,
+      album_artist: null,
       disc_quantity: 1,
       code_number: 3,
       code_volume_letters: null,
@@ -3313,6 +3363,48 @@ describe('library.controller', () => {
       // Default: the destination slot is free, so tests that touch genre_id
       // only incidentally don't have to mock this themselves.
       mockFindLibrarySlotOccupant.mockResolvedValue(undefined);
+    });
+
+    describe('album_artist (BS#2004)', () => {
+      it.each([
+        ['writes a credited album artist', 'Kruder & Dorfmeister', 'Kruder & Dorfmeister'],
+        ['trims surrounding whitespace', '  Kruder & Dorfmeister  ', 'Kruder & Dorfmeister'],
+        ['clears the field with an explicit null', null, null],
+        ['clears the field with an empty string', '', null],
+      ])('%s', async (_label, album_artist, expected) => {
+        // The fixture stores null, and clearing null is a no-op (#1555), so
+        // seed a stale value for the clearing rows to have something to clear.
+        mockGetLibraryRowById.mockResolvedValue({ ...existingRow, album_artist: 'Stale Credit' });
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_artist }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ album_artist: expected }));
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('is a no-op when the submitted value already matches the stored one (#1555)', async () => {
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ album_artist: null }), res, next);
+
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it.each([
+        [
+          'returns 400 for an over-length album_artist (>128 chars)',
+          'a'.repeat(129),
+          'album_artist must be 128 characters or fewer',
+        ],
+        ['returns 400 for a non-string album_artist', 42, 'album_artist must be a string or null'],
+      ])('%s', async (_label, album_artist, message) => {
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor({ album_artist }), res, next)).rejects.toThrow(message);
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
     });
 
     describe('format_id existence guard (#1550)', () => {
@@ -3367,6 +3459,21 @@ describe('library.controller', () => {
           'alternate_artist_name must be 128 characters or fewer'
         );
         expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      // BS#2004 review (finding 3): PATCH alternate_artist_name now measures in
+      // code points, matching Postgres varchar(128) and the rest of this file --
+      // not UTF-16 `.length`. An astral-heavy value over 128 UTF-16 units but
+      // within 128 code points is stored, not rejected.
+      it('accepts an alternate_artist_name of 128 code points even when it exceeds 128 UTF-16 units', async () => {
+        const value = '\u{1D400}'.repeat(128); // 128 code points, 256 UTF-16 units
+        expect(value.length).toBe(256);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ alternate_artist_name: value }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ alternate_artist_name: value }));
+        expect(res.status).toHaveBeenCalledWith(200);
       });
 
       it('returns 400 for an over-length label (>128 chars) without upserting it', async () => {
