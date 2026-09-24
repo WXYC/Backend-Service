@@ -49,17 +49,24 @@ npx tsx jobs/library-label-backfill/job.ts --dump /path/to/wxycmusic-backup-<dat
 
 The mapping itself reads only `ROTATION_RELEASE` and `COMPANY` and takes seconds. The default run also scans the 2.6M-row flowsheet — **purely to measure the population this job excludes**, which the report has to state — and that pass is what makes a full run take ~4 minutes. `--skip-excluded-census` drops it.
 
-## Which artefact to use
+## Which artefact was used
 
 The authoritative final capture named by BS#2669 is
 
 ```
 s3://wxyc-archive/legacy/tubafrenzy/2026-09-16/wxycmusic-backup-2026-09-16-135233.sql.gz
+sha256 533bb48da9dc89aa354849a6eebe8ab348da67e0ffc9e5a3941607925d46bad1
 ```
 
-sha256 `533bb48da9dc89aa354849a6eebe8ab348da67e0ffc9e5a3941607925d46bad1`, reachable with the `wxyc-api` AWS profile. **Verify by re-hashing a streamed copy** — the stored `ChecksumSHA256` is a 17-part multipart composite and is not comparable.
+reachable with the `wxyc-api` AWS profile. **Verify by re-hashing a streamed copy** — the stored `ChecksumSHA256` is a 17-part multipart composite and is not comparable.
 
-The committed artefacts were generated from a **later re-dump** of the same database (frozen since 2026-09-16 13:09 PDT), sha256 `aa289593f7652e77c2e83e5ce81a70c44ebe9ca1a04cd0da64a89e835fbfb95e`, because the S3 object is unreachable (expired SSO session). `REPORT.md` says so in its own provenance block. **Regenerate from the S3 object and diff before BS#2672 applies anything to production.**
+The committed artefacts were generated from the 2026-09-21 re-dump, sha256 `aa289593f7652e77c2e83e5ce81a70c44ebe9ca1a04cd0da64a89e835fbfb95e`. **The two files are identical in content**, which is verified rather than assumed: both are 142,256,283 bytes, and their gzip digests differ only because mysqldump writes a "Dump completed on" line and gzip stores an mtime. Strip the comment and blank lines and hash what remains —
+
+```sh
+gzip -dc <dump>.sql.gz | sed '/^--/d; /^$/d' | shasum -a 256
+```
+
+— and both yield `8fb365f1692594c7e08e1939773d4948ff43d99ca7dd741340bb44e44d8b8f9e`. The database has been frozen since 2026-09-16 13:09 PDT, so the two captures record the same state and re-running against the S3 object reproduces these figures exactly. Nothing needs regenerating before BS#2672; the artefact is named because provenance is worth recording.
 
 ## Output
 
