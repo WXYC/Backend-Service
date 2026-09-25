@@ -1219,6 +1219,13 @@
       "when": 1790221282245,
       "tag": "0176_2004-album-artist-column-comment",
       "breakpoints": true
+    },
+    {
+      "idx": 177,
+      "version": "7",
+      "when": 1790297317277,
+      "tag": "0177_2569-breakpoint-hour-uniq",
+      "breakpoints": true
     }
   ]
 }

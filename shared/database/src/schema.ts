@@ -1696,6 +1696,47 @@ export const flowsheet = wxyc_schema.table(
     // /flowsheet `?shows_limit=N` listing endpoint sequentially scans the
     // 2.6M-row table on every dj-site poll. See migration 0068 + issue #511.
     index('flowsheet_show_id_idx').on(table.show_id),
+    // BS#2569 — at most one hourly breakpoint per (show, hour).
+    //
+    // `radio_hour` is the server-stamped top-of-hour marker a breakpoint
+    // announces. Two breakpoints claiming the same hour of the same show are
+    // never meaningful: the flowsheet renders both, and the mobile clients'
+    // hour windows (`computeHourMs`, playlist-proxy.service.ts) key on the
+    // value, so a duplicate pins the same window twice.
+    //
+    // They arose from a concurrent-fill race, not from historical residue.
+    // `fillMissingHourlyBreakpoints` re-derives its watermark per request, so
+    // a *stale* watermark is impossible — but two POST /flowsheet requests on
+    // one show can both read the last breakpoint before either has inserted,
+    // and both then generate the same hour. Measured on prod: ~1-2% of fills,
+    // ~3/month, one observed pair 706 ms apart. The 25 groups that had
+    // accumulated were remediated 2026-09-23 before this index was built.
+    //
+    // Writer coverage is NOT uniform — see the migration header for the full
+    // audit. `fillMissingHourlyBreakpoints` tolerates the violation
+    // (a269b724: ON CONFLICT DO NOTHING, counting what RETURNING hands back),
+    // and that one mattered most because it runs on every POST /flowsheet.
+    // But the manual DJ breakpoint path does not: `addEntry` stamps
+    // `nearestStationHour(now)` and calls `addTrack`, a plain insert, and the
+    // fill FLOORS where `nearestStationHour` ROUNDS — so a 2:05 PM track and a
+    // 2:20 PM Breakpoint press both land on 2:00 PM and the second 500s.
+    // The tubafrenzy webhook catches this index but keys its post-conflict
+    // refresh on `legacy_entry_id`, so a cross-row collision drops the
+    // delivery at 200; the two ETL jobs use targeted conflict clauses and
+    // don't catch it at all. Follow-up work, not resolved here.
+    //
+    // The eslint suppression below is the #702 source-tagged acknowledgement.
+    // It is NOT the vacuous "upstream can't reach these rows" argument:
+    // tubafrenzy has its own RADIO_HOUR column (FLOWSHEET_ENTRY_PROD tuple[9])
+    // and 1607 of the 1726 indexed rows carry a `legacy_entry_id`. The
+    // constraint is confirmed compatible on the stronger ground that one
+    // station-ID break per hour is the upstream's semantics too — unlike
+    // migration 0071, which constrained (album_id, rotation_bin) on a table
+    // where the MD legitimately re-adds a pair and had to be reverted by 0072.
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    uniqueIndex('flowsheet_show_radio_hour_breakpoint_idx')
+      .on(table.show_id, table.radio_hour)
+      .where(sql`${table.entry_type} = 'breakpoint' AND ${table.radio_hour} IS NOT NULL`),
     // Composite B-tree on (show_id, play_order DESC) covering the per-show
     // `nextPlayOrder()` MAX lookup that POST /flowsheet/ runs on every track
     // and talkset insert. The original migration 0073 shipped a single-column
