@@ -24,3 +24,24 @@ tests/fixtures/recent-entries-v2-wire-golden.json
 # have no Prettier parser and are listed for intent, not effect.
 jobs/library-label-backfill/REPORT.md
 jobs/library-label-backfill/*.tsv
+
+# CLAUDE.md is loaded into context at the start of every session, so its size is
+# a running cost rather than a one-off. `docs(claude-md): unpad the monorepo
+# table` (7ef9d531) deliberately stripped the alignment padding from its tables
+# for that reason -- and column padding is precisely what prettier's markdown
+# printer insists on adding back: 126 lines of pure whitespace across the
+# package and route tables, which buys no legibility in a file that is read by a
+# model far more often than by a person.
+#
+# Same call as the wire golden above, for the same reason: the shape of this
+# content is owned by what consumes it, not by the formatter.
+#
+# How this surfaced, since it is worth not repeating: 7ef9d531 was a docs-only
+# push, so `detect-changes` skipped `lint-and-typecheck` and `format:check`
+# never ran on it. main sat red for that check while every main run reported
+# green, until the next PR touching code (WXYC/Backend-Service#2670) ran the job
+# and failed on a file it had not touched.
+#
+# Consequence to know: prettier no longer normalizes ANYTHING in this file, so
+# list markers, code fences and table pipes are on author discipline here.
+CLAUDE.md
