@@ -16,6 +16,13 @@
  * casings return *the same rows* out of real Postgres, under real collation and
  * a real ESCAPE clause.
  *
+ * The catalog half also covers BS#2702, the companion gate fix: a quoted term
+ * now suppresses alias expansion, so a bare quoted query's result set is
+ * assertable by membership rather than only by casing agreement. That assertion
+ * runs with `CATALOG_SEARCH_ALIAS_ENABLED: 'true'` in CI, so it is a live guard
+ * against the gate being reopened on exact conditions — not a flag-off
+ * tautology. The unit-level gate pin lives in `library-search-alias.test.ts`.
+ *
  * Deliberately not covered: the `dj:` prefix, the third flowsheet site. Its
  * column carries no index (migration 0083 dropped the trigram one and nothing
  * replaced it), so every dj-name predicate — quoted or not, before or after
@@ -176,34 +183,42 @@ describe('GET /library/query: quoted terms are case-insensitive (BS#2398)', () =
     expect(ids(upper)).toEqual(ids(mixed));
 
     // Membership, not just agreement: three identical over-wide pages would
-    // satisfy the equality above. A field-prefixed query leaves
-    // `hasAllFieldCondition` false, so `aliasActive` is false and this page is
-    // the whole-value predicate's own answer — every row must carry the value.
+    // satisfy the equality above.
     for (const row of mixed.body.results) {
       expect(row[rowField].toLowerCase()).toBe(value.toLowerCase());
     }
   });
 
-  test('an all-field quoted term returns the same rows in either casing', async () => {
+  test('a bare quoted term returns the same rows in either casing, and only whole-value matches', async () => {
     const mixed = await auth.get('/library/query').query({ q: '"Stereolab"', limit: 50 }).expect(200);
     const lower = await auth.get('/library/query').query({ q: '"stereolab"', limit: 50 }).expect(200);
 
     expect(ids(mixed).length).toBeGreaterThan(0);
     expect(ids(lower)).toEqual(ids(mixed));
 
-    // Deliberately no membership assertion here, unlike the field-prefixed
-    // case above. A BARE quoted term does leave `hasAllFieldCondition` true,
-    // and `aliasActive` never consults `exact`, so this page is a UNION whose
-    // branch (b) selects the rows where the whole-value predicate is NOT TRUE
-    // — pinning an id set here would pin that widening as though it were
-    // intended. Whether a quoted term should suppress alias expansion is a
-    // product call, tracked in BS#2702; that ticket's acceptance criteria are
-    // where this assertion belongs.
+    // Membership is assertable here because a quoted term now suppresses alias
+    // expansion (BS#2702): `hasExpandableAllField` asks for a NON-exact
+    // all-field condition, so this page is branch (a)'s own answer rather than
+    // a UNION whose branch (b) selects the rows where the whole-value predicate
+    // is NOT TRUE. Every row must whole-value match one of the three columns
+    // the all-field branch ORs over — artist, album or label — rather than
+    // merely belong to an artist with a fuzzy alias variant.
     //
-    // The casing equality is still the assertion that matters and is still
-    // sound: pg_trgm lowercases when it extracts trigrams, so the alias branch
-    // contributes identically across casings and cannot mask a case-sensitive
-    // branch (a).
+    // Phrased over all three rather than over `artist_name` alone because that
+    // is exactly what the predicate promises; pinning the artist would be
+    // asserting a property of the seed instead.
+    for (const row of mixed.body.results) {
+      const whole = [row.artist_name, row.album_title, row.label].map((v) => (v ?? '').toLowerCase());
+      expect(whole).toContain('stereolab');
+    }
+
+    // And it agrees with the field-scoped form, which took the alias-off path
+    // both before this change and after it. The two disagreeing is precisely
+    // what the widening looked like. Equality (not containment) holds because
+    // nothing in the seed is titled or labelled "Stereolab", so the extra two
+    // arms of the all-field OR contribute nothing here.
+    const scoped = await auth.get('/library/query').query({ q: 'artist:"Stereolab"', limit: 50 }).expect(200);
+    expect(ids(mixed)).toEqual(ids(scoped));
   });
 
   test('a quoted term still has to match the whole value', async () => {
