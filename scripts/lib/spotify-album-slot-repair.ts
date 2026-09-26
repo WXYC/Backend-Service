@@ -45,13 +45,24 @@ export function classifySpotifyUrl(url: string): SpotifyUrlCohort {
 }
 
 /**
+ * Mirrors `STREAMING_REASK_ATTEMPT_CAP` in `apps/enrichment-worker/enrich.ts`,
+ * which is the source of truth. Copied rather than imported because importing it
+ * would execute the enrichment worker's module graph (LML client, Sentry,
+ * PostHog) inside a one-off script. The copy is not trusted on faith — the unit
+ * test imports BOTH and asserts they are equal, so drift fails CI rather than
+ * silently resetting the counter on the wrong rows.
+ */
+export const REASK_ATTEMPT_CAP = 3;
+
+/**
  * The columns a repaired row gets written. Drizzle writes only the keys
- * present, so an ABSENT `spotify_status` means "leave the persisted verdict
- * alone" — which is the whole point of it being optional.
+ * present, so an ABSENT key means "leave that column alone" — which is the
+ * whole point of both optional fields.
  */
 export interface SpotifyRepairPatch {
   spotify_url: null;
-  spotify_status?: null;
+  spotify_status?: 'unresolved';
+  streaming_reask_attempts?: 0;
 }
 
 /**
@@ -69,49 +80,49 @@ export interface SpotifyRepairPatch {
  * permanent-null freeze, and it is the same failure the guard avoids by
  * deleting `streaming_status.spotify` rather than only nulling the URL.
  *
- * **Why NULL and not `'unresolved'`.** NULL is "never consulted", which is the
- * honest state — the value we had was not trustworthy, and we have not asked
- * since. Per `precheck.ts`, "a NULL status (never-consulted) does not force a
- * re-ask; only an explicit `'unresolved'` does", and that is the point: the
- * upstream defect (WXYC/library-metadata-lookup#1353) is still open, so every
- * re-ask would return the same artist URL, the guard would null it again, and
- * the row would burn all three `streaming_reask_attempts` for nothing — then
- * sit inert at the cap, worse off than if it had never been asked. This is the
- * hazard `isBandcampReaskEnabled`'s doc comment gates against in so many words.
- * NULL also un-pins merge rule 1, so nothing about the row is terminal any
- * more.
+ * **Why `'unresolved'` and not NULL.** `'unresolved'` is the ONLY value either
+ * re-ask gate selects on. `streaming-reask.ts`'s `needsStreamingReask` requires
+ * `spotify_status = 'unresolved'` (under `streaming_reask_attempts < CAP`), and
+ * `schema.ts`'s own `spotify_status` doc comment spells the vocabulary out: NULL
+ * means "never consulted" and "must NOT be treated as `absent`", but neither is
+ * it re-ask-eligible. A NULLed row therefore asks nothing, ever. That matters
+ * because the upstream defect is being FIXED, not merely acknowledged —
+ * WXYC/library-metadata-lookup#1355, #1356 and #1357 are landing to make LML
+ * return a correct Spotify album URL or an honest null instead of an artist
+ * page. A row left `'unresolved'` picks that corrected link up unattended, via
+ * merge rule 3, inside the existing bound; a row left NULL is frozen against
+ * exactly the improvement the rest of this work delivers.
  *
- * **What NULL costs, stated plainly, because it is not nothing.** The guard's
- * own outcome on the live path is NOT identical: there the writer's
- * `?? searchUrls.spotify_url` fills the column with a synthesized
- * `open.spotify.com/search/…` URL, and `jobs/streaming-url-upgrade` keys its
- * candidate net on exactly that prefix (`resolve.ts`'s `searchPrefix`), so a
- * guard-suppressed row is eligible for a later upgrade to a real album URL
- * while a row this pass NULLs is not. So the two agree on the VERDICT column
- * and differ on the URL column. NULL is still what BS#2689 asked for — "the
- * ~4,353 existing rows are corrected or nulled so the search-URL fallback
- * takes over" — and the fallback does take over, at request time, on every
- * read seam (`proxy.controller.ts`, `album-metadata-projection.ts`'s
- * `present.spotify_url ?? fallback.spotifyUrl`), so no DJ sees a dead button.
- * Whether these rows should additionally be made upgrade-eligible — by
- * persisting the synthesized search URL here, or by widening that job's net to
- * include NULLs — is a separate decision that belongs with that job.
+ * This is also the call `jobs/streaming-columns-drain` already made for this
+ * same column, in the same situation, and its comment is the whole argument:
+ * "hand it to the bounded sweep rather than leaving a NULL that nothing will
+ * ever re-ask." This pass now agrees with that drain instead of contradicting
+ * it.
+ *
+ * **Why the counter reset is conditional.** Both gates also require
+ * `streaming_reask_attempts < CAP`, so on a row already at or over the cap
+ * `'unresolved'` is inert — the status would be a lie about what happens next.
+ * Those rows get the counter cleared to 0. Rows under the cap do NOT: the key is
+ * omitted from the patch entirely rather than written back, because the value
+ * was read minutes earlier and re-asserting it would silently revert a
+ * concurrent increment, loosening the very bound #1747 added. (The counter is
+ * per-album, shared across the three services, so clearing an exhausted one does
+ * grant apple/bandcamp a fresh bounded budget on that row; that is the narrowest
+ * available instrument, and it stays bounded.)
  *
  * **Why `'absent'` survives.** Merge rule 4 makes `'absent'` terminal
  * specifically so a negative-cached field is never resurrected for re-ask — the
  * BS#1747/#1089 per-play amplifier. Clearing the URL is still right for such a
  * row (an artist page is wrong either way, and `'absent'` + NULL is the
- * canonical negative-cache shape), so the URL goes and the verdict stays.
- *
- * **Why `streaming_reask_attempts` is not here at all.** Resetting an exhausted
- * counter only matters if the row is going to `'unresolved'`, which it is not.
- * Leaving it out also removes a write-back of a minutes-old read: a concurrent
- * enrichment that bumped the counter without changing the URL would otherwise
- * have its increment silently reverted, loosening the very bound #1747 added.
+ * canonical negative-cache shape), so the URL goes and the verdict stays — and
+ * with it the counter, since granting fresh attempts to a terminal row would
+ * only spend the shared per-album budget on the other two services.
  */
-export function buildSpotifyRepairPatch(currentStatus: string | null): SpotifyRepairPatch {
+export function buildSpotifyRepairPatch(currentStatus: string | null, currentAttempts: number): SpotifyRepairPatch {
   if (currentStatus === 'absent') return { spotify_url: null };
-  return { spotify_url: null, spotify_status: null };
+  const patch: SpotifyRepairPatch = { spotify_url: null, spotify_status: 'unresolved' };
+  if (currentAttempts >= REASK_ATTEMPT_CAP) patch.streaming_reask_attempts = 0;
+  return patch;
 }
 
 /**

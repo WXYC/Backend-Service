@@ -16,15 +16,20 @@
  *   - `'absent'` is terminal (merge rule 4) — never downgraded to
  *     `'unresolved'`, or the row is resurrected for re-ask and the
  *     BS#1747/#1089 per-play amplifier comes back.
- *   - `streaming_reask_attempts` is never written, so the re-ask bound cannot
- *     be loosened by a stale read.
- *   - a cleared verdict goes to NULL ("never consulted"), not `'unresolved'`,
- *     matching what the guard itself lands for a fresh row.
+ *   - a cleared verdict goes to `'unresolved'`, the ONLY value either re-ask
+ *     gate selects on. `schema.ts`'s `spotify_status` doc comment states the
+ *     vocabulary outright, and `jobs/streaming-columns-drain` — a shipped
+ *     one-off over this same column — makes the same call for the same reason.
+ *   - `streaming_reask_attempts` is reset ONLY on a row already at/over the
+ *     cap, where `'unresolved'` would otherwise be inert, and is otherwise
+ *     absent from the patch entirely rather than written back from a stale read.
  */
+import { STREAMING_REASK_ATTEMPT_CAP } from '../../../apps/enrichment-worker/enrich';
 import {
   classifySpotifyUrl,
   buildSpotifyRepairPatch,
   reportedEntityKind,
+  REASK_ATTEMPT_CAP,
 } from '../../../scripts/lib/spotify-album-slot-repair';
 
 describe('classifySpotifyUrl', () => {
@@ -57,30 +62,66 @@ describe('classifySpotifyUrl', () => {
 });
 
 describe('buildSpotifyRepairPatch', () => {
-  it.each([['verified'], ['unresolved'], [null]])("clears the verdict to NULL, not 'unresolved' (was %s)", (status) => {
-    // NULL is "never consulted": `precheck.ts` does not force a re-ask on it,
-    // so the row costs no LML calls while upstream LML#1353 is still serving
-    // artist URLs, and `mergeStreamingField` rule 1 no longer pins it — a
-    // later genuine 'verified' can adopt a real album URL (rule 3).
-    // `'unresolved'` would instead spend all three re-ask attempts against an
-    // upstream with no better answer and then leave the row inert.
-    expect(buildSpotifyRepairPatch(status)).toEqual({ spotify_url: null, spotify_status: null });
+  // The mirrored cap must equal the real one or the reset arm fires on the
+  // wrong rows. Asserted rather than promised — the original copy carried only
+  // a comment arguing drift was safe in one direction.
+  it('mirrors the enrichment worker\u2019s attempt cap exactly', () => {
+    expect(REASK_ATTEMPT_CAP).toBe(STREAMING_REASK_ATTEMPT_CAP);
   });
 
+  it.each([['verified'], ['unresolved'], [null]])(
+    "clears the verdict to 'unresolved', the only re-ask-eligible value (was %s)",
+    (status) => {
+      // NULL would be invisible to both gates: `needsStreamingReask` requires
+      // `spotify_status = 'unresolved'`, and `schema.ts` says NULL means never
+      // consulted. Leaving NULL freezes the row against the upstream fixes
+      // (LML#1355/#1356/#1357) that are landing to make LML return a correct
+      // album URL — a re-ask is exactly how the row picks that up, unattended,
+      // under the existing bound.
+      expect(buildSpotifyRepairPatch(status, 0)).toEqual({
+        spotify_url: null,
+        spotify_status: 'unresolved',
+      });
+    }
+  );
+
   it("preserves a terminal 'absent' verdict instead of resurrecting it", () => {
-    const patch = buildSpotifyRepairPatch('absent');
+    const patch = buildSpotifyRepairPatch('absent', 0);
     expect(patch.spotify_url).toBeNull();
     // Key absent, not set to null: drizzle only writes columns present in the
     // `set` object, so omitting it leaves the negative cache exactly as-is.
     expect(patch).not.toHaveProperty('spotify_status');
+    expect(patch).not.toHaveProperty('streaming_reask_attempts');
   });
 
-  it.each([['verified'], ['absent'], [null]])(
-    'never writes streaming_reask_attempts, so the re-ask bound cannot loosen (was %s)',
-    (status) => {
-      expect(buildSpotifyRepairPatch(status)).not.toHaveProperty('streaming_reask_attempts');
+  it.each([[0], [1], [REASK_ATTEMPT_CAP - 1]])(
+    'leaves an under-cap counter out of the patch entirely (attempts=%s)',
+    (attempts) => {
+      // Omitted, not written back: the value was read minutes earlier, so
+      // re-asserting it would silently revert a concurrent increment and
+      // loosen the #1747 bound.
+      expect(buildSpotifyRepairPatch('verified', attempts)).not.toHaveProperty('streaming_reask_attempts');
     }
   );
+
+  it.each([[REASK_ATTEMPT_CAP], [REASK_ATTEMPT_CAP + 5]])(
+    "resets an exhausted counter so 'unresolved' is not inert (attempts=%s)",
+    (attempts) => {
+      // Both gates require `streaming_reask_attempts < CAP`, so on an already
+      // exhausted row `'unresolved'` alone selects nothing.
+      expect(buildSpotifyRepairPatch('verified', attempts)).toEqual({
+        spotify_url: null,
+        spotify_status: 'unresolved',
+        streaming_reask_attempts: 0,
+      });
+    }
+  );
+
+  it("never resets an exhausted counter on an 'absent' row", () => {
+    // Rule 4 keeps the verdict terminal, so granting fresh attempts would only
+    // spend the shared per-album budget on the other two services.
+    expect(buildSpotifyRepairPatch('absent', REASK_ATTEMPT_CAP + 1)).toEqual({ spotify_url: null });
+  });
 });
 
 describe('reportedEntityKind', () => {

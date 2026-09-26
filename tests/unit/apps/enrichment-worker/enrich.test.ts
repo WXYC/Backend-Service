@@ -1084,6 +1084,15 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
  * BS#2689 adds the `spotify_url` case: the same freeze mechanism, reached by
  * an album-slot PATH failure (an `open.spotify.com/artist/…` value) rather
  * than a malformed-host one, over ~4,353 prod rows.
+ *
+ * Both of the above read the INSERT payload, which is the never-persisted-album
+ * branch. The third test reads the CONFLICT branch, which is the one an
+ * already-persisted row takes — and pins that the guard is a NO-OP on disk
+ * there. That is not a defect to be fixed in the guard (inventing a verdict LML
+ * never asserted would be worse); it is the reason
+ * `scripts/repair-non-album-spotify-urls.ts` is load-bearing rather than
+ * cleanup, and it needs a test so nobody reads the two INSERT tests as
+ * reassurance about the 29,233 rows that already exist.
  */
 describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing integration)', () => {
   beforeEach(() => {
@@ -1159,6 +1168,38 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
     // gates, i.e. an album with no Spotify link, forever.
     expect(insertPayload.spotify_url).toContain('open.spotify.com/search');
     expect(insertPayload.spotify_status).toBeNull();
+  });
+
+  it('on an ALREADY-PERSISTED verified row the suppression is a no-op: the conflict set writes the live column back', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const rawResponse = {
+      search_type: 'direct',
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+            streaming_status: { spotify: 'verified' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    await finalizeRow(LINKED_ROW, sanitizeLookupStreamingUrls(rawResponse));
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    // The cleared key makes the incoming verdict `undefined`, so
+    // `buildStreamingFieldConflictSet` takes its not-consulted branch: the
+    // status column is written back to itself, and the url is the live column
+    // whenever that status is already 'verified'. For the ~4,353 rows this
+    // ticket is about — all of them `verified` — that is the stored artist URL,
+    // written back verbatim. The guard cannot heal them; the script has to.
+    expect(renderSql(conflictCfg.set.spotify_status)).toBe('<col>');
+    expect(sqlValues(conflictCfg.set.spotify_status)).toEqual([album_metadata.spotify_status]);
+    expect(renderSql(conflictCfg.set.spotify_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    expect(sqlValues(conflictCfg.set.spotify_url)[0]).toBe(album_metadata.spotify_status);
+    expect(sqlValues(conflictCfg.set.spotify_url)[1]).toBe(album_metadata.spotify_url);
   });
 });
 
