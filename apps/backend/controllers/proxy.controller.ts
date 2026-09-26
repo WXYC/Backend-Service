@@ -28,7 +28,7 @@ import {
   getArtistDetails,
   resolveEntity as lmlResolveEntity,
   searchLibrary,
-  isSpotifyUrl,
+  isSpotifyAlbumSlotUrl,
   isAppleMusicUrl,
   LmlClientError,
 } from '@wxyc/lml-client';
@@ -448,7 +448,7 @@ function buildLocalMetadataResponse(persisted: PersistedAlbumMetadata): Record<s
   // Music" button. Not setting it leaves the L508-509 fallback to synthesize a
   // real `open.spotify.com/search/…` URL — the same degradation the fresh-LML
   // branch already emits.
-  if (isSpotifyUrl(persisted.spotify_url)) metadata.spotifyUrl = persisted.spotify_url;
+  if (isSpotifyAlbumSlotUrl(persisted.spotify_url)) metadata.spotifyUrl = persisted.spotify_url;
   if (isAppleMusicUrl(persisted.apple_music_url)) metadata.appleMusicUrl = persisted.apple_music_url;
   if (persisted.youtube_music_url) metadata.youtubeMusicUrl = persisted.youtube_music_url;
   if (persisted.bandcamp_url) metadata.bandcampUrl = persisted.bandcamp_url;

@@ -1,5 +1,5 @@
 import type { FSEntry } from '@wxyc/database';
-import { isSpotifyUrl, isAppleMusicUrl } from '@wxyc/lml-client';
+import { isSpotifyAlbumSlotUrl, isAppleMusicUrl } from '@wxyc/lml-client';
 import type { DiscogsUnavailableFlags } from '../services/library.service.js';
 
 /**
@@ -121,7 +121,7 @@ export function projectFlowsheetEntry(row: FSEntry): ClientFacingFSEntry {
     release_year: row.release_year,
     // BS#1714: null a non-Spotify/non-Apple value; leave a nullish or genuine
     // value untouched — same `!= null &&` shape as `sanitizeLookupStreamingUrls`.
-    spotify_url: row.spotify_url != null && !isSpotifyUrl(row.spotify_url) ? null : row.spotify_url,
+    spotify_url: row.spotify_url != null && !isSpotifyAlbumSlotUrl(row.spotify_url) ? null : row.spotify_url,
     apple_music_url: row.apple_music_url != null && !isAppleMusicUrl(row.apple_music_url) ? null : row.apple_music_url,
     youtube_music_url: row.youtube_music_url,
     bandcamp_url: row.bandcamp_url,
@@ -159,7 +159,7 @@ export function pickClientFacingColumns(row: Record<string, unknown>): Record<st
   // columns actually hold is safe. Only null a key that is present — a partial
   // row that omitted it stays omitted (the "not padded with invented keys"
   // contract above).
-  if (Object.hasOwn(projected, 'spotify_url') && !isSpotifyUrl(projected.spotify_url as string | null)) {
+  if (Object.hasOwn(projected, 'spotify_url') && !isSpotifyAlbumSlotUrl(projected.spotify_url as string | null)) {
     projected.spotify_url = null;
   }
   if (Object.hasOwn(projected, 'apple_music_url') && !isAppleMusicUrl(projected.apple_music_url as string | null)) {
