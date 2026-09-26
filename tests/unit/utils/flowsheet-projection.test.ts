@@ -131,6 +131,40 @@ describe('projectFlowsheetEntry (BS#1513)', () => {
       expect(projected.bandcamp_url).toBe(row.bandcamp_url);
       expect(projected.soundcloud_url).toBe(row.soundcloud_url);
     });
+
+    // BS#2697 narrows this leg from "on a Spotify host" to "names a release or
+    // a search". The inline flowsheet copy needs it as much as the
+    // album_metadata one: the projection emits these columns verbatim, so a
+    // persisted artist page reaches the hardwired iOS "Spotify" button directly.
+    describe('BS#2697 album-slot narrowing', () => {
+      it.each([
+        ['artist page', 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7'],
+        ['track page', 'https://open.spotify.com/track/1A2GTWGtFfWp7KSQTwWOyo'],
+        ['id-less /album', 'https://open.spotify.com/album'],
+      ])('drops an on-host non-release spotify_url to null (%s)', (_label, url) => {
+        expect(projectFlowsheetEntry(makeFullFlowsheetRow({ spotify_url: url })).spotify_url).toBeNull();
+      });
+
+      it('keeps a synthesized search URL — the premise that foreclosed this option', () => {
+        // 3,787 persisted rows carry one. `isSpotifyUrl` accepts them and so
+        // does `isSpotifyAlbumSlotUrl`; if this goes red the narrowing has
+        // started eating working links.
+        const url = 'https://open.spotify.com/search/Cat%20Power%20Moon%20Pix';
+        expect(projectFlowsheetEntry(makeFullFlowsheetRow({ spotify_url: url })).spotify_url).toBe(url);
+      });
+
+      it('keeps a locale-prefixed album page', () => {
+        const url = 'https://open.spotify.com/intl-de/album/1A2GTWGtFfWp7KSQTwWOyo';
+        expect(projectFlowsheetEntry(makeFullFlowsheetRow({ spotify_url: url })).spotify_url).toBe(url);
+      });
+
+      it('does not narrow apple_music_url alongside it (BS#2691 is separate)', () => {
+        // A null apple_music_url has no search fallback (BS#1192), so the same
+        // narrowing there blanks the button instead of degrading it.
+        const apple = 'https://music.apple.com/us/artist/cat-power/12345';
+        expect(projectFlowsheetEntry(makeFullFlowsheetRow({ apple_music_url: apple })).apple_music_url).toBe(apple);
+      });
+    });
   });
 });
 

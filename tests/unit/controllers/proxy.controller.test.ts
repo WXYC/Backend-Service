@@ -35,7 +35,7 @@ jest.mock('@wxyc/lml-client', () => {
   // submodule so the suppression behaves exactly as in production — requiring
   // the whole `@wxyc/lml-client` index would needlessly load Sentry + the HTTP
   // client the rest of this factory deliberately stubs.
-  const { isSpotifyUrl, isAppleMusicUrl } = jest.requireActual<
+  const { isSpotifyUrl, isAppleMusicUrl, isSpotifyAlbumSlotUrl } = jest.requireActual<
     typeof import('../../../shared/lml-client/src/streaming-url-guard')
   >('../../../shared/lml-client/src/streaming-url-guard');
   return {
@@ -47,6 +47,7 @@ jest.mock('@wxyc/lml-client', () => {
     envInt: (_name: string, fallback: number) => fallback,
     isSpotifyUrl,
     isAppleMusicUrl,
+    isSpotifyAlbumSlotUrl,
     LmlClientError: MockLmlClientError,
   };
 });
@@ -1611,6 +1612,67 @@ describe('proxy.controller', () => {
         expect(result.youtubeMusicUrl).toBe('https://music.youtube.com/playlist?list=cachedyt');
         expect(result.bandcampUrl).toBe('https://artist.bandcamp.com/album/cached');
         expect(result.soundcloudUrl).toBe('https://soundcloud.com/artist/cached-album');
+      });
+
+      it('suppresses a persisted ON-HOST non-release spotify_url, synthesizing the search fallback (BS#2697)', async () => {
+        // The BS#2689 shape: an artist page in the album slot. It passes the
+        // BS#1714 host check, so before BS#2697 it was served verbatim under the
+        // hardwired iOS "Spotify" button and a DJ tapping it landed on an artist
+        // page rather than the record (the reported Married to the Mob case).
+        // 4,362 of 29,240 persisted rows (14.92%) carry a value like this.
+        mockLookupAlbumMetadataById.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/cached.jpg',
+          discogs_url: 'https://www.discogs.com/release/1580',
+          release_year: 2024,
+          spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+          apple_music_url: 'https://music.apple.com/us/album/cached/1440830867',
+          youtube_music_url: 'https://music.youtube.com/playlist?list=cachedyt',
+          bandcamp_url: 'https://artist.bandcamp.com/album/cached',
+          soundcloud_url: 'https://soundcloud.com/artist/cached-album',
+          artist_bio: 'A cached bio of the artist.',
+          artist_wikipedia_url: 'https://en.wikipedia.org/wiki/CachedArtist',
+        });
+
+        const req = {
+          query: { artistName: 'Cached Artist', releaseTitle: 'Cached Album', trackTitle: 'Cached Track' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        const result = (res.json as jest.Mock).mock.calls[0][0];
+        expect(result.spotifyUrl).not.toContain('/artist/');
+        expect(result.spotifyUrl).toContain('open.spotify.com/search');
+        // A legitimately album-shaped Apple URL is NOT narrowed (BS#2691).
+        expect(result.appleMusicUrl).toBe('https://music.apple.com/us/album/cached/1440830867');
+      });
+
+      it('still serves a persisted synthesized Spotify search URL rather than re-synthesizing over it', async () => {
+        // The predicate accepts `/search/`, which is what makes the read-time
+        // screen viable at all — narrowing with `isSpotifyUrl`-plus-album-only
+        // would have suppressed 3,787 working rows.
+        const persistedSearch = 'https://open.spotify.com/search/Persisted%20Query';
+        mockLookupAlbumMetadataById.mockResolvedValue({
+          artwork_url: 'https://i.discogs.com/cached.jpg',
+          discogs_url: 'https://www.discogs.com/release/1580',
+          release_year: 2024,
+          spotify_url: persistedSearch,
+          apple_music_url: null,
+          youtube_music_url: null,
+          bandcamp_url: null,
+          soundcloud_url: null,
+          artist_bio: null,
+          artist_wikipedia_url: null,
+        });
+
+        const req = {
+          query: { artistName: 'Cached Artist', releaseTitle: 'Cached Album', trackTitle: 'Cached Track' },
+        } as unknown as Request;
+        const res = createMockRes();
+
+        await getAlbumMetadata(req, res as Response, mockNext);
+
+        expect((res.json as jest.Mock).mock.calls[0][0].spotifyUrl).toBe(persistedSearch);
       });
 
       it('emits the 8 LML-only fields on a local hit, matching the cold extended-mode shape (BS#1336)', async () => {

@@ -76,7 +76,7 @@
  */
 import { album_metadata, flowsheet } from '@wxyc/database';
 import { sql } from 'drizzle-orm';
-import { isSpotifyUrl, isAppleMusicUrl, hasUrlParserDifferentialChar } from '@wxyc/lml-client';
+import { isSpotifyAlbumSlotUrl, isAppleMusicUrl, hasUrlParserDifferentialChar } from '@wxyc/lml-client';
 import { SearchUrlProvider } from '../services/metadata/providers/search-urls.provider.js';
 
 /**
@@ -139,7 +139,10 @@ export interface StreamingUrlPair {
  */
 export function suppressMislabeledStreamingUrls(raw: StreamingUrlPair): StreamingUrlPair {
   return {
-    spotify_url: isSpotifyUrl(raw.spotify_url) ? raw.spotify_url : null,
+    // BS#2697: the album-slot predicate, not the bare host check. This runs on
+    // the POST-COALESCE value, so it is the only guard that reaches
+    // `flowsheet.spotify_url` as well as the `album_metadata` copy (BS#2696).
+    spotify_url: isSpotifyAlbumSlotUrl(raw.spotify_url) ? raw.spotify_url : null,
     apple_music_url: isAppleMusicUrl(raw.apple_music_url) ? raw.apple_music_url : null,
   };
 }
