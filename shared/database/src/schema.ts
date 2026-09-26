@@ -112,7 +112,8 @@ export const user = pgTable(
     index('auth_user_self_signup_reviewed_by_idx').on(table.selfSignupReviewedBy),
     // auth_user trigram indexes (auth_user_dj_name_trgm_idx, auth_user_name_trgm_idx)
     // were dropped in migrations 0054 + 0065 — search no longer joins through
-    // auth_user; reads come from flowsheet.dj_name + flowsheet_dj_name_trgm_idx.
+    // auth_user; reads come from the denormalized flowsheet.dj_name, which is
+    // itself unindexed (see the flowsheet index list and BS#2400).
     // Declaration removed to keep schema.ts aligned with the dropped state (BS#1129).
   ]
 );
@@ -1629,11 +1630,18 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_track_title_trgm_idx').using('gin', sql`${table.track_title} gin_trgm_ops`),
     index('flowsheet_album_title_trgm_idx').using('gin', sql`${table.album_title} gin_trgm_ops`),
     index('flowsheet_record_label_trgm_idx').using('gin', sql`${table.record_label} gin_trgm_ops`),
-    // `flowsheet_dj_name_trgm_idx` removed in migration 0083 (#1060). dj-name
-    // search is served by `flowsheet_search_doc_idx` (the search_doc tsvector
-    // includes dj_name); the standalone trigram on dj_name was unused
-    // (idx_scan=0 in prod over months of writes + 14 autovacuum cycles).
-    // See parent epic #1058 for the broader write-amplification context.
+    // `flowsheet_dj_name_trgm_idx` removed in migration 0083 (#1060) as unused
+    // (idx_scan=0 in prod over months of writes + 14 autovacuum cycles). See
+    // parent epic #1058 for the broader write-amplification context.
+    //
+    // Nothing replaced it, and `flowsheet_search_doc_idx` below does NOT stand
+    // in for it: the search_doc tsvector includes dj_name, but a GIN tsvector
+    // index answers `@@`, not a pattern or equality predicate on the
+    // underlying text. So `dj_name` is unindexed, and every dj-name search
+    // predicate is a parallel seq scan of the whole heap (prod EXPLAIN
+    // 2026-09-08: cost ~230,971 for both `=` and ILIKE) that exceeds the 5s
+    // statement_timeout and 500s. BS#2400 owns that; this comment previously
+    // claimed the tsvector index served it, which is what let it go unnoticed.
     index('flowsheet_track_add_time_idx')
       .on(sql`${table.add_time} DESC`)
       .where(sql`${table.entry_type} = 'track'`),
@@ -3144,9 +3152,10 @@ export const shows = wxyc_schema.table(
     // at one row instead of the sequential scan of 72,893 rows they were.
     index('shows_start_time_id_idx').on(table.start_time, table.id),
     // shows_legacy_dj_name_trgm_idx was dropped in migrations 0054 + 0065 —
-    // search no longer joins through shows; dj-name reads come from
-    // flowsheet.dj_name + flowsheet_dj_name_trgm_idx. Declaration removed to
-    // keep schema.ts aligned with the dropped state (BS#1129).
+    // search no longer joins through shows; dj-name reads come from the
+    // denormalized flowsheet.dj_name, which is itself unindexed (see the
+    // flowsheet index list and BS#2400). Declaration removed to keep
+    // schema.ts aligned with the dropped state (BS#1129).
   ]
 );
 

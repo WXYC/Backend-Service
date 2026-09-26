@@ -764,12 +764,20 @@ function buildColumnMatch(field: CatalogField, value: string, exact: boolean): S
 
 function buildAllFieldMatch(value: string, exact: boolean): SQL {
   if (exact) {
-    // Exact matching skips the alias path — alias variants are normalized
-    // strings, not exact matches against the canonical name.
-    //
     // Whole-value, but case-insensitively: quoting narrows "contains" to "is"
     // and is not meant to also start distinguishing "cat power" from
     // "Cat Power". Every other predicate in this file already folds case.
+    //
+    // This fragment does not consult the alias substrate — alias variants are
+    // normalized strings, not exact matches against the canonical name — but
+    // do NOT read that as "a quoted query skips alias expansion". It does not.
+    // `aliasActive` gates on `field === 'all'` and never on `exact`, so a bare
+    // quoted term still builds the UNION, and branch (b) selects precisely the
+    // rows where this predicate is NOT TRUE. The alias CTE is also probed with
+    // the RAW `params.q`, quotes included, and pg_trgm treats `"` as a word
+    // separator — `similarity('cat power', '"cat power"')` is 1.0 — so the
+    // quotes are invisible to it. Whole-value therefore describes this
+    // predicate, not the result set the endpoint returns while the flag is on.
     return sql`(${ilikeEscaped(library_artist_view.artist_name, value, 'exact')} OR ${ilikeEscaped(library_artist_view.album_title, value, 'exact')} OR ${ilikeEscaped(library_artist_view.label, value, 'exact')})`;
   }
   // Trigram-backed ILIKE across artist/album/label. Tsvector ranking is the
