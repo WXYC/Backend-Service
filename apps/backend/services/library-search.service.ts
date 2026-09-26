@@ -757,7 +757,7 @@ function buildConditionFragment(condition: SearchCondition<CatalogField>): SQL |
 function buildColumnMatch(field: CatalogField, value: string, exact: boolean): SQL {
   const col = FIELD_COLUMNS[field];
   if (exact) {
-    return sql`${col} = ${value}`;
+    return ilikeEscaped(col, value, 'exact');
   }
   return ilikeEscaped(col, value, 'contains');
 }
@@ -766,7 +766,11 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
   if (exact) {
     // Exact matching skips the alias path — alias variants are normalized
     // strings, not exact matches against the canonical name.
-    return sql`(${library_artist_view.artist_name} = ${value} OR ${library_artist_view.album_title} = ${value} OR ${library_artist_view.label} = ${value})`;
+    //
+    // Whole-value, but case-insensitively: quoting narrows "contains" to "is"
+    // and is not meant to also start distinguishing "cat power" from
+    // "Cat Power". Every other predicate in this file already folds case.
+    return sql`(${ilikeEscaped(library_artist_view.artist_name, value, 'exact')} OR ${ilikeEscaped(library_artist_view.album_title, value, 'exact')} OR ${ilikeEscaped(library_artist_view.label, value, 'exact')})`;
   }
   // Trigram-backed ILIKE across artist/album/label. Tsvector ranking is the
   // deferred follow-up flagged in the plan (add `label` to library.search_doc

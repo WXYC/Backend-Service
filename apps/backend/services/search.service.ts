@@ -370,7 +370,7 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
   const col = COLUMN_MAP[column];
   if (!col) return sql`FALSE`;
   if (exact) {
-    return sql`${col} = ${value}`;
+    return ilikeEscaped(col, value, 'exact');
   }
   return ilikeEscaped(col, value, 'contains');
 }
@@ -389,7 +389,12 @@ export function shouldUseTsvector(value: string): boolean {
 
 function buildAllFieldMatch(value: string, exact: boolean): SQL {
   if (exact) {
-    return sql`(${flowsheet.artist_name} = ${value} OR ${flowsheet.track_title} = ${value} OR ${flowsheet.album_title} = ${value} OR ${flowsheet.record_label} = ${value})`;
+    // Whole-value, but case-insensitively: quoting narrows "contains" to "is",
+    // and nothing about it is meant to start distinguishing "hi scores" from
+    // "Hi Scores". The tsvector path below folds case via the `simple`
+    // configuration and the trigram path via ILIKE, so `=` was the one
+    // predicate in this file that did not.
+    return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'exact')} OR ${ilikeEscaped(flowsheet.track_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.album_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.record_label, value, 'exact')})`;
   }
   if (shouldUseTsvector(value)) {
     // Tsvector path: tokenized whole-word / prefix matching across all four
@@ -407,13 +412,20 @@ function buildDjNameMatch(value: string, exact: boolean): SQL {
   // The OR-decomposition this replaced (across user.djName, user.name, and
   // shows.legacy_dj_name) was a workaround for Postgres not pushing ILIKE
   // through the COALESCE display expression; with the resolved value stored
-  // on the row the predicate collapses to one column. ILIKE pattern matches
-  // here are served by flowsheet_search_doc_idx (the search_doc tsvector
-  // includes dj_name); the standalone flowsheet_dj_name_trgm_idx that
+  // on the row the predicate collapses to one column.
+  //
+  // Nothing indexes dj_name. The standalone flowsheet_dj_name_trgm_idx that
   // originally backed this path was dropped in migration 0083 (#1060) after
-  // pg_stat_user_indexes showed it had zero scans across months in prod.
+  // pg_stat_user_indexes showed zero scans across months, and nothing replaced
+  // it — `pg_stat_user_indexes` in prod lists 17 indexes on flowsheet, none on
+  // this column. flowsheet_search_doc_idx does not stand in for it: a GIN
+  // tsvector index answers `@@`, not a pattern or equality predicate on the
+  // underlying text. So every dj-name search, quoted or not, is a Parallel Seq
+  // Scan of the whole flowsheet heap (prod EXPLAIN 2026-09-08: cost ~230,971
+  // either way) against a 5s statement_timeout, and 500s. That predates this
+  // predicate's operator and is not fixed by it — BS#2400 owns it.
   if (exact) {
-    return sql`${flowsheet.dj_name} = ${value}`;
+    return ilikeEscaped(flowsheet.dj_name, value, 'exact');
   }
   return ilikeEscaped(flowsheet.dj_name, value, 'contains');
 }
