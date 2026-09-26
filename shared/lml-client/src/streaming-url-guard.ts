@@ -372,9 +372,25 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  * search-URL-only services (see `StreamingResolution`'s own doc comment) —
  * so there is nothing paired to clear for them.
  *
- * BS#2689 extends that same status-clearing to `spotify_url`, because the
- * freeze mechanism is identical and the population is far larger: ~4,353 prod
- * rows hold a non-album value.
+ * BS#2689 extends that same treatment to `spotify_url`, because the freeze
+ * mechanism is identical and the population is far larger: ~4,353 prod rows
+ * hold a non-album value. It does NOT copy the `delete`, though — it writes
+ * `'unresolved'`, because deleting only moves the freeze one square over.
+ * An `undefined` incoming verdict makes `mergeStreamingField` return `current`
+ * verbatim, so a FRESH album lands `spotify_status: NULL` beside the
+ * synthesized search URL; NULL matches neither re-ask gate while the search URL
+ * satisfies `hasAnyStreamingUrl`, so nothing ever looks at the row again. That
+ * is not a hypothetical shape — it is the "legacy frozen" Bandcamp cohort
+ * `precheck.ts`'s still-default-OFF `bandcampFrozenReask` arm exists to rescue,
+ * spelled `bandcamp_status IS NULL AND bandcamp_url LIKE '%bandcamp.com/search%'`.
+ * Writing `'unresolved'` keeps every terminal guarantee (the conflict set's
+ * status CASE holds a live `'verified'`/`'absent'`, and its url CASE is
+ * byte-identical to the not-consulted branch) and costs one thing only: a
+ * NULL-status row becomes re-ask-eligible instead of invisible.
+ *
+ * The `bandcamp_url` branch still deletes, deliberately: that is BS#2350's
+ * decision on a field whose frozen rows already have the gated precheck arm
+ * above, and converting it would change behavior this ticket never measured.
  *
  * `apple_music_url` is the remaining gap and BS#2689 does NOT close it. Its
  * branch below suppresses on host (BS#1710) and does not clear
@@ -384,7 +400,7 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  * result is a permanently blank Apple Music button rather than a degraded
  * search link. That is a pre-existing BS#2350 omission, not something this
  * branch's addition introduces or fixes; it needs its own ticket and its own
- * regression test rather than a drive-by `delete` here.
+ * regression test rather than a drive-by status write here.
  */
 export function sanitizeLookupStreamingUrls(response: LookupResponse): LookupResponse {
   for (const item of response.results ?? []) {
@@ -392,10 +408,32 @@ export function sanitizeLookupStreamingUrls(response: LookupResponse): LookupRes
     if (!artwork) continue;
     if (artwork.spotify_url != null && !isSpotifyAlbumSlotUrl(artwork.spotify_url)) {
       artwork.spotify_url = null;
-      // See this function's doc comment for why the status must go too.
+      // DEMOTED to 'unresolved', not deleted. See this function's doc comment
+      // for why the status cannot be left at 'verified'; this is why the fix
+      // is not `delete`. Deleting makes the incoming verdict `undefined`, and
+      // `mergeStreamingField` returns `current` untouched for that — so a
+      // FRESH album persists `spotify_status: NULL` beside the synthesized
+      // search URL. NULL satisfies neither re-ask gate (`precheck.ts`'s
+      // `needsStreamingReask` and the hourly sweep both spell it
+      // `= 'unresolved'`) while the search URL satisfies `hasAnyStreamingUrl`,
+      // so the row is skipped on every later play and never picks up LML's
+      // corrected album URL. That pair is exactly the "legacy frozen shape"
+      // Bandcamp needed a dedicated, still-default-OFF `bandcampFrozenReask`
+      // arm to dig out of; suppression must not manufacture more of it.
+      //
+      // 'unresolved' loses nothing the delete kept: the conflict branch's
+      // status CASE holds a live 'verified' or 'absent' row at its terminal
+      // value either way, and the url CASE is identical — so the ~4,353
+      // already-persisted rows still need the repair script, unchanged. The
+      // only behaviour that moves is the fresh-row and NULL-status case, which
+      // moves from never-consulted to re-ask-eligible.
       if (artwork.streaming_status) {
-        delete artwork.streaming_status.spotify;
+        artwork.streaming_status.spotify = 'unresolved';
       }
+      // Note the asymmetry with the `bandcamp_url` branch below, which still
+      // deletes: that is BS#2350's, its frozen rows already have the (gated)
+      // precheck arm above, and giving it the same treatment changes a field
+      // this ticket never measured. Filed rather than fixed in passing.
     }
     // Host-only, deliberately, and this is the OPEN QUESTION BS#2689 left: all
     // 288 populated `apple_url` values in LML's `streaming_links` artifact are

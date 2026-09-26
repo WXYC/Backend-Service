@@ -1157,17 +1157,25 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
 
     const sanitized = sanitizeLookupStreamingUrls(rawResponse);
     expect(sanitized.results[0].artwork?.spotify_url).toBeNull();
-    expect(sanitized.results[0].artwork?.streaming_status).not.toHaveProperty('spotify');
+    expect(sanitized.results[0].artwork?.streaming_status?.spotify).toBe('unresolved');
 
     await finalizeRow(LINKED_ROW, sanitized);
 
     const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    // The whole point of clearing the status: had 'verified' survived, this
-    // row would persist spotify_url: null + spotify_status: 'verified' —
-    // terminal under mergeStreamingField rule 1 and invisible to both re-ask
-    // gates, i.e. an album with no Spotify link, forever.
+    // The point of demoting the status: had 'verified' survived, this row would
+    // persist spotify_url: null + spotify_status: 'verified' — terminal under
+    // mergeStreamingField rule 1 and invisible to both re-ask gates, i.e. an
+    // album with no Spotify link, forever.
     expect(insertPayload.spotify_url).toContain('open.spotify.com/search');
-    expect(insertPayload.spotify_status).toBeNull();
+    // And 'unresolved' rather than NULL, which is what DELETING the key
+    // produced: `mergeStreamingField` returns `current` for an `undefined`
+    // incoming verdict, so the fresh row landed at NULL — a status neither
+    // re-ask gate matches, beside a search URL that satisfies
+    // `hasAnyStreamingUrl`. Search-link-but-never-re-asked is the same frozen
+    // shape Bandcamp needed a feature-flagged precheck arm to escape; this row
+    // must instead be picked up by the next sweep and healed once LML serves a
+    // real album URL.
+    expect(insertPayload.spotify_status).toBe('unresolved');
   });
 
   it('on an ALREADY-PERSISTED verified row the suppression is a no-op: the conflict set writes the live column back', async () => {
@@ -1189,14 +1197,26 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
     await finalizeRow(LINKED_ROW, sanitizeLookupStreamingUrls(rawResponse));
 
     const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
-    // The cleared key makes the incoming verdict `undefined`, so
-    // `buildStreamingFieldConflictSet` takes its not-consulted branch: the
-    // status column is written back to itself, and the url is the live column
-    // whenever that status is already 'verified'. For the ~4,353 rows this
-    // ticket is about — all of them `verified` — that is the stored artist URL,
-    // written back verbatim. The guard cannot heal them; the script has to.
-    expect(renderSql(conflictCfg.set.spotify_status)).toBe('<col>');
-    expect(sqlValues(conflictCfg.set.spotify_status)).toEqual([album_metadata.spotify_status]);
+    // The demoted 'unresolved' verdict takes `buildStreamingFieldConflictSet`'s
+    // unresolved branch, whose status CASE holds a live 'verified' OR 'absent'
+    // row at its terminal value and only writes 'unresolved' otherwise. So for
+    // the ~4,353 rows this ticket is about — all of them 'verified' — the status
+    // is held and the url CASE writes the live column back: the stored artist
+    // URL, verbatim. The guard still cannot heal them; the script has to.
+    //
+    // This is the assertion that shows demoting costs nothing here. The url
+    // fragment is byte-identical to the not-consulted branch the deleted key
+    // used to take, and the status fragment differs only in ALSO rescuing a
+    // NULL-status row to 'unresolved' — the fresh-row freeze, fixed without
+    // touching the persisted-verified case either way.
+    expect(renderSql(conflictCfg.set.spotify_status)).toBe(
+      "CASE WHEN <col> = 'verified' OR <col> = 'absent' THEN <col> ELSE 'unresolved' END"
+    );
+    expect(sqlValues(conflictCfg.set.spotify_status)).toEqual([
+      album_metadata.spotify_status,
+      album_metadata.spotify_status,
+      album_metadata.spotify_status,
+    ]);
     expect(renderSql(conflictCfg.set.spotify_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
     expect(sqlValues(conflictCfg.set.spotify_url)[0]).toBe(album_metadata.spotify_status);
     expect(sqlValues(conflictCfg.set.spotify_url)[1]).toBe(album_metadata.spotify_url);

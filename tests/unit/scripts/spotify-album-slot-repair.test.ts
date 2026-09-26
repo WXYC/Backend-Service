@@ -28,6 +28,7 @@ import { STREAMING_REASK_ATTEMPT_CAP } from '../../../apps/enrichment-worker/enr
 import {
   classifySpotifyUrl,
   buildSpotifyRepairPatch,
+  countCounterResets,
   reportedEntityKind,
   REASK_ATTEMPT_CAP,
 } from '../../../scripts/lib/spotify-album-slot-repair';
@@ -136,5 +137,43 @@ describe('reportedEntityKind', () => {
     ['not a url', '(unparseable)'],
   ])('labels %s as %s', (url, expected) => {
     expect(reportedEntityKind(url)).toBe(expected);
+  });
+});
+
+describe('countCounterResets', () => {
+  // The dry run prints this number under "will be cleared to 0" and an operator
+  // reads it before committing ~4,353 UPDATEs. The CLI used to compute it
+  // inline as `attempts >= CAP`, which over-reported: `buildSpotifyRepairPatch`
+  // omits the counter for an `'absent'` row, so an exhausted `'absent'` row was
+  // counted as a reset that never happens. Deriving the count FROM the patch
+  // builder makes the two incapable of drifting.
+  it('counts only rows whose patch actually carries the reset', () => {
+    const rows = [
+      { spotify_status: 'verified', streaming_reask_attempts: STREAMING_REASK_ATTEMPT_CAP },
+      { spotify_status: 'unresolved', streaming_reask_attempts: STREAMING_REASK_ATTEMPT_CAP + 2 },
+      { spotify_status: null, streaming_reask_attempts: STREAMING_REASK_ATTEMPT_CAP },
+    ];
+    expect(countCounterResets(rows)).toBe(3);
+  });
+
+  it('excludes an exhausted absent row, whose patch omits the counter', () => {
+    const rows = [{ spotify_status: 'absent', streaming_reask_attempts: STREAMING_REASK_ATTEMPT_CAP + 5 }];
+    expect(buildSpotifyRepairPatch('absent', STREAMING_REASK_ATTEMPT_CAP + 5)).not.toHaveProperty(
+      'streaming_reask_attempts'
+    );
+    expect(countCounterResets(rows)).toBe(0);
+  });
+
+  it('excludes rows under the cap regardless of status', () => {
+    const rows = [
+      { spotify_status: 'verified', streaming_reask_attempts: 0 },
+      { spotify_status: 'unresolved', streaming_reask_attempts: STREAMING_REASK_ATTEMPT_CAP - 1 },
+      { spotify_status: 'absent', streaming_reask_attempts: 1 },
+    ];
+    expect(countCounterResets(rows)).toBe(0);
+  });
+
+  it('is zero for an empty cohort', () => {
+    expect(countCounterResets([])).toBe(0);
   });
 });
