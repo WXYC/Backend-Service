@@ -1080,6 +1080,19 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
  * merge/UPSERT — rather than only at the guard unit level
  * (`tests/unit/shared/lml-client/streaming-url-guard.test.ts`) or only at
  * the merge unit level (the BS#1915 suite above).
+ *
+ * BS#2689 adds the `spotify_url` case: the same freeze mechanism, reached by
+ * an album-slot PATH failure (an `open.spotify.com/artist/…` value) rather
+ * than a malformed-host one, over ~4,353 prod rows.
+ *
+ * Both of the above read the INSERT payload, which is the never-persisted-album
+ * branch. The third test reads the CONFLICT branch, which is the one an
+ * already-persisted row takes — and pins that the guard is a NO-OP on disk
+ * there. That is not a defect to be fixed in the guard (inventing a verdict LML
+ * never asserted would be worse); it is the reason
+ * `scripts/repair-non-album-spotify-urls.ts` is load-bearing rather than
+ * cleanup, and it needs a test so nobody reads the two INSERT tests as
+ * reassurance about the 29,233 rows that already exist.
  */
 describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing integration)', () => {
   beforeEach(() => {
@@ -1122,6 +1135,91 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
     // permanent-null freeze a leftover 'verified' status would have caused.
     expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
     expect(insertPayload.bandcamp_status).toBeNull();
+  });
+
+  it('a suppressed spotify_url artist page (was verified) lands as the synthesized search URL, not null', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    // The BS#2689 shape as it arrives off the wire: an artist page in the
+    // album slot, paired with the 'verified' status LML asserted for it.
+    const rawResponse = {
+      search_type: 'direct',
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+            streaming_status: { spotify: 'verified' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    const sanitized = sanitizeLookupStreamingUrls(rawResponse);
+    expect(sanitized.results[0].artwork?.spotify_url).toBeNull();
+    expect(sanitized.results[0].artwork?.streaming_status?.spotify).toBe('unresolved');
+
+    await finalizeRow(LINKED_ROW, sanitized);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    // The point of demoting the status: had 'verified' survived, this row would
+    // persist spotify_url: null + spotify_status: 'verified' — terminal under
+    // mergeStreamingField rule 1 and invisible to both re-ask gates, i.e. an
+    // album with no Spotify link, forever.
+    expect(insertPayload.spotify_url).toContain('open.spotify.com/search');
+    // And 'unresolved' rather than NULL, which is what DELETING the key
+    // produced: `mergeStreamingField` returns `current` for an `undefined`
+    // incoming verdict, so the fresh row landed at NULL — a status neither
+    // re-ask gate matches, beside a search URL that satisfies
+    // `hasAnyStreamingUrl`. Search-link-but-never-re-asked is the same frozen
+    // shape Bandcamp needed a feature-flagged precheck arm to escape; this row
+    // must instead be picked up by the next sweep and healed once LML serves a
+    // real album URL.
+    expect(insertPayload.spotify_status).toBe('unresolved');
+  });
+
+  it('on an ALREADY-PERSISTED verified row the suppression is a no-op: the conflict set writes the live column back', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    const rawResponse = {
+      search_type: 'direct',
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+            streaming_status: { spotify: 'verified' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    await finalizeRow(LINKED_ROW, sanitizeLookupStreamingUrls(rawResponse));
+
+    const conflictCfg = mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> };
+    // The demoted 'unresolved' verdict takes `buildStreamingFieldConflictSet`'s
+    // unresolved branch, whose status CASE holds a live 'verified' OR 'absent'
+    // row at its terminal value and only writes 'unresolved' otherwise. So for
+    // the ~4,353 rows this ticket is about — all of them 'verified' — the status
+    // is held and the url CASE writes the live column back: the stored artist
+    // URL, verbatim. The guard still cannot heal them; the script has to.
+    //
+    // This is the assertion that shows demoting costs nothing here. The url
+    // fragment is byte-identical to the not-consulted branch the deleted key
+    // used to take, and the status fragment differs only in ALSO rescuing a
+    // NULL-status row to 'unresolved' — the fresh-row freeze, fixed without
+    // touching the persisted-verified case either way.
+    expect(renderSql(conflictCfg.set.spotify_status)).toBe(
+      "CASE WHEN <col> = 'verified' OR <col> = 'absent' THEN <col> ELSE 'unresolved' END"
+    );
+    expect(sqlValues(conflictCfg.set.spotify_status)).toEqual([
+      album_metadata.spotify_status,
+      album_metadata.spotify_status,
+      album_metadata.spotify_status,
+    ]);
+    expect(renderSql(conflictCfg.set.spotify_url)).toBe("CASE WHEN <col> = 'verified' THEN <col> ELSE <col> END");
+    expect(sqlValues(conflictCfg.set.spotify_url)[0]).toBe(album_metadata.spotify_status);
+    expect(sqlValues(conflictCfg.set.spotify_url)[1]).toBe(album_metadata.spotify_url);
   });
 });
 

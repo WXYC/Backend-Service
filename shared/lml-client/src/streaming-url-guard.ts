@@ -45,10 +45,28 @@
  * (LML never emits a resolution verdict for those two search-URL-only
  * services), so there is nothing paired to clear for them.
  *
- * This does NOT heal rows already persisted before the guard shipped —
- * BS persistence is fill-only, so an existing bad value survives. Those
- * need a separate overwrite migration (BS#1710 fix #3 did this for
- * spotify/apple).
+ * BS#2689 adds ONE thing on top of all that, for `spotify_url` alone: a path
+ * check. `https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7` IS a Spotify
+ * URL, so the host check passed it into a column whose name promises a
+ * RELEASE — 3,468 artist pages and 841 track pages out of the 29,233 populated
+ * prod `album_metadata.spotify_url` values (14.9%) sent a DJ tapping "Play on
+ * Spotify" to an artist page or a single track. It went into its own predicate
+ * ({@link isSpotifyAlbumSlotUrl}), composed over `isSpotifyUrl` rather than
+ * folded into it; that predicate's doc comment is the single home for why, and
+ * for the suppression's paired status clear.
+ *
+ * THIS GUARD IS PROSPECTIVE ONLY, and more strictly so than "persistence is
+ * fill-only" suggests. For a row already holding `spotify_status = 'verified'`,
+ * a suppression here is a NO-OP ON DISK: deleting the incoming
+ * `streaming_status.spotify` makes the incoming verdict `undefined`, and
+ * `apps/enrichment-worker/streaming-merge-sql.ts`'s not-consulted branch then
+ * emits `url: CASE WHEN status = 'verified' THEN <live column> ELSE <fallback>
+ * END`, writing the stored bad URL back verbatim; `mergeStreamingField`'s
+ * `if (current.status === 'verified') return current` says the same thing one
+ * layer up. That is deliberate — inventing a verdict LML did not assert is the
+ * worse failure — but it means the corrective pass is LOAD-BEARING for this
+ * guard rather than cleanup after it. `scripts/repair-non-album-spotify-urls.ts`
+ * is BS#2689's (BS#1710 fix #3 was the equivalent for spotify/apple hosts).
  */
 import type { LookupResponse } from '@wxyc/shared/dtos';
 
@@ -111,11 +129,93 @@ function safeHostname(url: string): string | null {
  * True iff `url` parses to an absolute URL whose host is `spotify.com`
  * or a subdomain (`open.spotify.com`, `www.spotify.com`, …). Case-folds
  * the host; returns false for nullish, non-string, or unparseable input.
+ *
+ * Host-only, deliberately, and DO NOT narrow it: an artist or track page is a
+ * perfectly good Spotify URL and this function must keep saying so. BS#2689's
+ * album-slot path screen is {@link isSpotifyAlbumSlotUrl} — see there for
+ * which callers depend on which question.
  */
 export function isSpotifyUrl(url: string | null | undefined): boolean {
   if (typeof url !== 'string') return false;
   const host = safeHostname(url);
   return host !== null && hostIsUnder(host, 'spotify.com');
+}
+
+/**
+ * True iff `url` is a Spotify URL (per {@link isSpotifyUrl}) whose path is a
+ * shape the `spotify_url` slot may legitimately hold. `spotify_url` names a
+ * RELEASE, so that is `/album/<id>` — optionally behind a locale segment, as
+ * on a localized link like `open.spotify.com/intl-de/album/<id>` — or a
+ * `/search…` page.
+ *
+ * SEPARATE from {@link isSpotifyUrl} and composed over it at the
+ * `sanitizeLookupStreamingUrls` call site, rather than folded into it, because
+ * the two questions have different callers. `isSpotifyUrl` answers "is this a
+ * Spotify URL", and BS#2350 requires its accept set stay byte-identical;
+ * several serve seams (`proxy.controller.ts`,
+ * `album-metadata-projection.ts`'s `suppressMislabeledStreamingUrls`,
+ * `flowsheet-projection.ts`) gate the PERSISTED-row READ path on it, where a
+ * stored non-album value is the corrective pass's problem rather than the
+ * serve seam's. Whether those seams should ALSO take this predicate is a live
+ * question and deliberately not settled here — it would suppress the stored
+ * artist/track rows on serve without writing anything, which is a different
+ * change with a different blast radius than a write-path screen.
+ *
+ * Search is an accept, not an oversight. It is the resolution ladder's last
+ * tier: BS mints exactly that shape itself in `apps/enrichment-worker/enrich.ts`'s
+ * `synthesizeSearchUrls` (`open.spotify.com/search/<query>`), 3,787 of the
+ * populated prod rows carry one, and `isSpotifyUrl`'s test list has pinned it
+ * as an accept since BS#1710. Nulling a search URL would be a regression, not
+ * a hardening — a search page for the record is a working answer, where an
+ * artist page is the wrong record.
+ *
+ * Everything else under the host is a different ENTITY and is rejected:
+ * `/artist/` (6,143 in LML's artifact), `/track/` (989), `/playlist/` (13),
+ * `/user/` (7), `/show/` (1, a podcast), and the bare `/album` with no id
+ * (11), which opens a Spotify error page rather than anything playable.
+ *
+ * The locale segment is matched as ANY first segment starting with `intl-`,
+ * not as the two fixed widths the artifact happens to contain (`intl-de`,
+ * `intl-pt-br`). The error directions are not symmetric: failing to recognize
+ * a locale form reads the locale as the entity kind and NULLS A REAL ALBUM
+ * LINK, while over-accepting costs nothing — Spotify has no entity kind
+ * beginning `intl-`, so no rejectable shape can slip through. Same cheap
+ * over-acceptance posture as `isYouTubeMusicUrl`'s `youtu.be`.
+ *
+ * Parses before delegating to {@link isSpotifyUrl} so the unparseable case is
+ * caught by this function's own `catch` rather than resting on an inference
+ * about another function's internals; the cost is a second `new URL()` on a
+ * value that is about to be parsed anyway, which is off any hot loop.
+ *
+ * Suppressing a value this rejects must ALSO clear the paired
+ * `streaming_status.spotify` verdict — see `sanitizeLookupStreamingUrls`.
+ */
+export function isSpotifyAlbumSlotUrl(url: string | null | undefined): boolean {
+  if (typeof url !== 'string') return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  // WHATWG parses an authority for any scheme written with `//`, so
+  // `javascript://open.spotify.com/album/x` reaches here with a spotify.com
+  // hostname and an album-shaped path. `isSpotifyUrl` inherits
+  // `safeHostname`'s scheme-blindness and must keep it (BS#2350), but this
+  // predicate has no pre-existing callers to preserve and its value is
+  // rendered as an href, so it screens the scheme like every other predicate
+  // in this file does via `safeHttpHostname`.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  // Host + the backslash-authority parser differential, unchanged and not
+  // reimplemented here.
+  if (!isSpotifyUrl(url)) return false;
+  const segments = parsed.pathname.split('/').filter((segment) => segment.length > 0);
+  // Case-folded for the same reason the host and the locale segment are: a real
+  // album link whose kind reads as unknown is one the corrective pass NULLs.
+  if (segments[0]?.toLowerCase().startsWith('intl-')) segments.shift();
+  const kind = segments[0]?.toLowerCase();
+  if (kind === 'search') return true;
+  return kind === 'album' && segments[1] !== undefined;
 }
 
 /**
@@ -244,11 +344,15 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  * field's check (host allowlist for spotify/apple/youtube_music/soundcloud;
  * well-formedness only for bandcamp — see `isBandcampUrl`) is set to
  * `null`. Mutates `response` in place (the caller owns the freshly-parsed
- * object) and returns it for convenience. A suppressed value falls through
- * each writer's `?? searchUrls.*` fallback to a well-formed synthesized
- * search URL, exactly as spotify/apple do today (BS#1710); `spotify_url`/
- * `apple_music_url` behavior is unchanged by BS#2350
- * (`isSpotifyUrl`/`isAppleMusicUrl` are untouched).
+ * object) and returns it for convenience. On the live enrichment path a
+ * suppressed value falls through `?? searchUrls.*` to a well-formed
+ * synthesized search URL, exactly as spotify/apple do today (BS#1710) — but
+ * that is the live writer's behavior, NOT a property of every consumer: some
+ * `jobs/*` writers project `artwork.spotify_url ?? null` with no search
+ * fallback, so for them a suppression lands a NULL column rather than a search
+ * URL. `apple_music_url` behavior is unchanged by BS#2350 and BS#2689 alike;
+ * the `spotify_url` slot additionally gets BS#2689's path screen, composed
+ * here as {@link isSpotifyAlbumSlotUrl}.
  *
  * BS#2350's central correctness fix: suppressing `bandcamp_url` also clears
  * the sibling `artwork.streaming_status.bandcamp` verdict when present.
@@ -266,17 +370,79 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  * null. `youtube_music_url`/`soundcloud_url` have no `streaming_status` key
  * to clear — LML never emits a resolution verdict for those two
  * search-URL-only services (see `StreamingResolution`'s own doc comment) —
- * so there is nothing paired to clear for them. `spotify_url`/
- * `apple_music_url` are untouched by this too, matching their byte-identical
- * predicate behavior.
+ * so there is nothing paired to clear for them.
+ *
+ * BS#2689 extends that same treatment to `spotify_url`, because the freeze
+ * mechanism is identical and the population is far larger: ~4,353 prod rows
+ * hold a non-album value. It does NOT copy the `delete`, though — it writes
+ * `'unresolved'`, because deleting only moves the freeze one square over.
+ * An `undefined` incoming verdict makes `mergeStreamingField` return `current`
+ * verbatim, so a FRESH album lands `spotify_status: NULL` beside the
+ * synthesized search URL; NULL matches neither re-ask gate while the search URL
+ * satisfies `hasAnyStreamingUrl`, so nothing ever looks at the row again. That
+ * is not a hypothetical shape — it is the "legacy frozen" Bandcamp cohort
+ * `precheck.ts`'s still-default-OFF `bandcampFrozenReask` arm exists to rescue,
+ * spelled `bandcamp_status IS NULL AND bandcamp_url LIKE '%bandcamp.com/search%'`.
+ * Writing `'unresolved'` keeps every terminal guarantee (the conflict set's
+ * status CASE holds a live `'verified'`/`'absent'`, and its url CASE is
+ * byte-identical to the not-consulted branch) and costs one thing only: a
+ * NULL-status row becomes re-ask-eligible instead of invisible.
+ *
+ * The `bandcamp_url` branch still deletes, deliberately: that is BS#2350's
+ * decision on a field whose frozen rows already have the gated precheck arm
+ * above, and converting it would change behavior this ticket never measured.
+ *
+ * `apple_music_url` is the remaining gap and BS#2689 does NOT close it. Its
+ * branch below suppresses on host (BS#1710) and does not clear
+ * `streaming_status.apple_music`, so the exact freeze described above is
+ * reachable there — and worse, because `enrich.ts` treats a null
+ * `apple_music_url` as load-bearing with no search fallback (BS#1192), the
+ * result is a permanently blank Apple Music button rather than a degraded
+ * search link. That is a pre-existing BS#2350 omission, not something this
+ * branch's addition introduces or fixes; it needs its own ticket and its own
+ * regression test rather than a drive-by status write here.
  */
 export function sanitizeLookupStreamingUrls(response: LookupResponse): LookupResponse {
   for (const item of response.results ?? []) {
     const artwork = item.artwork;
     if (!artwork) continue;
-    if (artwork.spotify_url != null && !isSpotifyUrl(artwork.spotify_url)) {
+    if (artwork.spotify_url != null && !isSpotifyAlbumSlotUrl(artwork.spotify_url)) {
       artwork.spotify_url = null;
+      // DEMOTED to 'unresolved', not deleted. See this function's doc comment
+      // for why the status cannot be left at 'verified'; this is why the fix
+      // is not `delete`. Deleting makes the incoming verdict `undefined`, and
+      // `mergeStreamingField` returns `current` untouched for that — so a
+      // FRESH album persists `spotify_status: NULL` beside the synthesized
+      // search URL. NULL satisfies neither re-ask gate (`precheck.ts`'s
+      // `needsStreamingReask` and the hourly sweep both spell it
+      // `= 'unresolved'`) while the search URL satisfies `hasAnyStreamingUrl`,
+      // so the row is skipped on every later play and never picks up LML's
+      // corrected album URL. That pair is exactly the "legacy frozen shape"
+      // Bandcamp needed a dedicated, still-default-OFF `bandcampFrozenReask`
+      // arm to dig out of; suppression must not manufacture more of it.
+      //
+      // 'unresolved' loses nothing the delete kept: the conflict branch's
+      // status CASE holds a live 'verified' or 'absent' row at its terminal
+      // value either way, and the url CASE is identical — so the ~4,353
+      // already-persisted rows still need the repair script, unchanged. The
+      // only behaviour that moves is the fresh-row and NULL-status case, which
+      // moves from never-consulted to re-ask-eligible.
+      if (artwork.streaming_status) {
+        artwork.streaming_status.spotify = 'unresolved';
+      }
+      // Note the asymmetry with the `bandcamp_url` branch below, which still
+      // deletes: that is BS#2350's, its frozen rows already have the (gated)
+      // precheck arm above, and giving it the same treatment changes a field
+      // this ticket never measured. Filed rather than fixed in passing.
     }
+    // Host-only, deliberately, and this is the OPEN QUESTION BS#2689 left: all
+    // 288 populated `apple_url` values in LML's `streaming_links` artifact are
+    // already album URLs, so there is no measured population of Apple artist
+    // URLs to guard, and an unmeasured screen would risk degrading real links
+    // (Apple album paths are locale-segmented and slug-bearing,
+    // `/<cc>/album/<slug>/<id>`, a wider shape than Spotify's). BS has never
+    // counted the path shapes in `album_metadata.apple_music_url`; if that
+    // count turns up artist URLs, this branch is where the screen goes.
     if (artwork.apple_music_url != null && !isAppleMusicUrl(artwork.apple_music_url)) {
       artwork.apple_music_url = null;
     }

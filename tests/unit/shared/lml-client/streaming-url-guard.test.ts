@@ -18,10 +18,17 @@
  * suppressing `bandcamp_url` also clears the paired
  * `artwork.streaming_status.bandcamp` verdict, closing the BS#1747/#1915
  * permanent-null freeze this guard could otherwise cause.
+ *
+ * BS#2689 adds a PATH-shape screen for the `spotify_url` slot in a separate
+ * predicate, `isSpotifyAlbumSlotUrl` — see its doc comment for why it is
+ * composed over `isSpotifyUrl` rather than folded into it. Suppressing
+ * `spotify_url` now clears the paired `streaming_status.spotify` verdict for
+ * exactly the bandcamp reason above.
  */
 import type { LookupResponse } from '@wxyc/lml-client';
 import {
   isSpotifyUrl,
+  isSpotifyAlbumSlotUrl,
   isAppleMusicUrl,
   isYouTubeMusicUrl,
   isBandcampUrl,
@@ -107,6 +114,99 @@ describe('isSpotifyUrl', () => {
   // genuine accept.
   it('accepts a raw space in the path (the stricter BS#2350 bar must not leak in here)', () => {
     expect(isSpotifyUrl('https://open.spotify.com/album/a b')).toBe(true);
+  });
+
+  // BS#2689 characterization: the album-slot PATH screen lives in a separate
+  // predicate (`isSpotifyAlbumSlotUrl`), so this one stays host-only. Other
+  // call sites depend on that — `proxy.controller.ts` gates the persisted
+  // read path on `isSpotifyUrl`, where a non-album value is the corrective
+  // pass's problem, not a reason to stop serving the field.
+  it.each([
+    ['artist page', 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7'],
+    ['track page', 'https://open.spotify.com/track/1301WleyT98MSxVHPZCA6M'],
+  ])('still accepts a non-album Spotify entity URL (%s) — host-only by contract', (_label, url) => {
+    expect(isSpotifyUrl(url)).toBe(true);
+  });
+});
+
+/**
+ * BS#2689: the album-slot path screen. `spotify_url` names a RELEASE, so a
+ * value in that slot must point at the album — or at a search for it, the
+ * resolution ladder's last tier — never at some other Spotify entity.
+ *
+ * Shape counts below are from LML's production `streaming_links` artifact
+ * (46,907 values, 2026-09), under `open.spotify.com`.
+ */
+describe('isSpotifyAlbumSlotUrl', () => {
+  it.each([
+    ['plain album page (31,835 in the artifact)', 'https://open.spotify.com/album/1A2GTWGtFfWp7KSQTwWOyo'],
+    // The ticket calls these out explicitly: legitimate localized album
+    // links that must NOT be nulled (24 in the artifact: fr, it, es, de, pt).
+    ['intl-de locale-prefixed album', 'https://open.spotify.com/intl-de/album/1A2GTWGtFfWp7KSQTwWOyo'],
+    ['intl-pt-br region-suffixed locale', 'https://open.spotify.com/intl-pt-br/album/1A2GTWGtFfWp7KSQTwWOyo'],
+    // Over-acceptance is the deliberate posture: the cost of not recognizing
+    // a locale segment is NULLING A REAL ALBUM LINK, so any `intl-`-prefixed
+    // first segment is skipped rather than only the two forms measured in the
+    // artifact. A script subtag and an uppercase region are the shapes a
+    // fixed-width `intl-[a-z]{2}(-[a-z]{2})?` match would have dropped.
+    ['intl-zh-hans script-subtag locale', 'https://open.spotify.com/intl-zh-hans/album/1A2GTWGtFfWp7KSQTwWOyo'],
+    ['intl-pt-BR uppercase region', 'https://open.spotify.com/intl-pt-BR/album/1A2GTWGtFfWp7KSQTwWOyo'],
+    // The synthesized last-tier fallback. BS mints exactly this shape in
+    // `synthesizeSearchUrls`, and `isSpotifyUrl`'s accept list has pinned it
+    // since BS#1710 — nulling it would be a regression, not a hardening.
+    ['path-style search fallback', 'https://open.spotify.com/search/Jessica%20Pratt%20On%20Your%20Own%20Love%20Again'],
+    ['query-style search fallback', 'https://open.spotify.com/search?q=Jessica%20Pratt'],
+    ['bare spotify.com apex album', 'https://spotify.com/album/abc'],
+    ['case-insensitive host', 'HTTPS://OPEN.SPOTIFY.COM/album/abc'],
+    // The host and the locale segment are both case-folded, so the entity kind
+    // must be too — otherwise the same asymmetry bites: a real album link read
+    // as an unknown kind is NULLED by the corrective pass.
+    ['mixed-case entity kind', 'https://open.spotify.com/Album/1A2GTWGtFfWp7KSQTwWOyo'],
+    ['mixed-case search', 'https://open.spotify.com/Search/Jessica%20Pratt'],
+  ])('accepts a value the album slot may hold (%s)', (_label, url) => {
+    expect(isSpotifyAlbumSlotUrl(url)).toBe(true);
+  });
+
+  it.each([
+    // The reported defect: 6,143 artist pages in the artifact, 3,468 served.
+    ['artist page (the reported defect)', 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7'],
+    ['intl-prefixed artist page', 'https://open.spotify.com/intl-fr/artist/7CaUk9xCxdXAmmqQn3PLR7'],
+    ['track page (989 in the artifact, 841 served)', 'https://open.spotify.com/track/1301WleyT98MSxVHPZCA6M'],
+    ['playlist page (13 in the artifact)', 'https://open.spotify.com/playlist/37i9dQZF1DX0XUsuxWHRQd'],
+    ['user page (7 in the artifact)', 'https://open.spotify.com/user/wxyc'],
+    ['show page — a podcast (1 in the artifact)', 'https://open.spotify.com/show/4rOoJ6Egrf8K2IrywzwOMk'],
+    // 11 of these exist: the word "album" with no release behind it, which
+    // opens a Spotify error page rather than anything a DJ can play.
+    ['bare /album with no id (11 in the artifact)', 'https://open.spotify.com/album'],
+    ['/album/ with an empty id', 'https://open.spotify.com/album/'],
+    ['host root with no path at all', 'https://open.spotify.com/'],
+    // Regression cover on the BS#1710 host check the screen composes over:
+    // the path may be album-shaped and the value still be foreign.
+    ['off-host album URL (Deezer)', 'https://www.deezer.com/album/254381182'],
+    ['off-host album URL (Apple Music)', 'https://music.apple.com/us/album/foo/123'],
+    ['host-suffix spoof with an album path', 'https://spotify.com.evil.example/album/abc'],
+    ['backslash-authority spoof', 'https://open.spotify.com\\@evil.example/album/abc'],
+    ['not a URL', 'not a url'],
+    ['empty string', ''],
+    // WHATWG parses an authority for any scheme written with `//`, so a
+    // non-http(s) scheme reaches this predicate with a spotify.com hostname and
+    // an album-shaped path. The value is rendered as an href on DJ-facing
+    // surfaces, and every sibling predicate in this file screens the scheme via
+    // `safeHttpHostname`; this one has no pre-existing callers to preserve, so
+    // it screens it too rather than inheriting `isSpotifyUrl`'s scheme-blind host
+    // check.
+    ['javascript: scheme with a spotify authority', 'javascript://open.spotify.com/album/abc'],
+    ['data: scheme with a spotify authority', 'data://open.spotify.com/album/abc'],
+    ['ftp: scheme with a spotify authority', 'ftp://open.spotify.com/album/abc'],
+  ])('rejects a value the album slot may not hold (%s)', (_label, url) => {
+    expect(isSpotifyAlbumSlotUrl(url)).toBe(false);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+  ])('rejects nullish input (%s)', (_label, input) => {
+    expect(isSpotifyAlbumSlotUrl(input)).toBe(false);
   });
 });
 
@@ -278,6 +378,110 @@ describe('sanitizeLookupStreamingUrls', () => {
     const url = 'https://open.spotify.com/album/abc123';
     const resp = build({ spotify_url: url });
     expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.spotify_url).toBe(url);
+  });
+
+  describe('BS#2689 spotify_url album-shape screen', () => {
+    // Wiring only — that the slot runs through `isSpotifyAlbumSlotUrl` at all.
+    // Which shapes it accepts is pinned exhaustively on the predicate above.
+    it('nulls a non-album Spotify URL in the spotify_url slot', () => {
+      const resp = build({ spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7' });
+      expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.spotify_url).toBeNull();
+    });
+
+    it.each([
+      ['locale-prefixed album (must NOT be nulled)', 'https://open.spotify.com/intl-de/album/1A2GTWGtFfWp7KSQTwWOyo'],
+      ['synthesized search fallback', 'https://open.spotify.com/search/Jessica%20Pratt'],
+    ])('preserves a legitimate album-slot value (%s)', (_label, url) => {
+      const resp = build({ spotify_url: url });
+      expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.spotify_url).toBe(url);
+    });
+
+    // The BS#2350 lesson applied to the new branch: without this, the merge
+    // in `apps/enrichment-worker/enrich.ts` persists `spotify_url: null`
+    // beside `spotify_status: 'verified'` — terminal under rule 1 and
+    // un-re-askable by `precheck.ts`/`streaming-reask.ts`, i.e. ~4,353 rows
+    // frozen with no Spotify link at all.
+    it.each([['verified'], ['absent']])(
+      "demotes streaming_status.spotify to 'unresolved' when spotify_url is suppressed (was '%s')",
+      (status) => {
+        const resp = build({
+          spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+          streaming_status: { spotify: status },
+        });
+        const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+        expect(out?.spotify_url).toBeNull();
+        // NOT deleted. Deleting the key makes the incoming verdict
+        // `undefined`, and `mergeStreamingField` returns `current` unchanged
+        // for that — so a FRESH album persisted `spotify_status: NULL` beside
+        // the synthesized search URL. That pair is the "legacy frozen shape"
+        // `precheck.ts` needed a dedicated (still default-OFF)
+        // `bandcampFrozenReask` arm to escape: NULL satisfies neither re-ask
+        // gate (both require `= 'unresolved'`) while the search URL satisfies
+        // `hasAnyStreamingUrl`, so the row is skipped forever and never picks
+        // up LML's corrected album URL. Suppression must not manufacture the
+        // shape a sibling field needed a feature flag to dig out of.
+        expect(out?.streaming_status?.spotify).toBe('unresolved');
+      }
+    );
+
+    it('the demoted value is exactly the literal both re-ask gates test for', () => {
+      // Pinned as a literal on purpose: `precheck.ts`'s `needsStreamingReask`
+      // and the hourly sweep's `findUnresolvedStreamingCandidates` both spell
+      // the predicate as SQL `= 'unresolved'`, so there is no shared TS
+      // constant to import. If that vocabulary ever changes, this fails here
+      // rather than silently re-freezing the cohort.
+      const resp = build({
+        spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+        streaming_status: { spotify: 'verified' },
+      });
+      const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+      expect(out?.streaming_status?.spotify).toBe('unresolved');
+      expect(['verified', 'absent']).not.toContain(out?.streaming_status?.spotify);
+    });
+
+    it('leaves streaming_status.spotify untouched when spotify_url is preserved', () => {
+      const url = 'https://open.spotify.com/intl-de/album/1A2GTWGtFfWp7KSQTwWOyo';
+      const resp = build({ spotify_url: url, streaming_status: { spotify: 'verified' } });
+      const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+      expect(out?.spotify_url).toBe(url);
+      expect(out?.streaming_status?.spotify).toBe('verified');
+    });
+
+    it('leaves the sibling apple_music/bandcamp verdicts untouched by a spotify suppression', () => {
+      const resp = build({
+        spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+        apple_music_url: 'https://music.apple.com/us/album/foo/123',
+        bandcamp_url: 'https://artist.bandcamp.com/album/foo',
+        streaming_status: { spotify: 'verified', apple_music: 'absent', bandcamp: 'verified' },
+      });
+      const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+      // Whole object asserted, so a future branch that clobbers a sibling
+      // verdict fails here: only spotify moves, and it moves to 'unresolved'.
+      expect(out?.streaming_status).toEqual({
+        spotify: 'unresolved',
+        apple_music: 'absent',
+        bandcamp: 'verified',
+      });
+    });
+
+    it('tolerates a suppressed spotify_url with no streaming_status object at all', () => {
+      const resp = build({ spotify_url: 'https://open.spotify.com/artist/abc' });
+      // One call only: the function mutates in place, so a second call would
+      // find the url already null and the assertion could not fail.
+      const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+      expect(out?.spotify_url).toBeNull();
+      expect(out?.streaming_status).toBeUndefined();
+    });
+
+    // BS#2689 deliberately does NOT screen apple_music_url on path shape:
+    // all 288 populated `apple_url` values in LML's artifact are already
+    // album URLs, so there is no measured population to guard. See the
+    // `apple_music_url` branch in `sanitizeLookupStreamingUrls`.
+    it('leaves an apple_music_url artist page alone (unmeasured, deliberately unguarded)', () => {
+      const url = 'https://music.apple.com/us/artist/stereolab/57312';
+      const resp = build({ apple_music_url: url });
+      expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.apple_music_url).toBe(url);
+    });
   });
 
   it('preserves a genuine Apple Music URL', () => {
