@@ -113,16 +113,45 @@ export interface SpotifyRepairPatch {
  * **Why `'absent'` survives.** Merge rule 4 makes `'absent'` terminal
  * specifically so a negative-cached field is never resurrected for re-ask — the
  * BS#1747/#1089 per-play amplifier. Clearing the URL is still right for such a
- * row (an artist page is wrong either way, and `'absent'` + NULL is the
- * canonical negative-cache shape), so the URL goes and the verdict stays — and
- * with it the counter, since granting fresh attempts to a terminal row would
- * only spend the shared per-album budget on the other two services.
+ * row (an artist page is wrong either way), so the URL goes and the verdict
+ * stays — and with it the counter, since granting fresh attempts to a terminal
+ * row would only spend the shared per-album budget on the other two services.
+ *
+ * An earlier draft called `'absent'` + NULL "the canonical negative-cache
+ * shape". It is not the shape the LIVE path writes: `buildStreamingFieldConflictSet`'s
+ * absent branch sets `url` to the synthesized search fallback for every service
+ * that has one, so an `'absent'` Spotify row written by the worker carries a
+ * search URL. Clearing to NULL here is still correct, for a different and better
+ * reason — `proxy.controller.ts` re-synthesizes all five search URLs at REQUEST
+ * time for any falsy column, so the DJ still gets a working Spotify search link
+ * off a NULL, and BS#1192's invariant as that file states it is precisely "don't
+ * persist synth URLs in album_metadata". Writing the fallback from a one-off
+ * script would persist one. NULL is the conservative write, not a degraded one.
  */
 export function buildSpotifyRepairPatch(currentStatus: string | null, currentAttempts: number): SpotifyRepairPatch {
   if (currentStatus === 'absent') return { spotify_url: null };
   const patch: SpotifyRepairPatch = { spotify_url: null, spotify_status: 'unresolved' };
   if (currentAttempts >= REASK_ATTEMPT_CAP) patch.streaming_reask_attempts = 0;
   return patch;
+}
+
+/**
+ * How many rows in a cohort will actually have their re-ask counter reset.
+ *
+ * Derived by asking {@link buildSpotifyRepairPatch}, not by re-deriving its
+ * `attempts >= CAP` condition — the dry run prints this under "will be cleared
+ * to 0" and an operator reads it before committing thousands of UPDATEs, so the
+ * reported number and the written patch must be incapable of disagreeing. The
+ * inline version over-reported: the patch omits the counter entirely for an
+ * `'absent'` row (see that function's "Why `'absent'` survives"), so an
+ * exhausted `'absent'` row was counted as a reset that never happens.
+ */
+export function countCounterResets(
+  rows: readonly { spotify_status: string | null; streaming_reask_attempts: number }[]
+): number {
+  return rows.filter(
+    (row) => buildSpotifyRepairPatch(row.spotify_status, row.streaming_reask_attempts).streaming_reask_attempts !== undefined
+  ).length;
 }
 
 /**

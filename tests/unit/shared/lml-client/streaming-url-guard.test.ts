@@ -402,7 +402,7 @@ describe('sanitizeLookupStreamingUrls', () => {
     // un-re-askable by `precheck.ts`/`streaming-reask.ts`, i.e. ~4,353 rows
     // frozen with no Spotify link at all.
     it.each([['verified'], ['absent']])(
-      "clears streaming_status.spotify when spotify_url is suppressed (was '%s')",
+      "demotes streaming_status.spotify to 'unresolved' when spotify_url is suppressed (was '%s')",
       (status) => {
         const resp = build({
           spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
@@ -410,9 +410,34 @@ describe('sanitizeLookupStreamingUrls', () => {
         });
         const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
         expect(out?.spotify_url).toBeNull();
-        expect(out?.streaming_status).not.toHaveProperty('spotify');
+        // NOT deleted. Deleting the key makes the incoming verdict
+        // `undefined`, and `mergeStreamingField` returns `current` unchanged
+        // for that — so a FRESH album persisted `spotify_status: NULL` beside
+        // the synthesized search URL. That pair is the "legacy frozen shape"
+        // `precheck.ts` needed a dedicated (still default-OFF)
+        // `bandcampFrozenReask` arm to escape: NULL satisfies neither re-ask
+        // gate (both require `= 'unresolved'`) while the search URL satisfies
+        // `hasAnyStreamingUrl`, so the row is skipped forever and never picks
+        // up LML's corrected album URL. Suppression must not manufacture the
+        // shape a sibling field needed a feature flag to dig out of.
+        expect(out?.streaming_status?.spotify).toBe('unresolved');
       }
     );
+
+    it("the demoted value is exactly the literal both re-ask gates test for", () => {
+      // Pinned as a literal on purpose: `precheck.ts`'s `needsStreamingReask`
+      // and the hourly sweep's `findUnresolvedStreamingCandidates` both spell
+      // the predicate as SQL `= 'unresolved'`, so there is no shared TS
+      // constant to import. If that vocabulary ever changes, this fails here
+      // rather than silently re-freezing the cohort.
+      const resp = build({
+        spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+        streaming_status: { spotify: 'verified' },
+      });
+      const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+      expect(out?.streaming_status?.spotify).toBe('unresolved');
+      expect(['verified', 'absent']).not.toContain(out?.streaming_status?.spotify);
+    });
 
     it('leaves streaming_status.spotify untouched when spotify_url is preserved', () => {
       const url = 'https://open.spotify.com/intl-de/album/1A2GTWGtFfWp7KSQTwWOyo';
@@ -430,7 +455,13 @@ describe('sanitizeLookupStreamingUrls', () => {
         streaming_status: { spotify: 'verified', apple_music: 'absent', bandcamp: 'verified' },
       });
       const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
-      expect(out?.streaming_status).toEqual({ apple_music: 'absent', bandcamp: 'verified' });
+      // Whole object asserted, so a future branch that clobbers a sibling
+      // verdict fails here: only spotify moves, and it moves to 'unresolved'.
+      expect(out?.streaming_status).toEqual({
+        spotify: 'unresolved',
+        apple_music: 'absent',
+        bandcamp: 'verified',
+      });
     });
 
     it('tolerates a suppressed spotify_url with no streaming_status object at all', () => {

@@ -60,10 +60,40 @@
  * a concurrent enrichment write changed in between is skipped rather than
  * clobbered.
  *
- * Upstream provenance (being fixed in parallel, and not a reason to wait):
- * WXYC/library-metadata-lookup#1353 (an April-2026 enrichment campaign
- * resolved ARTISTS into an album column) and #1352 (LML serves these
- * unverified).
+ * Upstream provenance: WXYC/library-metadata-lookup#1353 (an April-2026
+ * enrichment campaign resolved ARTISTS into an album column) and #1352 (LML
+ * serves these unverified). Both MERGED 2026-09-26, along with #1355 (the
+ * export-side match-provenance gate).
+ *
+ * SEQUENCING, and the reason this is not purely an operator's convenience.
+ * Every row this sets to `'unresolved'` becomes re-ask-eligible, and those
+ * re-asks are bounded by ONE shared per-album counter across spotify, apple and
+ * bandcamp (`STREAMING_REASK_ATTEMPT_CAP` = 3). So the pass spends a finite,
+ * shared budget, and what it buys depends on what LML answers when it is spent:
+ *
+ *   - Run it while the LML fixes are unDEPLOYED and LML still serves the same
+ *     artist page. The guard suppresses it, the conflict branch rewrites the
+ *     search fallback, the counter increments, and after three attempts the rows
+ *     sit at the cap still `'unresolved'` — which neither re-ask gate selects.
+ *     They then do NOT self-heal when LML is fixed, which is the entire reason
+ *     `'unresolved'` was chosen over NULL. The budget is spent for nothing and
+ *     apple/bandcamp lose theirs on all ~4,353 rows too.
+ *   - Run it after the fixes are live. LML no longer serves a non-album value in
+ *     the slot at all, so the re-ask resolves to a real verdict.
+ *
+ * LML `main` deploys to STAGING; production tracks its `prod` branch, and the
+ * export gate additionally only takes effect on the next daily `sync-library.sh`
+ * re-export. So "merged" is not the bar — confirm LML prod serves an
+ * album-shaped `spotify_url` (or none) for a sample of these albums before
+ * `--apply`. If the pass has already run, it must be run again afterwards.
+ *
+ * SWEEP OCCUPANCY. The newly-`'unresolved'` rows are drained by the hourly
+ * streaming-reask sweep at `ENRICHMENT_STREAMING_REASK_SWEEP_BATCH_SIZE` = 200
+ * per tick, and `findUnresolvedStreamingCandidates` has no `ORDER BY`, so there
+ * is no fairness between these rows and genuinely-unresolved albums. ~4,353 rows
+ * is ~22 ticks per pass and up to ~65 ticks (~2.7 days) across the three
+ * attempts, during which the sweep is largely working this cohort. Stage
+ * `--apply` in batches if that window matters.
  *
  * Defaults to a dry-run. Pass --apply to actually write.
  *
@@ -88,7 +118,7 @@ import { and, eq, isNotNull, sql } from 'drizzle-orm';
 // packages, for the reason `scripts/backfill-missing-org-members.ts` documents:
 // `@wxyc/database`'s barrel pulls the legacy tubafrenzy ETL utilities
 // (node-ssh -> native cpu-features) and would block a standalone script run.
-import { db } from '../shared/database/src/client';
+import { closeDatabaseConnection, db } from '../shared/database/src/client';
 import { intArrayLiteral } from '../shared/database/src/int-array-literal';
 import { album_metadata, flowsheet } from '../shared/database/src/schema';
 import {
@@ -96,6 +126,7 @@ import {
   buildSpotifyRepairPatch,
   reportedEntityKind,
   REASK_ATTEMPT_CAP,
+  countCounterResets,
   type SpotifyUrlCohort,
 } from './lib/spotify-album-slot-repair';
 
@@ -228,13 +259,21 @@ async function main(): Promise<void> {
     console.log(`  ${status.padEnd(22)} ${count}`);
   }
   console.log('');
-  const exhausted = repair.filter((row) => row.streaming_reask_attempts >= REASK_ATTEMPT_CAP);
-  console.log(`Of those, re-ask counter at/over the cap (will be cleared to 0): ${exhausted.length}`);
+  // Asked of `buildSpotifyRepairPatch` rather than re-deriving `>= CAP` here:
+  // the patch omits the counter for an `'absent'` row, so the inline condition
+  // promised a reset on rows that never get one.
+  console.log(`Of those, re-ask counter at/over the cap (will be cleared to 0): ${countCounterResets(repair)}`);
+  const atCapNoReset =
+    repair.filter((row) => row.streaming_reask_attempts >= REASK_ATTEMPT_CAP).length - countCounterResets(repair);
+  if (atCapNoReset > 0) {
+    console.log(`  (a further ${atCapNoReset} are at/over the cap but stay there: terminal 'absent' rows`);
+    console.log("   keep both their verdict and their counter — see buildSpotifyRepairPatch)");
+  }
   console.log('');
 
   if (repair.length === 0) {
     console.log('Nothing to do.');
-    process.exit(0);
+    return;
   }
 
   const unmaskable = await countUnmaskableInlineRows(repair.map((row) => row.album_id));
@@ -262,7 +301,7 @@ async function main(): Promise<void> {
     }
     console.log('');
     console.log('Dry run complete. Re-run with --apply to commit.');
-    process.exit(0);
+    return;
   }
 
   let updated = 0;
@@ -308,10 +347,26 @@ async function main(): Promise<void> {
   console.log(`Repaired:                  ${updated}`);
   console.log(`Skipped (changed under us):${skipped}`);
   console.log(`Failed:                    ${failures.length}`);
-  process.exit(failures.length > 0 ? 1 : 0);
+  // `process.exitCode` rather than `process.exit()`: this script's whole
+  // operator interface is its stdout, and an operator runs it under `| tee`.
+  // `process.exit()` tears down the process without flushing writes already
+  // queued on a pipe, which silently truncated the tail of the report — the
+  // sample rows and the completion line — in exactly that invocation.
+  process.exitCode = failures.length > 0 ? 1 : 0;
 }
 
-main().catch((error) => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+// Terminates by closing the pg pool and letting the event loop drain, NOT via
+// `process.exit()`. This script's entire operator interface is its stdout and it
+// is meant to be run under `| tee`; `process.exit()` tears the process down
+// without flushing writes already queued on a pipe, which silently truncated the
+// tail of the report — the sample rows and the completion line — in exactly that
+// invocation. The pool is why the sibling one-offs reach for `process.exit` at
+// all: an open pg pool keeps the loop alive, so the close has to be explicit or
+// the script appears to hang after finishing. `finally`, so a fatal error still
+// releases the connections.
+main()
+  .catch((error) => {
+    console.error('Fatal error:', error);
+    process.exitCode = 1;
+  })
+  .finally(() => closeDatabaseConnection());
