@@ -778,6 +778,7 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
     // separator — `similarity('cat power', '"cat power"')` is 1.0 — so the
     // quotes are invisible to it. Whole-value therefore describes this
     // predicate, not the result set the endpoint returns while the flag is on.
+    // BS#2702 is where that gate gets decided.
     return sql`(${ilikeEscaped(library_artist_view.artist_name, value, 'exact')} OR ${ilikeEscaped(library_artist_view.album_title, value, 'exact')} OR ${ilikeEscaped(library_artist_view.label, value, 'exact')})`;
   }
   // Trigram-backed ILIKE across artist/album/label. Tsvector ranking is the

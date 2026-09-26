@@ -196,7 +196,9 @@ describe('GET /library/query: quoted terms are case-insensitive (BS#2398)', () =
     // and `aliasActive` never consults `exact`, so this page is a UNION whose
     // branch (b) selects the rows where the whole-value predicate is NOT TRUE
     // — pinning an id set here would pin that widening as though it were
-    // intended. It is not in this change's scope and is filed separately.
+    // intended. Whether a quoted term should suppress alias expansion is a
+    // product call, tracked in BS#2702; that ticket's acceptance criteria are
+    // where this assertion belongs.
     //
     // The casing equality is still the assertion that matters and is still
     // sound: pg_trgm lowercases when it extracts trigrams, so the alias branch
