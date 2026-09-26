@@ -16,10 +16,24 @@
  * head can't occupy every future run's window — see
  * `jobs/flowsheet-no-match-recheck/watermark.ts`.
  */
+import * as fs from 'fs';
+import * as path from 'path';
+
 import { jest } from '@jest/globals';
 
 import { db } from '@wxyc/database';
-import { countCandidates, loadCandidates } from '../../../../jobs/flowsheet-no-match-recheck/query';
+import {
+  countCandidates,
+  loadCandidates,
+  CRON_SCHEDULE,
+  HEAD_CURSOR_WINDOW_DAYS,
+  HEAD_CURSOR_WINDOW_DEFAULT,
+  HEAD_SLICE_COVERAGE_MARGIN,
+  HEAD_SLICE_DEFAULT,
+  MEASURED_INFLOW_ROWS_PER_DAY,
+  RUNS_PER_DAY,
+  runsPerDayFromCronSchedule,
+} from '../../../../jobs/flowsheet-no-match-recheck/query';
 import { renderSql } from '../../../utils/render-sql';
 
 describe('loadCandidates', () => {
@@ -176,5 +190,130 @@ describe('countCandidates', () => {
     const count = await countCandidates(14);
 
     expect(count).toBe(0);
+  });
+});
+
+describe('RUNS_PER_DAY (BS#2222)', () => {
+  const jobPackageJson = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../../../../jobs/flowsheet-no-match-recheck/package.json'), 'utf-8')
+  ) as Record<string, string>;
+
+  test('CRON_SCHEDULE is the cadence the deploy actually installs, read from package.json', () => {
+    // The guard has to point THIS way round. Pinning `RUNS_PER_DAY` to the
+    // literal 4 fails when someone corrects the constant and passes when
+    // someone changes the real cadence (BS#2186 resizing it to hourly, say)
+    // and leaves the constant stale -- which is the silent 12x head-slice
+    // over-spend the "derived, not hardcoded" criterion exists to prevent.
+    // `scripts/resolve-cron-schedule.sh` reads this same field at deploy time.
+    expect(CRON_SCHEDULE).toBe(jobPackageJson['cron-schedule']);
+  });
+
+  test('is derived from CRON_SCHEDULE, not hand-copied', () => {
+    expect(RUNS_PER_DAY).toBe(runsPerDayFromCronSchedule(jobPackageJson['cron-schedule']));
+    expect(RUNS_PER_DAY).toBe(4); // `47 */6 * * *` -> one minute x four hours
+  });
+
+  test('runsPerDayFromCronSchedule handles every field shape this fleet uses', () => {
+    expect(runsPerDayFromCronSchedule('47 */6 * * *')).toBe(4); // this job
+    expect(runsPerDayFromCronSchedule('10 * * * *')).toBe(24); // flowsheet-metadata-backfill (hourly)
+    expect(runsPerDayFromCronSchedule('15 4 * * *')).toBe(1); // artist-search-alias-consumer (daily)
+    expect(runsPerDayFromCronSchedule('*/30 * * * *')).toBe(48); // legacy-linkage-resolve
+    expect(runsPerDayFromCronSchedule('0 0-11 * * *')).toBe(12); // a range
+    expect(runsPerDayFromCronSchedule('0,30 2,14 * * *')).toBe(4); // comma lists
+  });
+
+  test('deduplicates overlapping comma members instead of summing their spans', () => {
+    // `'*/6,0'` selects {0,6,12,18} -- four hours, not five. Summing spans
+    // counted 5 and silently UNDER-sized HEAD_SLICE_DEFAULT.
+    expect(runsPerDayFromCronSchedule('47 */6,0 * * *')).toBe(4);
+    expect(runsPerDayFromCronSchedule('47 0-5,3-8 * * *')).toBe(9); // {0..8}
+    expect(runsPerDayFromCronSchedule('0,0,0 4 * * *')).toBe(1);
+  });
+
+  test('refuses a schedule whose runs-per-day is undefined or unparseable, rather than guessing', () => {
+    // A weekly cron (rotation-release-id-pollution-check's `0 7 * * 1`) has no
+    // runs-per-day, so deriving a head slice from it would be nonsense.
+    expect(() => runsPerDayFromCronSchedule('0 7 * * 1')).toThrow(/does not run every day/);
+    expect(() => runsPerDayFromCronSchedule('10 7 * * 0')).toThrow(/does not run every day/);
+    expect(() => runsPerDayFromCronSchedule('47 */6 * *')).toThrow(/expected 5 fields/);
+    expect(() => runsPerDayFromCronSchedule('47 banana * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 */0 * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 24 * * *')).toThrow(/Unsupported cron field/);
+    // `Number('')` is 0, so an empty spec or step must be rejected explicitly
+    // or it silently parses as a valid `0`.
+    expect(() => runsPerDayFromCronSchedule('47 /5 * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 6/ * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('3,,4 6 * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 6-/2 * * *')).toThrow(/Unsupported cron field/);
+    expect(() => runsPerDayFromCronSchedule('47 1/2/3 * * *')).toThrow(/Unsupported cron field/);
+  });
+});
+
+describe('HEAD_SLICE_DEFAULT (BS#2222)', () => {
+  test('is derived arithmetic, not a bare constant: ceil(inflow * margin / runsPerDay)', () => {
+    expect(HEAD_SLICE_DEFAULT).toBe(
+      Math.ceil((MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN) / RUNS_PER_DAY)
+    );
+  });
+
+  test('matches the README table: 40/day inflow, 2x margin, 4 runs/day -> 20', () => {
+    expect(MEASURED_INFLOW_ROWS_PER_DAY).toBe(40);
+    expect(HEAD_SLICE_COVERAGE_MARGIN).toBe(2);
+    expect(RUNS_PER_DAY).toBe(4);
+    expect(HEAD_SLICE_DEFAULT).toBe(20);
+  });
+
+  test('clears the measured inflow with the stated margin: headSlice * runsPerDay >= inflow * margin', () => {
+    expect(HEAD_SLICE_DEFAULT * RUNS_PER_DAY).toBeGreaterThanOrEqual(
+      MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN
+    );
+  });
+
+  test('is independent of BATCH_SIZE — head coverage is an inflow requirement, not a batch fraction', () => {
+    // The docstring used to claim a BATCH_SIZE resize recomputed this. It does
+    // not, and cannot: none of the three inputs is a function of BATCH_SIZE.
+    // What a BATCH_SIZE resize invalidates is the README's wrap-period table
+    // and the head's share of each run, both prose.
+    expect(HEAD_SLICE_DEFAULT).toBe(
+      Math.ceil((MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN) / RUNS_PER_DAY)
+    );
+  });
+});
+
+describe('HEAD_CURSOR_WINDOW_DEFAULT (BS#2222)', () => {
+  test('is derived from the same inflow measurement, over the window it was measured on', () => {
+    expect(HEAD_CURSOR_WINDOW_DEFAULT).toBe(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_CURSOR_WINDOW_DAYS);
+    expect(HEAD_CURSOR_WINDOW_DEFAULT).toBe(200);
+  });
+
+  test('rotates fully in fewer runs than the window holds days of inflow', () => {
+    // The head must come back around to a row while that row is still inside
+    // the window, or the rotation would hand rows off to the tail's ~6-month
+    // wrap -- the deferral this whole change removes.
+    const rotationRuns = HEAD_CURSOR_WINDOW_DEFAULT / HEAD_SLICE_DEFAULT;
+    expect(rotationRuns / RUNS_PER_DAY).toBeLessThan(HEAD_CURSOR_WINDOW_DAYS);
+  });
+
+  test('the coverage condition holds: the head slice outruns per-run arrivals', () => {
+    // An OFFSET is a position in a MOVING ordering -- new rows land at position
+    // 0, so every existing row's position grows by the arrival count each run
+    // while the head cursor grows by HEAD_SLICE. The cursor only ever closes on
+    // a row if HEAD_SLICE > arrivals/run; at HEAD_SLICE <= arrivals/run the gap
+    // is frozen (or widening) and a row can be carried out of the window having
+    // never been head-read, falling back to the tail's ~191-day wrap.
+    //
+    // That makes HEAD_SLICE_COVERAGE_MARGIN > 1 load-bearing for COVERAGE, not
+    // just headroom on call volume -- margin 1 means zero closing speed. Pinned
+    // so a future "trim the margin to save LML calls" cannot silently take the
+    // head from "catches every row in <= 20 runs" to "may never catch one".
+    const arrivalsPerRun = MEASURED_INFLOW_ROWS_PER_DAY / RUNS_PER_DAY;
+    expect(HEAD_SLICE_COVERAGE_MARGIN).toBeGreaterThan(1);
+    expect(HEAD_SLICE_DEFAULT).toBeGreaterThan(arrivalsPerRun);
+
+    // And the closing speed has to cross the whole window before a row ages out
+    // of it: window / (headSlice - arrivals) runs <= window / arrivals runs.
+    const runsToCatch = HEAD_CURSOR_WINDOW_DEFAULT / (HEAD_SLICE_DEFAULT - arrivalsPerRun);
+    const runsOfResidency = HEAD_CURSOR_WINDOW_DEFAULT / arrivalsPerRun;
+    expect(runsToCatch).toBeLessThanOrEqual(runsOfResidency);
   });
 });

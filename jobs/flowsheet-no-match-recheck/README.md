@@ -22,7 +22,7 @@ Each run:
 4. **Trusted match** → fill-null write (never clobbers a populated field) and flips the row to `enriched_match`: linked rows (`album_id` present) UPSERT into `album_metadata`; unlinked (free-form) rows update flowsheet's own inline metadata columns.
 5. **No match, or an untrusted candidate** → stamps `no_match_recheck_attempted_at` so the row backs off behind the TTL; `metadata_status` stays `enriched_no_match`.
 6. **Transient LML failure** (a throw, a cascade-timeout body, or a breaker-open/shed response with no usable answer) → leaves the row untouched entirely, so it stays a candidate. Note the BS#2218 nuance: "stays a candidate" is not "is re-read next run". The marker is what makes the row eligible; the OFFSET cursor decides which eligible slice a run reads, and it advances exactly past this run's leftovers — so a transient row is re-read once the cursor comes back around, not on the immediately following run. That is the starvation guard working as intended, and it is why the cursor advances by leftovers rather than by batch size (see below).
-7. Advances and persists the BS#2218 OFFSET cursor past however many of this run's candidates are still candidates (skipped in `DRY_RUN`).
+7. Advances and persists both OFFSET cursors (skipped in `DRY_RUN`): the BS#2218 tail cursor past however many of the tail pass's candidates are still candidates, less the head pass's below-cursor departures; and the BS#2222 head cursor by one `HEAD_SLICE`, wrapped inside its small recent window.
 
 ## The BS#2218 self-lock and its fix
 
@@ -39,6 +39,66 @@ Fix, all three required together (see BS#2218 for the full measurement and decis
   The cursor's known cost is that it defers the head: a no-match row written today sorts to ordering position 0, and once the cursor has moved off 0 it does not return until it wraps — a fixed `total / BATCH_SIZE` runs, ~5.7 months at the 2026-08-18 numbers. `watermark.ts`'s module doc carries the reasoning for accepting that (the first pass still rescues the backlog newest-first, and a freshly-written no-match already survived a headerless live lookup since BS#1978, so it is a weaker recheck candidate than a historical one) and the shape to reach for if it stops holding.
 
 **Do not stamp the marker on a transient response to force progress** — that was considered and rejected; it would reintroduce the exact false-freeze BS#1977 and BS#2179 review HIGH 2 fixed, one TTL rotation removed.
+
+## HEAD_SLICE derivation (BS#2222)
+
+The cursor above has a cost the module doc calls out: it defers the head of the ordering. `query.ts` sorts never-attempted rows newest-first, so a no-match row the live worker writes today lands at ordering position 0 — but once the cursor has moved off 0 it does not return until it wraps, ~5.7 months at the 2026-08-18 cohort size. That was accepted when BS#2218 shipped on the theory that a fresh no-match is a weak recheck candidate (it already failed a full headerless cascade). A 2026-09-19 replay measured that theory false: 4 of 17 rows in one day's digest resolve cleanly under the worker's own auto-persist rule, so roughly 1 in 4 fresh no-matches is a live miss, not a settled answer — and until this fix, nothing would look at it again for months.
+
+The fix reserves a slice of every batch for the FRONT of the ordering, read every run regardless of where the tail cursor sits. That slice is not a bare `OFFSET 0` — it has its own small rotating cursor, for the reason "The head cursor" below gives:
+
+```text
+HEAD_SLICE = ceil(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN / RUNS_PER_DAY)
+```
+
+`job.ts` runs `query.ts`'s `loadCandidates` twice: once for `HEAD_SLICE` rows at the head cursor (see "The head cursor" below), once at the BS#2218 tail cursor for `BATCH_SIZE - HEAD_SLICE` rows (any tail row already covered by the head read is dropped — `orchestrate.ts`'s `excludeCandidateIds`). Both reads issue before either pass, so neither pass's writes can move the other's offset. The two runs' `Totals` are reported together (`mergeTotals`), but the tail cursor advances on the tail run's totals **minus the head run's below-cursor departures** — the head slice never occupied a tail cursor position, so folding its `scanned` in would advance past tail rows it never read, while its _departures_ remove positions below that cursor and so must come off (see `watermark.ts`'s module doc and `headDeparturesBelowCursor`).
+
+`MEASURED_INFLOW_ROWS_PER_DAY` (40) is 199 new `enriched_no_match` rows over 2026-09-13 → 2026-09-18 (5 days), replayed against `flowsheet.updated_at`. `RUNS_PER_DAY` (4) is **derived from `CRON_SCHEDULE`**, which the unit suite pins against `package.json`'s `cron-schedule` field — the same field `scripts/resolve-cron-schedule.sh` installs at deploy time — so changing the real cadence fails a test instead of silently leaving the head slice sized for the old one. `HEAD_SLICE_COVERAGE_MARGIN` (2) is the safety factor over that average so a heavier play day or a backfill drain still gets same-day head coverage instead of re-creating the queueing this whole job exists to remove.
+
+**What a resize does and does not recompute.** A **cadence** change recomputes `HEAD_SLICE_DEFAULT` automatically, through `RUNS_PER_DAY`. A **`BATCH_SIZE`** change does not, and cannot: head coverage is an inflow requirement, and none of the three inputs is a function of batch size. What a `BATCH_SIZE` resize (BS#2186) _does_ invalidate is prose in this file, and it has to be re-checked by hand — the wrap/stretch table below, the +11% figure, the head's share of each run (halving `BATCH_SIZE` doubles it from 10% to 20%), and the headroom behind `job.ts`'s half-batch clamp (`HEAD_SLICE_MAX_BATCH_SHARE`).
+
+| `HEAD_SLICE`     | head coverage/day | vs ~40/day inflow | wrap (days) | stretch vs no head slice |
+| ---------------- | ----------------- | ----------------- | ----------- | ------------------------ |
+| 10               | 40                | 1.0x — no margin  | 181         | +5%                      |
+| **20 (default)** | **80**            | **2.0x**          | **191**     | **+11%**                 |
+| 40               | 160               | 4.0x              | 215         | +25%                     |
+
+20 clears the measured inflow with 2x margin at an 11% wrap-period stretch (172 → 191 days for the tail-only traversal, since it now walks `BATCH_SIZE - HEAD_SLICE` = 180 rows/run instead of 200). 10 has no margin and reintroduces the failure mode under load; 40 materially delays the historical cohort BS#2218 set out to drain. Override with `FLOWSHEET_NO_MATCH_RECHECK_HEAD_SLICE` if the measured inflow or cadence moves enough to change this table.
+
+### The head cursor
+
+The head read is **not** a bare `OFFSET 0`. An unguarded `OFFSET 0` has exactly the defect the tail cursor exists to remove: a transient LML outcome deliberately leaves `no_match_recheck_attempted_at` untouched (the BS#1977 / BS#2179 review HIGH-2 contract), so a front-of-ordering row that transients on every call keeps ordering position 0 forever and would be re-asked every single run — permanently spending ~10% of the run's LML budget on rows that cannot progress, with nothing in the counters to distinguish it from healthy head churn.
+
+So the head gets its own small rotating cursor, deliberately symmetric with the tail's:
+
+```text
+head_cursor(n+1) = (head_cursor(n) + HEAD_SLICE) mod HEAD_CURSOR_WINDOW
+HEAD_CURSOR_WINDOW = min(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_CURSOR_WINDOW_DAYS, total_candidates)
+                   = min(40 * 5, total_candidates) = 200 rows in steady state
+```
+
+At the defaults that is 10 offsets (0, 20, 40, … 180), so the cursor returns to any given offset every **10 runs = 2.5 days**.
+
+**But an OFFSET is a position in an ordering that moves, so returning to an offset is not the same as returning to a row.** New `enriched_no_match` rows land at position 0 (`query.ts` sorts never-attempted rows `id DESC`), so every existing row's position grows by the arrival count `A` each run while the cursor grows by `HEAD_SLICE`. A row therefore closes on the head window at `HEAD_SLICE − A` positions per run, and the coverage guarantee is conditional on that being positive:
+
+| relation          | what happens                                                                                                                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `A < HEAD_SLICE`  | the cursor gains; every row in the window is read within `HEAD_CURSOR_WINDOW / (HEAD_SLICE − A)` runs. At the defaults (`A` = 40/day ÷ 4 = 10) that is **≤ 20 runs, ~5 days**.             |
+| `A >= HEAD_SLICE` | the gap never closes. A row that entered above the cursor is carried out of the window unread and falls back to the tail cursor's ~191-day wrap — the deferral this section exists to fix. |
+
+So **`HEAD_SLICE_COVERAGE_MARGIN` (2) is the coverage condition, not just headroom on call volume**: margin > 1 is exactly `HEAD_SLICE > A`. A sustained doubling of the measured inflow consumes it, which is why `query.test.ts` pins `margin > 1` rather than treating it as a comfort factor, and why **the response to "the newest rows aren't being rechecked" is to re-measure inflow first** — `MEASURED_INFLOW_ROWS_PER_DAY` going stale is the failure mode, and the run's `finished` line carries `head_scanned`/`head_resolved` so the head's productivity is observable without a query. Escaping the condition altogether needs a keyset (`id`-anchored) head cursor rather than an OFFSET one; that is a different mechanism than the one BS#2222 settled on, and is left to that ticket.
+
+Other properties worth knowing:
+
+- **The modulus is the window, not the cohort.** Wrapping the head against the full ~137k-row count would just make it a second tail. The head's job is same-week coverage of the newest rows.
+- **`min(window, total_candidates)`** keeps a head offset from landing past the end of a small cohort and reading nothing (`watermark.ts`'s `headCursorWindow`).
+- **The rotation is outcome-independent.** It advances by `HEAD_SLICE` every completed run whatever the outcome mix, which is what makes it a starvation guard rather than a progress measure. (The tail cursor is the opposite: it advances by what _stayed_.)
+- **A window that is not a multiple of `HEAD_SLICE` is fine** — the offsets drift rather than repeating a fixed set, which still covers the window.
+- **It never stamps the marker.** Forcing head rotation by stamping `no_match_recheck_attempted_at` on a transient was considered and rejected: it violates the BS#1977 contract and manufactures false no-match TTL gating.
+- **Persistence adds no column.** It lives on its own `cronjob_runs` row, `flowsheet-no-match-recheck:head`, using the `<job>:<sub-key>` idiom `library-etl` already uses for per-pass watermarks. The tail cursor's row and its `cursor_position` semantics are unchanged. Resetting either cursor is a one-row `DELETE`.
+
+### The cooperative-pause budget is pooled, not split
+
+Both passes share ONE `buildRecheckWaitForQuietPeriod` closure, so one run enforces one `LIVE_ACTIVITY_MAX_PAUSE_MS` ceiling no matter how many passes it has. Two shapes were wrong here and both are worth remembering: two independent gates would let a single run pause up to **2x** the configured ceiling, and _splitting_ the ceiling proportionally (head 10%, tail 90%) meant the first pass could exhaust its share on a busy evening show and throw `LiveActivityPauseCeilingExceededError` — `buildWaitForQuietPeriod` throws, and there is no per-pass catch — straight past the second pass. The **tail pass also runs first**, so a run the pause ceiling does cut short costs the head its turn rather than the starvation guard and the historical-cohort drain. The head loses little by yielding: its cursor stays put, so the same window is read next run.
 
 ## The retry marker
 
@@ -92,6 +152,7 @@ docker run --rm --env-file .env -e DRY_RUN=true $AWS_ECR_URI/flowsheet-no-match-
 | `DRY_RUN`                                            | `false`    | Skip all writes; log planned counts only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `FLOWSHEET_NO_MATCH_RECHECK_TTL_DAYS`                | `14`       | Re-attempt a stamped no-match/trust-rejected row only after this many days                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE`              | `200`      | Rows visited per run — the bounded-drip ceiling on LML call volume, independent of how large the total cohort is                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `FLOWSHEET_NO_MATCH_RECHECK_HEAD_SLICE`              | `20`       | BS#2222: rows read per run at the head cursor (its own rotating offset inside a ~200-row recent window), on top of `BATCH_SIZE - HEAD_SLICE` at the tail cursor — see "HEAD_SLICE derivation" and "The head cursor" above. Also the amount the head cursor rotates by each run                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `BACKFILL_LML_MAX_CONCURRENT`                        | `1`        | Concurrency cap on LML calls (semaphore permits)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `BACKFILL_LML_RATE_PER_MIN`                          | `20`       | Token-bucket rate limit on LML calls                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `FLOWSHEET_NO_MATCH_RECHECK_LML_PER_CALL_TIMEOUT_MS` | `35000`    | Client-side socket-abort safety net (mirrors `flowsheet-metadata-backfill`'s `BACKFILL_LML_PER_CALL_TIMEOUT_MS` default), not a lever that extends how long LML itself searches. **BS#2218:** this caller now sends `budgetMs: null` unconditionally, so `X-Caller-Budget-Ms` never reaches LML — a cold, hard-to-resolve release instead runs LML's full headerless cascade, bounded by LML's own `LML_SEARCH_HARD_TIMEOUT_MS` (25000ms default). This constant is a safety margin ABOVE that hard cap so it only fires on a genuinely wedged connection. `lml-fetch.ts`'s `isUnansweredDegraded` still treats a breaker-open/shed response or a socket `timeout: true` as transient so the row stays retryable |
@@ -122,24 +183,36 @@ JSON log line emitted on `step: finished`:
   "lml_error": 22,
   "raced": 2,
   "db_error": 0,
+  "head_slice": 20,
+  "head_scanned": 20,
+  "head_resolved": 5,
+  "head_resolved_dry": 0,
+  "head_unresolved": 12,
+  "head_trust_rejected": 1,
+  "head_lml_error": 2,
+  "tail_scanned": 180,
+  "tail_resolved": 41,
+  "tail_resolved_dry": 0,
   "repo": "Backend-Service",
   "tool": "flowsheet-no-match-recheck",
   "run_id": "<uuid>"
 }
 ```
 
-Invariant: `scanned == resolved + resolved_dry + unresolved + trust_rejected + lml_error + raced + db_error`.
+Invariant: `scanned == resolved + resolved_dry + unresolved + trust_rejected + lml_error + raced + db_error`, and `scanned == head_scanned + tail_scanned`.
 
-| Counter          | Meaning                                                                                                                                              |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scanned`        | Rows visited (matches the candidate query's row count, bounded by `FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE`)                                           |
-| `resolved`       | LML returned a track-context-trusted match and the write, including the row's status flip, landed cleanly                                            |
-| `resolved_dry`   | LML returned a trusted match; `DRY_RUN` suppressed the write                                                                                         |
-| `unresolved`     | LML found no candidate at all (or a trusted `search_type` with no artwork among its results); marker stamped so the TTL applies                      |
-| `trust_rejected` | LML found a candidate, but its `search_type` (`fallback`/`alternative`/`song_as_artist`) isn't trustworthy for a track-context write; marker stamped |
-| `lml_error`      | LML call threw, returned a `{timeout:true}` cascade-exhaustion body, or a breaker-open/shed response with no usable answer; marker left untouched    |
-| `raced`          | The write matched zero rows because a concurrent writer already moved the row off `enriched_no_match` between select and update                      |
-| `db_error`       | The marker or match write threw (deadlock, connection reset, …); isolated to the row so the batch continues, retried next tick                       |
+The `head_*` / `tail_*` fields (BS#2222) split the merged totals by pass, and they are emitted on dry runs too. Two reasons they are not merely nice to have: the premise this whole head slice rests on is a **head-vs-tail resolution rate** (~1 in 4 fresh no-match rows resolving), which is unrecoverable from the merged counters; and a head that has stopped reaching new rows — the coverage condition in "The head cursor" going false — shows up as a `head_resolved` that flatlines while `tail_resolved` keeps moving. Also note a run now emits **two** `candidates_loaded` lines, one per pass, discriminated by a `pass` field (`head` / `tail`); each one's `projected_lml_calls` is that pass's projection, not the run's.
+
+| Counter          | Meaning                                                                                                                                                                                                                                                     |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scanned`        | Rows visited across both passes, bounded by `FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE`. Legitimately BELOW that bound when the head and tail windows overlap, since the overlap is deduped out of the tail pass (`excludeCandidateIds`) — that is not a defect |
+| `resolved`       | LML returned a track-context-trusted match and the write, including the row's status flip, landed cleanly                                                                                                                                                   |
+| `resolved_dry`   | LML returned a trusted match; `DRY_RUN` suppressed the write                                                                                                                                                                                                |
+| `unresolved`     | LML found no candidate at all (or a trusted `search_type` with no artwork among its results); marker stamped so the TTL applies                                                                                                                             |
+| `trust_rejected` | LML found a candidate, but its `search_type` (`fallback`/`alternative`/`song_as_artist`) isn't trustworthy for a track-context write; marker stamped                                                                                                        |
+| `lml_error`      | LML call threw, returned a `{timeout:true}` cascade-exhaustion body, or a breaker-open/shed response with no usable answer; marker left untouched                                                                                                           |
+| `raced`          | The write matched zero rows because a concurrent writer already moved the row off `enriched_no_match` between select and update                                                                                                                             |
+| `db_error`       | The marker or match write threw (deadlock, connection reset, …); isolated to the row so the batch continues, retried next tick                                                                                                                              |
 
 `trust_rejected` and `unresolved` rows are exactly the kind the digest job (`jobs/metadata-no-match-digest`) reports — they now self-heal on this job's own TTL cadence instead of staying wrong forever.
 
@@ -151,7 +224,7 @@ Invariant: `scanned == resolved + resolved_dry + unresolved + trust_rejected + l
 
 ## Related
 
-- Ticket: BS#2176; self-lock fix: BS#2218 (supersedes/closes the follow-up filed as BS#2185)
+- Ticket: BS#2176; self-lock fix: BS#2218 (supersedes/closes the follow-up filed as BS#2185); head-of-ordering deferral fix: BS#2222
 - One-shot drains this generalizes: BS#1433, BS#1638, BS#1979
 - Orphan cohort that motivated the "no owner" framing: BS#1998
 - Structural donor (job shape — attempt marker + no-match TTL + cooperative pause): `jobs/rotation-release-id-backfill` (BS#1813/BS#1029)

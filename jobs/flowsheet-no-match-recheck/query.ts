@@ -103,6 +103,12 @@
  * accepts the already-resolved offset; it has no opinion on how the caller
  * got it.
  *
+ * BS#2222 composes this same `loadCandidates` twice per run: once for
+ * `HEAD_SLICE_DEFAULT` rows at the head cursor (its own small rotating offset
+ * inside `HEAD_CURSOR_WINDOW_DEFAULT`, so an unresolvable front-of-ordering
+ * row isn't re-asked every single run), once at the tail cursor for the rest
+ * — see `job.ts` and `watermark.ts`.
+ *
  * LEFT JOINs `library` on `album_id` to pre-read `discogs_unavailable`
  * (BS#1293 gate) the same way `rotation-release-id-backfill/query.ts` does —
  * a LEFT (not INNER) JOIN is required because `flowsheet.album_id` is
@@ -122,6 +128,146 @@ export const NO_MATCH_TTL_DAYS_DEFAULT = 14;
 
 export const BATCH_SIZE_ENV = 'FLOWSHEET_NO_MATCH_RECHECK_BATCH_SIZE';
 export const BATCH_SIZE_DEFAULT = 200;
+
+/**
+ * The cron cadence this job is registered with. It MUST equal
+ * `jobs/flowsheet-no-match-recheck/package.json`'s `cron-schedule` field,
+ * which is what `scripts/resolve-cron-schedule.sh` installs at deploy time —
+ * `tests/unit/jobs/flowsheet-no-match-recheck/query.test.ts` reads that file
+ * and fails if the two disagree. Pinning it against the package manifest
+ * rather than against the literal `4` is deliberate (BS#2222 review): a test
+ * that asserts `RUNS_PER_DAY === 4` guards the wrong direction — it fails
+ * when the constant changes and passes when the real cadence does.
+ */
+export const CRON_SCHEDULE = '47 */6 * * *';
+
+/**
+ * Which values one cron field selects out of `range` (60 minutes / 24 hours).
+ *
+ * Enumerated into a Set rather than counted as spans, so overlapping comma
+ * members collapse: an every-6-hours step plus an explicit hour 0 selects
+ * {0, 6, 12, 18} — four hours, where summing each member's span counted five
+ * and silently UNDER-sized `HEAD_SLICE_DEFAULT` (BS#2222 review). The ranges
+ * here are 24 and 60, so enumeration is free.
+ */
+const cronFieldValues = (field: string, range: number, schedule: string): Set<number> => {
+  const unsupported = (): never => {
+    throw new Error(`Unsupported cron field '${field}' in schedule '${schedule}'.`);
+  };
+  const values = new Set<number>();
+  for (const part of field.split(',')) {
+    const segments = part.split('/');
+    if (segments.length > 2) unsupported();
+    const spec = segments[0] ?? '';
+    const stepRaw = segments[1];
+    // `Number('')` is 0, so an empty step or an empty spec ('/5', '3,,4') has to
+    // be rejected explicitly or it parses as a valid `0`.
+    if (spec === '' || stepRaw === '') unsupported();
+    const step = stepRaw === undefined ? 1 : Number(stepRaw);
+    if (!Number.isInteger(step) || step <= 0) unsupported();
+    let lo: number;
+    let hi: number;
+    if (spec === '*') {
+      lo = 0;
+      hi = range - 1;
+    } else if (spec.includes('-')) {
+      const bounds = spec.split('-');
+      lo = Number(bounds[0]);
+      hi = Number(bounds[1]);
+      if (
+        bounds.length !== 2 ||
+        bounds.some((bound) => bound === '') ||
+        !Number.isInteger(lo) ||
+        !Number.isInteger(hi) ||
+        lo < 0 ||
+        hi >= range ||
+        lo > hi
+      ) {
+        unsupported();
+      }
+    } else {
+      lo = Number(spec);
+      if (!Number.isInteger(lo) || lo < 0 || lo >= range) unsupported();
+      // A bare literal selects one value; `v/step` selects v, v+step, … < range.
+      hi = stepRaw === undefined ? lo : range - 1;
+    }
+    for (let value = lo; value <= hi; value += step) values.add(value);
+  }
+  if (values.size === 0) unsupported();
+  return values;
+};
+
+/**
+ * Runs per day implied by a 5-field cron expression, from its minute and hour
+ * fields. Supports `*`, a literal, a `lo-hi` range, a comma list of any of
+ * those, and a `/step` on each — every shape this fleet's `cron-schedule`
+ * fields use. Throws on a schedule that does not run every day (a non-`*`
+ * day-of-month / month / day-of-week field), because "runs per day" is not
+ * well defined for one, and on a field it cannot parse: both are authoring
+ * errors in a repo-literal constant, caught by the unit suite at import time
+ * rather than shipped as a silently wrong head-slice size.
+ */
+export const runsPerDayFromCronSchedule = (schedule: string): number => {
+  const fields = schedule.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    throw new Error(`Unsupported cron schedule '${schedule}': expected 5 fields, got ${fields.length}.`);
+  }
+  const [minute = '', hour = '', dayOfMonth, month, dayOfWeek] = fields;
+  if (dayOfMonth !== '*' || month !== '*' || dayOfWeek !== '*') {
+    throw new Error(
+      `Cron schedule '${schedule}' does not run every day; runs-per-day is undefined for it. ` +
+        'Re-derive HEAD_SLICE_DEFAULT against the real cadence instead.'
+    );
+  }
+  return cronFieldValues(minute, 60, schedule).size * cronFieldValues(hour, 24, schedule).size;
+};
+
+/**
+ * HEAD_SLICE (BS#2222): rows read near the FRONT of the ordering every run, on
+ * top of the cursor-read tail `job.ts` composes it with — so a row the live
+ * worker writes today isn't deferred a full cursor wrap before its first
+ * recheck (see `watermark.ts`, `job.ts`). Derived rather than a bare constant:
+ *
+ *   HEAD_SLICE = ceil(MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN / RUNS_PER_DAY)
+ *
+ * Note what that does and does NOT recompute, because an earlier draft of this
+ * docstring overclaimed it (BS#2222 review). The head-coverage requirement is
+ * INFLOW-driven and genuinely `BATCH_SIZE`-independent — the head has to clear
+ * the rows arriving per day, however large a batch the tail reads — so a
+ * CADENCE change recomputes `HEAD_SLICE_DEFAULT` (via `RUNS_PER_DAY`, derived
+ * from `CRON_SCHEDULE` above) but a `BATCH_SIZE` resize (BS#2186) deliberately
+ * does not. What a `BATCH_SIZE` resize DOES invalidate is prose, not
+ * arithmetic, and has to be re-checked by hand: the README's wrap-period /
+ * stretch table, the +11% figure, and the headroom behind `job.ts`'s
+ * half-batch clamp (`HEAD_SLICE_MAX_BATCH_SHARE`; halving `BATCH_SIZE` doubles
+ * the head's share of every run from 10% to 20%, and halves the ceiling the
+ * requested head slice is clamped against).
+ *
+ * See README "HEAD_SLICE derivation" for the measurement + wrap-period table.
+ */
+export const RUNS_PER_DAY = runsPerDayFromCronSchedule(CRON_SCHEDULE);
+export const MEASURED_INFLOW_ROWS_PER_DAY = 40; // 199 new enriched_no_match rows, 2026-09-13 -> 2026-09-18
+export const HEAD_SLICE_COVERAGE_MARGIN = 2; // clears a heavy play day / backfill drain, not just the average
+
+export const HEAD_SLICE_ENV = 'FLOWSHEET_NO_MATCH_RECHECK_HEAD_SLICE';
+export const HEAD_SLICE_DEFAULT = Math.ceil((MEASURED_INFLOW_ROWS_PER_DAY * HEAD_SLICE_COVERAGE_MARGIN) / RUNS_PER_DAY);
+
+/**
+ * The head cursor's window (BS#2222): the head read rotates its own offset by
+ * `HEAD_SLICE` each run and wraps inside this many rows, so a
+ * permanently-transient front-of-ordering row is re-asked once per rotation
+ * instead of once per run — see `watermark.ts`'s `nextHeadCursorPosition`.
+ *
+ *   HEAD_CURSOR_WINDOW = MEASURED_INFLOW_ROWS_PER_DAY * HEAD_CURSOR_WINDOW_DAYS
+ *
+ * Sized against the same inflow measurement as `HEAD_SLICE`, over the same
+ * 5-day window it was measured on: ~5 days of arrivals, so a row written today
+ * is still inside the window when the head comes back around. The rotation
+ * itself takes `HEAD_CURSOR_WINDOW / HEAD_SLICE` = 10 runs (2.5 days at 4
+ * runs/day), well inside that.
+ */
+export const HEAD_CURSOR_WINDOW_DAYS = 5; // the BS#2222 inflow measurement window (2026-09-13 -> 2026-09-18)
+export const HEAD_CURSOR_WINDOW_DEFAULT = MEASURED_INFLOW_ROWS_PER_DAY * HEAD_CURSOR_WINDOW_DAYS;
 
 /**
  * The candidate predicate shared verbatim between `loadCandidates` and

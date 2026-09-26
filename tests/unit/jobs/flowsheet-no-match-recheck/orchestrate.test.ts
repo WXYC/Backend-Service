@@ -40,10 +40,14 @@ import type { DiscogsMatchResult } from '@wxyc/lml-client';
 
 import {
   runNoMatchRecheck,
+  buildRecheckWaitForQuietPeriod,
+  excludeCandidateIds,
+  mergeTotals,
   type Candidate,
   type LoadCandidatesFn,
   type LookupFn,
   type MarkAttemptedFn,
+  type Totals,
   type WriteFn,
 } from '../../../../jobs/flowsheet-no-match-recheck/orchestrate';
 
@@ -420,5 +424,120 @@ describe('runNoMatchRecheck', () => {
     });
 
     expect(checkLiveActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe('buildRecheckWaitForQuietPeriod / the shared pause budget (BS#2222)', () => {
+  const oneRow = (): Candidate[] => [
+    { id: 42, artist_name: 'Juana Molina', album_title: 'DOGA', track_title: 'la paradoja', album_id: null },
+  ];
+
+  test('an injected gate is awaited once per candidate, and the pass builds no gate of its own', async () => {
+    // This is what lets job.ts hand ONE accrual closure to both passes so they
+    // pool one LIVE_ACTIVITY_MAX_PAUSE_MS ceiling. The pre-review shape split
+    // the ceiling between two independently-accruing gates and ran the head
+    // first, so head exhaustion threw past the tail pass — the starvation
+    // guard and the whole historical-cohort drain — entirely.
+    const waitForQuietPeriod = jest.fn<() => Promise<boolean>>().mockResolvedValue(false);
+    const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValue(true);
+
+    await runNoMatchRecheck({
+      loadCandidates: makeLoadCandidates(oneRow()),
+      lookup: jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' }),
+      write: jest.fn<WriteFn>().mockResolvedValue({ written: true }),
+      markAttempted: makeMarkAttempted(),
+      waitForQuietPeriod,
+      checkLiveActivity,
+    });
+
+    expect(waitForQuietPeriod).toHaveBeenCalledTimes(1);
+    // The injected gate replaces the built one outright — a pass that also
+    // built its own would probe (and pause) twice per row.
+    expect(checkLiveActivity).not.toHaveBeenCalled();
+  });
+
+  test('shared across two passes, one budget covers both: the gate accrues across passes and throws in whichever pass hits the ceiling', async () => {
+    const waitForQuietPeriod = buildRecheckWaitForQuietPeriod({
+      liveActivityLookbackSeconds: 60,
+      liveActivityPauseMs: 0,
+      liveActivityMaxPauseMs: 1,
+      checkLiveActivity: jest.fn<CheckLiveActivityFn>().mockResolvedValue(true),
+    });
+    const pass = (): Promise<unknown> =>
+      runNoMatchRecheck({
+        loadCandidates: makeLoadCandidates(oneRow()),
+        lookup: jest.fn<LookupFn>().mockResolvedValue({ kind: 'no_match' }),
+        write: jest.fn<WriteFn>().mockResolvedValue({ written: true }),
+        markAttempted: makeMarkAttempted(),
+        waitForQuietPeriod,
+      });
+
+    // First pass pauses (budget not yet spent) and finishes its row only once
+    // the gate lets it through; with a 1 ms ceiling the gate throws on the
+    // second iteration, so the pass aborts.
+    await expect(pass()).rejects.toThrow(/Cooperative-pause budget exceeded/);
+    // The SAME closure is already exhausted for the second pass — which is the
+    // point: one run, one ceiling, regardless of how many passes it has.
+    await expect(pass()).rejects.toThrow(/Cooperative-pause budget exceeded/);
+  });
+});
+
+describe('mergeTotals (BS#2222)', () => {
+  const totalsOf = (overrides: Partial<Totals>): Totals => ({
+    scanned: 0,
+    resolved: 0,
+    resolved_dry: 0,
+    unresolved: 0,
+    trust_rejected: 0,
+    lml_error: 0,
+    raced: 0,
+    db_error: 0,
+    ...overrides,
+  });
+
+  test('sums every counter field-by-field across the head-slice run and the tail-cursor run', () => {
+    const head = totalsOf({ scanned: 20, resolved: 5, unresolved: 12, lml_error: 3 });
+    const tail = totalsOf({ scanned: 180, resolved: 40, unresolved: 100, trust_rejected: 10, raced: 20, db_error: 10 });
+
+    expect(mergeTotals(head, tail)).toEqual({
+      scanned: 200,
+      resolved: 45,
+      resolved_dry: 0,
+      unresolved: 112,
+      trust_rejected: 10,
+      lml_error: 3,
+      raced: 20,
+      db_error: 10,
+    });
+  });
+
+  test('is a no-op when one side is all-zero', () => {
+    const tail = totalsOf({ scanned: 180, resolved: 40 });
+    expect(mergeTotals(totalsOf({}), tail)).toEqual(tail);
+  });
+});
+
+describe('excludeCandidateIds (BS#2222)', () => {
+  const candidate = (id: number): Candidate => ({
+    id,
+    artist_name: 'Artist',
+    album_title: null,
+    track_title: null,
+    album_id: null,
+  });
+
+  test('drops candidates whose id is in excludeIds', () => {
+    const candidates = [candidate(1), candidate(2), candidate(3)];
+    expect(excludeCandidateIds(candidates, new Set([2]))).toEqual([candidate(1), candidate(3)]);
+  });
+
+  test('returns every candidate unchanged when excludeIds is empty -- the common case once the cursor is past HEAD_SLICE', () => {
+    const candidates = [candidate(10), candidate(11)];
+    expect(excludeCandidateIds(candidates, new Set())).toEqual(candidates);
+  });
+
+  test('drops every candidate when they are all already covered by the head slice -- the cursor-near-0 overlap case', () => {
+    const candidates = [candidate(1), candidate(2)];
+    expect(excludeCandidateIds(candidates, new Set([1, 2]))).toEqual([]);
   });
 });
