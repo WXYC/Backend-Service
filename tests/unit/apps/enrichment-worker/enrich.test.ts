@@ -1080,6 +1080,10 @@ describe('finalizeRow (BS#1915) — streaming self-heal merge on the linked-matc
  * merge/UPSERT — rather than only at the guard unit level
  * (`tests/unit/shared/lml-client/streaming-url-guard.test.ts`) or only at
  * the merge unit level (the BS#1915 suite above).
+ *
+ * BS#2689 adds the `spotify_url` case: the same freeze mechanism, reached by
+ * an album-slot PATH failure (an `open.spotify.com/artist/…` value) rather
+ * than a malformed-host one, over ~4,353 prod rows.
  */
 describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing integration)', () => {
   beforeEach(() => {
@@ -1122,6 +1126,39 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
     // permanent-null freeze a leftover 'verified' status would have caused.
     expect(insertPayload.bandcamp_url).toContain('bandcamp.com/search');
     expect(insertPayload.bandcamp_status).toBeNull();
+  });
+
+  it('a suppressed spotify_url artist page (was verified) lands as the synthesized search URL, not null', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+    // The BS#2689 shape as it arrives off the wire: an artist page in the
+    // album slot, paired with the 'verified' status LML asserted for it.
+    const rawResponse = {
+      search_type: 'direct',
+      results: [
+        {
+          artwork: {
+            artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+            release_url: 'https://discogs.com/release/123',
+            spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7',
+            streaming_status: { spotify: 'verified' },
+          },
+        },
+      ],
+    } as unknown as LookupResponse;
+
+    const sanitized = sanitizeLookupStreamingUrls(rawResponse);
+    expect(sanitized.results[0].artwork?.spotify_url).toBeNull();
+    expect(sanitized.results[0].artwork?.streaming_status).not.toHaveProperty('spotify');
+
+    await finalizeRow(LINKED_ROW, sanitized);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    // The whole point of clearing the status: had 'verified' survived, this
+    // row would persist spotify_url: null + spotify_status: 'verified' —
+    // terminal under mergeStreamingField rule 1 and invisible to both re-ask
+    // gates, i.e. an album with no Spotify link, forever.
+    expect(insertPayload.spotify_url).toContain('open.spotify.com/search');
+    expect(insertPayload.spotify_status).toBeNull();
   });
 });
 
