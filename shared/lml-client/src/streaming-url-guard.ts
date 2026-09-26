@@ -148,18 +148,26 @@ export function isSpotifyUrl(url: string | null | undefined): boolean {
  * on a localized link like `open.spotify.com/intl-de/album/<id>` — or a
  * `/search…` page.
  *
- * SEPARATE from {@link isSpotifyUrl} and composed over it at the
- * `sanitizeLookupStreamingUrls` call site, rather than folded into it, because
- * the two questions have different callers. `isSpotifyUrl` answers "is this a
- * Spotify URL", and BS#2350 requires its accept set stay byte-identical;
- * several serve seams (`proxy.controller.ts`,
- * `album-metadata-projection.ts`'s `suppressMislabeledStreamingUrls`,
- * `flowsheet-projection.ts`) gate the PERSISTED-row READ path on it, where a
- * stored non-album value is the corrective pass's problem rather than the
- * serve seam's. Whether those seams should ALSO take this predicate is a live
- * question and deliberately not settled here — it would suppress the stored
- * artist/track rows on serve without writing anything, which is a different
- * change with a different blast radius than a write-path screen.
+ * SEPARATE from {@link isSpotifyUrl} and composed over it, rather than folded
+ * into it, because the two questions have different callers. `isSpotifyUrl`
+ * answers "is this a Spotify URL" and BS#2350 requires its accept set stay
+ * byte-identical.
+ *
+ * **BS#2697 settled the read-path question in the affirmative**, so as of that
+ * change the four serve seams take THIS predicate, not the host-only one:
+ * `proxy.controller.ts`'s persisted branch, `album-metadata-projection.ts`'s
+ * `suppressMislabeledStreamingUrls` (post-COALESCE, so it is the only guard
+ * that also reaches `flowsheet.spotify_url` — BS#2696), and both arms of
+ * `flowsheet-projection.ts` (`projectFlowsheetEntry`, `pickClientFacingColumns`).
+ * It was safe to adopt there because the deciding number is zero: NO prod row
+ * has Spotify as its only streaming URL, on the coalesced values or the bare
+ * `flowsheet` columns, so the screen cannot push a row to zero-streaming and
+ * flip `fillSynthesizedSearchUrls`'s Gate 1. Measurements are on BS#2697.
+ *
+ * `isSpotifyUrl` still has two callers that genuinely ask the host question and
+ * must NOT be migrated: `jobs/streaming-url-remediation`'s
+ * `computeStreamingUrlFix` (arbitrating which column a URL belongs in) and
+ * `scripts/lib/spotify-album-slot-repair.ts`'s repair-vs-foreign-host split.
  *
  * Search is an accept, not an oversight. It is the resolution ladder's last
  * tier: BS mints exactly that shape itself in `apps/enrichment-worker/enrich.ts`'s
@@ -185,7 +193,16 @@ export function isSpotifyUrl(url: string | null | undefined): boolean {
  * Parses before delegating to {@link isSpotifyUrl} so the unparseable case is
  * caught by this function's own `catch` rather than resting on an inference
  * about another function's internals; the cost is a second `new URL()` on a
- * value that is about to be parsed anyway, which is off any hot loop.
+ * value that is about to be parsed anyway.
+ *
+ * That second parse is no longer off a hot path, and the claim that it was is
+ * withdrawn (BS#2697): since the serve seams adopted this predicate it runs
+ * once per row on `GET /flowsheet` and `recentEntries?v=2`, and once per CDC
+ * event in `pickClientFacingColumns`. Kept anyway — two `new URL()` calls on a
+ * ~60-character string are microseconds against a per-request row set in the
+ * low hundreds, and collapsing them would mean this function inferring
+ * `isSpotifyUrl`'s internals, which is the coupling the split exists to avoid.
+ * Measure before trading that away.
  *
  * Suppressing a value this rejects must ALSO clear the paired
  * `streaming_status.spotify` verdict — see `sanitizeLookupStreamingUrls`.

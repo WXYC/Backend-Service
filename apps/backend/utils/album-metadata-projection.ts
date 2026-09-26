@@ -19,9 +19,11 @@
  *      (Epic D / BS#897). A plain `album_metadata` read silently drops
  *      enrichment for free-form plays, which have no `album_id` and carry
  *      their metadata inline.
- *   2. `spotify_url` / `apple_music_url` are host-guarded on the way out
- *      (BS#1714) by {@link suppressMislabeledStreamingUrls}. A value whose
- *      host isn't Spotify/Apple was mislabeled at the LML boundary before
+ *   2. `spotify_url` / `apple_music_url` are screened on the way out
+ *      (BS#1714, narrowed for Spotify by BS#2697) by
+ *      {@link suppressMislabeledStreamingUrls}. `apple_music_url` is still a
+ *      host check; `spotify_url` must now name a RELEASE or a search. A value
+ *      whose host isn't Spotify/Apple was mislabeled at the LML boundary before
  *      #1712 shipped and must not reach the hardwired iOS
  *      "Spotify"/"Apple Music" buttons.
  *
@@ -122,7 +124,11 @@ export const ALBUM_METADATA_PROJECTION = {
   ...ALBUM_METADATA_PROJECTION_WITHOUT_ARTWORK,
 };
 
-/** The two host-guarded streaming fields (BS#1714). */
+/**
+ * The two screened streaming fields (BS#1714). "Screened", not "host-guarded":
+ * since BS#2697 only the Apple leg is a host check — see
+ * {@link suppressMislabeledStreamingUrls}.
+ */
 export interface StreamingUrlPair {
   spotify_url: string | null;
   apple_music_url: string | null;
@@ -130,10 +136,28 @@ export interface StreamingUrlPair {
 
 /**
  * BS#1714 serve-seam guard: suppress a persisted `spotify_url` /
- * `apple_music_url` whose host isn't Spotify / Apple (mislabeled at the LML
- * boundary before #1712 shipped) so it never reaches the hardwired iOS
- * "Spotify" / "Apple Music" button. No synthesized fallback exists at this
- * seam, so a mislabeled value drops to `null`.
+ * `apple_music_url` that must not reach the hardwired iOS "Spotify" / "Apple
+ * Music" button. No synthesized fallback exists at this seam, so a rejected
+ * value drops to `null`; the callers that need one run
+ * {@link fillSynthesizedSearchUrls} afterwards.
+ *
+ * The two legs ask DIFFERENT questions, and have since BS#2697:
+ *
+ *   - `apple_music_url` — host only. A value whose host isn't Apple was
+ *     mislabeled at the LML boundary before #1712 shipped. Narrowing this leg
+ *     to a path shape is BS#2691's call and deliberately not done here: a null
+ *     `apple_music_url` has no search fallback anywhere (BS#1192), so a
+ *     narrower screen blanks the button rather than degrading it.
+ *   - `spotify_url` — must NAME A RELEASE (or be a search URL), not merely sit
+ *     on a Spotify host: {@link isSpotifyAlbumSlotUrl}. 4,362 of the 29,240
+ *     persisted values (14.92%, prod 2026-09-26) are an artist page, a track
+ *     page, a playlist, a podcast or an id-less `/album`, and every one of them
+ *     used to be served under a button labelled "Spotify".
+ *
+ * Because this runs on the POST-COALESCE projection
+ * (`coalesce(album_metadata.X, flowsheet.X)`), it is the only screen in the
+ * codebase that reaches `flowsheet.spotify_url` as well as the `album_metadata`
+ * copy — the BS#2696 reach a write-boundary guard structurally cannot have.
  *
  * Every read surface that emits these two fields must run them through here.
  */
