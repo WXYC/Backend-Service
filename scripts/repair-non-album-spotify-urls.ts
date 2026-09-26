@@ -20,9 +20,11 @@
  * SCOPE. Deliberately NOT in scope:
  *   - `/album/…` and `/intl-xx/album/…` values (correct; kept)
  *   - `/search/…` values (the intentional synthesized fallback; kept)
- *   - values on a FOREIGN host, e.g. a Deezer URL under `spotify_url` — those
- *     are BS#1710's cohort and `jobs/streaming-url-remediation` owns them.
- *     Counted and reported here, never written.
+ *   - values on a FOREIGN host, e.g. a Deezer URL under `spotify_url` — BS#1710's
+ *     cohort. Counted and reported here, never written; see
+ *     `classifySpotifyUrl`'s doc comment for which parts of it
+ *     `jobs/streaming-url-remediation` can actually reach and which have no
+ *     owner at all.
  *   - `apple_music_url` — BS#2689 adds no Apple screen; see the
  *     `apple_music_url` branch in `sanitizeLookupStreamingUrls`.
  *   - **`flowsheet.spotify_url`** — the inline sibling column, and READ THE
@@ -53,22 +55,29 @@
  *
  * Defaults to a dry-run. Pass --apply to actually write.
  *
- * Usage:
- *   npx tsx scripts/repair-non-album-spotify-urls.ts
- *   npx tsx scripts/repair-non-album-spotify-urls.ts --apply
+ * Usage — via dotenvx, NOT a bare `tsx`. `import { config } from 'dotenv'; config()`
+ * does not work in an ES module: every `import` below is hoisted above it, so
+ * `shared/database/src/client.ts` evaluates first and throws on its
+ * module-scope env validation before dotenv has read the file. This is the
+ * mechanism package.json already uses for `check:audit-coverage`.
  *
- * Requires: DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD
+ *   npx dotenvx run -f .env -- tsx scripts/repair-non-album-spotify-urls.ts
+ *   npx dotenvx run -f .env -- tsx scripts/repair-non-album-spotify-urls.ts --apply
+ *
+ * Requires: DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD, and
+ * DB_STATEMENT_TIMEOUT_MS well above the 5,000 ms default that
+ * `shared/database/src/client.ts` resolves for HTTP callers — this pass full-
+ * scans `album_metadata` and probes the flowsheet play log, and every sibling
+ * one-off sets 300000 (see `Dockerfile.streaming-url-remediation`).
  */
 
-import { config } from 'dotenv';
-config();
-
-import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, sql } from 'drizzle-orm';
 // Imported from sources, not the built `@wxyc/database` / `@wxyc/lml-client`
 // packages, for the reason `scripts/backfill-missing-org-members.ts` documents:
 // `@wxyc/database`'s barrel pulls the legacy tubafrenzy ETL utilities
 // (node-ssh -> native cpu-features) and would block a standalone script run.
 import { db } from '../shared/database/src/client';
+import { intArrayLiteral } from '../shared/database/src/int-array-literal';
 import { album_metadata, flowsheet } from '../shared/database/src/schema';
 import {
   classifySpotifyUrl,
@@ -91,22 +100,53 @@ function tally(values: string[]): [string, number][] {
 
 /**
  * Count the albums in `repairIds` whose `flowsheet.spotify_url` inline copy
- * would be promoted by the COALESCE and is ITSELF not an album URL — see the
- * unmask warning in this file's header. Reported so the scope decision is made
- * with a number rather than an assumption.
+ * would be promoted by the COALESCE and would then be SERVED — see the unmask
+ * warning in this file's header. Reported so the scope decision is made with a
+ * number rather than an assumption.
+ *
+ * The test is `=== 'repair'`, not `!== 'album-slot'`: a foreign-host inline
+ * value cannot unmask, because the serve seams
+ * (`album-metadata-projection.ts`'s `suppressMislabeledStreamingUrls`,
+ * `flowsheet-projection.ts`) already null a non-Spotify host on every read. Only
+ * a Spotify-host non-album value passes those host-only checks verbatim, so only
+ * that cohort reaches a DJ. Folding the two together would inflate the number
+ * the follow-up ticket gets sized from.
+ *
+ * `DISTINCT` and `= ANY(...::int[])` are both load-bearing. `flowsheet.album_id`
+ * is not unique — it is a play log, ~1.2M linked rows — so the undeduped form
+ * returns one row per PLAYCUT to build a set whose only consumer is `.size`. And
+ * `intArrayLiteral` + `= ANY` is the repo's mandated shape over a bare array
+ * (BS#2010, `docs/bulk-update-playbook.md`); a 4,353-element `inArray` binds one
+ * parameter each, which is a ~30 KB statement walking toward PG's parameter
+ * ceiling.
  */
 async function countUnmaskableInlineRows(repairIds: number[]): Promise<number> {
   if (repairIds.length === 0) return 0;
+  const idArrayLiteral = intArrayLiteral(repairIds);
   const inline = await db
-    .select({ album_id: flowsheet.album_id, spotify_url: flowsheet.spotify_url })
+    .selectDistinct({ album_id: flowsheet.album_id, spotify_url: flowsheet.spotify_url })
     .from(flowsheet)
-    .where(and(inArray(flowsheet.album_id, repairIds), isNotNull(flowsheet.spotify_url)));
+    .where(and(sql`${flowsheet.album_id} = ANY(${idArrayLiteral}::int[])`, isNotNull(flowsheet.spotify_url)));
   const affected = new Set<number>();
   for (const row of inline) {
     if (row.album_id === null || row.spotify_url === null) continue;
-    if (classifySpotifyUrl(row.spotify_url) !== 'album-slot') affected.add(row.album_id);
+    if (classifySpotifyUrl(row.spotify_url) === 'repair') affected.add(row.album_id);
   }
   return affected.size;
+}
+
+/**
+ * ANALYZE after a run that wrote. Required by
+ * `docs/bulk-update-playbook.md`'s `post-bulk-update-analyze` rule, and not
+ * ceremony: this pass moves `spotify_url`'s `null_frac` by ~15% of the populated
+ * column and rewrites `spotify_status`, both of which `precheck.ts` reads on
+ * every enrichment and `album-metadata-projection.ts` plans against. BS#934 is
+ * the cost of skipping it — un-ANALYZEd bulk UPDATEs pushed `/flowsheet/suggest/*`
+ * to 5-second timeouts in front of on-air DJs. `jobs/streaming-columns-drain`
+ * does the same thing for the same table.
+ */
+async function analyzeAlbumMetadata(): Promise<void> {
+  await db.execute(sql.raw('ANALYZE "wxyc_schema"."album_metadata"'));
 }
 
 async function main(): Promise<void> {
@@ -156,7 +196,9 @@ async function main(): Promise<void> {
   }
 
   const unmaskable = await countUnmaskableInlineRows(repair.map((row) => row.album_id));
-  console.log(`Of those, albums whose flowsheet.spotify_url inline copy is ALSO not an album URL: ${unmaskable}`);
+  console.log(
+    `Of those, albums whose flowsheet.spotify_url inline copy is ALSO a non-album Spotify URL: ${unmaskable}`
+  );
   console.log('  (nulling album_metadata promotes that value on serve — see this script’s header)');
   console.log('');
 
@@ -199,6 +241,11 @@ async function main(): Promise<void> {
       console.error(`  FAIL album_id=${row.album_id}  ${message}`);
     }
   }
+
+  // Runs even when some rows failed: the rows that DID land already moved the
+  // planner's statistics, so a partial run needs the ANALYZE as much as a clean
+  // one does.
+  if (updated > 0) await analyzeAlbumMetadata();
 
   console.log('');
   console.log(`Repaired:                  ${updated}`);
