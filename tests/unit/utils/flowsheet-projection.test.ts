@@ -214,6 +214,29 @@ describe('pickClientFacingColumns (BS#1534)', () => {
       expect(picked.apple_music_url).toBeNull();
     });
 
+    // BS#2697: this is the fourth changed call site and the only one on the CDC
+    // push path. The cases above cannot detect a revert to `isSpotifyUrl` —
+    // a Deezer URL and a genuine album page are classified identically by both
+    // predicates — so without these the whole suite stays green if this seam
+    // alone loses the narrowing.
+    it.each([
+      ['artist page', 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7'],
+      ['track page', 'https://open.spotify.com/track/1A2GTWGtFfWp7KSQTwWOyo'],
+      ['id-less /album', 'https://open.spotify.com/album'],
+    ])('nulls an ON-HOST non-release spotify_url on the CDC payload (%s)', (_label, url) => {
+      const picked = pickClientFacingColumns({ id: 7, spotify_url: url });
+      expect(picked.spotify_url).toBeNull();
+      expect('spotify_url' in picked).toBe(true);
+    });
+
+    it.each([
+      ['album page', 'https://open.spotify.com/album/1A2GTWGtFfWp7KSQTwWOyo'],
+      ['locale-prefixed album', 'https://open.spotify.com/intl-de/album/1A2GTWGtFfWp7KSQTwWOyo'],
+      ['synthesized search URL', 'https://open.spotify.com/search/Cat%20Power%20Moon%20Pix'],
+    ])('keeps a legitimate album-slot value on the CDC payload (%s)', (_label, url) => {
+      expect(pickClientFacingColumns({ id: 7, spotify_url: url }).spotify_url).toBe(url);
+    });
+
     it('passes a genuine Spotify/Apple URL through unchanged', () => {
       const picked = pickClientFacingColumns({
         id: 7,

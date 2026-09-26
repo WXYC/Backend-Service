@@ -90,8 +90,16 @@ export type ClientFacingFSEntry = Pick<FSEntry, (typeof CLIENT_FACING_FLOWSHEET_
  * than a loop) so that TypeScript enforces the shape against `ClientFacingFSEntry`
  * and a schema change that renames a client-facing column is a compile error.
  *
- * BS#1714: `spotify_url` / `apple_music_url` are host-guarded on the way out — a
- * value whose host isn't Spotify/Apple (mislabeled at the LML boundary before
+ * BS#1714: `spotify_url` / `apple_music_url` are screened on the way out. Apple
+ * is a host check; `spotify_url` must NAME A RELEASE or be a search URL since
+ * BS#2697 (`isSpotifyAlbumSlotUrl`), which rejects the artist and track pages
+ * that pass a host check. **Neither of this module's two seams has a
+ * search-URL fallback** — `fillSynthesizedSearchUrls` runs in
+ * `flowsheet.service.ts` and `playlist-proxy.service.ts`, not here — so a
+ * rejected value is emitted as `null` and the client sees no Spotify button on
+ * that payload rather than a degraded one. That is the same degradation BS#1714
+ * already chose for a mislabeled host, applied to a larger population. A value
+ * whose host isn't Spotify/Apple (mislabeled at the LML boundary before
  * #1712 shipped) is dropped to `null` rather than emitted under the hardwired
  * iOS "Spotify"/"Apple Music" button. Every other column passes through as-is.
  */
@@ -140,8 +148,9 @@ export function projectFlowsheetEntry(row: FSEntry): ClientFacingFSEntry {
  * list, zero drift with the typed projector — and copies only the columns
  * actually present on the row, so a partial row is not padded with invented
  * keys. Values pass through untouched (an ISO-string date stays an ISO string),
- * with the sole exception of the BS#1714 host guard below: a `spotify_url` /
- * `apple_music_url` that is present but whose host isn't Spotify/Apple is nulled
+ * with the sole exception of the BS#1714 screen below: a present
+ * `apple_music_url` whose host isn't Apple, or a present `spotify_url` that
+ * does not name a release or a search (BS#2697), is nulled
  * (the same suppression {@link projectFlowsheetEntry} applies), so the CDC
  * `liveFs:update` SSE never carries a mislabeled URL under the hardwired iOS
  * "Spotify"/"Apple Music" button. A column absent from the row stays absent.

@@ -117,10 +117,17 @@ describe('isSpotifyUrl', () => {
   });
 
   // BS#2689 characterization: the album-slot PATH screen lives in a separate
-  // predicate (`isSpotifyAlbumSlotUrl`), so this one stays host-only. Other
-  // call sites depend on that — `proxy.controller.ts` gates the persisted
-  // read path on `isSpotifyUrl`, where a non-album value is the corrective
-  // pass's problem, not a reason to stop serving the field.
+  // predicate (`isSpotifyAlbumSlotUrl`), so this one stays host-only, and
+  // BS#2350 requires its accept set stay byte-identical.
+  //
+  // The justification originally written here — that the serve seams gate the
+  // persisted read path on THIS predicate, so a non-album value is the
+  // corrective pass's problem rather than the seam's — is no longer true.
+  // BS#2697 moved all four serve seams onto `isSpotifyAlbumSlotUrl`. The
+  // characterization below still holds and still matters; what depends on it now
+  // is `jobs/streaming-url-remediation`'s column arbitration and
+  // `scripts/lib/spotify-album-slot-repair.ts`'s repair-vs-foreign-host split,
+  // both of which genuinely ask "is this a Spotify URL at all".
   it.each([
     ['artist page', 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7'],
     ['track page', 'https://open.spotify.com/track/1301WleyT98MSxVHPZCA6M'],
