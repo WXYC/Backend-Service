@@ -19,11 +19,20 @@ import { isSpotifyUrl, isSpotifyAlbumSlotUrl } from '../../shared/lml-client/src
  *   - `repair`      — on the Spotify host but naming some other entity (an
  *                     artist page, a track, a bare `/album`). BS#2689's cohort.
  *   - `foreign-host`— not a Spotify URL at all, e.g. a Deezer link filed under
- *                     `spotify_url`. BS#1710's cohort, owned by
- *                     `jobs/streaming-url-remediation`: relocating a real link
+ *                     `spotify_url`. BS#1710's cohort: relocating a real link
  *                     that landed in the wrong slot is a different decision
  *                     from nulling a wrong-entity one, so this script counts
  *                     these and never writes them.
+ *
+ * "Counted, not written" is the honest description of the `foreign-host` cohort
+ * — do NOT read it as "handled elsewhere". `jobs/streaming-url-remediation` is
+ * the closest owner but its SQL net is `spotify_url NOT ILIKE '%spotify.com%'`,
+ * which structurally cannot select a value that CONTAINS that substring, so two
+ * sub-populations this cohort holds are outside it: a suffix spoof
+ * (`spotify.com.evil.example/album/…`, which that job's README explicitly puts
+ * out of scope) and a backslash-authority value (rejected by `safeHostname`,
+ * yet containing the apex). Those sit in prod with no owner. Reported here so
+ * the number exists; not fixed here, because relocation is that job's contract.
  *
  * Decided by the SAME predicate the write-path guard uses, imported rather than
  * re-approximated in SQL, so the two cannot drift.
@@ -62,17 +71,31 @@ export interface SpotifyRepairPatch {
  *
  * **Why NULL and not `'unresolved'`.** NULL is "never consulted", which is the
  * honest state — the value we had was not trustworthy, and we have not asked
- * since. It also matches exactly what the guard lands for a fresh row, so the
- * write path and the corrective pass state one policy rather than two. Per
- * `precheck.ts`, "a NULL status (never-consulted) does not force a re-ask; only
- * an explicit `'unresolved'` does", and that is the point: the upstream defect
- * (WXYC/library-metadata-lookup#1353) is still open, so every re-ask would
- * return the same artist URL, the guard would null it again, and the row would
- * burn all three `streaming_reask_attempts` for nothing — then sit inert at the
- * cap, worse off than if it had never been asked. This is the hazard
- * `isBandcampReaskEnabled`'s doc comment gates against in so many words.
- * NULL still un-pins merge rule 1, so the first play after LML#1353 lands can
- * adopt a real album URL via rule 3.
+ * since. Per `precheck.ts`, "a NULL status (never-consulted) does not force a
+ * re-ask; only an explicit `'unresolved'` does", and that is the point: the
+ * upstream defect (WXYC/library-metadata-lookup#1353) is still open, so every
+ * re-ask would return the same artist URL, the guard would null it again, and
+ * the row would burn all three `streaming_reask_attempts` for nothing — then
+ * sit inert at the cap, worse off than if it had never been asked. This is the
+ * hazard `isBandcampReaskEnabled`'s doc comment gates against in so many words.
+ * NULL also un-pins merge rule 1, so nothing about the row is terminal any
+ * more.
+ *
+ * **What NULL costs, stated plainly, because it is not nothing.** The guard's
+ * own outcome on the live path is NOT identical: there the writer's
+ * `?? searchUrls.spotify_url` fills the column with a synthesized
+ * `open.spotify.com/search/…` URL, and `jobs/streaming-url-upgrade` keys its
+ * candidate net on exactly that prefix (`resolve.ts`'s `searchPrefix`), so a
+ * guard-suppressed row is eligible for a later upgrade to a real album URL
+ * while a row this pass NULLs is not. So the two agree on the VERDICT column
+ * and differ on the URL column. NULL is still what BS#2689 asked for — "the
+ * ~4,353 existing rows are corrected or nulled so the search-URL fallback
+ * takes over" — and the fallback does take over, at request time, on every
+ * read seam (`proxy.controller.ts`, `album-metadata-projection.ts`'s
+ * `present.spotify_url ?? fallback.spotifyUrl`), so no DJ sees a dead button.
+ * Whether these rows should additionally be made upgrade-eligible — by
+ * persisting the synthesized search URL here, or by widening that job's net to
+ * include NULLs — is a separate decision that belongs with that job.
  *
  * **Why `'absent'` survives.** Merge rule 4 makes `'absent'` terminal
  * specifically so a negative-cached field is never resurrected for re-ask — the

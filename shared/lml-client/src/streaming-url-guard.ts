@@ -142,12 +142,16 @@ export function isSpotifyUrl(url: string | null | undefined): boolean {
  *
  * SEPARATE from {@link isSpotifyUrl} and composed over it at the
  * `sanitizeLookupStreamingUrls` call site, rather than folded into it, because
- * the two questions have different callers.
- * `apps/backend/controllers/proxy.controller.ts` gates the PERSISTED-row READ
- * path on `isSpotifyUrl`: there, a stored non-album value is the corrective
- * pass's problem, and narrowing that predicate would stop 3,787 legitimate
- * `/search/` rows being served at all. Keeping them apart also keeps BS#2350's
- * byte-identical constraint on both host predicates intact.
+ * the two questions have different callers. `isSpotifyUrl` answers "is this a
+ * Spotify URL", and BS#2350 requires its accept set stay byte-identical;
+ * several serve seams (`proxy.controller.ts`,
+ * `album-metadata-projection.ts`'s `suppressMislabeledStreamingUrls`,
+ * `flowsheet-projection.ts`) gate the PERSISTED-row READ path on it, where a
+ * stored non-album value is the corrective pass's problem rather than the
+ * serve seam's. Whether those seams should ALSO take this predicate is a live
+ * question and deliberately not settled here — it would suppress the stored
+ * artist/track rows on serve without writing anything, which is a different
+ * change with a different blast radius than a write-path screen.
  *
  * Search is an accept, not an oversight. It is the resolution ladder's last
  * tier: BS mints exactly that shape itself in `apps/enrichment-worker/enrich.ts`'s
@@ -180,20 +184,30 @@ export function isSpotifyUrl(url: string | null | undefined): boolean {
  */
 export function isSpotifyAlbumSlotUrl(url: string | null | undefined): boolean {
   if (typeof url !== 'string') return false;
-  let pathname: string;
+  let parsed: URL;
   try {
-    pathname = new URL(url).pathname;
+    parsed = new URL(url);
   } catch {
     return false;
   }
+  // WHATWG parses an authority for any scheme written with `//`, so
+  // `javascript://open.spotify.com/album/x` reaches here with a spotify.com
+  // hostname and an album-shaped path. `isSpotifyUrl` inherits
+  // `safeHostname`'s scheme-blindness and must keep it (BS#2350), but this
+  // predicate has no pre-existing callers to preserve and its value is
+  // rendered as an href, so it screens the scheme like every other predicate
+  // in this file does via `safeHttpHostname`.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
   // Host + the backslash-authority parser differential, unchanged and not
   // reimplemented here.
   if (!isSpotifyUrl(url)) return false;
-  const segments = pathname.split('/').filter((segment) => segment.length > 0);
+  const segments = parsed.pathname.split('/').filter((segment) => segment.length > 0);
+  // Case-folded for the same reason the host and the locale segment are: a real
+  // album link whose kind reads as unknown is one the corrective pass NULLs.
   if (segments[0]?.toLowerCase().startsWith('intl-')) segments.shift();
-  const [kind, id] = segments;
+  const kind = segments[0]?.toLowerCase();
   if (kind === 'search') return true;
-  return kind === 'album' && id !== undefined;
+  return kind === 'album' && segments[1] !== undefined;
 }
 
 /**
@@ -322,12 +336,15 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  * field's check (host allowlist for spotify/apple/youtube_music/soundcloud;
  * well-formedness only for bandcamp — see `isBandcampUrl`) is set to
  * `null`. Mutates `response` in place (the caller owns the freshly-parsed
- * object) and returns it for convenience. A suppressed value falls through
- * each writer's `?? searchUrls.*` fallback to a well-formed synthesized
- * search URL, exactly as spotify/apple do today (BS#1710).
- * `apple_music_url` behavior is unchanged by BS#2350 and BS#2689 alike; the
- * `spotify_url` slot additionally gets BS#2689's path screen, composed here as
- * {@link isSpotifyAlbumSlotUrl}.
+ * object) and returns it for convenience. On the live enrichment path a
+ * suppressed value falls through `?? searchUrls.*` to a well-formed
+ * synthesized search URL, exactly as spotify/apple do today (BS#1710) — but
+ * that is the live writer's behavior, NOT a property of every consumer: some
+ * `jobs/*` writers project `artwork.spotify_url ?? null` with no search
+ * fallback, so for them a suppression lands a NULL column rather than a search
+ * URL. `apple_music_url` behavior is unchanged by BS#2350 and BS#2689 alike;
+ * the `spotify_url` slot additionally gets BS#2689's path screen, composed
+ * here as {@link isSpotifyAlbumSlotUrl}.
  *
  * BS#2350's central correctness fix: suppressing `bandcamp_url` also clears
  * the sibling `artwork.streaming_status.bandcamp` verdict when present.
@@ -349,9 +366,17 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  *
  * BS#2689 extends that same status-clearing to `spotify_url`, because the
  * freeze mechanism is identical and the population is far larger: ~4,353 prod
- * rows hold a non-album value. `apple_music_url` keeps its untouched-by-this
- * treatment — BS#2689 adds no apple screen, so no apple suppression is
- * introduced for a verdict to be paired with.
+ * rows hold a non-album value.
+ *
+ * `apple_music_url` is the remaining gap and BS#2689 does NOT close it. Its
+ * branch below suppresses on host (BS#1710) and does not clear
+ * `streaming_status.apple_music`, so the exact freeze described above is
+ * reachable there — and worse, because `enrich.ts` treats a null
+ * `apple_music_url` as load-bearing with no search fallback (BS#1192), the
+ * result is a permanently blank Apple Music button rather than a degraded
+ * search link. That is a pre-existing BS#2350 omission, not something this
+ * branch's addition introduces or fixes; it needs its own ticket and its own
+ * regression test rather than a drive-by `delete` here.
  */
 export function sanitizeLookupStreamingUrls(response: LookupResponse): LookupResponse {
   for (const item of response.results ?? []) {

@@ -158,6 +158,11 @@ describe('isSpotifyAlbumSlotUrl', () => {
     ['query-style search fallback', 'https://open.spotify.com/search?q=Jessica%20Pratt'],
     ['bare spotify.com apex album', 'https://spotify.com/album/abc'],
     ['case-insensitive host', 'HTTPS://OPEN.SPOTIFY.COM/album/abc'],
+    // The host and the locale segment are both case-folded, so the entity kind
+    // must be too — otherwise the same asymmetry bites: a real album link read
+    // as an unknown kind is NULLED by the corrective pass.
+    ['mixed-case entity kind', 'https://open.spotify.com/Album/1A2GTWGtFfWp7KSQTwWOyo'],
+    ['mixed-case search', 'https://open.spotify.com/Search/Jessica%20Pratt'],
   ])('accepts a value the album slot may hold (%s)', (_label, url) => {
     expect(isSpotifyAlbumSlotUrl(url)).toBe(true);
   });
@@ -183,6 +188,16 @@ describe('isSpotifyAlbumSlotUrl', () => {
     ['backslash-authority spoof', 'https://open.spotify.com\\@evil.example/album/abc'],
     ['not a URL', 'not a url'],
     ['empty string', ''],
+    // WHATWG parses an authority for any scheme written with `//`, so a
+    // non-http(s) scheme reaches this predicate with a spotify.com hostname and
+    // an album-shaped path. The value is rendered as an href on DJ-facing
+    // surfaces, and every sibling predicate in this file screens the scheme via
+    // `safeHttpHostname`; this one has no pre-existing callers to preserve, so
+    // it screens it too rather than inheriting `isSpotifyUrl`'s scheme-blind host
+    // check.
+    ['javascript: scheme with a spotify authority', 'javascript://open.spotify.com/album/abc'],
+    ['data: scheme with a spotify authority', 'data://open.spotify.com/album/abc'],
+    ['ftp: scheme with a spotify authority', 'ftp://open.spotify.com/album/abc'],
   ])('rejects a value the album slot may not hold (%s)', (_label, url) => {
     expect(isSpotifyAlbumSlotUrl(url)).toBe(false);
   });
@@ -420,8 +435,11 @@ describe('sanitizeLookupStreamingUrls', () => {
 
     it('tolerates a suppressed spotify_url with no streaming_status object at all', () => {
       const resp = build({ spotify_url: 'https://open.spotify.com/artist/abc' });
-      expect(() => sanitizeLookupStreamingUrls(resp)).not.toThrow();
-      expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.spotify_url).toBeNull();
+      // One call only: the function mutates in place, so a second call would
+      // find the url already null and the assertion could not fail.
+      const out = sanitizeLookupStreamingUrls(resp).results[0].artwork;
+      expect(out?.spotify_url).toBeNull();
+      expect(out?.streaming_status).toBeUndefined();
     });
 
     // BS#2689 deliberately does NOT screen apple_music_url on path shape:
