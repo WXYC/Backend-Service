@@ -54,12 +54,10 @@ export type {
 // covered at one chokepoint. Imported (not just re-exported) so it's in
 // local scope for those callsites. BS#2350 extended the same guard to the
 // three remaining streaming fields (`isYouTubeMusicUrl`/`isBandcampUrl`/
-// `isSoundcloudUrl`). BS#2689 added `isSpotifyAlbumSlotUrl`, the album-slot
-// path screen composed over `isSpotifyUrl` inside the guard — exported here
-// so the one-off corrective pass over already-persisted rows
+// `isSoundcloudUrl`). BS#2689 added `isSpotifyAlbumSlotUrl`; it is exported
+// so the corrective pass over already-persisted rows
 // (`scripts/repair-non-album-spotify-urls.ts`) decides row-by-row with the
-// SAME predicate the write path uses, rather than a hand-written SQL
-// approximation of it that could drift.
+// SAME predicate the write path uses, not a SQL approximation that could drift.
 import {
   isSpotifyUrl,
   isSpotifyAlbumSlotUrl,

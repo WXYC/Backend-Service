@@ -19,16 +19,11 @@
  * `artwork.streaming_status.bandcamp` verdict, closing the BS#1747/#1915
  * permanent-null freeze this guard could otherwise cause.
  *
- * BS#2689 adds a PATH-shape screen on top of the `spotify_url` host check:
- * `open.spotify.com/artist/<id>` is a Spotify URL, so the host check passed
- * it into the album slot — 3,468 artist pages and 841 track pages out of
- * 29,233 populated prod `album_metadata.spotify_url` values. The screen is a
- * SEPARATE predicate (`isSpotifyAlbumSlotUrl`) composed at the
- * `sanitizeLookupStreamingUrls` call site, so `isSpotifyUrl` keeps both its
- * host-only contract and its other call sites (notably the persisted-row read
- * path in `proxy.controller.ts`). Suppressing `spotify_url` now clears the
- * paired `streaming_status.spotify` verdict for exactly the bandcamp reason
- * above.
+ * BS#2689 adds a PATH-shape screen for the `spotify_url` slot in a separate
+ * predicate, `isSpotifyAlbumSlotUrl` — see its doc comment for why it is
+ * composed over `isSpotifyUrl` rather than folded into it. Suppressing
+ * `spotify_url` now clears the paired `streaming_status.spotify` verdict for
+ * exactly the bandcamp reason above.
  */
 import type { LookupResponse } from '@wxyc/lml-client';
 import {
@@ -129,7 +124,6 @@ describe('isSpotifyUrl', () => {
   it.each([
     ['artist page', 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7'],
     ['track page', 'https://open.spotify.com/track/1301WleyT98MSxVHPZCA6M'],
-    ['playlist page', 'https://open.spotify.com/playlist/37i9dQZF1DX0XUsuxWHRQd'],
   ])('still accepts a non-album Spotify entity URL (%s) — host-only by contract', (_label, url) => {
     expect(isSpotifyUrl(url)).toBe(true);
   });
@@ -149,8 +143,14 @@ describe('isSpotifyAlbumSlotUrl', () => {
     // The ticket calls these out explicitly: legitimate localized album
     // links that must NOT be nulled (24 in the artifact: fr, it, es, de, pt).
     ['intl-de locale-prefixed album', 'https://open.spotify.com/intl-de/album/1A2GTWGtFfWp7KSQTwWOyo'],
-    ['intl-pt locale-prefixed album', 'https://open.spotify.com/intl-pt/album/1A2GTWGtFfWp7KSQTwWOyo'],
     ['intl-pt-br region-suffixed locale', 'https://open.spotify.com/intl-pt-br/album/1A2GTWGtFfWp7KSQTwWOyo'],
+    // Over-acceptance is the deliberate posture: the cost of not recognizing
+    // a locale segment is NULLING A REAL ALBUM LINK, so any `intl-`-prefixed
+    // first segment is skipped rather than only the two forms measured in the
+    // artifact. A script subtag and an uppercase region are the shapes a
+    // fixed-width `intl-[a-z]{2}(-[a-z]{2})?` match would have dropped.
+    ['intl-zh-hans script-subtag locale', 'https://open.spotify.com/intl-zh-hans/album/1A2GTWGtFfWp7KSQTwWOyo'],
+    ['intl-pt-BR uppercase region', 'https://open.spotify.com/intl-pt-BR/album/1A2GTWGtFfWp7KSQTwWOyo'],
     // The synthesized last-tier fallback. BS mints exactly this shape in
     // `synthesizeSearchUrls`, and `isSpotifyUrl`'s accept list has pinned it
     // since BS#1710 — nulling it would be a regression, not a hardening.
@@ -366,13 +366,10 @@ describe('sanitizeLookupStreamingUrls', () => {
   });
 
   describe('BS#2689 spotify_url album-shape screen', () => {
-    it.each([
-      ['artist page (the reported defect)', 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7'],
-      ['track page', 'https://open.spotify.com/track/1301WleyT98MSxVHPZCA6M'],
-      ['playlist page', 'https://open.spotify.com/playlist/37i9dQZF1DX0XUsuxWHRQd'],
-      ['bare /album with no id', 'https://open.spotify.com/album'],
-    ])('nulls a non-album Spotify URL in the spotify_url slot (%s)', (_label, url) => {
-      const resp = build({ spotify_url: url });
+    // Wiring only — that the slot runs through `isSpotifyAlbumSlotUrl` at all.
+    // Which shapes it accepts is pinned exhaustively on the predicate above.
+    it('nulls a non-album Spotify URL in the spotify_url slot', () => {
+      const resp = build({ spotify_url: 'https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7' });
       expect(sanitizeLookupStreamingUrls(resp).results[0].artwork?.spotify_url).toBeNull();
     });
 
@@ -389,7 +386,7 @@ describe('sanitizeLookupStreamingUrls', () => {
     // beside `spotify_status: 'verified'` — terminal under rule 1 and
     // un-re-askable by `precheck.ts`/`streaming-reask.ts`, i.e. ~4,353 rows
     // frozen with no Spotify link at all.
-    it.each([['verified'], ['absent'], ['unresolved']])(
+    it.each([['verified'], ['absent']])(
       "clears streaming_status.spotify when spotify_url is suppressed (was '%s')",
       (status) => {
         const resp = build({

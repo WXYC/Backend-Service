@@ -9,39 +9,15 @@
  * `isSpotifyAlbumSlotUrl`) stops new ones arriving; BS persistence is
  * fill-only, so the rows already stored need this pass.
  *
- * WHAT IT WRITES, and why it is three columns and not one:
- *   spotify_url              -> NULL          (the read path in
- *                                              `proxy.controller.ts` then
- *                                              synthesizes a real
- *                                              `open.spotify.com/search/…`
- *                                              link, which is a working
- *                                              answer where an artist page
- *                                              was the wrong record)
- *   spotify_status           -> 'unresolved'  (NOT left as-is)
- *   streaming_reask_attempts -> 0, ONLY if already at/over the cap
+ * The per-row judgement — which cohort a value is in, and what a cleared row
+ * may have written to it — lives in `scripts/lib/spotify-album-slot-repair.ts`
+ * under unit test, because `scripts/**` is outside both eslint and
+ * `npm run typecheck`. Read that module's doc comments for WHY the patch is
+ * shaped the way it is: two columns and not three, NULL and not
+ * `'unresolved'`, `'absent'` preserved, `streaming_reask_attempts` never
+ * touched. This file is the IO and the SQL.
  *
- * A bare `spotify_url = NULL` would FREEZE the row. `spotify_status` on these
- * rows is typically `'verified'`, and `mergeStreamingField`
- * (`apps/enrichment-worker/enrich.ts`) rule 1 never revisits a `verified`
- * field, while `precheck.ts` / `streaming-reask.ts` only re-ask an
- * `'unresolved'` one — so null URL + verified status is an album with no
- * Spotify link that nothing will ever look at again. That is the
- * BS#1747/#1915 permanent-null freeze, and it is the same failure the guard
- * avoids by deleting `streaming_status.spotify` rather than just nulling the
- * URL. `'unresolved'` is the value that puts the row back in front of both
- * re-ask mechanisms.
- *
- * `streaming_reask_attempts` is touched only where it would make
- * `'unresolved'` inert: both re-ask gates also require
- * `streaming_reask_attempts < STREAMING_REASK_ATTEMPT_CAP`. Rows under the cap
- * keep their counter untouched — the bound stays as tight as it was. (The
- * counter is per-album, shared across the three services, so clearing an
- * exhausted one does grant apple/bandcamp a fresh bounded budget on that row;
- * that is the narrowest available instrument, and it stays bounded.)
- *
- * SCOPE. The decision is per row, by the same predicate the write path uses —
- * imported, not reimplemented in SQL, so the two cannot drift. Deliberately
- * NOT in scope:
+ * SCOPE. Deliberately NOT in scope:
  *   - `/album/…` and `/intl-xx/album/…` values (correct; kept)
  *   - `/search/…` values (the intentional synthesized fallback; kept)
  *   - values on a FOREIGN host, e.g. a Deezer URL under `spotify_url` — those
@@ -49,6 +25,23 @@
  *     Counted and reported here, never written.
  *   - `apple_music_url` — BS#2689 adds no Apple screen; see the
  *     `apple_music_url` branch in `sanitizeLookupStreamingUrls`.
+ *   - **`flowsheet.spotify_url`** — the inline sibling column, and READ THE
+ *     WARNING BELOW before running with `--apply`.
+ *
+ * ⚠ THE INLINE COLUMN CAN UNMASK. `apps/backend/utils/album-metadata-projection.ts`
+ * serves `coalesce(album_metadata.spotify_url, flowsheet.spotify_url)`, and
+ * `flowsheet.spotify_url` holds its own inline copy written by the pre-Epic-D
+ * runtime path (and still written by the unlinked no-match arm). So for a
+ * playcut whose album carries a legacy inline value, nulling
+ * `album_metadata.spotify_url` PROMOTES `flowsheet.spotify_url` to the served
+ * value — and the serve seam's `suppressMislabeledStreamingUrls` only
+ * host-checks it, so if that inline value is itself an artist page the DJ still
+ * lands on an artist page while a re-count over `album_metadata` reports the
+ * column clean. The dry run therefore counts that cohort explicitly. It is not
+ * repaired here: `flowsheet` has no `spotify_status` / `streaming_reask_attempts`
+ * columns, so it is a different write with a different freeze analysis, and it
+ * needs its own ticket rather than a second arm bolted onto this one.
+ *
  * Each UPDATE re-asserts the exact URL it read in its WHERE clause, so a value
  * a concurrent enrichment write changed in between is skipped rather than
  * clobbered.
@@ -70,55 +63,50 @@
 import { config } from 'dotenv';
 config();
 
-import { and, eq, isNotNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 // Imported from sources, not the built `@wxyc/database` / `@wxyc/lml-client`
 // packages, for the reason `scripts/backfill-missing-org-members.ts` documents:
 // `@wxyc/database`'s barrel pulls the legacy tubafrenzy ETL utilities
 // (node-ssh -> native cpu-features) and would block a standalone script run.
 import { db } from '../shared/database/src/client';
-import { album_metadata } from '../shared/database/src/schema';
-import { isSpotifyUrl, isSpotifyAlbumSlotUrl } from '../shared/lml-client/src/streaming-url-guard';
-
-/**
- * Mirrors `STREAMING_REASK_ATTEMPT_CAP` in `apps/enrichment-worker/enrich.ts`,
- * which is the source of truth. Copied rather than imported because importing
- * it would execute the enrichment worker's module graph (LML client, PostHog,
- * …) inside a one-off script. Drift is safe in the direction that matters: if
- * the real cap grew, this script would clear FEWER counters than it could,
- * never more.
- */
-const STREAMING_REASK_ATTEMPT_CAP = 3;
+import { album_metadata, flowsheet } from '../shared/database/src/schema';
+import {
+  classifySpotifyUrl,
+  buildSpotifyRepairPatch,
+  reportedEntityKind,
+  type SpotifyUrlCohort,
+} from './lib/spotify-album-slot-repair';
 
 interface Candidate {
   album_id: number;
   spotify_url: string;
   spotify_status: string | null;
-  streaming_reask_attempts: number;
-}
-
-/**
- * The Spotify entity a URL names (`album`, `artist`, `track`, …), for the
- * dry-run breakdown ONLY. The keep-or-clear decision is
- * `isSpotifyAlbumSlotUrl`'s alone; this is reporting, and returns a label even
- * for shapes that predicate has no opinion about.
- */
-function reportedEntityKind(url: string): string {
-  let pathname: string;
-  try {
-    pathname = new URL(url).pathname;
-  } catch {
-    return '(unparseable)';
-  }
-  const segments = pathname.split('/').filter((segment) => segment.length > 0);
-  if (segments.length > 0 && /^intl-[a-z]{2}$|^intl-[a-z]{2}-[a-z]{2}$/.test(segments[0])) segments.shift();
-  if (segments.length === 0) return '(no path)';
-  return segments.length === 1 ? `/${segments[0]} (no id)` : `/${segments[0]}/`;
 }
 
 function tally(values: string[]): [string, number][] {
   const counts = new Map<string, number>();
   for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
   return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+/**
+ * Count the albums in `repairIds` whose `flowsheet.spotify_url` inline copy
+ * would be promoted by the COALESCE and is ITSELF not an album URL — see the
+ * unmask warning in this file's header. Reported so the scope decision is made
+ * with a number rather than an assumption.
+ */
+async function countUnmaskableInlineRows(repairIds: number[]): Promise<number> {
+  if (repairIds.length === 0) return 0;
+  const inline = await db
+    .select({ album_id: flowsheet.album_id, spotify_url: flowsheet.spotify_url })
+    .from(flowsheet)
+    .where(and(inArray(flowsheet.album_id, repairIds), isNotNull(flowsheet.spotify_url)));
+  const affected = new Set<number>();
+  for (const row of inline) {
+    if (row.album_id === null || row.spotify_url === null) continue;
+    if (classifySpotifyUrl(row.spotify_url) !== 'album-slot') affected.add(row.album_id);
+  }
+  return affected.size;
 }
 
 async function main(): Promise<void> {
@@ -131,7 +119,6 @@ async function main(): Promise<void> {
       album_id: album_metadata.album_id,
       spotify_url: album_metadata.spotify_url,
       spotify_status: album_metadata.spotify_status,
-      streaming_reask_attempts: album_metadata.streaming_reask_attempts,
     })
     .from(album_metadata)
     .where(isNotNull(album_metadata.spotify_url))
@@ -143,13 +130,13 @@ async function main(): Promise<void> {
     row.spotify_url === null ? [] : [{ ...row, spotify_url: row.spotify_url }]
   );
 
-  const keep = rows.filter((row) => isSpotifyAlbumSlotUrl(row.spotify_url));
-  const foreignHost = rows.filter((row) => !isSpotifyUrl(row.spotify_url));
-  const repair = rows.filter((row) => isSpotifyUrl(row.spotify_url) && !isSpotifyAlbumSlotUrl(row.spotify_url));
+  const cohorts: Record<SpotifyUrlCohort, Candidate[]> = { 'album-slot': [], 'foreign-host': [], repair: [] };
+  for (const row of rows) cohorts[classifySpotifyUrl(row.spotify_url)].push(row);
+  const repair = cohorts.repair;
 
   console.log(`Populated spotify_url rows:            ${rows.length}`);
-  console.log(`  album-slot shaped (kept)             ${keep.length}`);
-  console.log(`  foreign host (BS#1710's, not mine)   ${foreignHost.length}`);
+  console.log(`  album-slot shaped (kept)             ${cohorts['album-slot'].length}`);
+  console.log(`  foreign host (BS#1710's, not mine)   ${cohorts['foreign-host'].length}`);
   console.log(`  TO REPAIR                            ${repair.length}`);
   console.log('');
   console.log('To-repair breakdown by Spotify entity:');
@@ -161,15 +148,18 @@ async function main(): Promise<void> {
   for (const [status, count] of tally(repair.map((row) => row.spotify_status ?? '(null)'))) {
     console.log(`  ${status.padEnd(22)} ${count}`);
   }
-  const exhausted = repair.filter((row) => row.streaming_reask_attempts >= STREAMING_REASK_ATTEMPT_CAP);
-  console.log('');
-  console.log(`Of those, re-ask counter at/over the cap (will be cleared to 0): ${exhausted.length}`);
   console.log('');
 
   if (repair.length === 0) {
     console.log('Nothing to do.');
     process.exit(0);
   }
+
+  const unmaskable = await countUnmaskableInlineRows(repair.map((row) => row.album_id));
+  console.log(`Of those, albums whose flowsheet.spotify_url inline copy is ALSO not an album URL: ${unmaskable}`);
+  console.log('  (nulling album_metadata promotes that value on serve — see this script’s header)');
+  console.log('');
+
   if (!apply) {
     for (const row of repair.slice(0, 20)) {
       console.log(`  sample album_id=${row.album_id}  ${row.spotify_url}`);
@@ -186,14 +176,13 @@ async function main(): Promise<void> {
     try {
       const result = await db
         .update(album_metadata)
-        .set({
-          spotify_url: null,
-          spotify_status: 'unresolved',
-          // Untouched unless it would make 'unresolved' inert. See the header.
-          streaming_reask_attempts:
-            row.streaming_reask_attempts >= STREAMING_REASK_ATTEMPT_CAP ? 0 : row.streaming_reask_attempts,
-          updated_at: new Date(),
-        })
+        // `sql\`NOW()\`` rather than the script host's clock: both write arms in
+        // `apps/enrichment-worker/enrich.ts` carry
+        // `setWhere: album_metadata.updated_at < NOW()`, and `precheck.ts`'s
+        // header names an out-of-band backfill stamping a future timestamp as
+        // the one shape that defeats them — a forward-skewed clock here would
+        // make every later enrichment UPSERT on these rows a silent no-op.
+        .set({ ...buildSpotifyRepairPatch(row.spotify_status), updated_at: sql`NOW()` })
         // Re-asserting the exact value read above makes this a no-op rather
         // than a clobber if enrichment rewrote the row in between.
         .where(and(eq(album_metadata.album_id, row.album_id), eq(album_metadata.spotify_url, row.spotify_url)))
