@@ -55,10 +55,18 @@
  * folded into it; that predicate's doc comment is the single home for why, and
  * for the suppression's paired status clear.
  *
- * This does NOT heal rows already persisted before the guard shipped —
- * BS persistence is fill-only, so an existing bad value survives. Those
- * need a separate overwrite migration (BS#1710 fix #3 did this for
- * spotify/apple; `scripts/repair-non-album-spotify-urls.ts` is BS#2689's).
+ * THIS GUARD IS PROSPECTIVE ONLY, and more strictly so than "persistence is
+ * fill-only" suggests. For a row already holding `spotify_status = 'verified'`,
+ * a suppression here is a NO-OP ON DISK: deleting the incoming
+ * `streaming_status.spotify` makes the incoming verdict `undefined`, and
+ * `apps/enrichment-worker/streaming-merge-sql.ts`'s not-consulted branch then
+ * emits `url: CASE WHEN status = 'verified' THEN <live column> ELSE <fallback>
+ * END`, writing the stored bad URL back verbatim; `mergeStreamingField`'s
+ * `if (current.status === 'verified') return current` says the same thing one
+ * layer up. That is deliberate — inventing a verdict LML did not assert is the
+ * worse failure — but it means the corrective pass is LOAD-BEARING for this
+ * guard rather than cleanup after it. `scripts/repair-non-album-spotify-urls.ts`
+ * is BS#2689's (BS#1710 fix #3 was the equivalent for spotify/apple hosts).
  */
 import type { LookupResponse } from '@wxyc/shared/dtos';
 

@@ -54,10 +54,22 @@ export type {
 // covered at one chokepoint. Imported (not just re-exported) so it's in
 // local scope for those callsites. BS#2350 extended the same guard to the
 // three remaining streaming fields (`isYouTubeMusicUrl`/`isBandcampUrl`/
-// `isSoundcloudUrl`). BS#2689 added `isSpotifyAlbumSlotUrl`; it is exported
-// so the corrective pass over already-persisted rows
-// (`scripts/repair-non-album-spotify-urls.ts`) decides row-by-row with the
-// SAME predicate the write path uses, not a SQL approximation that could drift.
+// `isSoundcloudUrl`). BS#2689 added `isSpotifyAlbumSlotUrl`, re-exported here
+// to put the album-slot question on the package's public surface alongside the
+// host ones.
+//
+// Note for anyone tracing the corrective pass: `scripts/lib/spotify-album-slot-repair.ts`
+// does NOT come through this barrel — it deep-imports `./streaming-url-guard.js`
+// directly, and deliberately. Two reasons, both about not weakening the
+// no-drift property that import exists to buy. This module's package `exports`
+// map resolves `@wxyc/lml-client` to `dist/`, while the unit tests resolve it to
+// `src/` (jest `moduleNameMapper`), so a package-specifier import would let the
+// script run a stale build of the predicate its tests vouch for — the precise
+// drift it is supposed to rule out. And this barrel calls
+// `initDefaultLimiter()` at module scope and imports `@sentry/node`, which is
+// the module-graph weight the script's own header documents avoiding. The deep
+// import buys the property outright: it loads the very same source file this
+// barrel re-exports from, so the script and the write path cannot diverge.
 import {
   isSpotifyUrl,
   isSpotifyAlbumSlotUrl,

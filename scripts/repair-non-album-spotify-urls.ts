@@ -9,13 +9,25 @@
  * `isSpotifyAlbumSlotUrl`) stops new ones arriving; BS persistence is
  * fill-only, so the rows already stored need this pass.
  *
+ * THIS PASS IS NOT CLEANUP AFTER THE GUARD — it is the only thing that fixes an
+ * existing row. The guard is prospective ONLY, and not merely because
+ * persistence is fill-only: for a row already at `spotify_status = 'verified'`,
+ * deleting the incoming `streaming_status.spotify` makes the incoming verdict
+ * `undefined`, and `buildStreamingFieldConflictSet`'s not-consulted branch then
+ * emits `url: CASE WHEN status = 'verified' THEN <live column> ELSE <fallback>
+ * END` — so the UPDATE writes the stored artist URL back verbatim.
+ * `mergeStreamingField` says the same thing one layer up, with
+ * `if (current.status === 'verified') return current`. The guard stops the next
+ * bad value; these ~4,353 rows change only if this script runs.
+ *
  * The per-row judgement — which cohort a value is in, and what a cleared row
  * may have written to it — lives in `scripts/lib/spotify-album-slot-repair.ts`
  * under unit test, because `scripts/**` is outside both eslint and
  * `npm run typecheck`. Read that module's doc comments for WHY the patch is
- * shaped the way it is: two columns and not three, NULL and not
- * `'unresolved'`, `'absent'` preserved, `streaming_reask_attempts` never
- * touched. This file is the IO and the SQL.
+ * shaped the way it is: `'unresolved'` and not NULL (the only re-ask-eligible
+ * value, and the upstream fixes are landing), `'absent'` preserved as terminal,
+ * and `streaming_reask_attempts` reset only where `'unresolved'` would
+ * otherwise be inert. This file is the IO and the SQL.
  *
  * SCOPE. Deliberately NOT in scope:
  *   - `/album/…` and `/intl-xx/album/…` values (correct; kept)
@@ -83,6 +95,7 @@ import {
   classifySpotifyUrl,
   buildSpotifyRepairPatch,
   reportedEntityKind,
+  REASK_ATTEMPT_CAP,
   type SpotifyUrlCohort,
 } from './lib/spotify-album-slot-repair';
 
@@ -90,6 +103,13 @@ interface Candidate {
   album_id: number;
   spotify_url: string;
   spotify_status: string | null;
+  streaming_reask_attempts: number;
+  /**
+   * True iff `spotify_url` is this row's ONLY populated streaming column, so
+   * clearing it leaves the row with none. Read for the dry-run report, not for
+   * the repair decision — see `countRowsLeftWithNoStreamingUrl`.
+   */
+  onlyStreamingUrl: boolean;
 }
 
 function tally(values: string[]): [string, number][] {
@@ -159,6 +179,11 @@ async function main(): Promise<void> {
       album_id: album_metadata.album_id,
       spotify_url: album_metadata.spotify_url,
       spotify_status: album_metadata.spotify_status,
+      streaming_reask_attempts: album_metadata.streaming_reask_attempts,
+      apple_music_url: album_metadata.apple_music_url,
+      youtube_music_url: album_metadata.youtube_music_url,
+      bandcamp_url: album_metadata.bandcamp_url,
+      soundcloud_url: album_metadata.soundcloud_url,
     })
     .from(album_metadata)
     .where(isNotNull(album_metadata.spotify_url))
@@ -167,7 +192,21 @@ async function main(): Promise<void> {
   // somehow arrives NULL is dropped instead of flowing into the predicates as
   // a lie about its own type.
   const rows: Candidate[] = selected.flatMap((row) =>
-    row.spotify_url === null ? [] : [{ ...row, spotify_url: row.spotify_url }]
+    row.spotify_url === null
+      ? []
+      : [
+          {
+            album_id: row.album_id,
+            spotify_url: row.spotify_url,
+            spotify_status: row.spotify_status,
+            streaming_reask_attempts: row.streaming_reask_attempts,
+            onlyStreamingUrl:
+              row.apple_music_url === null &&
+              row.youtube_music_url === null &&
+              row.bandcamp_url === null &&
+              row.soundcloud_url === null,
+          },
+        ]
   );
 
   const cohorts: Record<SpotifyUrlCohort, Candidate[]> = { 'album-slot': [], 'foreign-host': [], repair: [] };
@@ -189,6 +228,9 @@ async function main(): Promise<void> {
     console.log(`  ${status.padEnd(22)} ${count}`);
   }
   console.log('');
+  const exhausted = repair.filter((row) => row.streaming_reask_attempts >= REASK_ATTEMPT_CAP);
+  console.log(`Of those, re-ask counter at/over the cap (will be cleared to 0): ${exhausted.length}`);
+  console.log('');
 
   if (repair.length === 0) {
     console.log('Nothing to do.');
@@ -200,6 +242,18 @@ async function main(): Promise<void> {
     `Of those, albums whose flowsheet.spotify_url inline copy is ALSO a non-album Spotify URL: ${unmaskable}`
   );
   console.log('  (nulling album_metadata promotes that value on serve — see this script’s header)');
+  console.log('');
+  // Clearing `spotify_url` on one of these takes the row to zero populated
+  // streaming columns, which trips three separate gates at once:
+  // `precheck.ts`'s `hasAnyStreamingUrl` (so the row stops being skippable and
+  // re-calls LML on every play), the BS#1924 counter increment, and
+  // `album-metadata-projection.ts`'s Gate 1 `carriesWireableStreamingUrl` —
+  // after which the flowsheet seams serve all five columns as NULL rather than
+  // just this one. An operator needs the size of that before --apply.
+  const leftWithNone = repair.filter((row) => row.onlyStreamingUrl).length;
+  console.log(`Of those, rows where spotify_url is the ONLY populated streaming column: ${leftWithNone}`);
+  console.log('  (clearing it takes the row to zero streaming URLs — flips precheck’s skip gate');
+  console.log('   and the projection’s wireable-URL gate; see BS#2295 / BS#1924)');
   console.log('');
 
   if (!apply) {
@@ -224,7 +278,10 @@ async function main(): Promise<void> {
         // header names an out-of-band backfill stamping a future timestamp as
         // the one shape that defeats them — a forward-skewed clock here would
         // make every later enrichment UPSERT on these rows a silent no-op.
-        .set({ ...buildSpotifyRepairPatch(row.spotify_status), updated_at: sql`NOW()` })
+        .set({
+          ...buildSpotifyRepairPatch(row.spotify_status, row.streaming_reask_attempts),
+          updated_at: sql`NOW()`,
+        })
         // Re-asserting the exact value read above makes this a no-op rather
         // than a clobber if enrichment rewrote the row in between.
         .where(and(eq(album_metadata.album_id, row.album_id), eq(album_metadata.spotify_url, row.spotify_url)))
