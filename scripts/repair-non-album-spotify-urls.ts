@@ -267,7 +267,7 @@ async function main(): Promise<void> {
     repair.filter((row) => row.streaming_reask_attempts >= REASK_ATTEMPT_CAP).length - countCounterResets(repair);
   if (atCapNoReset > 0) {
     console.log(`  (a further ${atCapNoReset} are at/over the cap but stay there: terminal 'absent' rows`);
-    console.log("   keep both their verdict and their counter — see buildSpotifyRepairPatch)");
+    console.log('   keep both their verdict and their counter — see buildSpotifyRepairPatch)');
   }
   console.log('');
 

@@ -150,7 +150,8 @@ export function countCounterResets(
   rows: readonly { spotify_status: string | null; streaming_reask_attempts: number }[]
 ): number {
   return rows.filter(
-    (row) => buildSpotifyRepairPatch(row.spotify_status, row.streaming_reask_attempts).streaming_reask_attempts !== undefined
+    (row) =>
+      buildSpotifyRepairPatch(row.spotify_status, row.streaming_reask_attempts).streaming_reask_attempts !== undefined
   ).length;
 }
 
