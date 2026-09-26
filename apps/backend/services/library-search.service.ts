@@ -287,16 +287,32 @@ export async function searchLibrary(
   // different views of the flag — alias rows would surface in the SELECT
   // but get re-filtered out by the WHERE.
   //
-  // Also gate on `hasAllField`: alias substrate matching is only routed
-  // for queries that include at least one `field === 'all'` condition.
+  // Also gate on `hasExpandableAllField`: alias substrate matching is only
+  // routed for queries that include at least one NON-EXACT `field === 'all'`
+  // condition.
+  //
   // Field-specific queries (`artist:foo`, `album:bar`) stay on the legacy
   // single-SELECT plan — they're narrow searches where alias expansion
   // would surface canonical-name-mismatched rows that the user explicitly
   // scoped against. Preserves pre-#1318 behavior for those paths; opening
   // alias expansion to field-specific queries is a future product call.
-  const hasAllFieldCondition = conditions.some((c) => c.field === 'all');
+  //
+  // A quoted term is the same kind of narrowing and gets the same treatment
+  // (BS#2702). Quoting means whole-value, and branch (b) below selects
+  // precisely the rows where that whole-value predicate is NOT TRUE, so an
+  // open gate answered a deliberately narrowed query with fuzzy neighbours —
+  // one variant hit at the similarity floor pulling in a whole discography,
+  // the BS#2018 shape. The quote characters could not even reach the probe to
+  // scope it: `buildAliasHitsCte` receives the raw `params.q`, and pg_trgm
+  // treats `"` as a word separator, so `similarity('cat power', '"cat power"')`
+  // is 1 and the alias arm behaved identically to the unquoted query.
+  //
+  // `some(non-exact)`, not `every(non-exact)`: a bare term sitting alongside a
+  // quoted one (`cat "Moon Pix"`) is still a legitimate thing to expand, and
+  // narrowing one term must not disable fuzzy matching for the other.
+  const hasExpandableAllField = conditions.some((c) => c.field === 'all' && !c.exact);
   const aliasConfig = getCatalogSearchAliasConfig();
-  const aliasActive = aliasConfig.enabled && params.q.trim().length > 0 && hasAllFieldCondition;
+  const aliasActive = aliasConfig.enabled && params.q.trim().length > 0 && hasExpandableAllField;
   const filterWhere = buildFilterClause(params);
 
   const orderDirection = params.order === 'asc' ? sql`ASC` : sql`DESC`;
@@ -325,7 +341,7 @@ export async function searchLibrary(
     // queryWhereAliasOff evaluate to NULL — `NOT NULL` is NULL (dropped from
     // both arms), but `NULL IS NOT TRUE` is TRUE (kept in b), which is exactly
     // the alias-only row the feature exists to surface. When queryWhereAliasOff
-    // is null (defensive — aliasActive gates on hasAllFieldCondition so this is
+    // is null (defensive — aliasActive gates on hasExpandableAllField so this is
     // unreachable today), (b) emits nothing, which is what we want.
     const dedupeWhere = queryWhereAliasOff ? sql`(${queryWhereAliasOff}) IS NOT TRUE` : sql`FALSE`;
     const branchBWhere = combineWhere(dedupeWhere, filterWhere);
@@ -768,17 +784,13 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
     // and is not meant to also start distinguishing "cat power" from
     // "Cat Power". Every other predicate in this file already folds case.
     //
-    // This fragment does not consult the alias substrate — alias variants are
-    // normalized strings, not exact matches against the canonical name — but
-    // do NOT read that as "a quoted query skips alias expansion". It does not.
-    // `aliasActive` gates on `field === 'all'` and never on `exact`, so a bare
-    // quoted term still builds the UNION, and branch (b) selects precisely the
-    // rows where this predicate is NOT TRUE. The alias CTE is also probed with
-    // the RAW `params.q`, quotes included, and pg_trgm treats `"` as a word
-    // separator — `similarity('cat power', '"cat power"')` is 1.0 — so the
-    // quotes are invisible to it. Whole-value therefore describes this
-    // predicate, not the result set the endpoint returns while the flag is on.
-    // BS#2702 is where that gate gets decided.
+    // Whole-value describes the endpoint's result set too, not just this
+    // fragment: a quoted term suppresses alias expansion upstream, at
+    // `hasExpandableAllField` (BS#2702). It did not always — this fragment
+    // never consulted the alias substrate, but the UNION was built anyway and
+    // its branch (b) selects precisely the rows where this predicate is NOT
+    // TRUE, so a narrowed query came back with fuzzy neighbours. Keep the two
+    // together: a change to that gate changes what quoting means here.
     return sql`(${ilikeEscaped(library_artist_view.artist_name, value, 'exact')} OR ${ilikeEscaped(library_artist_view.album_title, value, 'exact')} OR ${ilikeEscaped(library_artist_view.label, value, 'exact')})`;
   }
   // Trigram-backed ILIKE across artist/album/label. Tsvector ranking is the

@@ -699,7 +699,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
 
     it('flag on + only field-specific conditions: alias path is suppressed (gated on all-field condition)', async () => {
       // A pure `artist:foo` query parses to one field=='artist_name'
-      // condition with no `field === 'all'` member, so `hasAllFieldCondition`
+      // condition with no `field === 'all'` member, so `hasExpandableAllField`
       // is false and `aliasActive` is false. The catalog query falls through
       // to the legacy single-SELECT path — no CTE, no UNION ALL, no alias
       // substrate join — preserving pre-#1318 behavior for field-specific
@@ -725,6 +725,50 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(renderedCount).not.toContain('alias_hit');
       expect(renderedData).not.toContain('alias_hits');
       expect(renderedCount).not.toContain('alias_hits');
+    });
+
+    it('flag on + bare quoted term: alias path is suppressed (quoting opts out of fuzzy matching, BS#2702)', async () => {
+      // A quoted term is the user narrowing on purpose. Alias expansion is a
+      // widening, and branch (b) selects precisely the rows where the quoted
+      // whole-value predicate is NOT TRUE — so leaving the gate open on an
+      // exact condition answered a narrowed query with fuzzy neighbours. The
+      // quote characters could not even reach the probe: pg_trgm treats `"` as
+      // a word separator, so `similarity('cat power', '"cat power"')` is 1 and
+      // the alias arm behaved identically to the unquoted query.
+      //
+      // Same rationale the gate already applied to field-specific queries in
+      // the test above; `exact` simply belongs in the same category.
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      stubGenreFormatLookups();
+      db.execute.mockReset();
+      db.execute.mockResolvedValueOnce([baseQueryRow]).mockResolvedValueOnce([{ total: 1 }]);
+
+      const { results } = await searchCatalogQuery({ ...baseQueryParams, q: '"OHSEES"' });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].matched_via_alias).toBeUndefined();
+      const renderedData = JSON.stringify(db.execute.mock.calls[0]?.[0] ?? '');
+      const renderedCount = JSON.stringify(db.execute.mock.calls[1]?.[0] ?? '');
+      expect(renderedData).not.toContain('alias_hit');
+      expect(renderedCount).not.toContain('alias_hit');
+    });
+
+    it('flag on + a bare term alongside a quoted one: alias path stays active', async () => {
+      // The gate asks whether ANY all-field condition is non-exact, not
+      // whether none is exact. `cat "Moon Pix"` carries a bare all-field term,
+      // which is a legitimate thing to expand — narrowing one term must not
+      // silently disable fuzzy matching for the other.
+      process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      resetCatalogSearchAliasConfig();
+      stubGenreFormatLookups();
+      db.execute.mockReset();
+      db.execute.mockResolvedValueOnce([baseQueryRow]).mockResolvedValueOnce([{ total: 1, total_non_alias: 1 }]);
+
+      await searchCatalogQuery({ ...baseQueryParams, q: 'OHSEES "A Weird Exits"' });
+
+      const renderedData = JSON.stringify(db.execute.mock.calls[0]?.[0] ?? '');
+      expect(renderedData).toContain('alias_hits');
     });
 
     it('flag on: branch-B dedupe predicate is NULL-safe so alias-only NULL-label rows survive (BS#1557)', async () => {
