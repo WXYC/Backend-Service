@@ -155,9 +155,9 @@ describe('GET /library/query: quoted terms are case-insensitive (BS#2398)', () =
   // Stereolab and its two albums come from the seed (dev_env/seed_db.sql), so
   // this half adds no rows of its own.
   test.each([
-    ['artist:', 'artist', 'Stereolab'],
-    ['album:', 'album', 'Mars Audiac Quintet'],
-  ])('%s quoted term returns the same rows in either casing', async (_label, field, value) => {
+    ['artist:', 'artist', 'Stereolab', 'artist_name'],
+    ['album:', 'album', 'Mars Audiac Quintet', 'album_title'],
+  ])('%s quoted term returns the same rows in either casing', async (_label, field, value, rowField) => {
     const mixed = await auth
       .get('/library/query')
       .query({ q: `${field}:"${value}"`, limit: 50 })
@@ -174,6 +174,14 @@ describe('GET /library/query: quoted terms are case-insensitive (BS#2398)', () =
     expect(ids(mixed).length).toBeGreaterThan(0);
     expect(ids(lower)).toEqual(ids(mixed));
     expect(ids(upper)).toEqual(ids(mixed));
+
+    // Membership, not just agreement: three identical over-wide pages would
+    // satisfy the equality above. A field-prefixed query leaves
+    // `hasAllFieldCondition` false, so `aliasActive` is false and this page is
+    // the whole-value predicate's own answer — every row must carry the value.
+    for (const row of mixed.body.results) {
+      expect(row[rowField].toLowerCase()).toBe(value.toLowerCase());
+    }
   });
 
   test('an all-field quoted term returns the same rows in either casing', async () => {
@@ -182,6 +190,18 @@ describe('GET /library/query: quoted terms are case-insensitive (BS#2398)', () =
 
     expect(ids(mixed).length).toBeGreaterThan(0);
     expect(ids(lower)).toEqual(ids(mixed));
+
+    // Deliberately no membership assertion here, unlike the field-prefixed
+    // case above. A BARE quoted term does leave `hasAllFieldCondition` true,
+    // and `aliasActive` never consults `exact`, so this page is a UNION whose
+    // branch (b) selects the rows where the whole-value predicate is NOT TRUE
+    // — pinning an id set here would pin that widening as though it were
+    // intended. It is not in this change's scope and is filed separately.
+    //
+    // The casing equality is still the assertion that matters and is still
+    // sound: pg_trgm lowercases when it extracts trigrams, so the alias branch
+    // contributes identically across casings and cannot mask a case-sensitive
+    // branch (a).
   });
 
   test('a quoted term still has to match the whole value', async () => {
