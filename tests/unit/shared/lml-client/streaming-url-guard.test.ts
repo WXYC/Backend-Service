@@ -424,7 +424,7 @@ describe('sanitizeLookupStreamingUrls', () => {
       }
     );
 
-    it("the demoted value is exactly the literal both re-ask gates test for", () => {
+    it('the demoted value is exactly the literal both re-ask gates test for', () => {
       // Pinned as a literal on purpose: `precheck.ts`'s `needsStreamingReask`
       // and the hourly sweep's `findUnresolvedStreamingCandidates` both spell
       // the predicate as SQL `= 'unresolved'`, so there is no shared TS
