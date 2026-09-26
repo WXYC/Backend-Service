@@ -45,35 +45,20 @@
  * (LML never emits a resolution verdict for those two search-URL-only
  * services), so there is nothing paired to clear for them.
  *
- * BS#2689 REVERSES the host-only invariant for `spotify_url` alone, and
- * only for path shape. `https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7`
- * IS a Spotify URL, so the host check passed it into a column whose name
- * promises a RELEASE: 3,468 artist pages and 841 track pages out of the
- * 29,233 populated prod `album_metadata.spotify_url` values (14.9%) sent a DJ
- * tapping "Play on Spotify" to an artist page or a single track. Provenance is
- * upstream — two strategies of an April-2026 LML enrichment campaign resolved
- * ARTISTS into an album column (WXYC/library-metadata-lookup#1353), and LML's
- * `scripts/export_streaming_links.py` supplements album links from a
- * `track_results` table (#1352) — but this boundary is where a column-name
- * promise is enforceable, so the screen belongs here regardless of when
- * upstream lands.
- *
- * The screen is a SEPARATE predicate ({@link isSpotifyAlbumSlotUrl}) composed
- * at the `sanitizeLookupStreamingUrls` call site, NOT a change to
- * `isSpotifyUrl`. Two reasons. `isSpotifyUrl` has other callers that want the
- * host question and not this one — `apps/backend/controllers/proxy.controller.ts`
- * gates the PERSISTED-row read path on it, where a stored non-album value is
- * the corrective pass's problem and not a reason to stop serving the field at
- * all. And a predicate named for a host should keep meaning what it says; the
- * album-slot rule is a different invariant and gets its own name. Suppressing
- * `spotify_url` now also clears `streaming_status.spotify`, for the same
- * reason the bandcamp branch does — see below.
+ * BS#2689 adds ONE thing on top of all that, for `spotify_url` alone: a path
+ * check. `https://open.spotify.com/artist/7CaUk9xCxdXAmmqQn3PLR7` IS a Spotify
+ * URL, so the host check passed it into a column whose name promises a
+ * RELEASE — 3,468 artist pages and 841 track pages out of the 29,233 populated
+ * prod `album_metadata.spotify_url` values (14.9%) sent a DJ tapping "Play on
+ * Spotify" to an artist page or a single track. It went into its own predicate
+ * ({@link isSpotifyAlbumSlotUrl}), composed over `isSpotifyUrl` rather than
+ * folded into it; that predicate's doc comment is the single home for why, and
+ * for the suppression's paired status clear.
  *
  * This does NOT heal rows already persisted before the guard shipped —
  * BS persistence is fill-only, so an existing bad value survives. Those
  * need a separate overwrite migration (BS#1710 fix #3 did this for
- * spotify/apple; `scripts/repair-non-album-spotify-urls.ts` is BS#2689's, and
- * its header documents why clearing such a row is three columns and not one).
+ * spotify/apple; `scripts/repair-non-album-spotify-urls.ts` is BS#2689's).
  */
 import type { LookupResponse } from '@wxyc/shared/dtos';
 
@@ -137,11 +122,10 @@ function safeHostname(url: string): string | null {
  * or a subdomain (`open.spotify.com`, `www.spotify.com`, …). Case-folds
  * the host; returns false for nullish, non-string, or unparseable input.
  *
- * Host-only, deliberately, and it stays that way: BS#2689's album-slot PATH
- * screen is {@link isSpotifyAlbumSlotUrl}, a separate predicate composed over
- * this one. An artist or track page is a perfectly good Spotify URL and this
- * function must keep saying so — `proxy.controller.ts`'s persisted-row read
- * path asks exactly that question.
+ * Host-only, deliberately, and DO NOT narrow it: an artist or track page is a
+ * perfectly good Spotify URL and this function must keep saying so. BS#2689's
+ * album-slot path screen is {@link isSpotifyAlbumSlotUrl} — see there for
+ * which callers depend on which question.
  */
 export function isSpotifyUrl(url: string | null | undefined): boolean {
   if (typeof url !== 'string') return false;
@@ -150,25 +134,20 @@ export function isSpotifyUrl(url: string | null | undefined): boolean {
 }
 
 /**
- * Spotify's optional locale path prefix, as it appears on a localized album
- * link: `open.spotify.com/intl-de/album/<id>`. 24 of these exist in LML's
- * production `streaming_links` artifact (`fr`, `it`, `es`, `de`, `pt`) and
- * they are legitimate album URLs, so {@link isSpotifyAlbumSlotUrl} skips this
- * segment before reading the entity kind rather than tripping over it. The
- * optional region half (`intl-pt-br`) is accepted preemptively — same cheap
- * over-acceptance posture as `isYouTubeMusicUrl`'s `youtu.be`. Written as an
- * alternation of two fixed shapes rather than `(?:-[a-z]{2})?`, which
- * `security/detect-unsafe-regex` flags on star height alone; both forms accept
- * the same set, and a linter warning on a bounded pattern is not worth a
- * suppression comment.
- */
-const SPOTIFY_LOCALE_PREFIX = /^intl-[a-z]{2}$|^intl-[a-z]{2}-[a-z]{2}$/;
-
-/**
  * True iff `url` is a Spotify URL (per {@link isSpotifyUrl}) whose path is a
  * shape the `spotify_url` slot may legitimately hold. `spotify_url` names a
- * RELEASE, so that is `/album/<id>` — with an optional
- * {@link SPOTIFY_LOCALE_PREFIX} — or a `/search…` page.
+ * RELEASE, so that is `/album/<id>` — optionally behind a locale segment, as
+ * on a localized link like `open.spotify.com/intl-de/album/<id>` — or a
+ * `/search…` page.
+ *
+ * SEPARATE from {@link isSpotifyUrl} and composed over it at the
+ * `sanitizeLookupStreamingUrls` call site, rather than folded into it, because
+ * the two questions have different callers.
+ * `apps/backend/controllers/proxy.controller.ts` gates the PERSISTED-row READ
+ * path on `isSpotifyUrl`: there, a stored non-album value is the corrective
+ * pass's problem, and narrowing that predicate would stop 3,787 legitimate
+ * `/search/` rows being served at all. Keeping them apart also keeps BS#2350's
+ * byte-identical constraint on both host predicates intact.
  *
  * Search is an accept, not an oversight. It is the resolution ladder's last
  * tier: BS mints exactly that shape itself in `apps/enrichment-worker/enrich.ts`'s
@@ -183,10 +162,21 @@ const SPOTIFY_LOCALE_PREFIX = /^intl-[a-z]{2}$|^intl-[a-z]{2}-[a-z]{2}$/;
  * `/user/` (7), `/show/` (1, a podcast), and the bare `/album` with no id
  * (11), which opens a Spotify error page rather than anything playable.
  *
+ * The locale segment is matched as ANY first segment starting with `intl-`,
+ * not as the two fixed widths the artifact happens to contain (`intl-de`,
+ * `intl-pt-br`). The error directions are not symmetric: failing to recognize
+ * a locale form reads the locale as the entity kind and NULLS A REAL ALBUM
+ * LINK, while over-accepting costs nothing — Spotify has no entity kind
+ * beginning `intl-`, so no rejectable shape can slip through. Same cheap
+ * over-acceptance posture as `isYouTubeMusicUrl`'s `youtu.be`.
+ *
  * Parses before delegating to {@link isSpotifyUrl} so the unparseable case is
  * caught by this function's own `catch` rather than resting on an inference
  * about another function's internals; the cost is a second `new URL()` on a
  * value that is about to be parsed anyway, which is off any hot loop.
+ *
+ * Suppressing a value this rejects must ALSO clear the paired
+ * `streaming_status.spotify` verdict — see `sanitizeLookupStreamingUrls`.
  */
 export function isSpotifyAlbumSlotUrl(url: string | null | undefined): boolean {
   if (typeof url !== 'string') return false;
@@ -200,7 +190,7 @@ export function isSpotifyAlbumSlotUrl(url: string | null | undefined): boolean {
   // reimplemented here.
   if (!isSpotifyUrl(url)) return false;
   const segments = pathname.split('/').filter((segment) => segment.length > 0);
-  if (segments.length > 0 && SPOTIFY_LOCALE_PREFIX.test(segments[0])) segments.shift();
+  if (segments[0]?.toLowerCase().startsWith('intl-')) segments.shift();
   const [kind, id] = segments;
   if (kind === 'search') return true;
   return kind === 'album' && id !== undefined;
@@ -236,10 +226,7 @@ export function isAppleMusicUrl(url: string | null | undefined): boolean {
  * `spotify_url`/`apple_music_url` deliberately do NOT run through this
  * stricter check — that would risk changing which URLs `isSpotifyUrl` /
  * `isAppleMusicUrl` accept, and BS#2350 requires their behavior stay
- * byte-identical. Only the three BS#2350 predicates below use it. That
- * constraint survives BS#2689 intact: the album-slot path screen went into a
- * separate predicate ({@link isSpotifyAlbumSlotUrl}) composed at the call
- * site, so neither host predicate's accept set moved.
+ * byte-identical. Only the three BS#2350 predicates below use it.
  *
  * Checks run cheapest-first and share a single `new URL()` parse (unlike
  * {@link safeHostname}, which this function deliberately does not call —
@@ -337,11 +324,10 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  * `null`. Mutates `response` in place (the caller owns the freshly-parsed
  * object) and returns it for convenience. A suppressed value falls through
  * each writer's `?? searchUrls.*` fallback to a well-formed synthesized
- * search URL, exactly as spotify/apple do today (BS#1710);
- * `apple_music_url` behavior is unchanged by BS#2350 and BS#2689 alike
- * (`isSpotifyUrl`/`isAppleMusicUrl` are untouched as predicates — BS#2689
- * screens the `spotify_url` slot by composing {@link isSpotifyAlbumSlotUrl}
- * over `isSpotifyUrl` here, not by editing either one).
+ * search URL, exactly as spotify/apple do today (BS#1710).
+ * `apple_music_url` behavior is unchanged by BS#2350 and BS#2689 alike; the
+ * `spotify_url` slot additionally gets BS#2689's path screen, composed here as
+ * {@link isSpotifyAlbumSlotUrl}.
  *
  * BS#2350's central correctness fix: suppressing `bandcamp_url` also clears
  * the sibling `artwork.streaming_status.bandcamp` verdict when present.
@@ -361,21 +347,16 @@ export function isSoundcloudUrl(url: string | null | undefined): boolean {
  * search-URL-only services (see `StreamingResolution`'s own doc comment) —
  * so there is nothing paired to clear for them.
  *
- * BS#2689 extends the same status-clearing to `spotify_url`, because the
+ * BS#2689 extends that same status-clearing to `spotify_url`, because the
  * freeze mechanism is identical and the population is far larger: ~4,353 prod
- * rows hold a non-album value, and nulling one while leaving
- * `streaming_status.spotify: 'verified'` in place would persist
- * `spotify_url: null` + `spotify_status: 'verified'`, i.e. an album with no
- * Spotify link that nothing will ever re-ask. `apple_music_url` keeps its
- * untouched-by-this treatment: BS#2689 adds no apple screen, so no apple
- * suppression is introduced for a verdict to be paired with.
+ * rows hold a non-album value. `apple_music_url` keeps its untouched-by-this
+ * treatment — BS#2689 adds no apple screen, so no apple suppression is
+ * introduced for a verdict to be paired with.
  */
 export function sanitizeLookupStreamingUrls(response: LookupResponse): LookupResponse {
   for (const item of response.results ?? []) {
     const artwork = item.artwork;
     if (!artwork) continue;
-    // BS#2689: host check + album-slot path shape, composed — `isSpotifyUrl`
-    // itself is unchanged (see its doc comment for why).
     if (artwork.spotify_url != null && !isSpotifyAlbumSlotUrl(artwork.spotify_url)) {
       artwork.spotify_url = null;
       // See this function's doc comment for why the status must go too.
@@ -383,17 +364,14 @@ export function sanitizeLookupStreamingUrls(response: LookupResponse): LookupRes
         delete artwork.streaming_status.spotify;
       }
     }
-    // Host-only, deliberately: BS#2689 screened `spotify_url` on path shape
-    // because 4,353 prod rows hold a non-album value, and left this branch
-    // alone because all 288 populated `apple_url` values in LML's
-    // `streaming_links` artifact are already album URLs — there is no measured
-    // population of Apple artist URLs to guard, and an unmeasured screen here
-    // would risk degrading real album links (Apple album paths are
-    // locale-segmented and slug-bearing, `/<cc>/album/<slug>/<id>`, a wider
-    // shape than Spotify's) for no known benefit. OPEN QUESTION: BS has never
-    // counted the path shapes in `album_metadata.apple_music_url`. If that
-    // count turns up artist URLs, they came from the live probe/cache path
-    // rather than the artifact, and this branch is where the screen goes.
+    // Host-only, deliberately, and this is the OPEN QUESTION BS#2689 left: all
+    // 288 populated `apple_url` values in LML's `streaming_links` artifact are
+    // already album URLs, so there is no measured population of Apple artist
+    // URLs to guard, and an unmeasured screen would risk degrading real links
+    // (Apple album paths are locale-segmented and slug-bearing,
+    // `/<cc>/album/<slug>/<id>`, a wider shape than Spotify's). BS has never
+    // counted the path shapes in `album_metadata.apple_music_url`; if that
+    // count turns up artist URLs, this branch is where the screen goes.
     if (artwork.apple_music_url != null && !isAppleMusicUrl(artwork.apple_music_url)) {
       artwork.apple_music_url = null;
     }
