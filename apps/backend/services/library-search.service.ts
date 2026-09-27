@@ -30,6 +30,7 @@ import {
   ALIAS_HITS_PROJECTION_NULLS,
   type AliasHitFields,
 } from '../utils/alias-hits.js';
+import { ROTATION_BIN_DEDUP_ORDINAL } from '../utils/rotation-bin-order.js';
 import { rawProjection } from '../utils/sql-projection.js';
 
 export type CatalogSort = 'artist' | 'album' | 'plays' | 'date';
@@ -200,25 +201,6 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
 
 /** Raw SQL projection emitted from {@link CATALOG_ROW_PROJECTION_COLUMNS}. */
 const CATALOG_ROW_PROJECTION = rawProjection(CATALOG_ROW_PROJECTION_COLUMNS);
-
-// BS#1554: when an album has more than one active rotation row (e.g. H and
-// M simultaneously), the DISTINCT ON (id) dedup below must keep the
-// heaviest active bin, not the lightest. `rotation_bin`'s underlying
-// `freq_enum` sorts S < L < M < H — declaration order, which runs lightest to
-// heaviest — so a bare `rotation_bin ASC` keeps the lightest. This explicit
-// CASE assigns H the lowest ordinal so the `ASC` used at every DISTINCT-ON
-// site surfaces the heaviest bin instead.
-//
-// The `ELSE` is not a totality guard for a hypothetical: it is the hot
-// path. `library_artist_view` LEFT JOINs `rotation` (filtered to live rows), so
-// `rotation_bin` is NULL for every catalog album not currently in rotation —
-// the large majority — and `CASE NULL WHEN 'H' ...` falls through to 5 on all
-// of them. That is correct: a LEFT JOIN cannot produce both a NULL and a
-// non-NULL row for the same `id`, so ordinal 5 never competes inside a
-// `DISTINCT ON` group. Keep the `ELSE` regardless — without it the expression
-// yields NULL, which sorts last under the bare `ASC` used here but FIRST under
-// a `DESC`, a trap for any future caller that flips the direction.
-const ROTATION_BIN_DEDUP_ORDINAL = sql`CASE rotation_bin WHEN 'H' THEN 1 WHEN 'M' THEN 2 WHEN 'L' THEN 3 WHEN 'S' THEN 4 ELSE 5 END`;
 
 const SORT_COLUMNS: Record<CatalogSort, SQL> = {
   artist: sql`${library_artist_view.artist_name}`,
