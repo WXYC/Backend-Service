@@ -86,6 +86,7 @@ import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrack
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
+import { buildPrefixTsquery } from '../utils/tsquery.js';
 import {
   buildAliasHitsCte,
   buildFuzzyAliasTier,
@@ -2954,20 +2955,34 @@ function hasAlphanumeric(query: string): boolean {
 /**
  * Tsvector + plays ranker for the dj-site Both-mode default. Reads
  * `library.search_doc` (the STORED generated tsvector from migration 0058)
- * with `websearch_to_tsquery('simple', ...)` so multi-term queries get
- * AND-semantics, then weights ts_rank by `1 + ln(plays + 1)` to nudge
- * canonical answers up.
+ * with a prefix-matching `to_tsquery('simple', ...)` so multi-term queries get
+ * AND-semantics and partially-typed terms still match, then weights ts_rank by
+ * `1 + ln(plays + 1)` to nudge canonical answers up.
  *
  * The `(1 + ln(...))` shape is deliberate: `ln(plays + 1)` zeros out the
  * text-rank signal for albums with zero plays (most of the catalog), which
  * erases the ranking entirely for unpopular-but-relevant matches.
+ *
+ * BS#670 replaced `websearch_to_tsquery` here. dj-site issues a query on every
+ * keystroke, and `websearch_to_tsquery('simple','autec')` cannot match
+ * `autechre` — one lexeme against another, no overlap — so every prefix of a
+ * name returned zero rows and fell through to the trigram path at 11-232 ms
+ * instead of being served from the GIN index at 3-5 ms. See
+ * {@link buildPrefixTsquery} for why the tsquery is assembled by hand.
+ *
+ * A `null` from the builder means the input has no lexeme to search on (`!!!`,
+ * `$$$`). Returning no rows hands the query to the trigram fallback, which is
+ * the only path that can match it.
  */
 async function searchLibraryByTsvector(
   query: string,
   n: number,
   on_streaming?: boolean
 ): Promise<LibraryArtistViewEntry[]> {
-  const tsquery = sql`websearch_to_tsquery('simple', ${query})`;
+  const tsqueryText = buildPrefixTsquery(query);
+  if (tsqueryText === null) return [];
+
+  const tsquery = sql`to_tsquery('simple', ${tsqueryText})`;
   const tsvectorPredicate = sql`${library.search_doc} @@ ${tsquery}`;
   const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
 
@@ -2978,10 +2993,15 @@ async function searchLibraryByTsvector(
 }
 
 /**
- * Trigram fallback for Both-mode: typos and weird casing that
- * `websearch_to_tsquery` won't match. Operates on the denormalized
- * `library.artist_name` (backfilled in A.2) so the predicate is
- * single-table and reachable by the per-column GIN trigram indexes.
+ * Trigram fallback for Both-mode: typos and weird casing that the prefix
+ * tsquery won't match. Operates on the denormalized `library.artist_name`
+ * (backfilled in A.2) so the predicate is single-table and reachable by the
+ * per-column GIN trigram indexes.
+ *
+ * BS#670 narrowed what reaches here. A prefix tsquery serves partially-typed
+ * terms, so this path is no longer the keystroke path — it is now what it says
+ * it is, the misspelling path (`pikn floyd`), where no prefix of the typed
+ * string is a prefix of a real lexeme.
  */
 async function searchLibraryByTrigramBoth(
   query: string,
