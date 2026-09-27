@@ -17,6 +17,16 @@ const config: Config = {
   moduleNameMapper: {
     // Mock workspace packages
     '^@wxyc/database$': '<rootDir>/tests/mocks/database.mock.ts',
+    // @wxyc/database/streaming-merge-sql: separate entry for the same reason
+    // as @wxyc/observability/metrics below — moduleNameMapper patterns are
+    // anchored/exact, so the bare-specifier mapping above does NOT also match
+    // this subpath. It must NOT resolve to the database mock either: the
+    // subpath holds pure `sql` fragment builders with no `db` singleton, and
+    // tests (plus `apps/enrichment-worker`'s re-export shim) want the real
+    // implementation, not a double. Without this it falls through to node
+    // resolution against shared/database/dist, which CI's unit-tests job never
+    // builds (BS#2693).
+    '^@wxyc/database/streaming-merge-sql$': '<rootDir>/shared/database/src/streaming-merge-sql.ts',
     '^@wxyc/authentication$': '<rootDir>/tests/mocks/authentication.mock.ts',
     // @wxyc/lml-client: resolve to source so unit tests don't need a pre-built
     // dist (CI's unit-tests job doesn't run lint:prebuild before tests). Real

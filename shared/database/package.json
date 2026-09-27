@@ -11,6 +11,12 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
     },
+    "./streaming-merge-sql": {
+      "source": "./src/streaming-merge-sql.ts",
+      "types": "./dist/streaming-merge-sql.d.ts",
+      "import": "./dist/streaming-merge-sql.mjs",
+      "require": "./dist/streaming-merge-sql.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

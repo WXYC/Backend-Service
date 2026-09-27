@@ -25,7 +25,7 @@
  * (BS#2179 review HIGH 1): `apps/enrichment-worker/enrich.ts`'s unlinked
  * no-match write pre-populates those four with a synthesized search URL
  * unconditionally, so a plain COALESCE against them is a guaranteed no-op.
- * See `fillOrUpgradeSearchUrl` below.
+ * See `fillOrUpgradeSearchUrl` (`@wxyc/database/streaming-merge-sql`).
  *
  * `markRecheckAttempted` stamps `no_match_recheck_attempted_at` alone (no
  * status change) for a no-match / trust-rejected outcome, under the same
@@ -33,8 +33,8 @@
  */
 
 import { and, eq, sql } from 'drizzle-orm';
-import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
+import { fillOrUpgradeSearchUrl } from '@wxyc/database/streaming-merge-sql';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
 
@@ -52,6 +52,14 @@ import type { Candidate } from './orchestrate.js';
  * `synthesizeSearchUrls` is a DIFFERENT function scoped to 3 of these 4
  * columns (deliberately omits spotify — BS#1184/#1192) and is not the one
  * that landed on these rows, so it is not reused here.
+ *
+ * The table stays HERE while its consumer `fillOrUpgradeSearchUrl` moved to
+ * `@wxyc/database/streaming-merge-sql` (BS#2693): the CASE is write mechanics
+ * that three writers now share, but these strings are search-URL vocabulary
+ * that already exists in two other shapes, and a third home with no drift
+ * guard would invite exactly the divergence the paragraph above warns about.
+ * So the builder takes `prefix` as a parameter and each caller supplies its
+ * own, pinned by a parity test.
  */
 const SEARCH_URL_PREFIX = {
   spotify_url: 'https://open.spotify.com/search/',
@@ -59,25 +67,6 @@ const SEARCH_URL_PREFIX = {
   bandcamp_url: 'https://bandcamp.com/search?q=',
   soundcloud_url: 'https://soundcloud.com/search?q=',
 } as const;
-
-/**
- * Fill-null PLUS upgrade-if-placeholder, for the four streaming-search
- * columns only (BS#2179 review HIGH 1). A plain `COALESCE(column, incoming)`
- * is a guaranteed no-op here: every unlinked candidate this job selects
- * already has these four columns populated with a synthesized search URL
- * (never NULL — see `SEARCH_URL_PREFIX`'s doc comment), so a real
- * Discogs-sourced link could never land. This CASE generalizes COALESCE:
- * it fills a NULL exactly like COALESCE does, AND additionally prefers
- * `incoming` when the STORED value is itself one of the exact synthesized
- * placeholders (detected by prefix) — which a genuinely verified URL never
- * is. A `null` incoming always falls through to the stored value, so a
- * verified link already in the column is never downgraded. Mirrors
- * `jobs/streaming-url-upgrade/resolve.ts`'s `isSearchShaped` never-downgrade
- * guard, generalized to a fill-null write instead of that job's
- * search-shaped-only write.
- */
-const fillOrUpgradeSearchUrl = (column: AnyPgColumn, incoming: string | null, prefix: string) =>
-  sql`CASE WHEN ${incoming} IS NOT NULL AND (${column} IS NULL OR ${column} LIKE ${prefix + '%'}) THEN ${incoming} ELSE ${column} END`;
 
 export const markRecheckAttempted = async (rowId: number): Promise<{ written: boolean }> => {
   const updated = await db
@@ -163,7 +152,8 @@ const writeUnlinkedMatch = async (rowId: number, artwork: DiscogsMatchResult): P
       discogs_url: sql`COALESCE(${flowsheet.discogs_url}, ${artwork.release_url ?? null})`,
       release_year: sql`COALESCE(${flowsheet.release_year}, ${artwork.release_year || null})`,
       // BS#2179 review HIGH 1: fill-or-upgrade, not plain COALESCE — see
-      // `fillOrUpgradeSearchUrl`'s doc comment above.
+      // `fillOrUpgradeSearchUrl`'s doc comment in
+      // `@wxyc/database/streaming-merge-sql`.
       spotify_url: fillOrUpgradeSearchUrl(
         flowsheet.spotify_url,
         artwork.spotify_url ?? null,
