@@ -377,10 +377,29 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
 
 /**
  * Decide whether an `all`-field bare-term query should use the tsvector path
- * or fall back to the trigram ILIKE path. Tsvector handles whole-word and
- * prefix matching cleanly via `websearch_to_tsquery`, but it tokenizes — so
- * pure-punctuation strings (`!!!`, `$$$`) and single-character fragments are
- * better served by trigram, which can match arbitrary substrings.
+ * or the trigram ILIKE path. Tsvector handles whole-word matching cleanly via
+ * `websearch_to_tsquery`, but it tokenizes — so pure-punctuation strings
+ * (`!!!`, `$$$`) and single-character fragments are better served by trigram,
+ * which can match arbitrary substrings.
+ *
+ * **`websearch_to_tsquery` does NOT do prefix matching**, and this comment
+ * used to say it did. `websearch_to_tsquery('simple', 'autec')` lexes to the
+ * lexeme `autec`; the flowsheet holds `autechre`. Two different lexemes, no
+ * overlap, zero rows. So the `< 3` floor below is NOT the boundary between
+ * "tsvector can serve this" and "it cannot" — every partially-typed term is on
+ * the wrong side of that line, the floor just happens to route the shortest
+ * ones elsewhere. Correcting the claim only; the behavior is
+ * WXYC/Backend-Service#2712, which also carries the harder half: unlike the
+ * catalog's `searchLibraryByTsvector`, `buildAllFieldMatch` returns a single
+ * predicate with no zero-row fallback, so a 3+ character partial returns a
+ * hard, silent zero rather than a slow answer.
+ *
+ * Do not "fix" this by copying the catalog's `:*` prefix form until
+ * WXYC/Backend-Service#670's replacement has settled — the first attempt
+ * (WXYC/Backend-Service#2709) produced three confirmed regressions, and one of
+ * them is worse here: `search_doc` concatenates FOUR weighted segments, and
+ * `tsvector || tsvector` leaves no position gap, so a prefix-phrase query
+ * straddles three field seams rather than one (WXYC/Backend-Service#2714).
  */
 export function shouldUseTsvector(value: string): boolean {
   if (value.length < 3) return false;
@@ -397,9 +416,12 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
     return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'exact')} OR ${ilikeEscaped(flowsheet.track_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.album_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.record_label, value, 'exact')})`;
   }
   if (shouldUseTsvector(value)) {
-    // Tsvector path: tokenized whole-word / prefix matching across all four
-    // weighted fields via the GIN index on flowsheet.search_doc. websearch_
-    // to_tsquery handles natural query input (quoted phrases, OR, etc.).
+    // Tsvector path: tokenized whole-word matching across all four weighted
+    // fields via the GIN index on flowsheet.search_doc. websearch_to_tsquery
+    // handles natural query input (quoted phrases, OR, etc.) and never raises
+    // on user text — but it matches WHOLE LEXEMES only, so a partially-typed
+    // term reaches this branch and returns nothing. See shouldUseTsvector's
+    // docstring and WXYC/Backend-Service#2712.
     return sql`${flowsheet.search_doc} @@ websearch_to_tsquery('simple', ${value})`;
   }
   // Trigram fallback: short queries, pure-punctuation strings, and any other
