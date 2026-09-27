@@ -143,9 +143,11 @@ export function buildFuzzyAliasTier() {
  *
  * On both current callers this is unreachable, and deliberately kept anyway.
  * `searchLibraryByTrigramBoth` runs only after the tsvector tier returns zero
- * rows, and any real row scoring 1.0 on trigram necessarily matches
- * `websearch_to_tsquery` too (identical trigram sets imply the same word set),
- * so the tsvector tier short-circuits before this SQL is ever reached.
+ * rows, and any real row scoring 1.0 on trigram necessarily matches the tier's
+ * tsquery too (identical trigram sets imply the same word set), so the tsvector
+ * tier short-circuits before this SQL is ever reached. BS#670 only widened that
+ * short-circuit: a prefix tsquery matches a superset of what the exact-lexeme
+ * form did, so it cannot newly fail to reach a row the old form reached.
  * `searchByArtist` has no tsvector tier and no callers (BS#2022). The guard
  * costs one ORDER BY term and holds the invariant locally, rather than
  * borrowing it from a different subsystem's short-circuit — which is the kind
