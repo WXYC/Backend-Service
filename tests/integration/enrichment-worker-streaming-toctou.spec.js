@@ -4,8 +4,9 @@
  * `apps/enrichment-worker/enrich.ts#upsertMatchedAlbumMetadata`.
  *
  * BS#1945: this spec imports and runs the REAL
- * `buildStreamingFieldConflictSet` (BS#1923) — extracted to the
- * side-effect-free `apps/enrichment-worker/streaming-merge-sql.ts` precisely
+ * `buildStreamingFieldConflictSet` (BS#1923) — extracted to a side-effect-free
+ * module of its own (now `shared/database/src/streaming-merge-sql.ts`, BS#2693;
+ * `apps/enrichment-worker/streaming-merge-sql.ts` re-exports it) precisely
  * so a plain `.spec.js` integration test can `require` its compiled
  * `dist/streaming-merge-sql.cjs` (dual esm+cjs tsup entry, same recipe as
  * `jobs/artist-unicode-dedup/merge.ts` / `tests/integration/
@@ -96,8 +97,10 @@ const { sql, eq, and } = require('drizzle-orm');
 
 // The REAL `buildStreamingFieldConflictSet` (BS#1923), compiled by the
 // workspace `build` (tsup dual-format esm+cjs); CI's Build step runs before
-// the integration tier. Rebuild after editing `streaming-merge-sql.ts`
-// (`npm run build --workspace=@wxyc/enrichment-worker`).
+// the integration tier. This path is the re-export shim, so the implementation
+// to edit is `shared/database/src/streaming-merge-sql.ts` (BS#2693) and BOTH
+// workspaces need rebuilding after:
+// `npm run build --workspace=@wxyc/database --workspace=@wxyc/enrichment-worker`.
 const streamingMergeSql = require(
   path.join(__dirname, '..', '..', 'apps', 'enrichment-worker', 'dist', 'streaming-merge-sql.cjs')
 );

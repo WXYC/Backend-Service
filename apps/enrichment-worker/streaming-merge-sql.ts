@@ -1,123 +1,54 @@
 /**
- * Side-effect-free SQL-fragment builder for the streaming-field TOCTOU fix
- * (BS#1923), extracted out of `enrich.ts` (BS#1945).
+ * Pure re-export. The implementation moved to
+ * `shared/database/src/streaming-merge-sql.ts` (BS#2693) so that
+ * `jobs/album-level-backfill` and `jobs/flowsheet-artwork-repair` can share
+ * `buildStreamingFieldConflictSet`'s status CASE instead of each hand-rolling a
+ * fourth copy of `mergeStreamingField`'s rules in SQL. See that file's header
+ * for the rule-by-rule argument, and for why the subpath — not the
+ * `@wxyc/database` barrel — is the route.
  *
- * `buildStreamingFieldConflictSet` has NO import-time side effects: this
- * module touches only `drizzle-orm`'s `sql` tag (a pure query-fragment
- * builder — importing it opens no socket, starts no timer) and a type-only
- * reference to `@wxyc/lml-client`'s `StreamingResolutionStatus` (erased at
- * compile time, so it carries no runtime dependency on the LML client
- * either). No `@wxyc/database` `db` singleton, no LML HTTP client.
+ * This file stays because three things address the module by THIS path and none
+ * of them should have to change for a move:
  *
- * That is exactly what lets this module be built as its own tsup entry
- * (`tsup.config.ts`, dual esm+cjs — same recipe as
- * `jobs/artist-unicode-dedup/merge.ts`) and `require`d directly, as compiled
- * `dist/streaming-merge-sql.cjs`, by a plain `.spec.js` integration test:
- * `tests/integration/enrichment-worker-streaming-toctou.spec.js` runs THIS
- * REAL function's output against a live Postgres instead of a
- * hand-duplicated SQL mirror. Before BS#1945, hand-editing this function in
- * `enrich.ts` without updating that mirror left the integration spec green
- * against stale SQL; now the spec imports the genuine article, so there is
- * no second copy to drift.
+ *   1. `enrich.ts` imports `./streaming-merge-sql.js` and re-exports
+ *      `buildStreamingFieldConflictSet`, which is how
+ *      `tests/unit/apps/enrichment-worker/enrich.test.ts` reaches it;
+ *   2. `tsup.config.ts` lists this file as an entry, so the workspace build
+ *      still emits `dist/streaming-merge-sql.cjs`;
+ *   3. `tests/integration/enrichment-worker-streaming-toctou.spec.js` `require`s
+ *      that exact compiled path to exercise the real builder against a live
+ *      Postgres.
  *
- * `enrich.ts` re-imports and re-exports `buildStreamingFieldConflictSet`
- * unchanged, so `tests/unit/apps/enrichment-worker/enrich.test.ts` — which
- * pins this function's exact `.sql`/`.values` output — keeps importing it
- * from the same `apps/enrichment-worker/enrich` path with no test changes.
- *
- * @see WXYC/Backend-Service#1923 (the TOCTOU fix this builder implements)
- * @see WXYC/Backend-Service#1945 (this extraction)
+ * Nothing is redefined here — a second definition is the drift BS#1945 removed.
  */
 
-import { sql, type AnyColumn, type SQL } from 'drizzle-orm';
-import type { StreamingResolutionStatus } from '@wxyc/lml-client';
+import type { StreamingResolutionStatus as LmlStatus } from '@wxyc/lml-client';
+import type { StreamingResolutionStatus as DbStatus } from '@wxyc/database/streaming-merge-sql';
 
-/** A field with no synthesized search-URL fallback (Apple Music, BS#1192) never falls back — its non-verified branches keep/null the live URL directly instead of substituting a fresh search URL. */
-export const NO_FALLBACK = null;
+export {
+  buildStreamingFieldConflictSet,
+  fillOrUpgradeSearchUrl,
+  NO_FALLBACK,
+} from '@wxyc/database/streaming-merge-sql';
 
 /**
- * One field's `onConflictDoUpdate` `set` fragments (BS#1923): SQL `CASE`
- * expressions over the LIVE `statusCol`/`urlCol` values, translating
- * `mergeStreamingField`'s rules (`enrich.ts`) so the merge and the write are
- * the same atomic statement — no separate SELECT that could go stale during
- * the LML round-trip.
+ * Drift guard for the status union `shared/database` restates locally (it
+ * imports no `@wxyc/*` package — see that file's header).
  *
- * `incomingStatus`/`incomingUrl` are plain JS values fixed for this call
- * (this round's LML verdict) — only the "current persisted state" side of
- * the merge needs to become SQL, since that is the side a concurrent writer
- * could have changed since this call started. Per incoming verdict:
+ * This assertion lives HERE, in the shim, because `apps/**` is inside
+ * `npm run typecheck` while `tests/**` is not: `tests/tsconfig.json` sets
+ * `isolatedModules: true`, which makes ts-jest transpile-only, so the same two
+ * lines in a test file would pass no matter what the unions said. Measured, not
+ * assumed — removing a `paths` entry the tests import through produced no
+ * diagnostic at all.
  *
- *   - `undefined` (never consulted this round): status is left unchanged
- *     (whatever the live row already holds). A field WITH a search-URL
- *     fallback still recomputes it fresh whenever the live status isn't
- *     `'verified'` — unrelated to whether this field was asked this round;
- *     that mirrors the pre-#1915 last-writer-wins fallback recompute. A
- *     field with no fallback (Apple Music) leaves its url unchanged too.
- *   - `'verified'`: status becomes `'verified'` unconditionally (rule 3 of
- *     `mergeStreamingField` supersedes a prior `'absent'`); url adopts
- *     `incomingUrl` UNLESS the live row is already `'verified'`, in which
- *     case the live url is kept — a verified field is never downgraded,
- *     evaluated against the row as it stands at write time, not a stale
- *     snapshot.
- *   - `'absent'`: status becomes `'absent'` unless the live row is already
- *     `'verified'` (kept). url becomes the fallback (or NULL with no
- *     fallback) in that same non-verified branch — `current.status ===
- *     'absent'` (keep) and adopting `'absent'` fresh collapse to the same
- *     final url here, so one branch covers both.
- *   - `'unresolved'`: status becomes `'unresolved'` unless the live row is
- *     already `'verified'` OR already `'absent'` (both terminal, kept). url
- *     recomputes the fresh fallback in the non-verified branch for a field
- *     WITH a fallback (same recompute as the `undefined` case); for Apple
- *     Music (no fallback) the url never changes for an `'unresolved'`
- *     verdict, in every reachable branch — so it is left as the live column
- *     untouched.
- *
- * Every `${statusCol} = 'verified'` (and `'absent'`) comparison below is
- * written out at its use site rather than factored into a shared
- * sub-fragment — a flat template per branch, directly inspectable by a test
- * via `.sql`/`.values` without needing to recurse through nested `SQL`
- * objects (see `buildStreamingFieldConflictSet`'s unit tests). These
- * predicates read the LIVE row (evaluated by Postgres against the
- * pre-UPDATE row, same as every other `set` expression in an
- * `ON CONFLICT DO UPDATE`) — this is exactly what closes the TOCTOU window:
- * whatever a concurrent CDC verify wrote before this UPDATE commits is what
- * these CASEs see.
+ * If `@wxyc/shared` gains or loses a verdict, one of the two `true`s below stops
+ * being assignable and `npm run typecheck` fails, which is the moment to update
+ * `shared/database/src/streaming-merge-sql.ts` rather than discover a branch of
+ * `buildStreamingFieldConflictSet` has quietly become unreachable.
  */
-export function buildStreamingFieldConflictSet(
-  statusCol: AnyColumn,
-  urlCol: AnyColumn,
-  incomingStatus: StreamingResolutionStatus | undefined,
-  incomingUrl: string | null,
-  fallbackUrl: string | null
-): { status: SQL; url: SQL } {
-  const hasFallback = fallbackUrl !== NO_FALLBACK;
-
-  if (incomingStatus === undefined) {
-    return {
-      status: sql`${statusCol}`,
-      url: hasFallback
-        ? sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END`
-        : sql`${urlCol}`,
-    };
-  }
-
-  if (incomingStatus === 'verified') {
-    return {
-      status: sql`'verified'`,
-      url: sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${incomingUrl} END`,
-    };
-  }
-
-  if (incomingStatus === 'absent') {
-    return {
-      status: sql`CASE WHEN ${statusCol} = 'verified' THEN ${statusCol} ELSE 'absent' END`,
-      url: sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END`,
-    };
-  }
-
-  // incomingStatus === 'unresolved'
-  return {
-    status: sql`CASE WHEN ${statusCol} = 'verified' OR ${statusCol} = 'absent' THEN ${statusCol} ELSE 'unresolved' END`,
-    url: hasFallback ? sql`CASE WHEN ${statusCol} = 'verified' THEN ${urlCol} ELSE ${fallbackUrl} END` : sql`${urlCol}`,
-  };
-}
+type Covers<A, B> = [A] extends [B] ? true : false;
+const _dbCoversLml: Covers<LmlStatus, DbStatus> = true;
+const _lmlCoversDb: Covers<DbStatus, LmlStatus> = true;
+void _dbCoversLml;
+void _lmlCoversDb;

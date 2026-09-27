@@ -16,6 +16,7 @@
     "paths": {
       "@/*": ["apps/backend/*"],
       "@wxyc/database": ["shared/database/src/index.ts"],
+      "@wxyc/database/streaming-merge-sql": ["shared/database/src/streaming-merge-sql.ts"],
       "@wxyc/observability/metrics": ["shared/observability/src/metrics.ts"]
     },
     "types": ["jest", "node"]
