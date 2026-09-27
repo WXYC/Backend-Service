@@ -13,5 +13,14 @@ export default defineConfig({
   outDir: 'dist',
   clean: true,
   sourcemap: true,
+  // With two entries, esbuild's ESM code splitting (tsup's default) hoists shared
+  // helpers into a content-hashed `dist/chunk-*.mjs` whose name changes per build,
+  // and makes `dist/streaming-merge-sql.mjs` import it. Nothing misbehaves — the
+  // chunk holds only esbuild's `__export` helper and every Dockerfile copies the
+  // whole `dist` — but the subpath's entire justification is that it is reachable
+  // with NO barrel code in the graph, and that claim should hold of the artifact and
+  // not merely of the source. `false` keeps each entry genuinely standalone and the
+  // dist file set stable, matching `apps/enrichment-worker/tsup.config.ts`.
+  splitting: false,
   external: ['drizzle-orm', 'postgres'],
 });
