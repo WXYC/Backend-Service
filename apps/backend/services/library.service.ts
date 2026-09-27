@@ -86,6 +86,7 @@ import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrack
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
+import { buildPrefixTsquery } from '../utils/tsquery.js';
 import {
   buildAliasHitsCte,
   buildFuzzyAliasTier,
@@ -3117,10 +3118,15 @@ async function searchLibraryByTsvector(
 }
 
 /**
- * Trigram fallback for Both-mode: typos and weird casing that
- * `websearch_to_tsquery` won't match. Operates on the denormalized
- * `library.artist_name` (backfilled in A.2) so the predicate is
- * single-table and reachable by the per-column GIN trigram indexes.
+ * Trigram fallback for Both-mode: typos and weird casing that the prefix
+ * tsquery won't match. Operates on the denormalized `library.artist_name`
+ * (backfilled in A.2) so the predicate is single-table and reachable by the
+ * per-column GIN trigram indexes.
+ *
+ * BS#670 narrowed what reaches here. A prefix tsquery serves partially-typed
+ * terms, so this path is no longer the keystroke path — it is now what it says
+ * it is, the misspelling path (`pikn floyd`), where no prefix of the typed
+ * string is a prefix of a real lexeme.
  */
 async function searchLibraryByTrigramBoth(
   query: string,

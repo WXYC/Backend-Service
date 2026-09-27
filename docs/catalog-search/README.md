@@ -72,7 +72,7 @@ SELECT l.*, a.artist_name AS artist,
 FROM   wxyc_schema.library      l
 LEFT   JOIN wxyc_schema.album_plays p ON p.album_id = l.id
 INNER  JOIN wxyc_schema.artists     a ON a.id      = l.artist_id
-WHERE  l.search_doc @@ websearch_to_tsquery('simple', $q)
+WHERE  l.search_doc @@ to_tsquery('simple', $tsq)
    AND ($on_streaming IS NULL OR l.on_streaming = $on_streaming)
 ORDER BY match_tier DESC,
          ts_rank(l.search_doc, websearch_to_tsquery('simple', $q)) DESC,
@@ -82,7 +82,15 @@ LIMIT  $n;
 
 Ranking is an explicit `match_tier` (2 for an exact whole-lexeme hit, 1 for a prefix-only hit), not a `ts_rank * plays` product (BS#2725). Plays span roughly 10x on the real catalog — wider than the typical `ts_rank` gap between a good and a mediocre match — so multiplying let a popular near-miss outrank an exact hit, and `ts_rank` goes nearly constant under a prefix (`:*`) match, which would collapse a product-based score to a pure popularity sort once WXYC/Backend-Service#670's prefix builder lands. `match_tier` guarantees the exact-over-prefix ordering structurally; `ts_rank` then `plays` break ties within a tier. Today, before #670, the WHERE predicate and the `match_tier` predicate are the same tsquery, so every match is tier 2 — the tiering is dormant scaffolding until the prefix builder lands, and this ranker is correct and shippable without it.
 
-`websearch_to_tsquery('simple', ...)` is used for parsing because it is forgiving — it understands quoted phrases, `OR`, leading/trailing junk — and never raises on user input. Multi-token queries get AND-semantics by default, which is exactly the disambiguation `stereolab transient` needs.
+`$tsq` is not the raw query — it is built by `buildPrefixTsquery` (`apps/backend/utils/tsquery.ts`), which emits one quoted, `:*`-suffixed lexeme per token, AND-combined: `stereolab transient` becomes `'stereolab':* & 'transient':*`.
+
+**This replaced `websearch_to_tsquery` in BS#670.** `websearch_to_tsquery` was chosen originally because it is forgiving and never raises on user input, and it is still the right call for a query the user has finished typing. But dj-site issues a query on every keystroke, and `websearch_to_tsquery('simple','autec')` lexes to `autec`, which does not match Autechre's `autechre` — so every prefix of a name returned zero rows and fell through to the trigram path. Measured on production: 11-232 ms on the fallback (the spread tracks how common the letter combination is, so the typing path paid the worst case) against 3-5 ms for the prefix form through this same GIN index.
+
+`to_tsquery` takes a tsquery expression rather than user text, so it is the one variant with no input forgiveness — `&`, `|`, `!`, `(`, `)`, `<`, `>`, `:` and `*` reach it as operators and an unbalanced one raises. `buildPrefixTsquery` is the sanitizing layer: metacharacters become token separators, each token is quoted so what survives is read as a literal lexeme, and a token with no letter or digit is dropped. Input that yields no token at all (`!!!`, `$$$`) returns `null` and the tsvector path is skipped entirely rather than spending a query on an empty tsquery.
+
+Quoting does not suppress tokenization, which is the point: `'chuquimamani-condori':*` expands to `'chuquimamani-condori':* <-> 'chuquimamani':* <-> 'condori':*`, matching how the `simple` config actually lexed the name. Punctuation _inside_ a token is therefore preserved — `M.A.N.D.Y.` is the single lexeme `m.a.n.d.y`, and five one-letter tokens would match something else entirely.
+
+Multi-token queries keep AND-semantics, which is the disambiguation `stereolab transient` needs.
 
 ### Trigram fallback decision boundary
 
@@ -99,18 +107,39 @@ The fallback fires only when:
 
 1. Tsvector returned 0 rows (so we don't double-query the common case).
 2. The trimmed query has at least one alphanumeric character — pure punctuation skips both paths and returns empty without a roundtrip.
-3. The trimmed query is at least 2 characters long — single-character queries fall through to no-results because trigram on 1-char input is meaningless.
+3. The trimmed query is at least 2 characters long — single-character queries fall through to no-results because trigram on 1-char input is meaningless. (The _tsvector_ path has no such floor; see below for why it does not need one.)
 
 The fallback is single-table and uses `BitmapOr` across the two GIN trigram indexes on `library` — much faster than the cross-table OR the old path forced through the view.
 
 ### Pure punctuation and short queries
 
-| Query                           | Path                       | Result                        |
-| ------------------------------- | -------------------------- | ----------------------------- |
-| `""` (empty) or whitespace-only | (skipped)                  | empty                         |
-| `!!!` (no alphanumerics)        | (skipped)                  | empty                         |
-| `a` (1 char)                    | tsvector only; no fallback | empty unless tsvector matches |
-| `ab` (2+ chars, alphanumeric)   | tsvector → trigram on miss | full pipeline                 |
+| Query                             | Path                       | Result                                 |
+| --------------------------------- | -------------------------- | -------------------------------------- |
+| `""` (empty) or whitespace-only   | (skipped)                  | empty                                  |
+| `!!!` (no alphanumerics)          | (skipped)                  | empty                                  |
+| `$$$ ...` (no token has a lexeme) | (skipped)                  | empty — `buildPrefixTsquery` is `null` |
+| `a` (1 char)                      | tsvector only; no fallback | broad prefix match, ~64 ms             |
+| `ab` (2+ chars, alphanumeric)     | tsvector → trigram on miss | full pipeline                          |
+
+### Why the prefix path has no minimum token length
+
+A one-character prefix is the worst case the `:*` change introduces, and it was measured rather than guarded against. Timings below are the **whole** Both-mode call through the service — the full `library_artist_view` join, not the `search_doc` scan alone — warm, three runs, against a 64,193-row catalog:
+
+| query      | matching rows (tsquery alone) | Both-mode call |
+| ---------- | ----------------------------- | -------------- |
+| `a`        | 21,084 (33% of the catalog)   | 63-66 ms       |
+| `au`       | 383                           | 10-15 ms       |
+| `aut`      | 131                           | 8-9 ms         |
+| `autec`    | 14                            | 8-13 ms        |
+| `stereola` | 32                            | 7-9 ms         |
+
+The selectivity cliff is entirely at one character; two is already narrow, and from two characters up the prefix path costs 7-15 ms where the trigram fallback it displaces cost 11-232 ms. That is the win, and it covers every keystroke after the first.
+
+**The 1-char case is a different trade, and not a latency win at all.** `searchLibraryBothMode` gates the trigram fallback on `trimmed.length >= 2`, so a single-character query never reached it: the old behavior was a fast empty response, because `websearch_to_tsquery('simple','a')` matched only albums carrying a standalone one-letter word. The prefix form turns that into a 64 ms query returning ranked rows. So this buys useful first-keystroke autocomplete for ~64 ms; it does not replace something slower. 64 ms sits under the ~100 ms threshold where a keystroke still feels immediate.
+
+A floor is therefore a live option rather than a rejected one: suffixing `:*` only on tokens of 2+ characters would restore the old 1-char behavior exactly, for one line in `buildPrefixTsquery`. It is absent because the 64 ms buys something real and stays inside the perceptual budget — not because the 1-char case was measured as cheap.
+
+Two caveats on these numbers. They ran against an `album_plays` MV with **no rows** (the dev clone fixture is catalog-only — 0 `flowsheet` rows — so the MV cannot be populated from it), which makes the `(1 + ln(plays + 1))` factor constant; a populated MV adds a unique-index probe per candidate row and a varying sort key, so treat the 1-char figure as a floor rather than a ceiling. And they include JS and driver overhead, which is why they exceed a bare `EXPLAIN` of the `search_doc` predicate — that predicate alone is ~12 ms for `'a':*`, which is a component of the 64 ms and not a substitute for it.
 
 ## `album_plays` refresh cadence
 
