@@ -101,9 +101,52 @@ const { sql, eq, and } = require('drizzle-orm');
 // to edit is `shared/database/src/streaming-merge-sql.ts` (BS#2693) and BOTH
 // workspaces need rebuilding after:
 // `npm run build --workspace=@wxyc/database --workspace=@wxyc/enrichment-worker`.
-const streamingMergeSql = require(
-  path.join(__dirname, '..', '..', 'apps', 'enrichment-worker', 'dist', 'streaming-merge-sql.cjs')
+const fs = require('fs');
+const repoRoot = path.join(__dirname, '..', '..');
+
+/**
+ * BS#2693: the real SQL now lives in a SECOND artifact, so assert both are fresh
+ * before trusting either.
+ *
+ * Before the lift, one `npm run build --workspace=@wxyc/enrichment-worker` rebuilt
+ * everything this spec exercises. After it, that same command — the one the comment
+ * above used to give, and the one muscle memory reaches for — rebuilds only the shim
+ * and leaves `shared/database/dist/streaming-merge-sql.js` stale, so this spec would
+ * pass against SQL that no longer matches the source. That is a softer form of the
+ * exact "green against stale SQL" failure BS#1945 was filed to remove, and a comment
+ * is not a guard against it. CI is safe (root `npm run build`); a local run is not.
+ *
+ * Throws rather than skips: a silent skip on the one spec that validates the genuine
+ * CASE expressions against Postgres is worse than a loud failure.
+ */
+const assertArtifactFresh = (distSegments, srcSegments) => {
+  const dist = path.join(repoRoot, ...distSegments);
+  const src = path.join(repoRoot, ...srcSegments);
+  if (!fs.existsSync(dist)) {
+    throw new Error(
+      `${distSegments.join('/')} is missing. Build it first:\n` +
+        '  npm run build --workspace=@wxyc/database --workspace=@wxyc/enrichment-worker'
+    );
+  }
+  if (fs.statSync(dist).mtimeMs < fs.statSync(src).mtimeMs) {
+    throw new Error(
+      `${distSegments.join('/')} is OLDER than ${srcSegments.join('/')} — this spec would run against stale SQL, ` +
+        'which is the BS#1945 failure mode. Rebuild both workspaces:\n' +
+        '  npm run build --workspace=@wxyc/database --workspace=@wxyc/enrichment-worker'
+    );
+  }
+};
+
+assertArtifactFresh(
+  ['shared', 'database', 'dist', 'streaming-merge-sql.js'],
+  ['shared', 'database', 'src', 'streaming-merge-sql.ts']
 );
+assertArtifactFresh(
+  ['apps', 'enrichment-worker', 'dist', 'streaming-merge-sql.cjs'],
+  ['apps', 'enrichment-worker', 'streaming-merge-sql.ts']
+);
+
+const streamingMergeSql = require(path.join(repoRoot, 'apps', 'enrichment-worker', 'dist', 'streaming-merge-sql.cjs'));
 const { buildStreamingFieldConflictSet, NO_FALLBACK } = streamingMergeSql;
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
