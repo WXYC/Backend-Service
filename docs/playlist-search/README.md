@@ -134,6 +134,8 @@ Keep the trigram indexes. The router logic at the service layer chooses:
 
 This hybrid covers both user intents that show up in music search: "I remember a word from the title" and "I remember a fragment of an unusual name."
 
+**The shipped router does not actually make that distinction.** `shouldUseTsvector` tests only `value.length >= 3` plus "contains an alphanumeric" — it cannot tell a complete word from a partially-typed one, so a 3+ character _prefix_ is routed to the tsvector branch the first bullet reserves for whole words. `websearch_to_tsquery` matches whole lexemes only (`'autec'` does not match `autechre`), and `buildAllFieldMatch` returns that single predicate with no zero-row fallback, so such a query returns a hard zero instead of falling through to the trigram branch the second bullet describes. The routing above is the correct design; the gap is in the implementation, and it is tracked in [WXYC/Backend-Service#2712](https://github.com/WXYC/Backend-Service/issues/2712).
+
 When this lands, the test suite should cover music titles with stylized punctuation that exercises tokenizer edge cases: `M.A.N.D.Y.`, `!!!`, `Godspeed You! Black Emperor`, dotted initialisms, ampersands (`Belle & Sebastian`), and non-ASCII titles (`Sigur Rós`, Japanese / Cyrillic artist names). The hybrid router must keep these reachable when `tsvector` tokenization drops them.
 
 ### Done: DJ name path (steps 5a + 5b)
