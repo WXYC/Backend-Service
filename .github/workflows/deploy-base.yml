@@ -326,8 +326,106 @@ jobs:
           name: version-${{ matrix.target }}-${{ needs.setup.outputs.build_id }}
           path: deploy_version.txt
 
+  build-shared-builder:
+    # Builds ONCE per deploy the shared "dist-export" image that every
+    # per-target `build` job below consumes via the BUILDER_IMAGE build-arg,
+    # instead of each of up to 54 matrix jobs running its own `npm ci` over
+    # the whole monorepo in its own builder stage. All 56 Node
+    # Dockerfile.<target> files were verified to use their builder stage for
+    # exactly one thing -- producing compiled dist/** output -- so that step
+    # is factored out here. See docs/deploy.md "Shared builder image" and
+    # Dockerfile.deploy-builder.
+    #
+    # This is the one npm-ci-over-the-whole-monorepo build genuinely worth
+    # `mode=max` caching, and it's safe to cache-to a single ECR ref
+    # specifically BECAUSE it runs in exactly one job. Do not copy this
+    # cache-from/cache-to pattern into a per-target step -- concurrent
+    # writers to the same ref from a matrix is a last-writer-wins race,
+    # which is exactly what running this upstream of the matrix avoids.
+    needs: [setup]
+    runs-on: ubuntu-latest
+    # No production measurement yet (this is a new job) -- estimated at the
+    # `build` job's own npm-ci-inclusive p100 below (17.82 min for ONE
+    # target), on the assumption that one full-monorepo build is the same
+    # order of magnitude as one target's build, not 54x it. Capped at 75 --
+    # the same number `build` uses, for the same reason (see that job's own
+    # comment) -- rather than a tighter number this repo's own
+    # `deploy-timeouts.test.ts` 4x-headroom floor would otherwise reject
+    # against an estimate this coarse. Re-measure once this has run for
+    # real and tighten both the estimate and the cap.
+    timeout-minutes: 75
+    if: needs.setup.outputs.has_targets == 'true'
+    outputs:
+      builder_image: ${{ steps.image_ref.outputs.image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Amazon ECR
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${{ secrets.AWS_ECR_URI }}
+
+      - name: Ensure ECR repository exists
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr describe-repositories --repository-names deploy-builder --region $AWS_REGION 2>/dev/null || \
+            aws ecr create-repository --repository-name deploy-builder --region $AWS_REGION
+
+      # Best-effort housekeeping, same as the per-target step below: a
+      # missing ecr:PutLifecyclePolicy permission or a transient API error
+      # must not block the build.
+      - name: Apply ECR Lifecycle Policy
+        continue-on-error: true
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          aws ecr put-lifecycle-policy \
+            --repository-name deploy-builder \
+            --region "$AWS_REGION" \
+            --lifecycle-policy-text file://.github/ecr-lifecycle-policy.json
+
+      - name: Compute Image Reference
+        id: image_ref
+        run: |
+          IMAGE="${{ secrets.AWS_ECR_URI }}/deploy-builder:sha-${{ github.sha }}"
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+      # Same ECR cache-export requirements as the per-target builds below
+      # (image-manifest/oci-mediatypes required by ECR; ignore-error so a
+      # transient cache-export failure degrades to a full rebuild instead of
+      # failing the deploy; provenance/sbom disabled so the pushed image
+      # stays a single manifest, compatible with the lifecycle policy's
+      # untagged-expiry rule). See docs/deploy.md.
+      - name: Build and Push Shared Builder Image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.deploy-builder
+          target: dist-export
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+          tags: ${{ steps.image_ref.outputs.image }},${{ secrets.AWS_ECR_URI }}/deploy-builder:latest
+          cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/deploy-builder:buildcache
+          cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/deploy-builder:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
+
   build:
-    needs: [handle-git-tags, setup]
+    needs: [handle-git-tags, setup, build-shared-builder]
     runs-on: ubuntu-latest
     # p100 17.82 min -- and not a lone outlier: three of 1,512 sampled
     # builds exceeded 10 minutes, all successful ETL images that missed the
@@ -486,8 +584,15 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          # BUILDER_IMAGE feeds every target's `ARG BUILDER_IMAGE` / `FROM
+          # ${BUILDER_IMAGE} AS builder` (see docs/deploy.md "Shared builder
+          # image"). Dockerfile.rotation-release-id-pollution-check (the
+          # fleet's one Python job) doesn't declare that ARG, so it gets a
+          # harmless "build arg not consumed" warning rather than a
+          # per-target carve-out in this list.
           build-args: |
             NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+            BUILDER_IMAGE=${{ needs['build-shared-builder'].outputs.builder_image }}
           tags: ${{ steps.image_tags.outputs.tags }}
           cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache
           cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true

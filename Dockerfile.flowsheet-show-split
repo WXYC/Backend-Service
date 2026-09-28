@@ -1,14 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-WORKDIR /flowsheet-show-split-builder
-
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./jobs/flowsheet-show-split ./jobs/flowsheet-show-split
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-show-split
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -21,8 +15,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder ./flowsheet-show-split-builder/jobs/flowsheet-show-split/dist ./jobs/flowsheet-show-split/dist
-COPY --from=builder ./flowsheet-show-split-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder /jobs/flowsheet-show-split/dist ./jobs/flowsheet-show-split/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
 
 # Deliberately NOT the sibling one-shots' `DB_SYNCHRONOUS_COMMIT=off` tuning.
 # Those are resumable bulk backfills whose worst case on a lost commit is

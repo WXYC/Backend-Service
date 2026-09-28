@@ -1,18 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /flowsheet-linked-reenrichment-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./shared/lml-client ./shared/lml-client
-COPY ./shared/metadata ./shared/metadata
-COPY ./jobs/flowsheet-linked-reenrichment ./jobs/flowsheet-linked-reenrichment
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/flowsheet-linked-reenrichment
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -33,10 +23,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # pattern in Dockerfile.album-level-backfill / Dockerfile.backend.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./flowsheet-linked-reenrichment-builder/jobs/flowsheet-linked-reenrichment/dist ./jobs/flowsheet-linked-reenrichment/dist
-COPY --from=builder ./flowsheet-linked-reenrichment-builder/shared/database/dist ./shared/database/dist
-COPY --from=builder ./flowsheet-linked-reenrichment-builder/shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder ./flowsheet-linked-reenrichment-builder/shared/metadata/dist ./shared/metadata/dist
+COPY --from=builder /jobs/flowsheet-linked-reenrichment/dist ./jobs/flowsheet-linked-reenrichment/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Identifies the connection in pg_stat_activity during incident triage.
 ENV DB_APPLICATION_NAME=wxyc-flowsheet-linked-reenrichment

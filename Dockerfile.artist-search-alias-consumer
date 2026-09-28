@@ -1,14 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-WORKDIR /artist-search-alias-consumer-builder
-
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./jobs/artist-search-alias-consumer ./jobs/artist-search-alias-consumer
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/artist-search-alias-consumer
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -24,7 +18,7 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder ./artist-search-alias-consumer-builder/jobs/artist-search-alias-consumer/dist ./jobs/artist-search-alias-consumer/dist
-COPY --from=builder ./artist-search-alias-consumer-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder /jobs/artist-search-alias-consumer/dist ./jobs/artist-search-alias-consumer/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/artist-search-alias-consumer"]

@@ -1,14 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-WORKDIR /rotation-dedupe-builder
-
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./jobs/rotation-dedupe ./jobs/rotation-dedupe
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/rotation-dedupe
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -21,8 +15,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder ./rotation-dedupe-builder/jobs/rotation-dedupe/dist ./jobs/rotation-dedupe/dist
-COPY --from=builder ./rotation-dedupe-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder /jobs/rotation-dedupe/dist ./jobs/rotation-dedupe/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
 
 # Long-running per-statement timeout: the dedupe is a single transaction
 # with one CTE-driven UPDATE. On the small active rotation set (a few

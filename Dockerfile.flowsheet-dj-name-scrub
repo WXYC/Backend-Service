@@ -1,16 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /flowsheet-dj-name-scrub-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./jobs/flowsheet-dj-name-scrub ./jobs/flowsheet-dj-name-scrub
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-dj-name-scrub
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -25,8 +17,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./flowsheet-dj-name-scrub-builder/jobs/flowsheet-dj-name-scrub/dist ./jobs/flowsheet-dj-name-scrub/dist
-COPY --from=builder ./flowsheet-dj-name-scrub-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder /jobs/flowsheet-dj-name-scrub/dist ./jobs/flowsheet-dj-name-scrub/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
 
 # All three passes walk `flowsheet` (~2.6M rows) with an id-cursor scan, and
 # the main pass joins `shows` + `auth_user` on the way. The API's tight 5s

@@ -1,18 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /flowsheet-metadata-backfill-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./shared/lml-client ./shared/lml-client
-COPY ./shared/metadata ./shared/metadata
-COPY ./jobs/flowsheet-metadata-backfill ./jobs/flowsheet-metadata-backfill
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/flowsheet-metadata-backfill
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -33,10 +23,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # pattern in Dockerfile.backend.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./flowsheet-metadata-backfill-builder/jobs/flowsheet-metadata-backfill/dist ./jobs/flowsheet-metadata-backfill/dist
-COPY --from=builder ./flowsheet-metadata-backfill-builder/shared/database/dist ./shared/database/dist
-COPY --from=builder ./flowsheet-metadata-backfill-builder/shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder ./flowsheet-metadata-backfill-builder/shared/metadata/dist ./shared/metadata/dist
+COPY --from=builder /jobs/flowsheet-metadata-backfill/dist ./jobs/flowsheet-metadata-backfill/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: a per-row UPDATE over the 1.86M-row
 # tail can spend tens of seconds on the rare hot batch (search_doc tsvector

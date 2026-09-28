@@ -1,18 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /flowsheet-artwork-repair-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./shared/lml-client ./shared/lml-client
-COPY ./shared/metadata ./shared/metadata
-COPY ./jobs/flowsheet-artwork-repair ./jobs/flowsheet-artwork-repair
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/metadata --workspace=@wxyc/flowsheet-artwork-repair
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -32,10 +22,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # Dockerfile.flowsheet-metadata-backfill.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./flowsheet-artwork-repair-builder/jobs/flowsheet-artwork-repair/dist ./jobs/flowsheet-artwork-repair/dist
-COPY --from=builder ./flowsheet-artwork-repair-builder/shared/database/dist ./shared/database/dist
-COPY --from=builder ./flowsheet-artwork-repair-builder/shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder ./flowsheet-artwork-repair-builder/shared/metadata/dist ./shared/metadata/dist
+COPY --from=builder /jobs/flowsheet-artwork-repair/dist ./jobs/flowsheet-artwork-repair/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: the enumeration query's predicate
 # (`metadata_status='enriched_match' AND artwork_url IS NULL AND album_id IS

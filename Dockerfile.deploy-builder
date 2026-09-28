@@ -1,0 +1,48 @@
+# Shared builder image for the deploy pipeline (see docs/deploy.md "Shared
+# builder image"). Every Dockerfile.<target> under the repo root used to run
+# its own near-identical `npm ci && npm run build` over the whole monorepo in
+# its own "builder" stage -- one per target, each independently cached and
+# pulled by its own `build` matrix job. Every one of those builder stages was
+# ever used for exactly one thing: producing a `dist/` directory that gets
+# `COPY --from=builder`'d into the target's prod stage. This Dockerfile
+# factors that step out: built ONCE per deploy by a dedicated job upstream of
+# the matrix, it produces a tiny image containing only the compiled dist/**
+# output for every workspace -- no node_modules, no source -- which every
+# target's builder stage then consumes via `FROM ${BUILDER_IMAGE}` instead of
+# running its own npm ci.
+#
+# Do not point a per-target `mode=max` cache at this same ECR ref from
+# inside the build matrix -- concurrent writes from many matrix jobs to one
+# ref is a last-writer-wins race. This image is built and cached by exactly
+# one job, which is what makes mode=max safe here.
+
+FROM node:24-alpine AS builder
+
+ARG NPM_TOKEN
+WORKDIR /build
+
+COPY ./.npmrc ./
+COPY ./package.json ./package-lock.json ./
+COPY ./tsconfig.base.json ./
+COPY ./shared ./shared
+COPY ./apps ./apps
+COPY ./jobs ./jobs
+
+RUN npm ci && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**
+
+# Collect just the dist/** output for every workspace into one tree that
+# mirrors the repo layout (apps/<x>/dist, jobs/<x>/dist, shared/<x>/dist), so
+# every downstream Dockerfile's `COPY --from=builder` path only has to drop
+# its old per-target "<target>-builder/" prefix. The glob is anchored at
+# exactly this depth so it can never match a dependency's own nested dist/
+# directory under node_modules.
+RUN mkdir -p /dist-export/apps /dist-export/jobs /dist-export/shared && \
+    for d in apps/*/dist jobs/*/dist shared/*/dist; do \
+      if [ -d "$d" ]; then mkdir -p "/dist-export/$(dirname "$d")" && cp -r "$d" "/dist-export/$(dirname "$d")/"; fi; \
+    done
+
+# The only stage ever pushed or pulled. No node_modules, no source, no base
+# OS -- just the compiled output, so every downstream `build` matrix job's
+# pull is cheap regardless of matrix width.
+FROM scratch AS dist-export
+COPY --from=builder /dist-export/ /
