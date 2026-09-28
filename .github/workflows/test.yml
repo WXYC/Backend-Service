@@ -190,6 +190,17 @@ jobs:
               # `.github/` is metadata no spec asserts on.
               - '.github/actions/**'
               - 'dev_env/docker-compose.yml'
+              # BS#2718: `tests/unit/scripts/deploy-shared-builder-image.test.ts`
+              # and the pre-existing Dockerfile assertions in
+              # `sentry-transaction-filter.test.ts` / `dockerfile-cmd.test.ts`
+              # all read root `Dockerfile.*` files. Without this, the exact
+              # edit those guards exist to catch -- someone re-adding a
+              # per-target `RUN npm ci`, or a non-`dist` `COPY --from=builder`
+              # -- touches no other `src` path, so `unit-tests` never runs and
+              # the required check reports `skipped`, which branch protection
+              # accepts as passing. Same trap as BS#1807 / BS#2256 above, one
+              # more file class over.
+              - 'Dockerfile.*'
 
       - name: Determine if integration tests should run
         id: should-run

@@ -21,6 +21,21 @@ FROM node:24-alpine AS builder
 ARG NPM_TOKEN
 WORKDIR /build
 
+# `npm ci` and `npm run build` are two RUN instructions, not one, but this is
+# NOT the layer-caching split it looks like: `npm ci` still runs AFTER every
+# workspace's source is copied in, so this layer's cache key still busts on
+# nearly every deploy, same as before. A real split -- copy only manifests,
+# `npm ci`, then copy source -- was tried and reverted: `npm ci` in an npm
+# WORKSPACES repo needs every workspace's own package.json already present to
+# resolve the workspace graph and symlink node_modules correctly, not just
+# the root manifest + lockfile. Deferring the full `shared/`/`apps/`/`jobs/`
+# copies past `npm ci` produced a `node_modules` inconsistent with what
+# `npm run build` actually needed (missing `@types/node` resolution in one
+# workspace, a missing `@wxyc/shared` symlink in another) -- reproduced twice
+# locally, not a fluke. The two RUN instructions are split only so a build
+# failure's stage is unambiguous in the log; the cache-locality win the
+# split-manifest approach would buy is real but needs a manifest-only
+# pre-stage (or `turbo prune`) to do safely, which is out of scope here.
 COPY ./.npmrc ./
 COPY ./package.json ./package-lock.json ./
 COPY ./tsconfig.base.json ./
@@ -28,7 +43,8 @@ COPY ./shared ./shared
 COPY ./apps ./apps
 COPY ./jobs ./jobs
 
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**
+RUN npm ci
+RUN npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**
 
 # Collect just the dist/** output for every workspace into one tree that
 # mirrors the repo layout (apps/<x>/dist, jobs/<x>/dist, shared/<x>/dist), so

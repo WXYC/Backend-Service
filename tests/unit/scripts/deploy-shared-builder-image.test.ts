@@ -44,8 +44,12 @@ const repoRoot = path.resolve(__dirname, '../../..');
  * Dockerfiles that deliberately do NOT consume the shared builder image:
  * `migrate` builds a standalone init image with no `npm ci`/build step at
  * all, and the fleet's one Python job has no Node builder stage to share.
- * Pinned exactly (not a floor) -- if this list silently grew, a Dockerfile
- * that should be sharing the builder image would go unchecked.
+ * This list is not independently pinned by count or contents (that would be
+ * circular -- it's the input to the exclusion filter below, so asserting it
+ * equals itself proves nothing); what actually guards against it silently
+ * admitting a real target is the per-entry structural check below, which
+ * verifies each excluded file has no reason to be included in the first
+ * place (no Node two-stage builder pattern at all).
  */
 const NON_SHARED_BUILDER_DOCKERFILES = ['Dockerfile.migrate', 'Dockerfile.rotation-release-id-pollution-check'];
 
@@ -71,7 +75,13 @@ function nodeTargetDockerfiles(): string[] {
 
 const MIN_EXPECTED_NODE_DOCKERFILES = 50;
 
-const EXPECTED_BUILDER_BLOCK = 'ARG BUILDER_IMAGE\nFROM ${BUILDER_IMAGE} AS builder';
+// The default (BS#2718 follow-up fix) is what makes every local build path
+// -- dev_env/docker-compose.yml, every app/job's own `docker:build` script --
+// work without threading a BUILDER_IMAGE build-arg through ~55 scripts. In
+// CI, deploy-base.yml always overrides it with the real per-deploy ECR
+// image; the default only takes effect when nothing overrides it, which is
+// every local build path. See docs/deploy.md "Shared builder image".
+const EXPECTED_BUILDER_BLOCK = 'ARG BUILDER_IMAGE=wxyc-deploy-builder:local\nFROM ${BUILDER_IMAGE} AS builder';
 
 function readDockerfile(name: string): string {
   return fs.readFileSync(path.join(repoRoot, name), 'utf-8');
@@ -85,10 +95,19 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
     expect(nodeTargetDockerfiles().length).toBeGreaterThanOrEqual(MIN_EXPECTED_NODE_DOCKERFILES);
   });
 
-  it.each(NON_SHARED_BUILDER_DOCKERFILES)('%s does NOT consume the shared builder image', (name) => {
-    const text = readDockerfile(name);
-    expect(text).not.toContain('BUILDER_IMAGE');
-  });
+  it.each(NON_SHARED_BUILDER_DOCKERFILES)(
+    '%s does NOT consume the shared builder image, and structurally has no reason to',
+    (name) => {
+      const text = readDockerfile(name);
+      expect(text).not.toContain('BUILDER_IMAGE');
+      // The real protection: each exclusion must be justified by the file
+      // having no Node two-stage builder pattern at all -- not merely by
+      // being named in this list. If a future edit gave one of these files
+      // a real `npm ci`/build step, this is what would catch it.
+      expect(text).not.toMatch(/^FROM node:24-alpine AS builder$/m);
+      expect(text).not.toMatch(/^RUN npm ci\b/m);
+    }
+  );
 
   describe.each(nodeTargetDockerfiles())('%s', (name) => {
     const text = readDockerfile(name);
@@ -118,12 +137,27 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
   describe(SHARED_BUILDER_DOCKERFILE, () => {
     const text = readDockerfile(SHARED_BUILDER_DOCKERFILE);
 
-    it('runs the real npm ci + full-monorepo build exactly once', () => {
+    it('runs the real npm ci + full-monorepo build exactly once, after every workspace source is present', () => {
       expect(text).toContain('FROM node:24-alpine AS builder');
       expect(text).toMatch(/^ARG NPM_TOKEN$/m);
+      expect(text).toMatch(/^RUN npm ci$/m);
       expect(text).toMatch(
-        /^RUN npm ci && npm run build --workspace=@wxyc\/database --workspace=shared\/\*\* --workspace=apps\/\*\* --workspace=jobs\/\*\*$/m
+        /^RUN npm run build --workspace=@wxyc\/database --workspace=shared\/\*\* --workspace=apps\/\*\* --workspace=jobs\/\*\*$/m
       );
+      // `npm ci` must come AFTER the COPYs of shared/apps/jobs, not before.
+      // A manifest-only-first split (COPY only package.json's, npm ci, THEN
+      // copy source) was tried and reverted: in an npm WORKSPACES repo,
+      // `npm ci` needs every workspace's own package.json already present
+      // to resolve the workspace graph, not just the root manifest and
+      // lockfile -- deferring the source copies past it produced a
+      // node_modules inconsistent with what the build step actually needed,
+      // reproduced twice locally. See Dockerfile.deploy-builder's own
+      // comment and docs/deploy.md for the full account.
+      const npmCiIndex = text.indexOf('RUN npm ci\n');
+      const copyAppsIndex = text.indexOf('COPY ./apps ./apps');
+      expect(npmCiIndex).toBeGreaterThan(-1);
+      expect(copyAppsIndex).toBeGreaterThan(-1);
+      expect(npmCiIndex).toBeGreaterThan(copyAppsIndex);
     });
 
     it('collects dist/** for every workspace anchored at exactly one glob depth (never node_modules)', () => {
@@ -161,6 +195,24 @@ describe('deploy-base.yml wires the shared builder image ahead of the build matr
 
   it('makes the build matrix depend on the shared builder job and consume its image', () => {
     expect(deployBase).toMatch(/needs:\s*\[handle-git-tags, setup, build-shared-builder\]/);
-    expect(deployBase).toContain("BUILDER_IMAGE=${{ needs['build-shared-builder'].outputs.builder_image }}");
+    // Reconstructed from a secret-free tag output, not a full-URI job
+    // output -- see build-shared-builder's own "Compute Image Tag" comment.
+    expect(deployBase).toContain(
+      "BUILDER_IMAGE=${{ secrets.AWS_ECR_URI }}/deploy-builder:${{ needs['build-shared-builder'].outputs.builder_image_tag }}"
+    );
+  });
+
+  it('never lets a secret-bearing value cross the build-shared-builder job boundary as an output', () => {
+    // The regression this guards: outputs: builder_image: <full URI
+    // embedding secrets.AWS_ECR_URI> would risk GitHub's documented
+    // output-redaction behavior at the job boundary. Only a bare tag
+    // (no secret content) may be declared as this job's output.
+    const jobStart = deployBase.indexOf('build-shared-builder:');
+    const buildStart = deployBase.indexOf('\n  build:\n');
+    const jobBody = deployBase.slice(jobStart, buildStart);
+    const outputsMatch = jobBody.match(/outputs:\n( {6}\S.*\n)+/);
+    expect(outputsMatch).not.toBeNull();
+    expect(outputsMatch?.[0]).not.toContain('secrets.');
+    expect(outputsMatch?.[0]).toContain('builder_image_tag');
   });
 });
