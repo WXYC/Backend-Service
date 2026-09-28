@@ -127,6 +127,14 @@ CREATE INDEX flowsheet_search_doc_idx
 
 Use `'simple'` (no stemming) — music titles are full of proper nouns, foreign words, and stylized spellings that English stemming distorts. Use `websearch_to_tsquery('simple', $1)` to parse user input naturally; it understands quoted phrases and `OR` already.
 
+**The segments touch, and that is a known open defect (BS#2714).** `tsvector || tsvector` shifts the right operand's positions to continue from the left's with **no gap**, so each segment's first lexeme is adjacent to the previous segment's last one and a phrase query can match across a field boundary — matching `artist <-> track`, say, where those words were never adjacent in any real text. As shipped, `flowsheet.search_doc` has **five** segments (migration `0054` added `dj_name` to `0052`'s original four, and `0065` replayed it), so there are **four** such seams.
+
+`library.search_doc` had the same defect across its single seam, and migration `0178` fixed it: concatenate a sentinel between the segments to buy a position shift, then remove it with `ts_delete`, which deletes a lexeme's entry without renumbering the survivors. See `docs/catalog-search/README.md` → **Why the segments do not touch** for the mechanism and the numbers.
+
+**Flowsheet is deliberately not fixed the same way yet, and the reason is lock budget rather than disagreement.** Redefining a `STORED GENERATED` column requires `DROP COLUMN` + `ADD COLUMN` (Postgres cannot change a generation expression in place), which rewrites every row under `ACCESS EXCLUSIVE`. That cost about 1.71 s on the 64K-row catalog. Flowsheet carries roughly 2.6M rows across five segments — migration `0065`'s own header calls its rewrite "the one expensive change in the set" and asks for a low-traffic window — and `migrate()` applies every pending migration in one transaction, so the lock is held for the whole batch rather than for the rewrite alone. It needs its own measurement against prod-shaped data and its own window, tracked separately.
+
+What keeps the defect unreachable meanwhile is the reader, not the column: no flowsheet reader emits a prefix query today, and `shouldUseTsvector`'s header in `apps/backend/services/search.service.ts` carries an explicit gate against adding one before this is resolved. BS#2712 is the ticket that would change that, so it is what makes the flowsheet rewrite urgent.
+
 Keep the trigram indexes. The router logic at the service layer chooses:
 
 - Multi-character word with letters → `tsvector @@ websearch_to_tsquery(...)` (fast, supports relevance ranking via `ts_rank`)
