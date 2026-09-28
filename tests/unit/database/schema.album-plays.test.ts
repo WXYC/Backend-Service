@@ -6,7 +6,8 @@
  * A). Its shape is locked in three places: the migration SQL (what runs),
  * the schema declaration (drift detection + Drizzle access), and the
  * refresh service (consumer). Drift between any two would silently degrade
- * search ranking — by design, since `ts_rank * ln(plays + 1)` keeps
+ * search ranking — by design, and more so since BS#2725 made plays a
+ * tie-break rather than a multiplier, because the ranker keeps
  * returning rows even with stale or missing play counts.
  */
 import * as fs from 'fs';
