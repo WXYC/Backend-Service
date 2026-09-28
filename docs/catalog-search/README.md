@@ -67,18 +67,20 @@ Single-column modes intentionally keep the trigram path: they already use the ri
 ## Both-mode ranker
 
 ```sql
-SELECT l.*, a.artist_name AS artist
+SELECT l.*, a.artist_name AS artist,
+       CASE WHEN l.search_doc @@ websearch_to_tsquery('simple', $q) THEN 2 ELSE 1 END AS match_tier
 FROM   wxyc_schema.library      l
 LEFT   JOIN wxyc_schema.album_plays p ON p.album_id = l.id
 INNER  JOIN wxyc_schema.artists     a ON a.id      = l.artist_id
 WHERE  l.search_doc @@ websearch_to_tsquery('simple', $q)
    AND ($on_streaming IS NULL OR l.on_streaming = $on_streaming)
-ORDER BY ts_rank(l.search_doc, websearch_to_tsquery('simple', $q))
-       * (1 + ln(coalesce(p.plays, 0) + 1)) DESC
+ORDER BY match_tier DESC,
+         ts_rank(l.search_doc, websearch_to_tsquery('simple', $q)) DESC,
+         coalesce(p.plays, 0) DESC
 LIMIT  $n;
 ```
 
-The ranking expression is `ts_rank * (1 + ln(plays + 1))`. The `1 +` matters: `ln(plays + 1)` is zero when `plays = 0` (most of the catalog), which would erase the text-rank signal entirely for unpopular-but-relevant matches. Adding the constant 1 keeps text rank as the dominant signal while letting play counts break ties on the popular long tail.
+Ranking is an explicit `match_tier` (2 for an exact whole-lexeme hit, 1 for a prefix-only hit), not a `ts_rank * plays` product (BS#2725). Plays span roughly 10x on the real catalog — wider than the typical `ts_rank` gap between a good and a mediocre match — so multiplying let a popular near-miss outrank an exact hit, and `ts_rank` goes nearly constant under a prefix (`:*`) match, which would collapse a product-based score to a pure popularity sort once WXYC/Backend-Service#670's prefix builder lands. `match_tier` guarantees the exact-over-prefix ordering structurally; `ts_rank` then `plays` break ties within a tier. Today, before #670, the WHERE predicate and the `match_tier` predicate are the same tsquery, so every match is tier 2 — the tiering is dormant scaffolding until the prefix builder lands, and this ranker is correct and shippable without it.
 
 `websearch_to_tsquery('simple', ...)` is used for parsing because it is forgiving — it understands quoted phrases, `OR`, leading/trailing junk — and never raises on user input. Multi-token queries get AND-semantics by default, which is exactly the disambiguation `stereolab transient` needs.
 

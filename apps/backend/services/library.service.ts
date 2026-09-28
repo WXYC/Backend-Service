@@ -2953,17 +2953,26 @@ function libraryViewQuery() {
 }
 
 /**
- * The two window/scoring columns the album-scoped limit needs in SQL and that
+ * The four window/scoring columns the album-scoped limit needs in SQL and that
  * must never reach the wire.
  *
  * `serializeLibraryArtistViewEntry` composes transforms that SPREAD the row
  * (`withRotationCard` is `{ ...rest, card }`), so any extra key on the object
- * is emitted as a JSON field. `SELECT *` over the ranking subquery carries both
+ * is emitted as a JSON field. `SELECT *` over the ranking subquery carries all
  * of these out, so they are stripped in JS rather than re-projected away in
  * SQL — re-projecting would mean writing the 33-column list a second time,
  * which is exactly the hand-mirroring `rawProjection` exists to prevent.
+ *
+ * `match_tier` and `album_plays_count` are only projected by the tsvector tier
+ * (BS#2725) — the trigram and alias tiers rank on their own scales and never
+ * emit them, hence optional rather than required.
  */
-type AlbumRankHelperColumns = { album_score?: number | null; album_rank: number };
+type AlbumRankHelperColumns = {
+  album_score?: number | null;
+  album_rank: number;
+  match_tier?: number | null;
+  album_plays_count?: number | null;
+};
 
 /**
  * Wrap a ranked inner SELECT so the caller's limit counts ALBUMS, not rows.
@@ -3011,7 +3020,13 @@ function albumScopedQuery({ inner, limit, outerOrderBy }: { inner: SQL; limit: n
 const LIBRARY_VIEW_TIMESTAMP_COLUMNS = ['add_date', 'last_discogs_recheck_at'] as const;
 
 function toLibraryViewRow<T extends AlbumRankHelperColumns>(row: T): Omit<T, keyof AlbumRankHelperColumns> {
-  const { album_score: _album_score, album_rank: _album_rank, ...rest } = row;
+  const {
+    album_score: _album_score,
+    album_rank: _album_rank,
+    match_tier: _match_tier,
+    album_plays_count: _album_plays_count,
+    ...rest
+  } = row;
   const normalized = rest as Record<string, unknown>;
   for (const column of LIBRARY_VIEW_TIMESTAMP_COLUMNS) {
     const value = normalized[column];
@@ -3024,12 +3039,23 @@ function toLibraryViewRow<T extends AlbumRankHelperColumns>(row: T): Omit<T, key
  * Tsvector + plays ranker for the dj-site Both-mode default. Reads
  * `library.search_doc` (the STORED generated tsvector from migration 0058)
  * with `websearch_to_tsquery('simple', ...)` so multi-term queries get
- * AND-semantics, then weights ts_rank by `1 + ln(plays + 1)` to nudge
- * canonical answers up.
+ * AND-semantics.
  *
- * The `(1 + ln(...))` shape is deliberate: `ln(plays + 1)` zeros out the
- * text-rank signal for albums with zero plays (most of the catalog), which
- * erases the ranking entirely for unpopular-but-relevant matches.
+ * Ranking is an explicit tier — not a `ts_rank * plays` product (BS#2725).
+ * `plays` spans roughly 10x on the real catalog, wider than the typical
+ * `ts_rank` separation between a good and a mediocre match, so multiplying
+ * let a popular near-miss outrank an exact hit; `ts_rank` also goes nearly
+ * constant under a prefix (`:*`) match, so once WXYC/Backend-Service#670's
+ * prefix builder lands, a product-based score collapses to a pure popularity
+ * sort. `match_tier` guarantees an exact whole-lexeme hit sorts above a
+ * prefix-only one structurally, with `album_score` (bare `ts_rank`) and then
+ * `album_plays_count` breaking ties within a tier.
+ *
+ * `exactTsquery` is written separately from the WHERE-clause `tsquery` for
+ * WXYC/Backend-Service#670: today, before the prefix builder lands, the two
+ * are identical and every match is tier 2. Once #670 appends `:*` to the
+ * last token for the WHERE predicate, `exactTsquery` stays the non-prefixed
+ * token list, and a prefix-only match becomes tier 1.
  */
 async function searchLibraryByTsvector(
   query: string,
@@ -3037,10 +3063,19 @@ async function searchLibraryByTsvector(
   on_streaming?: boolean
 ): Promise<LibraryArtistViewEntry[]> {
   const tsquery = sql`websearch_to_tsquery('simple', ${query})`;
+  const exactTsquery = tsquery;
   const tsvectorPredicate = sql`${library.search_doc} @@ ${tsquery}`;
   const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
   const where = streamingPredicate ? and(tsvectorPredicate, streamingPredicate) : tsvectorPredicate;
-  const score = sql`ts_rank(${library.search_doc}, ${tsquery}) * (1 + ln(coalesce(${album_plays.plays}, 0) + 1))`;
+  const albumScore = sql`ts_rank(${library.search_doc}, ${tsquery})`;
+  const matchTier = sql`CASE WHEN ${library.search_doc} @@ ${exactTsquery} THEN 2 ELSE 1 END`;
+  const albumPlaysCount = sql`coalesce(${album_plays.plays}, 0)`;
+  // Repeated verbatim in both the outer projection and the window below —
+  // Postgres forbids output aliases in a window's ORDER BY, so `album_score`
+  // etc. cannot be named there. Keep this order in sync with `outerOrderBy`:
+  // if the window and the outer ORDER BY drift apart, `album_rank <= n`
+  // selects a different album set than the outer ORDER BY presents.
+  const rankOrdering = sql`${matchTier} DESC, ${albumScore} DESC, ${albumPlaysCount} DESC, ${library.id} ASC`;
 
   // `n` counts ALBUMS, not rows. `LIBRARY_VIEW_JOINS_RAW`'s `LEFT JOIN rotation`
   // is one-to-many — an album in two active bins produces two rows — so the
@@ -3064,15 +3099,17 @@ async function searchLibraryByTsvector(
     albumScopedQuery({
       inner: sql`
         SELECT ${LIBRARY_VIEW_PROJECTION_RAW},
-               ${score} AS album_score,
-               DENSE_RANK() OVER (ORDER BY ${score} DESC, ${library.id} ASC) AS album_rank
+               ${albumScore} AS album_score,
+               ${matchTier} AS match_tier,
+               ${albumPlaysCount} AS album_plays_count,
+               DENSE_RANK() OVER (ORDER BY ${rankOrdering}) AS album_rank
         FROM ${library}
         ${LIBRARY_VIEW_JOINS_RAW}
         LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library.id}
         WHERE ${where}
       `,
       limit: n,
-      outerOrderBy: sql`album_score DESC, id ASC`,
+      outerOrderBy: sql`match_tier DESC, album_score DESC, album_plays_count DESC, id ASC`,
     })
   )) as unknown as Array<LibraryArtistViewEntry & AlbumRankHelperColumns>;
 
