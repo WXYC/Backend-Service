@@ -44,7 +44,7 @@ export function renderSqlWithParams(node: unknown): string {
 
 /** The query shapes a Both-mode catalog search can issue. */
 export type CatalogQueryTier =
-  /** `searchLibraryByTsvector` — ranks on `ts_rank * plays`. */
+  /** `searchLibraryByTsvector` — ranks on `match_tier`, then `ts_rank`, then plays (BS#2725). */
   | 'tsvector'
   /** `searchLibraryByTrigramBoth`, alias flag OFF — ranks on `GREATEST(similarity(...))`. */
   | 'trigram'

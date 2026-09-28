@@ -318,6 +318,72 @@ describe('library.service', () => {
       expect(tsvectorSql).toContain('album_plays.plays');
     });
 
+    it('keeps the DENSE_RANK window and the outer ORDER BY in agreement (BS#2725)', async () => {
+      // The window ORDER BY must repeat expressions -- Postgres accepts an
+      // output alias only in a top-level ORDER BY -- while the outer list can
+      // only name projected aliases, because `albumScopedQuery`'s outer scope
+      // sees neither `search_doc` nor `album_plays.plays`. That makes them two
+      // hand-mirrored lists. If they drift, `album_rank <= n` selects a
+      // different album set than the outer ORDER BY presents: silently wrong
+      // results, not an error. Nothing else pins their agreement.
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
+
+      await searchLibrary('stereolab transient');
+      const rendered = lastCatalogQuerySql(db.execute, 'tsvector');
+
+      const windowOrder = /DENSE_RANK\(\)\s+OVER\s*\(\s*ORDER BY([\s\S]*?)\)\s+AS\s+album_rank/i.exec(rendered)?.[1];
+      const outerOrder = /ORDER BY\s+(match_tier[\s\S]*?)(?:\s+LIMIT\b|\s*$)/i.exec(rendered)?.[1];
+      expect(windowOrder).toBeTruthy();
+      expect(outerOrder).toBeTruthy();
+
+      // The outer list is alias-only and is the contract the caller sees.
+      const outerKeys = outerOrder
+        .split(',')
+        .map((k) => k.trim().replace(/\s+/g, ' '))
+        .filter(Boolean);
+      expect(outerKeys).toEqual(['match_tier DESC', 'album_score DESC', 'album_plays_count DESC', 'id ASC']);
+
+      // Each outer alias resolves to a projected expression; that expression
+      // must appear in the window at the same ordinal, with the same direction.
+      const projectionFor = (alias: string): string => {
+        // Scan rather than build a RegExp from `alias`: a non-literal RegExp
+        // trips the repo's security lint, and the projection is always the
+        // comma-delimited run immediately preceding ` AS <alias>`.
+        const marker = ` AS ${alias}`;
+        const end = rendered.indexOf(marker);
+        if (end === -1) throw new Error(`no projection found for ${alias}`);
+        const start = rendered.lastIndexOf(',', end) + 1;
+        return rendered.slice(start, end).trim();
+      };
+      // Split on commas at paren depth 0 -- `ts_rank(a, b)` must stay one key.
+      const splitTopLevel = (list: string): string[] => {
+        const out: string[] = [];
+        let depth = 0;
+        let cur = '';
+        for (const ch of list) {
+          if (ch === '(') depth++;
+          else if (ch === ')') depth--;
+          if (ch === ',' && depth === 0) {
+            out.push(cur);
+            cur = '';
+          } else cur += ch;
+        }
+        out.push(cur);
+        return out.map((k) => k.trim().replace(/\s+/g, ' ')).filter(Boolean);
+      };
+      const windowKeys = splitTopLevel(windowOrder);
+      expect(windowKeys).toHaveLength(outerKeys.length);
+
+      outerKeys.forEach((outerKey, i) => {
+        const [alias, direction] = outerKey.split(' ');
+        const windowKey = windowKeys[i];
+        expect(windowKey.endsWith(direction)).toBe(true);
+        // `id` is not one of the aliased helpers; it renders as the column.
+        const expr = alias === 'id' ? 'library.id' : projectionFor(alias);
+        expect(windowKey).toContain(expr);
+      });
+    });
+
     it('returns empty without a DB call for pure-punctuation queries', async () => {
       const results = await searchLibrary('!!!');
 
