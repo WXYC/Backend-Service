@@ -1,23 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /flowsheet-april-gap-import-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-# Column-mapping and timestamp-resolution reuse (BS#2119): resolveArtistName,
-# resolveMessage, resolveEntryTimestamp, resolveRadioHour, mapProdEntryType,
-# fetchLegacyEntriesInWindow, buildShowIdMap. tsup bundles the donor tree's
-# source into dist at build time, so it must be present here (never in prod).
-# Precedent: Dockerfile.concerts-artist-lml-resolver:16 does the same for its
-# own jobs/triangle-shows-etl donor.
-COPY ./jobs/flowsheet-etl ./jobs/flowsheet-etl
-COPY ./jobs/flowsheet-april-gap-import ./jobs/flowsheet-april-gap-import
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/flowsheet-april-gap-import
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -32,8 +17,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./flowsheet-april-gap-import-builder/jobs/flowsheet-april-gap-import/dist ./jobs/flowsheet-april-gap-import/dist
-COPY --from=builder ./flowsheet-april-gap-import-builder/shared/database/dist ./shared/database/dist
+COPY --from=builder /jobs/flowsheet-april-gap-import/dist ./jobs/flowsheet-april-gap-import/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
 
 # The date-window candidate scan and the Backend-side floor COUNT both walk
 # a meaningful slice of the 2.6M-row flowsheet table; the API's tight 5s

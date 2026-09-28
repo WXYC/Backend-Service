@@ -1,17 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /streaming-url-remediation-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./shared/lml-client ./shared/lml-client
-COPY ./jobs/streaming-url-remediation ./jobs/streaming-url-remediation
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/streaming-url-remediation
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -30,9 +21,9 @@ COPY ./shared/lml-client/package* ./shared/lml-client/
 # .npmrc the prod stage's npm install 401s on @wxyc/shared.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./streaming-url-remediation-builder/jobs/streaming-url-remediation/dist ./jobs/streaming-url-remediation/dist
-COPY --from=builder ./streaming-url-remediation-builder/shared/database/dist ./shared/database/dist
-COPY --from=builder ./streaming-url-remediation-builder/shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder /jobs/streaming-url-remediation/dist ./jobs/streaming-url-remediation/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 
 # The candidate SELECTs walk `flowsheet` (2.6M rows) with no covering
 # index; the API's tight 5s default statement timeout is too aggressive

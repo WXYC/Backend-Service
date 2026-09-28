@@ -1,17 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /library-discogs-unavailable-recheck-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./shared/lml-client ./shared/lml-client
-COPY ./jobs/library-discogs-unavailable-recheck ./jobs/library-discogs-unavailable-recheck
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/lml-client --workspace=@wxyc/library-discogs-unavailable-recheck
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -31,9 +22,9 @@ COPY ./shared/lml-client/package* ./shared/lml-client/
 # pattern in Dockerfile.backend and the BS#1015 lesson.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./library-discogs-unavailable-recheck-builder/jobs/library-discogs-unavailable-recheck/dist ./jobs/library-discogs-unavailable-recheck/dist
-COPY --from=builder ./library-discogs-unavailable-recheck-builder/shared/database/dist ./shared/database/dist
-COPY --from=builder ./library-discogs-unavailable-recheck-builder/shared/lml-client/dist ./shared/lml-client/dist
+COPY --from=builder /jobs/library-discogs-unavailable-recheck/dist ./jobs/library-discogs-unavailable-recheck/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 
 # Per-statement timeout: the writer does small single-album transactions
 # (a bounded rotation UPDATE plus a single-row library UPDATE); 60 s is more

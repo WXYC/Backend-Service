@@ -42,6 +42,11 @@
  * 4.5 minutes running -- queue time is not billed and is not capped by
  * `timeout-minutes`. It is not evidence for this guard.
  *
+ * `build-shared-builder` (BS#2718, added after this measurement) has no row
+ * above because it didn't exist on 2026-08-25 -- its p100 below is an
+ * estimate, not a sample from this table. See its own entry in
+ * `MEASURED_P100_MINUTES`.
+ *
  * # Why the caps are loose, and why that is the point
  *
  * The hazard runs in the other direction. `deploy` runs
@@ -93,6 +98,7 @@ const EXPECTED_JOBS = [
   'validate_inputs',
   'setup',
   'handle-git-tags',
+  'build-shared-builder',
   'build',
   'reclaim-disk',
   'ecr-refresh-cron',
@@ -104,11 +110,19 @@ const EXPECTED_JOBS = [
  * p100 job duration in minutes, measured 2026-08-25 across 32
  * `deploy-auto.yml` runs (see the header). These are the floors the caps
  * are derived from; re-measure before lowering any cap.
+ *
+ * `build-shared-builder` (BS#2718) is NEW and has no production
+ * measurement yet -- it did not exist on 2026-08-25. Its figure here is an
+ * ESTIMATE, not a measurement: it runs the same `npm ci`-over-the-whole-
+ * monorepo work as one `build` job today, just once per deploy instead of
+ * once per target, so `build`'s own p100 is the closest available proxy.
+ * Re-measure once this has run for real and replace the estimate.
  */
 const MEASURED_P100_MINUTES: Record<(typeof EXPECTED_JOBS)[number], number> = {
   validate_inputs: 0.38,
   setup: 1.08,
   'handle-git-tags': 0.63,
+  'build-shared-builder': 17.82, // estimate (proxied from `build`'s measured p100) -- see comment above
   build: 17.82,
   'reclaim-disk': 1.25,
   'ecr-refresh-cron': 0.13,

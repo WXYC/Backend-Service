@@ -1,16 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /auth-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared ./shared
-COPY ./apps/auth ./apps/auth
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=@wxyc/auth-service
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -27,10 +19,10 @@ COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./auth-builder/apps/auth/dist ./apps/auth/dist
-COPY --from=builder ./auth-builder/shared/database/dist ./shared/database/dist
-COPY --from=builder ./auth-builder/shared/authentication/dist ./shared/authentication/dist
-COPY --from=builder ./auth-builder/shared/observability/dist ./shared/observability/dist
+COPY --from=builder /apps/auth/dist ./apps/auth/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --from=builder /shared/authentication/dist ./shared/authentication/dist
+COPY --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Inherit the @wxyc/database 5s default. Auth handlers finish in
 # milliseconds (better-auth's queries are JWKS lookups, session reads,

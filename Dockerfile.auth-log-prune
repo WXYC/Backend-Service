@@ -1,17 +1,8 @@
-#Build stage
-FROM node:24-alpine AS builder
-
-ARG NPM_TOKEN
-WORKDIR /auth-log-prune-builder
-
-COPY ./.npmrc ./
-COPY ./package.json ./package-lock.json ./
-COPY ./tsconfig.base.json ./
-COPY ./shared/database ./shared/database
-COPY ./shared/authentication ./shared/authentication
-COPY ./jobs/auth-log-prune ./jobs/auth-log-prune
-
-RUN npm ci && npm run build --workspace=@wxyc/database --workspace=@wxyc/authentication --workspace=@wxyc/auth-log-prune
+# Build stage: consumes the shared dist-export image (built once per deploy
+# by Dockerfile.deploy-builder) instead of running its own npm ci + build.
+# See docs/deploy.md "Shared builder image".
+ARG BUILDER_IMAGE
+FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
 FROM node:24-alpine AS prod
@@ -27,9 +18,9 @@ COPY ./shared/authentication/package* ./shared/authentication/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder ./auth-log-prune-builder/jobs/auth-log-prune/dist ./jobs/auth-log-prune/dist
-COPY --from=builder ./auth-log-prune-builder/shared/database/dist ./shared/database/dist
-COPY --from=builder ./auth-log-prune-builder/shared/authentication/dist ./shared/authentication/dist
+COPY --from=builder /jobs/auth-log-prune/dist ./jobs/auth-log-prune/dist
+COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --from=builder /shared/authentication/dist ./shared/authentication/dist
 
 # A single DELETE against a table bounded by the retention window itself —
 # the API's 5s default statement timeout is fine here, unlike the paged
