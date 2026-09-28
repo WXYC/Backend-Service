@@ -195,4 +195,5 @@ Two consequences worth knowing before touching this column:
 
 - `docs/playlist-search/README.md` — sibling document on `GET /flowsheet/search`.
 - `docs/metadata-service/README.md` — flowsheet metadata enrichment via LML.
+- [ADR 0015](../adr/0015-catalog-search-query-operators.md) — decides what the leading `-`, bare `or`, and quoted-phrase operators inherited from `websearch_to_tsquery` mean on this surface.
 - Epic A on GitHub: [WXYC/Backend-Service#483](https://github.com/WXYC/Backend-Service/issues/483).
