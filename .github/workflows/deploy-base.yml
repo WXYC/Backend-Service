@@ -72,6 +72,14 @@ jobs:
       targets: ${{ steps.detect_targets.outputs.TARGETS }}
       has_targets: ${{ steps.detect_targets.outputs.HAS_TARGETS }}
       build_id: ${{ steps.generate_build_id.outputs.id }}
+      # Full universe of currently-buildable repo names (every apps/+jobs/
+      # workspace with a root Dockerfile), independent of what THIS push
+      # affected. Consumed by `reclaim-disk`'s retired-repo image sweep --
+      # see `Detect Live Target Repos` below. Falls back to `[]` on the
+      # `inputs.target` dispatch path, where the step that computes it is
+      # skipped (no `npm ci` / turbo on that path); the sweep treats an
+      # empty list as "unknown", never as "everything is retired".
+      live_targets: ${{ steps.detect_live_targets.outputs.LIVE_TARGETS || '[]' }}
 
     steps:
       # `fetch-depth: 0`, not the default 1, because `Detect Build Target`
@@ -243,6 +251,28 @@ jobs:
               echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
             fi
           fi
+
+      - name: Detect Live Target Repos
+        id: detect_live_targets
+        if: inputs.target == ''
+        run: |
+          # The FULL current target universe, not the --affected subset
+          # above -- a target this push didn't touch is still live, and
+          # `reclaim-disk`'s retired-repo sweep needs to tell "unaffected
+          # today" apart from "genuinely retired" (Dockerfile.<name>
+          # removed or the repo renamed, e.g. BS#2535's
+          # station-signup-attempt-prune -> auth-log-prune). Same
+          # Dockerfile-existence filter as the BUILDABLE loop above,
+          # applied over every apps/+jobs/ workspace instead of just the
+          # affected ones.
+          ALL=$(npx turbo ls --output=json 2>/dev/null | jq -c '[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort')
+          LIVE='[]'
+          for TARGET in $(echo "$ALL" | jq -r '.[]'); do
+            if [ -f "Dockerfile.$TARGET" ]; then
+              LIVE=$(echo "$LIVE" | jq -c --arg t "$TARGET" '. + [$t]')
+            fi
+          done
+          echo "LIVE_TARGETS=$LIVE" >> $GITHUB_OUTPUT
 
       - name: Generate Unique Build ID
         id: generate_build_id
@@ -650,6 +680,15 @@ jobs:
     timeout-minutes: 15
     if: needs.setup.outputs.has_targets == 'true'
     steps:
+      # Converts the JSON array from `setup` into a plain space-separated
+      # list once, on the runner (which has jq) -- the SSH script below
+      # only needs a bash `case` membership test, not a JSON parser on a
+      # host that may not have `jq` installed.
+      - name: Prepare live target list
+        id: live_targets
+        run: |
+          echo "list=$(echo '${{ needs.setup.outputs.live_targets }}' | jq -r 'join(" ")')" >> "$GITHUB_OUTPUT"
+
       - name: Reclaim Docker disk
         # Best-effort headroom: reclaiming must never fail the deploy, so no
         # `set -e` and `continue-on-error` — a full/unreachable host still lets
@@ -668,13 +707,85 @@ jobs:
             # a running or stopped container survives; dangling-only `prune -f`
             # (never `-a` / `--volumes` — an over-prune could strand a cron
             # behind the host's static ~12 h ECR token). Every line ends
-            # `|| true`, so a GC hiccup is inert.
+            # `|| true`, so a GC hiccup is inert. See docs/deploy.md.
             echo "Disk before reclaim:"; df -h / | tail -1
+
+            # Stale stopped one-off containers (BS#2721): a manual
+            # `docker run --name <foo> ...` invocation (a dry-run, a hand-run
+            # backfill, a verification pass) is never touched by anything
+            # else -- it isn't a `<target>-cron` container, so the per-cron
+            # `docker rm -f` prefix in the Deploy Cron Job step never reaps
+            # it, and every `docker rmi` below refuses as long as it exists.
+            # Left alone it pins its image forever. Only removes a STOPPED
+            # container more than 7 days old, and never one ending `-cron`
+            # (the live cron pin, rotated by its own next scheduled run).
+            CUTOFF_EPOCH=$(date -d '7 days ago' +%s)
+            docker ps -a --filter status=exited --format '{{.Names}}' | while read -r NAME; do
+              case "$NAME" in
+                *-cron) continue ;;
+              esac
+              FINISHED=$(docker inspect -f '{{.State.FinishedAt}}' "$NAME" 2>/dev/null)
+              FINISHED_EPOCH=$(date -d "$FINISHED" +%s 2>/dev/null || echo 0)
+              if [ "$FINISHED_EPOCH" -gt 0 ] && [ "$FINISHED_EPOCH" -lt "$CUTOFF_EPOCH" ]; then
+                echo "Removing stale stopped container: $NAME (exited $FINISHED)"
+                docker rm "$NAME" 2>/dev/null || true
+              fi
+            done || true
+
             docker images --format '{{.Repository}} {{.Tag}}' | \
               grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
               sort -k1,1 -k2,2Vr | \
               awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
               xargs -r -n1 docker rmi 2>/dev/null || true
+
+            # Non-v* tagged images (`:sha-...`, `:latest`) (BS#2721): the v*
+            # sweep above never matches these, so an image built or pulled
+            # under either tag scheme -- always true of a one-shot tool
+            # invoked by hand without a version tag -- was never collected
+            # by any of the three GC sites. Ordered by CreatedAt rather than
+            # the tag string, which has no shared ordering across `sha-` and
+            # `latest`. Excludes semantic-index entirely: its `:latest` tag
+            # is a deliberate host-local alias the nightly conductor may
+            # depend on (semantic-index#371), not GC residue.
+            docker images --format '{{.Repository}}|{{.Tag}}|{{.CreatedAt}}' | \
+              awk -F'|' '$1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
+              sort -t'|' -k1,1 -k3,3r | \
+              awk -F'|' '{ if ($1 in seen) print $1":"$2; else seen[$1]=1 }' | \
+              xargs -r -n1 docker rmi 2>/dev/null || true
+
+            # Retired-repo full sweep (BS#2721): a retired or renamed target
+            # (root Dockerfile removed, e.g. station-signup-attempt-prune ->
+            # auth-log-prune) never rebuilds, so the keep-newest sweeps above
+            # never reach zero for it -- there is always exactly one
+            # "newest" image sitting on the host forever. LIVE_TARGETS is
+            # the FULL current target universe from `setup`, not just what
+            # this push affected, so a repo missing from it is genuinely
+            # retired rather than merely unaffected today. Skipped entirely
+            # when LIVE_TARGETS is empty (the inputs.target dispatch path
+            # never computes it) rather than treating "unknown" as
+            # "everything is retired". db-migrate and deploy-builder are
+            # excluded because they are not matrix targets at all (built by
+            # their own dedicated jobs) and semantic-index is excluded for
+            # the same reason as above.
+            LIVE_TARGETS='${{ steps.live_targets.outputs.list }}'
+            AWS_ECR_URI='${{ secrets.AWS_ECR_URI }}'
+            if [ -n "$LIVE_TARGETS" ]; then
+              docker images --format '{{.Repository}}' | sort -u | while read -r REPO; do
+                case "$REPO" in
+                  "$AWS_ECR_URI"/*) NAME="${REPO#"$AWS_ECR_URI"/}" ;;
+                  *) continue ;;
+                esac
+                case "$NAME" in
+                  db-migrate|deploy-builder|semantic-index) continue ;;
+                esac
+                case " $LIVE_TARGETS " in
+                  *" $NAME "*) continue ;;
+                esac
+                echo "Retired target, removing all images for: $REPO"
+                docker images "$REPO" --format '{{.Repository}}:{{.Tag}}' | xargs -r -n1 docker rmi 2>/dev/null || true
+              done || true
+            fi
+
             docker image prune -f 2>/dev/null || true
             echo "Disk after reclaim:"; df -h / | tail -1
 
@@ -1053,6 +1164,18 @@ jobs:
               grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
               sort -k1,1 -k2,2Vr | \
               awk '{ c[$1]++; if (c[$1] > 2) print $1 ":" $2 }' | \
+              xargs -r -n1 docker rmi 2>/dev/null || true
+
+            # Same keep-newest-2 sweep for non-v* tags (`:sha-...`,
+            # `:latest`), which the grep above never matches (BS#2721).
+            # CreatedAt-ordered, not tag-ordered -- `sha-` and `latest` have
+            # no shared ordering as strings. semantic-index excluded: its
+            # `:latest` may be a deliberate host-local alias
+            # (semantic-index#371), not GC residue.
+            docker images --format '{{.Repository}}|{{.Tag}}|{{.CreatedAt}}' | \
+              awk -F'|' '$1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
+              sort -t'|' -k1,1 -k3,3r | \
+              awk -F'|' '{ c[$1]++; if (c[$1] > 2) print $1":"$2 }' | \
               xargs -r -n1 docker rmi 2>/dev/null || true
             docker image prune -f 2>/dev/null || true
 
