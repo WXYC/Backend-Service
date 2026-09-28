@@ -95,6 +95,7 @@ import {
   type AliasHitFields,
 } from '../utils/alias-hits.js';
 import { rawProjection } from '../utils/sql-projection.js';
+import { ROTATION_BIN_DEDUP_ORDINAL } from '../utils/rotation-bin-order.js';
 import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
@@ -2952,6 +2953,50 @@ function hasAlphanumeric(query: string): boolean {
 }
 
 /**
+ * The two window/scoring columns the album-scoped limit needs in SQL and that
+ * must never reach the wire.
+ *
+ * `serializeLibraryArtistViewEntry` composes transforms that SPREAD the row
+ * (`withRotationCard` is `{ ...rest, card }`), so any extra key on the object
+ * is emitted as a JSON field. `SELECT *` over the ranking subquery carries both
+ * of these out, so they are stripped in JS rather than re-projected away in
+ * SQL — re-projecting would mean writing the 33-column list a second time,
+ * which is exactly the hand-mirroring `rawProjection` exists to prevent.
+ */
+type AlbumRankHelperColumns = { album_score?: number | null; album_rank: number };
+
+/**
+ * Wrap a ranked inner SELECT so the caller's limit counts ALBUMS, not rows.
+ *
+ * `LIBRARY_VIEW_JOINS_RAW`'s `LEFT JOIN rotation` is one-to-many, so an album in
+ * several active bins produces several rows. A plain `LIMIT n` over that counts
+ * fan-out rows and lets one album occupy the whole page — on a production clone,
+ * searching `Tanuki` returned the same album five times, because that release
+ * holds nine active rotation rows.
+ *
+ * `inner` must project `album_rank` (a `DENSE_RANK` over the caller's ordering,
+ * so one album's fan-out rows share a rank) and whatever column `outerOrderBy`
+ * names. Callers own the ordering because each tier ranks differently — text
+ * relevance, trigram similarity, or the alias tiering.
+ */
+function albumScopedQuery({ inner, limit, outerOrderBy }: { inner: SQL; limit: number; outerOrderBy: SQL }): SQL {
+  return sql`
+    SELECT * FROM (
+      SELECT DISTINCT ON (id) * FROM (${inner}) AS ranked
+      WHERE album_rank <= ${limit}
+      ORDER BY id ASC, ${ROTATION_BIN_DEDUP_ORDINAL} ASC
+    ) AS deduped
+    ORDER BY ${outerOrderBy}
+  `;
+}
+
+/** Drop the helper columns so the returned row matches the wire shape. */
+function stripAlbumRankHelperColumns<T extends AlbumRankHelperColumns>(row: T): Omit<T, keyof AlbumRankHelperColumns> {
+  const { album_score: _album_score, album_rank: _album_rank, ...rest } = row;
+  return rest;
+}
+
+/**
  * Tsvector + plays ranker for the dj-site Both-mode default. Reads
  * `library.search_doc` (the STORED generated tsvector from migration 0058)
  * with `websearch_to_tsquery('simple', ...)` so multi-term queries get
@@ -2970,11 +3015,44 @@ async function searchLibraryByTsvector(
   const tsquery = sql`websearch_to_tsquery('simple', ${query})`;
   const tsvectorPredicate = sql`${library.search_doc} @@ ${tsquery}`;
   const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
+  const where = streamingPredicate ? and(tsvectorPredicate, streamingPredicate) : tsvectorPredicate;
+  const score = sql`ts_rank(${library.search_doc}, ${tsquery}) * (1 + ln(coalesce(${album_plays.plays}, 0) + 1))`;
 
-  return libraryViewQuery(true)
-    .where(streamingPredicate ? and(tsvectorPredicate, streamingPredicate) : tsvectorPredicate)
-    .orderBy(desc(sql`ts_rank(${library.search_doc}, ${tsquery}) * (1 + ln(coalesce(${album_plays.plays}, 0) + 1))`))
-    .limit(n) as unknown as Promise<LibraryArtistViewEntry[]>;
+  // `n` counts ALBUMS, not rows. `LIBRARY_VIEW_JOINS_RAW`'s `LEFT JOIN rotation`
+  // is one-to-many — an album in two active bins produces two rows — so the
+  // chained `.limit(n)` this replaced counted fan-out rows and let one album eat
+  // several slots. Measured on a production clone: 35 albums hold more than one
+  // active rotation row and the maximum on a single album is 9, against a
+  // default `n = 5`, so one album could fill an entire page by itself.
+  //
+  // `DENSE_RANK`, not `ROW_NUMBER`: the fan-out rows of one album must SHARE a
+  // rank so `album_rank <= n` admits all of them together. The `id` in the
+  // window's ORDER BY is load-bearing rather than cosmetic — ranking on `score`
+  // alone gives tied scores the same dense rank, and `ts_rank` ties are the
+  // common case (it scores by matching-lexeme count, so whole bands of the
+  // catalog tie), which would admit far more than `n` albums.
+  //
+  // The outer ORDER BY repeats the window's ordering so the page is ordered the
+  // same way the albums were selected. `DISTINCT ON (id)` then collapses each
+  // album's fan-out rows to one, keeping the heaviest active bin via
+  // ROTATION_BIN_DEDUP_ORDINAL.
+  const rows = (await db.execute(
+    albumScopedQuery({
+      inner: sql`
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW},
+               ${score} AS album_score,
+               DENSE_RANK() OVER (ORDER BY ${score} DESC, ${library.id} ASC) AS album_rank
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        LEFT JOIN ${album_plays} ON ${album_plays.album_id} = ${library.id}
+        WHERE ${where}
+      `,
+      limit: n,
+      outerOrderBy: sql`album_score DESC, id ASC`,
+    })
+  )) as unknown as Array<LibraryArtistViewEntry & AlbumRankHelperColumns>;
+
+  return rows.map(stripAlbumRankHelperColumns);
 }
 
 /**
@@ -2991,17 +3069,35 @@ async function searchLibraryByTrigramBoth(
   const { enabled: aliasEnabled, minSimilarity: aliasMinSimilarity } = getCatalogSearchAliasConfig();
 
   if (!aliasEnabled) {
-    // Byte-identical legacy path. The alias-off branch must stay on the
-    // chained builder so the planner reaches the per-column GIN trigram
-    // indexes via the same bind shape as today.
+    // Moved off the chained builder so the limit can count albums rather than
+    // rotation fan-out rows (see `albumScopedQuery`). The comment this replaced
+    // warned that the chained shape was required to reach the per-column GIN
+    // trigram indexes; that was worth checking rather than trusting, and it does
+    // not hold for this conversion — the predicate is interpolated unchanged, so
+    // the bind shape is preserved. Verified on a production clone: both shapes
+    // plan an identical `BitmapOr` over `library_artist_name_trgm_idx` and
+    // `title_trgm_idx` at the same costs and row counts.
     const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
     const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
-    return libraryViewQuery(false)
-      .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
-      .orderBy(
-        desc(sql`GREATEST(similarity(${library.artist_name}, ${query}), similarity(${library.album_title}, ${query}))`)
-      )
-      .limit(n) as unknown as Promise<TaggedLibraryViewEntry[]>;
+    const where = streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate;
+    const score = sql`GREATEST(similarity(${library.artist_name}, ${query}), similarity(${library.album_title}, ${query}))`;
+
+    const rows = (await db.execute(
+      albumScopedQuery({
+        inner: sql`
+          SELECT ${LIBRARY_VIEW_PROJECTION_RAW},
+                 ${score} AS album_score,
+                 DENSE_RANK() OVER (ORDER BY ${score} DESC, ${library.id} ASC) AS album_rank
+          FROM ${library}
+          ${LIBRARY_VIEW_JOINS_RAW}
+          WHERE ${where}
+        `,
+        limit: n,
+        outerOrderBy: sql`album_score DESC, id ASC`,
+      })
+    )) as unknown as Array<TaggedLibraryViewEntry & AlbumRankHelperColumns>;
+
+    return rows.map(stripAlbumRankHelperColumns) as TaggedLibraryViewEntry[];
   }
 
   // Alias-enabled path: ALT1 UNION ALL (BS#1318). The CTE runs the trigram
@@ -3051,35 +3147,50 @@ async function searchLibraryByTrigramBoth(
   // emits.
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
   const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
-  const rows = (await db.execute(sql`
-    ${buildAliasHitsCte(query, aliasMinSimilarity)}
-    SELECT * FROM (
-      (
-        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
-        FROM ${library}
-        ${LIBRARY_VIEW_JOINS_RAW}
-        WHERE ${trigramPredicate}
-        ${streamingClause}
-      )
-      UNION ALL
-      (
-        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
-        FROM ${library}
-        ${LIBRARY_VIEW_JOINS_RAW}
-        INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
-        WHERE NOT ${trigramPredicate}
-        ${streamingClause}
-      )
-    ) alias_search
-    ORDER BY ${buildFuzzyAliasTier()}, GREATEST(
+  // The full ordering, named once. It is both the window's ranking (so the
+  // album-scoped limit selects the same albums the old row-scoped LIMIT would
+  // have led with) and the final page order. Every term references a bare column
+  // the union exposes, so it is legal in all three scopes below.
+  const aliasOrdering = sql`${buildFuzzyAliasTier()}, GREATEST(
       similarity(artist_name, ${query}),
       similarity(album_title, ${query}),
       COALESCE(alias_max_sim, 0)
-    ) DESC, ${buildDirectMatchTieBreak()}, id ASC
-    LIMIT ${n}
-  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields)[];
+    ) DESC, ${buildDirectMatchTieBreak()}, id ASC`;
 
-  return rows.map(attachAliasHint);
+  // `DENSE_RANK` sits in a layer ABOVE the union rather than inside either
+  // branch: the ordering reads `alias_max_sim`, which only branch (b) projects
+  // non-null, so it is only in scope once the union has been lifted into
+  // `alias_search`.
+  const rows = (await db.execute(sql`
+    ${buildAliasHitsCte(query, aliasMinSimilarity)}
+    ${albumScopedQuery({
+      inner: sql`
+        SELECT *, DENSE_RANK() OVER (ORDER BY ${aliasOrdering}) AS album_rank
+        FROM (
+          (
+            SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+            FROM ${library}
+            ${LIBRARY_VIEW_JOINS_RAW}
+            WHERE ${trigramPredicate}
+            ${streamingClause}
+          )
+          UNION ALL
+          (
+            SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+            FROM ${library}
+            ${LIBRARY_VIEW_JOINS_RAW}
+            INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+            WHERE NOT ${trigramPredicate}
+            ${streamingClause}
+          )
+        ) alias_search
+      `,
+      limit: n,
+      outerOrderBy: aliasOrdering,
+    })}
+  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields & AlbumRankHelperColumns)[];
+
+  return rows.map(stripAlbumRankHelperColumns).map(attachAliasHint);
 }
 
 /**
