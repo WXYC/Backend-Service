@@ -3039,32 +3039,42 @@ function toLibraryViewRow<T extends AlbumRankHelperColumns>(row: T): Omit<T, key
 /**
  * Tsvector + plays ranker for the dj-site Both-mode default. Reads
  * `library.search_doc` (the STORED generated tsvector from migration 0058)
- * with `websearch_to_tsquery('simple', ...)` so multi-term queries get
- * AND-semantics.
+ * against a last-token prefix `tsquery` (`buildPrefixTsquery`,
+ * WXYC/Backend-Service#670) so multi-term queries get AND-semantics and the
+ * token the DJ is still typing gets prefix behavior.
  *
  * Ranking is an explicit tier — not a `ts_rank * plays` product (BS#2725).
  * `plays` spans roughly 10x on the real catalog, wider than the typical
  * `ts_rank` separation between a good and a mediocre match, so multiplying
  * let a popular near-miss outrank an exact hit; `ts_rank` also goes nearly
- * constant under a prefix (`:*`) match, so once WXYC/Backend-Service#670's
- * prefix builder lands, a product-based score collapses to a pure popularity
- * sort. `match_tier` guarantees an exact whole-lexeme hit sorts above a
+ * constant under a prefix (`:*`) match, which would collapse a product-based
+ * score to a pure popularity sort now that every query's last token is
+ * prefixed. `match_tier` guarantees an exact whole-lexeme hit sorts above a
  * prefix-only one structurally, with `album_score` (bare `ts_rank`) and then
  * `album_plays_count` breaking ties within a tier.
  *
- * `exactTsquery` is written separately from the WHERE-clause `tsquery` for
- * WXYC/Backend-Service#670: today, before the prefix builder lands, the two
- * are identical and every match is tier 2. Once #670 appends `:*` to the
- * last token for the WHERE predicate, `exactTsquery` stays the non-prefixed
- * token list, and a prefix-only match becomes tier 1.
+ * `exactTsquery` and `tsquery` are the two halves `buildPrefixTsquery`
+ * derives from one tokenization: `tsquery` has `:*` on the last token and
+ * drives the WHERE predicate and `album_score`; `exactTsquery` has no `:*`
+ * anywhere and drives only `match_tier`'s CASE, so a row matching every
+ * token as a complete word (tier 2) outranks one that only matched the last
+ * token as a prefix (tier 1). Before #670 these were the same object and
+ * every match was tier 2 — activating the tier is what this issue does.
  */
 async function searchLibraryByTsvector(
   query: string,
   n: number,
   on_streaming?: boolean
 ): Promise<LibraryArtistViewEntry[]> {
-  const tsquery = sql`websearch_to_tsquery('simple', ${query})`;
-  const exactTsquery = tsquery;
+  const built = buildPrefixTsquery(query);
+  // `searchLibraryBothMode` already gates on `hasAlphanumeric(trimmed)`
+  // before calling this, so `built` should never be null on that path — but
+  // the contract belongs here, not borrowed from the caller's gate, so a
+  // direct or future caller that skips the check still degrades safely to
+  // "no tsvector rows, fall through to trigram" rather than reaching
+  // `to_tsquery` with nothing to bind.
+  if (!built) return [];
+  const { tsquery, exactTsquery } = built;
   const tsvectorPredicate = sql`${library.search_doc} @@ ${tsquery}`;
   const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
   const where = streamingPredicate ? and(tsvectorPredicate, streamingPredicate) : tsvectorPredicate;
