@@ -337,11 +337,18 @@ jobs:
     # Dockerfile.deploy-builder.
     #
     # This is the one npm-ci-over-the-whole-monorepo build genuinely worth
-    # `mode=max` caching, and it's safe to cache-to a single ECR ref
-    # specifically BECAUSE it runs in exactly one job. Do not copy this
-    # cache-from/cache-to pattern into a per-target step -- concurrent
-    # writers to the same ref from a matrix is a last-writer-wins race,
-    # which is exactly what running this upstream of the matrix avoids.
+    # `mode=max` caching, and it's safe to cache-to a single ECR ref because
+    # it runs in exactly one job WITHIN a run -- do not copy this
+    # cache-from/cache-to pattern into a per-target step; concurrent writers
+    # to the same ref from a matrix is a last-writer-wins race, which is
+    # exactly what running this upstream of the matrix avoids. Note the
+    # caveat is scoped to a single run: deploy-auto.yml serializes itself
+    # (concurrency: cancel-in-progress: false), but deploy-manual.yml has no
+    # concurrency group, so an overlapping manual dispatch could still race
+    # THIS ref against a concurrent auto-deploy's write to it. Consequence
+    # is a clobbered cache (ignore-error=true already covers a failed
+    # cache-to export), not a corrupted deploy -- the pushed image itself
+    # is unaffected either way. Not fixed here.
     needs: [setup]
     runs-on: ubuntu-latest
     # No production measurement yet (this is a new job) -- estimated at the
@@ -356,8 +363,21 @@ jobs:
     timeout-minutes: 75
     if: needs.setup.outputs.has_targets == 'true'
     outputs:
-      builder_image: ${{ steps.image_ref.outputs.image }}
+      builder_image_tag: ${{ steps.image_ref.outputs.tag }}
     steps:
+      # Deliberately always checks out github.sha, never a version-pinned
+      # tag ref, even though `build` below does check out
+      # `refs/tags/<target>/<version>` for an explicit `deploy-manual.yml`
+      # version pin. Mirroring that per-target logic here was considered and
+      # rejected: this job is tagged `deploy-builder:sha-${{ github.sha }}`
+      # (see "Compute Image Tag" below), and `github.sha` names the
+      # workflow run's trigger commit, not whatever ref gets checked out --
+      # so building from the pinned historical ref while still tagging with
+      # the current trigger SHA would let two manual dispatches for
+      # different targets/versions off the same current `main` tip race to
+      # write DIFFERENT content to the SAME tag, a strictly worse hazard
+      # than the one being fixed. See docs/deploy.md "Shared builder image"
+      # for the resulting (narrower, accepted) mismatch risk this leaves.
       - name: Checkout code
         uses: actions/checkout@v7
 
@@ -396,11 +416,20 @@ jobs:
             --region "$AWS_REGION" \
             --lifecycle-policy-text file://.github/ecr-lifecycle-policy.json
 
-      - name: Compute Image Reference
+      # Deliberately outputs only the TAG, never the full image reference.
+      # GitHub documents that a job output containing a secret value is
+      # redacted -- embedding secrets.AWS_ECR_URI here and reading it via
+      # needs['build-shared-builder'].outputs.* from a different job risks
+      # exactly that. Keeping the secret out of the job-boundary crossing
+      # entirely is good practice on its own terms regardless of the exact
+      # redaction mechanics, and it costs nothing: the tag alone (a SHA, no
+      # secret content) is all any consumer needs, and each one already has
+      # its own `secrets.AWS_ECR_URI` in scope to reconstruct the full
+      # reference from.
+      - name: Compute Image Tag
         id: image_ref
         run: |
-          IMAGE="${{ secrets.AWS_ECR_URI }}/deploy-builder:sha-${{ github.sha }}"
-          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+          echo "tag=sha-${{ github.sha }}" >> $GITHUB_OUTPUT
 
       # Same ECR cache-export requirements as the per-target builds below
       # (image-manifest/oci-mediatypes required by ECR; ignore-error so a
@@ -420,7 +449,11 @@ jobs:
           sbom: false
           build-args: |
             NPM_TOKEN=${{ secrets.NPM_TOKEN }}
-          tags: ${{ steps.image_ref.outputs.image }},${{ secrets.AWS_ECR_URI }}/deploy-builder:latest
+          # No `:latest` tag -- nothing ever consumes it (every downstream
+          # reference goes through the sha- tag output above), and pushing
+          # one anyway would just be a dangling tag the lifecycle policy's
+          # sha-prefix rule can't expire.
+          tags: ${{ secrets.AWS_ECR_URI }}/deploy-builder:${{ steps.image_ref.outputs.tag }}
           cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/deploy-builder:buildcache
           cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/deploy-builder:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
 
@@ -589,10 +622,14 @@ jobs:
           # image"). Dockerfile.rotation-release-id-pollution-check (the
           # fleet's one Python job) doesn't declare that ARG, so it gets a
           # harmless "build arg not consumed" warning rather than a
-          # per-target carve-out in this list.
+          # per-target carve-out in this list. Reconstructed here (not
+          # passed as a full URI job output) because a job output
+          # containing a secret value gets masked/redacted the moment it
+          # crosses a job boundary -- see build-shared-builder's own
+          # "Compute Image Tag" step comment.
           build-args: |
             NPM_TOKEN=${{ secrets.NPM_TOKEN }}
-            BUILDER_IMAGE=${{ needs['build-shared-builder'].outputs.builder_image }}
+            BUILDER_IMAGE=${{ secrets.AWS_ECR_URI }}/deploy-builder:${{ needs['build-shared-builder'].outputs.builder_image_tag }}
           tags: ${{ steps.image_tags.outputs.tags }}
           cache-from: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache
           cache-to: type=registry,ref=${{ secrets.AWS_ECR_URI }}/${{ matrix.target }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
@@ -776,7 +813,20 @@ jobs:
             tail -n 5 "$LOG_FILE"
 
   migrate:
-    needs: [handle-git-tags, setup, reclaim-disk]
+    # `build` added to `needs` (BS#2718): previously migrate ran independent
+    # of build's outcome (schema changes don't depend on which images built),
+    # a deliberate choice that let one target's isolated build failure leave
+    # schema migrations unblocked for everyone else. The shared-builder-image
+    # design introduces a NEW single point of failure upstream of the whole
+    # `build` matrix -- if build-shared-builder fails, every target's build is
+    # skipped, and without this dependency migrate would still apply schema
+    # changes with literally nothing deployed to run against them. This makes
+    # migrate's gating consistent with `deploy` below, which already requires
+    # `build`'s aggregate success (a matrixed job's overall conclusion is
+    # "failure" if any leg fails, even with fail-fast: false) -- so this is
+    # not a new blast-radius class, just closing the one job that didn't
+    # already have it.
+    needs: [handle-git-tags, setup, reclaim-disk, build]
     runs-on: ubuntu-latest
     # p100 1.20 min, capped well above it: this applies schema migrations
     # against prod, and being killed mid-migration is worse than being slow.

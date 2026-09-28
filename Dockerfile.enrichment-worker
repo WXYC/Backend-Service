@@ -9,7 +9,7 @@
 # Build stage: consumes the shared dist-export image (built once per deploy
 # by Dockerfile.deploy-builder) instead of running its own npm ci + build.
 # See docs/deploy.md "Shared builder image".
-ARG BUILDER_IMAGE
+ARG BUILDER_IMAGE=wxyc-deploy-builder:local
 FROM ${BUILDER_IMAGE} AS builder
 
 #Production stage
