@@ -5,6 +5,7 @@ import {
   setCatalogTierRows,
   lastCatalogQuerySql,
   lastCatalogQueryArg,
+  resetCatalogTierRows,
 } from '../../utils/catalog-search-sql-mock';
 import {
   db,
@@ -160,6 +161,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     it('returns results with code_artist_number mapped from the view', async () => {
@@ -188,6 +190,7 @@ describe('library.service', () => {
   describe('fuzzySearchLibrary compilation-indicator short-circuit', () => {
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     it.each<[string, string | undefined]>([
@@ -258,6 +261,7 @@ describe('library.service', () => {
   describe('searchLibrary', () => {
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     it('maps code_artist_number from the view into codeArtistNumber', async () => {
@@ -267,6 +271,35 @@ describe('library.service', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0]).toHaveProperty('codeArtistNumber', 3);
+    });
+
+    it('re-hydrates timestamp columns the raw driver returns as text', async () => {
+      // The tiers moved from the chained builder to `db.execute`, which returns
+      // `client.unsafe(...)` unmapped — so timestamptz columns arrive as
+      // Postgres's own text (`2004-03-14 08:14:52.156+00`) rather than as
+      // `Date`. That is not RFC 3339, `api.yaml` declares `add_date` as
+      // `format: date-time`, and the `as unknown as` cast on the query result
+      // hides the mismatch from `tsc` — so this is the only thing that catches it.
+      mockCatalogTiers(db.execute, {
+        tsvector: [{ ...mockViewRow, add_date: '2004-03-14 08:14:52.156+00', last_discogs_recheck_at: null }],
+      });
+
+      const results = await fuzzySearchLibrary('Autechre', 'Autechre', 5);
+
+      expect(results).toHaveLength(1);
+      const addDate = (results[0] as unknown as { add_date: unknown }).add_date;
+      expect(addDate).toBeInstanceOf(Date);
+      expect(JSON.parse(JSON.stringify({ addDate })).addDate).toBe('2004-03-14T08:14:52.156Z');
+    });
+
+    it('leaves a null timestamp column null rather than coercing it to an epoch Date', async () => {
+      mockCatalogTiers(db.execute, {
+        tsvector: [{ ...mockViewRow, add_date: null, last_discogs_recheck_at: null }],
+      });
+
+      const results = await fuzzySearchLibrary('Autechre', 'Autechre', 5);
+
+      expect((results[0] as unknown as { add_date: unknown }).add_date).toBeNull();
     });
 
     it('routes free-text query through library + album_plays join (not library_artist_view)', async () => {
@@ -386,6 +419,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
       delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
       delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
       // Reset the lazy singleton so each test's per-case env mutations
@@ -593,6 +627,7 @@ describe('library.service', () => {
   describe('fuzzySearchLibrary Both-mode routing', () => {
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     it('routes through tsvector + album_plays when artist_name and album_title are identical', async () => {
@@ -664,6 +699,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
       delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
       delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
       resetCatalogTrackSearchConfig();
@@ -691,9 +727,7 @@ describe('library.service', () => {
     }
 
     it('flag-off: tsvector hit returns plain row, no matched_via', async () => {
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
 
       const results = await fuzzySearchLibrary('Autechre', 'Autechre', 5);
 
@@ -832,6 +866,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
       delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
       delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
       resetCatalogTrackSearchConfig();
@@ -984,6 +1019,7 @@ describe('library.service', () => {
   describe('searchByArtist', () => {
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     it('maps code_artist_number from the view into codeArtistNumber', async () => {
@@ -1001,6 +1037,7 @@ describe('library.service', () => {
   describe('searchAlbumsByTitle', () => {
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     it('maps code_artist_number from the view into codeArtistNumber', async () => {
@@ -1057,6 +1094,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
       __resetTrackSearchCacheForTests();
     });
 
@@ -1355,6 +1393,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
       delete process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED;
       delete process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED;
       resetCatalogTrackSearchConfig();
@@ -1597,6 +1636,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
       __resetTrackSearchCacheForTests();
       // Restore the default span instance so cross-test mockImplementation
       // changes (e.g., the "setAttributes throws" test) don't bleed.
@@ -2549,6 +2589,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     /**
@@ -2639,6 +2680,7 @@ describe('library.service', () => {
 
     beforeEach(() => {
       jest.clearAllMocks();
+      resetCatalogTierRows();
     });
 
     it('returns enriched results with a cta-source TrackMatchHint on track_title match', async () => {
