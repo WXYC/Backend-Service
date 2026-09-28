@@ -96,6 +96,7 @@ import {
 } from '../utils/alias-hits.js';
 import { rawProjection } from '../utils/sql-projection.js';
 import { ROTATION_BIN_DEDUP_ORDINAL } from '../utils/rotation-bin-order.js';
+import { hasAlphanumeric } from '../utils/text-query.js';
 import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
@@ -2949,11 +2950,6 @@ function libraryViewQuery() {
     .leftJoin(rotation, sql`${rotation.album_id} = ${library.id} AND ${rotationActiveSql()}`)
     .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id));
   return base;
-}
-
-/** A query has at least one alphanumeric character. Pure punctuation skips both search paths. */
-function hasAlphanumeric(query: string): boolean {
-  return /[\p{L}\p{N}]/u.test(query);
 }
 
 /**
