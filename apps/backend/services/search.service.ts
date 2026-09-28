@@ -394,13 +394,15 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
  * predicate with no zero-row fallback, so a 3+ character partial returns a
  * hard, silent zero rather than a slow answer.
  *
- * Do not "fix" this by copying the catalog's `:*` prefix form until
- * WXYC/Backend-Service#670's replacement has settled — the first attempt
- * (WXYC/Backend-Service#2709) produced three confirmed regressions, and one of
- * them is worse here: `flowsheet.search_doc` concatenates FIVE weighted
- * segments (artist A, track B, dj_name B, album C, label D — migration 0054
- * added dj_name to 0052's original four), and `tsvector || tsvector` leaves no
- * position gap, so a prefix-phrase query straddles FOUR field seams.
+ * WXYC/Backend-Service#670 has since landed the catalog's last-token prefix
+ * builder (`apps/backend/utils/tsquery.ts`), so this gate is no longer "wait
+ * for that to settle" — it is a flowsheet-specific hazard #670's builder does
+ * not share. `flowsheet.search_doc` concatenates FIVE weighted segments
+ * (artist A, track B, dj_name B, album C, label D — migration 0054 added
+ * dj_name to 0052's original four), and `tsvector || tsvector` leaves no
+ * position gap, so a prefix-phrase query straddles FOUR field seams. Porting
+ * `:*` here is tracked as WXYC/Backend-Service#2726, alongside the
+ * fallback-gap half of WXYC/Backend-Service#2712 below.
  *
  * `library.search_doc` had the same defect across its single seam and migration
  * 0178 closed it (WXYC/Backend-Service#2714) by concatenating a sentinel
