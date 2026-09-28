@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
 import { db, createMockQueryChain } from '../../mocks/database.mock';
+import { mockCatalogTiers, catalogTierCallLog, mockAliasTierRows } from '../../utils/catalog-search-sql-mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockLookupBySong = jest.fn<() => Promise<unknown>>();
@@ -124,24 +125,15 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
 
   describe('searchLibrary (Both-mode trigram path)', () => {
     it('flag off: trigram row without alias fields → matched_via_alias absent (raw alias SQL never fires)', async () => {
-      // tsvector returns 0, trigram returns row via chained builder.
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
-      const trigramChain = createMockQueryChain([baseViewRow]);
-      trigramChain.limit = jest.fn().mockResolvedValue([baseViewRow]);
-      let callIndex = 0;
+      // Every tier issues raw `db.execute` now, selected by SQL content — the
+      // flag-off trigram shape is `trigram`, the flag-on one is `alias`.
+      mockCatalogTiers(db.execute, { tsvector: [], trigram: [baseViewRow] });
       db.select.mockReset();
-      db.select.mockImplementation(() => {
-        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
-        callIndex += 1;
-        return chain;
-      });
-      // db.execute is also used by checkLibraryArtistNameHealth (non-alias);
-      // the load-bearing assertion is "no matched_via_alias on the result row".
-      db.execute.mockResolvedValue([]);
 
       const results = await searchLibrary('Thee Oh Sees');
 
+      // The alias CTE never ran, which is the load-bearing claim here.
+      expect(catalogTierCallLog(db.execute)).not.toContain('alias');
       expect(results).toHaveLength(1);
       expect(results[0]).toHaveProperty('id', 42);
       expect((results[0] as { matched_via_alias?: unknown }).matched_via_alias).toBeUndefined();
@@ -151,24 +143,18 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
 
-      // tsvector still returns 0 (chained builder).
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
-      db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
-
       const aliasRow = {
         ...baseViewRow,
         alias_max_sim: 0.78,
         alias_matched_variant: 'Thee Oh Sees',
         alias_matched_source: 'discogs_name_variation',
       };
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([aliasRow]);
+      mockCatalogTiers(db.execute, { tsvector: [], alias: [aliasRow] });
+      db.select.mockReset();
 
       const results = await searchLibrary('Thee Oh Sees');
 
-      expect(db.execute).toHaveBeenCalled();
+      expect(catalogTierCallLog(db.execute)).toContain('alias');
       expect(results).toHaveLength(1);
       const hit = results[0] as { matched_via_alias?: Array<{ matched_variant: string; source: string }> };
       expect(hit.matched_via_alias).toEqual([{ matched_variant: 'Thee Oh Sees', source: 'discogs_name_variation' }]);
@@ -178,10 +164,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
 
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
       db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
 
       const trigramOnlyRow = {
         ...baseViewRow,
@@ -189,8 +172,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         alias_matched_variant: null,
         alias_matched_source: null,
       };
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([trigramOnlyRow]);
+      mockAliasTierRows(db.execute, [trigramOnlyRow]);
 
       const results = await searchLibrary('OHSEES');
 
@@ -202,17 +184,16 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
 
-      const tsvectorChain = createMockQueryChain([baseViewRow]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([baseViewRow]);
+      mockCatalogTiers(db.execute, { tsvector: [baseViewRow] });
       db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
-      db.execute.mockReset();
 
       const results = await searchLibrary('Autechre');
 
       expect(results).toHaveLength(1);
       expect((results[0] as { matched_via_alias?: unknown }).matched_via_alias).toBeUndefined();
-      expect(db.execute).not.toHaveBeenCalled();
+      // The tsvector tier now goes through `db.execute` too, so "the alias SQL
+      // never ran" is asserted by naming the tiers rather than by no call at all.
+      expect(catalogTierCallLog(db.execute)).toEqual(['tsvector']);
     });
   });
 
@@ -239,13 +220,9 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
 
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
       db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
 
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([
+      mockAliasTierRows(db.execute, [
         { ...baseViewRow, alias_max_sim: null, alias_matched_variant: null, alias_matched_source: null },
         {
           ...baseViewRow,
@@ -266,13 +243,9 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
 
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
       db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
 
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([
+      mockAliasTierRows(db.execute, [
         {
           ...baseViewRow,
           alias_max_sim: 0.4,
@@ -329,18 +302,16 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         bandcamp_id: null,
       };
 
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
       const libraryChain = createMockQueryChain([trackRow]);
       libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
       const ctaChain = createMockQueryChain([]);
       ctaChain.where = jest.fn().mockResolvedValue([]);
       // CTA/Track 1 stays off (only CATALOG_TRACK_SEARCH_DISCOGS_ENABLED is
-      // set above), so `db.select` is only called for: tsvector, the Track 2
-      // library bridge query, and the CTA-exclusion query — no separate
-      // alias-off trigram `db.select` call, since the alias-enabled trigram
-      // path reads via raw `db.execute` SQL instead.
-      const chains = [tsvectorChain, libraryChain, ctaChain];
+      // set above), so `db.select` is now called only for the Track 2 library
+      // bridge query and the CTA-exclusion query. The tsvector tier no longer
+      // takes the first slot — it, and both trigram shapes, read via raw
+      // `db.execute` SQL, which `mockCatalogTiers` dispatches on content.
+      const chains = [libraryChain, ctaChain];
       let callIndex = 0;
       db.select.mockReset();
       db.select.mockImplementation(() => {
@@ -349,8 +320,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         return chain;
       });
 
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([
+      mockAliasTierRows(db.execute, [
         {
           ...baseViewRow,
           alias_max_sim: 0.4,
@@ -435,7 +405,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       libraryChain.limit = jest.fn().mockResolvedValue([nonStreamingTrackRow]);
       const ctaChain = createMockQueryChain([]);
       ctaChain.where = jest.fn().mockResolvedValue([]);
-      const chains = [tsvectorChain, libraryChain, ctaChain];
+      const chains = [libraryChain, ctaChain];
       let callIndex = 0;
       db.select.mockReset();
       db.select.mockImplementation(() => {
@@ -444,8 +414,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         return chain;
       });
 
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([
+      mockAliasTierRows(db.execute, [
         {
           ...baseViewRow,
           on_streaming: true,
@@ -525,7 +494,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       libraryChain.limit = jest.fn().mockResolvedValue([collidingTrackRow]);
       const ctaChain = createMockQueryChain([]);
       ctaChain.where = jest.fn().mockResolvedValue([]);
-      const chains = [tsvectorChain, libraryChain, ctaChain];
+      const chains = [libraryChain, ctaChain];
       let callIndex = 0;
       db.select.mockReset();
       db.select.mockImplementation(() => {
@@ -534,8 +503,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         return chain;
       });
 
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([
+      mockAliasTierRows(db.execute, [
         {
           ...baseViewRow,
           alias_max_sim: 0.4,
@@ -1009,8 +977,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         alias_matched_variant: 'Thee Oh Sees',
         alias_matched_source: 'wxyc_library_alt',
       };
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([aliasRow]);
+      mockAliasTierRows(db.execute, [aliasRow]);
 
       const results = await searchByArtist('Thee Oh Sees');
 
@@ -1028,8 +995,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
       db.select.mockReset();
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([]);
+      mockAliasTierRows(db.execute, []);
 
       await searchByArtist('Thee Oh Sees');
 
@@ -1051,12 +1017,8 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
       resetCatalogSearchAliasConfig();
 
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
       db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([]);
+      mockAliasTierRows(db.execute, []);
 
       await searchLibrary('Thee Oh Sees');
 
@@ -1119,12 +1081,8 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
     /** Render the alias-aware SQL emitted by the Both-mode trigram tier. */
     async function renderBothModeSql(query = 'monolake'): Promise<string> {
       // tsvector tier must return 0 rows so the trigram tier fires.
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
       db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([]);
+      mockAliasTierRows(db.execute, []);
 
       await searchLibrary(query);
 
@@ -1136,8 +1094,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
     /** Render the alias-aware SQL emitted by the request-line artist path. */
     async function renderByArtistSql(query = 'monolake'): Promise<string> {
       db.select.mockReset();
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([]);
+      mockAliasTierRows(db.execute, []);
 
       await searchByArtist(query);
 
@@ -1216,8 +1173,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         callIndex += 1;
         return chain;
       });
-      db.execute.mockReset();
-      db.execute.mockResolvedValue([]);
+      mockAliasTierRows(db.execute, []);
 
       await searchLibrary('monolake');
 

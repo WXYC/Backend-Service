@@ -1,5 +1,12 @@
 import { jest } from '@jest/globals';
 import {
+  mockCatalogTiers,
+  catalogTierCallLog,
+  setCatalogTierRows,
+  lastCatalogQuerySql,
+  lastCatalogQueryArg,
+} from '../../utils/catalog-search-sql-mock';
+import {
   db,
   createMockQueryChain,
   library,
@@ -199,13 +206,11 @@ describe('library.service', () => {
     });
 
     it('does NOT short-circuit when artist===album (both-mode cascade still runs)', async () => {
-      const chain = createMockQueryChain([]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([]);
+      mockCatalogTiers(db.execute, { tsvector: [] });
 
       await fuzzySearchLibrary('Various Artists', 'Various Artists', 5);
 
-      expect(db.select).toHaveBeenCalled();
+      expect(catalogTierCallLog(db.execute).length).toBeGreaterThan(0);
     });
 
     it('does NOT short-circuit for legitimate artist names', async () => {
@@ -256,9 +261,7 @@ describe('library.service', () => {
     });
 
     it('maps code_artist_number from the view into codeArtistNumber', async () => {
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
 
       const results = await searchLibrary('Autechre');
 
@@ -267,19 +270,19 @@ describe('library.service', () => {
     });
 
     it('routes free-text query through library + album_plays join (not library_artist_view)', async () => {
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
 
       await searchLibrary('stereolab transient');
 
       // Tsvector path reads from `library` directly so the search_doc GIN
       // index is reachable; reading from the view forces a 5-way join first.
-      expect(chain.from).toHaveBeenCalledWith(library);
-      expect(chain.from).not.toHaveBeenCalledWith(library_artist_view);
+      // Asserted against the emitted SQL rather than the builder's arguments,
+      // because the tier now builds its query as raw SQL.
+      const tsvectorSql = lastCatalogQuerySql(db.execute, 'tsvector');
+      expect(tsvectorSql).toContain('library.search_doc');
+      expect(tsvectorSql).not.toContain('library_artist_view');
       // album_plays drives the play-weighted ranking factor.
-      const leftJoinTables = chain.leftJoin.mock.calls.map((c) => c[0]);
-      expect(leftJoinTables).toContain(album_plays);
+      expect(tsvectorSql).toContain('album_plays.plays');
     });
 
     it('returns empty without a DB call for pure-punctuation queries', async () => {
@@ -290,33 +293,23 @@ describe('library.service', () => {
     });
 
     it('falls back to trigram when tsvector returns 0 rows', async () => {
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
-      const trigramChain = createMockQueryChain([mockViewRow]);
-      trigramChain.limit = jest.fn().mockResolvedValue([mockViewRow]);
-      let callIndex = 0;
-      db.select.mockReset();
-      db.select.mockImplementation(() => {
-        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
-        callIndex += 1;
-        return chain;
-      });
+      mockCatalogTiers(db.execute, { tsvector: [], trigram: [mockViewRow] });
 
       const results = await searchLibrary('pikn floyd');
 
-      expect(db.select).toHaveBeenCalledTimes(2);
+      // Asserts the routing itself rather than a call count: tsvector ran, came
+      // back empty, and the trigram tier answered.
+      expect(catalogTierCallLog(db.execute)).toEqual(['tsvector', 'trigram']);
       expect(results).toHaveLength(1);
     });
 
     it('does not fall back to trigram for single-character queries', async () => {
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
-      db.select.mockReset();
-      db.select.mockReturnValue(tsvectorChain);
+      mockCatalogTiers(db.execute, { tsvector: [] });
 
       const results = await searchLibrary('a');
 
-      expect(db.select).toHaveBeenCalledTimes(1);
+      // The 2-char floor: tsvector runs and misses, and trigram is never asked.
+      expect(catalogTierCallLog(db.execute)).toEqual(['tsvector']);
       expect(results).toEqual([]);
     });
   });
@@ -416,17 +409,14 @@ describe('library.service', () => {
      * Returns the recorded call counts so tests can assert the cascade order.
      */
     function setUpPrimarySearchMocks(trigramRows: object[] = []): void {
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
-      const trigramChain = createMockQueryChain(trigramRows);
-      trigramChain.limit = jest.fn().mockResolvedValue(trigramRows);
-      let callIndex = 0;
+      // Both primary tiers issue raw `db.execute` now, so they are selected by
+      // SQL content rather than by call order — see `catalog-search-sql-mock`.
+      mockCatalogTiers(db.execute, { tsvector: [], trigram: trigramRows });
+      // Still reset `db.select`, which the chained-builder version of this helper
+      // did implicitly. `jest.clearAllMocks()` clears recorded calls but leaves
+      // implementations installed, so without this an earlier test's chain stays
+      // wired up and answers a query this one expected to come back empty.
       db.select.mockReset();
-      db.select.mockImplementation(() => {
-        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
-        callIndex += 1;
-        return chain;
-      });
     }
 
     /**
@@ -434,15 +424,15 @@ describe('library.service', () => {
      * library-bridge + cta-exclusion queries on top of the primary mocks.
      */
     function setUpPrimaryAndTrackMocks(trackRows: object[], ctaCoveredIds: number[] = []): void {
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
-      const trigramChain = createMockQueryChain([]);
-      trigramChain.limit = jest.fn().mockResolvedValue([]);
+      mockCatalogTiers(db.execute, { tsvector: [], trigram: [] });
       const libraryChain = createMockQueryChain(trackRows);
       libraryChain.limit = jest.fn().mockResolvedValue(trackRows);
       const ctaChain = createMockQueryChain(ctaCoveredIds.map((id) => ({ library_id: id })));
       ctaChain.where = jest.fn().mockResolvedValue(ctaCoveredIds.map((id) => ({ library_id: id })));
-      const chains = [tsvectorChain, trigramChain, libraryChain, ctaChain];
+      // Only the ranked tiers moved to `db.execute`; the track arm still uses
+      // chained selects, so these two stay sequenced by call order — and they no
+      // longer have to sit behind the two primary tiers to be reached.
+      const chains = [libraryChain, ctaChain];
       let callIndex = 0;
       db.select.mockReset();
       db.select.mockImplementation(() => {
@@ -454,33 +444,35 @@ describe('library.service', () => {
 
     it('flag-off baseline: tsvector+trigram return 0 and no fallback fires', async () => {
       setUpPrimarySearchMocks();
-      db.execute.mockResolvedValue([]);
+      setCatalogTierRows({ cta: [] });
 
       const results = await searchLibrary('nilufer yanya');
 
       expect(results).toEqual([]);
-      expect(db.execute).not.toHaveBeenCalled();
+      // The primary tiers use `db.execute` too, so "no fallback fired" is asserted
+      // by the absence of the CTA tier rather than the absence of a call.
+      expect(catalogTierCallLog(db.execute)).not.toContain('cta');
       expect(mockLookupBySong).not.toHaveBeenCalled();
     });
 
     it('flag-off: tsvector hit still returns primary results unchanged', async () => {
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
-      db.execute.mockResolvedValue([]);
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
 
       const results = await searchLibrary('Autechre');
 
       expect(results).toHaveLength(1);
       expect(results[0].matched_via).toBeUndefined();
-      expect(db.execute).not.toHaveBeenCalled();
+      // The tsvector tier itself now goes through `db.execute`, so "no fallback
+      // fired" is asserted by naming the tiers that ran rather than by the
+      // absence of an execute call.
+      expect(catalogTierCallLog(db.execute)).toEqual(['tsvector']);
       expect(mockLookupBySong).not.toHaveBeenCalled();
     });
 
     it('CTA flag on, primary returns 0 → CTA fires and matched_via.source=cta', async () => {
       process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
       setUpPrimarySearchMocks();
-      db.execute.mockResolvedValue([ctaRow]);
+      setCatalogTierRows({ cta: [ctaRow] });
 
       const results = await searchLibrary('Call Your Name');
 
@@ -492,21 +484,19 @@ describe('library.service', () => {
 
     it('CTA flag on, primary returns >0 → CTA NOT called (direct hits outrank fallback)', async () => {
       process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
 
       const results = await searchLibrary('Autechre');
 
       expect(results).toHaveLength(1);
-      expect(db.execute).not.toHaveBeenCalled();
+      expect(catalogTierCallLog(db.execute)).not.toContain('cta');
     });
 
     it('Both flags on, primary 0 + CTA >0 → LML NOT called (CTA suppresses Track 2)', async () => {
       process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
       process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
       setUpPrimarySearchMocks();
-      db.execute.mockResolvedValue([ctaRow]);
+      setCatalogTierRows({ cta: [ctaRow] });
 
       const results = await searchLibrary('Call Your Name');
 
@@ -525,7 +515,7 @@ describe('library.service', () => {
         found_on_compilation: false,
       });
       setUpPrimaryAndTrackMocks([trackRow]);
-      db.execute.mockResolvedValue([]);
+      setCatalogTierRows({ cta: [] });
 
       const results = await searchLibrary('Back, Baby');
 
@@ -549,14 +539,16 @@ describe('library.service', () => {
       expect(results).toHaveLength(1);
       expect(results[0].id).toBe(101);
       // CTA flag was off; the CTA probe should not have been queried.
-      expect(db.execute).not.toHaveBeenCalled();
+      // The primary tiers use `db.execute` too, so "no fallback fired" is asserted
+      // by the absence of the CTA tier rather than the absence of a call.
+      expect(catalogTierCallLog(db.execute)).not.toContain('cta');
     });
 
     it('Both flags on, all three layers miss → empty array', async () => {
       process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
       process.env.CATALOG_TRACK_SEARCH_DISCOGS_ENABLED = 'true';
       setUpPrimarySearchMocks();
-      db.execute.mockResolvedValue([]);
+      setCatalogTierRows({ cta: [] });
       mockLookupBySong.mockResolvedValue({
         results: [],
         search_type: 'none',
@@ -567,7 +559,7 @@ describe('library.service', () => {
       const results = await searchLibrary('xyzzy-unknown-track');
 
       expect(results).toEqual([]);
-      expect(db.execute).toHaveBeenCalledTimes(1);
+      expect(catalogTierCallLog(db.execute).filter((tier) => tier === 'cta')).toHaveLength(1);
       expect(mockLookupBySong).toHaveBeenCalledTimes(1);
     });
 
@@ -578,18 +570,22 @@ describe('library.service', () => {
 
       await searchLibrary('Call Your Name');
 
-      expect(db.execute).not.toHaveBeenCalled();
+      // The primary tiers use `db.execute` too, so "no fallback fired" is asserted
+      // by the absence of the CTA tier rather than the absence of a call.
+      expect(catalogTierCallLog(db.execute)).not.toContain('cta');
       expect(mockLookupBySong).not.toHaveBeenCalled();
     });
 
     it('threads on_streaming into the CTA fallback when flag is on', async () => {
       process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
       setUpPrimarySearchMocks();
-      db.execute.mockResolvedValue([ctaRow]);
+      setCatalogTierRows({ cta: [ctaRow] });
 
       await searchLibrary('Call Your Name', undefined, undefined, 5, true);
 
-      const sqlArg = db.execute.mock.calls[0]?.[0];
+      // Named by tier, not by call index: `checkLibraryArtistNameHealth` issues
+      // two probes before any tier runs, so index 0 is not the CTA query.
+      const sqlArg = lastCatalogQueryArg(db.execute, 'cta');
       expect(flattenSqlValues(sqlArg)).toContain(true);
     });
   });
@@ -600,16 +596,14 @@ describe('library.service', () => {
     });
 
     it('routes through tsvector + album_plays when artist_name and album_title are identical', async () => {
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
 
       await fuzzySearchLibrary('Stereolab', 'Stereolab', 5);
 
-      expect(chain.from).toHaveBeenCalledWith(library);
-      expect(chain.from).not.toHaveBeenCalledWith(library_artist_view);
-      const leftJoinTables = chain.leftJoin.mock.calls.map((c) => c[0]);
-      expect(leftJoinTables).toContain(album_plays);
+      const tsvectorSql = lastCatalogQuerySql(db.execute, 'tsvector');
+      expect(tsvectorSql).toContain('library.search_doc');
+      expect(tsvectorSql).not.toContain('library_artist_view');
+      expect(tsvectorSql).toContain('album_plays.plays');
     });
 
     it('keeps single-column path (no album_plays join) when only artist is provided', async () => {
@@ -686,17 +680,14 @@ describe('library.service', () => {
 
     /** Tsvector returns 0 rows; trigram returns whatever caller provides. */
     function setUpPrimarySearchMocks(trigramRows: object[] = []): void {
-      const tsvectorChain = createMockQueryChain([]);
-      tsvectorChain.limit = jest.fn().mockResolvedValue([]);
-      const trigramChain = createMockQueryChain(trigramRows);
-      trigramChain.limit = jest.fn().mockResolvedValue(trigramRows);
-      let callIndex = 0;
+      // Both primary tiers issue raw `db.execute`, so they are selected by SQL
+      // content rather than by call order — see `catalog-search-sql-mock`.
+      mockCatalogTiers(db.execute, { tsvector: [], trigram: trigramRows });
+      // `jest.clearAllMocks()` clears recorded calls but leaves implementations
+      // installed, so reset `db.select` too — the chained-builder version of this
+      // helper did it implicitly, and without it an earlier test's chain stays
+      // wired up and answers a query this one expects to come back empty.
       db.select.mockReset();
-      db.select.mockImplementation(() => {
-        const chain = callIndex === 0 ? tsvectorChain : trigramChain;
-        callIndex += 1;
-        return chain;
-      });
     }
 
     it('flag-off: tsvector hit returns plain row, no matched_via', async () => {
@@ -714,7 +705,7 @@ describe('library.service', () => {
 
     it('flag-off baseline: primary 0 → no LML, returns []', async () => {
       setUpPrimarySearchMocks();
-      db.execute.mockResolvedValue([]);
+      setCatalogTierRows({ cta: [] });
 
       const results = await fuzzySearchLibrary('nilufer yanya', 'nilufer yanya', 5);
 
@@ -725,7 +716,7 @@ describe('library.service', () => {
     it('CTA flag on, primary 0 → CTA fires and matched_via.source=cta surfaces on the wire row', async () => {
       process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
       setUpPrimarySearchMocks();
-      db.execute.mockResolvedValue([ctaRow]);
+      setCatalogTierRows({ cta: [ctaRow] });
 
       const results = await fuzzySearchLibrary('Call Your Name', 'Call Your Name', 5);
 
@@ -979,8 +970,12 @@ describe('library.service', () => {
 
       await runCatalogTrackSearchCascade('Call Your Name', 5, true);
 
-      expect(db.execute).toHaveBeenCalledTimes(1);
-      const sqlArg = db.execute.mock.calls[0]?.[0];
+      // Counted by tier: `checkLibraryArtistNameHealth`'s two probes also go
+      // through `db.execute`, so a bare call count is not the CTA arm's count.
+      expect(catalogTierCallLog(db.execute).filter((tier) => tier === 'cta')).toHaveLength(1);
+      // Named by tier, not by call index: `checkLibraryArtistNameHealth` issues
+      // two probes before any tier runs, so index 0 is not the CTA query.
+      const sqlArg = lastCatalogQueryArg(db.execute, 'cta');
       const flat = flattenSqlValues(sqlArg);
       expect(flat).toContain(true);
     });
