@@ -1,6 +1,11 @@
 import { jest } from '@jest/globals';
 import { db, createMockQueryChain } from '../../mocks/database.mock';
-import { mockCatalogTiers, catalogTierCallLog, mockAliasTierRows } from '../../utils/catalog-search-sql-mock';
+import {
+  mockCatalogTiers,
+  catalogTierCallLog,
+  mockAliasTierRows,
+  resetCatalogTierRows,
+} from '../../utils/catalog-search-sql-mock';
 
 const mockLookupMetadata = jest.fn<() => Promise<unknown>>();
 const mockLookupBySong = jest.fn<() => Promise<unknown>>();
@@ -113,6 +118,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    resetCatalogTierRows();
     delete process.env.CATALOG_SEARCH_ALIAS_ENABLED;
     resetCatalogSearchAliasConfig();
   });

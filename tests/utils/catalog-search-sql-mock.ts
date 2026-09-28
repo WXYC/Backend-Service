@@ -107,6 +107,19 @@ export function mockCatalogTiers(execute: jest.Mock, rows: CatalogTierRows): voi
 let activeRows: CatalogTierRows | null = null;
 
 /**
+ * Forget the active dispatcher's rows.
+ *
+ * Call from a suite's `beforeEach`. `jest.clearAllMocks()` clears recorded calls
+ * but leaves the `db.execute` implementation installed, and `activeRows` is
+ * module scope, so without this a test that never calls `mockCatalogTiers`
+ * inherits the previous test's rows instead of the empty result it expects —
+ * silently, where an unstubbed `db.execute` used to fail loudly.
+ */
+export function resetCatalogTierRows(): void {
+  activeRows = null;
+}
+
+/**
  * Merge more per-tier rows into the active dispatcher.
  *
  * Replaces a bare `db.execute.mockResolvedValue(rows)` placed after

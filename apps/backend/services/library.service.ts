@@ -2885,7 +2885,7 @@ const LIBRARY_VIEW_PROJECTION = {
 } as const satisfies Record<keyof LibraryArtistViewEntry, Column>;
 
 /**
- * Raw SQL mirror of `libraryViewQuery(false)`'s join chain. Used when the
+ * Raw SQL mirror of `libraryViewQuery()`'s join chain. Used when the
  * caller needs a query shape Drizzle's chained builder can't express — the
  * UNION ALL alias path emitted by `buildAliasHitsCte`, and the CTA arm's
  * windowed subquery, which prepends its own `compilation_track_artist` →
@@ -2924,11 +2924,15 @@ export const LIBRARY_VIEW_PROJECTION_RAW = rawProjection(LIBRARY_VIEW_PROJECTION
 
 /**
  * Build the `FROM library` query shape with the joins needed to project the
- * `LibraryArtistViewEntry` columns. `withPlays` adds the `album_plays`
- * materialized view as a LEFT JOIN — only the tsvector ranker needs it, so
- * single-column trigram paths skip it.
+ * `LibraryArtistViewEntry` columns.
+ *
+ * It used to take a `withPlays` flag that added the `album_plays` materialized
+ * view as a LEFT JOIN for the tsvector ranker. Every Both-mode tier now builds
+ * its own raw SQL — it needs a subquery for the album-scoped limit, which the
+ * chained builder cannot express — and joins `album_plays` there, so the flag
+ * had exactly zero `true` call sites left and the branch was unreachable.
  */
-function libraryViewQuery(withPlays: boolean) {
+function libraryViewQuery() {
   const base = db
     .select(LIBRARY_VIEW_PROJECTION)
     .from(library)
@@ -2944,7 +2948,7 @@ function libraryViewQuery(withPlays: boolean) {
     )
     .leftJoin(rotation, sql`${rotation.album_id} = ${library.id} AND ${rotationActiveSql()}`)
     .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id));
-  return withPlays ? base.leftJoin(album_plays, eq(album_plays.album_id, library.id)) : base;
+  return base;
 }
 
 /** A query has at least one alphanumeric character. Pure punctuation skips both search paths. */
@@ -2990,9 +2994,33 @@ function albumScopedQuery({ inner, limit, outerOrderBy }: { inner: SQL; limit: n
   `;
 }
 
-/** Drop the helper columns so the returned row matches the wire shape. */
-function stripAlbumRankHelperColumns<T extends AlbumRankHelperColumns>(row: T): Omit<T, keyof AlbumRankHelperColumns> {
+/**
+ * The `timestamptz` columns in `LIBRARY_VIEW_PROJECTION`, which `db.execute`
+ * returns as raw Postgres text rather than as `Date`.
+ *
+ * The chained builder these tiers replaced mapped them through
+ * `PgTimestamp.mapFromDriverValue` (`new Date(value)`). `db.execute` returns
+ * `client.unsafe(...)` unmapped, and the postgres-js driver installs a
+ * transparent parser for OIDs 1184/1082/1114, so a raw query yields Postgres's
+ * own rendering: `2004-03-14 08:14:52.156+00`. That is not RFC 3339 — space
+ * separator, `+00` offset — so `res.json()` emits it verbatim instead of letting
+ * `Date.prototype.toJSON` produce `2004-03-14T08:14:52.156Z`. `api.yaml`
+ * declares `add_date` as `format: date-time`, and Swift's
+ * `ISO8601DateFormatter`, Kotlin's `Instant.parse` and Safari's `new Date()`
+ * all reject the raw form.
+ *
+ * `LibraryArtistViewEntry` declares both columns as `Date`, and the
+ * `as unknown as` casts on these query results hide the mismatch from `tsc`.
+ */
+const LIBRARY_VIEW_TIMESTAMP_COLUMNS = ['add_date', 'last_discogs_recheck_at'] as const;
+
+function toLibraryViewRow<T extends AlbumRankHelperColumns>(row: T): Omit<T, keyof AlbumRankHelperColumns> {
   const { album_score: _album_score, album_rank: _album_rank, ...rest } = row;
+  const normalized = rest as Record<string, unknown>;
+  for (const column of LIBRARY_VIEW_TIMESTAMP_COLUMNS) {
+    const value = normalized[column];
+    if (typeof value === 'string') normalized[column] = new Date(value);
+  }
   return rest;
 }
 
@@ -3052,7 +3080,7 @@ async function searchLibraryByTsvector(
     })
   )) as unknown as Array<LibraryArtistViewEntry & AlbumRankHelperColumns>;
 
-  return rows.map(stripAlbumRankHelperColumns);
+  return rows.map(toLibraryViewRow);
 }
 
 /**
@@ -3097,7 +3125,7 @@ async function searchLibraryByTrigramBoth(
       })
     )) as unknown as Array<TaggedLibraryViewEntry & AlbumRankHelperColumns>;
 
-    return rows.map(stripAlbumRankHelperColumns) as TaggedLibraryViewEntry[];
+    return rows.map(toLibraryViewRow) as TaggedLibraryViewEntry[];
   }
 
   // Alias-enabled path: ALT1 UNION ALL (BS#1318). The CTE runs the trigram
@@ -3190,7 +3218,7 @@ async function searchLibraryByTrigramBoth(
     })}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields & AlbumRankHelperColumns)[];
 
-  return rows.map(stripAlbumRankHelperColumns).map(attachAliasHint);
+  return rows.map(toLibraryViewRow).map(attachAliasHint);
 }
 
 /**
@@ -3321,7 +3349,7 @@ export const fuzzySearchLibrary = async (
   // index via BitmapOr instead of materializing the full view first.
   if (artist_name && album_title) {
     const trigramPredicate = sql`(${library.artist_name} % ${artist_name} OR ${library.album_title} % ${album_title})`;
-    return libraryViewQuery(false)
+    return libraryViewQuery()
       .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
       .orderBy(asc(sql`${library.artist_name} <-> ${artist_name}`), asc(sql`${library.album_title} <-> ${album_title}`))
       .limit(n) as unknown as LibraryArtistViewEntry[];
@@ -3331,7 +3359,7 @@ export const fuzzySearchLibrary = async (
   const column = artist_name ? library.artist_name : library.album_title;
   const value = artist_name ?? album_title ?? null;
   const trigramPredicate = sql`${column} % ${value}`;
-  return libraryViewQuery(false)
+  return libraryViewQuery()
     .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
     .orderBy(asc(sql`${column} <-> ${value}`))
     .limit(n) as unknown as LibraryArtistViewEntry[];
@@ -6989,7 +7017,7 @@ export async function findSimilarArtist(artistName: string, threshold = 0.85): P
 export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promise<EnrichedLibraryResult[]> {
   await checkLibraryArtistNameHealth();
 
-  const rows = (await libraryViewQuery(false)
+  const rows = (await libraryViewQuery()
     .where(sql`${library.album_title} % ${albumTitle}`)
     .orderBy(desc(sql`similarity(${library.album_title}, ${albumTitle})`))
     .limit(limit)) as unknown as LibraryArtistViewEntry[];
@@ -7283,7 +7311,7 @@ export async function searchByArtist(artistName: string, limit = 5): Promise<Enr
   const { enabled: aliasEnabled, minSimilarity: aliasMinSimilarity } = getCatalogSearchAliasConfig();
 
   if (!aliasEnabled) {
-    const rows = (await libraryViewQuery(false)
+    const rows = (await libraryViewQuery()
       .where(sql`${library.artist_name} % ${artistName}`)
       .orderBy(desc(sql`similarity(${library.artist_name}, ${artistName})`))
       .limit(limit)) as unknown as LibraryArtistViewEntry[];
