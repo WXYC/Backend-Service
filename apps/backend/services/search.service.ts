@@ -397,9 +397,20 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
  * Do not "fix" this by copying the catalog's `:*` prefix form until
  * WXYC/Backend-Service#670's replacement has settled — the first attempt
  * (WXYC/Backend-Service#2709) produced three confirmed regressions, and one of
- * them is worse here: `search_doc` concatenates FOUR weighted segments, and
- * `tsvector || tsvector` leaves no position gap, so a prefix-phrase query
- * straddles three field seams rather than one (WXYC/Backend-Service#2714).
+ * them is worse here: `flowsheet.search_doc` concatenates FIVE weighted
+ * segments (artist A, track B, dj_name B, album C, label D — migration 0054
+ * added dj_name to 0052's original four), and `tsvector || tsvector` leaves no
+ * position gap, so a prefix-phrase query straddles FOUR field seams.
+ *
+ * `library.search_doc` had the same defect across its single seam and migration
+ * 0178 closed it (WXYC/Backend-Service#2714) by concatenating a sentinel
+ * between the segments and removing it with `ts_delete`, which shifts positions
+ * without leaving a queryable lexeme behind. Flowsheet is deliberately NOT
+ * fixed there: the same rewrite costs about 1.7 s of ACCESS EXCLUSIVE on the
+ * 64K-row catalog, and flowsheet carries ~2.6M rows across five segments, on a
+ * table the live flowsheet writes to during every show. That needs its own
+ * lock-budget measurement and window, so it is tracked separately — and it is
+ * this gate, not the column, that keeps the defect unreachable meanwhile.
  */
 export function shouldUseTsvector(value: string): boolean {
   if (value.length < 3) return false;

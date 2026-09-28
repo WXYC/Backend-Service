@@ -749,8 +749,20 @@ export const library = wxyc_schema.table(
     // weight bands (artist=A, album=B). NULL for rows where artist_name has
     // not been backfilled yet — A.2 populates legacy rows, A.3 keeps live
     // writes current. Read by the new tsvector search path in A.5.
+    //
+    // The `wxycsearchdocgap` sentinel buys a POSITION GAP between the two
+    // segments, and `ts_delete` then removes it without renumbering what
+    // survives. `tsvector || tsvector` shifts the right operand's positions to
+    // continue from the left's with no gap, so without this the album title's
+    // first lexeme is adjacent to the artist name's last one and a phrase query
+    // matches across the field boundary (BS#2714). Deleting the sentinel rather
+    // than leaving it in place is what keeps it out of the GIN index — a
+    // sentinel lexeme would be prefix-reachable, and `'w':*` would then match
+    // every row in the catalog. Migration 0178 has the full rationale and the
+    // measured lock budget; this expression must match it character-for-character
+    // or drizzle-kit drift detection will propose a spurious rewrite.
     search_doc: tsvector('search_doc').generatedAlwaysAs(
-      sql`setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'B')`
+      sql`ts_delete(setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || to_tsvector('simple', 'wxycsearchdocgap wxycsearchdocgap wxycsearchdocgap') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'B'), 'wxycsearchdocgap')`
     ),
   },
   (table) => {
