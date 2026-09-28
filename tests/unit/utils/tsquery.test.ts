@@ -39,8 +39,8 @@ describe('buildPrefixTsquery', () => {
     it('prefixes only the last token, keeps every earlier token exact, and stays under the operand cap', () => {
       const built = buildPrefixTsquery(name);
       expect(built).not.toBeNull();
-      const tsqueryExpr = param(built!.tsquery);
-      const exactExpr = param(built!.exactTsquery);
+      const tsqueryExpr = param(built.tsquery);
+      const exactExpr = param(built.exactTsquery);
 
       // Everything but the very last operand is byte-identical between the
       // two variants, and the last operand differs by exactly a trailing
@@ -75,8 +75,8 @@ describe('buildPrefixTsquery', () => {
       // a no-op here and a regression for a digit-led token elsewhere. The
       // builder must not special-case it at all.
       const built = buildPrefixTsquery('-autechre stereolab');
-      expect(param(built!.exactTsquery)).toBe("'-autechre' & 'stereolab'");
-      expect(param(built!.tsquery)).toBe("'-autechre' & 'stereolab':*");
+      expect(param(built.exactTsquery)).toBe("'-autechre' & 'stereolab'");
+      expect(param(built.tsquery)).toBe("'-autechre' & 'stereolab':*");
     });
 
     it('leaves a leading "-" before a digit alone, where stripping would silently break matching (ADR 0015)', () => {
@@ -84,63 +84,63 @@ describe('buildPrefixTsquery', () => {
       // signed-int lexeme and matches `to_tsvector('simple','Minus 5 -3d
       // World')`; a stripped `'3d':*` does not (measured on PG 18.6).
       const built = buildPrefixTsquery('-3d');
-      expect(param(built!.exactTsquery)).toBe("'-3d'");
-      expect(param(built!.tsquery)).toBe("'-3d':*");
+      expect(param(built.exactTsquery)).toBe("'-3d'");
+      expect(param(built.tsquery)).toBe("'-3d':*");
     });
 
     it('treats "&" as a token separator, not literal content', () => {
       const built = buildPrefixTsquery('Belle & Sebastian');
-      expect(param(built!.exactTsquery)).toBe("'Belle' & 'Sebastian'");
-      expect(param(built!.tsquery)).toBe("'Belle' & 'Sebastian':*");
+      expect(param(built.exactTsquery)).toBe("'Belle' & 'Sebastian'");
+      expect(param(built.tsquery)).toBe("'Belle' & 'Sebastian':*");
     });
 
     it('escapes an interior apostrophe by doubling it rather than stripping it', () => {
       // `to_tsvector('simple', "D'Angelo")` is `'angelo':2 'd':1` -- the
       // apostrophe is a token boundary the parser needs, not junk to drop.
       const built = buildPrefixTsquery("D'Angelo");
-      expect(param(built!.exactTsquery)).toBe("'D''Angelo'");
-      expect(param(built!.tsquery)).toBe("'D''Angelo':*");
+      expect(param(built.exactTsquery)).toBe("'D''Angelo'");
+      expect(param(built.tsquery)).toBe("'D''Angelo':*");
     });
 
     it('builds a quoted phrase identically to the same words unquoted (ADR 0015 -- quotes are inert)', () => {
       const quoted = buildPrefixTsquery('"cat power"');
       const bare = buildPrefixTsquery('cat power');
-      expect(param(quoted!.tsquery)).toBe(param(bare!.tsquery));
-      expect(param(quoted!.exactTsquery)).toBe(param(bare!.exactTsquery));
-      expect(param(quoted!.exactTsquery)).toBe("'cat' & 'power'");
+      expect(param(quoted.tsquery)).toBe(param(bare.tsquery));
+      expect(param(quoted.exactTsquery)).toBe(param(bare.exactTsquery));
+      expect(param(quoted.exactTsquery)).toBe("'cat' & 'power'");
     });
 
     it('keeps a bare "or" as an ordinary AND\'d token, never disjunction (ADR 0015)', () => {
       const built = buildPrefixTsquery('cat or power');
-      expect(param(built!.exactTsquery)).toBe("'cat' & 'or' & 'power'");
-      expect(param(built!.tsquery)).toBe("'cat' & 'or' & 'power':*");
+      expect(param(built.exactTsquery)).toBe("'cat' & 'or' & 'power'");
+      expect(param(built.tsquery)).toBe("'cat' & 'or' & 'power':*");
     });
 
     it('drops a bare double quote, matching how the parser would discard it unstripped', () => {
       // `12"` lexes to the single lexeme `12` -- the trailing quote carries
       // no query-building meaning on this surface (ADR 0015).
       const built = buildPrefixTsquery('12"');
-      expect(param(built!.exactTsquery)).toBe("'12'");
-      expect(param(built!.tsquery)).toBe("'12':*");
+      expect(param(built.exactTsquery)).toBe("'12'");
+      expect(param(built.tsquery)).toBe("'12':*");
     });
 
     it('caps operands at 16 by dropping the EARLIEST tokens, keeping the last-typed token prefixed', () => {
       const tokens = Array.from({ length: 20 }, (_, i) => `tok${i}`);
       const built = buildPrefixTsquery(tokens.join(' '));
-      const exactExpr = param(built!.exactTsquery);
+      const exactExpr = param(built.exactTsquery);
 
       expect(operandCount(exactExpr)).toBe(16);
       for (let i = 0; i < 4; i++) expect(exactExpr).not.toContain(`'tok${i}'`);
       for (let i = 4; i < 20; i++) expect(exactExpr).toContain(`'tok${i}'`);
       // The last-typed token (tok19) is still the one that gets `:*`.
-      expect(param(built!.tsquery)).toBe(`${exactExpr}:*`);
-      expect(param(built!.tsquery).endsWith("'tok19':*")).toBe(true);
+      expect(param(built.tsquery)).toBe(`${exactExpr}:*`);
+      expect(param(built.tsquery).endsWith("'tok19':*")).toBe(true);
     });
 
     it('AND-combines multiple tokens so a second partial token still narrows results', () => {
       const built = buildPrefixTsquery('stereolab transien');
-      expect(param(built!.exactTsquery)).toBe("'stereolab' & 'transien'");
-      expect(param(built!.tsquery)).toBe("'stereolab' & 'transien':*");
+      expect(param(built.exactTsquery)).toBe("'stereolab' & 'transien'");
+      expect(param(built.tsquery)).toBe("'stereolab' & 'transien':*");
     });
   });
 });

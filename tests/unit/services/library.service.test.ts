@@ -335,8 +335,8 @@ describe('library.service', () => {
       expect(caseMatch).not.toBeNull();
       expect(whereMatch).not.toBeNull();
 
-      const caseParam = caseMatch![1];
-      const whereParam = whereMatch![1];
+      const caseParam = caseMatch[1];
+      const whereParam = whereMatch[1];
 
       // The WHERE predicate's last token is prefix-matched; match_tier's
       // token list is not. If `exactTsquery` were aliased back to `tsquery`,
