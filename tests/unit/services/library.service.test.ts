@@ -318,6 +318,34 @@ describe('library.service', () => {
       expect(tsvectorSql).toContain('album_plays.plays');
     });
 
+    it('drives match_tier from an un-prefixed tsquery, never the same object as the WHERE predicate (BS#670 seam)', async () => {
+      // BS#2725 landed `match_tier` with `const exactTsquery = tsquery;` --
+      // deliberately dormant scaffolding, since before #670 the WHERE
+      // predicate and the CASE predicate were the same websearch_to_tsquery
+      // and every match was tier 2. Activating the tier is #670's job, and
+      // nothing else fails if it silently doesn't happen: this is the one
+      // test that catches a regression back to that alias.
+      mockCatalogTiers(db.execute, { tsvector: [mockViewRow] });
+
+      await searchLibrary('stereolab transien');
+
+      const rendered = lastCatalogQuerySql(db.execute, 'tsvector');
+      const caseMatch = /CASE WHEN library\.search_doc @@ to_tsquery\('simple', ([^)]*)\)/.exec(rendered);
+      const whereMatch = /WHERE library\.search_doc @@ to_tsquery\('simple', ([^)]*)\)/.exec(rendered);
+      expect(caseMatch).not.toBeNull();
+      expect(whereMatch).not.toBeNull();
+
+      const caseParam = caseMatch![1];
+      const whereParam = whereMatch![1];
+
+      // The WHERE predicate's last token is prefix-matched; match_tier's
+      // token list is not. If `exactTsquery` were aliased back to `tsquery`,
+      // these would be textually identical and both assertions below fail.
+      expect(whereParam).toContain(':*');
+      expect(caseParam).not.toContain(':*');
+      expect(caseParam).not.toBe(whereParam);
+    });
+
     it('keeps the DENSE_RANK window and the outer ORDER BY in agreement (BS#2725)', async () => {
       // The window ORDER BY must repeat expressions -- Postgres accepts an
       // output alias only in a top-level ORDER BY -- while the outer list can
