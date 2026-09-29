@@ -14,8 +14,8 @@ const charsetTorture = require('../fixtures/charset-torture.json');
  * at 3-5 ms.
  *
  * `apps/backend/utils/tsquery.ts` builds a last-token-prefix tsquery pair
- * instead -- `tsquery` (`:*` on the last token) drives WHERE, `exactTsquery`
- * (no `:*` anywhere) drives `match_tier`. The unit suite at
+ * instead -- `tsquery` (`:*` on the last token) drives WHERE and `album_score`,
+ * `exactTsquery` (no `:*` anywhere) drives `match_tier` and `exact_score`. The unit suite at
  * tests/unit/utils/tsquery.test.ts pins the SQL the builder renders; these
  * tests assert the schema, seed fixture and `simple` text-search config
  * compose so the published endpoint actually returns the row and ranks it
@@ -94,16 +94,20 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
   }
 
   describe('every prefix of a seeded artist name matches that row', () => {
-    // Chuquimamani-Condori exercises the hyphenated-compound case migration
-    // 0178 bought a position gap to protect: `to_tsvector` lexes it to the
-    // compound plus its two parts, so a prefix anywhere in the name --
-    // including one that lands exactly at or just past the hyphen -- must
-    // still resolve to a phrase-adjacency query that matches the stored row.
+    // Chuquimamani-Condori: `to_tsvector` lexes it to the compound plus its
+    // two parts, and every prefix must still reach the stored row. Limit of
+    // what this can catch: from about `Chuquimamani-` on, trigram similarity
+    // to the stored name clears the 0.3 threshold, so a tsvector miss there
+    // would be served by the fallback. Only the short heads (`Chuq`, 0.19)
+    // isolate the tsvector tier, and row presence cannot tell a phrase
+    // match from an AND match.
     const HYPHEN_ID = 7910;
     const HYPHEN_NAME = 'Chuquimamani-Condori';
 
-    // Csillagrablók exercises a non-ASCII letter class (the `simple` config
-    // keeps diacritics in the lexeme) with no internal punctuation. The sweep
+    // Csillagrablók: a diacritic-bearing name. Same limit as above -- the
+    // prefixes that include the `ó` (similarity 0.80 and up) are reachable
+    // through the trigram fallback, so only `Cs`..`Csil` isolate the tsvector
+    // tier, and those are ASCII. The sweep
     // starts at two characters, like the hyphen sweep above. The tsvector path
     // has no minimum token length (docs/catalog-search/README.md "Why the
     // prefix path has no minimum token length"), but a one-character prefix
@@ -217,16 +221,11 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
     );
   });
 
-  describe('tier activation (match_tier seam) — the red case', () => {
-    // BS#2725 landed match_tier with `const exactTsquery = tsquery;` --
-    // deliberately dormant until this builder feeds it a genuinely
-    // un-prefixed token list. If that alias regresses, EXACT and PREFIXONLY
-    // both read as tier 2 (their WHERE-predicate tsquery is identical, so
-    // match_tier's CASE -- checking the SAME predicate against itself --
-    // is trivially true for both), ts_rank does not meaningfully separate
-    // an exact lexeme from a longer word it merely prefixes, and the
-    // ranking falls through to plays: PREFIXONLY's 40 plays would outrank
-    // EXACT's 0, exactly the #2709 popularity-collapse regression.
+  describe('tier activation (match_tier seam)', () => {
+    // With one token, a tier-1 row's `exact_score` is 0, so `exact_score`
+    // alone already sorts the exact row first and this single-token case
+    // pins the ordering, not `match_tier` specifically. The three-token case
+    // below is the one only `match_tier` gets right.
     const EXACT_ID = 7990; // artist_name is the whole query token -> tier 2
     const PREFIXONLY_ID = 7991; // artist_name only starts with the query token -> tier 1
 
@@ -259,6 +258,30 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       expect(ids.indexOf(EXACT_ID)).toBeGreaterThanOrEqual(0);
       expect(ids.indexOf(PREFIXONLY_ID)).toBeGreaterThanOrEqual(0);
       expect(ids.indexOf(EXACT_ID)).toBeLessThan(ids.indexOf(PREFIXONLY_ID));
+    });
+
+    test('with three tokens, match_tier keeps the exact row above a tier-1 row that scores higher', async () => {
+      // `zzm zzn zzo`: TIER2 holds all three words (in the weight-B album
+      // field); TIER1 holds `zzm zzn` exactly but only `zzox` for the last
+      // token, in the weight-A artist field. On the exact tsquery TIER1 still
+      // scores 0.991 against TIER2's 0.779 (PG 18.6), because `ts_rank`
+      // credits the two completed tokens it does match. So `exact_score`
+      // alone would put TIER1 first; only `match_tier` keeps TIER2 on top.
+      const TIER2_ID = 7984;
+      const TIER1_ID = 7985;
+      await seedProbe({ id: TIER2_ID, codeNumber: 984, artistName: 'Zztierprobe', albumTitle: 'Zzm Zzn Zzo' });
+      await seedProbe({ id: TIER1_ID, codeNumber: 985, artistName: 'Zzm Zzn Zzox', albumTitle: 'Probe Album' });
+      try {
+        const res = await bothMode('zzm zzn zzo').expect(200);
+
+        expectArray(res);
+        const ids = res.body.map((row) => row.id);
+        expect(ids.indexOf(TIER2_ID)).toBeGreaterThanOrEqual(0);
+        expect(ids.indexOf(TIER1_ID)).toBeGreaterThanOrEqual(0);
+        expect(ids.indexOf(TIER2_ID)).toBeLessThan(ids.indexOf(TIER1_ID));
+      } finally {
+        await teardownProbes([TIER2_ID, TIER1_ID]);
+      }
     });
   });
 
@@ -374,6 +397,35 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       // ...and nothing that a disjunction would have added does.
       expect(ids).not.toContain(CAT_ID);
       expect(ids).not.toContain(POWER_ID);
+    });
+
+    test('an interior " splits words into an AND, not a phrase adjacency', async () => {
+      // Unstripped, `'zziq' & 'cat"power':*` lexes to `'cat':* <-> 'power':*`
+      // and matches only ADJACENT. With `"` in the metacharacter class it is
+      // `'zziq' & 'cat' & 'power':*`, which also matches SPREAD. ADJACENT keeps
+      // the tsvector tier non-empty either way, so the trigram fallback
+      // cannot mask a regression. (A quote at a token's edge is discarded by
+      // the parser regardless, which is why the whole-phrase pin below cannot
+      // catch this.)
+      const SPREAD_ID = 7986;
+      const ADJACENT_ID = 7987;
+      await seedProbe({
+        id: SPREAD_ID,
+        codeNumber: 986,
+        artistName: 'Zziq Cat Blue Power',
+        albumTitle: 'Probe Album D',
+      });
+      await seedProbe({ id: ADJACENT_ID, codeNumber: 987, artistName: 'Zziq Cat Power', albumTitle: 'Probe Album E' });
+      try {
+        const res = await bothMode('zziq cat"power').expect(200);
+
+        expectArray(res);
+        const ids = res.body.map((row) => row.id);
+        expect(ids).toContain(ADJACENT_ID);
+        expect(ids).toContain(SPREAD_ID);
+      } finally {
+        await teardownProbes([SPREAD_ID, ADJACENT_ID]);
+      }
     });
 
     test('a "quoted" term is not a tsquery phrase -- it returns the same rows as the same words unquoted', async () => {
