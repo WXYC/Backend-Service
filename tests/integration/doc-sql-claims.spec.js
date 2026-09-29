@@ -170,8 +170,8 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
       await expect(evaluateClaim(conn, "to_tsquery('simple', 'a')")).resolves.toBe("'a'");
     } finally {
       await conn.end();
+      await dropClaimRole(plain, other.user);
     }
-    await dropClaimRole(plain, other.user);
     const names = (await plain`SELECT rolname FROM pg_roles WHERE rolname IN (${other.user}, ${credentials.user})`).map(
       (r) => r.rolname
     );
@@ -231,12 +231,17 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
   test('RESIDUAL, pinned: a session advisory lock taken under a lexer bypass outlives the rollback', async () => {
     // The lexer never admits pg_advisory_*; this documents what layer 4 does
     // not cover (see the module header's residual list).
-    await expect(evaluateWithoutLexicalCheck(sql, 'pg_advisory_lock(2737)::text')).resolves.toBe('');
-    const [{ held }] = await sql`
-      SELECT count(*)::int AS held FROM pg_locks
-      WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND objid = 2737`;
-    expect(held).toBe(1);
-    await sql`SELECT pg_advisory_unlock_all()`;
+    try {
+      await expect(evaluateWithoutLexicalCheck(sql, 'pg_advisory_lock(2737)::text')).resolves.toBe('');
+      const [{ held }] = await sql`
+        SELECT count(*)::int AS held FROM pg_locks
+        WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND objid = 2737`;
+      expect(held).toBe(1);
+    } finally {
+      // Unconditional, so a failing assertion cannot leave lock 2737 held for
+      // the rest of the file (or for a concurrent run against the same DB).
+      await sql`SELECT pg_advisory_unlock_all()`;
+    }
   });
 
   test('the claim transaction pins search_path to pg_catalog on its own', async () => {

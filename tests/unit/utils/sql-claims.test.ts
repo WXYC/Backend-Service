@@ -450,12 +450,16 @@ describe('createClaimRole — a per-run role, never a cleartext password in SQL 
       )
     );
     expect(sql.calls.join('\n')).not.toContain(a.password);
-    expect(sql.calls).toContain("SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'");
+    expect(sql.calls).toContain(
+      "SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'; " +
+        'SET LOCAL log_min_duration_statement = -1; SET LOCAL log_min_duration_sample = -1; ' +
+        'SET LOCAL log_transaction_sample_rate = 0'
+    );
   });
 
-  it('refuses up front, and says why, when the DB user is not a superuser (CREATEROLE included)', async () => {
+  it('refuses up front, and says why, when the DB user is not a superuser', async () => {
     const sql = fakeSql(false);
-    await expect(createClaimRole(sql)).rejects.toThrow(/must be a superuser.*CREATEROLE/s);
+    await expect(createClaimRole(sql)).rejects.toThrow(/must be a superuser.*log_statement/s);
     expect(sql.calls.some((q) => q.startsWith('CREATE ROLE'))).toBe(false);
   });
 
