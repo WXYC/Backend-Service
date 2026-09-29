@@ -98,11 +98,23 @@ Only the LAST token is prefixed, not every token. An earlier attempt (WXYC/Backe
 
 **This replaced `websearch_to_tsquery` in BS#670.** `websearch_to_tsquery` was chosen originally because it is forgiving and never raises on user input, and it is still the right call for a query the user has finished typing. But dj-site issues a query on every keystroke, and `websearch_to_tsquery('simple','autec')` lexes to `autec`, which does not match Autechre's `autechre` — so every prefix of a name returned zero rows and fell through to the trigram path. Measured on production: 11-232 ms on the fallback (the spread tracks how common the letter combination is, so the typing path paid the worst case) against 3-5 ms for the prefix form through this same GIN index.
 
+```sql-claim
+websearch_to_tsquery('simple', 'autec')                                       ->  'autec'
+to_tsvector('simple', 'Autechre') @@ websearch_to_tsquery('simple', 'autec')  ->  false
+to_tsvector('simple', 'Autechre') @@ to_tsquery('simple', $$'autec':*$$)      ->  true
+```
+
 `to_tsquery` takes a tsquery expression rather than user text, so it is the one variant with no input forgiveness — `&`, `|`, `!`, `(`, `)`, `<`, `>`, `:`, `*`, `\` and `"` reach it as operators and an unbalanced one raises. `buildPrefixTsquery` is the sanitizing layer: metacharacters become token separators, each token is quoted so what survives is read as a literal lexeme, and a token with no letter or digit is dropped. Input that yields no token at all (`!!!`, `$$$`) returns `null` and the tsvector path is skipped entirely rather than spending a query on an empty tsquery. A leading `-` is deliberately left alone rather than stripped or treated as exclusion, and a bare `or` and a `"quoted"` term carry no special meaning either — see [ADR 0015](../adr/0015-catalog-search-query-operators.md) for why each of those three would-be operators is retired rather than reimplemented.
 
 [ADR 0015](../adr/0015-catalog-search-query-operators.md)'s operator contract governs **this tsvector tier's `to_tsquery` construction only.** It says nothing about the trigram fallback below, which never sees a tsquery at all — it runs `%` similarity against the raw query string and interprets no operators, retired or otherwise. So a query that reads like it invokes one of the three retired operators can still surface fuzzy matches once the tsvector tier misses: `cat or power` is three required AND'd tokens under ADR 0015 (`or` narrows, it does not disjoin), and the tsvector tier correctly returns 0 rows for it on the real catalog — no artist or album contains the literal word "or" next to "cat" and "power" — but the Both-mode trigram fallback then runs on the same raw string and, measured on the production-shaped clone, returns `Cat Power` rows at similarity 0.77 (`GET /library?artist_name=cat+or+power&album_title=cat+or+power` does return Cat Power, through the fallback, not the tsvector tier). The endpoint-level behavior and the tier-level contract are two different things; ADR 0015 pins the latter.
 
-Quoting does not suppress tokenization, which is the point: `'chuquimamani-condori':*` expands to `'chuquimamani-condori':* <-> 'chuquimamani':* <-> 'condori':*`, matching how the `simple` config actually lexed the name. Punctuation _inside_ a token is therefore preserved — `M.A.N.D.Y.` is the single lexeme `m.a.n.d.y`, and five one-letter tokens would match something else entirely.
+Quoting does not suppress tokenization, which is the point: a quoted hyphenated token expands to the compound plus its parts, matching how the `simple` config actually lexed the name. Punctuation _inside_ a token is therefore preserved — `M.A.N.D.Y.` is the single lexeme `m.a.n.d.y`, and five one-letter tokens would match something else entirely.
+
+```sql-claim
+to_tsquery('simple', $$'chuquimamani-condori':*$$)  ->  'chuquimamani-condori':* <-> 'chuquimamani':* <-> 'condori':*
+to_tsvector('simple', 'Chuquimamani-Condori')       ->  'chuquimamani':2 'chuquimamani-condori':1 'condori':3
+to_tsquery('simple', $$'M.A.N.D.Y.':*$$)             ->  'm.a.n.d.y':*
+```
 
 Multi-token queries keep AND-semantics, which is the disambiguation `stereolab transient` needs.
 
@@ -207,20 +219,22 @@ Backfill / live-write deliveries (no migrations of their own):
 
 ## Why the segments do not touch
 
-`tsvector || tsvector` does not just append — it **shifts the right operand's positions to continue from the left's, with no gap**. So before migration `0178`, `Todd Rundgren` / `Angel Hair` stored as:
+`tsvector || tsvector` does not just append — it **shifts the right operand's positions to continue from the left's, with no gap**. So before migration `0178`, `Todd Rundgren` / `Angel Hair` stored as follows (Postgres prints lexemes alphabetically; read the positions):
 
-```
-'todd':1A 'rundgren':2A 'angel':3B 'hair':4B
+```sql-claim
+setweight(to_tsvector('simple', 'Todd Rundgren'), 'A') || setweight(to_tsvector('simple', 'Angel Hair'), 'B')  ->  'angel':3B 'hair':4B 'rundgren':2A 'todd':1A
+(setweight(to_tsvector('simple', 'Todd Rundgren'), 'A') || setweight(to_tsvector('simple', 'Angel Hair'), 'B')) @@ to_tsquery('simple', $$'rundgren' <-> 'angel'$$)  ->  true
 ```
 
 `rundgren` at 2 and `angel` at 3 are adjacent, so the phrase query `'rundgren' <-> 'angel'` matched a row where those two words live in different fields and were never adjacent in any real text.
 
 This stayed latent because today's reader emits a phrase query only for genuinely quoted input or for a token the parser splits internally, so reaching it meant typing both full lexemes, adjacent, spanning the seam. It stops being latent the moment a reader emits **prefix** phrases. Measured on a 64,193-row production clone, `'d':* <-> 'a':*` — what `to_tsquery` makes of a `d'a` prefix token — matched 760 rows, **184 of them straddling the seam** (`Amor Belhom Duo / Amor Belhom Duo`, `It's a Beautiful Day / At Carnegie Hall`, `PM Dawn / A Watcher's Point Of View 12"`). After `0178` the same query matches 576, none cross-boundary.
 
-The gap is bought with a sentinel token and then removed with `ts_delete`, which deletes a lexeme's entry **without renumbering the survivors' positions**:
+The gap is bought with a sentinel token and then removed with `ts_delete`, which deletes a lexeme's entry **without renumbering the survivors' positions** (this is `0178`'s generation expression with the columns filled in):
 
-```
-'todd':1A 'rundgren':2A 'angel':6B 'hair':7B
+```sql-claim
+ts_delete(setweight(to_tsvector('simple', 'Todd Rundgren'), 'A') || to_tsvector('simple', 'wxycsearchdocgap wxycsearchdocgap wxycsearchdocgap') || setweight(to_tsvector('simple', 'Angel Hair'), 'B'), 'wxycsearchdocgap')  ->  'angel':6B 'hair':7B 'rundgren':2A 'todd':1A
+ts_delete(setweight(to_tsvector('simple', 'Todd Rundgren'), 'A') || to_tsvector('simple', 'wxycsearchdocgap wxycsearchdocgap wxycsearchdocgap') || setweight(to_tsvector('simple', 'Angel Hair'), 'B'), 'wxycsearchdocgap') @@ to_tsquery('simple', $$'rundgren' <-> 'angel'$$)  ->  false
 ```
 
 Deleting the sentinel rather than leaving it in place is load-bearing, not tidiness. A sentinel lexeme left in the vector is in the GIN index and is prefix-reachable, so `'w':*` would match **every row in the catalog**. `ts_delete` is IMMUTABLE on both PG14 and PG18, so it is legal inside a `STORED GENERATED` column, and the index grows only ~1% (position bytes, no new lexemes).
@@ -241,4 +255,5 @@ Two consequences worth knowing before touching this column:
 - `docs/playlist-search/README.md` — sibling document on `GET /flowsheet/search`.
 - `docs/metadata-service/README.md` — flowsheet metadata enrichment via LML.
 - [ADR 0015](../adr/0015-catalog-search-query-operators.md) — decides what the leading `-`, bare `or`, and quoted-phrase operators inherited from `websearch_to_tsquery` mean on this surface.
+- `sql-claim` blocks — the fenced `expression -> expected` blocks in this document and in ADR 0015 are executed against Postgres by `tests/integration/doc-sql-claims.spec.js` (WXYC/Backend-Service#2737), so a claim about Postgres behaviour that stops being true fails a test by file:line. The grammar, the read-only guarantees and the note on Postgres-version sensitivity live in the header of `tests/utils/sql-claims.js`. A claim that needs table data (row counts on the clone) cannot be a `sql-claim` and stays prose.
 - Epic A on GitHub: [WXYC/Backend-Service#483](https://github.com/WXYC/Backend-Service/issues/483).

@@ -133,6 +133,16 @@ jobs:
               # only fires if editing the .sql runs the integration suite —
               # and the paste PR touches nothing but scripts/audit/:
               - 'scripts/audit/bs_replacement_char_cta.sql'
+              # tests/integration/doc-sql-claims.spec.js executes every
+              # ```sql-claim block under docs/ (BS#2737). A docs-only PR is
+              # exactly the change that can make a claim false, and without
+              # these entries it would skip Integration-Tests and merge the
+              # false claim unchecked. Enumerated rather than `docs/**` so an
+              # ordinary docs PR still skips the Postgres job;
+              # tests/unit/scripts/ci-sql-claim-docs-filter.test.ts fails when
+              # a doc holding a sql-claim block is missing from this list.
+              - 'docs/adr/0015-catalog-search-query-operators.md'
+              - 'docs/catalog-search/README.md'
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'

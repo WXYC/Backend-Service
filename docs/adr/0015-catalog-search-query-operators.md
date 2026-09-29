@@ -4,7 +4,7 @@
 
 That gap — no specified contract, no test, and a UI describing behaviour nobody had committed to — stopped being free the moment `websearch_to_tsquery` itself stopped being the query builder. WXYC/Backend-Service#670 replaces the tsvector tier's query construction with a last-token prefix builder, and a hand-built builder has to decide what a leading `-` means — deliberately here, or implicitly in whatever the builder happens to do. WXYC/Backend-Service#2709 is what implicit looks like: it inverted the operator rather than merely dropping it. Measured against `websearch_to_tsquery` on PG 18:
 
-```
+```sql-claim
 websearch_to_tsquery('simple', '-autechre stereolab')  ->  !'autechre' & 'stereolab'
 ```
 
@@ -38,7 +38,7 @@ Retiring `-` needs **no new code**, and both obvious implementations are wrong. 
 
 **Do not strip a leading `-` either.** It reads like the careful thing to do and it is measurably worse than doing nothing. For every token whose second character is a letter the strip is a pure no-op, because the lexer has already discarded the `-`. Measured on PG 18.6:
 
-```
+```sql-claim
 to_tsquery('simple', $$'-transient':*$$)       ->  'transient':*          -- identical to 'transient':*
 to_tsquery('simple', $$'--foo':*$$)            ->  'foo':*                -- identical to 'foo':*
 to_tsquery('simple', $$'-zoviet-france':*$$)   ->  'zoviet-france':* <-> 'zoviet':* <-> 'france':*
@@ -46,9 +46,11 @@ to_tsquery('simple', $$'-zoviet-france':*$$)   ->  'zoviet-france':* <-> 'zoviet
 
 The strip changes the emitted query in exactly one class — a `-` followed by a **digit**, which the `simple` parser lexes as a signed `int` that keeps its sign — and there it breaks matching that works today:
 
-```
-to_tsquery('simple', $$'-3d':*$$)  ->  '-3':* <-> 'd':*     matches to_tsvector('simple','Minus 5 -3d World')  -- true
-to_tsquery('simple', $$'3d':*$$)   ->  '3d':*               same document                                      -- FALSE
+```sql-claim
+to_tsquery('simple', $$'-3d':*$$)                                               ->  '-3':* <-> 'd':*
+to_tsvector('simple', 'Minus 5 -3d World') @@ to_tsquery('simple', $$'-3d':*$$)  ->  true
+to_tsquery('simple', $$'3d':*$$)                                                ->  '3d':*
+to_tsvector('simple', 'Minus 5 -3d World') @@ to_tsquery('simple', $$'3d':*$$)   ->  false   -- same document
 ```
 
 So a strip does nothing in the case it was written for and silently drops results in the only case it touches. The builder should leave the token alone.
@@ -68,3 +70,26 @@ So a strip does nothing in the case it was written for and silently drops result
 - This contract has no enforcement point until that builder lands, and its tests are where it must be pinned. The load-bearing test is the one that fails when an interior `-` is split — `Chuquimamani-Condori` must still match every prefix of itself. A test asserting that a leading `-` is _removed from the emitted string_ would be actively harmful: it would certify the signed-integer regression above. Assert on match behaviour, not on the emitted query text.
 - The two removals need their own pins, since they are live advertised behaviour and nothing currently guards them: one asserting that `cat or power` does **not** return the union of `cat` and `power` — note it does not return the same rows as `cat power` either: `or` becomes an ordinary required token, so the query narrows to nothing on a catalog with no literal "or" (measured: `cat power` → 2 rows, `cat or power` → 0). Assert the absence of the union, not equality. And one asserting `"cat power"` returns the same rows as `cat power` (no phrase), which does hold exactly. Without these, the ADR repairs the "no specified contract" half of its own diagnosis and leaves the "no test" half exactly as it found it.
 - `docs/catalog-search/README.md` gets a pointer to this ADR; the prose describing the builder itself belongs to #670, not here.
+
+## Appendix: the prose claims, executable
+
+The three blocks above are `sql-claim` blocks, which `tests/integration/doc-sql-claims.spec.js` runs against Postgres on every integration run (grammar: `tests/utils/sql-claims.js`). The measured claims made in prose elsewhere in this ADR are restated here in the same form, so that none of them depends on a reviewer choosing to re-run it. The prose above is the argument; this block is only the evidence.
+
+```sql-claim
+-- Context: how websearch_to_tsquery reads the dj-site "Search tips". Quotes and OR are live operators; AND, NOT and * are not.
+websearch_to_tsquery('simple', '"cat power"')         ->  'cat' <-> 'power'
+websearch_to_tsquery('simple', 'cat OR power')        ->  'cat' | 'power'
+websearch_to_tsquery('simple', 'cat or power')        ->  'cat' | 'power'   -- a bare lower-case `or` disjoins too
+websearch_to_tsquery('simple', 'a AND b')             ->  'a' & 'and' & 'b'
+websearch_to_tsquery('simple', 'rolling NOT stones')  ->  'rolling' & 'not' & 'stones'
+websearch_to_tsquery('simple', 'elect*')              ->  'elect'
+-- Context: the #2709 inversion of `stereolab -transient`, from excluded to required.
+websearch_to_tsquery('simple', 'stereolab -transient')    ->  'stereolab' & !'transient'
+to_tsquery('simple', $$'stereolab':* & '-transient':*$$)  ->  'stereolab':* & 'transient':*
+-- Decision: an interior hyphen lexes to the compound plus its two parts.
+to_tsvector('simple', 'Chuquimamani-Condori')  ->  'chuquimamani':2 'chuquimamani-condori':1 'condori':3
+-- Consequences: an unstripped interior `"` is a separator, so it builds an adjacency rather than an AND.
+to_tsquery('simple', $$'cat"power':*$$)                                                    ->  'cat':* <-> 'power':*
+to_tsvector('simple', 'Cat Great Power') @@ to_tsquery('simple', $$'cat':* & 'power':*$$)  ->  true
+to_tsvector('simple', 'Cat Great Power') @@ to_tsquery('simple', $$'cat"power':*$$)        ->  false
+```
