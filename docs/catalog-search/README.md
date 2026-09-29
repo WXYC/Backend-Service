@@ -88,7 +88,7 @@ ORDER BY match_tier DESC,
 LIMIT  $n;
 ```
 
-<!-- @rule id=catalog-match-tier-two-tsquery-wiring enforced-by=tests/integration/library.search-prefix-tsvector.spec.js:three-token-match-tier added=2026-09-28 incidents=#2736 -->
+<!-- @rule id=catalog-match-tier-two-tsquery-wiring enforced-by=tests/unit/services/library.service.test.ts added=2026-09-28 incidents=#2736 -->
 
 Ranking is an explicit `match_tier` (2 for an exact whole-lexeme hit, 1 for a prefix-only hit), not a `ts_rank * plays` product (BS#2725). Plays span roughly 10x on the real catalog — wider than the typical `ts_rank` gap between a good and a mediocre match — so multiplying let a popular near-miss outrank an exact hit, and `ts_rank` goes nearly constant under a prefix (`:*`) match, which collapses a product-based score to a pure popularity sort. `match_tier` guarantees the exact-over-prefix ordering structurally. Within a tier, `exact_score` (`ts_rank` on `$exact_tsq`) sorts first, then `album_score` (`ts_rank` on `$tsq`), then `plays`.
 
