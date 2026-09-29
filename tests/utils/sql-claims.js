@@ -29,10 +29,19 @@
  * - A trailing `-- comment` after the expected text is stripped. A `--` inside
  *   a quoted lexeme of the expected text (`'--foo'`) is not a comment.
  * - Blank lines and whole-line `-- comments` inside a block are ignored.
- * - Everything is strict. A block with zero claims, an unclosed block, a
- *   near-miss info string (`sql-claims`, `SQL-claim`, `sql-claim x`), an
- *   indented or tilde fence, a line with no separator, and an expression the
- *   lexer below does not accept are all errors naming file:line. Nothing is
+ *   LF and CRLF line endings are both read. The block closes at the next line
+ *   of three or more backticks indented at most three spaces (a closer
+ *   indented four is content under CommonMark, so it is read as a claim line
+ *   and fails for lacking a separator).
+ * - Everything is strict. Any line with a fence marker followed, anywhere
+ *   after it, by `sql` and then `claim` (case- and NFKC-folded, so a Unicode
+ *   hyphen, `{sql-claim}` and `{.sql .claim}` count) must be exactly
+ *   `` ```sql-claim `` at column 0 and outside every other code block, or it
+ *   is an error. That catches near-miss info strings, indented, tilde,
+ *   blockquoted (`> `) and list-item (`- `) openers, and an opener swallowed
+ *   by an earlier fence someone forgot to close. A block with zero claims, an
+ *   unclosed block, a line with no separator, and an expression the lexer
+ *   below does not accept are errors too, all naming file:line. Nothing is
  *   skipped: a skipped claim is a check that silently covers nothing.
  *
  * A claim is a single scalar expression over literals. It cannot read a table
@@ -69,7 +78,12 @@
  * 4. **Always rolled back.** The claim's transaction ends in ROLLBACK, never
  *    COMMIT, so even a side effect that escaped layers 1-3 does not persist.
  * 5. **Pinned session**, both as startup parameters and again by `SET LOCAL`
- *    inside each claim's transaction. `search_path=pg_catalog` (the only
+ *    inside each claim's transaction. `ROLE` is set to `CLAIM_ROLE`, a
+ *    NOLOGIN role with no grants that `ensureClaimRole` creates idempotently,
+ *    so a superuser-only function (`pg_read_file`, or terminating a
+ *    superuser's backend) is refused even when the lexer is bypassed; the
+ *    CI database user is a superuser, so without this a lexer bypass would
+ *    run with superuser rights. `search_path=pg_catalog` (the only
  *    schema searched, so an unqualified application table does not resolve
  *    and an allowlisted function name resolves only among the built-ins),
  *    `statement_timeout` (a CPU- or sleep-bound expression is cancelled), and
@@ -78,9 +92,14 @@
  *    to `pg_catalog.simple` so a one-argument text-search call is
  *    deterministic regardless of the server's initdb locale.
  *
- * Layer 1 is still load-bearing on its own: a read-only transaction does not
- * stop `pg_sleep`, `pg_terminate_backend` or `set_config`. Layers 2-5 are
- * there so that a lexer bug is not, by itself, a way to write to the database.
+ * Layer 1 is still load-bearing on its own: a read-only transaction running as
+ * an unprivileged role still runs `pg_sleep` (the timeout bounds it) and
+ * `set_config` (the rollback undoes it). Layers 2-5 are there so that a lexer
+ * bug is not, by itself, a way to write to the database or to act with the
+ * connecting user's privileges. Measured on PG 18.6 as `CLAIM_ROLE` inside
+ * `BEGIN READ ONLY`: `pg_read_file` fails with "permission denied for
+ * function", and `pg_terminate_backend` on a superuser's backend fails with
+ * "permission denied to terminate process".
  *
  * ### Why these functions
  *
@@ -96,14 +115,36 @@
  * Widening the list is a reviewable edit to this file; it is not something a
  * doc can do.
  *
+ * ## Where it runs
+ *
+ * - `tests/integration/doc-sql-claims.spec.js` evaluates every claim against
+ *   Postgres and pins each doc's exact claim count. It runs in CI's
+ *   Integration-Tests job, which a docs-only PR reaches only because each
+ *   claim-bearing doc is listed in `.github/workflows/test.yml`'s `tests`
+ *   paths-filter. The list is explicit rather than `docs/**` by maintainer
+ *   decision.
+ * - `scripts/check-sql-claim-docs.mjs` parses every block (no database) and
+ *   checks that the paths-filter lists exactly the claim-bearing docs. It
+ *   runs in the unconditional `auth-tables-doc-drift` job, so a docs-only PR
+ *   that adds a doc's first block without listing it fails in that PR. The
+ *   gap an earlier revision left there (neither check ran on such a PR) is
+ *   closed; what remains is that a claim's VALUE is checked only where
+ *   Integration-Tests runs, which the filter guarantees for listed docs.
+ *
  * ## Version sensitivity
  *
  * Text-search output is stable across recent Postgres majors but not
  * guaranteed forever. If a claim starts failing after a Postgres upgrade, the
  * check is working: the document's claim stopped being true on the version we
  * now run. Fix the document (and any code that relied on the old behaviour);
- * do not delete the check. Every claim in the docs today was verified on
- * PostgreSQL 18.6.
+ * do not delete the check.
+ *
+ * What a green run certifies is the CI Postgres major, 18 (`postgres:18.0-alpine`
+ * in `.github/workflows/test.yml`). It does NOT certify production RDS, which
+ * runs PostgreSQL 14.22, a documented and intentional skew (BS#1424, noted on
+ * the Integration-Tests service in test.yml). A claim can pass here and be
+ * false on production if 14 and 18 disagree. The claims in the docs today
+ * were measured on 18.6 locally and pass on CI's 18.0; none was checked on 14.
  */
 
 const { readdirSync, readFileSync, statSync } = require('fs');
@@ -128,6 +169,9 @@ const ALLOWED_FUNCTIONS = new Set([
 const ALLOWED_TYPES = new Set(['text', 'tsquery', 'tsvector', 'regconfig', 'boolean', 'integer', 'real']);
 
 const ALLOWED_WORDS = new Set(['true', 'false', 'null', 'and', 'or', 'not']);
+
+/** Allowed words that may directly precede `(` without being read as a function call. */
+const PREFIX_KEYWORDS = new Set(['and', 'or', 'not']);
 
 const ALLOWED_OPERATORS = new Set(['@@', '||', '=', '<>', '<', '>', '<=', '>=']);
 
@@ -252,7 +296,7 @@ function assertSafeExpression(expr) {
         if (!ALLOWED_TYPES.has(word)) reject(`type \`${word}\` is not in ALLOWED_TYPES`);
         if (expr[after] === '(' || expr[after] === '[') reject(`type modifier on \`${word}\``);
         expectType = false;
-      } else if (expr[after] === '(') {
+      } else if (expr[after] === '(' && !PREFIX_KEYWORDS.has(word)) {
         if (!ALLOWED_FUNCTIONS.has(word)) reject(`function \`${word}\` is not in ALLOWED_FUNCTIONS`);
       } else if (!ALLOWED_WORDS.has(word)) {
         reject(`\`${word}\` is not an allowed word (no keywords, identifiers or table references)`);
@@ -323,48 +367,67 @@ function parseClaimLine(line) {
   return { expr, expected };
 }
 
-const FENCE = /^(\s*)(`{3,}|~{3,})(.*)$/;
+/** A CommonMark fence line: at most three spaces of indent (four is an indented code block). */
+const FENCE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+
+/** The only accepted opener, byte for byte. */
+const CLAIM_OPENER = '```sql-claim';
 
 /**
- * Parse every `sql-claim` block in a markdown document.
+ * True when a line looks like it is trying to open a sql-claim block: a fence
+ * marker anywhere on the line (so a blockquote `> ` or list `- ` prefix does
+ * not hide it) followed by `sql` and then `claim`, after folding case and
+ * compatibility forms (so `SQL‐claim` with a Unicode hyphen, `{sql-claim}` and
+ * `{.sql .claim}` all count). Every such line must be exactly
+ * `CLAIM_OPENER`, at top level, or it is an error.
+ */
+function looksLikeClaimOpener(line) {
+  const m = /(`{3,}|~{3,})/.exec(line);
+  return (
+    m !== null &&
+    /sql[\s\S]*claim/.test(
+      line
+        .slice(m.index + m[0].length)
+        .normalize('NFKC')
+        .toLowerCase()
+    )
+  );
+}
+
+/**
+ * Parse every `sql-claim` block in a markdown document. See the module
+ * header for the grammar. Strict by design: a line that looks like a claim
+ * opener but is not consumed as one is an error, never a skip.
  * @param {string} text  markdown source
  * @param {string} file  label used in `file:line` locations
  * @returns {{ claims: {file:string,line:number,expr:string,expected:string}[], errors: {file:string,line:number,message:string}[] }}
  */
 function parseSqlClaims(text, file) {
-  const lines = text.split('\n');
+  const lines = text.split(/\r?\n/);
   const claims = [];
   const errors = [];
   const err = (line, message) => errors.push({ file, line, message });
+  const consumed = new Set();
+  const enclosing = new Map(); // claim-looking line index -> line number of the plain fence swallowing it
 
   let n = 0;
   while (n < lines.length) {
     const m = FENCE.exec(lines[n]);
-    if (!m) {
+    if (!m || (m[2][0] === '`' && m[3].includes('`'))) {
       n++;
       continue;
     }
-    const [, indent, marker, infoRaw] = m;
-    const info = infoRaw.trim();
-    const openLine = n + 1;
-    const isClaimFence = /^sql[-_ ]?claim/i.test(info);
-    if (isClaimFence && (info !== 'sql-claim' || marker !== '```' || indent !== '')) {
-      err(
-        openLine,
-        `malformed sql-claim fence ${JSON.stringify(lines[n])}: open it with exactly "\`\`\`sql-claim" at column 0`
-      );
-    }
+    const marker = m[2];
+    const isClaim = lines[n] === CLAIM_OPENER;
     const closes = (l) => {
       const c = FENCE.exec(l);
-      return c && c[2][0] === marker[0] && c[2].length >= marker.length && c[3].trim() === '';
+      return c !== null && c[2][0] === marker[0] && c[2].length >= marker.length && c[3].trim() === '';
     };
     let end = n + 1;
     while (end < lines.length && !closes(lines[end])) end++;
-    if (end >= lines.length) {
-      if (isClaimFence) err(openLine, 'unclosed sql-claim block');
-      break;
-    }
-    if (info === 'sql-claim' && marker === '```' && indent === '') {
+    if (isClaim) {
+      consumed.add(n);
+      if (end >= lines.length) err(n + 1, 'unclosed sql-claim block');
       let count = 0;
       for (let k = n + 1; k < end; k++) {
         const body = lines[k].trim();
@@ -377,11 +440,27 @@ function parseSqlClaims(text, file) {
           err(k + 1, `${e.message}: ${body}`);
         }
       }
-      if (count === 0) err(openLine, 'sql-claim block contains zero claims');
+      if (end < lines.length && count === 0) err(n + 1, 'sql-claim block contains zero claims');
+    } else {
+      for (let k = n + 1; k < end; k++) if (!enclosing.has(k)) enclosing.set(k, n + 1);
     }
     n = end + 1;
   }
+
+  lines.forEach((line, k) => {
+    if (consumed.has(k) || !looksLikeClaimOpener(line)) return;
+    const where = enclosing.has(k)
+      ? `it is inside the code block opened at line ${enclosing.get(k)} (is that fence unclosed?)`
+      : `open a block with exactly "${CLAIM_OPENER}" at column 0, outside any blockquote, list or other code block`;
+    err(k + 1, `malformed sql-claim fence ${JSON.stringify(line)}: ${where}`);
+  });
+  errors.sort((a, b) => a.line - b.line);
   return { claims, errors };
+}
+
+/** True when `text` holds anything that looks like a sql-claim opener (see `looksLikeClaimOpener`). */
+function mentionsSqlClaim(text) {
+  return text.split(/\r?\n/).some(looksLikeClaimOpener);
 }
 
 /** Every `.md` file under `dir`, recursively, in a stable order. */
@@ -413,6 +492,25 @@ function claimConnectionOptions(base) {
 
 const ROLLBACK = Symbol('sql-claim rollback');
 
+/** The unprivileged role every claim runs as (layer 5). NOLOGIN, no grants. */
+const CLAIM_ROLE = 'wxyc_sql_claim_reader';
+
+/**
+ * Create `CLAIM_ROLE` if it does not exist. Idempotent, including against a
+ * concurrent creator (42710 duplicate_object is swallowed). Needs a writable
+ * connection whose user may create roles; the claim connection is read-only,
+ * so the spec calls this on a separate one before any claim runs.
+ */
+async function ensureClaimRole(sql) {
+  const [{ exists }] = await sql`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${CLAIM_ROLE}) AS exists`;
+  if (exists) return;
+  try {
+    await sql.unsafe(`CREATE ROLE ${CLAIM_ROLE} NOLOGIN`);
+  } catch (e) {
+    if (e.code !== '42710') throw e;
+  }
+}
+
 /**
  * Evaluate `expr` WITHOUT the lexical check: layers 2-5 only. Exists so the
  * integration spec can prove those layers hold on their own. Everything else
@@ -423,7 +521,7 @@ async function evaluateWithoutLexicalCheck(sql, expr) {
   try {
     await sql.begin('read only', async (tx) => {
       await tx.unsafe(
-        "SET LOCAL search_path = pg_catalog; SET LOCAL statement_timeout = '2s'; " +
+        `SET LOCAL ROLE ${CLAIM_ROLE}; SET LOCAL search_path = pg_catalog; SET LOCAL statement_timeout = '2s'; ` +
           "SET LOCAL standard_conforming_strings = on; SET LOCAL default_text_search_config = 'pg_catalog.simple'"
       );
       rows = await tx.unsafe(`SELECT (${expr})::text AS v`, [], { simple: false, prepare: false });
@@ -448,13 +546,16 @@ module.exports = {
   ALLOWED_WORDS,
   ALLOWED_OPERATORS,
   SESSION_PARAMETERS,
+  CLAIM_ROLE,
   ClaimSyntaxError,
   assertSafeExpression,
   parseClaimLine,
   parseSqlClaims,
+  mentionsSqlClaim,
   findMarkdownFiles,
   collectSqlClaims,
   claimConnectionOptions,
+  ensureClaimRole,
   evaluateClaim,
   evaluateWithoutLexicalCheck,
 };

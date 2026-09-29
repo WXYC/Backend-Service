@@ -73,7 +73,7 @@ So a strip does nothing in the case it was written for and silently drops result
 
 ## Appendix: the prose claims, executable
 
-The three blocks above are `sql-claim` blocks, which `tests/integration/doc-sql-claims.spec.js` runs against Postgres on every integration run (grammar: `tests/utils/sql-claims.js`). The measured claims made in prose elsewhere in this ADR are restated here in the same form, so that none of them depends on a reviewer choosing to re-run it. The prose above is the argument; this block is only the evidence.
+The three blocks above are `sql-claim` blocks, which `tests/integration/doc-sql-claims.spec.js` runs against Postgres on every integration run (grammar: `tests/utils/sql-claims.js`). Every measured claim made in prose elsewhere in this ADR that a single scalar expression can settle is restated here in the same form, so that none of them depends on a reviewer choosing to re-run it. Three kinds cannot be, and stay prose: the row counts measured against the catalog (they need table data), the `ts_debug` token listing (it returns a set), and the `42601` a trailing backslash raises (the grammar asserts values, not errors). The prose above is the argument; this block is only the evidence.
 
 ```sql-claim
 -- Context: how websearch_to_tsquery reads the dj-site "Search tips". Quotes and OR are live operators; AND, NOT and * are not.
@@ -86,6 +86,8 @@ websearch_to_tsquery('simple', 'elect*')              ->  'elect'
 -- Context: the #2709 inversion of `stereolab -transient`, from excluded to required.
 websearch_to_tsquery('simple', 'stereolab -transient')    ->  'stereolab' & !'transient'
 to_tsquery('simple', $$'stereolab':* & '-transient':*$$)  ->  'stereolab':* & 'transient':*
+-- Scope: `-a` is an exclusion under websearch_to_tsquery (the flowsheet side of that divergence is an endpoint behaviour, so it stays prose).
+websearch_to_tsquery('simple', '-a')  ->  !'a'
 -- Decision: an interior hyphen lexes to the compound plus its two parts.
 to_tsvector('simple', 'Chuquimamani-Condori')  ->  'chuquimamani':2 'chuquimamani-condori':1 'condori':3
 -- Consequences: an unstripped interior `"` is a separator, so it builds an adjacency rather than an AND.

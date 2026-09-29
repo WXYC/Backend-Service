@@ -84,6 +84,11 @@ describe('assertSafeExpression — the shapes docs actually use are accepted', (
     "'simple'::regconfig",
     'true',
     '1e-20',
+    // `not`, `and` and `or` before `(` are keywords, not function calls.
+    "not (to_tsvector('simple', 'a') @@ to_tsquery('simple', 'b'))",
+    "not(to_tsvector('simple', 'a') @@ to_tsquery('simple', 'b'))",
+    "true and (to_tsvector('simple', 'a') @@ to_tsquery('simple', 'a'))",
+    "false or (to_tsvector('simple', 'a') @@ to_tsquery('simple', 'a'))",
   ])('%s', (expr) => {
     expect(() => assertSafeExpression(expr)).not.toThrow();
   });
@@ -140,14 +145,14 @@ describe('parseSqlClaims — block grammar', () => {
     const { claims, errors } = parseSqlClaims(fixture('hostile.md'), 'hostile.md');
     expect(claims).toEqual([]);
     expect(errors.map((e) => `${e.file}:${e.line}`)).toEqual([
+      // Having no valid line, the block itself is empty (errors are sorted by line).
+      'hostile.md:5',
       'hostile.md:6',
       'hostile.md:7',
       'hostile.md:8',
       'hostile.md:9',
       'hostile.md:10',
       'hostile.md:11',
-      // ...and, having no valid line, the block itself is empty.
-      'hostile.md:5',
     ]);
   });
 
@@ -179,9 +184,13 @@ describe('parseSqlClaims — block grammar', () => {
     ]);
   });
 
-  it('ignores a sql-claim fence quoted inside another code block', () => {
+  it('fails a sql-claim fence quoted inside another code block instead of ignoring it', () => {
     const text = '````markdown\n```sql-claim\npg_sleep(10)  ->  x\n```\n````\n';
-    expect(parseSqlClaims(text, 'doc.md')).toEqual({ claims: [], errors: [] });
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(claims).toEqual([]);
+    expect(errors).toEqual([
+      expect.objectContaining({ line: 2, message: expect.stringMatching(/inside the code block opened at line 1/) }),
+    ]);
   });
 
   it('collects across a directory with stable ordering and file labels', () => {
@@ -191,6 +200,66 @@ describe('parseSqlClaims — block grammar', () => {
       'valid.md:5',
     ]);
     expect(new Set(errors.map((e: { file: string }) => e.file))).toEqual(new Set(['hostile.md', 'zero-claims.md']));
+  });
+});
+
+/**
+ * Round-1 review (PR #2746): each of these shapes made a whole block vanish.
+ * Before the fix, parseSqlClaims returned `{ claims: [], errors: [] }` for
+ * every case below except the indented closer, which returned the first claim
+ * and silently dropped the rest. Each must now be loud, naming file:line.
+ */
+describe('parseSqlClaims — shapes that used to skip a block silently', () => {
+  const HOSTILE = 'pg_sleep(10)  ->  x';
+  const VALID = "'a'::text  ->  a";
+
+  it('reads CRLF line endings, so a CRLF block is parsed and its hostile line rejected', () => {
+    const hostile = parseSqlClaims(`intro\r\n\`\`\`sql-claim\r\n${HOSTILE}\r\n\`\`\`\r\n`, 'doc.md');
+    expect(hostile.claims).toEqual([]);
+    expect(hostile.errors.map((e) => e.line)).toEqual([2, 3]);
+    const valid = parseSqlClaims(`\`\`\`sql-claim\r\n${VALID}\r\n\`\`\`\r\n`, 'doc.md');
+    expect(valid).toEqual({ claims: [{ file: 'doc.md', line: 2, expr: "'a'::text", expected: 'a' }], errors: [] });
+  });
+
+  it.each([
+    ['in a blockquote', `> \`\`\`sql-claim\n> ${VALID}\n> \`\`\`\n`],
+    ['on a list-item line', `- \`\`\`sql-claim\n  ${VALID}\n  \`\`\`\n`],
+    ['with a braced info string', `\`\`\`{sql-claim}\n${VALID}\n\`\`\`\n`],
+    ['with a Unicode hyphen', `\`\`\`sql\u2010claim\n${VALID}\n\`\`\`\n`],
+    ['with an attribute-style info string', `\`\`\`{.sql .claim}\n${VALID}\n\`\`\`\n`],
+  ])('fails a sql-claim opener %s', (_label, text) => {
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(claims).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ file: 'doc.md', line: 1 })]);
+  });
+
+  it('fails a sql-claim opener swallowed by an earlier unclosed plain fence', () => {
+    const text = `\`\`\`\nforgot to close this\n\n\`\`\`sql-claim\n${HOSTILE}\n\`\`\`\n`;
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(claims).toEqual([]);
+    expect(errors).toEqual([
+      expect.objectContaining({ line: 4, message: expect.stringMatching(/inside the code block opened at line 1/) }),
+    ]);
+  });
+
+  it('does not treat a closing fence indented four spaces as a closer (CommonMark: it is content)', () => {
+    const text = `\`\`\`sql-claim\n${VALID}\n    \`\`\`\n'b'::text  ->  b\n\`\`\`\n`;
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(claims.map((c) => c.line)).toEqual([2, 4]);
+    expect(errors).toEqual([
+      expect.objectContaining({ line: 3, message: expect.stringMatching(/no ` -> ` separator/) }),
+    ]);
+  });
+
+  it('accepts a closing fence indented up to three spaces', () => {
+    expect(parseSqlClaims(`\`\`\`sql-claim\n${VALID}\n   \`\`\`\n`, 'doc.md').errors).toEqual([]);
+  });
+
+  it('still ignores plain fences, closed or not, that hold no sql-claim opener', () => {
+    expect(parseSqlClaims('```sql\nSELECT 1; -- -> x\n```\n\n```\nunclosed\n', 'doc.md')).toEqual({
+      claims: [],
+      errors: [],
+    });
   });
 });
 
