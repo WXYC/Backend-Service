@@ -282,8 +282,25 @@ describe("reclaim-disk removes a retired target's stale -cron container (gap c, 
 describe('reclaim-disk refuses the retired-repo sweep on a truncated live-target list (truncation guard)', () => {
   it('cross-checks every crontab-referenced and running-container repo against live_targets', () => {
     expect(reclaimDisk).toContain('REFERENCED_REPOS=');
-    expect(reclaimDisk).toContain("grep -oE '# wxyc_[a-zA-Z0-9-]+'");
+    expect(reclaimDisk).toContain("grep -oE '# wxyc_[a-zA-Z0-9-]+$'");
     expect(reclaimDisk).toContain("docker ps --format '{{.Image}}'");
+  });
+
+  it('reads only whole kebab-case target markers from the crontab, never a non-target marker like wxyc_ecr_refresh', () => {
+    // The ecr-refresh-cron job installs `# wxyc_ecr_refresh`. An unanchored
+    // `[a-zA-Z0-9-]+` stops at the underscore and reports a target named
+    // `ecr`, which is never in LIVE_TARGETS, so the guard tripped on every
+    // deploy and the retired-repo sweep never ran (#2740 follow-up).
+    const match = reclaimDisk.match(/echo "\$CRONTAB_OUT" \| grep -oE '([^']+)' \| sed 's\/\^# wxyc_\/\/'/);
+    if (!match) throw new Error('truncation guard crontab grep not found in reclaim-disk');
+    const marker = new RegExp(match[1], 'gm');
+    const crontab = [
+      '10 * * * * docker run --rm --name flowsheet-metadata-backfill-cron img # wxyc_flowsheet-metadata-backfill',
+      '0 */6 * * * aws ecr get-login-password | docker login # wxyc_ecr_refresh',
+      '27 15 * * * docker run --rm --name auth-log-prune-cron img # wxyc_auth-log-prune',
+    ].join('\n');
+    const names = Array.from(crontab.matchAll(marker), (m) => m[0].replace(/^# wxyc_/, ''));
+    expect(names).toEqual(['flowsheet-metadata-backfill', 'auth-log-prune']);
   });
 
   it('sets TRUNCATED and warns loudly when a referenced repo is missing from live_targets', () => {
