@@ -37,7 +37,7 @@ function workflow(docs: string[]): string {
  * `counts` defaults to the true per-doc counts of `files`, so a case that is
  * not about the count map does not have to restate it.
  */
-function run(files: Record<string, string>, listed: string[], counts?: Record<string, number>) {
+function run(files: Record<string, string>, listed: string[], counts?: Record<string, number>, afterGitAdd = '') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sql-claim-docs-'));
   try {
     const trueCounts: Record<string, number> = {};
@@ -51,7 +51,8 @@ function run(files: Record<string, string>, listed: string[], counts?: Record<st
     fs.writeFileSync(path.join(root, '.github', 'workflows', 'test.yml'), workflow(listed));
     fs.mkdirSync(path.join(root, 'tests', 'utils'), { recursive: true });
     fs.writeFileSync(path.join(root, 'tests', 'utils', 'sql-claim-counts.json'), JSON.stringify(counts ?? trueCounts));
-    const git = spawnSync('sh', ['-c', 'git init -q && git add -A'], { cwd: root, encoding: 'utf8' });
+    const setup = `git init -q && git add -A${afterGitAdd ? ` && ${afterGitAdd}` : ''}`;
+    const git = spawnSync('sh', ['-c', setup], { cwd: root, encoding: 'utf8' });
     if (git.status !== 0) throw new Error(`git init failed: ${git.stderr}`);
     const r = spawnSync('node', [scriptPath, root], { encoding: 'utf8' });
     return { status: r.status, out: `${r.stdout}${r.stderr}` };
@@ -126,6 +127,11 @@ describe('scripts/check-sql-claim-docs.mjs', () => {
       },
       ['docs/a.md']
     );
+    expect(r).toEqual({ status: 0, out: expect.stringMatching(/sql-claim docs OK/) });
+  });
+
+  it('skips a tracked .md that is deleted but not yet staged, instead of crashing', () => {
+    const r = run({ 'docs/a.md': BLOCK, 'NOTES.md': 'notes\n' }, ['docs/a.md'], undefined, 'rm NOTES.md');
     expect(r).toEqual({ status: 0, out: expect.stringMatching(/sql-claim docs OK/) });
   });
 

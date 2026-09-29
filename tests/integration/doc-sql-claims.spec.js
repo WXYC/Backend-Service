@@ -1,10 +1,12 @@
+const { randomBytes } = require('crypto');
 const path = require('path');
 const postgres = require('postgres');
 const {
-  CLAIM_ROLE,
   claimConnectionOptions,
   collectSqlClaims,
-  ensureClaimRole,
+  createClaimRole,
+  dropClaimRole,
+  dropStaleClaimRoles,
   evaluateClaim,
   evaluateWithoutLexicalCheck,
 } = require('../utils/sql-claims');
@@ -54,11 +56,12 @@ const connectionBase = {
 
 const { claims, errors } = collectSqlClaims(DOCS_DIR, (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/'));
 
-// `sql` is the claim connection, logged in as CLAIM_ROLE. `plain` logs in as
-// the suite's own (superuser) DB user, is writable, and is opened with every
-// pinned setting deliberately set to the OPPOSITE of the pin, so a test that
-// runs a claim on `plain` proves what the per-claim transaction does on its
-// own. `plain` also creates CLAIM_ROLE, which needs a superuser.
+// `sql` is the claim connection, logged in as this run's own claim role.
+// `plain` logs in as the suite's own (superuser) DB user, is writable, and is
+// opened with every pinned setting deliberately set to the OPPOSITE of the
+// pin, so a test that runs a claim on `plain` proves what the per-claim
+// transaction does on its own. `plain` also creates and drops the claim role,
+// which needs a superuser.
 let sql;
 let plain;
 let credentials;
@@ -73,12 +76,17 @@ beforeAll(async () => {
       search_path: 'public',
     },
   });
-  credentials = await ensureClaimRole(plain);
+  await dropStaleClaimRoles(plain);
+  credentials = await createClaimRole(plain);
   sql = postgres(claimConnectionOptions(connectionBase, credentials));
 });
 afterAll(async () => {
+  // The claim pool must end before its role can be dropped.
   if (sql) await sql.end();
-  if (plain) await plain.end();
+  if (plain) {
+    if (credentials) await dropClaimRole(plain, credentials.user);
+    await plain.end();
+  }
 });
 
 describe('docs/**/*.md sql-claim blocks', () => {
@@ -147,15 +155,49 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
     await expect(evaluateWithoutLexicalCheck(sql, '1)::text; SELECT (1')).rejects.toMatchObject({ code: '42601' });
   });
 
-  test('the claim transaction runs as the unprivileged claim role, so a superuser-only read is refused', async () => {
-    await expect(evaluateWithoutLexicalCheck(plain, 'current_user')).resolves.toBe(CLAIM_ROLE);
-    await expect(evaluateWithoutLexicalCheck(plain, "pg_read_file('postgresql.conf')")).rejects.toMatchObject({
+  test('claims run as the unprivileged claim role, so a superuser-only read is refused', async () => {
+    await expect(evaluateWithoutLexicalCheck(sql, 'current_user')).resolves.toBe(credentials.user);
+    await expect(evaluateWithoutLexicalCheck(sql, "pg_read_file('postgresql.conf')")).rejects.toMatchObject({
       code: '42501',
     });
   });
 
-  test('ensureClaimRole is idempotent on a database that already has the role', async () => {
-    await expect(ensureClaimRole(plain)).resolves.toEqual(credentials);
+  test('each run gets its own role, which authenticates and is dropped without touching another run', async () => {
+    const other = await createClaimRole(plain);
+    expect(other.user).not.toBe(credentials.user);
+    const conn = postgres(claimConnectionOptions(connectionBase, other));
+    try {
+      await expect(evaluateClaim(conn, "to_tsquery('simple', 'a')")).resolves.toBe("'a'");
+    } finally {
+      await conn.end();
+    }
+    await dropClaimRole(plain, other.user);
+    const names = (await plain`SELECT rolname FROM pg_roles WHERE rolname IN (${other.user}, ${credentials.user})`).map(
+      (r) => r.rolname
+    );
+    expect(names).toEqual([credentials.user]);
+  });
+
+  test("a crashed run's role is dropped once stale, and a live run's role is not", async () => {
+    // A name whose embedded timestamp is 2001: older than any live run's.
+    // Random suffix, so concurrent runs never collide on it; either run's
+    // cleanup may be the one that drops it.
+    const orphan = `wxyc_sql_claim_1000000000_${randomBytes(8).toString('hex')}`;
+    await plain.unsafe(`CREATE ROLE ${orphan} NOLOGIN`);
+    // A just-created role with no session yet: another run between
+    // createClaimRole and its first connection. Too young to be touched.
+    const fresh = await createClaimRole(plain);
+    try {
+      const found = await dropStaleClaimRoles(plain);
+      expect(found).not.toContain(credentials.user);
+      expect(found).not.toContain(fresh.user);
+      const names = (
+        await plain`SELECT rolname FROM pg_roles WHERE rolname IN (${orphan}, ${credentials.user}, ${fresh.user})`
+      ).map((r) => r.rolname);
+      expect(names.sort()).toEqual([credentials.user, fresh.user].sort());
+    } finally {
+      await dropClaimRole(plain, fresh.user);
+    }
   });
 
   test('the claim connection logs in as the claim role, which is not a superuser', async () => {
@@ -163,7 +205,7 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
       SELECT session_user::text AS who, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
       FROM pg_roles WHERE rolname = session_user`;
     expect(row).toEqual({
-      who: CLAIM_ROLE,
+      who: credentials.user,
       rolsuper: false,
       rolcreaterole: false,
       rolcreatedb: false,
@@ -173,9 +215,8 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
   });
 
   // Round-2 review (PR #2746): with the lexer bypassed, an expression that
-  // resets the role runs with the SESSION user's privileges. These three pin
-  // what the claim connection's unprivileged session user buys, and the fourth
-  // pins the limit that made it necessary.
+  // resets the role runs with the SESSION user's privileges. These pin what
+  // the claim connection's unprivileged session user buys.
   test.each([
     ['set_config role', `set_config('role', '${connectionBase.user}', true) || current_user::text`],
     ['set_config session_authorization', `set_config('session_authorization', '${connectionBase.user}', true)`],
@@ -187,11 +228,15 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
     await expect(evaluateWithoutLexicalCheck(sql, expr)).rejects.toMatchObject({ code: '42501' });
   });
 
-  test('LIMIT, pinned: SET LOCAL ROLE alone is undone by set_config when the session user is a superuser', async () => {
-    const admin = connectionBase.user;
-    await expect(
-      evaluateWithoutLexicalCheck(plain, `set_config('role', '${admin}', true) || current_user::text`)
-    ).resolves.toBe(`${admin}${admin}`);
+  test('RESIDUAL, pinned: a session advisory lock taken under a lexer bypass outlives the rollback', async () => {
+    // The lexer never admits pg_advisory_*; this documents what layer 4 does
+    // not cover (see the module header's residual list).
+    await expect(evaluateWithoutLexicalCheck(sql, 'pg_advisory_lock(2737)::text')).resolves.toBe('');
+    const [{ held }] = await sql`
+      SELECT count(*)::int AS held FROM pg_locks
+      WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND objid = 2737`;
+    expect(held).toBe(1);
+    await sql`SELECT pg_advisory_unlock_all()`;
   });
 
   test('the claim transaction pins search_path to pg_catalog on its own', async () => {

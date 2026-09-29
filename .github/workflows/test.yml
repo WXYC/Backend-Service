@@ -449,13 +449,15 @@ jobs:
       - name: Auth-tables doc drift (BS#1573)
         run: node scripts/check-auth-tables-doc.mjs
 
-      # BS#2737: parse every ```sql-claim block under docs/ and check that the
-      # `tests` paths-filter above lists exactly the docs holding one. It lives
-      # in this job because this job is unconditional: a docs-only PR skips
-      # unit-tests and Integration-Tests, and would otherwise merge a doc's
-      # first claim block without anything reading it. No DB, no npm ci; the
-      # claims themselves are executed by tests/integration/doc-sql-claims.spec.js.
-      - name: sql-claim docs parse and CI filter sync (BS#2737)
+      # BS#2737: the static half of the ```sql-claim check. Every block under
+      # docs/ parses; each doc's claim count matches
+      # tests/utils/sql-claim-counts.json; the `tests` paths-filter above lists
+      # exactly the claim-bearing docs; and no tracked .md outside docs/ holds
+      # a block. It lives in this job because this job is unconditional: a
+      # docs-only PR skips unit-tests and Integration-Tests, and would
+      # otherwise merge a claim nothing reads. No DB, no npm ci; the claims
+      # themselves are executed by tests/integration/doc-sql-claims.spec.js.
+      - name: sql-claim docs static check (BS#2737)
         run: node scripts/check-sql-claim-docs.mjs
 
   # Runs the WHOLE unit suite, deliberately -- do not reintroduce Jest's

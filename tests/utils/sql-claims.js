@@ -34,14 +34,16 @@
  *   indented four is content under CommonMark, so it is read as a claim line
  *   and fails for lacking a separator).
  * - Everything is strict. Any line whose fence marker sits where a fence can
- *   start (the start of the line, after at most three spaces and any
- *   blockquote `>` or list-item `-`/`*`/`+`/`1.` prefixes) and is followed by
+ *   start (the start of the line, after any leading whitespace, so a fence
+ *   four or more spaces into list-item content counts, and any blockquote
+ *   `>` or list-item `-`/`*`/`+`/`1.` prefixes) and is followed by
  *   `sql` and then `claim` (with format characters such as a zero-width space
  *   removed, then case- and NFKC-folded, so a Unicode hyphen, `{sql-claim}`
  *   and `{.sql .claim}` count) must be exactly `` ```sql-claim `` at column 0
  *   and outside every other code block, or it is an error. That catches
  *   near-miss info strings, indented, tilde, blockquoted and list-item
- *   openers, and an opener swallowed by an earlier fence someone forgot to
+ *   openers (on the marker line or in the item's content), and an opener
+ *   swallowed by an earlier fence someone forgot to
  *   close. A plain fence whose first content line is `sql-claim` is an error
  *   too ("info string must be on the fence line"). A block with zero claims,
  *   an unclosed block, a line with no separator, and an expression the lexer
@@ -50,10 +52,10 @@
  *   covers nothing.
  * - A fence marker mid-sentence is prose, not an opener, so a paragraph may
  *   mention `` ```sql-claim `` in inline code without tripping the check.
- * - Unsupported, and not detected: an HTML `<pre>` block, and a claim block
- *   in any file outside docs/. `scripts/check-sql-claim-docs.mjs` fails a
- *   sql-claim block in any tracked .md outside docs/; `<pre>` is simply not a
- *   claim block.
+ * - Not executed: a claim block in any file outside docs/ (the static check
+ *   `scripts/check-sql-claim-docs.mjs` fails one in any tracked .md, so it
+ *   cannot land silently), and an HTML `<pre>` block, which is not a claim
+ *   block and is not detected.
  *
  * A claim is a single scalar expression over literals. It cannot read a table
  * (and the lexer rejects any attempt), so a claim like "matches 2,788 of the
@@ -87,21 +89,25 @@
  *    claim additionally runs inside `BEGIN READ ONLY`. Either alone rejects a
  *    write (SQLSTATE 25006).
  * 4. **Always rolled back.** The claim's transaction ends in ROLLBACK, never
- *    COMMIT, so even a side effect that escaped layers 1-3 does not persist.
- * 5. **Unprivileged session.** The claim connection logs in as `CLAIM_ROLE`,
- *    a non-superuser LOGIN role with no grants that `ensureClaimRole` creates
- *    or re-asserts idempotently, and every claim transaction also runs
- *    `SET LOCAL ROLE` to it. Because the SESSION user is unprivileged, a
- *    claim cannot re-escalate: `set_config('role', …)`,
- *    `set_config('session_authorization', …)`, `SET ROLE` and `RESET ROLE`
- *    all fail or land back on `CLAIM_ROLE`. So a superuser-only function the
- *    lexer admitted by mistake is refused (`pg_read_file`, including through
- *    `query_to_xml`), and so is terminating a superuser's backend.
- *    `SET LOCAL ROLE` ALONE does not give that: when the session user is a
- *    superuser, as the CI user is, `set_config('role', <superuser>, true)` in
- *    the same expression undoes it. An earlier revision relied on it alone,
- *    and the spec pins that limit by running exactly that escape on a
- *    superuser connection.
+ *    COMMIT, so a transactional side effect that escaped layers 1-3 does not
+ *    persist. A session-level advisory lock is not transactional and does
+ *    persist, until the claim connection ends (see the residual list below).
+ * 5. **Unprivileged session.** The claim connection logs in as a role that
+ *    `createClaimRole` makes for this run only (`wxyc_sql_claim_<unix
+ *    seconds>_<16 hex>`): LOGIN, not a superuser, no
+ *    CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS, no grants. The spec drops it
+ *    in afterAll. Its password is random and reaches the server only as a
+ *    client-computed SCRAM-SHA-256 verifier, with statement logging off for
+ *    the DDL, so the cleartext is never in SQL text or the server log. Because
+ *    the SESSION user is unprivileged, a claim cannot re-escalate:
+ *    `set_config('role', …)`, `set_config('session_authorization', …)`,
+ *    `SET ROLE` and `RESET ROLE` all fail or stay on the claim role. So a
+ *    superuser-only function the lexer admitted by mistake is refused
+ *    (`pg_read_file`, including through `query_to_xml`), and so is
+ *    terminating a superuser's backend. A superuser session that merely
+ *    `SET ROLE`s to an unprivileged role does not give this: the same
+ *    expression can `set_config('role', <superuser>, true)` back (measured on
+ *    18.6 in review of an earlier revision that did exactly that).
  *    The session is also pinned, both as startup parameters and again by
  *    `SET LOCAL`: `search_path=pg_catalog` (the only schema searched, so an
  *    unqualified application table does not resolve and an allowlisted
@@ -114,20 +120,30 @@
  *
  * Layer 1 is still load-bearing on its own. The lexer never admits
  * `set_config`, `current_setting`, `SET`, `RESET`, `current_user`,
- * `session_user` or a `regrole` cast, so no claim can reach the role
- * machinery at all. And an unprivileged read-only transaction still runs
- * `pg_sleep` (the timeout bounds it), `set_config` of an ordinary setting
- * (the rollback undoes it), and `pg_terminate_backend` against another
- * connection logged in as `CLAIM_ROLE` itself. Layers 2-5 are there so that
+ * `session_user`, a `regrole` cast or any `pg_advisory_*` function, so no
+ * claim can reach the role machinery or take a lock. Residual risk if the
+ * lexer were bypassed anyway, as the claim role inside a read-only
+ * transaction: `pg_sleep` runs (the timeout bounds it); `set_config` of an
+ * ordinary setting runs (the rollback undoes it); `pg_terminate_backend`
+ * works against another backend logged in as the same claim role (only this
+ * run's own claim connections); and a session-level advisory lock
+ * (`pg_advisory_lock`) survives the rollback and is held until the claim
+ * connection ends in afterAll, so a colliding key used by the app or another
+ * spec in the same run would block until then. Layers 2-5 are there so that
  * a lexer bug is not, by itself, a way to write to the database or to act
  * with the privileges of the user the suite connects as. Measured on PG 18.6
- * logged in as `CLAIM_ROLE` inside `BEGIN READ ONLY`: `set_config('role',
+ * logged in as a claim role inside `BEGIN READ ONLY`: `set_config('role',
  * 'postgres', true)` fails with "permission denied to set role",
  * `set_config('session_authorization', 'postgres', true)` with "permission
  * denied to set session authorization", `query_to_xml('select
  * pg_read_file(…)', …)` with "permission denied for function pg_read_file",
- * `RESET ROLE` leaves `current_user` = `CLAIM_ROLE`, and `pg_terminate_backend`
- * on another backend logged in as `CLAIM_ROLE` returns true.
+ * `RESET ROLE` leaves `current_user` on the claim role, and
+ * `pg_terminate_backend` on another backend of the same role returns true.
+ *
+ * A run that crashes before afterAll leaves its role behind: a LOGIN role
+ * with no grants whose password nobody knows. The next run's
+ * `dropStaleClaimRoles` drops any claim role over an hour old (by the
+ * timestamp in its name) that has no session logged in as it.
  *
  * ### Why these functions
  *
@@ -177,7 +193,7 @@
  * were measured on 18.6 locally and pass on CI's 18.0; none was checked on 14.
  */
 
-const { randomBytes } = require('crypto');
+const { createHash, createHmac, pbkdf2Sync, randomBytes } = require('crypto');
 const { readdirSync, readFileSync, statSync } = require('fs');
 const { join } = require('path');
 
@@ -405,23 +421,38 @@ const FENCE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 const CLAIM_OPENER = '```sql-claim';
 
 /**
- * Where a fence can start: the start of the line, after at most three spaces
+ * The text after a fence marker when the marker is where a fence can start,
+ * else null. "Where a fence can start" means after any leading whitespace
+ * (any amount: a fence inside list-item content sits four or more spaces in)
  * and any run of blockquote (`>`) or list-item (`-`, `*`, `+`, `1.`, `1)`)
  * prefixes. A fence marker mid-sentence (inline code, prose naming a fence)
- * is not an opener. Captures the text after the marker.
+ * is not an opener.
+ *
+ * The prefixes are stripped one at a time in a loop, each step consuming at
+ * least one character with a non-nested regex, so a line of thousands of `>`
+ * scans in linear time. A single regex with a quantified group inside
+ * another backtracks exponentially on such a line (measured in review: 41 s
+ * for 30 `>`).
  */
-const OPENER_CANDIDATE = /^ {0,3}(?:(?:>[ \t]?)+ {0,3}|(?:[-*+]|\d{1,9}[.)])[ \t]+)*(?:`{3,}|~{3,})(.*)$/;
+function textAfterOpenerMarker(line) {
+  let rest = line.replace(/^[ \t]+/, '');
+  for (let m; (m = /^(?:>|[-*+][ \t]|\d{1,9}[.)][ \t])/.exec(rest)) !== null;) {
+    rest = rest.slice(m[0].length).replace(/^[ \t]+/, '');
+  }
+  const marker = /^(?:`{3,}|~{3,})/.exec(rest);
+  return marker === null ? null : rest.slice(marker[0].length);
+}
 
 /**
  * True when a line looks like it is trying to open a sql-claim block: a fence
- * marker where a fence can start (see `OPENER_CANDIDATE`), followed by `sql`
- * and then `claim` after folding (`foldInfo`), so a Unicode hyphen, a
+ * marker where a fence can start (see `textAfterOpenerMarker`), followed by
+ * `sql` and then `claim` after folding (`foldInfo`), so a Unicode hyphen, a
  * zero-width character, `{sql-claim}` and `{.sql .claim}` all count. Every
  * such line must be exactly `CLAIM_OPENER`, at top level, or it is an error.
  */
 function looksLikeClaimOpener(line) {
-  const m = OPENER_CANDIDATE.exec(line);
-  return m !== null && /sql[\s\S]*claim/.test(foldInfo(m[1]));
+  const info = textAfterOpenerMarker(line);
+  return info !== null && /sql[\s\S]*claim/.test(foldInfo(info));
 }
 
 /** Drop format characters (zero-width space/joiner, BOM, …), then fold case and compatibility forms. */
@@ -532,8 +563,8 @@ function collectSqlClaims(dir, label = (p) => p) {
 
 /**
  * postgres.js options for the claim connection. `base` supplies host, port
- * and database; the connection logs in as `CLAIM_ROLE` with the credentials
- * `ensureClaimRole` returned, never as `base.user`.
+ * and database; the connection logs in as the role `createClaimRole` made,
+ * with the credentials it returned, never as `base.user`.
  */
 function claimConnectionOptions(base, credentials) {
   return {
@@ -548,54 +579,99 @@ function claimConnectionOptions(base, credentials) {
 
 const ROLLBACK = Symbol('sql-claim rollback');
 
-/**
- * The role every claim runs as (layer 5): LOGIN, not a superuser, no
- * CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS, no grants. The claim connection
- * logs in AS this role, so it is the session user, and a session user that is
- * not a superuser cannot `SET ROLE`, `set_config('role', …)` or
- * `set_config('session_authorization', …)` its way to one.
- */
-const CLAIM_ROLE = 'wxyc_sql_claim_reader';
+/** Every claim role's name starts with this; the rest is `<unix seconds>_<16 hex>`. */
+const CLAIM_ROLE_PREFIX = 'wxyc_sql_claim_';
+const CLAIM_ROLE_NAME = new RegExp(`^${CLAIM_ROLE_PREFIX}(\\d{10})_[0-9a-f]{16}$`);
+/** A leftover role older than this, with no session logged in as it, is from a crashed run. */
+const STALE_CLAIM_ROLE_SECONDS = 3600;
+
+const SUPERUSER_REQUIRED =
+  'doc-sql-claims: the integration DB user must be a superuser. It creates a per-run LOGIN role for the claims, and a ' +
+  'non-superuser cannot: without CREATEROLE the CREATE ROLE is refused, and with CREATEROLE (PG 16+) the creator is ' +
+  'granted the new role without SET, so the layer tests that SET ROLE to it fail with "permission denied to set role". ' +
+  'CI uses the postgres image superuser POSTGRES_USER.';
 
 /**
- * Per-process password. Random so that no fixed credential exists for a
- * LOGIN role on whatever database the integration suite points at. Two
- * processes running the suite at once against one database rotate it under
- * each other; a claim connection that already authenticated is unaffected.
+ * A SCRAM-SHA-256 verifier for `password` (RFC 5802 / RFC 7677), in the form
+ * Postgres stores in pg_authid. Postgres accepts a verifier in `PASSWORD '…'`
+ * as-is, so the cleartext never appears in SQL text or the server log.
  */
-const CLAIM_ROLE_PASSWORD = randomBytes(24).toString('hex');
+function scramSha256Verifier(password, salt = randomBytes(16), iterations = 4096) {
+  const salted = pbkdf2Sync(password, salt, iterations, 32, 'sha256');
+  const hmac = (key, text) => createHmac('sha256', key).update(text).digest();
+  const storedKey = createHash('sha256').update(hmac(salted, 'Client Key')).digest();
+  const serverKey = hmac(salted, 'Server Key');
+  const b64 = (buf) => buf.toString('base64');
+  return `SCRAM-SHA-256$${iterations}:${b64(salt)}$${b64(storedKey)}:${b64(serverKey)}`;
+}
 
 /**
- * Create or update `CLAIM_ROLE` and return `{ user, password }` for
- * `claimConnectionOptions`. Idempotent: an existing role (including a NOLOGIN
- * one from an earlier revision of this module) is re-asserted to the exact
- * attributes above. A concurrent creator surfaces as 42710 duplicate_object
- * (it committed before our CREATE began) or 23505 unique_violation on
- * pg_authid_rolname_index (it committed while our CREATE waited); both mean
- * the role now exists, so both fall through to the ALTER.
+ * Create this run's claim role and return `{ user, password }` for
+ * `claimConnectionOptions` (layer 5). The name is unique per call, so
+ * concurrent runs against one database never touch each other's role, and the
+ * password (random, never reused) goes to the server only as a SCRAM verifier.
+ * The DDL runs with statement logging switched off for the transaction as
+ * well. Call `dropClaimRole` once every connection logged in as it has ended.
  *
- * Needs a writable connection whose user is a superuser (the CI user is the
- * postgres image's superuser POSTGRES_USER). A superuser is also what the
- * spec's layer tests need, since they `SET ROLE` to this role from that
- * connection. Without it this fails with 42501, and the error says so rather
- * than leaving every claim to fail later with a confusing permission error.
+ * Needs a writable connection whose user is a superuser, checked up front so
+ * the failure names the requirement (see SUPERUSER_REQUIRED).
  */
-async function ensureClaimRole(sql) {
-  const attributes = `LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${CLAIM_ROLE_PASSWORD}'`;
+async function createClaimRole(sql) {
+  const [{ rolsuper }] = await sql.unsafe('SELECT rolsuper FROM pg_roles WHERE rolname = current_user');
+  if (!rolsuper) throw new Error(SUPERUSER_REQUIRED);
+  const user = `${CLAIM_ROLE_PREFIX}${Math.floor(Date.now() / 1000)}_${randomBytes(8).toString('hex')}`;
+  const password = randomBytes(24).toString('hex');
   try {
-    try {
-      await sql.unsafe(`CREATE ROLE ${CLAIM_ROLE} ${attributes}`);
-    } catch (e) {
-      if (e.code !== '42710' && e.code !== '23505') throw e;
-      await sql.unsafe(`ALTER ROLE ${CLAIM_ROLE} ${attributes}`);
-    }
+    await sql.begin(async (tx) => {
+      await tx.unsafe("SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'");
+      await tx.unsafe(
+        `CREATE ROLE ${user} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${scramSha256Verifier(password)}'`
+      );
+    });
   } catch (e) {
-    if (e.code === '42501') {
-      e.message = `ensureClaimRole: the integration DB user cannot create or alter ${CLAIM_ROLE} (${e.message}); it needs to be a superuser`;
-    }
+    if (e.code === '42501') e.message = `${SUPERUSER_REQUIRED} (${e.message})`;
     throw e;
   }
-  return { user: CLAIM_ROLE, password: CLAIM_ROLE_PASSWORD };
+  return { user, password };
+}
+
+/** Drop a role `createClaimRole` made. Refuses any other name. */
+async function dropClaimRole(sql, user) {
+  if (!CLAIM_ROLE_NAME.test(user)) throw new Error(`dropClaimRole: ${user} is not a claim role name`);
+  await sql.unsafe(`DROP ROLE IF EXISTS ${user}`);
+}
+
+/**
+ * Drop claim roles a crashed run left behind: older than
+ * STALE_CLAIM_ROLE_SECONDS by the timestamp in their name, and with no
+ * session logged in as them. A live run's role is younger than that or has
+ * its connection open, so it is never touched. Concurrent runs may race to
+ * drop the same orphan; losing that race is not an error. Returns the stale
+ * names found.
+ */
+async function dropStaleClaimRoles(sql, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const rows = await sql.unsafe(
+    `SELECT r.rolname FROM pg_roles r
+     WHERE r.rolname LIKE '${CLAIM_ROLE_PREFIX}%'
+       AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.usename = r.rolname)`
+  );
+  const stale = rows
+    .map((r) => r.rolname)
+    .filter((name) => {
+      const m = CLAIM_ROLE_NAME.exec(name);
+      return m !== null && nowSeconds - Number(m[1]) > STALE_CLAIM_ROLE_SECONDS;
+    });
+  for (const name of stale) {
+    try {
+      await dropClaimRole(sql, name);
+    } catch (e) {
+      // Another run's cleanup may drop the same orphan at the same moment.
+      // That is fine; anything else is not.
+      const [{ n }] = await sql.unsafe(`SELECT count(*)::int AS n FROM pg_roles WHERE rolname = '${name}'`);
+      if (n !== 0) throw e;
+    }
+  }
+  return stale;
 }
 
 /**
@@ -608,7 +684,7 @@ async function evaluateWithoutLexicalCheck(sql, expr) {
   try {
     await sql.begin('read only', async (tx) => {
       await tx.unsafe(
-        `SET LOCAL ROLE ${CLAIM_ROLE}; SET LOCAL search_path = pg_catalog; SET LOCAL statement_timeout = '2s'; ` +
+        "SET LOCAL search_path = pg_catalog; SET LOCAL statement_timeout = '2s'; " +
           "SET LOCAL standard_conforming_strings = on; SET LOCAL default_text_search_config = 'pg_catalog.simple'"
       );
       rows = await tx.unsafe(`SELECT (${expr})::text AS v`, [], { simple: false, prepare: false });
@@ -633,7 +709,7 @@ module.exports = {
   ALLOWED_WORDS,
   ALLOWED_OPERATORS,
   SESSION_PARAMETERS,
-  CLAIM_ROLE,
+  CLAIM_ROLE_PREFIX,
   ClaimSyntaxError,
   assertSafeExpression,
   parseClaimLine,
@@ -642,7 +718,10 @@ module.exports = {
   findMarkdownFiles,
   collectSqlClaims,
   claimConnectionOptions,
-  ensureClaimRole,
+  createClaimRole,
+  dropClaimRole,
+  dropStaleClaimRoles,
+  scramSha256Verifier,
   evaluateClaim,
   evaluateWithoutLexicalCheck,
 };
