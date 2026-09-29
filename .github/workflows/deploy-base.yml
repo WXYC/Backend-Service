@@ -837,7 +837,10 @@ jobs:
             TRUNCATED=false
             if [ -n "$LIVE_TARGETS" ]; then
               REFERENCED_REPOS=$(
-                { echo "$CRONTAB_OUT" | grep -oE '# wxyc_[a-zA-Z0-9-]+' | sed 's/^# wxyc_//'
+                # Anchored to end of line: target markers are kebab-case, so a
+                # non-target marker like `# wxyc_ecr_refresh` must not be read
+                # as a target named `ecr` (that tripped this guard on every run).
+                { echo "$CRONTAB_OUT" | grep -oE '# wxyc_[a-zA-Z0-9-]+$' | sed 's/^# wxyc_//'
                   docker ps --format '{{.Image}}' | while read -r IMG; do
                     case "$IMG" in
                       "$AWS_ECR_URI"/*) echo "${IMG#"$AWS_ECR_URI"/}" | cut -d: -f1 ;;
