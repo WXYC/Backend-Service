@@ -33,7 +33,7 @@
  * reads `git ls-files`). The unit test passes a fixture tree it `git init`s.
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -102,7 +102,10 @@ if (start < 0 || end < 0) {
 // 4. No sql-claim block in a tracked .md outside docs/.
 const tracked = execFileSync('git', ['ls-files', '-z', '--', '*.md'], { cwd: root, encoding: 'utf8' })
   .split('\0')
-  .filter((p) => p !== '' && !p.startsWith('docs/') && !p.startsWith(FIXTURE_DIR));
+  .filter((p) => p !== '' && !p.startsWith('docs/') && !p.startsWith(FIXTURE_DIR))
+  // A tracked file deleted in the working tree but not yet staged is still in
+  // the index; there is nothing to read, and nothing to execute either.
+  .filter((p) => existsSync(join(root, p)));
 for (const file of tracked) {
   if (mentionsSqlClaim(readFileSync(join(root, file), 'utf8'))) {
     problems.push(

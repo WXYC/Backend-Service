@@ -5,15 +5,16 @@
  * allowlist) and the block grammar without a database; the layers that need
  * Postgres are pinned in `tests/integration/doc-sql-claims.spec.js`.
  */
+import { createHmac } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
   ClaimSyntaxError,
   assertSafeExpression,
-  CLAIM_ROLE,
   collectSqlClaims,
-  ensureClaimRole,
+  createClaimRole,
   evaluateClaim,
+  scramSha256Verifier,
   mentionsSqlClaim,
   parseClaimLine,
   parseSqlClaims,
@@ -281,6 +282,8 @@ describe('assertSafeExpression — re-escalation is refused by the lexer', () =>
     "query_to_xml('select 1', false, false, '')",
     'pg_terminate_backend(1)',
     "pg_read_file('PG_VERSION')",
+    'pg_advisory_lock(42)',
+    'pg_try_advisory_lock(42)',
   ])('rejects the call %s', (expr) => {
     expect(() => assertSafeExpression(expr)).toThrow(/is not in ALLOWED_FUNCTIONS/);
   });
@@ -349,6 +352,42 @@ describe('parseSqlClaims — malformed openers still fail (round 2)', () => {
   });
 });
 
+describe('parseSqlClaims — list-item content and pathological prefixes (round 3)', () => {
+  it.each([
+    [
+      'a fence four spaces into an ordered-list item',
+      "1. Step one:\n\n    ```sql-claim\n    to_tsquery('simple', 'a')  ->  wrong\n    ```\n",
+    ],
+    [
+      'a fence six spaces into a nested list item',
+      "- a\n  - b\n\n      ```sql-claim\n      'a'::text  ->  a\n      ```\n",
+    ],
+  ])('fails %s instead of skipping it', (_label, text) => {
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(claims).toEqual([]);
+    expect(errors).toEqual([expect.objectContaining({ message: expect.stringMatching(/malformed sql-claim fence/) })]);
+    expect(mentionsSqlClaim(text)).toBe(true);
+  });
+
+  it.each([
+    ['5,000 `>`', '>'.repeat(5000) + 'x'],
+    ['2,000 `> `', '> '.repeat(2000) + 'x'],
+    ['mixed `> - > -` runs', '> - '.repeat(2000) + 'x'],
+    ['5,000 leading spaces', ' '.repeat(5000) + 'x'],
+  ])('scans %s in linear time', (_label, line) => {
+    const t0 = process.hrtime.bigint();
+    expect(parseSqlClaims(`${line}\n${line}\n`, 'doc.md')).toEqual({ claims: [], errors: [] });
+    expect(Number(process.hrtime.bigint() - t0) / 1e6).toBeLessThan(200);
+  });
+
+  it('still finds an opener at the end of a long prefix run', () => {
+    const { errors } = parseSqlClaims('> '.repeat(2000) + '```sql-claim\n', 'doc.md');
+    expect(errors).toEqual([
+      expect.objectContaining({ line: 1, message: expect.stringMatching(/malformed sql-claim fence/) }),
+    ]);
+  });
+});
+
 describe('evaluateClaim — the lexical check runs before the database is touched', () => {
   it.each([
     '1; DROP TABLE x',
@@ -364,52 +403,64 @@ describe('evaluateClaim — the lexical check runs before the database is touche
   });
 });
 
-describe('ensureClaimRole — idempotent create-or-alter (round 2)', () => {
-  const pgError = (code: string, message = code) => Object.assign(new Error(message), { code });
-  const fakeSql = (createError?: Error, alterError?: Error) => ({
-    unsafe: jest.fn((q: string) => {
-      if (q.startsWith('CREATE ROLE') && createError) return Promise.reject(createError);
-      if (q.startsWith('ALTER ROLE') && alterError) return Promise.reject(alterError);
-      return Promise.resolve([]);
-    }),
+describe('scramSha256Verifier — the password never reaches SQL in cleartext (round 3)', () => {
+  it('derives the RFC 7677 keys: the verifier for "pencil" reproduces the RFC server signature', () => {
+    const salt = Buffer.from('W22ZaJ0SNY7soEsUEjb6gQ==', 'base64');
+    const verifier = scramSha256Verifier('pencil', salt, 4096);
+    expect(verifier).toBe(
+      'SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ==$WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU='
+    );
+    // RFC 7677 section 3: ServerSignature = HMAC(ServerKey, AuthMessage).
+    const serverKey = Buffer.from(verifier.split(':').pop(), 'base64');
+    const authMessage =
+      'n=user,r=rOprNGfwEbeRWgbNEkqO,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0';
+    expect(createHmac('sha256', serverKey).update(authMessage).digest('base64')).toBe(
+      '6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4='
+    );
   });
+});
 
-  it('creates a non-superuser LOGIN role and returns its credentials', async () => {
-    const sql = fakeSql();
-    const creds = await ensureClaimRole(sql);
-    expect(creds).toEqual({ user: CLAIM_ROLE, password: expect.stringMatching(/^[0-9a-f]{48}$/) });
-    expect(sql.unsafe.mock.calls[0][0]).toMatch(
+describe('createClaimRole — a per-run role, never a cleartext password in SQL (round 3)', () => {
+  type Call = string;
+  const fakeSql = (rolsuper: boolean, createError?: Error) => {
+    const calls: Call[] = [];
+    const run = (q: string) => {
+      calls.push(q);
+      if (q.startsWith('CREATE ROLE') && createError) return Promise.reject(createError);
+      return Promise.resolve(q.includes('rolsuper') ? [{ rolsuper }] : []);
+    };
+    const tx = { unsafe: run };
+    return {
+      calls,
+      unsafe: run,
+      begin: (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+    };
+  };
+
+  it('creates a uniquely named non-superuser LOGIN role from a SCRAM verifier, with statement logging off', async () => {
+    const sql = fakeSql(true);
+    const a = await createClaimRole(sql);
+    const b = await createClaimRole(fakeSql(true));
+    expect(a.user).toMatch(/^wxyc_sql_claim_\d{10}_[0-9a-f]{16}$/);
+    expect(b.user).not.toBe(a.user);
+    const create = sql.calls.find((q) => q.startsWith('CREATE ROLE'));
+    expect(create).toMatch(
       new RegExp(
-        `^CREATE ROLE ${CLAIM_ROLE} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '[0-9a-f]{48}'$`
+        `^CREATE ROLE ${a.user} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'SCRAM-SHA-256\\$4096:[^']+'$`
       )
     );
+    expect(sql.calls.join('\n')).not.toContain(a.password);
+    expect(sql.calls).toContain("SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'");
   });
 
-  it.each([
-    ['42710 (the other creator committed first)', '42710'],
-    ['23505 on pg_authid_rolname_index (the other creator committed while we waited)', '23505'],
-  ])('treats %s as "exists" and re-asserts the attributes', async (_label, code) => {
-    const sql = fakeSql(pgError(code));
-    const first = await ensureClaimRole(sql);
-    expect(sql.unsafe.mock.calls.map((c: string[]) => c[0].split(' ').slice(0, 2).join(' '))).toEqual([
-      'CREATE ROLE',
-      'ALTER ROLE',
-    ]);
-    expect(await ensureClaimRole(fakeSql(pgError(code)))).toEqual(first);
+  it('refuses up front, and says why, when the DB user is not a superuser (CREATEROLE included)', async () => {
+    const sql = fakeSql(false);
+    await expect(createClaimRole(sql)).rejects.toThrow(/must be a superuser.*CREATEROLE/s);
+    expect(sql.calls.some((q) => q.startsWith('CREATE ROLE'))).toBe(false);
   });
 
-  it('says what the DB user lacks when it cannot create or alter the role (42501)', async () => {
-    await expect(ensureClaimRole(fakeSql(pgError('42501', 'permission denied to create role')))).rejects.toThrow(
-      /cannot create or alter wxyc_sql_claim_reader \(permission denied to create role\); it needs to be a superuser/
-    );
-    await expect(ensureClaimRole(fakeSql(pgError('42710'), pgError('42501', 'denied')))).rejects.toMatchObject({
-      code: '42501',
-    });
-  });
-
-  it('rethrows any other error unchanged', async () => {
-    await expect(ensureClaimRole(fakeSql(pgError('08006', 'connection failure')))).rejects.toThrow(
-      /^connection failure$/
-    );
+  it('rewrites a 42501 from CREATE ROLE into the same setup message', async () => {
+    const denied = Object.assign(new Error('permission denied to create role'), { code: '42501' });
+    await expect(createClaimRole(fakeSql(true, denied))).rejects.toThrow(/must be a superuser/);
   });
 });
