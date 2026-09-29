@@ -3147,10 +3147,11 @@ async function searchLibraryByTsvector(
  * (backfilled in A.2) so the predicate is single-table and reachable by the
  * per-column GIN trigram indexes.
  *
- * BS#670 narrowed what reaches here. A prefix tsquery serves partially-typed
- * terms, so this path is no longer the keystroke path — it is now what it says
- * it is, the misspelling path (`pikn floyd`), where no prefix of the typed
- * string is a prefix of a real lexeme.
+ * BS#670 narrowed what reaches here: the prefix tsquery now serves a
+ * partially-typed LAST token, which used to fall through. What still arrives
+ * is misspellings (`pikn floyd`), an incomplete earlier token (`stereola
+ * transien` — only the last token is a prefix), and queries whose literal
+ * words no row holds together, such as `cat or power` (ADR 0015).
  */
 async function searchLibraryByTrigramBoth(
   query: string,
