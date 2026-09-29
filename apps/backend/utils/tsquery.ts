@@ -95,13 +95,14 @@ const TSQUERY_METACHARACTERS = /[&|!()<>:*\\"]/g;
 const HAS_LEXEME_CHARACTER = /[\p{L}\p{N}]/u;
 
 /**
- * Ceiling on the number of AND'd operands in the emitted tsquery.
+ * Ceiling on the number of whitespace-separated tokens AND'd together.
  *
- * `:*` costs roughly 5x a bare lexeme per operand (a prior measurement put
- * 4,000 rows at 68.9 ms with prefixes against 12.4 ms without), so an
- * unbounded token count is an unbounded cost per query. 16 is generous for
- * any real search phrase and cheap enough that the cap is never the thing a
- * DJ notices.
+ * This bounds the token count, not the query's cost. `to_tsquery` re-lexes
+ * each quoted token, so one hyphen- or punctuation-joined token expands into
+ * a `<->` chain of any length (`'a-b-c-d-e-f':*` is seven prefix operands).
+ * A 1,500-part chain costs about 0.8 s on the 64,193-row clone, comparable to
+ * `websearch_to_tsquery` on the same string, so the exposure predates this
+ * builder. 16 tokens is generous for any real search phrase.
  */
 const MAX_OPERANDS = 16;
 
