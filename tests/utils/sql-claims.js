@@ -586,10 +586,10 @@ const CLAIM_ROLE_NAME = new RegExp(`^${CLAIM_ROLE_PREFIX}(\\d{10})_[0-9a-f]{16}$
 const STALE_CLAIM_ROLE_SECONDS = 3600;
 
 const SUPERUSER_REQUIRED =
-  'doc-sql-claims: the integration DB user must be a superuser. It creates a per-run LOGIN role for the claims, and a ' +
-  'non-superuser cannot: without CREATEROLE the CREATE ROLE is refused, and with CREATEROLE (PG 16+) the creator is ' +
-  'granted the new role without SET, so the layer tests that SET ROLE to it fail with "permission denied to set role". ' +
-  'CI uses the postgres image superuser POSTGRES_USER.';
+  'doc-sql-claims: the integration DB user must be a superuser. It creates a per-run LOGIN role for the claims inside ' +
+  'a transaction that first runs SET LOCAL log_statement / log_min_error_statement, so the role DDL is never logged, ' +
+  'and only a superuser may set those parameters: a CREATEROLE non-superuser is refused there with 42501 before the ' +
+  'CREATE ROLE runs. CI uses the postgres image superuser POSTGRES_USER.';
 
 /**
  * A SCRAM-SHA-256 verifier for `password` (RFC 5802 / RFC 7677), in the form
@@ -610,8 +610,12 @@ function scramSha256Verifier(password, salt = randomBytes(16), iterations = 4096
  * `claimConnectionOptions` (layer 5). The name is unique per call, so
  * concurrent runs against one database never touch each other's role, and the
  * password (random, never reused) goes to the server only as a SCRAM verifier.
- * The DDL runs with statement logging switched off for the transaction as
- * well. Call `dropClaimRole` once every connection logged in as it has ended.
+ * The DDL runs with statement, error-statement and duration logging switched
+ * off for the transaction as well. One sink is out of reach: with
+ * pg_stat_statements loaded (track_utility on), the CREATE ROLE text,
+ * verifier included, stays in pg_stat_statements.query. That is a verifier
+ * for a random 192-bit password and a grant-less role dropped seconds later,
+ * not the password; neither CI nor the dev profiles load the extension. Call `dropClaimRole` once every connection logged in as it has ended.
  *
  * Needs a writable connection whose user is a superuser, checked up front so
  * the failure names the requirement (see SUPERUSER_REQUIRED).
@@ -623,7 +627,11 @@ async function createClaimRole(sql) {
   const password = randomBytes(24).toString('hex');
   try {
     await sql.begin(async (tx) => {
-      await tx.unsafe("SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'");
+      await tx.unsafe(
+        "SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'; " +
+          'SET LOCAL log_min_duration_statement = -1; SET LOCAL log_min_duration_sample = -1; ' +
+          'SET LOCAL log_transaction_sample_rate = 0'
+      );
       await tx.unsafe(
         `CREATE ROLE ${user} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${scramSha256Verifier(password)}'`
       );
