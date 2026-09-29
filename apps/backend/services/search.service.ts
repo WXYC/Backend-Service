@@ -401,8 +401,8 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
  * (artist A, track B, dj_name B, album C, label D — migration 0054 added
  * dj_name to 0052's original four), and `tsvector || tsvector` leaves no
  * position gap, so a prefix-phrase query straddles FOUR field seams. Porting
- * `:*` here is tracked as WXYC/Backend-Service#2726, alongside the
- * fallback-gap half of WXYC/Backend-Service#2712 below.
+ * `:*` here is WXYC/Backend-Service#2712, which is blocked on
+ * WXYC/Backend-Service#2726 closing those seams first.
  *
  * `library.search_doc` had the same defect across its single seam and migration
  * 0178 closed it (WXYC/Backend-Service#2714) by concatenating a sentinel

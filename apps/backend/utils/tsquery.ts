@@ -1,4 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
+import { hasAlphanumeric } from './text-query.js';
 
 /**
  * Last-token prefix `tsquery` construction for catalog search (BS#670).
@@ -21,10 +22,10 @@ import { sql, type SQL } from 'drizzle-orm';
  * ## Why only the LAST token is prefixed
  *
  * An earlier attempt (WXYC/Backend-Service#2709) suffixed `:*` on every
- * token. `ts_rank` is essentially constant under `:*` — it scores by
- * matching-lexeme count, and a prefix operand always "matches" — so
- * prefixing every token left the ranker with no text signal at all, and
- * `cat` ranked `Catherine Catapult / Cats` above `Cat Power`. Prefixing only
+ * token. A prefix operand credits every word it prefixes, so `ts_rank` under
+ * `:*` over-rewards rows full of longer words that merely start with the
+ * query — `cat` ranked `Catherine Catapult / Cats` (1.459) above `Cat Power`
+ * (0.608). Prefixing only
  * the token the DJ is *currently typing* — always the last one — keeps every
  * earlier, already-completed token an exact whole-lexeme match, so `ts_rank`
  * stays meaningful and a completed prefix (`stereolab`) still favors an exact
@@ -35,10 +36,11 @@ import { sql, type SQL } from 'drizzle-orm';
  *
  * {@link buildPrefixTsquery} returns both halves of that seam from a single
  * pass over the input: `tsquery` (last token prefixed) drives the WHERE
- * predicate and the `ts_rank` score, and `exactTsquery` (no token prefixed —
- * every token an exact lexeme) drives only `match_tier`'s CASE, so a row that
- * matches on every token *exactly* outranks one that only matched the last
- * token as a prefix.
+ * predicate and the secondary `album_score`, and `exactTsquery` (no token
+ * prefixed — every token an exact lexeme) drives `match_tier`'s CASE and
+ * `exact_score`, the first sort key within a tier. A row that matches every
+ * token exactly outranks one that only matched the last token as a prefix,
+ * and within a tier a whole-word hit outranks prefix credit.
  *
  * ## Why this has to be built by hand
  *
@@ -85,14 +87,13 @@ import { sql, type SQL } from 'drizzle-orm';
  * phrase adjacency (`'cat"power':*` → `'cat':* <-> 'power':*`) instead of the
  * AND `"cat power"` is supposed to build identically to `cat power`.
  *
- * `-` is deliberately NOT in this class. Splitting on every hyphen would
- * break interior compounds (`Chuquimamani-Condori`) that migration `0178`
- * bought a position gap specifically to keep matching — see ADR 0015.
+ * `-` is deliberately NOT in this class. Splitting on it would turn a signed
+ * number into a bare one (`-3d` stops matching a row that holds `-3d`), and
+ * would loosen a hyphenated compound from within-field adjacency
+ * (`'chuquimamani':* <-> 'condori':*`) to an AND of the two words — see
+ * ADR 0015.
  */
 const TSQUERY_METACHARACTERS = /[&|!()<>:*\\"]/g;
-
-/** A token contributes a lexeme only if it holds a letter or a digit. */
-const HAS_LEXEME_CHARACTER = /[\p{L}\p{N}]/u;
 
 /**
  * Ceiling on the number of whitespace-separated tokens AND'd together.
@@ -110,14 +111,15 @@ const MAX_OPERANDS = 16;
 export interface PrefixTsquery {
   /**
    * Every token an exact quoted lexeme except the last, which is suffixed
-   * `:*`. Drives the WHERE predicate and the `ts_rank` score — it accepts
-   * the row the DJ is still typing toward.
+   * `:*`. Drives the WHERE predicate and `album_score`, the secondary
+   * within-tier `ts_rank` — it accepts the row the DJ is still typing toward.
    */
   tsquery: SQL;
   /**
-   * The same token list, quoted, with no `:*` anywhere. Drives only
+   * The same token list, quoted, with no `:*` anywhere. Drives
    * `searchLibraryByTsvector`'s `match_tier` CASE — a row that matches this
-   * matched every token as a complete word, not merely a prefix of one.
+   * matched every token as a complete word, not merely a prefix of one — and
+   * `exact_score`, the first sort key within a tier.
    */
   exactTsquery: SQL;
 }
@@ -141,7 +143,7 @@ export function buildPrefixTsquery(query: string): PrefixTsquery | null {
   const allTokens = query
     .replace(TSQUERY_METACHARACTERS, ' ')
     .split(/\s+/)
-    .filter((token) => token.length > 0 && HAS_LEXEME_CHARACTER.test(token));
+    .filter((token) => token.length > 0 && hasAlphanumeric(token));
 
   if (allTokens.length === 0) return null;
 
