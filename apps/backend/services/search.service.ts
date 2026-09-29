@@ -392,12 +392,11 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
  * `to_tsvector('simple', 'Кино Группа крови') @@ websearch_to_tsquery('simple', 'Кино')`
  * -> `true`. The tsvector path could serve every non-Latin query in
  * `tests/fixtures/charset-torture.json`'s 33 no-ASCII-alphanumeric entries;
- * this predicate does not ask that question. It stays ASCII-only anyway,
- * for two reasons, neither of them "tsvector can't tokenize this": trigram's
- * substring recall (`тр` matching inside a longer Cyrillic word) is worth
- * more here than tsvector's whole-lexeme precision when nobody has measured
- * which scripts' DJ queries are usually partial words vs. complete ones; and
- * no one has measured the alternative — swapping the test for
+ * this predicate does not ask that question. It stays ASCII-only because the
+ * alternative is unmeasured, not because it is known to be worse: trigram
+ * substring-matches a partial word inside a longer one, tsvector matches
+ * whole lexemes only, and nobody knows which of those non-Latin DJ queries
+ * usually need. Swapping the test for
  * `/[\p{L}\p{N}]/u` (matching `hasAlphanumeric` in
  * `apps/backend/utils/text-query.ts`) is a user-visible recall change on the
  * live `GET /flowsheet/search` surface (33 charset classes move from
