@@ -241,11 +241,17 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
         counters.preResolved += 1;
       } else {
         // Null with no LRU growth: tier 1+2 missed and LML was either
-        // unconfigured, returned the same negative we'd already cached, or
-        // declined the row due to NULL artist_name/album_title. None of
-        // these populate either LRU, so we fold them into preResolved for
-        // the summary (the picker won't pay an LML round-trip on next open
-        // either way — it'll degrade to free-text immediately).
+        // unconfigured, returned the same negative we'd already cached,
+        // declined the row due to NULL artist_name/album_title, or (BS#2731)
+        // answered `degraded`/`timeout` with no trusted match, or threw.
+        // None of these populate either LRU, so we fold them all into
+        // preResolved for the summary — but unlike the first three reasons,
+        // the last two (degraded/timeout/thrown) are NOT actually cheap on
+        // the next open: nothing was cached, so that request pays the full
+        // LML round-trip again. `preResolved` undercounts real warm-pass
+        // work for this cohort; there's no signal here to separate it from
+        // the genuinely-free cases without also touching `resolveRotationPickerSource`'s
+        // return shape.
         counters.preResolved += 1;
       }
     } catch (err) {

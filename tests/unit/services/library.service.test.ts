@@ -34,6 +34,20 @@ class MockLmlClientError extends Error {
   }
 }
 
+// Mirror the real `LimiterShedError` shape (BS#2731): extends
+// `LmlClientError` (statusCode 503) and carries a `reason`. Used to give the
+// "thrown LML errors leave the row retryable" tests a real shed instance —
+// `resolveRotationDiscogsReleaseViaLml` no longer branches on the error's
+// type (a shed is just one more thrown error, same as a timeout or a 5xx),
+// but the test still wants a shed-shaped rejection, not a duck-typed plain
+// `Error`, to exercise the case honestly.
+class MockLimiterShedError extends MockLmlClientError {
+  constructor(public readonly reason: string) {
+    super(`LML limiter shed: ${reason}`, 503);
+    this.name = 'LimiterShedError';
+  }
+}
+
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   lookupBySong: mockLookupBySong,
@@ -41,6 +55,7 @@ jest.mock('@wxyc/lml-client', () => ({
   getRelease: mockGetRelease,
   envInt: (_name: string, fallback: number) => fallback,
   LmlClientError: MockLmlClientError,
+  LimiterShedError: MockLimiterShedError,
   // Mirrors the real predicate exactly (`@wxyc/lml-client` `src/trust.ts`):
   // `search_type === 'direct'`, fail-closed when the field is absent.
   isTrustedLmlAlbumMatch: (response: { search_type?: string } | null | undefined) => response?.search_type === 'direct',
@@ -3003,20 +3018,17 @@ describe('library.service', () => {
       expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
       // 10 s timeout matches tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` so picker
       // coverage on long-tail rotation rows parity-matches the legacy system.
-      // No `budgetMs` here on purpose: BS#1186's cutoff was justified by
-      // malformed-query examples (track-titles-as-album-names) — for the
-      // picker, which always passes real `(artist_name, album_title)` pairs
-      // from rotation, the cascade's later strategies are exactly where the
-      // match for obscure college rotation comes from.
       // `extended: true` is no longer passed at the callsite — the
       // LmlLookupCoordinator (BS#885) forces it on the wire. Coordinator
       // mock receives the callsite args without it.
       // BS#1826 PR 2: the 10 s timeout is now the `library-rotation-picker`
       // class-2 override in the per-caller policy layer, not a call-site
       // `timeoutMs` literal.
+      // No `requireSearchType` gate (BS#2731): the trust check happens on the
+      // raw response via `isTrustedLmlAlbumMatch` so a degraded/timed-out
+      // reply can be told apart from a genuine untrusted match.
       expect(mockLookupMetadata).toHaveBeenCalledWith('Autechre', 'Confield', undefined, {
         caller: 'library-rotation-picker',
-        requireSearchType: 'direct',
       });
     });
 
@@ -3044,7 +3056,7 @@ describe('library.service', () => {
         undefined,
         'All the Young Droids: Junkshop Synth Pop 1978-1985',
         undefined,
-        { caller: 'library-rotation-picker', requireSearchType: 'direct' }
+        { caller: 'library-rotation-picker' }
       );
     });
 
@@ -3274,28 +3286,148 @@ describe('library.service', () => {
       expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
     });
 
-    it('does not cache transient LML failures so the next call retries', async () => {
-      // A thrown LML error indicates an upstream blip (timeout, 5xx). Caching
-      // null in that case would lock the picker into degraded mode for the
-      // negative TTL window even after LML recovers. The implementation skips
-      // the cache write on the catch arm — pin that here.
-      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
-      mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    describe('LML response gating (BS#2731) — a trusted match wins even under degraded/timeout', () => {
+      // Mirrors `DiscogsProvider.search` (BS#1890), NOT `enrichWithArtwork`:
+      // LML's `_build_degraded_response` still runs `fetch_artwork` before
+      // shedding later pipeline steps, so a degraded reply can still carry a
+      // real trusted match. The trust/artwork extraction runs first and wins
+      // regardless of `degraded`/`timeout`; only a NULL result from such a
+      // reply is left retryable (no cache, no stamp) rather than treated as
+      // a confirmed no-match — see the 30-days-of-telemetry note on
+      // `resolveRotationDiscogsReleaseViaLml`'s own doc comment for how often
+      // this caller actually sees a degraded/timed-out reply in practice
+      // (rare — the defect is real but latent).
+      it('returns and positive-caches a trusted direct match even when the reply is degraded', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockResolvedValueOnce({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+          degraded: true,
+          degraded_reason: 'deadline_exceeded',
+        });
 
-      const first = await resolveRotationPickerSource(42);
-      expect(first).toBeNull();
+        const result = await resolveRotationPickerSource(42);
 
-      mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
-      mockLookupMetadata.mockResolvedValueOnce({
-        results: [{ artwork: { release_id: 4080 } }],
-        search_type: 'direct',
+        expect(result).toEqual({ releaseId: 4080, inlineTracklist: null });
+        expect(__rotationLmlCacheSizesForWarm().positive).toBe(1);
+        expect(db.update).not.toHaveBeenCalled();
       });
-      const second = await resolveRotationPickerSource(42);
-      expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
 
-      expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
-      consoleSpy.mockRestore();
+      it.each([
+        [
+          'degraded: true, no usable match (LML shed its own enrichment tail)',
+          { results: [], search_type: 'none', degraded: true, degraded_reason: 'deadline_exceeded' },
+        ],
+        [
+          'timeout: true, no usable match (LML hit its own hard cap)',
+          { results: [], search_type: 'none', timeout: true },
+        ],
+      ])('%s leaves the row retryable: no cache write, no persisted stamp', async (_label, response) => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockResolvedValueOnce(response);
+
+        const first = await resolveRotationPickerSource(42);
+        expect(first).toBeNull();
+        expect(db.update).not.toHaveBeenCalled();
+        expect(__rotationLmlCacheSizesForWarm()).toEqual({ positive: 0, negative: 0 });
+
+        // Next call retries LML from scratch — no marker of any kind survives.
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockResolvedValueOnce({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+        const second = await resolveRotationPickerSource(42);
+        expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    describe('thrown LML errors (BS#2731) leave the row retryable', () => {
+      // Timeout, 5xx, a BS#1748 limiter shed, or anything else the lookup
+      // throws: no cache write, no persisted stamp — the same contract as
+      // before BS#2731. LML keeps working and warms its own cache after a
+      // client-side timeout, so the next open tends to succeed fast without
+      // any help from a cache here.
+      it.each([
+        ['a generic network error', new Error('LML request failed: fetch failed')],
+        // `lmlFetch` converts an AbortController firing into exactly this
+        // shape (`shared/lml-client/src/index.ts` ~778-779) — not a raw
+        // `AbortError`, which never reaches this catch block in practice.
+        ['a timeout (LmlClientError 504)', new MockLmlClientError('LML request timed out', 504)],
+        ['a 5xx (LmlClientError 502)', new MockLmlClientError('LML responded with 502', 502)],
+        ['a limiter shed', new MockLimiterShedError('shed_breaker_open')],
+      ])('%s: no cache write, no persisted stamp, next call retries LML', async (_label, err) => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockRejectedValueOnce(err);
+        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        const first = await resolveRotationPickerSource(42);
+        expect(first).toBeNull();
+        expect(db.update).not.toHaveBeenCalled();
+        expect(__rotationLmlCacheSizesForWarm()).toEqual({ positive: 0, negative: 0 });
+
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockResolvedValueOnce({
+          results: [{ artwork: { release_id: 4080 } }],
+          search_type: 'direct',
+        });
+        const second = await resolveRotationPickerSource(42);
+        expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
+
+        expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+        consoleSpy.mockRestore();
+      });
+    });
+
+    describe('picker.lml_outcome span telemetry (BS#2731)', () => {
+      // Restores the per-call visibility the old `requireSearchType` gate
+      // collapsed away (that gate turned "degraded" and "untrusted match"
+      // into the same opaque `null`). Mirrors the coordinator's own
+      // `trust_reject_reason` span projection.
+      it.each([
+        ['a trusted direct match', { results: [{ artwork: { release_id: 4080 } }], search_type: 'direct' }, 'trusted'],
+        [
+          'a trusted direct match under a degraded reply',
+          {
+            results: [{ artwork: { release_id: 4080 } }],
+            search_type: 'direct',
+            degraded: true,
+            degraded_reason: 'deadline_exceeded',
+          },
+          'trusted',
+        ],
+        [
+          'an untrusted alternative match',
+          { results: [{ artwork: { release_id: 999 } }], search_type: 'alternative' },
+          'untrusted:alternative',
+        ],
+        ['a genuine empty no-match', { results: [], search_type: 'none' }, 'untrusted:none'],
+        [
+          'a degraded reply with no usable match',
+          { results: [], search_type: 'none', degraded: true, degraded_reason: 'cache_only' },
+          'degraded:cache_only',
+        ],
+        ['a timed-out reply with no usable match', { results: [], search_type: 'none', timeout: true }, 'timeout'],
+      ])('projects the right picker.lml_outcome for %s', async (_label, response, expectedOutcome) => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockResolvedValueOnce(response);
+
+        await resolveRotationPickerSource(42);
+
+        expect(mockSpanSetAttribute).toHaveBeenCalledWith('picker.lml_outcome', expectedOutcome);
+      });
+
+      it('projects picker.lml_outcome=error when the lookup throws', async () => {
+        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
+        mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
+        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        await resolveRotationPickerSource(42);
+
+        expect(mockSpanSetAttribute).toHaveBeenCalledWith('picker.lml_outcome', 'error');
+        consoleSpy.mockRestore();
+      });
     });
 
     it('carries an inline tracklist when LML returns extended-mode tracks', async () => {
