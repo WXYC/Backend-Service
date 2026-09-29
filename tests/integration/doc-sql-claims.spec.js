@@ -29,26 +29,20 @@ const {
  * the raw connection) with input the lexer would have rejected. Each of those
  * tests fails if its layer is removed.
  *
- * The parse-only half (every block parses, and test.yml's paths-filter lists
- * exactly the docs that hold one) also runs without a database in the
- * unconditional `auth-tables-doc-drift` CI job, via
- * scripts/check-sql-claim-docs.mjs, so a docs-only PR cannot skip it.
+ * The static half (every block parses, each doc's count matches
+ * tests/utils/sql-claim-counts.json, test.yml's paths-filter lists exactly
+ * the claim-bearing docs, and no tracked .md outside docs/ holds a block) also
+ * runs without a database in the unconditional `auth-tables-doc-drift` CI
+ * job, via scripts/check-sql-claim-docs.mjs, so a docs-only PR cannot skip it.
  */
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 const DOCS_DIR = path.join(REPO_ROOT, 'docs');
 
-/**
- * Exact claim count per doc. Not a floor: demoting ANY one block to a plain
- * ```sql fence (the one change the parser cannot see, because a plain fence
- * is legitimate markdown) changes a count and fails here. Update this map in
- * the same change that adds or removes a claim, and add a doc when it gains
- * its first block.
- */
-const EXPECTED_CLAIM_COUNTS = {
-  'docs/adr/0015-catalog-search-query-operators.md': 21,
-  'docs/catalog-search/README.md': 10,
-};
+// Exact claim count per doc, not a floor: demoting ANY one block to a plain
+// ```sql fence (legitimate markdown the parser cannot flag) changes a count.
+// One copy of the map, shared with scripts/check-sql-claim-docs.mjs.
+const EXPECTED_CLAIM_COUNTS = require('../utils/sql-claim-counts.json');
 
 const connectionBase = {
   host: process.env.DB_HOST || 'localhost',
@@ -60,14 +54,15 @@ const connectionBase = {
 
 const { claims, errors } = collectSqlClaims(DOCS_DIR, (p) => path.relative(REPO_ROOT, p).split(path.sep).join('/'));
 
-// `sql` is the claim connection. `plain` is writable and opened with every
-// layer-5 setting deliberately set to the OPPOSITE of the pin, so a test that
-// runs a claim on `plain` proves what the per-claim transaction pins on its
-// own. `plain` also creates CLAIM_ROLE, which needs a writable connection.
+// `sql` is the claim connection, logged in as CLAIM_ROLE. `plain` logs in as
+// the suite's own (superuser) DB user, is writable, and is opened with every
+// pinned setting deliberately set to the OPPOSITE of the pin, so a test that
+// runs a claim on `plain` proves what the per-claim transaction does on its
+// own. `plain` also creates CLAIM_ROLE, which needs a superuser.
 let sql;
 let plain;
+let credentials;
 beforeAll(async () => {
-  sql = postgres(claimConnectionOptions(connectionBase));
   plain = postgres({
     ...connectionBase,
     max: 1,
@@ -78,7 +73,8 @@ beforeAll(async () => {
       search_path: 'public',
     },
   });
-  await ensureClaimRole(plain);
+  credentials = await ensureClaimRole(plain);
+  sql = postgres(claimConnectionOptions(connectionBase, credentials));
 });
 afterAll(async () => {
   if (sql) await sql.end();
@@ -159,7 +155,43 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
   });
 
   test('ensureClaimRole is idempotent on a database that already has the role', async () => {
-    await expect(ensureClaimRole(plain)).resolves.toBeUndefined();
+    await expect(ensureClaimRole(plain)).resolves.toEqual(credentials);
+  });
+
+  test('the claim connection logs in as the claim role, which is not a superuser', async () => {
+    const [row] = await sql`
+      SELECT session_user::text AS who, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
+      FROM pg_roles WHERE rolname = session_user`;
+    expect(row).toEqual({
+      who: CLAIM_ROLE,
+      rolsuper: false,
+      rolcreaterole: false,
+      rolcreatedb: false,
+      rolreplication: false,
+      rolbypassrls: false,
+    });
+  });
+
+  // Round-2 review (PR #2746): with the lexer bypassed, an expression that
+  // resets the role runs with the SESSION user's privileges. These three pin
+  // what the claim connection's unprivileged session user buys, and the fourth
+  // pins the limit that made it necessary.
+  test.each([
+    ['set_config role', `set_config('role', '${connectionBase.user}', true) || current_user::text`],
+    ['set_config session_authorization', `set_config('session_authorization', '${connectionBase.user}', true)`],
+    [
+      'query_to_xml over pg_read_file',
+      "query_to_xml('select pg_read_file(''PG_VERSION'') as x', false, false, '')::text",
+    ],
+  ])('the claim connection refuses re-escalation via %s (42501)', async (_label, expr) => {
+    await expect(evaluateWithoutLexicalCheck(sql, expr)).rejects.toMatchObject({ code: '42501' });
+  });
+
+  test('LIMIT, pinned: SET LOCAL ROLE alone is undone by set_config when the session user is a superuser', async () => {
+    const admin = connectionBase.user;
+    await expect(
+      evaluateWithoutLexicalCheck(plain, `set_config('role', '${admin}', true) || current_user::text`)
+    ).resolves.toBe(`${admin}${admin}`);
   });
 
   test('the claim transaction pins search_path to pg_catalog on its own', async () => {
@@ -186,7 +218,7 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
     // set_config(..., is_local => false) survives COMMIT but not ROLLBACK. A
     // dedicated connection, closed afterwards, so a regression cannot leak the
     // setting into the connection the other tests share.
-    const probe = postgres(claimConnectionOptions(connectionBase));
+    const probe = postgres(claimConnectionOptions(connectionBase, credentials));
     try {
       await evaluateWithoutLexicalCheck(probe, "set_config('application_name', 'sql-claim-leak', false)");
       const [row] = await probe`SHOW application_name`;
@@ -208,6 +240,8 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
       '1)::text; SELECT (1',
       "current_setting('search_path')",
       "pg_read_file('postgresql.conf')",
+      "set_config('role', 'postgres', true)",
+      "query_to_xml('select 1', false, false, '')",
       'current_user',
       'pg_sleep(30)',
       '(SELECT count(*) FROM library)',

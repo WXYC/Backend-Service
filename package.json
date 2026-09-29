@@ -57,6 +57,7 @@
     "check:doc-budget": "node scripts/check-doc-budget.mjs",
     "check:doc-rules": "node scripts/check-doc-rules.mjs",
     "check:auth-tables-doc": "node scripts/check-auth-tables-doc.mjs",
+    "check:sql-claim-docs": "node scripts/check-sql-claim-docs.mjs",
     "check:better-auth-mock-sync": "tsx scripts/check-better-auth-mock-sync.ts",
     "check:db-mock-sync": "tsx scripts/check-db-mock-sync.mjs",
     "check:audit-coverage": "dotenvx run -f .env -- tsx scripts/check-audit-route-coverage.ts",
