@@ -382,6 +382,33 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
  * (`!!!`, `$$$`) and single-character fragments are better served by trigram,
  * which can match arbitrary substrings.
  *
+ * **The `/[a-zA-Z0-9]/` test is ASCII-only, and that routes every non-Latin
+ * script to the trigram branch too** (WXYC/Backend-Service#2739) — Cyrillic,
+ * Greek, CJK, Arabic, Hebrew queries never see `websearch_to_tsquery` at all,
+ * since they have no character this regex matches. That is a deliberate
+ * choice, not an oversight, but the choice is NOT "the `simple` config can't
+ * tokenize these scripts" — it can. Verified on PG 18.6:
+ * `to_tsvector('simple', 'Кино')` -> `'кино':1`, and
+ * `to_tsvector('simple', 'Кино Группа крови') @@ websearch_to_tsquery('simple', 'Кино')`
+ * -> `true`. The tsvector path could serve every non-Latin query in
+ * `tests/fixtures/charset-torture.json`'s 33 no-ASCII-alphanumeric entries;
+ * this predicate does not ask that question. It stays ASCII-only anyway,
+ * for two reasons, neither of them "tsvector can't tokenize this": trigram's
+ * substring recall (`тр` matching inside a longer Cyrillic word) is worth
+ * more here than tsvector's whole-lexeme precision when nobody has measured
+ * which scripts' DJ queries are usually partial words vs. complete ones; and
+ * no one has measured the alternative — swapping the test for
+ * `/[\p{L}\p{N}]/u` (matching `hasAlphanumeric` in
+ * `apps/backend/utils/text-query.ts`) is a user-visible recall change on the
+ * live `GET /flowsheet/search` surface (33 charset classes move from
+ * ILIKE-substring to tsvector-whole-lexeme), and evaluating it needs a
+ * before/after row-count measurement against flowsheet-bearing data, which no
+ * local environment has (`dev_env/seed-clone.sql` is catalog-only, zero
+ * flowsheet rows). `tests/unit/services/search.service.test.ts` pins the
+ * current (a)-decision routing for every no-ASCII-alphanumeric entry in the
+ * corpus, so a future switch to the script-aware regex fails loudly here
+ * instead of silently reaching production.
+ *
  * **`websearch_to_tsquery` does NOT do prefix matching**, and this comment
  * used to say it did. `websearch_to_tsquery('simple', 'autec')` lexes to the
  * lexeme `autec`; the flowsheet holds `autechre`. Two different lexemes, no

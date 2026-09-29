@@ -10,6 +10,7 @@ import {
   parseCursor,
   encodeCursor,
 } from '../../../apps/backend/services/search.service';
+import { CHARSET_TORTURE_ENTRIES, charsetEntryId } from '../../charset-torture';
 
 const makeRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: 1,
@@ -193,6 +194,38 @@ describe('shouldUseTsvector', () => {
     ])('uses trigram for %j (%s)', (value) => {
       expect(shouldUseTsvector(value)).toBe(false);
     });
+  });
+
+  // WXYC/Backend-Service#2739: pin the ASCII-only decision (option (a) — see
+  // this function's docstring) against every charset-torture entry whose
+  // ONLY letters/digits are non-Latin (i.e. an entry `/[a-zA-Z0-9]/` cannot
+  // see at all). `shouldUseTsvector` must route every one of those to the
+  // trigram branch, since the tsvector branch never sees a query it can
+  // build a lexeme match from. This is a routing pin, not a recall claim:
+  // the docstring records — and PG 18.6 confirms — that the tsvector path
+  // *could* tokenize several of these scripts; the point here is that this
+  // function does not currently route them there, and a change to
+  // `/[\p{L}\p{N}]/u` (matching `hasAlphanumeric`) must fail this table.
+  describe('routes every no-ASCII-alphanumeric charset-torture entry to trigram (BS#2739, decision (a))', () => {
+    // Recomputed from the fixture, not copied from the issue — the issue's
+    // count (33 of 57) is a snapshot, this filter is the source of truth.
+    // `null\u0000byte` (the `quoting` category's NUL-byte entry) is excluded
+    // by this same filter because it contains ASCII letters ("null", "byte")
+    // — it is not part of the no-ASCII-alphanumeric cohort this table pins,
+    // and this test never writes it to Postgres (which cannot store a NUL
+    // byte in `text`), since `shouldUseTsvector` is a pure string predicate.
+    const noAsciiAlphanumericEntries = CHARSET_TORTURE_ENTRIES.filter((e) => !/[a-zA-Z0-9]/.test(e.input));
+
+    it('the corpus has at least one qualifying entry (the table below is not vacuous)', () => {
+      expect(noAsciiAlphanumericEntries.length).toBeGreaterThan(0);
+    });
+
+    it.each(noAsciiAlphanumericEntries.map((entry) => [charsetEntryId(entry), entry] as const))(
+      'uses trigram for %s (no ASCII alphanumeric)',
+      (_id, entry) => {
+        expect(shouldUseTsvector(entry.input)).toBe(false);
+      }
+    );
   });
 });
 
