@@ -137,10 +137,12 @@ jobs:
               # ```sql-claim block under docs/ (BS#2737). A docs-only PR is
               # exactly the change that can make a claim false, and without
               # these entries it would skip Integration-Tests and merge the
-              # false claim unchecked. Enumerated rather than `docs/**` so an
-              # ordinary docs PR still skips the Postgres job;
-              # tests/unit/scripts/ci-sql-claim-docs-filter.test.ts fails when
-              # a doc holding a sql-claim block is missing from this list.
+              # false claim unchecked. Enumerated rather than `docs/**` (a
+              # deliberate, maintainer-approved choice) so an ordinary docs PR
+              # still skips the Postgres job. scripts/check-sql-claim-docs.mjs,
+              # run in the unconditional auth-tables-doc-drift job, fails any
+              # PR -- docs-only included -- that leaves a claim-bearing doc off
+              # this list or keeps a doc that no longer holds a block.
               - 'docs/adr/0015-catalog-search-query-operators.md'
               - 'docs/catalog-search/README.md'
             db-init:
@@ -446,6 +448,15 @@ jobs:
 
       - name: Auth-tables doc drift (BS#1573)
         run: node scripts/check-auth-tables-doc.mjs
+
+      # BS#2737: parse every ```sql-claim block under docs/ and check that the
+      # `tests` paths-filter above lists exactly the docs holding one. It lives
+      # in this job because this job is unconditional: a docs-only PR skips
+      # unit-tests and Integration-Tests, and would otherwise merge a doc's
+      # first claim block without anything reading it. No DB, no npm ci; the
+      # claims themselves are executed by tests/integration/doc-sql-claims.spec.js.
+      - name: sql-claim docs parse and CI filter sync (BS#2737)
+        run: node scripts/check-sql-claim-docs.mjs
 
   # Runs the WHOLE unit suite, deliberately -- do not reintroduce Jest's
   # affected-tests mode (`--changedSince`) here. Selection is built from the
