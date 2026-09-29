@@ -103,12 +103,13 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
     const HYPHEN_NAME = 'Chuquimamani-Condori';
 
     // Csillagrablók exercises a non-ASCII letter class (the `simple` config
-    // keeps diacritics in the lexeme) with no internal punctuation, and its
-    // one-character prefix documents the floor: the tsvector path has none
-    // (docs/catalog-search/README.md "Why the prefix path has no minimum
-    // token length") -- only the trigram fallback's own `length >= 2` gate
-    // does, and that gate never fires here because the tsvector tier
-    // already returns a row.
+    // keeps diacritics in the lexeme) with no internal punctuation. The sweep
+    // starts at two characters, like the hyphen sweep above. The tsvector path
+    // has no minimum token length (docs/catalog-search/README.md "Why the
+    // prefix path has no minimum token length"), but a one-character prefix
+    // such as `'c':*` matches a large share of the catalog, so whether this
+    // one row lands inside the top `n` depends on the rest of the seed data,
+    // not on the builder. The one-character shape is pinned in the unit tier.
     const DIACRITIC_ID = 7911;
     const DIACRITIC_NAME = 'Csillagrablók';
 
@@ -135,8 +136,8 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       }
     );
 
-    test.each(Array.from({ length: DIACRITIC_NAME.length }, (_, i) => DIACRITIC_NAME.slice(0, i + 1)))(
-      'prefix %s of "Csillagrablók" (including the 1-character floor) matches the seeded row',
+    test.each(Array.from({ length: DIACRITIC_NAME.length - 1 }, (_, i) => DIACRITIC_NAME.slice(0, i + 2)))(
+      'prefix %s of "Csillagrablók" matches the seeded row',
       async (prefix) => {
         const res = await bothMode(prefix).expect(200);
         expectArray(res);
@@ -262,7 +263,13 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       await seedProbe({
         id: BOTH_ID,
         codeNumber: 997,
-        artistName: 'Zzorprobe Cat Power',
+        // Holds the literal word `or`, so `zzorprobe cat or power` has a
+        // tsvector hit and the Both-mode trigram fallback never runs. Without
+        // it the tsvector tier correctly returns zero rows, and the typo
+        // fallback -- which interprets no operators and is outside ADR 0015's
+        // contract -- returns the fuzzy look-alikes, cat-only and power-only
+        // rows included, making the union assertion below test the wrong tier.
+        artistName: 'Zzorprobe Cat Or Power',
         albumTitle: 'Probe Album C',
       });
     });
@@ -273,15 +280,17 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
 
     test('a bare "or" is not disjunction -- it narrows like any other AND-combined token, never widens to the union', async () => {
       // Do NOT assert equality with the bare AND query: `or` is a fourth
-      // required literal token, and no catalog row contains it, so the
-      // correct result is the EMPTY set, not the same 1 row `cat power`
-      // returns (measured on PG 18.6: `cat power` -> 1 row, `cat or power`
-      // -> 0). What this pins is the absence of the union of "cat"-only and
-      // "power"-only rows -- neither CAT_ID nor POWER_ID may appear.
+      // required literal token, so `cat or power` matches only rows that
+      // contain the word -- a strict subset of what `cat power` matches. What
+      // this pins is the absence of the union of "cat"-only and "power"-only
+      // rows -- neither CAT_ID nor POWER_ID may appear.
       const res = await bothMode('zzorprobe cat or power').expect(200);
 
       expectArray(res);
       const ids = res.body.map((row) => row.id);
+      // `or` is a required literal: the one row containing it matches...
+      expect(ids).toContain(BOTH_ID);
+      // ...and nothing that a disjunction would have added does.
       expect(ids).not.toContain(CAT_ID);
       expect(ids).not.toContain(POWER_ID);
     });
@@ -302,7 +311,10 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
     // this keeps holding against the same data library.search-ranking.spec.js
     // exercises: a second, still-partial token must narrow rather than widen.
     test('a second partial token narrows results rather than returning the whole discography', async () => {
-      const res = await bothMode('stereola transien').expect(200);
+      // Only the LAST token is a prefix; every earlier token is an exact
+      // lexeme, so the first word must be complete. `stereola transien` is
+      // correctly a tsvector miss (the fallback then serves the discography).
+      const res = await bothMode('stereolab transien').expect(200);
 
       expectArray(res);
       expect(res.body.length).toBeGreaterThan(0);
