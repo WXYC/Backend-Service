@@ -185,8 +185,15 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       await teardownProbes(ids);
     });
 
+    // What this guarantees is narrower than "the tsvector tier matches it":
+    // the query is byte-identical to the stored name, so for any entry of two
+    // or more characters the Both-mode trigram fallback finds the row at
+    // similarity 1.0 even if the tsvector tier missed. Only the one-character
+    // entries (the trigram gate is `length >= 2`) exercise the tsvector tier
+    // alone. For the rest this pins that no corpus input 500s and every seeded
+    // row stays reachable through the cascade.
     test.each(withLexeme.map((e, i) => [e.category, e.expected_storage, ids[i]]))(
-      '%s entry %j round-trips through the tsvector path',
+      '%s entry %j is reachable through the Both-mode cascade without raising',
       async (_category, value, id) => {
         const res = await bothMode(value).expect(200);
         expectArray(res);
@@ -194,9 +201,12 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       }
     );
 
-    // No letter or digit anywhere (the emoji category) -- `hasAlphanumeric`
-    // short-circuits before the tsvector path is even reached, same as
-    // `!!!`. Nothing to seed; only asserting the request doesn't 500.
+    // Classified on `expected_storage` but queried with `input`, and those can
+    // differ: the mojibake entry `â€™` is stored as `’` (no lexeme), but its
+    // input carries `â`, a letter, so `hasAlphanumeric` passes and that request
+    // runs the full cascade (tsvector, trigram, then the track-search cascade)
+    // rather than short-circuiting. It returns empty only because nothing
+    // seeded matches it. The emoji entries do short-circuit, like `!!!`.
     test.each(withoutLexeme.map((e) => [e.category, e.input]))(
       '%s entry %j returns empty without raising',
       async (_category, value) => {
@@ -249,6 +259,77 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       expect(ids.indexOf(EXACT_ID)).toBeGreaterThanOrEqual(0);
       expect(ids.indexOf(PREFIXONLY_ID)).toBeGreaterThanOrEqual(0);
       expect(ids.indexOf(EXACT_ID)).toBeLessThan(ids.indexOf(PREFIXONLY_ID));
+    });
+  });
+
+  describe('within-tier ordering (exact_score)', () => {
+    // Both rows are tier 2: each contains `zzqx` as a whole lexeme. They
+    // differ in how the rest of the row scores. WHOLE matches it in the
+    // weight-A artist field; SPLIT matches it only in the weight-B album
+    // field and prefix-matches it in the artist field (`zzqxs`). Scored on the
+    // prefixed tsquery, SPLIT collects credit from both fields and wins
+    // (0.85 vs 0.61 on PG 18.6) -- the shape that put Gene Loves Jezebel
+    // above Love for `love`. Scored on the exact tsquery, WHOLE wins
+    // (0.61 vs 0.24). Plays are equal, so only `exact_score` decides this.
+    const WHOLE_ID = 7980;
+    const SPLIT_ID = 7981;
+
+    beforeAll(async () => {
+      await seedProbe({ id: WHOLE_ID, codeNumber: 980, artistName: 'Zzqx', albumTitle: 'Probe One' });
+      await seedProbe({ id: SPLIT_ID, codeNumber: 981, artistName: 'Zzqxs', albumTitle: 'Zzqx Tapes' });
+    });
+
+    afterAll(async () => {
+      await teardownProbes([WHOLE_ID, SPLIT_ID]);
+    });
+
+    test('a whole-word hit in the artist field outranks a prefix hit that adds a second field', async () => {
+      const res = await bothMode('zzqx').expect(200);
+
+      expectArray(res);
+      const ids = res.body.map((row) => row.id);
+      expect(ids.indexOf(WHOLE_ID)).toBeGreaterThanOrEqual(0);
+      expect(ids.indexOf(SPLIT_ID)).toBeGreaterThanOrEqual(0);
+      expect(ids.indexOf(WHOLE_ID)).toBeLessThan(ids.indexOf(SPLIT_ID));
+    });
+  });
+
+  describe('leading "-" is a literal, not exclusion (ADR 0015)', () => {
+    // Asserted on match behaviour, never on the emitted string: a test that
+    // checked the `-` was removed would certify the regression below.
+    const DASH_ID = 7982;
+    const NODASH_ID = 7983;
+
+    beforeAll(async () => {
+      await seedProbe({ id: DASH_ID, codeNumber: 982, artistName: 'Zzminus Probe', albumTitle: 'Minus 5 -3d World' });
+      await seedProbe({ id: NODASH_ID, codeNumber: 983, artistName: 'Zzminus Probe', albumTitle: 'Minus 5 3d World' });
+    });
+
+    afterAll(async () => {
+      await teardownProbes([DASH_ID, NODASH_ID]);
+    });
+
+    test('a leading "-" does not exclude the term', async () => {
+      // `-transient` is not an exclusion: quoting makes to_tsquery discard the
+      // `-`, so this narrows to the Transient album like `stereolab transient`.
+      const res = await bothMode('stereolab -transient').expect(200);
+
+      expectArray(res);
+      expect(res.body.length).toBeGreaterThan(0);
+      expect(res.body[0].album_title.toLowerCase()).toContain('transient');
+    });
+
+    test('a "-" before a digit is kept as the sign of the lexeme', async () => {
+      // `'-3d':*` re-lexes to `'-3':* <-> 'd':*`, which matches the dashed row
+      // only. Stripping the `-` would emit `'3d':*`, which matches the
+      // dashless row only -- and because that is still a tsvector hit, the
+      // trigram fallback never runs to mask it.
+      const res = await bothMode('zzminus -3d').expect(200);
+
+      expectArray(res);
+      const ids = res.body.map((row) => row.id);
+      expect(ids).toContain(DASH_ID);
+      expect(ids).not.toContain(NODASH_ID);
     });
   });
 
@@ -344,15 +425,28 @@ describe('GET /library — prefix tsvector (BS#670)', () => {
       ['&|!', 'tsquery operators only'],
       ['$$$ ...', 'no token carries a lexeme'],
     ])('%s (%s) returns empty without raising', async (q) => {
-      // `to_tsquery` is the one *_to_tsquery variant with no input
-      // forgiveness: these reach it as operators, and an unbalanced one
-      // raises rather than returning no rows. A 500 here means the
-      // sanitizer let something through.
+      // None of these carries a letter or digit, so `hasAlphanumeric` returns
+      // empty before the builder or `to_tsquery` runs. These pin that
+      // short-circuit; the letter-bearing cases below are what reach
+      // `to_tsquery` and exercise the sanitizer.
       const res = await bothMode(q).expect(200);
 
       expectArray(res);
       expect(res.body.length).toBe(0);
     });
+
+    test.each([['foo\\'], ['cat:'], ['(cat'], ['a<b'], ['x|y'], ["it's"], ['cat*'], ['a&'], ['!cat']])(
+      '%s (a metacharacter beside a letter) does not raise',
+      async (q) => {
+        // Unlike the cases above, these carry a letter, so they pass
+        // `hasAlphanumeric` and reach `to_tsquery`. Each metacharacter here is
+        // one the sanitizer must neutralize; `'foo\':*` raises 42601 if the
+        // backslash gets through. A 500 means the escape set was narrowed.
+        const res = await bothMode(q).expect(200);
+
+        expectArray(res);
+      }
+    );
 
     test('an apostrophe in the query does not raise', async () => {
       // Doubled inside the quoted lexeme by the builder. Not asserting a
