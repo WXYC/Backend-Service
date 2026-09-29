@@ -200,12 +200,13 @@ describe('shouldUseTsvector', () => {
   // this function's docstring) against every charset-torture entry whose
   // ONLY letters/digits are non-Latin (i.e. an entry `/[a-zA-Z0-9]/` cannot
   // see at all). `shouldUseTsvector` must route every one of those to the
-  // trigram branch, since the tsvector branch never sees a query it can
-  // build a lexeme match from. This is a routing pin, not a recall claim:
+  // trigram branch. This is a routing pin, not a recall claim:
   // the docstring records — and PG 18.6 confirms — that the tsvector path
   // *could* tokenize several of these scripts; the point here is that this
   // function does not currently route them there, and a change to
   // `/[\p{L}\p{N}]/u` (matching `hasAlphanumeric`) must fail this table.
+  // Entries shorter than three characters stay on trigram under either regex
+  // (the length floor), so only the longer ones detect that swap.
   describe('routes every no-ASCII-alphanumeric charset-torture entry to trigram (BS#2739, decision (a))', () => {
     // Recomputed from the fixture, not copied from the issue — the issue's
     // count (33 of 57) is a snapshot, this filter is the source of truth.
