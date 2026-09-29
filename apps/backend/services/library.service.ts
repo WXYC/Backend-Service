@@ -1911,14 +1911,22 @@ export async function getDiscogsReleaseIdByLegacyId(legacyId: number): Promise<n
  * concept (process-local map keyed by rotation id), minus the warm-on-startup
  * pass.
  *
- * Two caches — positive (resolved release id) and negative (LML returned
- * nothing). lru-cache v11 constrains value types to non-nullable, so the
- * negative cache stores `true` and uses key presence as the signal. Both
- * TTLs are 24 h: Discogs release tracklists and the negative classification
- * ("no Discogs release for this artist+album") are both stable conditions
- * that don't flip within a day; deploys re-warm both caches via the
- * `rotation-tracks-cache-warm` walker (BS#1231); 24 h is a soft ceiling
- * against drift, not a refresh interval.
+ * Two caches — positive (resolved release id) and negative (LML gave a
+ * definitive no-match: a genuine answer with an untrusted `search_type`, or
+ * empty results). lru-cache v11 constrains value types to non-nullable, so
+ * the negative cache stores `true` and uses key presence as the signal.
+ * Both share a 24 h TTL: a resolved Discogs release and "no Discogs release
+ * for this artist+album" are both stable conditions that don't flip within
+ * a day; deploys re-warm both via the `rotation-tracks-cache-warm` walker
+ * (BS#1231); 24 h is a soft ceiling against drift, not a refresh interval.
+ *
+ * A degraded/timed-out LML response or a thrown error (BS#2731) writes
+ * NEITHER cache (nor the persisted `tracklist_lookup_attempted_at` stamp
+ * below) — UNLESS a trusted match was extracted from the reply anyway, in
+ * which case it still populates the positive cache: a degraded/timeout reply
+ * with no usable match says nothing about the catalog, but one that DOES
+ * carry a usable match is real. See `resolveRotationDiscogsReleaseViaLml`'s
+ * doc comment for why.
  *
  * (Distinct from `proxy.controller.ts`'s artwork/negativeCache pair, which
  * uses a 1 h positive TTL because artwork images can be re-uploaded but the
@@ -1940,30 +1948,31 @@ const ROTATION_TRACKLIST_LOOKUP_NEGATIVE_WINDOW_MS = 7 * MS_PER_DAY;
 // BS#1826 PR 2: `ROTATION_LML_LOOKUP_TIMEOUT_MS`, `LIBRARY_INTERACTIVE_LML_
 // BUDGET_MS`, and `LIBRARY_SEARCH_LML_BUDGET_MS` retired — all three now
 // come from the per-caller policy layer (`@wxyc/lml-client` `policy.ts`):
-// `library-rotation-picker` is the BS#992/BS#1186 class-2 override (10s
-// timeout / 9000ms budget, preserving the "no aggressive budget cap"
-// rationale below), `library-track-search` is class 2 (4000ms budget /
-// 5000ms timeout), and `library-enrich-artwork` is the #1828 class-2
-// override (`LIBRARY_SEARCH_LML_BUDGET_MS` env name preserved as the
-// override's env lever). See `docs/env-vars.md` for the retired-constant
-// → class mapping.
+// `library-rotation-picker` is the BS#992 class-2 override (`ROTATION_PICKER_
+// TIMEOUT_MS`/`ROTATION_PICKER_BUDGET_MS`, 10s/9000ms), `library-track-search`
+// is class 2 (4000ms budget / 5000ms timeout), and `library-enrich-artwork`
+// is the #1828 class-2 override (`LIBRARY_SEARCH_LML_BUDGET_MS` env name
+// preserved as the override's env lever). See `docs/env-vars.md` for the
+// retired-constant → class mapping.
 //
 // Per-call LML timeout for the picker's tier-3 lookup. 10 s matches
 // tubafrenzy's `RELEASE_LOOKUP_TIMEOUT` (`LibrarySearchClient.java:64`),
 // which is the parity bar we measure picker coverage against. Shorter
 // timeouts cut off LML's cascade before the later strategies that find
-// obscure college-rotation releases get to run — the source of the
-// coverage regression that motivated dropping the BS#1186 budget.
+// obscure college-rotation releases get to run.
 //
-// Intentionally no `budgetMs` companion: BS#1186 added a 4 s
-// `X-Caller-Budget-Ms` header to short-circuit LML's empty-results
-// cascade. That cap was justified by malformed-query examples
-// (track-titles-as-album-names) and applied uniformly across callers,
-// including this one. For the picker — which always passes real
-// `(artist_name, album_title)` pairs from rotation rows — the cascade's
-// later strategies are exactly where matches come from, so capping at
-// 4 s collapsed picker coverage to ~23 %. The iOS proxy/artwork hot-path
-// callers keep their budgets; only this call site opts out.
+// The 9000ms `budgetMs` header value is NOT the effective budget LML runs
+// under. BS#1914 (`policy.ts`) corrected the model: LML clamps to
+// `min(header − 200ms, LML_SEARCH_BUDGET_MS)`, and prod's default
+// `LML_SEARCH_BUDGET_MS` is 4000ms — so this call site's effective budget is
+// ~4000ms, the same order of magnitude as the BS#1186 cap this file used to
+// warn had collapsed picker coverage to ~23%. BS#1983 tracks that this
+// override predates the corrected model and is a live inconsistency, not
+// fixed here. A cold lookup can still come back as a 200 LML itself marks
+// `degraded`/`timeout` rather than a thrown error — the response shape
+// `resolveRotationDiscogsReleaseViaLml` distinguishes from a genuine
+// no-match (BS#2731) — though 30 days of telemetry show this is rare in
+// practice (see that function's doc comment).
 
 /**
  * Wire shape returned by `GET /library/rotation/:rotation_id/tracks`. The
@@ -2101,19 +2110,37 @@ export async function resolveRotationPickerSource(rotationId: number): Promise<R
  * tubafrenzy's `RotationTracklistCache.fetchAndCache`, which calls
  * `LibrarySearchClient.searchDiscogsRelease` → `POST /api/v1/lookup`.
  *
- * Caches positive and negative results per `rotation_id`. The negative
- * TTL is shorter so rows that become resolvable (LML catalog improvements,
- * Discogs additions) recover within minutes rather than waiting for a
- * process restart. No DB cache-through here — tubafrenzy's MySQL column
- * isn't a write target on this path either, and a column-mix between
- * paste-URL-prefilled and LML-resolved values would muddy provenance.
+ * Caches positive and (definitive) negative results per `rotation_id`, both
+ * for 24 h — see the module doc above `rotationLmlPositiveCache`. No DB
+ * cache-through here — tubafrenzy's MySQL column isn't a write target on
+ * this path either, and a column-mix between paste-URL-prefilled and
+ * LML-resolved values would muddy provenance.
  *
  * Bounded at 10 s per call (the `library-rotation-picker` class-2 policy
- * override, BS#1826) — fast-fail for the user-visible picker (BS#992).
- * Caller errors are swallowed so
- * the picker degrades to free-text rather than 500ing; the LML client
- * already wraps the call in a Sentry span carrying `lml.cache.*` and
- * `lml.queue_depth` attributes for trace-explorer drill-down.
+ * override, BS#1826) — fast-fail for the user-visible picker (BS#992). Its
+ * `ROTATION_PICKER_BUDGET_MS` companion (`policy.ts`) clamps to an effective
+ * ~4s budget under LML's corrected model (BS#1914; see the constant's own
+ * doc comment above), so a cold Discogs lookup CAN come back as a 200 LML
+ * itself marks `degraded` or `timeout` rather than as a thrown error — but
+ * 30 days of Sentry telemetry show this is rare in practice for this caller
+ * (0 degraded picker replies observed; the dominant miss shape is a
+ * trust-rejected `search_type: 'alternative'`, ~90% of lookups). The defect
+ * below is real but latent, not routine.
+ *
+ * A response only earns the 24 h/7-day cache above when LML genuinely
+ * answered the question with no usable trusted match — `isTrustedLmlAlbumMatch`
+ * below decides trust directly, so this call deliberately omits the
+ * coordinator's `requireSearchType` gate. Mirrors `DiscogsProvider.search`
+ * (BS#1890), NOT `enrichWithArtwork`: a trusted match is extracted from the
+ * response FIRST, independent of `degraded`/`timeout`, because LML's
+ * `_build_degraded_response` still runs `fetch_artwork` before shedding
+ * later pipeline steps — a degraded reply routinely still carries a
+ * genuine direct match. Only when that extraction comes up empty does
+ * `degraded`/`timeout` matter: such a reply says nothing about the catalog
+ * ("couldn't ask", not "asked and missed"), so it's left exactly as
+ * retryable as a thrown error (timeout, 5xx, a BS#1748 limiter shed,
+ * anything) — no cache write, no stamp, picker degrades to free-text for
+ * that one request only (BS#2731).
  */
 /**
  * Detect Various-Artists artist-name variants the picker should omit from
@@ -2135,6 +2162,36 @@ export function isVariousArtistsName(name: string): boolean {
   return false;
 }
 
+/**
+ * Classify why a tier-3 LML lookup did or didn't produce a trusted match, for
+ * `projectPickerLmlOutcome` below. `trusted` wins outright (a positive result
+ * is a positive result, degraded or not); otherwise `degraded`/`timeout`
+ * take priority over a plain untrusted `search_type`, since they're the more
+ * specific "LML couldn't fully answer" signal BS#2731 exists to track.
+ */
+function classifyPickerLmlOutcome(trusted: boolean, response: LookupResponse): string {
+  if (trusted) return 'trusted';
+  if (response.degraded) return `degraded:${response.degraded_reason ?? 'unknown'}`;
+  if (response.timeout) return 'timeout';
+  return `untrusted:${response.search_type ?? 'unknown'}`;
+}
+
+/**
+ * BS#2731: per-call telemetry for the tier-3 picker lookup, restoring
+ * visibility the old `requireSearchType` gate collapsed away (that gate
+ * turned "degraded" and "untrusted match" into the same opaque `null`).
+ * Mirrors the coordinator's own `trust_reject_reason` span projection
+ * (`lookup-coordinator.ts`'s `applyTrustGate`) — same try/catch-and-warn
+ * shape, same "the active span, whatever it is" target.
+ */
+function projectPickerLmlOutcome(outcome: string): void {
+  try {
+    Sentry.getActiveSpan()?.setAttribute('picker.lml_outcome', outcome);
+  } catch (err) {
+    console.warn('[library.service] failed to project picker.lml_outcome onto span', err);
+  }
+}
+
 async function resolveRotationDiscogsReleaseViaLml(
   rotationId: number,
   artistName: string | null,
@@ -2151,17 +2208,19 @@ async function resolveRotationDiscogsReleaseViaLml(
 
   let source: RotationPickerSource | null;
   try {
-    // BS#1351: non-direct `search_type` values surface candidates for the wrong
-    // album (Yenbett → Tzenni). The coordinator enforces the gate via
-    // `requireSearchType: 'direct'` and projects `lml.coordinator.trust_reject_reason`
-    // on the per-lookup span. LML's `fetch_one` enforces the 80/80 album-title
-    // floor for `direct` matches, so this is sufficient — the picker falls
-    // through to free-text on rejection.
+    // Deliberately NOT `requireSearchType: 'direct'` — this reads the raw
+    // response and applies `isTrustedLmlAlbumMatch` itself below, mirroring
+    // `DiscogsProvider.search` (BS#1890), NOT `enrichWithArtwork`.
     const response = await lmlLookupCoordinator.lookup(lookupArtist, albumTitle, undefined, {
       caller: 'library-rotation-picker',
-      requireSearchType: 'direct',
     });
-    if (response === null) {
+
+    const trusted = isTrustedLmlAlbumMatch(response);
+    if (!trusted) {
+      // BS#1351: non-direct `search_type` values surface candidates for the
+      // wrong album (Yenbett → Tzenni). LML's `fetch_one` enforces the 80/80
+      // album-title floor for `direct` matches, so this predicate is
+      // sufficient — the picker falls through to free-text on rejection.
       source = null;
     } else {
       const artwork = response.results?.[0]?.artwork ?? null;
@@ -2175,7 +2234,25 @@ async function resolveRotationDiscogsReleaseViaLml(
       const inlineTracklist = projectInlineTracklist(artwork?.tracklist, artistName);
       source = releaseId !== null || inlineTracklist !== null ? { releaseId, inlineTracklist } : null;
     }
+
+    projectPickerLmlOutcome(classifyPickerLmlOutcome(trusted, response));
+
+    // Only the negative branch is gated on degraded/timeout — a trusted
+    // match extracted above is real and already sitting in `source`
+    // regardless of this flag (BS#1890-style: LML's `_build_degraded_response`
+    // still runs `fetch_artwork` before shedding later pipeline steps). A
+    // `null` source from a degraded/timed-out reply says nothing about the
+    // catalog ("couldn't ask", not "asked and missed") — leave it exactly as
+    // retryable as a thrown error: no cache, no stamp.
+    if (source === null && (response.degraded || response.timeout)) {
+      return null;
+    }
   } catch (err) {
+    // Thrown — timeout, 5xx, a BS#1748 limiter shed, anything else: no
+    // cache, no stamp, same as before BS#2731. The picker degrades to
+    // free-text for this one request; the next request retries LML from
+    // scratch.
+    projectPickerLmlOutcome('error');
     console.warn(
       '[library.service] LML /lookup for rotation_id=%d failed; degrading picker to free-text: %s',
       rotationId,
