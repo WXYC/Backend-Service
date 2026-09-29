@@ -344,6 +344,26 @@ describe('library.service', () => {
       expect(whereParam).toContain(':*');
       expect(caseParam).not.toContain(':*');
       expect(caseParam).not.toBe(whereParam);
+
+      // Each ts_rank must read its own tsquery. `exact_score` sorts first
+      // within a tier; fed the prefixed tsquery, it credits `'love':*`
+      // matching `loves` like the word itself and reorders the tier (the
+      // `love` regression measured on the clone). `album_score` stays on
+      // the prefixed tsquery so it can still order the tier-1 rows.
+      // Scan rather than build a RegExp from `alias` (the repo's security lint
+      // rejects a non-literal RegExp): the projection is the run immediately
+      // preceding ` AS <alias>`, `ts_rank(library.search_doc, to_tsquery(...))`.
+      const scoreParam = (alias: string): string => {
+        const end = rendered.indexOf(`) AS ${alias}`);
+        expect(end).toBeGreaterThan(-1);
+        const prefix = "ts_rank(library.search_doc, to_tsquery('simple', ";
+        const start = rendered.lastIndexOf(prefix, end);
+        expect(start).toBeGreaterThan(-1);
+        // Drop the `)` that closes to_tsquery; `end` already sits on ts_rank's.
+        return rendered.slice(start + prefix.length, end - 1);
+      };
+      expect(scoreParam('exact_score')).toBe(caseParam);
+      expect(scoreParam('album_score')).toBe(whereParam);
     });
 
     it('keeps the DENSE_RANK window and the outer ORDER BY in agreement (BS#2725)', async () => {
@@ -369,7 +389,13 @@ describe('library.service', () => {
         .split(',')
         .map((k) => k.trim().replace(/\s+/g, ' '))
         .filter(Boolean);
-      expect(outerKeys).toEqual(['match_tier DESC', 'album_score DESC', 'album_plays_count DESC', 'id ASC']);
+      expect(outerKeys).toEqual([
+        'match_tier DESC',
+        'exact_score DESC',
+        'album_score DESC',
+        'album_plays_count DESC',
+        'id ASC',
+      ]);
 
       // Each outer alias resolves to a projected expression; that expression
       // must appear in the window at the same ordinal, with the same direction.

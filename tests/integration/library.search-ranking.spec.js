@@ -202,7 +202,7 @@ describe('GET /library — match-tier ranking (BS#2725)', () => {
     }
   });
 
-  test('the match_tier and album_plays_count helper columns never reach the response body', async () => {
+  test('the ranking helper columns never reach the response body', async () => {
     const token = 'zzrankprobe2725c';
     const PROBE = 7081;
 
@@ -215,6 +215,8 @@ describe('GET /library — match-tier ranking (BS#2725)', () => {
       expect(res.body.length).toBeGreaterThan(0);
       for (const row of res.body) {
         expect(row).not.toHaveProperty('match_tier');
+        expect(row).not.toHaveProperty('exact_score');
+        expect(row).not.toHaveProperty('album_score');
         expect(row).not.toHaveProperty('album_plays_count');
       }
     } finally {

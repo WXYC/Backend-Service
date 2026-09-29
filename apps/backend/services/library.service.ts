@@ -2964,12 +2964,13 @@ function libraryViewQuery() {
  * SQL — re-projecting would mean writing the 33-column list a second time,
  * which is exactly the hand-mirroring `rawProjection` exists to prevent.
  *
- * `match_tier` and `album_plays_count` are only projected by the tsvector tier
- * (BS#2725) — the trigram and alias tiers rank on their own scales and never
- * emit them, hence optional rather than required.
+ * `match_tier`, `exact_score` and `album_plays_count` are only projected by
+ * the tsvector tier (BS#2725, BS#670) — the trigram and alias tiers rank on
+ * their own scales and never emit them, hence optional rather than required.
  */
 type AlbumRankHelperColumns = {
   album_score?: number | null;
+  exact_score?: number | null;
   album_rank: number;
   match_tier?: number | null;
   album_plays_count?: number | null;
@@ -3023,6 +3024,7 @@ const LIBRARY_VIEW_TIMESTAMP_COLUMNS = ['add_date', 'last_discogs_recheck_at'] a
 function toLibraryViewRow<T extends AlbumRankHelperColumns>(row: T): Omit<T, keyof AlbumRankHelperColumns> {
   const {
     album_score: _album_score,
+    exact_score: _exact_score,
     album_rank: _album_rank,
     match_tier: _match_tier,
     album_plays_count: _album_plays_count,
@@ -3050,16 +3052,26 @@ function toLibraryViewRow<T extends AlbumRankHelperColumns>(row: T): Omit<T, key
  * constant under a prefix (`:*`) match, which would collapse a product-based
  * score to a pure popularity sort now that every query's last token is
  * prefixed. `match_tier` guarantees an exact whole-lexeme hit sorts above a
- * prefix-only one structurally, with `album_score` (bare `ts_rank`) and then
- * `album_plays_count` breaking ties within a tier.
+ * prefix-only one structurally; within a tier, `exact_score` (`ts_rank`
+ * against `exactTsquery`) breaks the tie first, then `album_score` (bare
+ * `ts_rank` against the prefixed `tsquery`), then `album_plays_count`.
  *
  * `exactTsquery` and `tsquery` are the two halves `buildPrefixTsquery`
  * derives from one tokenization: `tsquery` has `:*` on the last token and
  * drives the WHERE predicate and `album_score`; `exactTsquery` has no `:*`
- * anywhere and drives only `match_tier`'s CASE, so a row matching every
- * token as a complete word (tier 2) outranks one that only matched the last
- * token as a prefix (tier 1). Before #670 these were the same object and
- * every match was tier 2 — activating the tier is what this issue does.
+ * anywhere and drives `match_tier`'s CASE *and* `exact_score`.
+ *
+ * `exact_score` exists because scoring on the prefixed `tsquery` alone
+ * re-opens the #2709 rank-blindness inside a tier: a single-word query
+ * prefixes its only token, and `'love':*` credits `loves`, `loved` and
+ * `lovett` like the word itself. Measured on the 64,193-row clone, `love`
+ * then ranked Gene Loves Jezebel, Loved Ones and Lyle Lovett #1-3; ordering
+ * on `exact_score` first restores main's top six for `love` and `the velvet`
+ * exactly. For a tier-1 row `exact_score` is 0 with one token and a `1e-20`
+ * floor with two (PG 18.6); from three tokens the completed ones score
+ * normally. `match_tier` sorts first, so it only orders rows within a tier. Before #670
+ * the two tsqueries were the same object and every match was tier 2
+ * — activating the tier is what this issue does.
  */
 async function searchLibraryByTsvector(
   query: string,
@@ -3079,6 +3091,7 @@ async function searchLibraryByTsvector(
   const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
   const where = streamingPredicate ? and(tsvectorPredicate, streamingPredicate) : tsvectorPredicate;
   const albumScore = sql`ts_rank(${library.search_doc}, ${tsquery})`;
+  const exactScore = sql`ts_rank(${library.search_doc}, ${exactTsquery})`;
   const matchTier = sql`CASE WHEN ${library.search_doc} @@ ${exactTsquery} THEN 2 ELSE 1 END`;
   const albumPlaysCount = sql`coalesce(${album_plays.plays}, 0)`;
   // Repeated verbatim in both the outer projection and the window below —
@@ -3086,7 +3099,7 @@ async function searchLibraryByTsvector(
   // etc. cannot be named there. Keep this order in sync with `outerOrderBy`:
   // if the window and the outer ORDER BY drift apart, `album_rank <= n`
   // selects a different album set than the outer ORDER BY presents.
-  const rankOrdering = sql`${matchTier} DESC, ${albumScore} DESC, ${albumPlaysCount} DESC, ${library.id} ASC`;
+  const rankOrdering = sql`${matchTier} DESC, ${exactScore} DESC, ${albumScore} DESC, ${albumPlaysCount} DESC, ${library.id} ASC`;
 
   // `n` counts ALBUMS, not rows. `LIBRARY_VIEW_JOINS_RAW`'s `LEFT JOIN rotation`
   // is one-to-many — an album in two active bins produces two rows — so the
@@ -3111,6 +3124,7 @@ async function searchLibraryByTsvector(
       inner: sql`
         SELECT ${LIBRARY_VIEW_PROJECTION_RAW},
                ${albumScore} AS album_score,
+               ${exactScore} AS exact_score,
                ${matchTier} AS match_tier,
                ${albumPlaysCount} AS album_plays_count,
                DENSE_RANK() OVER (ORDER BY ${rankOrdering}) AS album_rank
@@ -3120,7 +3134,7 @@ async function searchLibraryByTsvector(
         WHERE ${where}
       `,
       limit: n,
-      outerOrderBy: sql`match_tier DESC, album_score DESC, album_plays_count DESC, id ASC`,
+      outerOrderBy: sql`match_tier DESC, exact_score DESC, album_score DESC, album_plays_count DESC, id ASC`,
     })
   )) as unknown as Array<LibraryArtistViewEntry & AlbumRankHelperColumns>;
 
