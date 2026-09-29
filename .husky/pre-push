@@ -30,6 +30,13 @@ npm run check:docs || true
 # CLAUDE.md sentinel list against the Drizzle schema, and a mismatch is
 # always a bug. Kept separate so `|| true` above doesn't mask it.
 npm run check:auth-tables-doc
+# `check:sql-claim-docs` (BS#2737) is hard-fail: it parses every ```sql-claim
+# block in docs/, checks each doc's claim count against
+# tests/utils/sql-claim-counts.json, and checks that test.yml's `tests`
+# paths-filter lists exactly the claim-bearing docs. It needs no database and
+# runs in ~0.5s, and it is the one check that can fail a docs-only push, the
+# push least likely to run anything else locally.
+npm run check:sql-claim-docs
 # `check:better-auth-mock-sync` (BS#2282) is hard-fail — the unit suite runs
 # against hand-written better-auth mocks, so this is the ONLY thing that
 # notices a library upgrade changing the org-admin statement set or

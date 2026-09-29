@@ -10,8 +10,11 @@ import { join } from 'path';
 import {
   ClaimSyntaxError,
   assertSafeExpression,
+  CLAIM_ROLE,
   collectSqlClaims,
+  ensureClaimRole,
   evaluateClaim,
+  mentionsSqlClaim,
   parseClaimLine,
   parseSqlClaims,
 } from '../../utils/sql-claims';
@@ -263,6 +266,89 @@ describe('parseSqlClaims — shapes that used to skip a block silently', () => {
   });
 });
 
+/**
+ * Round-2 review (PR #2746). The claim role only bounds a lexer bypass that
+ * cannot also re-escalate, so layer 1 must refuse every way an expression can
+ * change the current role or session user, or read one.
+ */
+describe('assertSafeExpression — re-escalation is refused by the lexer', () => {
+  it.each([
+    "set_config('role', 'postgres', true)",
+    "set_config('session_authorization', 'postgres', true)",
+    "set_config('role', 'postgres', true) || to_tsquery('simple', 'a')",
+    "current_setting('role')",
+    "current_setting('is_superuser')",
+    "query_to_xml('select 1', false, false, '')",
+    'pg_terminate_backend(1)',
+    "pg_read_file('PG_VERSION')",
+  ])('rejects the call %s', (expr) => {
+    expect(() => assertSafeExpression(expr)).toThrow(/is not in ALLOWED_FUNCTIONS/);
+  });
+
+  it.each(['current_user', 'session_user', 'current_role', 'reset', 'role', "'postgres'::regrole"])(
+    'rejects the word or cast %s',
+    (expr) => {
+      expect(() => assertSafeExpression(expr)).toThrow(/not an allowed word|type `regrole`/);
+    }
+  );
+});
+
+describe('parseSqlClaims — prose that mentions a fence is not an opener (round 2)', () => {
+  it.each([
+    ['inline code mid-sentence', 'Claims are written as ` ```sql-claim ` blocks, one per line.'],
+    ['a fence named mid-sentence', 'Demoting a block to a plain ```sql fence drops the claim silently.'],
+    ['a tilde run mid-sentence', 'Use ~~~ for strikethrough in sql prose and claim nothing.'],
+    ['inline code at the start of a line', '` ```sql-claim ` is the opener.'],
+  ])('%s', (_label, line) => {
+    expect(parseSqlClaims(`intro\n${line}\n`, 'doc.md')).toEqual({ claims: [], errors: [] });
+    expect(mentionsSqlClaim(line)).toBe(false);
+  });
+
+  it('reports a fence-like line inside a claim block once, as a bad claim line, not also as an opener', () => {
+    const { errors } = parseSqlClaims("```sql-claim\n'a'::text  ->  a\n~~~sql-claim\n```\n", 'doc.md');
+    expect(errors).toEqual([
+      expect.objectContaining({ line: 3, message: expect.stringMatching(/no ` -> ` separator/) }),
+    ]);
+  });
+
+  it('does not scan the lines of a consumed claim block for openers', () => {
+    const text = "```sql-claim\nto_tsquery('simple', $$'x'$$)  ->  'x'   -- see ~~~sql-claim\n```\n";
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(errors).toEqual([]);
+    expect(claims).toHaveLength(1);
+  });
+});
+
+describe('parseSqlClaims — malformed openers still fail (round 2)', () => {
+  it.each([
+    ['three-space indent', "   ```sql-claim\n'a'::text  ->  a\n   ```\n"],
+    ['nested blockquote', "> > ```sql-claim\n> > 'a'::text  ->  a\n> > ```\n"],
+    ['ordered-list item', "1. ```sql-claim\n   'a'::text  ->  a\n   ```\n"],
+    ['star list item with tilde fence', "* ~~~sql-claim\n  'a'::text  ->  a\n  ~~~\n"],
+    ['zero-width space inside the info string', "```s​ql-claim\n'a'::text  ->  a\n```\n"],
+    ['zero-width joiner after the info string', "```sql-claim‍\n'a'::text  ->  a\n```\n"],
+  ])('%s', (_label, text) => {
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(claims).toEqual([]);
+    expect(errors).toEqual([
+      expect.objectContaining({ line: 1, message: expect.stringMatching(/malformed sql-claim fence/) }),
+    ]);
+    expect(mentionsSqlClaim(text)).toBe(true);
+  });
+
+  it.each([
+    ['backtick fence', "```\nsql-claim\n'a'::text  ->  a\n```\n"],
+    ['tilde fence, mixed case', "~~~\nSQL-Claim\n'a'::text  ->  a\n~~~\n"],
+  ])('fails a plain %s whose first content line is the info string', (_label, text) => {
+    const { claims, errors } = parseSqlClaims(text, 'doc.md');
+    expect(claims).toEqual([]);
+    expect(errors).toEqual([
+      expect.objectContaining({ line: 2, message: expect.stringMatching(/info string must be on the fence line/) }),
+    ]);
+    expect(mentionsSqlClaim(text)).toBe(true);
+  });
+});
+
 describe('evaluateClaim — the lexical check runs before the database is touched', () => {
   it.each([
     '1; DROP TABLE x',
@@ -275,5 +361,55 @@ describe('evaluateClaim — the lexical check runs before the database is touche
     await expect(evaluateClaim(sql, expr)).rejects.toThrow(ClaimSyntaxError);
     expect(sql.begin).not.toHaveBeenCalled();
     expect(sql.unsafe).not.toHaveBeenCalled();
+  });
+});
+
+describe('ensureClaimRole — idempotent create-or-alter (round 2)', () => {
+  const pgError = (code: string, message = code) => Object.assign(new Error(message), { code });
+  const fakeSql = (createError?: Error, alterError?: Error) => ({
+    unsafe: jest.fn((q: string) => {
+      if (q.startsWith('CREATE ROLE') && createError) return Promise.reject(createError);
+      if (q.startsWith('ALTER ROLE') && alterError) return Promise.reject(alterError);
+      return Promise.resolve([]);
+    }),
+  });
+
+  it('creates a non-superuser LOGIN role and returns its credentials', async () => {
+    const sql = fakeSql();
+    const creds = await ensureClaimRole(sql);
+    expect(creds).toEqual({ user: CLAIM_ROLE, password: expect.stringMatching(/^[0-9a-f]{48}$/) });
+    expect(sql.unsafe.mock.calls[0][0]).toMatch(
+      new RegExp(
+        `^CREATE ROLE ${CLAIM_ROLE} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '[0-9a-f]{48}'$`
+      )
+    );
+  });
+
+  it.each([
+    ['42710 (the other creator committed first)', '42710'],
+    ['23505 on pg_authid_rolname_index (the other creator committed while we waited)', '23505'],
+  ])('treats %s as "exists" and re-asserts the attributes', async (_label, code) => {
+    const sql = fakeSql(pgError(code));
+    const first = await ensureClaimRole(sql);
+    expect(sql.unsafe.mock.calls.map((c: string[]) => c[0].split(' ').slice(0, 2).join(' '))).toEqual([
+      'CREATE ROLE',
+      'ALTER ROLE',
+    ]);
+    expect(await ensureClaimRole(fakeSql(pgError(code)))).toEqual(first);
+  });
+
+  it('says what the DB user lacks when it cannot create or alter the role (42501)', async () => {
+    await expect(ensureClaimRole(fakeSql(pgError('42501', 'permission denied to create role')))).rejects.toThrow(
+      /cannot create or alter wxyc_sql_claim_reader \(permission denied to create role\); it needs to be a superuser/
+    );
+    await expect(ensureClaimRole(fakeSql(pgError('42710'), pgError('42501', 'denied')))).rejects.toMatchObject({
+      code: '42501',
+    });
+  });
+
+  it('rethrows any other error unchanged', async () => {
+    await expect(ensureClaimRole(fakeSql(pgError('08006', 'connection failure')))).rejects.toThrow(
+      /^connection failure$/
+    );
   });
 });
