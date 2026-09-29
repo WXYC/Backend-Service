@@ -88,6 +88,22 @@ describe('buildPrefixTsquery', () => {
       expect(param(built.tsquery)).toBe("'-3d':*");
     });
 
+    it.each([['foo\\'], ['cat:'], ['(cat'], ['a<b'], ['x|y'], ['cat*'], ['a&'], ['!cat'], ['cat"'], ['c(a)t']])(
+      'neutralizes every metacharacter in %j so none reaches to_tsquery outside a quoted lexeme',
+      (input) => {
+        const built = buildPrefixTsquery(input);
+        expect(built).not.toBeNull();
+        for (const expr of [param(built.tsquery), param(built.exactTsquery)]) {
+          const lexemes = [...expr.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1]);
+          expect(lexemes.length).toBeGreaterThan(0);
+          // Inside a lexeme: no metacharacter at all (`'foo\\':*` raises 42601).
+          for (const lexeme of lexemes) expect(lexeme).not.toMatch(/[&|!()<>:*\\"]/);
+          // Outside the lexemes: only the builder's own ` & ` and `:*`.
+          expect(expr.replace(/'(?:[^']|'')*'/g, '')).toMatch(/^(?:(?: & )|(?::\*))*$/);
+        }
+      }
+    );
+
     it('treats "&" as a token separator, not literal content', () => {
       const built = buildPrefixTsquery('Belle & Sebastian');
       expect(param(built.exactTsquery)).toBe("'Belle' & 'Sebastian'");
