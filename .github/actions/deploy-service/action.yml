@@ -55,6 +55,7 @@ runs:
           PUBLISH_PORT=${{ inputs.publish_port }}
           DEPLOY_TAG=${{ inputs.deploy_tag }}
           TARGET_APP=${{ inputs.target_app }}
+          AWS_ECR_URI=${{ inputs.aws_ecr_uri }}
 
           echo "Logging into AWS ECR..."
           aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin ${{ inputs.aws_ecr_uri }}
@@ -93,18 +94,22 @@ runs:
           # refuses removal and is swallowed by `|| true`.
           echo "Cleaning up old Docker images (keep newest 2 per repo)..."
           docker images --format '{{.Repository}} {{.Tag}}' | \
-            grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
+            grep -E ' v[0-9]+\.[0-9]+\.[0-9]+$' | \
             sort -k1,1 -k2,2Vr | \
             awk '{ c[$1]++; if (c[$1] > 2) print $1 ":" $2 }' | \
             xargs -r -n1 docker rmi 2>/dev/null || true
 
           # Same keep-newest-2 sweep for non-v* tags (`:sha-...`, `:latest`),
-          # which the grep above never matches (BS#2721). CreatedAt-ordered,
-          # not tag-ordered -- `sha-` and `latest` have no shared ordering as
-          # strings. semantic-index excluded: its `:latest` may be a
-          # deliberate host-local alias (semantic-index#371), not GC residue.
+          # which the grep above never matches (#2740). Scoped to this host's
+          # own ECR registry (never a hand-pulled reference image like
+          # `postgres:*`) and CreatedAt-ordered, not tag-ordered -- `sha-`
+          # and `latest` have no shared ordering as strings. semantic-index
+          # excluded: its `:latest` may be a deliberate host-local alias
+          # (semantic-index#371), not GC residue. See `reclaim-disk`'s
+          # comment in deploy-base.yml, and docs/deploy.md, for the
+          # ECR-scoping rationale and the per-tag-not-per-image-id caveat.
           docker images --format '{{.Repository}}|{{.Tag}}|{{.CreatedAt}}' | \
-            awk -F'|' '$1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
+            awk -F'|' -v ecr="$AWS_ECR_URI" 'index($1, ecr "/") == 1 && $1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
             sort -t'|' -k1,1 -k3,3r | \
             awk -F'|' '{ c[$1]++; if (c[$1] > 2) print $1":"$2 }' | \
             xargs -r -n1 docker rmi 2>/dev/null || true

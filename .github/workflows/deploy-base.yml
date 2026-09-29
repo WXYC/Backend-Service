@@ -272,6 +272,14 @@ jobs:
               LIVE=$(echo "$LIVE" | jq -c --arg t "$TARGET" '. + [$t]')
             fi
           done
+          if [ "$LIVE" = "[]" ]; then
+            # On this (non-dispatch) path an empty result is unexpected --
+            # this repo always has apps/+jobs/ targets with a Dockerfile.
+            # `reclaim-disk`'s retired-repo sweep already no-ops on an empty
+            # list, but surface this loudly rather than let it pass as
+            # "nothing to report".
+            echo "::warning title=Empty live-target list::turbo ls (unfiltered) or the Dockerfile-existence filter returned zero targets; reclaim-disk's retired-repo sweep will skip this run."
+          fi
           echo "LIVE_TARGETS=$LIVE" >> $GITHUB_OUTPUT
 
       - name: Generate Unique Build ID
@@ -710,20 +718,50 @@ jobs:
             # `|| true`, so a GC hiccup is inert. See docs/deploy.md.
             echo "Disk before reclaim:"; df -h / | tail -1
 
-            # Stale stopped one-off containers (BS#2721): a manual
-            # `docker run --name <foo> ...` invocation (a dry-run, a hand-run
-            # backfill, a verification pass) is never touched by anything
-            # else -- it isn't a `<target>-cron` container, so the per-cron
-            # `docker rm -f` prefix in the Deploy Cron Job step never reaps
-            # it, and every `docker rmi` below refuses as long as it exists.
-            # Left alone it pins its image forever. Only removes a STOPPED
-            # container more than 7 days old, and never one ending `-cron`
-            # (the live cron pin, rotated by its own next scheduled run).
+            LIVE_TARGETS='${{ steps.live_targets.outputs.list }}'
+            AWS_ECR_URI='${{ secrets.AWS_ECR_URI }}'
             CUTOFF_EPOCH=$(date -d '7 days ago' +%s)
+            CRONTAB_OUT=$(crontab -l 2>/dev/null || true)
+
+            # Stale stopped containers (#2740): a manual `docker run --name
+            # <foo> ...` invocation (a dry-run, a hand-run backfill, a
+            # verification pass) is never touched by anything else, so a soft
+            # `docker rmi` on its image refuses forever. A candidate must be
+            # stopped more than 7 days AND have `HostConfig.RestartPolicy.Name`
+            # `no` -- a deliberately stopped SERVICE container keeps the
+            # `unless-stopped` policy deploy-service/action.yml gives it while
+            # it's paused (e.g. `enrichment-worker` stopped for a bulk drain),
+            # so this distinguishes "nobody manages this container" from "an
+            # operator paused a live service" independent of its name. Name is
+            # still checked first, as a cheaper pre-filter before the
+            # docker-inspect call: a bare name is skipped if it is in
+            # LIVE_TARGETS (the current apps/+jobs/+Dockerfile universe from
+            # `setup`) or is `semantic-index`; a `<name>-cron` name is skipped
+            # if `crontab -l` still carries its `# wxyc_<name>` entry -- a
+            # `-cron` container with NO matching entry is not the live cron
+            # pin, it is a leftover from a job that was deleted (e.g. a
+            # retired target) or unscheduled. Retained-but-unscheduled
+            # one-shots like `flowsheet-etl`/`rotation-etl` fall in exactly
+            # that last case: they have no crontab entry either, so their
+            # stale `-cron` containers are removed here too, but their `v*`
+            # images are untouched because they stay in LIVE_TARGETS.
             docker ps -a --filter status=exited --format '{{.Names}}' | while read -r NAME; do
               case "$NAME" in
-                *-cron) continue ;;
+                *-cron)
+                  BASE_NAME="${NAME%-cron}"
+                  if echo "$CRONTAB_OUT" | grep -q "# wxyc_${BASE_NAME}\$"; then
+                    continue
+                  fi
+                  ;;
+                *)
+                  [ "$NAME" = "semantic-index" ] && continue
+                  case " $LIVE_TARGETS " in
+                    *" $NAME "*) continue ;;
+                  esac
+                  ;;
               esac
+              RESTART_POLICY=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$NAME" 2>/dev/null)
+              [ "$RESTART_POLICY" = "no" ] || continue
               FINISHED=$(docker inspect -f '{{.State.FinishedAt}}' "$NAME" 2>/dev/null)
               FINISHED_EPOCH=$(date -d "$FINISHED" +%s 2>/dev/null || echo 0)
               if [ "$FINISHED_EPOCH" -gt 0 ] && [ "$FINISHED_EPOCH" -lt "$CUTOFF_EPOCH" ]; then
@@ -733,43 +771,94 @@ jobs:
             done || true
 
             docker images --format '{{.Repository}} {{.Tag}}' | \
-              grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
+              grep -E ' v[0-9]+\.[0-9]+\.[0-9]+$' | \
               sort -k1,1 -k2,2Vr | \
               awk '{ if ($1 in seen) print $1 ":" $2; else seen[$1]=1 }' | \
               xargs -r -n1 docker rmi 2>/dev/null || true
 
-            # Non-v* tagged images (`:sha-...`, `:latest`) (BS#2721): the v*
+            # Non-v* tagged images (`:sha-...`, `:latest`) (#2740): the v*
             # sweep above never matches these, so an image built or pulled
             # under either tag scheme -- always true of a one-shot tool
-            # invoked by hand without a version tag -- was never collected
-            # by any of the three GC sites. Ordered by CreatedAt rather than
-            # the tag string, which has no shared ordering across `sha-` and
-            # `latest`. Excludes semantic-index entirely: its `:latest` tag
-            # is a deliberate host-local alias the nightly conductor may
-            # depend on (semantic-index#371), not GC residue.
+            # invoked by hand without a version tag -- was never collected by
+            # any of the three GC sites. Restricted to this host's own ECR
+            # registry (the same prefix check as the retired-repo sweep
+            # below) -- without it this would also sweep hand-pulled
+            # reference images like `postgres:*`, which were never
+            # version-tagged to begin with and are not this pipeline's
+            # concern. Ordered by CreatedAt rather than the tag string, which
+            # has no shared ordering across `sha-` and `latest`. Excludes
+            # semantic-index entirely: its `:latest` tag is a deliberate
+            # host-local alias the nightly conductor may depend on
+            # (semantic-index#371), not GC residue.
+            #
+            # Counts per TAG, not per underlying image id: a repo whose
+            # newest N images include one with two tags pointing at the same
+            # id can have one of those tags fall outside the kept N and get
+            # untagged, even though the image itself survives via its other
+            # tag. Accepted rather than fixed here -- see docs/deploy.md.
             docker images --format '{{.Repository}}|{{.Tag}}|{{.CreatedAt}}' | \
-              awk -F'|' '$1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
+              awk -F'|' -v ecr="$AWS_ECR_URI" 'index($1, ecr "/") == 1 && $1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
               sort -t'|' -k1,1 -k3,3r | \
               awk -F'|' '{ if ($1 in seen) print $1":"$2; else seen[$1]=1 }' | \
               xargs -r -n1 docker rmi 2>/dev/null || true
 
-            # Retired-repo full sweep (BS#2721): a retired or renamed target
+            # Retired-repo full sweep (#2740): a retired or renamed target
             # (root Dockerfile removed, e.g. station-signup-attempt-prune ->
             # auth-log-prune) never rebuilds, so the keep-newest sweeps above
-            # never reach zero for it -- there is always exactly one
-            # "newest" image sitting on the host forever. LIVE_TARGETS is
-            # the FULL current target universe from `setup`, not just what
-            # this push affected, so a repo missing from it is genuinely
-            # retired rather than merely unaffected today. Skipped entirely
-            # when LIVE_TARGETS is empty (the inputs.target dispatch path
-            # never computes it) rather than treating "unknown" as
-            # "everything is retired". db-migrate and deploy-builder are
-            # excluded because they are not matrix targets at all (built by
-            # their own dedicated jobs) and semantic-index is excluded for
-            # the same reason as above.
-            LIVE_TARGETS='${{ steps.live_targets.outputs.list }}'
-            AWS_ECR_URI='${{ secrets.AWS_ECR_URI }}'
+            # never reach zero for it -- there is always exactly one "newest"
+            # image sitting on the host forever. LIVE_TARGETS is the FULL
+            # current target universe from `setup`, not just what this push
+            # affected, so a repo missing from it is genuinely retired rather
+            # than merely unaffected today.
+            #
+            # THE EXCLUSION LIST BELOW IS A DENYLIST, NOT DERIVED FROM
+            # setup -- db-migrate and deploy-builder are excluded because
+            # they are built by their own dedicated jobs and can never appear
+            # in LIVE_TARGETS at all; semantic-index for the same reason as
+            # the sweep above. It has NO knowledge of any OTHER service that
+            # might share this host and this ECR registry without being a
+            # Backend-Service apps/+jobs/ target (e.g. auto-dj-orchestrator):
+            # ANY NEW SERVICE DEPLOYED TO THIS HOST FROM THIS REGISTRY MUST
+            # BE ADDED TO THIS LIST, or this sweep deletes its images on
+            # every Backend-Service deploy. An allowlist was considered and
+            # rejected -- there is no existing signal (an ECR tag, a naming
+            # convention) that marks "this repo belongs to Backend-Service"
+            # separately from "this repo is a live target", so an allowlist
+            # here would be this same list inverted, with the same
+            # maintenance burden and no added safety. See docs/deploy.md.
+            #
+            # Two guards before this runs at all: skipped when LIVE_TARGETS
+            # is empty (the inputs.target dispatch path never computes it,
+            # and a `turbo ls` failure would also empty it) rather than
+            # treating "unknown" as "everything is retired" -- and skipped
+            # when TRUNCATED (below) found a repo LIVE_TARGETS should know
+            # about but doesn't, the same "unknown, not retired" call for a
+            # list that came back non-empty but wrong.
+            TRUNCATED=false
             if [ -n "$LIVE_TARGETS" ]; then
+              REFERENCED_REPOS=$(
+                { echo "$CRONTAB_OUT" | grep -oE '# wxyc_[a-zA-Z0-9-]+' | sed 's/^# wxyc_//'
+                  docker ps --format '{{.Image}}' | while read -r IMG; do
+                    case "$IMG" in
+                      "$AWS_ECR_URI"/*) echo "${IMG#"$AWS_ECR_URI"/}" | cut -d: -f1 ;;
+                    esac
+                  done
+                } | sort -u
+              )
+              for REPO_NAME in $REFERENCED_REPOS; do
+                case "$REPO_NAME" in
+                  db-migrate|deploy-builder|semantic-index) continue ;;
+                esac
+                case " $LIVE_TARGETS " in
+                  *" $REPO_NAME "*) : ;;
+                  *)
+                    echo "::warning::live_targets is missing '$REPO_NAME', referenced by a crontab entry or a running container -- treating live_targets as truncated and skipping the retired-repo image sweep this run."
+                    TRUNCATED=true
+                    ;;
+                esac
+              done
+            fi
+            if [ -n "$LIVE_TARGETS" ] && [ "$TRUNCATED" = false ]; then
               docker images --format '{{.Repository}}' | sort -u | while read -r REPO; do
                 case "$REPO" in
                   "$AWS_ECR_URI"/*) NAME="${REPO#"$AWS_ECR_URI"/}" ;;
@@ -1161,19 +1250,23 @@ jobs:
             # container survives.
             echo "Cleaning up old Docker images (keep newest 2 per repo)..."
             docker images --format '{{.Repository}} {{.Tag}}' | \
-              grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' | \
+              grep -E ' v[0-9]+\.[0-9]+\.[0-9]+$' | \
               sort -k1,1 -k2,2Vr | \
               awk '{ c[$1]++; if (c[$1] > 2) print $1 ":" $2 }' | \
               xargs -r -n1 docker rmi 2>/dev/null || true
 
             # Same keep-newest-2 sweep for non-v* tags (`:sha-...`,
-            # `:latest`), which the grep above never matches (BS#2721).
-            # CreatedAt-ordered, not tag-ordered -- `sha-` and `latest` have
-            # no shared ordering as strings. semantic-index excluded: its
-            # `:latest` may be a deliberate host-local alias
-            # (semantic-index#371), not GC residue.
+            # `:latest`), which the grep above never matches (#2740). Scoped
+            # to this host's own ECR registry (never a hand-pulled reference
+            # image like `postgres:*`) and CreatedAt-ordered, not
+            # tag-ordered -- `sha-` and `latest` have no shared ordering as
+            # strings. semantic-index excluded: its `:latest` may be a
+            # deliberate host-local alias (semantic-index#371), not GC
+            # residue. See `reclaim-disk`'s comment in this file, and
+            # docs/deploy.md, for the ECR-scoping rationale and the
+            # per-tag-not-per-image-id caveat.
             docker images --format '{{.Repository}}|{{.Tag}}|{{.CreatedAt}}' | \
-              awk -F'|' '$1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
+              awk -F'|' -v ecr="$AWS_ECR_URI" 'index($1, ecr "/") == 1 && $1 !~ /(^|\/)semantic-index$/ && $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/' | \
               sort -t'|' -k1,1 -k3,3r | \
               awk -F'|' '{ c[$1]++; if (c[$1] > 2) print $1":"$2 }' | \
               xargs -r -n1 docker rmi 2>/dev/null || true
