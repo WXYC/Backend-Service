@@ -18,8 +18,9 @@
  *      from the caller's join and embeds none of its own, so omitting the join
  *      is a request-time Postgres error, not a compile error.
  *
- * The last test keeps the list of call sites honest: any module that starts
- * importing the fragment fails it until its statement is added here.
+ * The last two tests keep the list of call sites honest: a new use of the
+ * fragment inside `flowsheet.service.ts`, or any other module that starts
+ * importing it, fails them until its statement is added here.
  *
  * Mechanism: the explicit `jest.mock` factory overrides `jest.unit.config.ts`'s
  * `@wxyc/database` redirect (whose tables are plain string maps) with the REAL
@@ -107,8 +108,24 @@ describe('rotation_bin at each FSEntryFieldsRaw call site — rendered statement
     expect(await statementOf(run)).toContain(ROTATION_JOIN);
   });
 
+  const repoRoot = path.resolve(__dirname, '../../..');
+
+  it('flowsheet.service.ts uses the fragment only through the pinned read paths', () => {
+    // Any other use in that file — a fifth `.select(FSEntryFieldsRaw)`, a
+    // spread of it, a second `rotationBinExpr()` — is a statement no pin above
+    // renders. Comment lines are dropped so prose mentions do not count.
+    const code = fs
+      .readFileSync(path.join(repoRoot, 'apps/backend/services/flowsheet.service.ts'), 'utf-8')
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
+      .join('\n');
+
+    expect(code.match(/\brotationBinExpr\(/g)).toHaveLength(1);
+    // The declaration, plus one `.select(FSEntryFieldsRaw)` per pinned read path.
+    expect(code.match(/\bFSEntryFieldsRaw\b/g)).toHaveLength(callSites.length + 1);
+  });
+
   it('no module outside this list selects the fragment', () => {
-    const repoRoot = path.resolve(__dirname, '../../..');
     const walk = (dir: string, out: string[]): string[] => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (entry.name === 'node_modules' || entry.name === 'dist') continue;

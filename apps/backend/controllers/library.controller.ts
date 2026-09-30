@@ -3263,7 +3263,7 @@ function buildLinkedSnapshotConflictMessage(
  *      for" failure `ROTATION_NO_COLUMN_FIELDS` above exists to prevent.
  *   2. It would break a load-bearing invariant. "A library-LINKED rotation
  *      row carries NULL denormalized names" is documented verbatim in
- *      `flowsheet.service.ts` (the rotation-badge read path) and restated in
+ *      `utils/sql-rotation-bin.ts` (the rotation-badge read path) and restated in
  *      the mirror's `rotation-match.ts` (removed in BS#2403); BS#2080's arm-(b) /
  *      arm-(c) partition rests on it and neither arm filters
  *      `album_id IS NULL`. A snapshot on a linked row makes arm (b) match
