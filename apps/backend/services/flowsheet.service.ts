@@ -156,7 +156,7 @@ const FSEntryFieldsRaw = {
   rotation_label: labels.label_name,
   rotation_id: flowsheet.rotation_id,
   // Resolution decision and full rationale (BS#2183, BS#2080, the measured
-  // blast radius, the five call sites that share the decision, and why the
+  // blast radius, the six call sites that share the decision, and why the
   // fifth — `playlist-proxy.service.ts`'s batched form — is deliberately NOT
   // this fragment) live on `rotationBinExpr`'s header in
   // `../utils/sql-rotation-bin.js`. Requires the `leftJoin(rotation,

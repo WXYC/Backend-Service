@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/node';
 import { sql, type SQL } from 'drizzle-orm';
-import { db, flowsheet } from '@wxyc/database';
+import { db, flowsheet, rotation, library } from '@wxyc/database';
 import {
   parseSearchQuery,
   FLOWSHEET_PARSER_CONFIG,
@@ -8,6 +8,7 @@ import {
   type SearchCondition,
 } from './search-parser.service.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
+import { rotationBinExpr } from '../utils/sql-rotation-bin.js';
 
 export type SearchParams = {
   q: string;
@@ -65,6 +66,10 @@ type SearchResultRow = {
   record_label: string | null;
   show_id: number | null;
   dj_name: string | null;
+  rotation_bin: string | null;
+  request_flag: boolean;
+  /** `null` means no linked library row; only an explicit `false` is a known negative. */
+  on_streaming: boolean | null;
 };
 
 type CountRow = { total: number };
@@ -94,6 +99,9 @@ export type SearchResult = {
   record_label: string;
   show_id: number;
   dj_name: string;
+  rotation_bin: string | null;
+  request_flag: boolean;
+  on_streaming: boolean | null;
 };
 
 // Display projection for the resolved DJ name. Reads the denormalized column
@@ -173,14 +181,32 @@ export async function searchFlowsheet(
     WHERE ${flowsheet.entry_type} = 'track'
   `;
 
-  let fullWhere = whereClause ? sql`${baseFrom} AND ${whereClause}` : baseFrom;
-  if (parsedCursor) {
-    // Compound (add_time, id) cursor handles ties when multiple rows share an
-    // add_time — common for batch-imported legacy entries that all carry the
-    // same import timestamp.
-    const cmp = order === 'asc' ? sql`>` : sql`<`;
-    fullWhere = sql`${fullWhere} AND (${flowsheet.add_time}, ${flowsheet.id}) ${cmp} (${parsedCursor.addTime}::timestamptz, ${parsedCursor.id})`;
+  // The two joins that feed rotation_bin/on_streaming. Left off `baseFrom`
+  // (and so off the count query below) on purpose — see "The trap, and the
+  // shape that avoids it" on BS#2699: appending them there would make the
+  // capped count scan two joins over up to COUNT_CAP + 1 rows.
+  const dataFrom = sql`
+    FROM ${flowsheet}
+    LEFT JOIN ${rotation} ON ${rotation.id} = ${flowsheet.rotation_id}
+    LEFT JOIN ${library} ON ${library.id} = ${flowsheet.album_id}
+    WHERE ${flowsheet.entry_type} = 'track'
+  `;
+
+  /** Append the shared predicates (text filter, cursor) to a FROM/WHERE fragment. */
+  function composeWhere(from: SQL): SQL {
+    let where = whereClause ? sql`${from} AND ${whereClause}` : from;
+    if (parsedCursor) {
+      // Compound (add_time, id) cursor handles ties when multiple rows share
+      // an add_time — common for batch-imported legacy entries that all
+      // carry the same import timestamp.
+      const cmp = order === 'asc' ? sql`>` : sql`<`;
+      where = sql`${where} AND (${flowsheet.add_time}, ${flowsheet.id}) ${cmp} (${parsedCursor.addTime}::timestamptz, ${parsedCursor.id})`;
+    }
+    return where;
   }
+
+  const countWhere = composeWhere(baseFrom);
+  const dataWhere = composeWhere(dataFrom);
 
   // Add id as a tiebreaker whenever a cursor could be involved — received OR
   // handed out — so the ORDER BY matches the cursor predicate's compound key.
@@ -230,16 +256,20 @@ export async function searchFlowsheet(
       ${flowsheet.album_title},
       ${flowsheet.record_label},
       ${flowsheet.show_id},
-      ${DJ_NAME_EXPR} AS dj_name
-    ${fullWhere}
+      ${DJ_NAME_EXPR} AS dj_name,
+      ${rotationBinExpr()} AS rotation_bin,
+      ${flowsheet.request_flag},
+      ${library.on_streaming}
+    ${dataWhere}
     ORDER BY ${orderByClause}
     ${limitClause}
   `;
 
   // Capped count (BS#1681): `COUNT(*)` over a `LIMIT COUNT_CAP + 1` derived
   // table stops scanning once the cap is reached, bounding cost regardless of
-  // how many rows the predicate actually matches.
-  const countQuery = sql`SELECT COUNT(*)::int AS total FROM (SELECT 1 ${fullWhere} LIMIT ${COUNT_CAP + 1}) AS capped`;
+  // how many rows the predicate actually matches. Reuses `baseFrom` (via
+  // `countWhere`) with no joins, so the two new joins above never reach it.
+  const countQuery = sql`SELECT COUNT(*)::int AS total FROM (SELECT 1 ${countWhere} LIMIT ${COUNT_CAP + 1}) AS capped`;
 
   // allSettled, not all: the count is now cheap enough that it should never
   // time out, but if it (or a future predicate) does, the data page is already
@@ -310,6 +340,12 @@ function transformRow(row: SearchResultRow): SearchResult {
     record_label: row.record_label ?? '',
     show_id: row.show_id ?? 0,
     dj_name: row.dj_name ?? '',
+    rotation_bin: row.rotation_bin ?? null,
+    request_flag: row.request_flag,
+    // `?? null`, never `?? false`: null means "no linked library row", which
+    // says nothing about streaming — only an explicit `false` is a known
+    // negative. Matches `transformToV2` (flowsheet.service.ts).
+    on_streaming: row.on_streaming ?? null,
   };
 }
 
