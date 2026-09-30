@@ -1,12 +1,14 @@
 /**
  * Schema-source assertions for the two expression indexes that make the
- * `rotation_bin` fallback in `FSEntryFieldsRaw` indexable (BS#2080).
+ * `rotation_bin` fallback (BS#2080) indexable. The fallback itself lives in
+ * `ROTATION_BIN_EXPR`, `apps/backend/utils/sql-rotation-bin.ts` (extracted
+ * from `flowsheet.service.ts`'s `FSEntryFieldsRaw.rotation_bin` by BS#2698).
  *
  * These indexes are unusually fragile. An expression index only serves a query
  * whose expression is written **character-for-character** the same way, and
  * both sides here are hand-written SQL: the index expression lives in
  * `schema.ts` / the migration, and the predicate lives inside a raw
- * `` sql`...` `` template in `flowsheet.service.ts`. A purely cosmetic edit to
+ * `` sql`...` `` template in `sql-rotation-bin.ts`. A purely cosmetic edit to
  * either — `btrim` for `trim`, dropping the vestigial `coalesce` on a NOT NULL
  * column, reordering the composite — leaves every behavioural test green while
  * silently reverting the planner to the 21,563-row seq scan of `rotation` that
@@ -24,7 +26,7 @@ import * as path from 'path';
 const migrationsDir = path.resolve(__dirname, '../../../shared/database/src/migrations');
 const journalPath = path.join(migrationsDir, 'meta/_journal.json');
 const schemaPath = path.resolve(__dirname, '../../../shared/database/src/schema.ts');
-const servicePath = path.resolve(__dirname, '../../../apps/backend/services/flowsheet.service.ts');
+const servicePath = path.resolve(__dirname, '../../../apps/backend/utils/sql-rotation-bin.ts');
 
 // Resolve the migration filename from the journal so the test stays correct if
 // the idx number shifts during a rebase against main.
@@ -50,11 +52,11 @@ const executableSql = migrationSql
   .filter((line) => !line.trimStart().startsWith('--'))
   .join('\n');
 
-/** The `rotation_bin` raw-SQL template, isolated from the rest of the file. */
+/** The `ROTATION_BIN_EXPR` raw-SQL template, isolated from the rest of the file. */
 const rotationBinSql = (() => {
-  const start = serviceSrc.indexOf('rotation_bin: sql<string | null>`');
+  const start = serviceSrc.indexOf('export const ROTATION_BIN_EXPR: SQL<string | null> = sql`');
   expect(start).toBeGreaterThan(-1);
-  const end = serviceSrc.indexOf('`,', start);
+  const end = serviceSrc.indexOf('`;', start);
   expect(end).toBeGreaterThan(start);
   return serviceSrc.slice(start, end);
 })();
