@@ -22,8 +22,11 @@
  * decision spans SIX join sites: four in flowsheet.service.ts, one in
  * playlist-proxy.service.ts (`fetchRecentRows`, the legacy
  * /playlists/recentEntries?v=2 path), and one in search.service.ts
- * (`searchFlowsheet`, BS#2699). This spec only executes against the
- * flowsheet.service.ts lane.
+ * (`searchFlowsheet`, BS#2699). This spec exercises the flowsheet.service.ts
+ * lane through every cohort above, and the search.service.ts lane through the
+ * one GET /flowsheet/search case in the "primary FK join is deliberately
+ * unwindowed" describe block below; playlist-proxy.service.ts's lane has no
+ * case here.
  *
  * The window is placed in 1997 — outside anything the shared dev/CI schema
  * seeds and outside the BS#2062 spec's 1998 window, so the two can run in the
@@ -352,6 +355,12 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     return entry.rotation_bin ?? null;
   };
 
+  const rangeEntryOf = (key) => {
+    const entry = body.entries.find((e) => e.id === entryIds[key]);
+    expect(entry).toBeDefined();
+    return entry;
+  };
+
   it.each([
     ['cohortA', 'album_id matches an active rotation row', 'H'],
     ['cohortB', "rotation row's own denormalized artist/album snapshot", 'M'],
@@ -375,9 +384,9 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     // the primary FK join by bolting the fallback's add_date/kill_date window
     // onto it without reading that decision first. See the header of
     // `rotationBinExpr` (apps/backend/utils/sql-rotation-bin.ts) and the six
-    // annotated `.leftJoin(rotation, ...)` call sites — four in
-    // flowsheet.service.ts, one in playlist-proxy.service.ts, one in
-    // search.service.ts.
+    // join sites it spans — five annotated `.leftJoin(rotation, ...)` builder
+    // calls (four in flowsheet.service.ts, one in playlist-proxy.service.ts)
+    // plus search.service.ts's own raw-template `LEFT JOIN`.
     //
     // Note what a windowed FK join would actually do, because it is not what
     // it looks like: the fallback would NOT pick these rows up. Its CASE is
@@ -403,13 +412,22 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     });
 
     it('GET /flowsheet/search badges the same killed-before-play entry the same way (BS#2699)', async () => {
-      // The desired end state for BS#2699: rotation_bin for a given entry id
-      // equals what GET /flowsheet/range already returned for it above.
+      // The desired end state for BS#2699: rotation_bin, request_flag and
+      // on_streaming for a given entry id equal what GET /flowsheet/range
+      // already returned for it above. The fixture entry doesn't set
+      // request_flag (defaults false) and links a library row that doesn't
+      // set on_streaming (defaults NULL), so this also pins that a wrong
+      // join or a wrong projected column doesn't silently swap in another
+      // row's values.
       const res = await request.get('/flowsheet/search').query({ q: `${MARKER} fkKilledBeforeKillDate` });
       expect(res.status).toBe(200);
       const hit = res.body.results.find((r) => r.id === entryIds.fkKilledBeforeKillDate);
       expect(hit).toBeDefined();
+      const rangeEntry = rangeEntryOf('fkKilledBeforeKillDate');
       expect(hit.rotation_bin).toBe(binOf('fkKilledBeforeKillDate'));
+      expect(hit.request_flag).toBe(false);
+      expect(hit.request_flag).toBe(rangeEntry.request_flag);
+      expect(hit.on_streaming).toBe(rangeEntry.on_streaming);
     });
   });
 
