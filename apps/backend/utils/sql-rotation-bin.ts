@@ -70,7 +70,7 @@ import { rotation, flowsheet, library, artists } from '@wxyc/database';
  * than the windowed badge you were reaching for. Windowing the join therefore means
  * re-gating the CASE too, which is a different and larger change than it looks.
  *
- * FIVE call sites carry this decision. Four are the `.leftJoin(rotation, ...)` sites in
+ * SIX call sites carry this decision. Four are the `.leftJoin(rotation, ...)` sites in
  * `flowsheet.service.ts` (getEntriesByPage, getEntriesByRange, getEntriesInTimeWindow,
  * getEntriesByShow), which all select this fragment through `FSEntryFieldsRaw.rotation_bin` —
  * this module is their one shared source. The fifth is outside that file:
@@ -79,9 +79,12 @@ import { rotation, flowsheet, library, artists } from '@wxyc/database';
  * identically. That fallback is NOT this fragment, and was deliberately not unified with it: it
  * is a batched `WITH cand(...) / active_rot AS MATERIALIZED` form with `DISTINCT ON (cand.fid)`
  * — the same three cohorts and the same window, resolved in bulk rather than per row — and
- * folding it in is a different, larger piece of work. Keep all five in step — changing one
- * and not its twins is the BS#2088 failure mode, and the cross-file fifth is the one most
- * easily missed.
+ * folding it in is a different, larger piece of work. The sixth is `search.service.ts`'s
+ * `searchFlowsheet` (BS#2699), which calls this function directly in its data query's own
+ * `LEFT JOIN rotation` — the capped count query beside it carries neither the join nor the
+ * fragment, since appending them there would make BS#1681's cap scan two joins per row. Keep
+ * all six in step — changing one and not its twins is the BS#2088 failure mode, and the
+ * cross-file fifth and sixth are the ones most easily missed.
  *
  * Subquery only fires per-row on a missed FK join; on rows with a populated rotation_id
  * COALESCE short-circuits and the subquery is not evaluated.

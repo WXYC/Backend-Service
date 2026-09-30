@@ -42,9 +42,15 @@ jest.mock('@wxyc/database', () => {
   const capturedStatements: string[] = [];
   const client = {
     options: { parsers: {}, serializers: {} },
+    // Answers both shapes a caller can await: the query-builder path (used by
+    // flowsheet.service.ts) chains `.values()`; `search.service.ts`'s raw
+    // `db.execute(sql\`...\`)` awaits this return value directly. A thenable
+    // resolving to `[]` with a `.values()` method attached satisfies both.
     unsafe: (statement: string) => {
       capturedStatements.push(statement);
-      return { values: () => Promise.resolve([]) };
+      const result = Promise.resolve([]) as Promise<never[]> & { values: () => Promise<never[]> };
+      result.values = () => Promise.resolve([]);
+      return result;
     },
   };
   return {
@@ -65,6 +71,7 @@ import {
   getEntriesByShow,
   getEntriesInTimeWindow,
 } from '../../../apps/backend/services/flowsheet.service';
+import { searchFlowsheet } from '../../../apps/backend/services/search.service';
 import { rotationBinExpr } from '../../../apps/backend/utils/sql-rotation-bin';
 import baseline from '../../fixtures/rotation-bin-fragment-baseline.json';
 
@@ -108,6 +115,34 @@ describe('rotation_bin at each FSEntryFieldsRaw call site — rendered statement
     expect(await statementOf(run)).toContain(ROTATION_JOIN);
   });
 
+  // search.service.ts's first import of the fragment (BS#2699). Its own
+  // describe block below: unlike the four call sites above, `searchFlowsheet`
+  // issues two statements per call (the joined data query and the unjoined
+  // capped count — see "The trap, and the shape that avoids it" on BS#2699),
+  // so it can't share `statementOf`'s one-statement assertion, and its raw
+  // `sql` LEFT JOIN renders with different casing than drizzle's own
+  // `.leftJoin()` builder, so it can't share the lowercase `ROTATION_JOIN`
+  // constant either.
+  describe('searchFlowsheet (BS#2699)', () => {
+    const SEARCH_ROTATION_JOIN = `LEFT JOIN "${SCHEMA}"."rotation" ON "${SCHEMA}"."rotation"."id" = "${SCHEMA}"."flowsheet"."rotation_id"`;
+
+    it('issues exactly two statements: the joined data query and the unjoined capped count', async () => {
+      capturedStatements.length = 0;
+      await searchFlowsheet({ q: '', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+      expect(capturedStatements).toHaveLength(2);
+      const [dataStatement, countStatement] = capturedStatements;
+
+      expect(dataStatement.split(PINNED_FRAGMENT)).toHaveLength(2);
+      expect(dataStatement).toContain(SEARCH_ROTATION_JOIN);
+
+      // The capped count reuses `baseFrom` verbatim — neither the fragment
+      // nor the join it depends on may reach it (BS#1681's timeout history).
+      expect(countStatement).not.toContain(PINNED_FRAGMENT);
+      expect(countStatement).not.toContain(SEARCH_ROTATION_JOIN);
+    });
+  });
+
   const repoRoot = path.resolve(__dirname, '../../..');
 
   it('flowsheet.service.ts uses the fragment only through the pinned read paths', () => {
@@ -142,6 +177,9 @@ describe('rotation_bin at each FSEntryFieldsRaw call site — rendered statement
 
     // A new caller belongs in `callSites` above, with its own join assertion,
     // before it belongs in this list.
-    expect(importers).toEqual(['apps/backend/services/flowsheet.service.ts']);
+    expect(importers).toEqual([
+      'apps/backend/services/flowsheet.service.ts',
+      'apps/backend/services/search.service.ts',
+    ]);
   });
 });

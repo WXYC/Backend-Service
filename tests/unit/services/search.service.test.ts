@@ -24,6 +24,9 @@ const makeRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   record_label: 'Warp',
   show_id: 100,
   dj_name: 'DJ Test',
+  rotation_bin: 'H',
+  request_flag: false,
+  on_streaming: true,
   ...overrides,
 });
 
@@ -161,6 +164,34 @@ describe('searchFlowsheet', () => {
     expect(result.results[0].track_title).toBe('');
     expect(result.results[0].album_title).toBe('');
     expect(result.results[0].record_label).toBe('');
+  });
+
+  it('passes through rotation_bin, request_flag and on_streaming (BS#2699)', async () => {
+    mockDataAndCount([makeRow({ rotation_bin: 'M', request_flag: true, on_streaming: false })], 1);
+
+    const result = await searchFlowsheet({ q: 'autechre', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(result.results[0].rotation_bin).toBe('M');
+    expect(result.results[0].request_flag).toBe(true);
+    expect(result.results[0].on_streaming).toBe(false);
+  });
+
+  it('coerces a null rotation_bin to null, not an empty string (BS#2699)', async () => {
+    mockDataAndCount([makeRow({ rotation_bin: null })], 1);
+
+    const result = await searchFlowsheet({ q: 'autechre', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(result.results[0].rotation_bin).toBeNull();
+  });
+
+  it('preserves a null on_streaming rather than coercing to false (BS#2699)', async () => {
+    // null means "no linked library row"; only an explicit false is a known
+    // negative. Matches transformToV2 in flowsheet.service.ts.
+    mockDataAndCount([makeRow({ on_streaming: null })], 1);
+
+    const result = await searchFlowsheet({ q: 'autechre', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(result.results[0].on_streaming).toBeNull();
   });
 });
 

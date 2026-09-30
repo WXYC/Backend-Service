@@ -19,9 +19,10 @@
  * contrasts with: the fallback subquery above is windowed against add_time,
  * but the primary `rotation_id` FK join is deliberately NOT — see the
  * "primary FK join is deliberately unwindowed" describe block below. That
- * decision spans FIVE join sites: four in flowsheet.service.ts and one in
+ * decision spans SIX join sites: four in flowsheet.service.ts, one in
  * playlist-proxy.service.ts (`fetchRecentRows`, the legacy
- * /playlists/recentEntries?v=2 path). This spec only executes against the
+ * /playlists/recentEntries?v=2 path), and one in search.service.ts
+ * (`searchFlowsheet`, BS#2699). This spec only executes against the
  * flowsheet.service.ts lane.
  *
  * The window is placed in 1997 — outside anything the shared dev/CI schema
@@ -373,9 +374,10 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     // pin the BS#2183 decision so it fails loudly if someone later "fixes"
     // the primary FK join by bolting the fallback's add_date/kill_date window
     // onto it without reading that decision first. See the header of
-    // `rotationBinExpr` (apps/backend/utils/sql-rotation-bin.ts) and the five
+    // `rotationBinExpr` (apps/backend/utils/sql-rotation-bin.ts) and the six
     // annotated `.leftJoin(rotation, ...)` call sites — four in
-    // flowsheet.service.ts, one in playlist-proxy.service.ts.
+    // flowsheet.service.ts, one in playlist-proxy.service.ts, one in
+    // search.service.ts.
     //
     // Note what a windowed FK join would actually do, because it is not what
     // it looks like: the fallback would NOT pick these rows up. Its CASE is
@@ -398,6 +400,16 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
       // would exclude this row (add_date > add_time) and the badge would be
       // null, exactly as `addedLater` proves above.
       expect(binOf('fkAiredBeforeAddDate')).toBe('M');
+    });
+
+    it('GET /flowsheet/search badges the same killed-before-play entry the same way (BS#2699)', async () => {
+      // The desired end state for BS#2699: rotation_bin for a given entry id
+      // equals what GET /flowsheet/range already returned for it above.
+      const res = await request.get('/flowsheet/search').query({ q: `${MARKER} fkKilledBeforeKillDate` });
+      expect(res.status).toBe(200);
+      const hit = res.body.results.find((r) => r.id === entryIds.fkKilledBeforeKillDate);
+      expect(hit).toBeDefined();
+      expect(hit.rotation_bin).toBe(binOf('fkKilledBeforeKillDate'));
     });
   });
 

@@ -522,10 +522,11 @@ async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
       // UNWINDOWED (BS#2183), while resolveFallbackRotation's arm is bounded on
       // both sides against the play date. The asymmetry is the decision, not an
       // oversight: an explicit rotation_id is the writer's assertion and outranks
-      // date arithmetic. This is the fifth twin of the four join sites in
-      // flowsheet.service.ts, which share `rotationBinExpr` — see its header in
+      // date arithmetic. This is the fifth of six call sites that share this
+      // decision — the four joins in flowsheet.service.ts and search.service.ts's
+      // searchFlowsheet call `rotationBinExpr` directly. See its header in
       // ../utils/sql-rotation-bin.ts for the full rationale and the measured
-      // blast radius, and keep the two in step.
+      // blast radius, and keep all six in step.
       rotation_bin: rotation.rotation_bin,
     })
     .from(flowsheet)
