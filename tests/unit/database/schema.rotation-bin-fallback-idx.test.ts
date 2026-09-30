@@ -1,8 +1,8 @@
 /**
  * Schema-source assertions for the two expression indexes that make the
  * `rotation_bin` fallback (BS#2080) indexable. The fallback itself lives in
- * `ROTATION_BIN_EXPR`, `apps/backend/utils/sql-rotation-bin.ts` (extracted
- * from `flowsheet.service.ts`'s `FSEntryFieldsRaw.rotation_bin` by BS#2698).
+ * `rotationBinExpr`, `apps/backend/utils/sql-rotation-bin.ts`, which
+ * `flowsheet.service.ts`'s `FSEntryFieldsRaw.rotation_bin` selects.
  *
  * These indexes are unusually fragile. An expression index only serves a query
  * whose expression is written **character-for-character** the same way, and
@@ -52,9 +52,9 @@ const executableSql = migrationSql
   .filter((line) => !line.trimStart().startsWith('--'))
   .join('\n');
 
-/** The `ROTATION_BIN_EXPR` raw-SQL template, isolated from the rest of the file. */
+/** The `rotationBinExpr` raw-SQL template, isolated from the rest of the file. */
 const rotationBinSql = (() => {
-  const start = serviceSrc.indexOf('export const ROTATION_BIN_EXPR: SQL<string | null> = sql`');
+  const start = serviceSrc.indexOf('export function rotationBinExpr(): SQL<string | null> {\n  return sql`');
   expect(start).toBeGreaterThan(-1);
   const end = serviceSrc.indexOf('`;', start);
   expect(end).toBeGreaterThan(start);

@@ -523,8 +523,9 @@ async function fetchRecentRows(limit: number): Promise<RecentRow[]> {
       // both sides against the play date. The asymmetry is the decision, not an
       // oversight: an explicit rotation_id is the writer's assertion and outranks
       // date arithmetic. This is the fifth twin of the four join sites in
-      // flowsheet.service.ts — see FSEntryFieldsRaw.rotation_bin there for the
-      // full rationale and the measured blast radius, and keep the two in step.
+      // flowsheet.service.ts, which share `rotationBinExpr` — see its header in
+      // ../utils/sql-rotation-bin.ts for the full rationale and the measured
+      // blast radius, and keep the two in step.
       rotation_bin: rotation.rotation_bin,
     })
     .from(flowsheet)

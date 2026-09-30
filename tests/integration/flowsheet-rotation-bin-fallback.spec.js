@@ -372,10 +372,10 @@ describe('rotation_bin fallback cohorts (BS#2080)', () => {
     // correct and expected — the point isn't to drive new behavior, it's to
     // pin the BS#2183 decision so it fails loudly if someone later "fixes"
     // the primary FK join by bolting the fallback's add_date/kill_date window
-    // onto it without reading that decision first. See the
-    // FSEntryFieldsRaw.rotation_bin comment and the five annotated
-    // `.leftJoin(rotation, ...)` call sites — four in flowsheet.service.ts,
-    // one in playlist-proxy.service.ts.
+    // onto it without reading that decision first. See the header of
+    // `rotationBinExpr` (apps/backend/utils/sql-rotation-bin.ts) and the five
+    // annotated `.leftJoin(rotation, ...)` call sites — four in
+    // flowsheet.service.ts, one in playlist-proxy.service.ts.
     //
     // Note what a windowed FK join would actually do, because it is not what
     // it looks like: the fallback would NOT pick these rows up. Its CASE is
