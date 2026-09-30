@@ -34,7 +34,7 @@ import {
   suppressMislabeledStreamingUrls,
   fillSynthesizedSearchUrls,
 } from '../utils/album-metadata-projection.js';
-import { ROTATION_BIN_EXPR } from '../utils/sql-rotation-bin.js';
+import { rotationBinExpr } from '../utils/sql-rotation-bin.js';
 import { generateMissingBreakpoints, nearestStationHour, MAX_AUTO_BREAKPOINTS } from '../utils/breakpoint-generator.js';
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
@@ -155,13 +155,13 @@ const FSEntryFieldsRaw = {
   // arithmetic" rule (BS#2183).
   rotation_label: labels.label_name,
   rotation_id: flowsheet.rotation_id,
-  // Resolution decision + full rationale (BS#2183, BS#2080, the five call
-  // sites this shares the decision with, and why the fifth —
-  // `playlist-proxy.service.ts`'s batched form — is deliberately NOT unified
-  // with this one) now live on `ROTATION_BIN_EXPR`'s header in
-  // `../utils/sql-rotation-bin.js` (BS#2698). Requires the `leftJoin(rotation,
-  // rotation.id = flowsheet.rotation_id)` below at every call site.
-  rotation_bin: ROTATION_BIN_EXPR,
+  // Resolution decision and full rationale (BS#2183, BS#2080, the measured
+  // blast radius, the five call sites that share the decision, and why the
+  // fifth — `playlist-proxy.service.ts`'s batched form — is deliberately NOT
+  // this fragment) live on `rotationBinExpr`'s header in
+  // `../utils/sql-rotation-bin.js`. Requires the `leftJoin(rotation,
+  // rotation.id = flowsheet.rotation_id)` at every call site below.
+  rotation_bin: rotationBinExpr(),
   // Resolved catalog artist for the played release, via the flowsheet ->
   // library FK join already present on every read path below
   // (`leftJoin(library, library.id = flowsheet.album_id)`). NULL for
@@ -549,7 +549,7 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .from(page)
     .innerJoin(flowsheet, eq(flowsheet.id, page.id))
     // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see ROTATION_BIN_EXPR's header in ../utils/sql-rotation-bin.js.
+    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -593,7 +593,7 @@ export const getEntriesByRange = async (startId: number, endId: number): Promise
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see ROTATION_BIN_EXPR's header in ../utils/sql-rotation-bin.js.
+    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -638,7 +638,7 @@ export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IF
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see ROTATION_BIN_EXPR's header in ../utils/sql-rotation-bin.js.
+    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
@@ -752,7 +752,7 @@ export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[
     .select(FSEntryFieldsRaw)
     .from(flowsheet)
     // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see ROTATION_BIN_EXPR's header in ../utils/sql-rotation-bin.js.
+    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
     .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
     .leftJoin(library, eq(library.id, flowsheet.album_id))
     .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))

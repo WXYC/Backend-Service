@@ -1,36 +1,38 @@
 /**
- * Unit tests for `apps/backend/utils/sql-rotation-bin.ts` (BS#2698 — the
- * extraction of `FSEntryFieldsRaw.rotation_bin` out of `flowsheet.service.ts`
- * into a shared, composable fragment).
+ * Unit tests for `apps/backend/utils/sql-rotation-bin.ts` — the `rotation_bin`
+ * resolution expression, rendered on its own.
  *
- * `ROTATION_BIN_EXPR` is built at module-import time from whatever
- * `rotation`/`flowsheet`/`library`/`artists` the module receives from
- * `@wxyc/database` — the unit suite's `moduleNameMapper` points that bare
- * specifier at `tests/mocks/database.mock.ts`, whose "columns" are plain
- * strings rather than real Drizzle `Column`s, so an expression built from
- * them renders as bind parameters (`$1`, `$2`, ...), not as
- * `"rotation"."rotation_bin"`. The precondition guard this file exists to
- * enforce (constraint 5 of BS#2698: callers must `leftJoin(rotation, ...)`)
- * needs the real column identifiers, so this suite overrides `@wxyc/database`
- * with the real, pure `schema.ts` pgTable definitions before importing the
- * module under test — mirroring how `tests/unit/database/last-logged-show-entry.test.ts`
- * reaches for real Drizzle objects instead of the double.
+ * `rotationBinExpr()` builds its `SQL` from whatever `rotation`/`flowsheet`/
+ * `library`/`artists` the module receives from `@wxyc/database` — the unit
+ * suite's `moduleNameMapper` points that bare specifier at
+ * `tests/mocks/database.mock.ts`, whose "columns" are plain strings rather
+ * than real Drizzle `Column`s, so an expression built from them renders as
+ * bind parameters (`$1`, `$2`, ...), not as `"rotation"."rotation_bin"`. This
+ * suite overrides `@wxyc/database` with the real, pure `schema.ts` pgTable
+ * definitions before importing the module under test — mirroring how
+ * `tests/unit/database/last-logged-show-entry.test.ts` reaches for real
+ * Drizzle objects instead of the double.
+ *
+ * What this file cannot check is the caller's side of the contract: rendering
+ * the fragment alone never sees a join list. That the `rotation` join is
+ * present, and that each call site serves the pre-extraction SQL byte for
+ * byte, is `tests/unit/services/flowsheet.rotationBin.sql.test.ts`'s job.
  */
 jest.unmock('drizzle-orm');
 jest.mock('@wxyc/database', () => jest.requireActual('../../../shared/database/src/schema'));
 
+import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { ROTATION_BIN_EXPR } from '../../../apps/backend/utils/sql-rotation-bin';
+import { rotationBinExpr } from '../../../apps/backend/utils/sql-rotation-bin';
 
 const dialect = new PgDialect();
-const rendered = dialect.sqlToQuery(ROTATION_BIN_EXPR).sql;
+const render = (fragment: Parameters<PgDialect['sqlToQuery']>[0]): string => dialect.sqlToQuery(fragment).sql;
+const rendered = render(rotationBinExpr());
 
-describe('ROTATION_BIN_EXPR', () => {
-  it('references the primary FK lane as a real, qualified column — not a bind parameter', () => {
-    // This is the precondition guard: if a future caller (or a refactor of
-    // this module) drops the requirement that `rotation` be joined, the
-    // primary lane stops being a real column reference and this assertion
-    // catches it before a request-time "relation \"rotation\" does not exist".
+describe('rotationBinExpr', () => {
+  it('reads the primary lane from the joined `rotation` table as a real column, not a bind parameter', () => {
+    // This column is why every caller must join `rotation`: the fragment
+    // carries no join of its own for it.
     expect(rendered).toContain('"rotation"."rotation_bin"');
   });
 
@@ -51,5 +53,16 @@ describe('ROTATION_BIN_EXPR', () => {
 
   it('is a single COALESCE — the FK lane always wins when populated', () => {
     expect(rendered.trim().toLowerCase().startsWith('coalesce(')).toBe(true);
+  });
+
+  it('returns a fresh SQL per call, so a caller mutating its copy cannot reach any other caller', () => {
+    // drizzle's `SQL.append()`, `.mapWith()` and `.inlineParams()` modify the
+    // instance in place and return `this`.
+    const mine = rotationBinExpr();
+    mine.append(sql` + 1`);
+
+    const theirs = rotationBinExpr();
+    expect(theirs).not.toBe(mine);
+    expect(render(theirs)).toBe(rendered);
   });
 });
