@@ -17,15 +17,18 @@ import { rotation, flowsheet, library, artists } from '@wxyc/database';
  *     `sql` template: `missing FROM-clause entry for table "rotation"`;
  *   - bare — a single-table drizzle select (`.select({...}).from(flowsheet)`
  *     and no join), where drizzle strips the table qualifier from every column
- *     of an `sql` field: `column "rotation_bin" does not exist`. That mode
- *     hides a second hazard: the correlated `flowsheet.*` references inside
- *     the fallback subquery also render bare and rebind to `r2`'s same-named
- *     columns (`r2.album_id = "album_id"` becomes a tautology). The only thing
- *     keeping it loud is that `flowsheet` has no `rotation_bin` column.
+ *     of an `sql` field: `column "rotation_bin" does not exist`. The
+ *     correlated `flowsheet.*` references inside the fallback subquery render
+ *     bare too. In arms (a) and (b) they rebind to `r2`'s same-named columns
+ *     (`r2.album_id = "album_id"` becomes a tautology) and would badge the
+ *     wrong rows without complaint; in arm (c) `"artist_name"` and
+ *     `"album_title"` are ambiguous across `r2`/`l2`/`a2` and error. Those two
+ *     errors are all that keep this mode loud.
  * Every statement that selects this fragment is rendered and checked for the
- * join in `tests/unit/services/flowsheet.rotationBin.sql.test.ts`, which also
- * fails when a module it does not list imports this one — a new caller adds
- * its statement there.
+ * join in `tests/unit/services/flowsheet.rotationBin.sql.test.ts`. That test
+ * also counts the fragment's uses in `flowsheet.service.ts` and fails when a
+ * module it does not list imports this one — a new caller adds its statement
+ * there.
  *
  * A FUNCTION, NOT A SHARED CONSTANT: drizzle's `SQL` is mutable —
  * `append()`, `mapWith()` and `inlineParams()` modify the instance and return
