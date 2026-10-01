@@ -154,28 +154,26 @@ const COLUMN_MAP: Record<string, SQL> = {
   record_label: sql`${flowsheet.record_label}`,
 };
 
-/** Search historical flowsheet entries with filtering, sorting, and pagination. */
-export async function searchFlowsheet(
-  params: SearchParams
-): Promise<{ results: SearchResult[]; total: number; nextCursor?: string }> {
-  const { q, page, limit, sort, order, cursor } = params;
-  const conditions = parseSearchQuery(q, FLOWSHEET_PARSER_CONFIG);
-
-  const whereClause = buildWhereClause(conditions);
+/**
+ * Build and run the data + count queries for one request. Pure extraction
+ * from `searchFlowsheet` — no behaviour change, byte-identical SQL — so the
+ * follow-up ticket that makes this callable more than once per request (one
+ * predicate per tier) has a single, already-isolated seam to extend.
+ */
+async function runTierQuery(
+  whereClause: SQL | null,
+  ctx: {
+    sort: SearchParams['sort'];
+    order: SearchParams['order'];
+    limit: number;
+    offset: number;
+    parsedCursor: Cursor | null;
+    cursorEligible: boolean;
+  }
+) {
+  const { sort, order, limit, offset, parsedCursor, cursorEligible } = ctx;
   const orderDirection = order === 'asc' ? sql`ASC` : sql`DESC`;
   const sortExpr = SORT_MAP[sort];
-
-  // Whether this request can take part in cursor pagination at all — as the
-  // page that RECEIVES a cursor, as the page that EMITS one, or both. Date
-  // sort is the whole condition: `parseCursor` is consulted only when this
-  // holds, so a cursor handed out under any other sort would be silently
-  // ignored on the way back in and the client would re-request the same page
-  // forever. Non-date sorts fall back to offset regardless — their sort
-  // columns are not unique and there is no compound (sort_col, id) index to
-  // support a cursor predicate for them.
-  const cursorEligible = sort === 'date';
-  const parsedCursor = cursorEligible && cursor !== undefined ? parseCursor(cursor) : null;
-  const offset = parsedCursor !== null ? 0 : page * limit;
 
   const baseFrom = sql`
     FROM ${flowsheet}
@@ -272,11 +270,39 @@ export async function searchFlowsheet(
   // `countWhere`) with no joins, so the two new joins above never reach it.
   const countQuery = sql`SELECT COUNT(*)::int AS total FROM (SELECT 1 ${countWhere} LIMIT ${COUNT_CAP + 1}) AS capped`;
 
-  // allSettled, not all: the count is now cheap enough that it should never
-  // time out, but if it (or a future predicate) does, the data page is already
-  // in hand — degrade to a lower-bound total rather than 500-ing the whole
-  // request the way the pre-BS#1681 `Promise.all` did.
   const [dataSettled, countSettled] = await Promise.allSettled([db.execute(dataQuery), db.execute(countQuery)]);
+  return { dataSettled, countSettled };
+}
+
+/** Search historical flowsheet entries with filtering, sorting, and pagination. */
+export async function searchFlowsheet(
+  params: SearchParams
+): Promise<{ results: SearchResult[]; total: number; nextCursor?: string }> {
+  const { q, page, limit, sort, order, cursor } = params;
+  const conditions = parseSearchQuery(q, FLOWSHEET_PARSER_CONFIG);
+
+  const whereClause = buildWhereClause(conditions);
+
+  // Whether this request can take part in cursor pagination at all — as the
+  // page that RECEIVES a cursor, as the page that EMITS one, or both. Date
+  // sort is the whole condition: `parseCursor` is consulted only when this
+  // holds, so a cursor handed out under any other sort would be silently
+  // ignored on the way back in and the client would re-request the same page
+  // forever. Non-date sorts fall back to offset regardless — their sort
+  // columns are not unique and there is no compound (sort_col, id) index to
+  // support a cursor predicate for them.
+  const cursorEligible = sort === 'date';
+  const parsedCursor = cursorEligible && cursor !== undefined ? parseCursor(cursor) : null;
+  const offset = parsedCursor !== null ? 0 : page * limit;
+
+  const { dataSettled, countSettled } = await runTierQuery(whereClause, {
+    sort,
+    order,
+    limit,
+    offset,
+    parsedCursor,
+    cursorEligible,
+  });
 
   if (dataSettled.status === 'rejected') {
     // No data page means nothing to serve — a data-query failure stays fatal
