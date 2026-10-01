@@ -170,7 +170,11 @@ describe('other ambiguous column references stay qualified (BS#2699)', () => {
 
   it('the tsvector arm of the all-field match reads a qualified search_doc', async () => {
     // 3+ alphanumeric characters with no field prefix routes to the tsvector
-    // branch — see shouldUseTsvector.
+    // branch — see shouldUseTsvector. `dataStatement` returns the FIRST
+    // statement issued, which is always the 'word' tier's data query
+    // (WXYC/Backend-Service#2712's cascade tries 'word' first, and its SQL
+    // is byte-identical to pre-#2712 `main` — the 'prefix' tier's own CASE
+    // form is covered separately, in search.service.cascade.test.ts).
     const statement = await dataStatement(() =>
       searchFlowsheet({ q: 'probe', page: 0, limit: 50, sort: 'date', order: 'desc' })
     );

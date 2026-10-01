@@ -273,8 +273,8 @@ describe("BS#2344: the cursor carries the row's full timestamp resolution", () =
 
     const result = await searchFlowsheet({ q: '', page: 0, limit: 1, sort: 'date', order: 'desc' });
 
-    expect(result.nextCursor).toBe(encodeCursor('2026-08-30T12:00:00.123456Z', 42));
-    expect(result.nextCursor).not.toBe(encodeCursor(result.results[0].play_date, 42));
+    expect(result.nextCursor).toBe(encodeCursor('2026-08-30T12:00:00.123456Z', 42, 'word'));
+    expect(result.nextCursor).not.toBe(encodeCursor(result.results[0].play_date, 42, 'word'));
   });
 
   it('keeps cursor_time out of the returned SearchResult objects', async () => {

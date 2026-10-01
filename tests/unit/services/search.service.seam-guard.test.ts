@@ -8,13 +8,24 @@
 // rewrite (an ~8-minute ACCESS EXCLUSIVE lock on 2.65M rows, see the plan on
 // #2726), so the fix lives in the READER instead: `buildAllFieldMatch`
 // switches its tsvector branch from `websearch_to_tsquery` to the catalog's
-// `buildPrefixTsquery(value).exactTsquery` (BS#670's builder, which never
-// emits negation or a user operator, making the AND-narrowing below
-// unconditionally safe — see docs/playlist-search/README.md), and ANDs in a
-// second predicate against a GAPPED rebuild of the same five segments (a
-// `wxycsearchdocgap` sentinel between each pair, removed by `ts_delete`
-// without renumbering the survivors — the exact 0178 mechanism, applied at
-// read time instead of at the column).
+// `buildPrefixTsquery` (BS#670's builder, which never emits negation or a
+// user operator, making the AND-narrowing below unconditionally safe — see
+// docs/playlist-search/README.md), and ANDs in a second predicate against a
+// GAPPED rebuild of the same five segments (a `wxycsearchdocgap` sentinel
+// between each pair, removed by `ts_delete` without renumbering the
+// survivors — the exact 0178 mechanism, applied at read time instead of at
+// the column).
+//
+// `searchFlowsheet` compiles via `dialect.sqlToQuery` here (`jest.unmock('drizzle-orm')`
+// below), and `compiledExecuteCall(1)` reads the SECOND db.execute call,
+// which is always the 'word' tier's own count query (WXYC/Backend-Service#2712):
+// every word below is tsvector-eligible, so the 'word' tier never returns
+// non-empty before the mock resolves it empty, but this file only inspects
+// calls 0/1 regardless of whether a later cascade call follows — so it pins
+// the 'word' tier's guard exclusively, byte-identical to pre-#2712 `main`.
+// The 'prefix' tier's own, DIFFERENT seam mechanics (an outer boolean CASE,
+// not a tsquery-level one) are covered in
+// tests/unit/services/search.service.cascade.test.ts.
 //
 // BS#2753 review: the guard is routed in SQL (`strpos(q::text, '<') = 0 OR
 // gapped @@ q`), not predicted in JS, so this file asserts the UNCONDITIONAL

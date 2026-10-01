@@ -54,7 +54,21 @@ export const searchFlowsheetEndpoint: RequestHandler<object, unknown, unknown, S
   // Cursor is optional. If present it must round-trip through parseCursor;
   // a malformed token is a 400 rather than silently falling back to offset
   // (clients that ask for cursor mode should know it failed).
+  //
+  // `req.query.cursor` is typed `string | undefined` above, but Express 5's
+  // default query parser hands back `string[]` for a repeated param
+  // (`?cursor=a&cursor=b`) regardless of the declared type -- the type
+  // annotation describes the common case, not every value the parser can
+  // actually produce. parseCursor assumes a string and calls `.endsWith` on
+  // it; an array has no such method, so letting one through would throw a
+  // TypeError here, before this handler's own try/catch, and 500 where
+  // `main` 400ed. Reject a non-string cursor the same way a malformed one
+  // is rejected.
   const cursor = req.query.cursor;
+  if (cursor !== undefined && typeof cursor !== 'string') {
+    res.status(400).json({ message: 'Invalid cursor token' });
+    return;
+  }
   if (cursor !== undefined && parseCursor(cursor) === null) {
     res.status(400).json({ message: 'Invalid cursor token' });
     return;

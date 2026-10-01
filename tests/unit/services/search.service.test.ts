@@ -263,10 +263,11 @@ describe('shouldUseTsvector', () => {
 
 describe('cursor codec', () => {
   describe('parseCursor', () => {
-    it('parses a valid cursor', () => {
+    it('parses a valid cursor, defaulting to the word tier when unmarked', () => {
       expect(parseCursor('2024-06-15T14:30:00.000Z_12345')).toEqual({
         addTime: '2024-06-15T14:30:00.000Z',
         id: 12345,
+        tier: 'word',
       });
     });
 
@@ -277,6 +278,7 @@ describe('cursor codec', () => {
       expect(parseCursor('2024-06-15T14:30:00.000Z_999')).toEqual({
         addTime: '2024-06-15T14:30:00.000Z',
         id: 999,
+        tier: 'word',
       });
     });
 
@@ -293,11 +295,22 @@ describe('cursor codec', () => {
   });
 
   describe('encodeCursor', () => {
-    it('round-trips with parseCursor', () => {
-      const cursor = encodeCursor('2024-06-15T14:30:00.000Z', 12345);
+    it('round-trips with parseCursor on the word tier (no marker)', () => {
+      const cursor = encodeCursor('2024-06-15T14:30:00.000Z', 12345, 'word');
       expect(parseCursor(cursor)).toEqual({
         addTime: '2024-06-15T14:30:00.000Z',
         id: 12345,
+        tier: 'word',
+      });
+    });
+
+    it('round-trips with parseCursor on the prefix tier (_pfx marker)', () => {
+      const cursor = encodeCursor('2024-06-15T14:30:00.000Z', 12345, 'prefix');
+      expect(cursor).toBe('2024-06-15T14:30:00.000Z_12345_pfx');
+      expect(parseCursor(cursor)).toEqual({
+        addTime: '2024-06-15T14:30:00.000Z',
+        id: 12345,
+        tier: 'prefix',
       });
     });
   });
@@ -325,7 +338,7 @@ describe('searchFlowsheet cursor pagination', () => {
     });
 
     expect(result.results).toHaveLength(50);
-    expect(result.nextCursor).toBe(encodeCursor(rows[49].cursor_time, rows[49].id));
+    expect(result.nextCursor).toBe(encodeCursor(rows[49].cursor_time, rows[49].id, 'word'));
   });
 
   it('omits nextCursor when fewer rows are returned than requested', async () => {
@@ -360,7 +373,7 @@ describe('searchFlowsheet cursor pagination', () => {
       order: 'desc',
     });
 
-    expect(result.nextCursor).toBe(encodeCursor(rows[49].cursor_time, rows[49].id));
+    expect(result.nextCursor).toBe(encodeCursor(rows[49].cursor_time, rows[49].id, 'word'));
   });
 
   it('omits nextCursor when sort is not date even if cursor is provided', async () => {
