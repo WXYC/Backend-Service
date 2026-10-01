@@ -2,7 +2,14 @@ import { sql, type SQL } from 'drizzle-orm';
 import { hasAlphanumeric } from './text-query.js';
 
 /**
- * Last-token prefix `tsquery` construction for catalog search (BS#670).
+ * Last-token prefix `tsquery` construction for catalog search (BS#670). Also
+ * the sole non-prefixed consumer of {@link PrefixTsquery.exactTsquery}: the
+ * flowsheet gapped-vector seam guard (BS#2726, `buildAllFieldMatch` in
+ * `apps/backend/services/search.service.ts`) routes its own guard in SQL —
+ * `strpos(q::text, '<') = 0` — rather than predicting phrase-capability here,
+ * so this module has nothing else to export for it. See that function's
+ * docstring for why asking Postgres beat an earlier `phraseCapable` field
+ * computed in JS.
  *
  * ## Why not `websearch_to_tsquery`
  *
@@ -107,19 +114,35 @@ const TSQUERY_METACHARACTERS = /[&|!()<>:*\\"]/g;
  */
 const MAX_OPERANDS = 16;
 
-/** The two tsqueries {@link buildPrefixTsquery} derives from one tokenization. */
+/**
+ * The two tsqueries {@link buildPrefixTsquery} derives from one tokenization.
+ * Two consumers: the catalog's `searchLibraryByTsvector`
+ * (`apps/backend/services/library.service.ts`, BS#670) reads `tsquery` and
+ * `exactTsquery`; the flowsheet's `buildAllFieldMatch`
+ * (`apps/backend/services/search.service.ts`, BS#2726) reads `exactTsquery`
+ * only — it never suffixes a token with `:*`, so `tsquery` has no flowsheet
+ * reader, and it never asks this module whether a token *could* produce a
+ * `<->` chain (an earlier `phraseCapable` field tried to predict that in JS;
+ * see `buildAllFieldMatch`'s docstring for why asking Postgres at query time
+ * replaced it).
+ */
 export interface PrefixTsquery {
   /**
    * Every token an exact quoted lexeme except the last, which is suffixed
-   * `:*`. Drives the WHERE predicate and `album_score`, the secondary
-   * within-tier `ts_rank` — it accepts the row the DJ is still typing toward.
+   * `:*`. Drives the catalog's WHERE predicate and `album_score`, the
+   * secondary within-tier `ts_rank` — it accepts the row the DJ is still
+   * typing toward.
    */
   tsquery: SQL;
   /**
-   * The same token list, quoted, with no `:*` anywhere. Drives
+   * The same token list, quoted, with no `:*` anywhere. Drives the catalog's
    * `searchLibraryByTsvector`'s `match_tier` CASE — a row that matches this
    * matched every token as a complete word, not merely a prefix of one — and
-   * `exact_score`, the first sort key within a tier.
+   * `exact_score`, the first sort key within a tier. Also the flowsheet's
+   * `buildAllFieldMatch` tsvector-branch predicate (BS#2726, WHERE `q` in
+   * that file's `${flowsheet.search_doc} @@ q` and the guarded AND) — the
+   * flowsheet reader wants whole-lexeme matching only, so it never touches
+   * `tsquery`, the prefixed form.
    */
   exactTsquery: SQL;
 }

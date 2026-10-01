@@ -76,8 +76,14 @@ describe('BS#1681 fix #1: capped count query', () => {
     const { sql: text, params } = compiledExecuteCall(1);
     const lower = text.toLowerCase();
     expect(lower).toMatch(/from\s*\(\s*select 1/);
-    // The broad predicate is preserved inside the capped derived table.
-    expect(lower).toContain('websearch_to_tsquery');
+    // The broad predicate is preserved inside the capped derived table. BS#2726
+    // switched the tsvector branch from websearch_to_tsquery to the catalog's
+    // buildPrefixTsquery — see search.service.seam-guard.test.ts. `to_tsquery`
+    // as a plain substring is vacuous (it's also a substring of
+    // `websearch_to_tsquery`), so assert the operator is ABSENT and match the
+    // real function name on a word boundary instead.
+    expect(lower).not.toContain('websearch_to_tsquery');
+    expect(lower).toMatch(/\bto_tsquery\(/);
     expect(params).toContain(COUNT_CAP + 1);
   });
 

@@ -9,6 +9,7 @@ import {
 } from './search-parser.service.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
 import { rotationBinExpr } from '../utils/sql-rotation-bin.js';
+import { buildPrefixTsquery } from '../utils/tsquery.js';
 
 export type SearchParams = {
   q: string;
@@ -414,25 +415,27 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
 /**
  * Decide whether an `all`-field bare-term query should use the tsvector path
  * or the trigram ILIKE path. Tsvector handles whole-word matching cleanly via
- * `websearch_to_tsquery`, but it tokenizes — so pure-punctuation strings
+ * `buildPrefixTsquery(value).exactTsquery` (BS#670's catalog builder, shared
+ * here since BS#2726), but it tokenizes — so pure-punctuation strings
  * (`!!!`, `$$$`) and single-character fragments are better served by trigram,
  * which can match arbitrary substrings.
  *
  * **The `/[a-zA-Z0-9]/` test is ASCII-only, and that routes every non-Latin
  * script to the trigram branch too** (WXYC/Backend-Service#2739) — Cyrillic,
- * Greek, CJK, Arabic, Hebrew queries never see `websearch_to_tsquery` at all,
+ * Greek, CJK, Arabic, Hebrew queries never reach the tsvector branch at all,
  * since they have no character this regex matches. That is a deliberate
  * choice, not an oversight, but the choice is NOT "the `simple` config can't
  * tokenize these scripts" — it can. Verified on PG 18.6:
  * `to_tsvector('simple', 'Кино')` -> `'кино':1`, and
- * `to_tsvector('simple', 'Кино Группа крови') @@ websearch_to_tsquery('simple', 'Кино')`
- * -> `true`. The tsvector path could serve every non-Latin query in
- * `tests/fixtures/charset-torture.json`'s 33 no-ASCII-alphanumeric entries;
- * this predicate does not ask that question. It stays ASCII-only because the
- * alternative is unmeasured, not because it is known to be worse: trigram
- * substring-matches a partial word inside a longer one, tsvector matches
- * whole lexemes only, and nobody knows which of those non-Latin DJ queries
- * usually need. Swapping the test for
+ * `to_tsvector('simple', 'Кино Группа крови') @@ to_tsquery('simple', $$'Кино'$$)`
+ * -> `true` (`to_tsquery('simple', $$'Кино'$$)` is what `buildPrefixTsquery('Кино').exactTsquery`
+ * itself builds, checked against the real builder). The tsvector path could
+ * serve every non-Latin query in `tests/fixtures/charset-torture.json`'s 33
+ * no-ASCII-alphanumeric entries; this predicate does not ask that question.
+ * It stays ASCII-only because the alternative is unmeasured, not because it
+ * is known to be worse: trigram substring-matches a partial word inside a
+ * longer one, tsvector matches whole lexemes only, and nobody knows which of
+ * those non-Latin DJ queries usually need. Swapping the test for
  * `/[\p{L}\p{N}]/u` (matching `hasAlphanumeric` in
  * `apps/backend/utils/text-query.ts`) is a user-visible recall change on the
  * live `GET /flowsheet/search` surface (33 charset classes move from
@@ -444,41 +447,155 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
  * corpus, so a future switch to the script-aware regex fails loudly here
  * instead of silently reaching production.
  *
- * **`websearch_to_tsquery` does NOT do prefix matching**, and this comment
- * used to say it did. `websearch_to_tsquery('simple', 'autec')` lexes to the
- * lexeme `autec`; the flowsheet holds `autechre`. Two different lexemes, no
- * overlap, zero rows. So the `< 3` floor below is NOT the boundary between
- * "tsvector can serve this" and "it cannot" — every partially-typed term is on
- * the wrong side of that line, the floor just happens to route the shortest
- * ones elsewhere. Correcting the claim only; the behavior is
- * WXYC/Backend-Service#2712, which also carries the harder half: unlike the
- * catalog's `searchLibraryByTsvector`, `buildAllFieldMatch` returns a single
- * predicate with no zero-row fallback, so a 3+ character partial returns a
- * hard, silent zero rather than a slow answer.
+ * **`buildPrefixTsquery(value).exactTsquery` does NOT do prefix matching**
+ * (it never suffixes `:*` — that is `.tsquery`'s job, and this branch reads
+ * `.exactTsquery` only), and an earlier version of this comment, written
+ * against the `websearch_to_tsquery` predecessor, used to say the predecessor
+ * did. `to_tsquery('simple', $$'autec'$$)` lexes to the lexeme `autec`; the
+ * flowsheet holds `autechre`. Two different lexemes, no overlap, zero rows.
+ * So the `< 3` floor below is NOT the boundary between "tsvector can serve
+ * this" and "it cannot" — every partially-typed term is on the wrong side of
+ * that line, the floor just happens to route the shortest ones elsewhere.
+ * Correcting the claim only; the behavior is WXYC/Backend-Service#2712,
+ * which also carries the harder half: unlike the catalog's
+ * `searchLibraryByTsvector`, `buildAllFieldMatch` returns a single predicate
+ * with no zero-row fallback, so a 3+ character partial returns a hard,
+ * silent zero rather than a slow answer.
  *
- * WXYC/Backend-Service#670 has since landed the catalog's last-token prefix
- * builder (`apps/backend/utils/tsquery.ts`), so this gate is no longer "wait
- * for that to settle" — it is a flowsheet-specific hazard #670's builder does
- * not share. `flowsheet.search_doc` concatenates FIVE weighted segments
- * (artist A, track B, dj_name B, album C, label D — migration 0054 added
- * dj_name to 0052's original four), and `tsvector || tsvector` leaves no
- * position gap, so a prefix-phrase query straddles FOUR field seams. Porting
- * `:*` here is WXYC/Backend-Service#2712, which is blocked on
- * WXYC/Backend-Service#2726 closing those seams first.
+ * WXYC/Backend-Service#670 landed the catalog's last-token prefix builder
+ * (`apps/backend/utils/tsquery.ts`). `flowsheet.search_doc` concatenates FIVE
+ * weighted segments (artist A, track B, dj_name B, album C, label D —
+ * migration 0054 added dj_name to 0052's original four), and `tsvector ||
+ * tsvector` leaves no position gap, so a phrase query built from a
+ * punctuation-bearing token can straddle any of the four field seams and
+ * match text that was never adjacent in any real row.
  *
- * `library.search_doc` had the same defect across its single seam and migration
- * 0178 closed it (WXYC/Backend-Service#2714) by concatenating a sentinel
- * between the segments and removing it with `ts_delete`, which shifts positions
- * without leaving a queryable lexeme behind. Flowsheet is deliberately NOT
- * fixed there: the same rewrite costs about 1.7 s of ACCESS EXCLUSIVE on the
- * 64K-row catalog, and flowsheet carries ~2.6M rows across five segments, on a
- * table the live flowsheet writes to during every show. That needs its own
- * lock-budget measurement and window, so it is tracked separately — and it is
- * this gate, not the column, that keeps the defect unreachable meanwhile.
+ * `library.search_doc` had the same defect across its single seam, and
+ * migration 0178 (WXYC/Backend-Service#2714) closed it at the column: a
+ * sentinel between the segments, removed by `ts_delete`, which shifts
+ * positions without leaving a queryable lexeme behind. Flowsheet cannot take
+ * that fix — the same `DROP COLUMN` / `ADD COLUMN` rewrite measured about
+ * 8 m 06 s of ACCESS EXCLUSIVE on a restored production snapshot (db.t4g.small,
+ * PG 14.22, 2.65M rows), which blocks every flowsheet read and write for the
+ * duration and has no quiet hour to hide in.
+ *
+ * WXYC/Backend-Service#2726 closes the four seams at the READER instead: this
+ * branch switched from `websearch_to_tsquery` to the catalog's
+ * `buildPrefixTsquery(value).exactTsquery` (never negation, never a user
+ * operator — see docs/playlist-search/README.md), and `buildAllFieldMatch`
+ * ANDs in a second predicate against a gapped rebuild of the same five
+ * segments (the 0178 sentinel mechanism, applied at read time) guarded by
+ * `strpos(q::text, '<') = 0` — a SQL-side question, not a JS prediction; see
+ * that guard's docstring at the bottom of `buildAllFieldMatch` for why. A GIN
+ * tsvector index stores lexemes, not positions, so the gapped expression
+ * yields exactly the same candidate rows as the existing
+ * `flowsheet_search_doc_idx` — the AND only narrows what the stored-column
+ * recheck already fetched. Measured warm on production (pre-#2753, under the
+ * earlier JS-routed guard, which only emitted the second predicate's SQL text
+ * at all for a token the JS rule flagged): the ordinary bitmap-on-GIN-index
+ * path costs more with the guard than without it (a cursor page carrying a
+ * guarded token went from 105 ms to 280-465 ms depending on token), so "the
+ * guard is free" is not the honest claim for the common case — see
+ * docs/playlist-search/README.md for the full cost table. What IS free is the
+ * worst case: a query whose predicate forces a full `add_time`-ordered walk
+ * instead of the bitmap scan pays almost nothing extra for the guard, because
+ * the planner evaluates the cheap `search_doc @@` clause before the (also
+ * cheap, once reached) gapped one — `b_side` measured 11,688 ms column-only
+ * vs 11,660 ms with the AND, on production. Under the current SQL-routed
+ * guard a PLAIN word pays even less than that measurement: BS#2753 confirmed
+ * via `EXPLAIN (ANALYZE, BUFFERS)` on a 200k-row local clone that Postgres's
+ * custom-plan constant-folds `strpos((to_tsquery('simple', $1))::text, '<')`
+ * at plan time whenever `$1` is a literal (which it always is on this
+ * connection — see that guard's docstring), collapsing the Filter clause to
+ * byte-identical text, and byte-identical cost, as the bare `search_doc @@ q`
+ * predicate; a guarded (phrase-forming) token's Filter clause folds the other
+ * way, to byte-identical text as the unconditional AND. See
+ * `gappedSearchDocSql`'s docstring for why the AND form is exactly the gapped
+ * semantics rather than an approximation of it.
  */
 export function shouldUseTsvector(value: string): boolean {
   if (value.length < 3) return false;
   return /[a-zA-Z0-9]/.test(value);
+}
+
+/**
+ * Rebuild `flowsheet.search_doc`'s five weighted segments WITH a position
+ * gap between each pair, so a `<->` phrase query cannot straddle a field
+ * seam (WXYC/Backend-Service#2726) — the migration 0178 mechanism
+ * (WXYC/Backend-Service#2714), applied at read time instead of baked into a
+ * `STORED GENERATED` column, because flowsheet cannot afford that column
+ * rewrite's lock (see `shouldUseTsvector`'s docstring).
+ *
+ * Each segment is `setweight(to_tsvector('simple', coalesce(<col>, '')),
+ * '<w>')`, copied verbatim from `search_doc`'s own generation expression
+ * (`schema.ts`, migration 0065) — same five columns, same weights, same
+ * order (artist A, track B, dj_name B, album C, label D). `coalesce` is
+ * required on every segment: all five columns are nullable, and without it a
+ * NULL `album_title` or `record_label` would make the whole `||` chain NULL
+ * rather than merely contributing no lexemes.
+ *
+ * The four gaps are `to_tsvector('simple', 'wxycsearchdocgap
+ * wxycsearchdocgap wxycsearchdocgap')`, and `ts_delete(…, 'wxycsearchdocgap')`
+ * wraps the whole chain — `ts_delete` removes a lexeme's position entries
+ * WITHOUT renumbering the survivors, so three repeats of the sentinel buy a
+ * cross-seam distance of 4 and every `<->`/`<2>`/`<3>` fails while the
+ * sentinel itself is never left behind to become a spurious prefix match
+ * (`0178`'s header has the full mechanics and the sentinel-collision
+ * analysis; `wxycsearchdocgap` appears in 0 of 2.65M production flowsheet
+ * rows).
+ *
+ * An EXPRESSION INDEX over this rebuild — rather than calling it inline as
+ * `buildAllFieldMatch` does — was considered and rejected: a GIN tsvector
+ * index stores lexemes, not positions, so an index built on this same
+ * expression would return exactly the same candidate rows
+ * `flowsheet_search_doc_idx` already returns, and its own phrase recheck
+ * would recompute this expression from the row's raw columns anyway (there
+ * is no materialized value for it to read the way a STORED column's recheck
+ * reads the stored value cheaply — the rewrite cost that column shape would
+ * need is exactly what this whole function exists to avoid). That is why
+ * `buildAllFieldMatch` ANDs this expression onto `search_doc @@ q` rather
+ * than building a second index for it: the AND gets its candidates from the
+ * existing index and evaluates this expression only on rows that already
+ * passed the stored-column recheck. For `q` built by
+ * `buildPrefixTsquery` — quoted lexemes AND'd together, never negated, never
+ * a user operator — a positive match against the gapped vector is a SUBSET
+ * of a positive match against the ungapped one (gapping can only lengthen a
+ * cross-seam distance, never shorten a within-segment one), so `search_doc @@
+ * q AND gapped @@ q` is exactly `gapped @@ q`'s semantics, computed cheaply.
+ * Verified read-only on production (2026-09-29 PDT): the AND form returns
+ * exactly the gapped counts (`it's` 19,235 -> 19,234; `i'm` 19,104 -> 19,103;
+ * `b_side` 620 -> 612; `pratt'back` — a token built to straddle the
+ * artist->track seam — 62 -> 0; `o'rourke`, `rock'n'roll` and `don't`
+ * unchanged).
+ *
+ * A factory, not a module-level const, matching the `rotationActiveSql`
+ * precedent in `shared/database/src/schema.ts` — a shared const would
+ * compile correctly too (drizzle's `dialect.sqlToQuery` rebuilds the bound
+ * parameter list fresh on every compile, confirmed by reusing one `SQL`
+ * object across repeated compiles), so this is a style choice for
+ * consistency with that precedent, not a correctness requirement.
+ */
+/**
+ * The sentinel `gappedSearchDocSql` concatenates between segments, named once
+ * so a test can pin it against `library.search_doc`'s own copy of the same
+ * mechanism (`shared/database/src/schema.ts`, migration 0178) rather than two
+ * source files each hand-typing the literal and drifting silently —
+ * `tests/unit/services/search.service.gapped-vector-schema-drift.test.ts`.
+ * Value and three-repeat width are migration 0178's own choice (`0 of 2.65M`
+ * production flowsheet rows and, per that migration's header, 0 of the
+ * catalog's rows contain it); this file does not re-derive either, only
+ * reuses them.
+ */
+export const SEARCH_DOC_GAP_SENTINEL = 'wxycsearchdocgap';
+
+function gappedSearchDocSql(): SQL {
+  // Literal SQL text, not a bound parameter -- matching migration 0178's own
+  // shape (and the BS#2753 benchmark, which measured this exact text) rather
+  // than introducing an extra param the planner has no reason to see.
+  const gapVector = `${SEARCH_DOC_GAP_SENTINEL} ${SEARCH_DOC_GAP_SENTINEL} ${SEARCH_DOC_GAP_SENTINEL}`;
+  const gap = sql.raw(`to_tsvector('simple', '${gapVector}')`);
+  const sentinel = sql.raw(`'${SEARCH_DOC_GAP_SENTINEL}'`);
+  return sql`ts_delete(setweight(to_tsvector('simple', coalesce(${flowsheet.artist_name}, '')), 'A') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.track_title}, '')), 'B') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.dj_name}, '')), 'B') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.album_title}, '')), 'C') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.record_label}, '')), 'D'), ${sentinel})`;
 }
 
 function buildAllFieldMatch(value: string, exact: boolean): SQL {
@@ -491,13 +608,71 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
     return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'exact')} OR ${ilikeEscaped(flowsheet.track_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.album_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.record_label, value, 'exact')})`;
   }
   if (shouldUseTsvector(value)) {
-    // Tsvector path: tokenized whole-word matching across all four weighted
-    // fields via the GIN index on flowsheet.search_doc. websearch_to_tsquery
-    // handles natural query input (quoted phrases, OR, etc.) and never raises
-    // on user text — but it matches WHOLE LEXEMES only, so a partially-typed
-    // term reaches this branch and returns nothing. See shouldUseTsvector's
-    // docstring and WXYC/Backend-Service#2712.
-    return sql`${flowsheet.search_doc} @@ websearch_to_tsquery('simple', ${value})`;
+    // Tsvector path: tokenized whole-word matching across all five weighted
+    // fields via the GIN index on flowsheet.search_doc. `buildPrefixTsquery`
+    // (BS#670's catalog builder, WXYC/Backend-Service#2726) never emits
+    // negation or a user operator — see docs/playlist-search/README.md — and
+    // matches WHOLE LEXEMES only, so a partially-typed term reaches this
+    // branch and returns nothing. See shouldUseTsvector's docstring and
+    // WXYC/Backend-Service#2712.
+    //
+    // `built` can be `null` only when no token in `value` carries a letter or
+    // digit — `shouldUseTsvector` already guarantees an ASCII alphanumeric,
+    // so this branch cannot see that shape, but the fallthrough to the
+    // trigram branch below handles it if that guarantee ever loosens.
+    const built = buildPrefixTsquery(value);
+    if (built !== null) {
+      const q = built.exactTsquery;
+      // The seam guard, routed in SQL rather than predicted in JS (BS#2753
+      // review of the original BS#2726 shape, which computed a `phraseCapable`
+      // boolean in `apps/backend/utils/tsquery.ts` by re-implementing enough
+      // of `to_tsquery`'s word-boundary rules to GUESS whether it would split
+      // a token into a `<->` chain). `strpos(q::text, '<') = 0` asks Postgres
+      // the same question directly, against the tsquery it actually built,
+      // instead of predicting the answer from the pre-tokenization input:
+      // `<` is the one character that can appear in a tsquery's `::text`
+      // rendering ONLY as part of the `<->` / `<N>` phrase-distance operator
+      // Postgres's own lexer inserts when it splits a quoted lexeme — never as
+      // literal lexeme content, because `buildPrefixTsquery`'s own
+      // `TSQUERY_METACHARACTERS` strips `<` and `>` from the raw input before
+      // any token is quoted, so no lexeme this builder emits can contain one.
+      // Verified against the real builder (BS#2753): 20 adversarial inputs,
+      // including raw `<`, `>`, `<->` and `<2>` sequences the metacharacter
+      // strip neutralizes before quoting, produce an `exactTsquery` parameter
+      // string containing no `<` in any case; running each of those (plus
+      // `o'rourke`, `it's`, `4e4abyss`, `pratt-back`, superscript-digit, and
+      // every token this file's predecessor test fixture covered) through
+      // `to_tsquery('simple', $1)::text` on a real PG 18.6 confirms `<`
+      // appears in the rendered OUTPUT if and only if the lexer actually split
+      // the token. There is no Unicode table, locale, or Postgres major
+      // version this can disagree with — it is Postgres's own tsquery output,
+      // not a second implementation of its parsing rules.
+      //
+      // `to_tsquery(regconfig, text)` is IMMUTABLE, so when the bound
+      // parameter's actual value is known at plan time, Postgres's planner
+      // constant-folds `strpos((to_tsquery('simple', $1))::text, '<') = 0` to
+      // a literal `true`/`false` during planning, before execution — the
+      // whole `(... = 0 OR gapped @@ q)` branch collapses to no runtime cost
+      // at all. That is the custom-plan behavior, and it is the ONLY plan
+      // this connection ever uses: `db.execute` compiles to postgres-js's
+      // `client.unsafe(query, params)` (`node_modules/drizzle-orm/postgres-js/session.js`),
+      // and postgres-js's own `unsafe()` hard-codes `{ prepare: false }`
+      // unless overridden (`node_modules/postgres/src/index.js`), which
+      // neither this file nor `shared/database/src/client.ts` does — so every
+      // query this service sends is a one-shot, unnamed statement that
+      // Postgres always plans against the literal bound value, never a cached
+      // generic plan. BS#2753 confirmed this is not just a theoretical
+      // distinction: `EXPLAIN (ANALYZE, BUFFERS)` on a 200k-row local clone
+      // under `PREPARE`/`EXECUTE` with `plan_cache_mode = force_custom_plan`
+      // showed the Filter clause for a plain word collapse to byte-identical
+      // text and cost as the bare `search_doc @@ q` predicate, and for a
+      // guarded word collapse to byte-identical text and cost as the
+      // unconditional `AND gapped @@ q`. Only `force_generic_plan` (a mode
+      // this connection never requests) showed the extra per-row cost a
+      // naive reading of `strpos` might expect — see
+      // docs/playlist-search/README.md for the full measurement.
+      return sql`(${flowsheet.search_doc} @@ ${q} AND (strpos((${q})::text, '<') = 0 OR ${gappedSearchDocSql()} @@ ${q}))`;
+    }
   }
   // Trigram fallback: short queries, pure-punctuation strings, and any other
   // input that the tsvector path would tokenize away.

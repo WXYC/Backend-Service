@@ -145,6 +145,7 @@ jobs:
               # this list or keeps a doc that no longer holds a block.
               - 'docs/adr/0015-catalog-search-query-operators.md'
               - 'docs/catalog-search/README.md'
+              - 'docs/playlist-search/README.md'
             db-init:
               - 'dev_env/Dockerfile.init'
               - 'dev_env/init-db.mjs'
