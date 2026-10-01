@@ -3391,10 +3391,9 @@ describe('library.service', () => {
     });
 
     describe('LML response gating (BS#2731) — a trusted match wins even under degraded/timeout', () => {
-      // Mirrors `DiscogsProvider.search` (BS#1890), NOT `enrichWithArtwork`:
-      // LML's `_build_degraded_response` still runs `fetch_artwork` before
-      // shedding later pipeline steps, so a degraded reply can still carry a
-      // real trusted match. The trust/artwork extraction runs first and wins
+      // Mirrors `DiscogsProvider.search` (BS#1890), as `enrichWithArtwork`
+      // now does too (BS#2757): a degraded reply packages whatever state LML
+      // reached before it shed, so it can still carry a real trusted match. The trust/artwork extraction runs first and wins
       // regardless of `degraded`/`timeout`; only a NULL result from such a
       // reply is left retryable (no cache, no stamp) rather than treated as
       // a confirmed no-match — see the 30-days-of-telemetry note on
