@@ -992,42 +992,77 @@ export function shedReasonOf(response: {
 
 /**
  * `degraded_reason` values that describe LML's OWN load rather than the
- * calling request's budget — a Discogs breaker open, admission shedding —
- * and are therefore equally true for every caller. Listed as the cacheable
- * set (not the uncacheable one) because `degraded_reason` is documented
- * non-exhaustive on the wire contract (LML may add reasons in a later minor
- * version): an unrecognized future value then falls on the "budget-relative,
- * don't cache" side by construction, rather than silently passing through a
- * stale allow-list check.
+ * calling request, and are therefore equally true for every caller.
+ * Listed as the cacheable set (not the uncacheable one) because
+ * `degraded_reason` is documented non-exhaustive on the wire contract (LML
+ * may add reasons in a later minor version): an unrecognized future value
+ * then falls on the "caller-relative, don't cache" side by construction,
+ * rather than silently passing through a stale allow-list check.
+ *
+ * `cache_only` is deliberately NOT in this set, even though it sounds like
+ * a load signal. LML's admission shed (`lookup/admission.py`
+ * `evaluate_admission_shed`) only ever returns `cache_only` to low-priority
+ * requests (`X-Caller-Class=5` / bulk) under loop lag with enforcement on —
+ * an interactive caller asking at the same instant gets a full answer. So
+ * `cache_only` depends on which caller class asked, not just on LML's load,
+ * and caching it under a caller-agnostic key would replay a class-5
+ * caller's shed to interactive callers — the same cross-caller leak this
+ * predicate exists to close.
  */
-const BUDGET_INDEPENDENT_DEGRADED_REASONS = new Set<string>(['upstream_unavailable', 'cache_only']);
+const CALLER_INDEPENDENT_DEGRADED_REASONS = new Set<string>(['upstream_unavailable']);
 
 /**
- * BS#2528: true when `response`'s outcome depends on the CALLING request's
- * own budget rather than on the catalog or on LML's load, so it must not be
- * written to a shared cache keyed only on `(artist, album, song)` — doing so
- * would replay one caller's short deadline (or LML's own hard cap) to every
- * other caller sharing that key for the rest of the TTL. Two shapes qualify:
- * `response.timeout === true` (LML's server-side hard cap or a per-strategy
- * ceiling fired mid-search, independent of which caller asked), and
- * `response.degraded === true` with a `degraded_reason` outside the
- * allow-list `{'upstream_unavailable', 'cache_only'}` — most commonly
- * `deadline_exceeded` (the caller's own `X-Caller-Budget-Ms` ran out), but
- * also a missing or unrecognized reason, treated as budget-relative
- * fail-safe. `upstream_unavailable` and `cache_only` describe LML's own
- * load and are equally true for every caller, so they are NOT
- * budget-relative and stay cacheable. Exported (not private to
- * `LmlLookupCoordinator`) because WXYC/Backend-Service#2765 needs the same
- * predicate for `library-track-search`'s separate cache.
+ * BS#2528: true when `response`'s outcome depends on the CALLING request —
+ * its own budget, or which caller class it belongs to — rather than on the
+ * catalog or on LML's own load, so it must not be written to a shared cache
+ * keyed only on `(artist, album, song)`. Doing so would replay one caller's
+ * circumstances to every other caller sharing that key for the rest of the
+ * TTL. Two shapes qualify, for different reasons:
+ *
+ * - `response.timeout === true`. On the wire this means "LML's hard cap
+ *   fired mid-search," but that single bit conflates (at least) four
+ *   distinct internal sources, and the response gives no way to tell them
+ *   apart: the caller-budget gate (`X-Caller-Budget-Ms` elapsed with empty
+ *   results so far) and the spine-deadline trip are both built from the
+ *   CALLER's own budget; LML's universal hard cap and its Discogs
+ *   API-call ceiling (`LML_SEARCH_MAX_API_CALLS`) are caller-independent.
+ *   Since the two caller-independent sources are indistinguishable on the
+ *   wire from the two caller-relative ones, every `timeout: true` reply is
+ *   treated as unsafe to share. `timeout: true` wins over an otherwise
+ *   cacheable `degraded_reason` — a single reply can carry both (e.g.
+ *   `timeout: true` alongside `degraded_reason: 'upstream_unavailable'`),
+ *   and the timeout alone is sufficient to withhold it from the cache.
+ *
+ * - `response.degraded === true` with a `degraded_reason` outside the
+ *   allow-list `CALLER_INDEPENDENT_DEGRADED_REASONS` (today just
+ *   `'upstream_unavailable'`). Most commonly `deadline_exceeded` (the
+ *   caller's own `X-Caller-Budget-Ms` ran out — budget-relative), or
+ *   `cache_only` (LML's admission shed, which is caller-CLASS-relative,
+ *   not load-relative — see that constant's doc comment for why it's
+ *   excluded here), but also a missing or unrecognized reason, treated as
+ *   caller-relative fail-safe.
+ *
+ * Returns `false` for a client-side shed or skip reply — the
+ * `LimiterShedError` conversion `shedReasonOf` detects, and the BS#1293
+ * `skipped_discogs_unavailable` gate — because both synthesize
+ * `{ timeout: false, degraded: false }` regardless of what LML would have
+ * said, so this predicate has no way to see them. A caller deciding
+ * whether to admit a reply to its own cache must check `shedReasonOf`
+ * FIRST and handle a shed as its own transient-failure case; only a reply
+ * that clears that check should be passed here.
+ *
+ * Exported (not private to `LmlLookupCoordinator`) because
+ * WXYC/Backend-Service#2765 needs the same predicate for
+ * `library-track-search`'s separate cache.
  */
-export function isBudgetRelativeDegradation(response: {
+export function isCallerRelativeDegradation(response: {
   timeout?: boolean;
   degraded?: boolean;
   degraded_reason?: string;
 }): boolean {
   if (response.timeout === true) return true;
   if (response.degraded !== true) return false;
-  return !BUDGET_INDEPENDENT_DEGRADED_REASONS.has(response.degraded_reason ?? '');
+  return !CALLER_INDEPENDENT_DEGRADED_REASONS.has(response.degraded_reason ?? '');
 }
 
 /**

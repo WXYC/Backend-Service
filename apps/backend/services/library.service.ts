@@ -2843,7 +2843,10 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // "LML answered, and the match is untrusted" into the same `null`, and
       // only the second of those may be stamped — so a caller that has to tell
       // them apart must read the response itself. Asking without the gate
-      // changes nothing else: responses are cached raw, before any gating.
+      // changes nothing else: cache admission is independent of this gate
+      // (BS#2528 — a response is cached raw, or withheld entirely per
+      // `isCallerRelativeDegradation`, before any requireSearchType gating
+      // ever runs).
       const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
         caller: 'library-enrich-artwork',
       });

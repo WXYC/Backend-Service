@@ -32,25 +32,26 @@ const fakeShedReasonOf = (r: { outcome?: string }): string | undefined =>
 // coordinator's actual gating behavior rather than a mocked verdict.
 const fakeIsTrustedLmlAlbumMatch = (r: { search_type?: string }): boolean => r.search_type === 'direct';
 
-// Faithful stand-in for the BS#2528 predicate the `.then()` arm now gates
-// cache admission on. Mirrors the real `isBudgetRelativeDegradation`: a
-// `timeout: true` reply, or a `degraded: true` reply whose `degraded_reason`
-// falls outside the allow-list, is budget-relative and must not be cached.
-const BUDGET_RELATIVE_CACHEABLE_REASONS = new Set(['upstream_unavailable', 'cache_only']);
-const fakeIsBudgetRelativeDegradation = (r: { timeout?: boolean; degraded?: boolean; degraded_reason?: string }) => {
-  if (r.timeout === true) return true;
-  if (r.degraded !== true) return false;
-  return !BUDGET_RELATIVE_CACHEABLE_REASONS.has(r.degraded_reason ?? '');
-};
-
-jest.mock('@wxyc/lml-client', () => ({
-  lookupMetadata: mockLookupMetadata,
-  envInt: (_name: string, fallback: number) => fallback,
-  shedReasonOf: fakeShedReasonOf,
-  LimiterShedError: FakeLimiterShedError,
-  isTrustedLmlAlbumMatch: fakeIsTrustedLmlAlbumMatch,
-  isBudgetRelativeDegradation: fakeIsBudgetRelativeDegradation,
-}));
+jest.mock('@wxyc/lml-client', () => {
+  // BS#2528 review: the cache-admission predicate is loaded from the REAL
+  // module rather than hand-copied here. A hand-copied allow-list drifts
+  // silently from the real one (this file shipped exactly that bug: its
+  // first draft kept `cache_only` cacheable after the real predicate had
+  // dropped it, and the coordinator table below stayed green regardless —
+  // verified by mutation, see the predicate test file's header). Going
+  // through the real `isCallerRelativeDegradation` means a future change to
+  // the allow-list breaks this suite unless the table below is updated to
+  // match, instead of silently testing a stale copy.
+  const actual = jest.requireActual<typeof import('@wxyc/lml-client')>('@wxyc/lml-client');
+  return {
+    lookupMetadata: mockLookupMetadata,
+    envInt: (_name: string, fallback: number) => fallback,
+    shedReasonOf: fakeShedReasonOf,
+    LimiterShedError: FakeLimiterShedError,
+    isTrustedLmlAlbumMatch: fakeIsTrustedLmlAlbumMatch,
+    isCallerRelativeDegradation: actual.isCallerRelativeDegradation,
+  };
+});
 
 // Capture span attribute writes so the requireSearchType tests can assert
 // `lml.coordinator.trust_reject_reason` lands on the per-lookup span. The
@@ -349,39 +350,77 @@ describe('LmlLookupCoordinator', () => {
     });
   });
 
-  describe('budget-relative degraded/timeout admission (BS#2528)', () => {
-    // A reply whose outcome depends on the CALLING request's own budget is
-    // still returned to the caller that asked (never thrown — a plain
-    // `await lookup(...)` resolving is itself part of the assertion here),
-    // but must not be written to the LRU: a second lookup for the same key
-    // re-fetches. `upstream_unavailable` and `cache_only` describe LML's own
-    // load, equally true for every caller, and keep caching exactly as
-    // before.
-    it.each<{ name: string; buildResponse: () => LookupResponse; expectCalls: number }>([
+  describe('caller-relative degraded/timeout admission (BS#2528)', () => {
+    // A reply whose outcome depends on the CALLING request itself -- its
+    // budget, or which caller class it belongs to -- is still returned to
+    // the caller that asked (never thrown — a plain `await lookup(...)`
+    // resolving is itself part of the assertion here), but must not be
+    // written to the LRU: a second lookup for the same key re-fetches.
+    // Only `upstream_unavailable` describes LML's own load, equally true
+    // for every caller, and keeps caching exactly as before. `cache_only`
+    // is NOT in that set — LML's admission shed returns it only to
+    // low-priority (class 5 / bulk) callers, so caching it under this
+    // caller-agnostic key would replay a bulk caller's shed to an
+    // interactive one.
+    it.each<{
+      name: string;
+      buildResponse: () => LookupResponse;
+      expectCalls: number;
+      expectedResults: LookupResponse['results'];
+    }>([
       {
         name: 'degraded: true, degraded_reason: deadline_exceeded -- not cached',
         buildResponse: () => ({ ...fakeResponse(), degraded: true, degraded_reason: 'deadline_exceeded' }),
         expectCalls: 2,
+        expectedResults: fakeResponse().results,
       },
       {
-        name: 'timeout: true, degraded: false -- not cached',
-        buildResponse: () => ({ ...fakeResponse(), timeout: true, degraded: false }),
+        name: 'timeout: true, degraded: false, empty results -- not cached',
+        buildResponse: () => ({
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+          timeout: true,
+          degraded: false,
+        }),
         expectCalls: 2,
+        expectedResults: [],
       },
       {
-        name: 'timeout: true with non-empty results -- not cached, results still returned unchanged',
+        name: 'timeout: true with non-empty results -- not cached, results deep-equal what LML returned',
         buildResponse: () => ({ ...fakeResponse(), timeout: true }),
         expectCalls: 2,
+        expectedResults: fakeResponse().results,
+      },
+      {
+        name: 'timeout: true + degraded: true, degraded_reason: upstream_unavailable -- not cached (timeout wins)',
+        buildResponse: () => ({
+          ...fakeResponse(),
+          timeout: true,
+          degraded: true,
+          degraded_reason: 'upstream_unavailable',
+        }),
+        expectCalls: 2,
+        expectedResults: fakeResponse().results,
+      },
+      {
+        name: 'degraded: true with degraded_reason undefined -- not cached',
+        buildResponse: () => ({ ...fakeResponse(), degraded: true, degraded_reason: undefined }),
+        expectCalls: 2,
+        expectedResults: fakeResponse().results,
       },
       {
         name: 'degraded_reason: upstream_unavailable -- cached',
         buildResponse: () => ({ ...fakeResponse(), degraded: true, degraded_reason: 'upstream_unavailable' }),
         expectCalls: 1,
+        expectedResults: fakeResponse().results,
       },
       {
-        name: 'degraded_reason: cache_only -- cached',
+        name: 'degraded_reason: cache_only -- NOT cached (LML shows cache_only only to low-priority callers)',
         buildResponse: () => ({ ...fakeResponse(), degraded: true, degraded_reason: 'cache_only' }),
-        expectCalls: 1,
+        expectCalls: 2,
+        expectedResults: fakeResponse().results,
       },
       {
         name: 'unrecognized degraded_reason outside the current union -- not cached (fail-safe)',
@@ -391,17 +430,18 @@ describe('LmlLookupCoordinator', () => {
           degraded_reason: 'future_reason' as unknown as LookupResponse['degraded_reason'],
         }),
         expectCalls: 2,
+        expectedResults: fakeResponse().results,
       },
-    ])('$name', async ({ buildResponse, expectCalls }) => {
+    ])('$name', async ({ buildResponse, expectCalls, expectedResults }) => {
       mockLookupMetadata.mockImplementation(() => Promise.resolve(buildResponse()));
 
       const first = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'a' });
       expect(first).not.toBeNull();
-      expect(first?.results).toHaveLength(1);
+      expect(first?.results).toEqual(expectedResults);
 
       const second = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'b' });
       expect(second).not.toBeNull();
-      expect(second?.results).toHaveLength(1);
+      expect(second?.results).toEqual(expectedResults);
 
       expect(mockLookupMetadata).toHaveBeenCalledTimes(expectCalls);
     });
