@@ -32,12 +32,24 @@ const fakeShedReasonOf = (r: { outcome?: string }): string | undefined =>
 // coordinator's actual gating behavior rather than a mocked verdict.
 const fakeIsTrustedLmlAlbumMatch = (r: { search_type?: string }): boolean => r.search_type === 'direct';
 
+// Faithful stand-in for the BS#2528 predicate the `.then()` arm now gates
+// cache admission on. Mirrors the real `isBudgetRelativeDegradation`: a
+// `timeout: true` reply, or a `degraded: true` reply whose `degraded_reason`
+// falls outside the allow-list, is budget-relative and must not be cached.
+const BUDGET_RELATIVE_CACHEABLE_REASONS = new Set(['upstream_unavailable', 'cache_only']);
+const fakeIsBudgetRelativeDegradation = (r: { timeout?: boolean; degraded?: boolean; degraded_reason?: string }) => {
+  if (r.timeout === true) return true;
+  if (r.degraded !== true) return false;
+  return !BUDGET_RELATIVE_CACHEABLE_REASONS.has(r.degraded_reason ?? '');
+};
+
 jest.mock('@wxyc/lml-client', () => ({
   lookupMetadata: mockLookupMetadata,
   envInt: (_name: string, fallback: number) => fallback,
   shedReasonOf: fakeShedReasonOf,
   LimiterShedError: FakeLimiterShedError,
   isTrustedLmlAlbumMatch: fakeIsTrustedLmlAlbumMatch,
+  isBudgetRelativeDegradation: fakeIsBudgetRelativeDegradation,
 }));
 
 // Capture span attribute writes so the requireSearchType tests can assert
@@ -334,6 +346,64 @@ describe('LmlLookupCoordinator', () => {
       const result = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'b' });
       expect(result.results).toHaveLength(1);
       expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('budget-relative degraded/timeout admission (BS#2528)', () => {
+    // A reply whose outcome depends on the CALLING request's own budget is
+    // still returned to the caller that asked (never thrown — a plain
+    // `await lookup(...)` resolving is itself part of the assertion here),
+    // but must not be written to the LRU: a second lookup for the same key
+    // re-fetches. `upstream_unavailable` and `cache_only` describe LML's own
+    // load, equally true for every caller, and keep caching exactly as
+    // before.
+    it.each<{ name: string; buildResponse: () => LookupResponse; expectCalls: number }>([
+      {
+        name: 'degraded: true, degraded_reason: deadline_exceeded -- not cached',
+        buildResponse: () => ({ ...fakeResponse(), degraded: true, degraded_reason: 'deadline_exceeded' }),
+        expectCalls: 2,
+      },
+      {
+        name: 'timeout: true, degraded: false -- not cached',
+        buildResponse: () => ({ ...fakeResponse(), timeout: true, degraded: false }),
+        expectCalls: 2,
+      },
+      {
+        name: 'timeout: true with non-empty results -- not cached, results still returned unchanged',
+        buildResponse: () => ({ ...fakeResponse(), timeout: true }),
+        expectCalls: 2,
+      },
+      {
+        name: 'degraded_reason: upstream_unavailable -- cached',
+        buildResponse: () => ({ ...fakeResponse(), degraded: true, degraded_reason: 'upstream_unavailable' }),
+        expectCalls: 1,
+      },
+      {
+        name: 'degraded_reason: cache_only -- cached',
+        buildResponse: () => ({ ...fakeResponse(), degraded: true, degraded_reason: 'cache_only' }),
+        expectCalls: 1,
+      },
+      {
+        name: 'unrecognized degraded_reason outside the current union -- not cached (fail-safe)',
+        buildResponse: () => ({
+          ...fakeResponse(),
+          degraded: true,
+          degraded_reason: 'future_reason' as unknown as LookupResponse['degraded_reason'],
+        }),
+        expectCalls: 2,
+      },
+    ])('$name', async ({ buildResponse, expectCalls }) => {
+      mockLookupMetadata.mockImplementation(() => Promise.resolve(buildResponse()));
+
+      const first = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'a' });
+      expect(first).not.toBeNull();
+      expect(first?.results).toHaveLength(1);
+
+      const second = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, { caller: 'b' });
+      expect(second).not.toBeNull();
+      expect(second?.results).toHaveLength(1);
+
+      expect(mockLookupMetadata).toHaveBeenCalledTimes(expectCalls);
     });
   });
 

@@ -7,10 +7,19 @@
  *   1. **In-flight coalescing.** Concurrent callers asking for the same
  *      `(artist, album, song)` await one Promise; the first caller's wire
  *      call services every coalescer.
- *   2. **Short-TTL response cache.** Successful `LookupResponse` payloads
- *      memoize for 5 min in a process-local LRU. LML's PG cache remains
+ *   2. **Short-TTL response cache, with a budget-relative admission rule
+ *      (BS#2528).** Successful `LookupResponse` payloads memoize for 5 min
+ *      in a process-local LRU, keyed only on `(artist, album, song)` — not
+ *      on which caller asked or with what budget. LML's PG cache remains
  *      the source of truth; this is "we asked LML 30 s ago, the answer
- *      hasn't changed yet."
+ *      hasn't changed yet." A reply whose outcome instead depends on the
+ *      CALLING request's own budget (`timeout: true`, or `degraded: true`
+ *      with a `degraded_reason` outside the allow-list
+ *      `{'upstream_unavailable', 'cache_only'}` — see
+ *      `isBudgetRelativeDegradation`) is still returned to that caller but
+ *      is never written to the LRU, so a caller with a short budget can't
+ *      have its "ran out of time" reply replayed to a caller with a longer
+ *      one for the rest of the TTL.
  *
  * Cross-instance coalescing (Redis / PG advisory locks) is out of scope —
  * dj-site session stickiness collapses most same-key bursts onto one
@@ -46,7 +55,9 @@
  *
  * **No error caching.** Throws propagate to all waiters; the next request
  * for the same key issues a fresh wire call. LML's own short cache TTL
- * on errors handles avalanche.
+ * on errors handles avalanche. A budget-relative degraded/timeout reply
+ * (BS#2528, see above) follows the same non-caching rule without throwing —
+ * it resolves normally and is simply never written to the LRU.
  */
 import * as Sentry from '@sentry/node';
 import { LRUCache } from 'lru-cache';
@@ -54,6 +65,7 @@ import { LRUCache } from 'lru-cache';
 import {
   lookupMetadata,
   shedReasonOf,
+  isBudgetRelativeDegradation,
   LimiterShedError,
   isTrustedLmlAlbumMatch,
   type GatedLookupResponse,
@@ -193,7 +205,19 @@ export class LmlLookupCoordinator {
           if (shedReason) {
             throw new LimiterShedError(shedReason);
           }
-          this.cache.set(key, result);
+          // BS#2528: a degraded/timeout reply whose outcome depends on the
+          // CALLING request's own budget (a short-budget caller's deadline
+          // exhausted, or LML's own hard cap firing mid-search) is not
+          // evidence about the catalog — writing it here would replay one
+          // caller's "ran out of time" result to every other caller sharing
+          // this key for up to 5 min. Still returned, never thrown: the
+          // asking caller's own degraded-reply handling (`enrichWithArtwork`,
+          // `applyTrustGate`, etc.) sees it exactly as LML sent it.
+          // `upstream_unavailable` / `cache_only` describe LML's own load,
+          // equally true for every caller, and keep caching as before.
+          if (!isBudgetRelativeDegradation(result)) {
+            this.cache.set(key, result);
+          }
           return result;
         })
         .finally(() => {
