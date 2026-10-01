@@ -1,22 +1,28 @@
-# CDC WebSocket Endpoint
+# CDC pipeline
 
-WebSocket endpoint at `/cdc` that broadcasts all database changes via PostgreSQL LISTEN/NOTIFY triggers. It was built for the tubafrenzy reconciliation monitor (`scripts/sync/reconcile.ts`), a cross-database verifier that was removed with the rest of the tubafrenzy dev infra (WXYC/wiki#92) once the MySQL side went dark on 2026-09-16; no in-repo consumer remains. See [Former consumer](#former-consumer-the-reconciliation-monitor) below.
+PostgreSQL triggers broadcast every row change on `pg_notify`, and in-process Node consumers subscribe to them. There is no external endpoint: the `/cdc` WebSocket that used to fan these events out to off-box listeners was removed together with its only consumer, the tubafrenzy reconciliation monitor (see [History](#history-the-cdc-websocket)).
 
-## Endpoint
+## Architecture
 
-`ws://host:8080/cdc` — requires `CDC_SECRET` environment variable.
+PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every INSERT/UPDATE/DELETE. Each process that cares opens one dedicated LISTEN connection and dispatches notifications to registered handlers. No application code is instrumented, so the stream sees every change: ETL, auth, and direct SQL included.
 
-### Authentication (BS#1136)
+Two processes listen today:
 
-Present the shared secret in an `Authorization: Bearer <CDC_SECRET>` header. The upgrade handler compares it against `CDC_SECRET` with `crypto.timingSafeEqual` (length-guarded, constant time). A missing or wrong secret gets a `403 Forbidden` and the socket is destroyed; the presented secret is never logged.
+| Process                  | Owner of the LISTEN                                                                                           | Consumer                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `apps/backend`           | `startCdcDispatcher()` (`apps/backend/services/cdc/dispatcher.ts`), started unconditionally at boot (BS#1187) | `setupMetadataBroadcast()` — rebroadcasts terminal metadata updates as SSE `liveFs:update` (BS#893 / BS#628) |
+| `apps/enrichment-worker` | `startCdcListener()` in `apps/enrichment-worker/worker.ts`                                                    | `cdc-subscriber.ts` — claims new `pending` flowsheet track rows for LML enrichment (BS#892)                  |
 
-```ts
-new WebSocket('ws://host:8080/cdc', { headers: { Authorization: `Bearer ${CDC_SECRET}` } });
-```
+Handlers register with `onCdcEvent` from `@wxyc/database`; every handler on a process sees every event.
 
-The header path replaces the old `?key=<CDC_SECRET>` query parameter, which leaked the secret to every HTTP-aware intermediary on the path (CloudFront / nginx / EC2 access logs, browser history, request snapshots) even under TLS, and used a non-constant-time `!==` compare vulnerable to a byte-at-a-time timing attack.
+### Fire-and-forget: no delivery guarantee
 
-**Deprecated shim, removed after one deploy:** the upgrade handler still accepts `?key=<CDC_SECRET>` for backwards compatibility, but every use logs a `[cdc-ws] DEPRECATED: … ?key= …` warning. Migrate any out-of-band consumer to the header, then delete the `?key=` branch in `apps/backend/services/cdc/cdc-websocket.ts` (`extractCdcSecret`). The former in-repo consumer (`scripts/sync/reconcile.ts`, since removed) used the header.
+**"Sees every change" is only true while the LISTEN connection is up.** `pg_notify` is fire-and-forget — Postgres does not durably queue notifications for absent listeners, and the in-Node LISTEN buffer is bounded. A process that drops its connection (network blip, restart, deploy) misses every event between disconnect and reconnect, and there is no replay. Every consumer therefore needs an out-of-band catch-up path against the source of truth:
+
+- the enrichment worker is backstopped by the hourly C6 gap-recovery cron (`jobs/flowsheet-metadata-backfill`, BS#895);
+- a missed `liveFs:update` costs a dj-site client one stale row until its next refetch.
+
+Any new consumer that treats the stream as a reliable event log without such a path will silently lose events. A bulk write is also visible here: a full drain can emit on the order of a million events, so a new consumer must tolerate bursts.
 
 ## Event format
 
@@ -30,59 +36,27 @@ The header path replaces the old `?key=<CDC_SECRET>` query parameter, which leak
 }
 ```
 
-### Non-event frames (wire contract)
+### Payload shape and exposure (BS#1513)
 
-Two of the frames on this channel are not CDC events. Both are part of the wire contract, not an implementation detail — a consumer must tolerate them and must not read `table` / `action` off them:
+The `data` field is the **full row** — the trigger emits `to_jsonb(NEW)` (or `OLD` on DELETE), every column, unprojected. For `flowsheet` events this includes every internal column the HTTP surfaces deliberately withhold; `apps/backend/utils/flowsheet-projection.ts`'s module docstring is the canonical enumeration of that withheld set.
 
-| Frame       | Emitted                                      | Shape                                             |
-| ----------- | -------------------------------------------- | ------------------------------------------------- |
-| `connected` | once, immediately after a successful upgrade | `{"type":"connected","serverTime":1714000000000}` |
-| `heartbeat` | every 30s, on the heartbeat tick             | `{"type":"heartbeat","timestamp":1714000000000}`  |
+That is safe only because the raw event never leaves the process. A consumer that forwards CDC data anywhere — SSE, an HTTP response, a log line shipped off-box — must project at its own boundary. `metadata-broadcast` does: it sends `liveFs:update` through the same allow-list the mutation echoes and DJ peek use. Do not add an external fan-out of the raw event.
 
-Discriminate on `type`: a CDC event never carries it, and these two never carry `table`. An early return on `msg.type === 'heartbeat' || msg.type === 'connected'` is the minimum handling every consumer needs (the removed `scripts/sync/reconcile.ts` did exactly this).
+## Fallback channels (BS#1120)
 
-The `heartbeat` frame carries an epoch-ms `timestamp`, as it did from this endpoint's first commit until BS#1412 removed the frame — restoring it verbatim is the point of BS#2427, since it is the only periodic frame on a channel that carries no other clock and a consumer deriving staleness from it would read `undefined` off a narrowed frame. All clients on a given tick are stamped with the same value. Both narrowing and widening the shape are contract changes to be announced, not implementation details: the channel is `CDC_SECRET`-gated, so who is connected cannot be surveyed.
-
-## Architecture
-
-PostgreSQL triggers (`cdc_notify()`) fire `pg_notify('cdc', payload)` on every INSERT/UPDATE/DELETE. A dedicated LISTEN connection in Node.js receives notifications and broadcasts them to WebSocket clients. Zero application code instrumentation — captures all changes including ETL, auth, and direct SQL.
-
-**Load-bearing dependency: "captures all changes" is only true while a consumer is connected.** `pg_notify` is fire-and-forget — Postgres does not durably queue notifications for absent listeners, and the in-Node LISTEN buffer is bounded. A WebSocket consumer that drops its connection (network blip, restart, backpressure) misses every event between disconnect and reconnect, and there is no replay endpoint. Consumers that need a complete change record must compare against the source of truth on reconnect — the former reconciliation monitor (below) did this, and was the canonical example, not a generic utility. Any new consumer that treats the CDC stream as a reliable event log without an out-of-band catch-up path will silently lose events.
-
-## Payload shape and exposure (BS#1513)
-
-The `data` field is the **full row** — the trigger emits `to_jsonb(NEW)` (or `OLD` on DELETE), every column, unprojected. For `flowsheet` events this therefore includes every internal column the HTTP surfaces deliberately withhold: BS#1513 projects the mutation / DJ-peek responses through the allow-list in `apps/backend/utils/flowsheet-projection.ts`, whose module docstring is the canonical enumeration of the withheld set and the per-column rationale. (`metadata_status` is _not_ withheld — it is client-facing per the `FlowsheetEntryResponse` SSOT and rides both the HTTP projections and this stream.)
-
-This is intentional and stays unprojected: the `/cdc` channel is **internal-trusted**, hard-gated on `CDC_SECRET`, and was designed for the (now removed) reconciliation monitor, which needed the complete row to diff against the source of truth. Projecting the fan-out would defeat that purpose and require touching the trigger SQL. A new internal column added to `flowsheet` _will_ appear on this stream — that is acceptable here (unlike the HTTP responses) precisely because the audience is trusted and the payload is a verification artifact, not a client contract. If an untrusted consumer is ever added, project at that consumer's boundary rather than widening this channel's contract.
+When the primary `cdc` payload would be dropped, migration 0096 emits on two fallback channels instead: `cdc_oversized` (payload over `pg_notify`'s size limit) and `cdc_error` (the trigger itself threw). The backend dispatcher wires both to `Sentry.captureMessage` under stable fingerprints (`cdc-oversized-payload`, `cdc-trigger-exception`), so an alert counts notifications, not per-table churn.
 
 ## Key files
 
-- `shared/database/src/migrations/0045_cdc_notify_triggers.sql` — trigger function + per-table triggers
-- `shared/database/src/cdc-listener.ts` — dedicated LISTEN connection and event dispatch
-- `apps/backend/services/cdc/dispatcher.ts` — per-process LISTEN startup/shutdown. Runs unconditionally so in-process consumers (`metadata-broadcast`) work regardless of `CDC_SECRET` (BS#1187)
-- `apps/backend/services/cdc/cdc-websocket.ts` — WebSocket server with auth and heartbeat; gated on `CDC_SECRET` (external-listener channel only)
+- `shared/database/src/migrations/0046_cdc_notify_triggers.sql` — trigger function + per-table triggers
+- `shared/database/src/migrations/0096_cdc_oversized_fallback.sql` — the BS#1120 fallback channels
+- `shared/database/src/cdc-listener.ts` — dedicated LISTEN connection and `onCdcEvent` dispatch
+- `apps/backend/services/cdc/dispatcher.ts` — backend LISTEN startup/shutdown + fallback-channel Sentry sinks
+- `apps/backend/services/metadata-broadcast/metadata-broadcast.ts` — the backend's in-process consumer
+- `apps/enrichment-worker/cdc-subscriber.ts` — the enrichment worker's consumer
 
-## Back-pressure and liveness (BS#1134)
+## History: the `/cdc` WebSocket
 
-Per-client guards in `cdc-websocket.ts` keep one misbehaving consumer from leaking memory or wedging the heartbeat signal:
+Until WXYC/wiki#92, `apps/backend/services/cdc/cdc-websocket.ts` exposed the raw stream at `ws://host:8080/cdc`, gated on a shared `CDC_SECRET`. Its only consumer was `scripts/sync/reconcile.ts`, a bidirectional monitor that cross-checked tubafrenzy's MySQL against Backend's Postgres during the decommission. Once tubafrenzy went dark (2026-09-16) the monitor was deleted, and the WebSocket followed: it streamed full, unprojected rows to whoever held the secret, and that holder could not be surveyed. Both are recoverable from git history. Its auth hardening (BS#1136), back-pressure and ping/pong liveness (BS#1134), and app-level heartbeat frame (BS#2427) are documented in this file's history, not here.
 
-- **Back-pressure**: every send (fan-out and heartbeat) checks `client.bufferedAmount`. Over `BACKPRESSURE_THRESHOLD_BYTES` (1 MiB) the client is `terminate()`d and a Sentry `cdc_ws.buffered_amount_high` warning is captured. The CDC stream offers no replay, so dropping a single event for a slow consumer is no worse than what already happens at reconnect (see the "consumers reconcile out-of-band" contract above).
-- **Native ping/pong**: the 30s heartbeat uses `ws.ping()` and tracks `'pong'` arrival. Clients that miss a pong before the next tick are terminated with a Sentry `cdc_ws.missed_pong` warning. This decouples "client is wedged" from "client is slow" — pre-#1134 the app-level message conflated both into a single send-callback signal. **This, and only this, is the liveness mechanism**: an app-level frame cannot detect a half-open socket, because writing into one succeeds.
-
-### Two heartbeat mechanisms, one tick (BS#2427)
-
-The same 30s tick emits **both** a native ping and an app-level `heartbeat` frame. They are not alternatives and neither replaces the other:
-
-|                                                       | Native ping/pong                   | App-level `heartbeat` frame          |
-| ----------------------------------------------------- | ---------------------------------- | ------------------------------------ |
-| Purpose                                               | detect a half-open socket          | give the consumer observable traffic |
-| Visible to a browser `WebSocket` / hand-rolled client | no — the protocol layer absorbs it | yes, as an ordinary message          |
-| Termination on failure                                | yes (`cdc_ws.missed_pong`)         | no                                   |
-
-Order within the tick: both termination checks run first (missed pong, back-pressure), then the ping, then the frame — so a client being terminated on that tick receives no heartbeat frame. The frame goes out through the same `safeSend` back-pressure guard as a fan-out event, so it can never be the write that grows an already-saturated buffer.
-
-**What an idle stream looks like.** Every consumer — Node `ws`, browser `WebSocket`, hand-rolled — receives exactly one `heartbeat` message every 30s and nothing else when there are no database changes. The frame goes to every open client; what differs between consumers is only whether ping/pong is _also_ visible, and it never is at the application layer (`ws` answers pings automatically below the API, and browsers expose no hook at all). So a Node `ws` consumer must discriminate on `type` exactly like any other: an idle stream is not a silent one. That single frame per 30s is the healthy idle signature, and it is what makes a "no frame in N seconds → reconnect" watchdog safe to write against this endpoint (pick N > 30s, ideally ≥ 90s to tolerate one dropped tick). BS#1412 removed this frame in favour of ping/pong alone, which left that population seeing a healthy idle stream as a dead one; the restoration is deliberate and the per-consumer cost of one small frame per 30s was accepted. Any future change that again makes an idle stream invisible to a non-`ws` consumer is a breaking wire change to be announced, not an implementation detail.
-
-## Former consumer: the reconciliation monitor
-
-`scripts/sync/reconcile.ts` was a bidirectional monitor: forward, it checked that tubafrenzy's SSE change events landed in Backend-Service PG; reverse, it checked that this endpoint's events landed in a local `wxycmusic` MySQL clone, refreshed by `scripts/sync/refresh-local-mysql.sh` (a mysqldump over SSH from Kattare). Both scripts were deleted under Phase 5 of the tubafrenzy decommissioning (WXYC/wiki#92): tubafrenzy's CDC stream and MySQL went dark on 2026-09-16 and the Kattare host shut down on 2026-09-22, so neither direction can run. Recover them from git history if a PG-only verifier is ever wanted; the `ws` client and the `type` discrimination above are the parts worth keeping.
+The `CDC_SECRET` variable is no longer read by anything; if it is still set in an environment's `.env`, it can be deleted.

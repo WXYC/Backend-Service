@@ -32,12 +32,7 @@ import {
   startAlbumPopularityRefresh,
   stopAlbumPopularityRefresh,
 } from './services/album-popularity-refresh.service.js';
-import {
-  setupCdcWebSocket,
-  shutdownCdcWebSocket,
-  startCdcDispatcher,
-  shutdownCdcDispatcher,
-} from './services/cdc/index.js';
+import { startCdcDispatcher, shutdownCdcDispatcher } from './services/cdc/index.js';
 import { setupMetadataBroadcast } from './services/metadata-broadcast/index.js';
 import { startSseMetrics, stopSseMetrics } from './services/sse/sse-metrics.js';
 import { serverEventsMgr } from './utils/serverEvents.js';
@@ -204,24 +199,19 @@ const server = app.listen(port, () => {
   startAlbumPlaysRefresh();
   startAlbumPopularityRefresh();
   startSseMetrics(() => serverEventsMgr.getClientCountByTopic());
-  // LISTEN startup runs unconditionally so in-process subscribers
-  // (`setupMetadataBroadcast`, future consumers) fire whether or not
-  // CDC_SECRET is set (BS#1187). The websocket call below self-no-ops
-  // when the secret is unset.
+  // LISTEN startup for the in-process CDC subscribers
+  // (`setupMetadataBroadcast`, future consumers). The external `/cdc`
+  // WebSocket fan-out that once shared this connection was removed with
+  // its only consumer, the tubafrenzy reconciliation monitor (WXYC/wiki#92).
   void startCdcDispatcher().catch((err) => {
     console.error('startCdcDispatcher failed to start:', err);
     Sentry.captureException(err, { tags: { subsystem: 'cdc' } });
   });
-  // Second CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
+  // CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
   // `liveFs:update` so dj-site stays in sync after the enrichment-worker
   // (BS#892) finalizes a row. Closes BS#893 + BS#628. Registers a handler
-  // on the same per-process LISTEN connection — independent of the
-  // websocket handler, both fire on every event.
+  // on the same per-process LISTEN connection.
   setupMetadataBroadcast();
-  void setupCdcWebSocket(server).catch((err) => {
-    console.error('setupCdcWebSocket failed to start:', err);
-    Sentry.captureException(err, { tags: { subsystem: 'cdc' } });
-  });
   // One-shot warm of the rotation-tracks picker LRUs in
   // `library.service.ts`. Fire-and-forget — the walk shares the LML
   // semaphore with concurrent traffic, and the LRUs are process-local so
@@ -277,7 +267,6 @@ function shutdown(signal: string): void {
   stopAlbumPopularityRefresh();
   stopSseMetrics();
   stopPeriodicEmit();
-  void shutdownCdcWebSocket();
   void shutdownCdcDispatcher();
   // BS#905: observe enrichments abandoned mid-flight. Sentry captureMessage
   // fires only when at least one promise is still pending after the deadline,

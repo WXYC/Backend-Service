@@ -1,11 +1,11 @@
 /**
  * CDC dispatcher: owns the per-process LISTEN connection.
  *
- * Split out from `cdc-websocket.ts` (BS#1187): the LISTEN startup must run
- * independently of the WebSocket exposure so that in-process CDC subscribers
- * (`setupMetadataBroadcast()`, future consumers) keep working in environments
- * that don't configure `CDC_SECRET`. The websocket fan-out is one consumer of
- * the dispatcher, not its owner.
+ * Split out from the former `cdc-websocket.ts` (BS#1187) so the LISTEN
+ * startup ran independently of the `CDC_SECRET`-gated WebSocket exposure.
+ * That WebSocket was removed with its only consumer (WXYC/wiki#92); the
+ * dispatcher now serves only in-process subscribers
+ * (`setupMetadataBroadcast()`, future consumers).
  *
  * Wire format and `onCdcEvent` API are unchanged — both still come from
  * `@wxyc/database` and remain the cross-consumer contract.
