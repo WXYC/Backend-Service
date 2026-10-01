@@ -174,7 +174,22 @@ describe('other ambiguous column references stay qualified (BS#2699)', () => {
     const statement = await dataStatement(() =>
       searchFlowsheet({ q: 'probe', page: 0, limit: 50, sort: 'date', order: 'desc' })
     );
-    expect(outerWhereClause(statement)).toContain(`${SEARCH_DOC} @@ websearch_to_tsquery`);
+    expect(outerWhereClause(statement)).toContain(`${SEARCH_DOC} @@ to_tsquery`);
+  });
+
+  it("the seam guard's gapped rebuild reads all five columns qualified (BS#2726)", async () => {
+    // `library` also has an `artist_name`, and BS#2699 joins it into this
+    // query, so an unqualified column inside the gapped vector would be
+    // ambiguous. An apostrophe token makes the guard's gapped arm render.
+    const statement = await dataStatement(() =>
+      searchFlowsheet({ q: "o'rourke", page: 0, limit: 50, sort: 'date', order: 'desc' })
+    );
+    const where = outerWhereClause(statement);
+    const DJ = `"${SCHEMA}"."flowsheet"."dj_name"`;
+    for (const column of [ARTIST, TRACK, DJ, ALBUM, LABEL]) {
+      expect(where).toContain(`coalesce(${column}, '')`);
+    }
+    expect(where).not.toMatch(/coalesce\("(artist_name|track_title|dj_name|album_title|record_label)"/);
   });
 
   it('the quoted-exact arm of the all-field match qualifies all four columns', async () => {
