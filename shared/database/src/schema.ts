@@ -688,14 +688,19 @@ export const library = wxyc_schema.table(
     // being re-asked on every catalog search. Left NULL on every transient
     // outcome, which stays immediately retryable: a throw (5xx, network, a
     // BS#1748 client-side shed or open breaker, which the coordinator
-    // re-throws), and equally a 200 carrying `degraded` or `timeout`, which is
-    // LML shedding its own enrichment tail or blowing its hard cap and says
-    // nothing about this release. Nothing upstream distinguishes that second
-    // class — `shedReasonOf` reads only the client-side `outcome` — so the call
-    // site reads the response's own flags, which is why it applies the trust
-    // predicate in-process instead of using the coordinator's gate: the gate
-    // renders "degraded" and "answered, untrusted" as the same `null`, and only
-    // the second may be stamped. That split is BS#1089's rule. Written under
+    // re-throws), and equally a 200 carrying `degraded` or `timeout` with no
+    // usable trusted cover — LML shed its enrichment tail or blew its hard cap
+    // before resolving artwork for this release, so the reply is a "couldn't
+    // ask", not a confirmed miss. A trusted usable cover IS persisted even
+    // from a degraded/timeout reply (BS#2757): `enrichWithArtwork` extracts
+    // and writes it before this marker is ever considered, since any artwork
+    // such a reply does carry is real (`api.yaml`: degraded = "trustworthy
+    // but incomplete"). Nothing upstream distinguishes a no-cover shed from a
+    // genuine no-match — `shedReasonOf` reads only the client-side `outcome`
+    // — so the call site applies the trust predicate to the raw response
+    // itself rather than using the coordinator's gate, which renders
+    // "degraded" and "answered, untrusted" as the same `null` and only lets
+    // the second be stamped. That split is BS#1089's rule. Written under
     // the same
     // `artwork_url IS NULL` race guard as `updateArtworkUrl` (BS#718), so a
     // concurrent success is never overwritten by a negative. A stamp never

@@ -2130,17 +2130,16 @@ export async function resolveRotationPickerSource(rotationId: number): Promise<R
  * A response only earns the 24 h/7-day cache above when LML genuinely
  * answered the question with no usable trusted match — `isTrustedLmlAlbumMatch`
  * below decides trust directly, so this call deliberately omits the
- * coordinator's `requireSearchType` gate. Mirrors `DiscogsProvider.search`
- * (BS#1890), NOT `enrichWithArtwork`: a trusted match is extracted from the
- * response FIRST, independent of `degraded`/`timeout`, because LML's
- * `_build_degraded_response` still runs `fetch_artwork` before shedding
- * later pipeline steps — a degraded reply routinely still carries a
- * genuine direct match. Only when that extraction comes up empty does
- * `degraded`/`timeout` matter: such a reply says nothing about the catalog
- * ("couldn't ask", not "asked and missed"), so it's left exactly as
- * retryable as a thrown error (timeout, 5xx, a BS#1748 limiter shed,
- * anything) — no cache write, no stamp, picker degrades to free-text for
- * that one request only (BS#2731).
+ * coordinator's `requireSearchType` gate. `enrichWithArtwork` now follows
+ * the same pattern (BS#2757): a trusted match is extracted from the
+ * response FIRST, independent of `degraded`/`timeout`, because a degraded
+ * reply carries whatever state LML reached before it shed — any artwork or
+ * direct match present in it is real whether or not the full pipeline ran.
+ * Only when that extraction comes up empty does `degraded`/`timeout`
+ * matter: such a reply says nothing about the catalog ("couldn't ask", not
+ * "asked and missed"), so it's left exactly as retryable as a thrown error
+ * (timeout, 5xx, a BS#1748 limiter shed, anything) — no cache write, no
+ * stamp, picker degrades to free-text for that one request only (BS#2731).
  */
 /**
  * Detect Various-Artists artist-name variants the picker should omit from
@@ -2209,8 +2208,8 @@ async function resolveRotationDiscogsReleaseViaLml(
   let source: RotationPickerSource | null;
   try {
     // Deliberately NOT `requireSearchType: 'direct'` — this reads the raw
-    // response and applies `isTrustedLmlAlbumMatch` itself below, mirroring
-    // `DiscogsProvider.search` (BS#1890), NOT `enrichWithArtwork`.
+    // response and applies `isTrustedLmlAlbumMatch` itself below, the same
+    // pattern `enrichWithArtwork` now follows (BS#2757).
     const response = await lmlLookupCoordinator.lookup(lookupArtist, albumTitle, undefined, {
       caller: 'library-rotation-picker',
     });
@@ -2853,30 +2852,37 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // Evaluate trust and extract artwork BEFORE looking at `degraded` /
       // `timeout`, mirroring the rotation picker
       // (`resolveRotationDiscogsReleaseViaLml`, BS#2731) and
-      // `DiscogsProvider.search` (BS#1890). LML's `_build_degraded_response`
-      // still runs `fetch_artwork` before it sheds the later
-      // `enrich_metadata` / `resolve_identities` steps, and `api.yaml`
-      // defines `degraded` as "trustworthy but incomplete" — not "says
-      // nothing about this release." So a trusted `direct` match with a
-      // usable cover is real and gets persisted regardless of either flag.
-      const trusted = isTrustedLmlAlbumMatch(lookupResult);
-      const artworkUrl = trusted ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url) : null;
-      if (trusted && artworkUrl) {
+      // `DiscogsProvider.search` (BS#1890). A degraded/timed-out reply
+      // carries whatever `state` LML had accumulated at the moment it
+      // shed — artwork is present only when the shed landed after
+      // `fetch_artwork` ran, and when it's present it's real, since
+      // `api.yaml` defines `degraded` as "trustworthy but incomplete", not
+      // "says nothing about this release." So a trusted match with a usable
+      // cover is persisted regardless of either flag.
+      const artworkUrl = isTrustedLmlAlbumMatch(lookupResult)
+        ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url)
+        : null;
+      if (artworkUrl) {
         row.artwork_url = artworkUrl;
         await updateArtworkUrl(row.id, artworkUrl);
         return;
       }
 
       // Nothing usable above. A degraded/timed-out reply with no usable
-      // trusted cover genuinely "couldn't ask" about this release — caller
-      // deadline, admission-control pressure, or an upstream it couldn't
-      // reach — so it must leave the row retryable, not stamp it as a
-      // confirmed miss. This caller sends a 4s budget, which makes
+      // trusted cover leaves the row retryable rather than stamping it as a
+      // confirmed miss — caller deadline, admission-control pressure, or an
+      // upstream it couldn't reach. This caller's `library-enrich-artwork`
+      // class carries a 2000 ms LML budget (`policy.ts`'s
+      // `LIBRARY_ENRICH_ARTWORK_BUDGET_FALLBACK_MS`), which makes
       // `deadline_exceeded` LML's routine answer on a cold Discogs cascade —
       // exactly the hard-to-resolve rows the marker exists for, so stamping
-      // here would poison the population it is meant to serve. Client-side
-      // sheds never reach this line: the coordinator re-throws those
-      // (BS#1748).
+      // here would poison the population it is meant to serve. Known limit:
+      // this call site can't distinguish "LML shed before `fetch_artwork`
+      // ran" from "`fetch_artwork` ran and found nothing" — a degraded/timeout
+      // reply is conservatively treated as "couldn't ask" either way, so both
+      // shapes stay retryable rather than risk stamping a row LML never
+      // actually checked. Client-side sheds never reach this line: the
+      // coordinator re-throws those (BS#1748).
       if (lookupResult.degraded || lookupResult.timeout) return;
 
       // Below this point LML genuinely responded about this release with
