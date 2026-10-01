@@ -77,7 +77,6 @@ import {
   LmlClientError,
   resolveIdentity,
   type LookupResponse,
-  type GatedLookupResponse,
   type DiscogsTrackItem,
   type DiscogsReleaseMetadata,
   type ReleaseIdentityResolveRequest,
@@ -7236,10 +7235,7 @@ async function searchLibraryByTrackUncachedOrThrow(
   query: string
 ): Promise<{ results: TaggedLibraryViewEntry[]; cacheable: boolean }> {
   const lookupStart = performance.now();
-  // `GatedLookupResponse`, not the plain `LookupResponse` `lookupBySong`
-  // declares: a shed resolves through the same `postLookup` chokepoint with
-  // `.outcome` set, and `shedReasonOf` needs that optional field in scope.
-  const response: GatedLookupResponse = await lookupBySong(query, {
+  const response = await lookupBySong(query, {
     caller: 'library-track-search',
   });
   try {
@@ -7434,10 +7430,11 @@ export function __resetTrackSearchCacheForTests(): void {
 export async function searchLibraryByTrackRaw(query: string, limit: number): Promise<TaggedLibraryViewEntry[]> {
   return Sentry.startSpan({ name: 'searchLibraryByTrack', op: 'catalog.track_search' }, async (span) => {
     const start = performance.now();
-    // master_lookup_ms is set by searchLibraryByTrackUncachedOrThrow on the
-    // miss path (via the active span). Default to 0 so cache hits and
-    // pre-LML failures still emit a numeric value — p95 dashboards then
-    // see one row per call without coalesce.
+    // track_search.master_lookup_ms is set only on a miss, by
+    // searchLibraryByTrackUncachedOrThrow via the active span.
+    // `cacheable` starts false so neither the catch arm (LML threw) nor the
+    // cache-hit arm (the inner call never runs) reaches `trackSearchCache.set`
+    // below.
     let cacheable = false;
     let results: TaggedLibraryViewEntry[];
 
