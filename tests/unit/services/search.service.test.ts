@@ -289,6 +289,9 @@ describe('cursor codec', () => {
       ['2024-06-15T14:30:00.000Z_', 'empty id'],
       ['2024-06-15T14:30:00.000Z_abc', 'non-numeric id'],
       ['not-a-date_42', 'unparseable date'],
+      ['2024-06-15T14:30:00.000Z_12345_sub_sub', 'doubled _sub marker'],
+      ['2024-06-15T14:30:00.000Z_12345_pfx_sub', 'mixed _pfx and _sub markers'],
+      ['2024-06-15T14:30:00.000Z_12345_SUB', 'uppercase marker (case-sensitive)'],
     ])('returns null for %j (%s)', (cursor) => {
       expect(parseCursor(cursor)).toBeNull();
     });
@@ -311,6 +314,16 @@ describe('cursor codec', () => {
         addTime: '2024-06-15T14:30:00.000Z',
         id: 12345,
         tier: 'prefix',
+      });
+    });
+
+    it('round-trips with parseCursor on the substring tier (_sub marker)', () => {
+      const cursor = encodeCursor('2024-06-15T14:30:00.000Z', 12345, 'substring');
+      expect(cursor).toBe('2024-06-15T14:30:00.000Z_12345_sub');
+      expect(parseCursor(cursor)).toEqual({
+        addTime: '2024-06-15T14:30:00.000Z',
+        id: 12345,
+        tier: 'substring',
       });
     });
   });

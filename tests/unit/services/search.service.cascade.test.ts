@@ -144,6 +144,48 @@ describe('cascade: advancing to the prefix tier', () => {
   });
 });
 
+describe('cascade: advancing to the substring tier (WXYC/Backend-Service#2712, PR 2)', () => {
+  it('word empty -> prefix empty -> substring rows: a third statement pair fires and its rows win', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([]) // word data
+      .mockResolvedValueOnce([{ total: 0 }]) // word count
+      .mockResolvedValueOnce([]) // prefix data
+      .mockResolvedValueOnce([{ total: 0 }]) // prefix count
+      .mockResolvedValueOnce([makeRow()]) // substring data
+      .mockResolvedValueOnce([{ total: 1 }]); // substring count
+
+    const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(db.execute).toHaveBeenCalledTimes(6);
+    expect(result.results).toHaveLength(1);
+    expect(result.total).toBe(1);
+  });
+
+  it('no typing term -> word empty -> substring: a trailing short term disqualifies "prefix" but not "substring"', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([]) // word data
+      .mockResolvedValueOnce([{ total: 0 }]) // word count
+      .mockResolvedValueOnce([makeRow()]) // substring data
+      .mockResolvedValueOnce([{ total: 1 }]); // substring count
+
+    // "am" (2 chars) ends findTypingTermIndex's backward scan, so there is no
+    // typing term and 'prefix' is never attempted -- but 'substring' doesn't
+    // key off the typing term at all, so it still runs once 'word' is empty.
+    const result = await searchFlowsheet({ q: 'autechre am', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(db.execute).toHaveBeenCalledTimes(4);
+    expect(result.results).toHaveLength(1);
+  });
+
+  it('a non-date sort never reaches the substring tier either, even with two empty tiers in play', async () => {
+    (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: 0 }]);
+
+    await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'dj', order: 'asc' });
+
+    expect(db.execute).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('cascade: a rejected fallback tier is not fatal -- but only a cascaded tier, and only a statement timeout', () => {
   it('a TIMED-OUT prefix tier (reached by cascading) ends the cascade, serves the empty word-tier result, and reports once with the fixed fingerprint', async () => {
     const captureException = Sentry.captureException as unknown as jest.Mock;
@@ -228,6 +270,55 @@ describe('cascade: a rejected fallback tier is not fatal -- but only a cascaded 
     ).rejects.toThrow('Failed query: select pg_sleep($1)');
   });
 
+  it('a TIMED-OUT prefix tier ends the cascade WITHOUT ever running substring (WXYC/Backend-Service#2712, PR 2)', async () => {
+    const captureException = Sentry.captureException as unknown as jest.Mock;
+    const consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (db.execute as jest.Mock)
+        .mockResolvedValueOnce([]) // word data: empty
+        .mockResolvedValueOnce([{ total: 0 }]) // word count: 0
+        .mockRejectedValueOnce(statementTimeoutError()) // prefix data: times out
+        .mockResolvedValueOnce([{ total: 0 }]); // prefix count (run concurrently; its value is never read on a rejected data query)
+
+      const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+      expect(result.results).toEqual([]);
+      // Exactly 4 calls (word data+count, prefix data+count) -- a rejected
+      // tier ENDS the cascade; it never issues a 'substring' pair.
+      expect(db.execute).toHaveBeenCalledTimes(4);
+      expect(consoleWarn).toHaveBeenCalledTimes(1);
+      const [, options] = captureException.mock.calls[0];
+      expect(options.tags).toMatchObject({ tier: 'prefix' });
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it('a TIMED-OUT substring tier (reached by cascading through word and prefix) returns the empty result and reports once tagged tier: substring', async () => {
+    const captureException = Sentry.captureException as unknown as jest.Mock;
+    const consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (db.execute as jest.Mock)
+        .mockResolvedValueOnce([]) // word data: empty
+        .mockResolvedValueOnce([{ total: 0 }]) // word count: 0
+        .mockResolvedValueOnce([]) // prefix data: empty
+        .mockResolvedValueOnce([{ total: 0 }]) // prefix count: 0
+        .mockRejectedValueOnce(statementTimeoutError()); // substring data: times out
+
+      const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+      expect(result.results).toEqual([]);
+      expect(result.total).toBe(0);
+      expect(consoleWarn).toHaveBeenCalledTimes(1);
+      expect(captureException).toHaveBeenCalledTimes(1);
+      const [, options] = captureException.mock.calls[0];
+      expect(options.fingerprint).toEqual(['flowsheet-search-fallback-tier']);
+      expect(options.tags).toMatchObject({ tier: 'substring' });
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
   // Mutation proof (manual; run during implementation): dropping the `i === 0 ||`
   // half of the fatality guard (swallowing ANY tier's timeout, cascaded or
   // not) flips the "cursor pinned directly to a non-word tier" test above to
@@ -285,6 +376,43 @@ describe('cascade: the cursor carries the resolved tier forward', () => {
     expect(db.execute).toHaveBeenCalledTimes(2);
     expect(result.nextCursor).toBeDefined();
     expect(result.nextCursor).not.toMatch(/_pfx$/);
+  });
+
+  it('a full substring-tier page emits a cursor with the _sub marker (WXYC/Backend-Service#2712, PR 2)', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => makeRow({ id: i + 1 }));
+    (db.execute as jest.Mock).mockResolvedValueOnce(rows).mockResolvedValueOnce([{ total: 1000 }]);
+
+    const result = await searchFlowsheet({
+      q: 'autec',
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+      cursor: encodeCursor('2024-06-15T00:00:00.000000Z', 999, 'substring'),
+    });
+
+    // A cursor pins its own tier and never cascades -- one statement pair.
+    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(result.nextCursor).toBeDefined();
+    expect(result.nextCursor).toMatch(/_sub$/);
+  });
+
+  it('a _sub cursor whose query no longer has any substring-eligible term is treated as the word tier, and emits an unmarked cursor', async () => {
+    const rows = Array.from({ length: 50 }, (_, i) => makeRow({ id: i + 1 }));
+    (db.execute as jest.Mock).mockResolvedValueOnce(rows).mockResolvedValueOnce([{ total: 1000 }]);
+
+    const result = await searchFlowsheet({
+      q: 'tv', // 2 chars -- shouldUseTsvector is false, so no term is substring-eligible either
+      page: 0,
+      limit: 50,
+      sort: 'date',
+      order: 'desc',
+      cursor: encodeCursor('2024-06-15T00:00:00.000000Z', 999, 'substring'),
+    });
+
+    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(result.nextCursor).toBeDefined();
+    expect(result.nextCursor).not.toMatch(/_sub$/);
   });
 
   // Mutation proof (manual; run during implementation): replacing the
