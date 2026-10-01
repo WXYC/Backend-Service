@@ -2823,6 +2823,70 @@ type ArtworkEnrichable = {
   artwork_url: string | null | undefined;
 };
 
+/**
+ * Closed outcome vocabulary for one row's pass through the
+ * `Promise.allSettled` batch below, for `projectArtworkEnrichOutcomes`.
+ * `persisted` and `retryable_degraded` are each a parent bucket PLUS the
+ * subset BS#2766's decision gate cares about — whether a persisted cover
+ * came from a degraded/timeout reply (question 1), and whether a
+ * degraded/timeout reply with no usable cover was nonetheless a trusted
+ * match (question 2) — so these six outcomes partition every settled or
+ * rejected row disjointly, and `projectArtworkEnrichOutcomes` sums each
+ * subset pair back into its parent span attribute.
+ *
+ * Exported for the unit-test parity matrix; not part of the public service
+ * surface.
+ */
+export type ArtworkEnrichOutcome =
+  'persisted' | 'persisted_degraded' | 'stamped' | 'retryable_degraded' | 'retryable_degraded_trusted' | 'rejected';
+
+/**
+ * Classify one settled (non-thrown) row against the same two predicates
+ * `enrichWithArtwork` already evaluates — `trusted` (`isTrustedLmlAlbumMatch`)
+ * and `hasCover` (whether `filterSpacerGif` left a usable URL) — plus the
+ * response's own `degraded`/`timeout` flags. Pure, so it's table-tested
+ * directly; `enrichWithArtwork` is the only caller, and it classifies once
+ * per row, up front, rather than re-deriving this at each branch.
+ *
+ * `rejected` is never produced here — a thrown settlement never reaches a
+ * `LookupResponse` to classify, so the `Promise.allSettled` loop below
+ * assigns that outcome directly.
+ */
+export function classifyArtworkEnrichOutcome(
+  trusted: boolean,
+  hasCover: boolean,
+  response: LookupResponse
+): ArtworkEnrichOutcome {
+  const degradedOrTimeout = response.degraded || response.timeout;
+  if (hasCover) return degradedOrTimeout ? 'persisted_degraded' : 'persisted';
+  if (degradedOrTimeout) return trusted ? 'retryable_degraded_trusted' : 'retryable_degraded';
+  return 'stamped';
+}
+
+/**
+ * BS#2766: tally per-row outcomes across one `enrichWithArtwork` call onto
+ * the active Sentry span. One attribute per row would overwrite itself —
+ * a single call enriches many rows under one span — so outcomes are summed
+ * across the whole batch and set once, after `Promise.allSettled` resolves.
+ * Mirrors `projectPickerLmlOutcome` (BS#2731): `Sentry.getActiveSpan()?.
+ * setAttributes(...)` inside try/catch with a `console.warn`, so telemetry
+ * can never break the search path.
+ */
+function projectArtworkEnrichOutcomes(tally: Record<ArtworkEnrichOutcome, number>): void {
+  try {
+    Sentry.getActiveSpan()?.setAttributes({
+      'artwork_enrich.persisted': tally.persisted + tally.persisted_degraded,
+      'artwork_enrich.persisted_degraded': tally.persisted_degraded,
+      'artwork_enrich.stamped': tally.stamped,
+      'artwork_enrich.retryable_degraded': tally.retryable_degraded + tally.retryable_degraded_trusted,
+      'artwork_enrich.retryable_degraded_trusted': tally.retryable_degraded_trusted,
+      'artwork_enrich.rejected': tally.rejected,
+    });
+  } catch (err) {
+    console.warn('[Library] failed to project artwork_enrich outcomes onto span', err);
+  }
+}
+
 export async function enrichWithArtwork<T extends ArtworkEnrichable>(
   results: T[],
   options: { maxLookups?: number } = {}
@@ -2838,7 +2902,7 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
   if (budgeted.length === 0) return results;
 
   const settlements = await Promise.allSettled(
-    budgeted.map(async (row) => {
+    budgeted.map(async (row): Promise<ArtworkEnrichOutcome | undefined> => {
       // Deliberately NOT `requireSearchType: 'direct'`, though the trust rule
       // is unchanged and `isTrustedLmlAlbumMatch` below is the very predicate
       // that gate applies. The coordinator's gate collapses "LML degraded" and
@@ -2852,7 +2916,11 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
         caller: 'library-enrich-artwork',
       });
-      if (lookupResult === null) return;
+      // Unreachable via this caller's overload (`requireSearchType` is never
+      // passed, so the coordinator's return type is non-null) — kept as
+      // defensive dead code. Not classified: there is no `LookupResponse` to
+      // tally an outcome against.
+      if (lookupResult === null) return undefined;
 
       // Evaluate trust and extract artwork BEFORE looking at `degraded` /
       // `timeout`, mirroring the rotation picker
@@ -2863,14 +2931,20 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // `fetch_artwork` ran, and when it's present it's real, since
       // `api.yaml` defines `degraded` as "trustworthy but incomplete", not
       // "says nothing about this release." So a trusted match with a usable
-      // cover is persisted regardless of either flag.
-      const artworkUrl = isTrustedLmlAlbumMatch(lookupResult)
-        ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url)
-        : null;
+      // cover is persisted regardless of either flag. `trusted` is saved
+      // (rather than re-derived) so the BS#2766 outcome classification below
+      // can read it without a second `isTrustedLmlAlbumMatch` call.
+      const trusted = isTrustedLmlAlbumMatch(lookupResult);
+      const artworkUrl = trusted ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url) : null;
+      // BS#2766: classify once, up front — the branches below are exactly
+      // the behavior this classification mirrors (see
+      // `classifyArtworkEnrichOutcome`), so computing it here rather than at
+      // each `return` can't drift from what the row actually did.
+      const outcome = classifyArtworkEnrichOutcome(trusted, Boolean(artworkUrl), lookupResult);
       if (artworkUrl) {
         row.artwork_url = artworkUrl;
         await updateArtworkUrl(row.id, artworkUrl);
-        return;
+        return outcome;
       }
 
       // Nothing usable above. A degraded/timed-out reply with no usable
@@ -2888,7 +2962,7 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // shapes stay retryable rather than risk stamping a row LML never
       // actually checked. Client-side sheds never reach this line: the
       // coordinator re-throws those (BS#1748).
-      if (lookupResult.degraded || lookupResult.timeout) return;
+      if (lookupResult.degraded || lookupResult.timeout) return outcome;
 
       // Below this point LML genuinely responded about this release with
       // nothing usable, so that is durable knowledge and gets stamped: the
@@ -2896,14 +2970,27 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // transient failure throws past all of this into the rejected
       // settlement arm.
       await stampArtworkLookupAttempt(row.id);
+      return outcome;
     })
   );
 
+  const tally: Record<ArtworkEnrichOutcome, number> = {
+    persisted: 0,
+    persisted_degraded: 0,
+    stamped: 0,
+    retryable_degraded: 0,
+    retryable_degraded_trusted: 0,
+    rejected: 0,
+  };
   for (const s of settlements) {
     if (s.status === 'rejected') {
+      tally.rejected += 1;
       console.warn('[Library] Artwork enrichment failed:', s.reason);
+    } else if (s.value !== undefined) {
+      tally[s.value] += 1;
     }
   }
+  projectArtworkEnrichOutcomes(tally);
 
   return results;
 }

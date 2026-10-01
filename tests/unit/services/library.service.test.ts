@@ -131,6 +131,7 @@ import {
   markAlbumMissing,
   markAlbumFound,
   enrichWithArtwork,
+  classifyArtworkEnrichOutcome,
   updateArtworkUrl,
   updateAlbumInDB,
   resolveRotationPickerSource,
@@ -1988,6 +1989,15 @@ describe('library.service', () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].id).toBe(101);
+
+      // `clearMocks` (jest.unit.config.ts) clears call history before every
+      // test but not a `mockImplementation` override, and this block has no
+      // `beforeEach` that restores one. Left as-is, this throwing stub would
+      // bleed into every later `describe` in this file that reaches
+      // `Sentry.getActiveSpan()?.setAttributes(...)` — harmless while nothing
+      // downstream called it, but BS#2766's `enrichWithArtwork` telemetry
+      // now does, so restore the default (non-throwing) double explicitly.
+      mockSpanSetAttributes.mockReset();
     });
   });
 
@@ -2930,6 +2940,177 @@ describe('library.service', () => {
           expect(db.update).not.toHaveBeenCalled();
           expect(enriched[0].artwork_url).toBeNull();
         }
+      });
+    });
+
+    /**
+     * BS#2766: the pure classifier `enrichWithArtwork` calls once per row to
+     * decide which `artwork_enrich.*` bucket a settled lookup falls into.
+     * Table-tested directly (no Sentry/DB mocks needed) because it's a pure
+     * function of (trusted, hasCover, degraded, timeout) — mirrors
+     * `classifyPickerLmlOutcome`'s role for `picker.lml_outcome` (BS#2731),
+     * except that one has no standalone test and this one does, since the
+     * issue asks for the classifier to be verified in isolation from the
+     * span-projection plumbing below.
+     */
+    describe('classifyArtworkEnrichOutcome (pure classifier)', () => {
+      const response = (degraded: boolean, timeout: boolean): LookupResponse =>
+        ({ degraded, timeout }) as LookupResponse;
+
+      it.each([
+        ['trusted cover, clean reply', true, true, false, false, 'persisted'],
+        ['trusted cover, degraded reply', true, true, true, false, 'persisted_degraded'],
+        ['trusted cover, timed-out reply', true, true, false, true, 'persisted_degraded'],
+        ['untrusted match, no cover, clean reply', false, false, false, false, 'stamped'],
+        ['trusted match, no cover (e.g. spacer gif), clean reply', true, false, false, false, 'stamped'],
+        ['untrusted match, no cover, degraded reply', false, false, true, false, 'retryable_degraded'],
+        ['untrusted match, no cover, timed-out reply', false, false, false, true, 'retryable_degraded'],
+        ['trusted match, no cover, degraded reply', true, false, true, false, 'retryable_degraded_trusted'],
+        ['trusted match, no cover, timed-out reply', true, false, false, true, 'retryable_degraded_trusted'],
+      ] as const)('%s', (_label, trusted, hasCover, degraded, timeout, expected) => {
+        expect(classifyArtworkEnrichOutcome(trusted, hasCover, response(degraded, timeout))).toBe(expected);
+      });
+    });
+
+    /**
+     * BS#2766: `enrichWithArtwork` tallies the `ArtworkEnrichOutcome` of
+     * every row in its `Promise.allSettled` batch and projects the sums onto
+     * the active span ONCE, after the batch settles — a per-row attribute
+     * would overwrite itself under one shared span. Each case below drives a
+     * single-row batch through one exit and asserts the full six-attribute
+     * object `projectArtworkEnrichOutcomes` sets, so a case that lands in
+     * the wrong bucket (or sums a subset into the wrong parent) fails here
+     * rather than only in production Sentry data weeks later.
+     */
+    describe('artwork_enrich outcome span telemetry (BS#2766)', () => {
+      beforeEach(() => {
+        // `clearMocks` (jest.unit.config.ts) clears call history but not a
+        // `mockImplementation` override — the "setAttributes throws" case
+        // below installs one, so every test in this block restores the
+        // default (non-throwing) span double first, regardless of run order.
+        mockSpanSetAttributes.mockReset();
+      });
+
+      const directMatchWith = (artworkUrl: string | null, flags: Record<string, unknown> = {}) => ({
+        results: [
+          {
+            library_item: { id: 7, title: 'Quiet Signs', artist: 'Jessica Pratt', call_number: '', library_url: '' },
+            artwork: {
+              release_id: 4242,
+              release_url: 'https://www.discogs.com/release/4242',
+              artwork_url: artworkUrl,
+              confidence: 0.95,
+            },
+          },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+        degraded: false,
+        timeout: false,
+        ...flags,
+      });
+
+      const cleanMiss = {
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+      };
+
+      const zeroTally = {
+        'artwork_enrich.persisted': 0,
+        'artwork_enrich.persisted_degraded': 0,
+        'artwork_enrich.stamped': 0,
+        'artwork_enrich.retryable_degraded': 0,
+        'artwork_enrich.retryable_degraded_trusted': 0,
+        'artwork_enrich.rejected': 0,
+      };
+
+      it.each([
+        [
+          'a degraded reply WITH trusted artwork',
+          () =>
+            mockLookupMetadata.mockResolvedValue(
+              directMatchWith('https://i.discogs.com/quiet-signs.jpg', {
+                degraded: true,
+                degraded_reason: 'deadline_exceeded',
+              })
+            ),
+          { ...zeroTally, 'artwork_enrich.persisted': 1, 'artwork_enrich.persisted_degraded': 1 },
+        ],
+        [
+          'a degraded reply without trusted artwork (trusted match, no cover)',
+          () =>
+            mockLookupMetadata.mockResolvedValue(
+              directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' })
+            ),
+          { ...zeroTally, 'artwork_enrich.retryable_degraded': 1, 'artwork_enrich.retryable_degraded_trusted': 1 },
+        ],
+        [
+          'a timeout with no usable match',
+          () => mockLookupMetadata.mockResolvedValue({ ...cleanMiss, timeout: true }),
+          { ...zeroTally, 'artwork_enrich.retryable_degraded': 1 },
+        ],
+        [
+          'a clean hit',
+          () => mockLookupMetadata.mockResolvedValue(directMatchWith('https://i.discogs.com/quiet-signs.jpg')),
+          { ...zeroTally, 'artwork_enrich.persisted': 1 },
+        ],
+        [
+          'a clean miss',
+          () => mockLookupMetadata.mockResolvedValue(cleanMiss),
+          { ...zeroTally, 'artwork_enrich.stamped': 1 },
+        ],
+        [
+          'an untrusted match',
+          () =>
+            mockLookupMetadata.mockResolvedValue(
+              directMatchWith('https://i.discogs.com/quiet-signs.jpg', { search_type: 'fallback' })
+            ),
+          { ...zeroTally, 'artwork_enrich.stamped': 1 },
+        ],
+        [
+          'a spacer-gif result',
+          () => mockLookupMetadata.mockResolvedValue(directMatchWith('https://st.discogs.com/images/spacer.gif')),
+          { ...zeroTally, 'artwork_enrich.stamped': 1 },
+        ],
+        [
+          'a thrown shed',
+          () => mockLookupMetadata.mockRejectedValue(new MockLimiterShedError('breaker_open')),
+          { ...zeroTally, 'artwork_enrich.rejected': 1 },
+        ],
+      ] as const)('projects the right artwork_enrich attributes for %s', async (_label, setup, expectedAttrs) => {
+        setup();
+        mockStampWrite();
+        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        await enrichWithArtwork([
+          { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
+        ]);
+
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith(expectedAttrs);
+        consoleSpy.mockRestore();
+      });
+
+      it('resolves successfully and leaves persist/stamp behavior unchanged when span.setAttributes throws', async () => {
+        mockSpanSetAttributes.mockImplementation(() => {
+          throw new Error('sentry boom');
+        });
+        const chain = mockStampWrite();
+        mockLookupMetadata.mockResolvedValue(cleanMiss);
+        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        const results = [{ id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null }];
+        const enriched = await enrichWithArtwork(results);
+
+        // Observability threw; the row's own outcome (stamp the negative
+        // marker on a clean miss) must still have happened exactly as it
+        // would without telemetry at all.
+        expect(enriched[0].artwork_url).toBeNull();
+        const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+        expect(Object.keys(setArg)).toEqual(['artwork_lookup_attempted_at']);
+        consoleSpy.mockRestore();
       });
     });
   });
