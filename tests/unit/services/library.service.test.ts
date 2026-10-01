@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import type { LookupResponse } from '@wxyc/lml-client';
 import {
   mockCatalogTiers,
   catalogTierCallLog,
@@ -48,18 +49,30 @@ class MockLimiterShedError extends MockLmlClientError {
   }
 }
 
-jest.mock('@wxyc/lml-client', () => ({
-  lookupMetadata: mockLookupMetadata,
-  lookupBySong: mockLookupBySong,
-  isLmlConfigured: mockIsLmlConfigured,
-  getRelease: mockGetRelease,
-  envInt: (_name: string, fallback: number) => fallback,
-  LmlClientError: MockLmlClientError,
-  LimiterShedError: MockLimiterShedError,
-  // Mirrors the real predicate exactly (`@wxyc/lml-client` `src/trust.ts`):
-  // `search_type === 'direct'`, fail-closed when the field is absent.
-  isTrustedLmlAlbumMatch: (response: { search_type?: string } | null | undefined) => response?.search_type === 'direct',
-}));
+jest.mock('@wxyc/lml-client', () => {
+  // BS#2765: `isCallerRelativeDegradation` (and `shedReasonOf`, for the shed
+  // case `searchLibraryByTrackUncachedOrThrow` also has to withhold from the
+  // cache) are loaded from the REAL module rather than hand-copied here —
+  // same rationale as `tests/unit/services/lml/lookup-coordinator.test.ts`'s
+  // BS#2528 review comment: a hand-copied allow-list can silently drift from
+  // the real one while this suite stays green.
+  const actual = jest.requireActual<typeof import('@wxyc/lml-client')>('@wxyc/lml-client');
+  return {
+    lookupMetadata: mockLookupMetadata,
+    lookupBySong: mockLookupBySong,
+    isLmlConfigured: mockIsLmlConfigured,
+    getRelease: mockGetRelease,
+    envInt: (_name: string, fallback: number) => fallback,
+    LmlClientError: MockLmlClientError,
+    LimiterShedError: MockLimiterShedError,
+    // Mirrors the real predicate exactly (`@wxyc/lml-client` `src/trust.ts`):
+    // `search_type === 'direct'`, fail-closed when the field is absent.
+    isTrustedLmlAlbumMatch: (response: { search_type?: string } | null | undefined) =>
+      response?.search_type === 'direct',
+    isCallerRelativeDegradation: actual.isCallerRelativeDegradation,
+    shedReasonOf: actual.shedReasonOf,
+  };
+});
 
 // Backend code paths now route through the LmlLookupCoordinator (BS#885).
 // The mock stub mirrors the real coordinator's `requireSearchType` gate
@@ -1505,13 +1518,19 @@ describe('library.service', () => {
      * DB; subsequent calls without resetting the mocks return whatever the
      * mock would return again (but we'll assert the cache short-circuits
      * before that).
+     *
+     * `responseOverrides` (BS#2765) merges onto the otherwise-healthy
+     * `lookupBySong` reply so the caller-relative-degradation table below can
+     * reuse this same full DB-join setup while only varying `timeout` /
+     * `degraded` / `degraded_reason`.
      */
-    function primeMocks(): void {
+    function primeMocks(responseOverrides: Record<string, unknown> = {}): void {
       mockLookupBySong.mockResolvedValue({
         results: [lookupItem],
         search_type: 'direct',
         song_not_found: false,
         found_on_compilation: false,
+        ...responseOverrides,
       });
       const libraryChain = createMockQueryChain([trackRow]);
       libraryChain.limit = jest.fn().mockResolvedValue([trackRow]);
@@ -1714,6 +1733,64 @@ describe('library.service', () => {
       await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong.mock.calls.length).toBe(callsAfterFirst + 1);
+    });
+
+    // BS#2765: `library-track-search` called `lookupBySong` directly (not
+    // through `LmlLookupCoordinator`) and cached whatever it got back,
+    // including a reply whose shape only held because of the ASKING
+    // request's own budget or caller class. Replaying that to every other DJ
+    // searching the same title for the 10-minute TTL was the bug. Each case
+    // below starts from the same healthy `primeMocks()` DB-join setup
+    // (non-empty `results`) and only varies the degradation shape, so a
+    // `false` (not cached) row below still exercises the real bridge query —
+    // it fails for the right reason (the cache re-admits a prior response)
+    // rather than a trivial one (no results to bridge in the first place).
+    it.each([
+      [
+        'degraded: true, degraded_reason: deadline_exceeded',
+        { degraded: true, degraded_reason: 'deadline_exceeded' },
+        false,
+      ],
+      ['degraded: true, degraded_reason: cache_only', { degraded: true, degraded_reason: 'cache_only' }, false],
+      ['timeout: true (degraded false)', { timeout: true, degraded: false }, false],
+      [
+        'degraded: true, unrecognized degraded_reason',
+        // Cast through the real DTO's `degraded_reason` type: LML's wire
+        // contract is documented non-exhaustive (`shared/lml-client/src/
+        // index.ts`'s `CALLER_INDEPENDENT_DEGRADED_REASONS` comment), so a
+        // value outside today's three-member union must still fall on the
+        // "don't cache" side rather than typechecking this fixture away.
+        { degraded: true, degraded_reason: 'embargo_window' as unknown as LookupResponse['degraded_reason'] },
+        false,
+      ],
+      [
+        'degraded: true, degraded_reason: upstream_unavailable',
+        { degraded: true, degraded_reason: 'upstream_unavailable' },
+        true,
+      ],
+      ['plain non-degraded reply', {}, true],
+    ])('%s -> trackSearchCache admits it: %s', async (_label, responseOverrides, shouldCache) => {
+      primeMocks(responseOverrides);
+      await searchLibraryByTrack('Back, Baby', 10);
+      const callsAfterFirst = mockLookupBySong.mock.calls.length;
+
+      // Re-prime so a second, uncached call would have fresh DB chains to
+      // consume — irrelevant if the cache serves the first response, which
+      // is exactly what `shouldCache` asserts.
+      primeMocks(responseOverrides);
+      const second = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(mockLookupBySong.mock.calls.length).toBe(shouldCache ? callsAfterFirst : callsAfterFirst + 1);
+      expect(second).toHaveLength(1);
+    });
+
+    it('a timeout: true reply with non-empty results still returns those results to the first caller unchanged', async () => {
+      primeMocks({ timeout: true, degraded: false });
+
+      const results = await searchLibraryByTrack('Back, Baby', 10);
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe(101);
     });
   });
 

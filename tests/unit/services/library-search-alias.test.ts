@@ -21,14 +21,27 @@ class MockLmlClientError extends Error {
   }
 }
 
-jest.mock('@wxyc/lml-client', () => ({
-  lookupMetadata: mockLookupMetadata,
-  lookupBySong: mockLookupBySong,
-  isLmlConfigured: mockIsLmlConfigured,
-  getRelease: mockGetRelease,
-  envInt: (_name: string, fallback: number) => fallback,
-  LmlClientError: MockLmlClientError,
-}));
+jest.mock('@wxyc/lml-client', () => {
+  // BS#2765: `library.service.ts`'s track-search path now also imports
+  // `isCallerRelativeDegradation` + `shedReasonOf` from this module. Load
+  // them from the REAL module (same rationale as
+  // `tests/unit/services/lml/lookup-coordinator.test.ts`'s BS#2528 review
+  // comment) rather than omitting them — an omitted named export resolves to
+  // `undefined` here, and calling it throws inside
+  // `searchLibraryByTrackUncachedOrThrow`, silently degrading every Track 2
+  // result in this suite to the caught-error empty-array path.
+  const actual = jest.requireActual<typeof import('@wxyc/lml-client')>('@wxyc/lml-client');
+  return {
+    lookupMetadata: mockLookupMetadata,
+    lookupBySong: mockLookupBySong,
+    isLmlConfigured: mockIsLmlConfigured,
+    getRelease: mockGetRelease,
+    envInt: (_name: string, fallback: number) => fallback,
+    LmlClientError: MockLmlClientError,
+    isCallerRelativeDegradation: actual.isCallerRelativeDegradation,
+    shedReasonOf: actual.shedReasonOf,
+  };
+});
 
 const mockSpanSetAttribute = jest.fn();
 const mockSpanSetAttributes = jest.fn();
