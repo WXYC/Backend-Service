@@ -2651,13 +2651,19 @@ describe('library.service', () => {
        * `LookupResponse.degraded` and `.timeout` are LML's own server-side
        * transient signals, and they arrive on a plain 200 — the coordinator's
        * `shedReasonOf` re-throw only covers CLIENT-side sheds (`outcome`), so
-       * nothing upstream of this call site turns them into a failure. Without
-       * an explicit check they reach the trust gate, fail it on an empty
-       * `results`, and read as a definitive no-match. This caller sends a 4s
-       * budget, so `deadline_exceeded` is LML's ordinary answer on a cold
-       * Discogs cascade; stamping it would suppress precisely the slow-to-
-       * resolve rows the marker is for, for a week, on the strength of one
-       * overrun. That is the BS#1089 regression in its original form.
+       * nothing upstream of this call site turns them into a failure. These
+       * fixtures carry empty `results`; without an explicit check they'd reach
+       * the trust gate, fail it, and read as a definitive no-match — a
+       * degraded/timeout reply is NOT always unusable, as the sibling "a
+       * degraded or timed-out reply with a trusted usable cover" table below
+       * exercises: a usable cover must be extracted and persisted regardless
+       * of either flag, and only the no-cover case stamps nothing. This
+       * caller's `library-enrich-artwork` class carries a 2000 ms LML budget
+       * (`policy.ts`), so `deadline_exceeded` is LML's ordinary answer on a
+       * cold Discogs cascade; stamping a no-cover reply here would suppress
+       * precisely the slow-to-resolve rows the marker is for, for a week, on
+       * the strength of one overrun. That is the BS#1089 regression in its
+       * original form.
        */
       it.each([
         ['degraded', { degraded: true, degraded_reason: 'upstream_unavailable', timeout: false }],
@@ -2746,16 +2752,6 @@ describe('library.service', () => {
         ...flags,
       });
 
-      const noUsableMatch = (flags: Record<string, unknown> = {}) => ({
-        results: [],
-        search_type: 'none',
-        song_not_found: false,
-        found_on_compilation: false,
-        degraded: false,
-        timeout: false,
-        ...flags,
-      });
-
       it.each([
         [
           'degraded (deadline_exceeded) + direct + usable cover: persisted, no stamp',
@@ -2769,11 +2765,6 @@ describe('library.service', () => {
           'timeout + direct + usable cover: persisted, no stamp',
           directMatch('https://i.discogs.com/quiet-signs.jpg', { timeout: true }),
           'persist',
-        ],
-        [
-          'degraded + no results: nothing persisted, no stamp',
-          noUsableMatch({ degraded: true, degraded_reason: 'upstream_unavailable' }),
-          'none',
         ],
         [
           'degraded + untrusted match with a cover: nothing persisted, no stamp',
@@ -2808,6 +2799,12 @@ describe('library.service', () => {
         if (expected === 'persist') {
           const expectedUrl = lookupResponse.results[0]?.artwork?.artwork_url;
           expect(chain.set).toHaveBeenCalledWith({ artwork_url: expectedUrl });
+          // Prove the stamp write did NOT also run — `chain` is the single
+          // mocked `db.update(...)` chain shared by both `updateArtworkUrl`
+          // and `stampArtworkLookupAttempt`, so a second write past the
+          // persist branch's `return` would show up here as a second `.set`
+          // call, which `toHaveBeenCalledWith` alone would not catch.
+          expect(chain.set).toHaveBeenCalledTimes(1);
           expect(enriched[0].artwork_url).toBe(expectedUrl);
         } else if (expected === 'stamp') {
           const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
