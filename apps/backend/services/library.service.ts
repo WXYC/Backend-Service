@@ -2850,33 +2850,41 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       });
       if (lookupResult === null) return;
 
-      // LML answered 200 but shed its enrichment tail — caller deadline,
-      // admission-control pressure, or an upstream it couldn't reach — or blew
-      // its own hard cap mid-pipeline. Either way `results` is empty or partial
-      // for reasons that say nothing about THIS release, so it is "couldn't
-      // ask", not "asked and missed", and must leave the row retryable. This
-      // caller sends a 4s budget, which makes `deadline_exceeded` LML's routine
-      // answer on a cold Discogs cascade — exactly the hard-to-resolve rows the
-      // marker exists for, so stamping here would poison the population it is
-      // meant to serve. Client-side sheds never reach this line: the
-      // coordinator re-throws those (BS#1748).
+      // Evaluate trust and extract artwork BEFORE looking at `degraded` /
+      // `timeout`, mirroring the rotation picker
+      // (`resolveRotationDiscogsReleaseViaLml`, BS#2731) and
+      // `DiscogsProvider.search` (BS#1890). LML's `_build_degraded_response`
+      // still runs `fetch_artwork` before it sheds the later
+      // `enrich_metadata` / `resolve_identities` steps, and `api.yaml`
+      // defines `degraded` as "trustworthy but incomplete" — not "says
+      // nothing about this release." So a trusted `direct` match with a
+      // usable cover is real and gets persisted regardless of either flag.
+      const trusted = isTrustedLmlAlbumMatch(lookupResult);
+      const artworkUrl = trusted ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url) : null;
+      if (trusted && artworkUrl) {
+        row.artwork_url = artworkUrl;
+        await updateArtworkUrl(row.id, artworkUrl);
+        return;
+      }
+
+      // Nothing usable above. A degraded/timed-out reply with no usable
+      // trusted cover genuinely "couldn't ask" about this release — caller
+      // deadline, admission-control pressure, or an upstream it couldn't
+      // reach — so it must leave the row retryable, not stamp it as a
+      // confirmed miss. This caller sends a 4s budget, which makes
+      // `deadline_exceeded` LML's routine answer on a cold Discogs cascade —
+      // exactly the hard-to-resolve rows the marker exists for, so stamping
+      // here would poison the population it is meant to serve. Client-side
+      // sheds never reach this line: the coordinator re-throws those
+      // (BS#1748).
       if (lookupResult.degraded || lookupResult.timeout) return;
 
-      // Below this point LML genuinely responded about this release, so both
-      // outcomes are durable knowledge and both get stamped: the match was
-      // untrusted, or it was trusted and carried no usable cover. A transient
-      // failure throws past all of this into the rejected settlement arm.
-      if (!isTrustedLmlAlbumMatch(lookupResult)) {
-        await stampArtworkLookupAttempt(row.id);
-        return;
-      }
-      const artworkUrl = filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url);
-      if (!artworkUrl) {
-        await stampArtworkLookupAttempt(row.id);
-        return;
-      }
-      row.artwork_url = artworkUrl;
-      await updateArtworkUrl(row.id, artworkUrl);
+      // Below this point LML genuinely responded about this release with
+      // nothing usable, so that is durable knowledge and gets stamped: the
+      // match was untrusted, or it was trusted and carried no usable cover. A
+      // transient failure throws past all of this into the rejected
+      // settlement arm.
+      await stampArtworkLookupAttempt(row.id);
     })
   );
 

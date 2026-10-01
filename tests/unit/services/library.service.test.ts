@@ -2712,6 +2712,113 @@ describe('library.service', () => {
         expect(enriched[0].artwork_url).toBe('https://i.discogs.com/quiet-signs.jpg');
       });
     });
+
+    /**
+     * BS#2757: a degraded or timed-out reply can still carry a trusted `direct`
+     * match with a usable cover — LML's `_build_degraded_response` runs
+     * `fetch_artwork` before it sheds the later `enrich_metadata` /
+     * `resolve_identities` steps, and `wxyc-shared/api.yaml` defines `degraded`
+     * as "trustworthy but incomplete," not "says nothing about this release."
+     * Trust + extraction must therefore run BEFORE the degraded/timeout check,
+     * mirroring the rotation picker (`resolveRotationDiscogsReleaseViaLml`,
+     * BS#2731) and `DiscogsProvider.search` (BS#1890): a trusted usable cover
+     * persists regardless of either flag, and only a reply with nothing usable
+     * AND degraded/timeout is left retryable (no write, no stamp).
+     */
+    describe('a degraded or timed-out reply with a trusted usable cover', () => {
+      const directMatch = (artworkUrl: string | null, flags: Record<string, unknown> = {}) => ({
+        results: [
+          {
+            library_item: { id: 7, title: 'Quiet Signs', artist: 'Jessica Pratt', call_number: '', library_url: '' },
+            artwork: {
+              release_id: 4242,
+              release_url: 'https://www.discogs.com/release/4242',
+              artwork_url: artworkUrl,
+              confidence: 0.95,
+            },
+          },
+        ],
+        search_type: 'direct',
+        song_not_found: false,
+        found_on_compilation: false,
+        degraded: false,
+        timeout: false,
+        ...flags,
+      });
+
+      const noUsableMatch = (flags: Record<string, unknown> = {}) => ({
+        results: [],
+        search_type: 'none',
+        song_not_found: false,
+        found_on_compilation: false,
+        degraded: false,
+        timeout: false,
+        ...flags,
+      });
+
+      it.each([
+        [
+          'degraded (deadline_exceeded) + direct + usable cover: persisted, no stamp',
+          directMatch('https://i.discogs.com/quiet-signs.jpg', {
+            degraded: true,
+            degraded_reason: 'deadline_exceeded',
+          }),
+          'persist',
+        ],
+        [
+          'timeout + direct + usable cover: persisted, no stamp',
+          directMatch('https://i.discogs.com/quiet-signs.jpg', { timeout: true }),
+          'persist',
+        ],
+        [
+          'degraded + no results: nothing persisted, no stamp',
+          noUsableMatch({ degraded: true, degraded_reason: 'upstream_unavailable' }),
+          'none',
+        ],
+        [
+          'degraded + untrusted match with a cover: nothing persisted, no stamp',
+          directMatch('https://i.discogs.com/quiet-signs.jpg', {
+            search_type: 'fallback',
+            degraded: true,
+            degraded_reason: 'enrich_metadata',
+          }),
+          'none',
+        ],
+        [
+          'degraded + direct + spacer gif: treated as no cover, nothing persisted, no stamp',
+          directMatch('https://st.discogs.com/images/spacer.gif', {
+            degraded: true,
+            degraded_reason: 'deadline_exceeded',
+          }),
+          'none',
+        ],
+        [
+          'non-degraded untrusted match: stamped (BS#2522 unchanged)',
+          directMatch('https://i.discogs.com/quiet-signs.jpg', { search_type: 'fallback' }),
+          'stamp',
+        ],
+        ['non-degraded direct with no cover: stamped (BS#2522 unchanged)', directMatch(null), 'stamp'],
+      ] as const)('%s', async (_label, lookupResponse, expected) => {
+        mockLookupMetadata.mockResolvedValue(lookupResponse);
+        const chain = mockStampWrite();
+
+        const results = [{ id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null }];
+        const enriched = await enrichWithArtwork(results);
+
+        if (expected === 'persist') {
+          const expectedUrl = lookupResponse.results[0]?.artwork?.artwork_url;
+          expect(chain.set).toHaveBeenCalledWith({ artwork_url: expectedUrl });
+          expect(enriched[0].artwork_url).toBe(expectedUrl);
+        } else if (expected === 'stamp') {
+          const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+          expect(Object.keys(setArg)).toEqual(['artwork_lookup_attempted_at']);
+          expect(enriched[0].artwork_url).toBeNull();
+        } else {
+          expect(db.update).not.toHaveBeenCalled();
+          expect(enriched[0].artwork_url).toBeNull();
+        }
+      });
+    });
   });
 
   describe('updateAlbumInDB artwork-marker reset', () => {
