@@ -89,7 +89,6 @@
     "@types/ssh2": "^1.15.6",
     "@types/supertest": "^7.2.1",
     "@types/swagger-ui-express": "^4.1.8",
-    "@types/ws": "^8.18.1",
     "better-call": "^1.4.0",
     "concurrently": "^10.0.5",
     "drizzle-kit": "^0.31.10",
@@ -113,7 +112,6 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.70.0",
     "wait-on": "^9.1.0",
-    "ws": "^8.21.3",
     "yaml": "^2.9.1"
   },
   "dependencies": {

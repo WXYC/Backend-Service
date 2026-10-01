@@ -27,9 +27,9 @@
  * off the public stream — the same allow-list the mutation echoes and DJ
  * peek use (BS#1513). `wxyc-shared`'s `LiveFsUpdateEvent` is the canonical
  * cross-language shape; this file's `LiveFsUpdatePayload` mirrors that
- * contract. (The `/cdc` WebSocket fan-out stays unprojected by design — it
- * is `CDC_SECRET`-gated and its reconciliation-monitor consumer needs the
- * complete row; see `docs/cdc.md`.)
+ * contract. The raw CDC event never leaves the process unprojected: the
+ * external `/cdc` WebSocket that once fanned it out whole was removed with
+ * its only consumer (WXYC/wiki#92; see `docs/cdc.md`).
  *
  * False positives: the filter matches any flowsheet UPDATE that lands in
  * a terminal metadata_status. The historical `flowsheet-metadata-backfill`
@@ -474,12 +474,10 @@ export function isAgeSuppressedInsert(event: CdcEvent): boolean {
 
 /**
  * Register the metadata-broadcast CDC handler. Call once at startup, after
- * `serverEventsMgr` is ready. Sits alongside `setupCdcWebSocket()` — both
- * register independent `onCdcEvent` handlers against the per-process LISTEN
- * connection owned by `startCdcDispatcher()` (see
- * `apps/backend/services/cdc/dispatcher.ts`). The dispatcher runs whether
- * or not the websocket is configured (BS#1187), so this handler fires in
- * environments without `CDC_SECRET`.
+ * `serverEventsMgr` is ready. Registers an `onCdcEvent` handler against the
+ * per-process LISTEN connection owned by `startCdcDispatcher()` (see
+ * `apps/backend/services/cdc/dispatcher.ts`), which runs unconditionally
+ * (BS#1187).
  *
  * BS#1962: both handlers additionally enrich a library-linked payload with
  * `discogsUnavailable` / `discogsUnavailableNote` before broadcasting, for
