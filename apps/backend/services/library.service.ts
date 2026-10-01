@@ -72,9 +72,12 @@ import {
   lookupMetadata,
   isLmlConfigured,
   isTrustedLmlAlbumMatch,
+  isCallerRelativeDegradation,
+  shedReasonOf,
   LmlClientError,
   resolveIdentity,
   type LookupResponse,
+  type GatedLookupResponse,
   type DiscogsTrackItem,
   type DiscogsReleaseMetadata,
   type ReleaseIdentityResolveRequest,
@@ -7211,13 +7214,32 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
  * applied by the wrapper post-cache so a `limit=10` miss can serve a smaller
  * `limit=5` hit without a second LML round-trip.
  *
+ * This function calls `lookupBySong` directly, not through
+ * `LmlLookupCoordinator`, so it owns its own cache-admission check (BS#2765,
+ * the `library-track-search` half of BS#2528). `cacheable` is `false` — the
+ * result is still returned to the CURRENT search unchanged — for a
+ * client-side limiter/breaker shed (`shedReasonOf`; `lookupBySong` shares the
+ * coordinator's `defaultLimiter`, so a shed can resolve here too, just
+ * without a throw to hide it) or a caller-relative LML reply
+ * (`isCallerRelativeDegradation` — a budget timeout, or a `degraded_reason`
+ * other than `upstream_unavailable`). Caching either would replay one
+ * caller's own circumstances to every other DJ searching the same title for
+ * the cache's TTL.
+ *
  * @param query - Track-title query
- * @returns Array of enriched library results with `matched_via` populated
+ * @returns `results` (enriched library results with `matched_via` populated)
+ *   plus `cacheable`, telling the wrapper whether this reply may be written
+ *   to `trackSearchCache`.
  * @throws Whatever `lookupBySong` throws — the wrapper handles the boundary.
  */
-async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<TaggedLibraryViewEntry[]> {
+async function searchLibraryByTrackUncachedOrThrow(
+  query: string
+): Promise<{ results: TaggedLibraryViewEntry[]; cacheable: boolean }> {
   const lookupStart = performance.now();
-  const response: LookupResponse = await lookupBySong(query, {
+  // `GatedLookupResponse`, not the plain `LookupResponse` `lookupBySong`
+  // declares: a shed resolves through the same `postLookup` chokepoint with
+  // `.outcome` set, and `shedReasonOf` needs that optional field in scope.
+  const response: GatedLookupResponse = await lookupBySong(query, {
     caller: 'library-track-search',
   });
   try {
@@ -7228,14 +7250,19 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
     console.warn('[Library] searchLibraryByTrack: failed to project master_lookup_ms onto span', err);
   }
 
+  // Checked separately: `shedReasonOf` reads `.outcome`, which
+  // `isCallerRelativeDegradation` can't see (`timeout`/`degraded` are
+  // `false` on a shed reply by construction).
+  const cacheable = !shedReasonOf(response) && !isCallerRelativeDegradation(response);
+
   const items = response.results ?? [];
-  if (items.length === 0) return [];
+  if (items.length === 0) return { results: [], cacheable };
 
   // LML's library_item.id is the legacy MySQL surrogate; BS stores it as
   // library.legacy_release_id. Bridge that to BS library.id so callers get
   // the row id their controllers and dj-site links expect.
   const legacyIds = items.map((item) => item.library_item?.id).filter((id): id is number => typeof id === 'number');
-  if (legacyIds.length === 0) return [];
+  if (legacyIds.length === 0) return { results: [], cacheable };
 
   // Read the view shape, which carries legacy_release_id (BS#2128), so we
   // can re-order BS rows in LML's response order below.
@@ -7301,7 +7328,7 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
     }
     results.push(tagged);
   }
-  return results;
+  return { results, cacheable };
 }
 
 // --- Track 2 result cache ---
@@ -7317,6 +7344,10 @@ async function searchLibraryByTrackUncachedOrThrow(query: string): Promise<Tagge
 // BS JOIN binds to `legacyIds.length`) and slices to the caller's `limit` at
 // read time. This lets a `limit=10` miss serve a subsequent `limit=5` hit
 // without a second LML round-trip.
+//
+// BS#2765: keyed only on `(query, flag-state)`, no per-caller dimension, so
+// admission excludes any reply shaped by the ASKING request rather than the
+// catalog — see `searchLibraryByTrackUncachedOrThrow`'s `cacheable` field.
 //
 // Mirrors the LRUCache shape used in artworkCache (apps/backend/controllers/
 // proxy.controller.ts). Plan reference:
@@ -7387,6 +7418,12 @@ export function __resetTrackSearchCacheForTests(): void {
  * expected steady-state for nonsense queries and because re-running the
  * round-trip every time would defeat the cache's purpose.
  *
+ * BS#2765: admission also depends on the uncached call's `cacheable` flag,
+ * not just whether it threw — a caller-relative reply (see
+ * {@link searchLibraryByTrackUncachedOrThrow}) still returns to THIS search
+ * unchanged but is withheld from `trackSearchCache` so it isn't replayed to
+ * a different DJ's identical query for the remaining TTL.
+ *
  * The returned array is a shallow copy of the cached entry, so callers can
  * sort or mutate without bleeding into subsequent hits.
  *
@@ -7401,7 +7438,7 @@ export async function searchLibraryByTrackRaw(query: string, limit: number): Pro
     // miss path (via the active span). Default to 0 so cache hits and
     // pre-LML failures still emit a numeric value — p95 dashboards then
     // see one row per call without coalesce.
-    let lmlSucceeded = true;
+    let cacheable = false;
     let results: TaggedLibraryViewEntry[];
 
     const key = trackSearchCacheKey(query);
@@ -7412,12 +7449,13 @@ export async function searchLibraryByTrackRaw(query: string, limit: number): Pro
     } else {
       // Fetch the full LML-bounded result; the cache stores the un-sliced array.
       try {
-        results = await searchLibraryByTrackUncachedOrThrow(query);
+        const outcome = await searchLibraryByTrackUncachedOrThrow(query);
+        results = outcome.results;
+        cacheable = outcome.cacheable;
       } catch {
-        lmlSucceeded = false;
         results = [];
       }
-      if (lmlSucceeded) {
+      if (cacheable) {
         trackSearchCache.set(key, results);
       }
       results = results.slice(0, limit);
