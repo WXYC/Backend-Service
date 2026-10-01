@@ -29,21 +29,24 @@ export type SearchParams = {
 };
 
 /**
- * Which predicate shape `buildWhereClause` compiles for the query's typing
- * term. See "Tiered matching and the cascade" in
- * docs/playlist-search/README.md. `'substring'` (a third tier) is not yet
- * implemented, so it is omitted from this union rather than left unreachable.
+ * Which predicate shape `buildWhereClause` compiles for the query's
+ * conditions. See "Tiered matching and the cascade" in
+ * docs/playlist-search/README.md: `'word'` is today's whole-lexeme match,
+ * `'prefix'` additionally prefix-matches the typing term, and `'substring'`
+ * additionally OR's every tsvector-eligible condition's own predicate against
+ * the four-column ILIKE-contains fallback.
  */
-export type Tier = 'word' | 'prefix';
+export type Tier = 'word' | 'prefix' | 'substring';
 
 export type Cursor = { addTime: string; id: number; tier: Tier };
 
 /** Cursor-token suffix marking a non-`'word'` tier. An unmarked cursor — every one issued before this existed — parses as `'word'`. */
 const TIER_CURSOR_SUFFIX: Record<Exclude<Tier, 'word'>, string> = {
   prefix: '_pfx',
+  substring: '_sub',
 };
 
-/** Encode a cursor for the next page. Format: `${ISO timestamp}_${id}[_pfx]`. */
+/** Encode a cursor for the next page. Format: `${ISO timestamp}_${id}[_pfx|_sub]`. */
 export function encodeCursor(addTime: string, id: number, tier: Tier): string {
   const suffix = tier === 'word' ? '' : TIER_CURSOR_SUFFIX[tier];
   return `${addTime}_${id}${suffix}`;
@@ -56,6 +59,9 @@ export function parseCursor(cursor: string): Cursor | null {
   if (working.endsWith(TIER_CURSOR_SUFFIX.prefix)) {
     tier = 'prefix';
     working = working.slice(0, -TIER_CURSOR_SUFFIX.prefix.length);
+  } else if (working.endsWith(TIER_CURSOR_SUFFIX.substring)) {
+    tier = 'substring';
+    working = working.slice(0, -TIER_CURSOR_SUFFIX.substring.length);
   }
   const lastUnderscore = working.lastIndexOf('_');
   if (lastUnderscore <= 0) return null;
@@ -343,15 +349,16 @@ export async function searchFlowsheet(
   const parsedCursor = cursorEligible && cursor !== undefined ? parseCursor(cursor) : null;
   const offset = parsedCursor !== null ? 0 : page * limit;
 
-  // A cursor pins its own tier and never cascades — EXCEPT a `_pfx` cursor
-  // whose query no longer has a typing term (e.g. the DJ deleted characters
-  // since the link was issued): there is nothing for the 'prefix' tier to
-  // change, so treat the request as the 'word' tier. Its own nextCursor, if
-  // any, comes back unmarked, which self-corrects every later page.
+  // A cursor pins its own tier and never cascades — EXCEPT a `_pfx`/`_sub`
+  // cursor whose query no longer qualifies for that tier (e.g. the DJ
+  // deleted characters since the link was issued): there is nothing left for
+  // that tier to change, so treat the request as the 'word' tier. Its own
+  // nextCursor, if any, comes back unmarked, which self-corrects every later
+  // page.
   const tiers =
     parsedCursor !== null
-      ? [parsedCursor.tier === 'prefix' && typingTermIndex === -1 ? 'word' : parsedCursor.tier]
-      : tiersFor(typingTermIndex, sort);
+      ? [resolvePinnedTier(parsedCursor.tier, conditions, typingTermIndex)]
+      : tiersFor(conditions, typingTermIndex, sort);
 
   let lastGood: TierAttempt | null = null;
   for (let i = 0; i < tiers.length; i++) {
@@ -489,10 +496,35 @@ function findTypingTermIndex(conditions: SearchCondition<FlowsheetField>[]): num
   return -1;
 }
 
-/** Tiers to try in order: `['word']` for a non-date sort or no typing term, else `['word', 'prefix']`. See docs/playlist-search/README.md. */
-function tiersFor(typingTermIndex: number, sort: SearchParams['sort']): Tier[] {
+/**
+ * Whether any condition would change under the `'substring'` tier: a
+ * positive (non-negated), unquoted, bare `all` term that passes
+ * `shouldUseTsvector` — the same eligibility `findTypingTermIndex` tests for
+ * the typing term, but checked across every condition rather than just the
+ * last one, since the substring tier's OR applies to all of them.
+ */
+function hasSubstringEligibleTerm(conditions: SearchCondition<FlowsheetField>[]): boolean {
+  return conditions.some((c) => c.field === 'all' && !c.negated && !c.exact && shouldUseTsvector(c.value));
+}
+
+/** Tiers to try in order: always `'word'`; `'prefix'` when a typing term exists; `'substring'` when any term is tsvector-eligible. A non-date sort returns `['word']` only. See docs/playlist-search/README.md. */
+function tiersFor(
+  conditions: SearchCondition<FlowsheetField>[],
+  typingTermIndex: number,
+  sort: SearchParams['sort']
+): Tier[] {
   if (sort !== 'date') return ['word'];
-  return typingTermIndex === -1 ? ['word'] : ['word', 'prefix'];
+  const tiers: Tier[] = ['word'];
+  if (typingTermIndex !== -1) tiers.push('prefix');
+  if (hasSubstringEligibleTerm(conditions)) tiers.push('substring');
+  return tiers;
+}
+
+/** A cursor's own tier, downgraded to `'word'` if its query no longer qualifies for it (the `_pfx` rule, extended to `_sub`). */
+function resolvePinnedTier(tier: Tier, conditions: SearchCondition<FlowsheetField>[], typingTermIndex: number): Tier {
+  if (tier === 'prefix' && typingTermIndex === -1) return 'word';
+  if (tier === 'substring' && !hasSubstringEligibleTerm(conditions)) return 'word';
+  return tier;
 }
 
 function buildWhereClause(
@@ -504,14 +536,20 @@ function buildWhereClause(
 
   // Only the 'prefix' tier prefix-matches the typing term; the 'word' tier
   // ignores `typingTermIndex` entirely, which keeps its compiled SQL
-  // byte-identical to pre-#2712 `main`.
+  // byte-identical to pre-#2712 `main`. The 'substring' tier never prefixes
+  // (substring already subsumes a prefix) but widens every eligible,
+  // non-negated condition's own predicate with the ILIKE-contains OR.
   const prefixIndex = tier === 'prefix' ? typingTermIndex : -1;
+  const substringTier = tier === 'substring';
 
   const parts: { operator: 'AND' | 'OR'; fragment: SQL }[] = [];
 
   for (let i = 0; i < conditions.length; i++) {
     const condition = conditions[i];
-    const fragment = buildConditionFragment(condition, { prefix: i === prefixIndex });
+    const fragment = buildConditionFragment(condition, {
+      prefix: i === prefixIndex,
+      substring: substringTier && !condition.negated,
+    });
     if (fragment) {
       parts.push({ operator: condition.operator, fragment });
     }
@@ -532,14 +570,17 @@ function buildWhereClause(
   return sql`(${result})`;
 }
 
-function buildConditionFragment(condition: SearchCondition<FlowsheetField>, options: { prefix: boolean }): SQL | null {
+function buildConditionFragment(
+  condition: SearchCondition<FlowsheetField>,
+  options: { prefix: boolean; substring: boolean }
+): SQL | null {
   const { field, value, exact, negated } = condition;
 
   let fragment: SQL;
 
   switch (field) {
     case 'all':
-      fragment = buildAllFieldMatch(value, { exact, prefix: options.prefix });
+      fragment = buildAllFieldMatch(value, { exact, prefix: options.prefix, substring: options.substring });
       break;
     case 'dj_name':
       fragment = buildDjNameMatch(value, exact);
@@ -608,11 +649,23 @@ function gappedSearchDocSql(): SQL {
 }
 
 /**
+ * Four-column ILIKE-contains predicate (`artist_name`, `track_title`,
+ * `album_title`, `record_label` — no `dj_name`, which has no trigram index;
+ * see `buildDjNameMatch`). The trigram fallback for an ineligible term
+ * (`shouldUseTsvector` false) and, as of WXYC/Backend-Service#2712, the
+ * `'substring'` tier's OR-partner for every eligible term.
+ */
+function ilikeContainsFragment(value: string): SQL {
+  return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'contains')} OR ${ilikeEscaped(flowsheet.track_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.album_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.record_label, value, 'contains')})`;
+}
+
+/**
  * Predicate for an `all`-field (bare-term) condition. `options.exact` means
  * quoted — whole-value ILIKE, the same in every tier. `options.prefix` is
  * true for exactly one condition per `'prefix'`-tier query, the typing term
  * `searchFlowsheet` resolves via `findTypingTermIndex`; always false in the
- * `'word'` tier.
+ * `'word'` and `'substring'` tiers. `options.substring` is true for every
+ * non-negated condition in the `'substring'` tier.
  *
  * **Word tier:** `search_doc @@ E AND (strpos((E)::text, '<') = 0 OR gapped
  * @@ E)`, where `E = buildPrefixTsquery(value).exactTsquery` matches whole
@@ -632,12 +685,18 @@ function gappedSearchDocSql(): SQL {
  * cost reason, not a recall one. See docs/playlist-search/README.md for the
  * full design and the EXPLAIN verification that both arms fold cleanly.
  *
+ * **Substring tier:** `(<word tier's own predicate> OR <ilikeContainsFragment>)`
+ * — never the prefix CASE, which substring matching already subsumes. The OR
+ * keeps `dj_name` coverage: `search_doc` includes `dj_name` but
+ * `ilikeContainsFragment` does not, so a term that only matched via `dj_name`
+ * in an earlier tier keeps matching here. See docs/playlist-search/README.md.
+ *
  * `built` is `null` only when no token carries a letter or digit —
  * `shouldUseTsvector` already guarantees one, so the trigram fallback below
  * only actually triggers if that guarantee ever loosens.
  */
-function buildAllFieldMatch(value: string, options: { exact: boolean; prefix: boolean }): SQL {
-  const { exact, prefix } = options;
+function buildAllFieldMatch(value: string, options: { exact: boolean; prefix: boolean; substring: boolean }): SQL {
+  const { exact, prefix, substring } = options;
   if (exact) {
     // Whole-value, but case-insensitively: quoting narrows "contains" to "is",
     // and nothing about it is meant to start distinguishing "hi scores" from
@@ -650,18 +709,18 @@ function buildAllFieldMatch(value: string, options: { exact: boolean; prefix: bo
     const built = buildPrefixTsquery(value);
     if (built !== null) {
       const q = built.exactTsquery;
-      if (prefix) {
-        // One outer boolean CASE (see docstring): THEN picks the prefix
-        // form directly, ELSE is exactly the word tier's own predicate.
-        return sql`(CASE WHEN strpos((${q})::text, '<') = 0 THEN ${flowsheet.search_doc} @@ ${built.tsquery} ELSE (${flowsheet.search_doc} @@ ${q} AND ${gappedSearchDocSql()} @@ ${q}) END)`;
-      }
-      // Word tier: byte-identical to pre-#2712 `main`.
-      return sql`(${flowsheet.search_doc} @@ ${q} AND (strpos((${q})::text, '<') = 0 OR ${gappedSearchDocSql()} @@ ${q}))`;
+      const wordMatch = prefix
+        ? // One outer boolean CASE (see docstring): THEN picks the prefix
+          // form directly, ELSE is exactly the word tier's own predicate.
+          sql`(CASE WHEN strpos((${q})::text, '<') = 0 THEN ${flowsheet.search_doc} @@ ${built.tsquery} ELSE (${flowsheet.search_doc} @@ ${q} AND ${gappedSearchDocSql()} @@ ${q}) END)`
+        : // Word tier: byte-identical to pre-#2712 `main`.
+          sql`(${flowsheet.search_doc} @@ ${q} AND (strpos((${q})::text, '<') = 0 OR ${gappedSearchDocSql()} @@ ${q}))`;
+      return substring ? sql`(${wordMatch} OR ${ilikeContainsFragment(value)})` : wordMatch;
     }
   }
   // Trigram fallback: short queries, pure-punctuation strings, and any other
   // input that the tsvector path would tokenize away.
-  return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'contains')} OR ${ilikeEscaped(flowsheet.track_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.album_title, value, 'contains')} OR ${ilikeEscaped(flowsheet.record_label, value, 'contains')})`;
+  return ilikeContainsFragment(value);
 }
 
 function buildDjNameMatch(value: string, exact: boolean): SQL {

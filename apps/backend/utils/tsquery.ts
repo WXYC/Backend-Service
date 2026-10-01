@@ -15,7 +15,12 @@ import { hasAlphanumeric } from './text-query.js';
  * runs is routed in SQL — `strpos(exactTsquery::text, '<') = 0` — rather
  * than predicted here, so this module has nothing else to export for it. See
  * `buildAllFieldMatch`'s docstring for the exact CASE shape and why asking
- * Postgres beat an earlier `phraseCapable` field computed in JS.
+ * Postgres beat an earlier `phraseCapable` field computed in JS. A third
+ * tier, `'substring'` (PR 2 of the same issue), reads only
+ * {@link PrefixTsquery.exactTsquery} again — the same shape as `'word'`, OR'd
+ * against a four-column ILIKE-contains predicate — and never reads
+ * {@link PrefixTsquery.tsquery} at all: substring matching already subsumes
+ * a prefix match, so there is no CASE to choose an arm of in that tier.
  *
  * ## Why not `websearch_to_tsquery`
  *
@@ -125,15 +130,18 @@ const MAX_OPERANDS = 16;
  * The catalog's `searchLibraryByTsvector` (`apps/backend/services/library.service.ts`,
  * BS#670) reads both on every call. The flowsheet's `buildAllFieldMatch`
  * (`apps/backend/services/search.service.ts`) reads only `exactTsquery` in
- * its `'word'` tier (BS#2726's shape, unchanged), and reads BOTH only for the
- * one condition its `'prefix'` tier (WXYC/Backend-Service#2712) prefix-matches
- * — the typing term `findTypingTermIndex` names — where `tsquery` and
- * `exactTsquery` become the two ARMS of an outer boolean CASE rather than two
- * candidate values for one tsquery slot. Neither reader asks this module
- * whether a token *could* produce a `<->` chain (an earlier `phraseCapable`
- * field tried to predict that in JS; see `buildAllFieldMatch`'s docstring for
- * why asking Postgres at query time replaced it) — that question is answered
- * in SQL, against `exactTsquery`, by whichever caller has it in hand.
+ * its `'word'` tier (BS#2726's shape, unchanged) and its `'substring'` tier
+ * (WXYC/Backend-Service#2712 PR 2, which OR's that same predicate against an
+ * ILIKE-contains fallback rather than ever reading `tsquery`), and reads BOTH
+ * only for the one condition its `'prefix'` tier (WXYC/Backend-Service#2712
+ * PR 1) prefix-matches — the typing term `findTypingTermIndex` names — where
+ * `tsquery` and `exactTsquery` become the two ARMS of an outer boolean CASE
+ * rather than two candidate values for one tsquery slot. Neither reader asks
+ * this module whether a token *could* produce a `<->` chain (an earlier
+ * `phraseCapable` field tried to predict that in JS; see
+ * `buildAllFieldMatch`'s docstring for why asking Postgres at query time
+ * replaced it) — that question is answered in SQL, against `exactTsquery`, by
+ * whichever caller has it in hand.
  */
 export interface PrefixTsquery {
   /**
@@ -148,7 +156,9 @@ export interface PrefixTsquery {
    * phrase's `tsquery` suffixes `:*` onto every lexeme the chain re-lexes
    * into, not just the last one (`to_tsquery('simple', $$'i''m':*$$)::text`
    * -> `'i':* <-> 'm':*`), which measured 15.6s for a capped count on
-   * production — over the endpoint's 5s HTTP timeout.
+   * production — over the endpoint's 5s HTTP timeout. Never read by the
+   * flowsheet's `'substring'` tier (PR 2 of the same issue) at all — that
+   * tier never prefix-matches, so it has no CASE arm to pick `tsquery` for.
    */
   tsquery: SQL;
   /**
@@ -157,10 +167,13 @@ export interface PrefixTsquery {
    * matched every token as a complete word, not merely a prefix of one — and
    * `exact_score`, the first sort key within a tier. Also the flowsheet's
    * `'word'`-tier predicate (BS#2726, unchanged by #2712) for every
-   * condition, and the flowsheet's `'prefix'`-tier CASE's own routing
-   * question (`strpos(exactTsquery::text, '<') = 0`) plus its ELSE arm — the
-   * same `'word'`-tier predicate, reused verbatim, for a typing term whose
-   * `tsquery` would be unaffordable to run.
+   * condition, the flowsheet's `'prefix'`-tier CASE's own routing question
+   * (`strpos(exactTsquery::text, '<') = 0`) plus its ELSE arm — the same
+   * `'word'`-tier predicate, reused verbatim, for a typing term whose
+   * `tsquery` would be unaffordable to run — and, as of PR 2, the left
+   * operand of the flowsheet's `'substring'`-tier OR against a four-column
+   * ILIKE-contains predicate, for every eligible condition rather than just
+   * the typing term.
    */
   exactTsquery: SQL;
 }

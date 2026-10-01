@@ -142,17 +142,27 @@ describe('typing-term selection (findTypingTermIndex, consulted only in the pref
     expect(db.execute).toHaveBeenCalledTimes(2);
   });
 
-  it('a trailing 1-2 char bare term ENDS the search rather than being skipped past -- "autechre am" has no typing term', async () => {
-    (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: 0 }]);
+  it('a trailing 1-2 char bare term ENDS the search for the PREFIX tier -- "autechre am" has no typing term, so the CASE form never runs', async () => {
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([]) // word data
+      .mockResolvedValueOnce([{ total: 0 }]) // word count
+      .mockResolvedValueOnce([]) // substring data (WXYC/Backend-Service#2712 PR 2 -- see below)
+      .mockResolvedValueOnce([{ total: 0 }]); // substring count
 
     await searchFlowsheet({ q: 'autechre am', page: 0, limit: 50, sort: 'date', order: 'desc' });
 
     // The DJ is typing "am" (2 chars, not tsvector-eligible); "autechre" is
     // an earlier, already-completed word and must NOT be reached for by
     // skipping "am" -- findTypingTermIndex stops at the first positive bare
-    // term scanning backward, so there is no typing term at all here and no
-    // cascade is attempted.
-    expect(db.execute).toHaveBeenCalledTimes(2);
+    // term scanning backward, so there is no typing term at all here and the
+    // 'prefix' tier (the one that would CASE-prefix-match "autechre") never
+    // runs. As of PR 2, `tiersFor`'s 'substring' gate is independent of the
+    // typing term -- "autechre" alone qualifies -- so the cascade still
+    // advances from 'word' to 'substring' (4 calls, not 2); see
+    // search.service.substring-tier.test.ts for that tier's own coverage.
+    expect(db.execute).toHaveBeenCalledTimes(4);
+    const { sql: text } = compiledExecuteCall(2);
+    expect(text.toLowerCase()).not.toContain('case when strpos');
   });
 
   // Mutation proof (manual; run during implementation): swapping
@@ -165,6 +175,6 @@ describe('typing-term selection (findTypingTermIndex, consulted only in the pref
   // the `shouldUseTsvector` guard flips the 1-2 char test to red -- a third
   // call pair would fire for `tv`. Reverting the "ends the search" rule to
   // the old "skip past an ineligible trailing term" behaviour flips the
-  // "autechre am" test above to red -- it would cascade and prefix-match the
-  // completed word "autechre" instead of stopping at "am".
+  // "autechre am" test above to red -- the 'prefix' tier's CASE form would
+  // appear at call 2 instead of the 'substring' tier's predicate.
 });

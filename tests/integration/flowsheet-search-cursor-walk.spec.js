@@ -418,3 +418,186 @@ describe('GET /flowsheet/search prefix-tier cascade cursor walk (WXYC/Backend-Se
     expect(page3.body.results).toHaveLength(0);
   });
 });
+
+/**
+ * WXYC/Backend-Service#2712, PR 2 -- the `'substring'` tier's own cursor
+ * walk, mirroring the 'prefix' walk above exactly but one tier deeper.
+ * Neither row is reachable by 'word' (no exact-lexeme match) or 'prefix'
+ * (the marker is NOT a true string prefix of either row's first word --
+ * both are prefixed with an extra "x" the query never supplies, so `:*`
+ * cannot match from the start of the lexeme), so the cascade reaches
+ * 'substring' on page 0 and the walk must stay pinned there (`_sub`) for
+ * every later page.
+ */
+const SUBSTRING_WALK_MARKER = 'bs2712subcursorwalkprobe';
+const SUBSTRING_WALK_SUFFIXES = ['alpha', 'beta'];
+
+describe('GET /flowsheet/search substring-tier cascade cursor walk (WXYC/Backend-Service#2712, PR 2)', () => {
+  let sql;
+  let insertedIds = [];
+
+  beforeAll(async () => {
+    sql = makeSql();
+
+    const rows = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (entry_type, artist_name, track_title, album_title, play_order, add_time)
+       SELECT 'track', 'x' || $1::text || suffix, 'x' || $1::text || suffix || ' track', 'Substring Cursor Walk Probe', n,
+              TIMESTAMPTZ '2019-03-05 12:00:00+00' + ((n - 1) * INTERVAL '1 minute')
+       FROM unnest($2::text[]) WITH ORDINALITY AS t(suffix, n)
+       RETURNING id`,
+      [SUBSTRING_WALK_MARKER, SUBSTRING_WALK_SUFFIXES]
+    );
+    insertedIds = rows.map((r) => r.id);
+    expect(insertedIds).toHaveLength(SUBSTRING_WALK_SUFFIXES.length);
+
+    // Premise: the bare marker is not a whole-word match (both rows' first
+    // word is prefixed with "x") -- confirmed directly against the ungapped
+    // tsvector column, the same way the sibling 'prefix' spec does.
+    const exact = await sql.unsafe(
+      `SELECT count(*)::int AS n FROM "${SCHEMA}".flowsheet
+       WHERE entry_type = 'track' AND search_doc @@ to_tsquery('simple', $1)`,
+      [`'${SUBSTRING_WALK_MARKER}'`]
+    );
+    expect(exact[0].n).toBe(0);
+
+    // Premise: the marker is not a PREFIX match either (':*' matches only
+    // from the start of a lexeme, and both rows' lexeme starts with "x").
+    const prefix = await sql.unsafe(
+      `SELECT count(*)::int AS n FROM "${SCHEMA}".flowsheet
+       WHERE entry_type = 'track' AND search_doc @@ to_tsquery('simple', $1)`,
+      [`'${SUBSTRING_WALK_MARKER}':*`]
+    );
+    expect(prefix[0].n).toBe(0);
+  });
+
+  afterAll(async () => {
+    if (insertedIds.length > 0) {
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE id = ANY($1::int[])`, [insertedIds]);
+    }
+    if (sql) await sql.end();
+  });
+
+  test('a limit-1 walk cascades into the substring tier on page 0, stays pinned to it, returns both distinct rows, and terminates', async () => {
+    const page1 = await request
+      .get('/flowsheet/search')
+      .query({ q: SUBSTRING_WALK_MARKER, page: 0, limit: 1, sort: 'date', order: 'desc' })
+      .send()
+      .expect(200);
+
+    expect(page1.body.results).toHaveLength(1);
+    expect(insertedIds).toContain(page1.body.results[0].id);
+    expect(typeof page1.body.nextCursor).toBe('string');
+    expect(page1.body.nextCursor).toMatch(/_sub$/);
+
+    const page2 = await request
+      .get('/flowsheet/search')
+      .query({
+        q: SUBSTRING_WALK_MARKER,
+        page: 0,
+        limit: 1,
+        sort: 'date',
+        order: 'desc',
+        cursor: page1.body.nextCursor,
+      })
+      .send()
+      .expect(200);
+
+    expect(page2.body.results).toHaveLength(1);
+    expect(insertedIds).toContain(page2.body.results[0].id);
+    // Distinct from page 1 -- the walk advanced, it did not re-serve or loop.
+    expect(page2.body.results[0].id).not.toBe(page1.body.results[0].id);
+    // Still pinned to the substring tier (the cursor decides, never cascades).
+    expect(page2.body.nextCursor).toMatch(/_sub$/);
+
+    const page3 = await request
+      .get('/flowsheet/search')
+      .query({
+        q: SUBSTRING_WALK_MARKER,
+        page: 0,
+        limit: 1,
+        sort: 'date',
+        order: 'desc',
+        cursor: page2.body.nextCursor,
+      })
+      .send()
+      .expect(200);
+
+    // Both rows already served -- the walk terminates rather than looping.
+    expect(page3.body.results).toHaveLength(0);
+  });
+});
+
+/**
+ * WXYC/Backend-Service#2712, PR 2 -- a 'word'-tier cursor walk whose final
+ * page lands exactly on `limit` must end with a genuinely empty page, not a
+ * page of 'substring'-tier rows. Before PR 2 this was automatic (there was
+ * nothing past 'prefix' for a query with no typing term to fall into); PR 2
+ * adds a tier whose OWN eligibility gate (`hasSubstringEligibleTerm`) does
+ * NOT depend on a typing term, so the bare marker here -- a perfectly
+ * ordinary tsvector-eligible word -- WOULD head a cold request's tier list
+ * with 'substring' too. A cursor pinned to 'word' must never reach it: the
+ * marker is deliberately chosen so that if it did, the query's own ILIKE-
+ * contains fallback would trivially match every row again (self-fallback
+ * would be invisible as a bug), so this test proves termination the only
+ * way that can't happen to pass by accident -- by pinning the tier via the
+ * emitted cursor and checking it carries no `_sub`/`_pfx` marker throughout.
+ */
+const WORD_TIER_WALK_MARKER = 'bs2712wordcursorwalkprobe';
+const WORD_TIER_WALK_ROW_COUNT = 4;
+const WORD_TIER_WALK_PAGE_SIZE = 2;
+
+describe("GET /flowsheet/search 'word'-tier cursor walk with an exactly-full final page (WXYC/Backend-Service#2712, PR 2)", () => {
+  let sql;
+  let insertedIds = [];
+
+  beforeAll(async () => {
+    sql = makeSql();
+
+    // Every row's artist_name IS the bare marker exactly (a whole-word
+    // match), so the 'word' tier alone accounts for every row and the
+    // cascade never has a reason to advance past it.
+    const rows = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (entry_type, artist_name, track_title, album_title, play_order, add_time)
+       SELECT 'track', $1::text, $1::text || ' track #' || n, 'Word Tier Cursor Walk Probe', n,
+              TIMESTAMPTZ '2019-03-06 12:00:00+00' + ((n - 1) * INTERVAL '1 minute')
+       FROM generate_series(1, $2::int) AS n
+       RETURNING id`,
+      [WORD_TIER_WALK_MARKER, WORD_TIER_WALK_ROW_COUNT]
+    );
+    insertedIds = rows.map((r) => r.id);
+    expect(insertedIds).toHaveLength(WORD_TIER_WALK_ROW_COUNT);
+    // WORD_TIER_WALK_ROW_COUNT is a multiple of the page size on purpose --
+    // the point of this fixture is a FINAL page that is exactly full.
+    expect(WORD_TIER_WALK_ROW_COUNT % WORD_TIER_WALK_PAGE_SIZE).toBe(0);
+  });
+
+  afterAll(async () => {
+    if (insertedIds.length > 0) {
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE id = ANY($1::int[])`, [insertedIds]);
+    }
+    if (sql) await sql.end();
+  });
+
+  test('every page stays on the word tier (no _pfx/_sub marker) and the walk ends with one genuinely empty page, not substring-tier rows', async () => {
+    const pages = await walkFromColdStart({
+      q: WORD_TIER_WALK_MARKER,
+      page: 0,
+      limit: WORD_TIER_WALK_PAGE_SIZE,
+      sort: 'date',
+      order: 'desc',
+    });
+
+    // Two full pages of 2, then a fourth request that returns nothing.
+    expect(pages.map((p) => p.results.length)).toEqual([2, 2, 0]);
+    expect(pages[0].nextCursor).toBeDefined();
+    expect(pages[0].nextCursor).not.toMatch(/_pfx$|_sub$/);
+    expect(pages[1].nextCursor).toBeDefined();
+    expect(pages[1].nextCursor).not.toMatch(/_pfx$|_sub$/);
+    // The empty final page carries no cursor of its own.
+    expect(pages[2].nextCursor).toBeUndefined();
+
+    const seen = pages.flatMap((p) => p.results.map((r) => r.id));
+    expect(new Set(seen)).toEqual(new Set(insertedIds));
+    expect(seen).toHaveLength(WORD_TIER_WALK_ROW_COUNT);
+  });
+});

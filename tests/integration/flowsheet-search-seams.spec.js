@@ -20,10 +20,17 @@ const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.POR
  * tier (`tests/unit/services/search.service.seam-guard.test.ts`) only pins
  * the SQL shape.
  *
- * No trigram fallback is in play anywhere here (every query below is
- * `shouldUseTsvector`-eligible: 3+ chars, contains an ASCII letter), so a
- * seam row's absence from the results is unambiguous — there is no fallback
- * path that could still surface it.
+ * As of WXYC/Backend-Service#2712 PR 2, every query below IS tsvector-eligible
+ * (3+ chars, contains an ASCII letter) and so also runs the `'substring'`
+ * tier when the earlier tiers come back empty — which every seam query here
+ * does, by design (the cross-seam phrase never matches the ungapped column
+ * as a whole word either). That tier ORs in a four-column ILIKE-contains
+ * predicate per eligible token, but a seam row's absence stays meaningful:
+ * the cross-seam STRING (e.g. `pratt'back`, with the apostrophe) never
+ * appears as a literal substring of any ONE column — it is only the gapped
+ * vector's seam-adjacency that could have matched it, and ILIKE has no seam
+ * to cross. Confirmed by running this spec end to end after PR 2 landed; no
+ * seam assertion below changed.
  *
  * Scoping: every probe row carries a fixed PAST `add_time` on one shared day,
  * and every request scopes with `dateRange:<day>..<day> <token>`, following
@@ -317,14 +324,19 @@ describe('GET /flowsheet/search — gapped-vector seam guard (BS#2726)', () => {
         album: 'Unrelated Album Six',
         label: 'Unrelated Label Six',
       });
-      // Dedicated fixture for the "trailing short term ends the search"
-      // case: "am" is a genuine whole-word lexeme here (not just filler),
-      // so under the OLD rule (skip past an ineligible trailing term)
-      // "autec" would still be reachable as the typing term and the row
-      // would match via the 'prefix' tier cascade; under the NEW rule the
-      // search ends at "am" (too short for shouldUseTsvector), so there is
-      // no typing term, no cascade is attempted at all, and "autec" never
-      // gets the chance to prefix-match "autechretrailing".
+      // Dedicated fixture for the "trailing short term ends the search FOR
+      // THE PREFIX TIER" case: "am" is a genuine whole-word lexeme here (not
+      // just filler), so under the pre-#2712 rule (skip past an ineligible
+      // trailing term) "autec" would be reachable as the typing term and the
+      // row would match via the 'prefix' tier's CASE; under the shipped rule
+      // the typing-term SCAN ends at "am" (too short for shouldUseTsvector),
+      // so there is no typing term and the 'prefix' tier never runs. As of
+      // PR 2, that does NOT mean no cascade at all: `tiersFor`'s 'substring'
+      // gate is independent of the typing term ("autec" alone still
+      // qualifies as an eligible condition), so the cascade still advances
+      // from 'word' to 'substring' once 'word' is empty, and ILIKE-contains
+      // matches "autec" against "autechretrailing" there -- see the test
+      // below, which now expects the row, not its absence.
       trailingShortTermId = await seedRow({
         artist: 'Wxycprefixprobetrailing Autechretrailing',
         track: 'Am Unrelated Track Fourteen',
@@ -437,21 +449,43 @@ describe('GET /flowsheet/search — gapped-vector seam guard (BS#2726)', () => {
       expect(idsOf(negated)).toContain(warpaintId);
     });
 
-    test('a within-field phrase-shaped partial ("pratt\'ba") is not prefix-matched', async () => {
-      const res = await search(`${dateRange} wxycprefixprobepratt'ba`).expect(200);
+    test('a within-field phrase-shaped partial ("pratt\'ba") is not prefix-matched -- pinned to the "prefix" tier directly, the row is absent', async () => {
+      // A cursor pins its own tier and never cascades (see
+      // flowsheet-search-cursor-walk.spec.js), so requesting with a cursor
+      // already marked `_pfx` runs ONLY the 'prefix' tier end to end against
+      // real Postgres -- the same invariant this test pinned before PR 2
+      // added a 'substring' tier that would otherwise recover this same row
+      // (see the test below) and mask a regression here. The cursor's
+      // boundary is set after every row this file seeds on `DAY`, so nothing
+      // seeded is excluded by the cursor predicate itself.
+      const pinnedToPrefix = `${DAY}T12:00:01.000000Z_1_pfx`;
+      const res = await search(`${dateRange} wxycprefixprobepratt'ba`).query({ cursor: pinnedToPrefix }).expect(200);
       expect(idsOf(res)).not.toContain(prattBaWithinFieldId);
     });
 
-    test('a trailing 1-2 char bare term ENDS the search rather than being skipped past ("wxycprefixprobetrailing autec am" has no typing term)', async () => {
-      // "am" is a real word in this row's track_title, so under the OLD
-      // rule the row WOULD match (the cascade reaches 'prefix', "autec"
-      // prefix-matches "autechretrailing", and the un-skipped "am"
-      // condition is satisfied as an exact word on its own). Under the NEW
-      // rule the search ends at "am" -- too short for shouldUseTsvector --
-      // so there is no typing term, no cascade is attempted, and the
-      // 'word' tier alone can never match "autec" against "autechretrailing".
+    test('a within-field phrase-shaped partial ("pratt\'ba") IS recovered by the substring tier (WXYC/Backend-Service#2712, PR 2)', async () => {
+      // Unlike the pinned-prefix check above, the ordinary (cascading)
+      // request reaches 'substring' once 'word' and 'prefix' both come back
+      // empty -- "wxycprefixprobepratt'ba" is a literal substring of the
+      // row's own track_title "Wxycprefixprobepratt'back Suite" (its first
+      // 23 characters), so the four-column ILIKE-contains predicate matches
+      // it even though no tsquery-shaped predicate ever did.
+      const res = await search(`${dateRange} wxycprefixprobepratt'ba`).expect(200);
+      expect(idsOf(res)).toContain(prattBaWithinFieldId);
+    });
+
+    test('a trailing 1-2 char bare term ends the search for the PREFIX tier only -- the SUBSTRING tier still reaches the row (WXYC/Backend-Service#2712, PR 2)', async () => {
+      // "am" (2 chars) ends findTypingTermIndex's backward scan, so there is
+      // no typing term and the 'prefix' tier's CASE never runs -- "autec"
+      // never gets prefix-matched. But `tiersFor`'s 'substring' gate does not
+      // key off the typing term at all: "wxycprefixprobetrailing" and
+      // "autec" both independently qualify as eligible conditions, so once
+      // the 'word' tier comes back empty (the row's artist/track words don't
+      // EXACTLY equal "autec"), the cascade advances to 'substring', where
+      // "autec" matches via ILIKE-contains against "...Autechretrailing" and
+      // "am" matches (as it always has) via its own ILIKE-contains branch.
       const res = await search(`${dateRange} wxycprefixprobetrailing autec am`).expect(200);
-      expect(idsOf(res)).not.toContain(trailingShortTermId);
+      expect(idsOf(res)).toContain(trailingShortTermId);
     });
 
     // Mutation proof (manual; run during implementation, against this real
@@ -459,18 +493,99 @@ describe('GET /flowsheet/search — gapped-vector seam guard (BS#2726)', () => {
     // throughout the 'prefix' tier's ELSE arm -- `(search_doc @@ P AND
     // gapped @@ P)` instead of `(search_doc @@ E AND gapped @@ E)`, keeping
     // the AND-gapped STRUCTURE but prefixing the phrase instead of falling
-    // back to the exact form -- makes ONLY the within-field phrase test
-    // above go red (22 passed, 1 failed, confirmed): "ba":* prefix-matches
-    // "...back" even inside one field, where there is no seam gap to stop
-    // it. The four CROSS-SEAM tests above do NOT catch this mutation --
+    // back to the exact form -- makes ONLY the pinned-prefix test above go
+    // red (24 passed, 1 failed, confirmed, this file alone): "ba":*
+    // prefix-matches "...back" even inside one field, where there is no seam
+    // gap to stop it. As of PR 2, this mutation is observable ONLY through
+    // the pinned-prefix request -- the ordinary cascading request (the
+    // "IS recovered by the substring tier" test) returns the row in both the
+    // buggy and the fixed world, since 'substring' independently recovers it
+    // via ILIKE-contains regardless of what the 'prefix' tier's ELSE arm
+    // does; pinning the cursor to 'prefix' is what isolates the regression
+    // again. The four CROSS-SEAM tests above do NOT catch this mutation --
     // confirmed by running it -- because the gapped vector's position
     // shift still defeats `gapped @@ P` across a field seam exactly as it
     // defeats `gapped @@ E`; that half of the guard is prefix-agnostic. A
     // CRUDER mutation that also drops the `AND gapped @@` half entirely
     // (bare `search_doc @@ P`) does NOT isolate the two questions -- it
-    // breaks the seam guard too and all four cross-seam tests go red
-    // alongside this one (5 of 23 failed, confirmed) -- which is why this
-    // fixture exists: it is the only one of the two that proves the
-    // prefix-vs-exact choice specifically, independent of the seam guard.
+    // breaks the seam guard too and the cross-seam tests go red alongside
+    // this one -- which is why the pinned-prefix fixture exists: it is the
+    // only one of the two that proves the prefix-vs-exact choice
+    // specifically, independent of the seam guard.
+  });
+
+  /**
+   * The 'substring' tier (WXYC/Backend-Service#2712, PR 2): recall that
+   * neither 'word' nor 'prefix' can reach -- a mid-word fragment, a fragment
+   * alongside a word that only matches via `dj_name` (not ILIKE-covered, so
+   * the OR must fall back to the word-tier predicate to keep it), and the
+   * complementary case to PR 1's "art ens" fixture (both terms a true
+   * fragment, neither a prefix, so 'word' AND 'prefix' are both empty and
+   * only 'substring' matches). Dedicated `wxycsubprobe*` vocabulary, same
+   * pattern as the "tiered matching and the cascade" fixtures above.
+   */
+  describe("the 'substring' tier (WXYC/Backend-Service#2712, PR 2)", () => {
+    let midWordId, djWordId, bothFragmentsId;
+
+    beforeAll(async () => {
+      // "olvear" is a true middle fragment of "Convolvearoo" (not a prefix,
+      // not the whole word) -- 'word' and 'prefix' both stay empty for it.
+      midWordId = await seedRow({
+        artist: 'Wxycsubprobemidword Convolvearoo',
+        track: 'Unrelated Track Sub One',
+        album: 'Unrelated Album Sub One',
+        label: 'Unrelated Label Sub One',
+      });
+      // dj_name supplies the SECOND query word as a whole-word match.
+      // search_doc includes dj_name (weight B) but ilikeContainsFragment
+      // does not cover it, so this row proves the OR's wordMatch side -- not
+      // ILIKE -- is what keeps dj_name reachable in this tier.
+      djWordId = await seedRow({
+        artist: 'Wxycsubprobedjword Convolvearoo',
+        track: 'Unrelated Track Sub Two',
+        album: 'Unrelated Album Sub Two',
+        label: 'Unrelated Label Sub Two',
+        djName: 'Wxycsubprobedjhandle Somebody',
+      });
+      // Complementary case to the PR 1 "art ens" fixture above: BOTH query
+      // terms are true fragments of their row's first word (neither a
+      // prefix -- each row's first word starts with an "x" the query term
+      // omits), so 'word' and 'prefix' are both empty and only 'substring'
+      // recovers it.
+      bothFragmentsId = await seedRow({
+        artist: 'Xwxycsubprobefirstfragment Unrelated',
+        track: 'Xwxycsubprobesecondfragment Live',
+        album: 'Unrelated Album Sub Three',
+        label: 'Unrelated Label Sub Three',
+      });
+    });
+
+    test('a mid-word fragment recovers the seeded row ("olvear" matches "Convolvearoo")', async () => {
+      const res = await search(`${dateRange} wxycsubprobemidword olvear`).expect(200);
+      expect(idsOf(res)).toContain(midWordId);
+    });
+
+    test('a fragment plus a whole dj_name word still matches -- dj_name coverage survives the OR', async () => {
+      const res = await search(`${dateRange} olvear wxycsubprobedjhandle`).expect(200);
+      expect(idsOf(res)).toContain(djWordId);
+    });
+
+    test('a first-word fragment in a TWO-WORD query matches by substring once both earlier tiers are empty (neither term is a prefix)', async () => {
+      const res = await search(`${dateRange} wxycsubprobefirstfragment wxycsubprobesecondfragment`).expect(200);
+      expect(idsOf(res)).toContain(bothFragmentsId);
+    });
+
+    // Mutation proof (manual; run during implementation, confirmed both
+    // directions): dropping `wordMatch` from the substring OR (replacing it
+    // with a bare `FALSE`, keeping only the four-column ILIKE) fails ONLY
+    // the dj_name test above (27 passed, 1 failed, this file) -- proving
+    // that test depends on `wordMatch`, since dj_name has no ILIKE coverage.
+    // Dropping `ilikeContainsFragment(value)` instead (replacing it with
+    // `FALSE`, keeping only `wordMatch`) fails the mid-word, dj-word's own
+    // fragment term, both-fragments, and the two "tiered matching" recovery
+    // tests above (plus the sibling 'substring' cursor-walk spec's first
+    // page) -- six failures total across both spec files, none of them a
+    // 'word'/'prefix'-reachable test -- proving those five depend on the
+    // ILIKE side specifically.
   });
 });
