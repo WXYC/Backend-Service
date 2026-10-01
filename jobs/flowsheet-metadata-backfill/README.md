@@ -180,7 +180,7 @@ This job intentionally uses `POST /api/v1/lookup`, not `/lookup/bulk`. Its throu
 
 ## Operational notes
 
-- **Do not run `scripts/sync/reconcile.ts` (the CDC monitor) during a catch-up window** — a full drain emits up to ~1.86M CDC events and the reconciler floods.
+- **A full drain emits up to ~1.86M CDC events** on `/cdc`. Its former consumer, the reconciliation monitor, flooded under that load and was removed with the tubafrenzy dev infra (WXYC/wiki#92); any new `/cdc` consumer must tolerate the same burst.
 - **Pause the hourly cron before a catch-up run** (step 3 above) and restore it after. The limiter is per-process, so a concurrent cron run adds a second rate bucket against the shared Discogs ceiling.
 - **Deploy re-arm caveat**: `deploy-base.yml` rebuilds the crontab from the canonical active line on any `main` deploy that marks this target affected (a shared-dep change marks all targets). A paused cron silently returns after such a deploy — re-check during a multi-day drain, or freeze `main` deploys for the window.
 

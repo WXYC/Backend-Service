@@ -10,7 +10,7 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/bulk-update-playbook.md`](docs/bulk-update-playbook.md)** — Per-row cost on `flowsheet`, ANALYZE-after-UPDATE rule, async-commit + batch-size + partial-index recipe, infinite-loop pitfall, sync-gap remediation
 - **[`docs/env-vars.md`](docs/env-vars.md)** — Full environment-variable reference (Backend, DB, Auth, Email, Sentry, Slack, ETL, mirror queue, cross-cache-identity flags)
 - **[`docs/replication.md`](docs/replication.md)** — Local PostgreSQL logical-replication setup and operation
-- **[`docs/cdc.md`](docs/cdc.md)** — CDC WebSocket endpoint, event format, reconciliation monitor
+- **[`docs/cdc.md`](docs/cdc.md)** — CDC WebSocket endpoint, event format, back-pressure/liveness
 - **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, buildx registry layer caching (ECR manifest requirement, lifecycle policy) plus the shared builder image that replaced 56 per-target `npm ci` builds (`Dockerfile.deploy-builder`, BS#2718), CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857), edge gzip (allowlist, the SSE guard, `/auth` opt-out)
 - **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha
 - **[`docs/pii.md`](docs/pii.md)** — PII field registry: `real_name`/`email` vs `dj_name`/`name` classification, allowed read sites, the `wxyc/restricted-real-name` ESLint rule, DJ-name/real-name conflation history
