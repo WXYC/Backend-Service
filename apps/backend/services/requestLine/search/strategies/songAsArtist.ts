@@ -56,7 +56,13 @@ export async function executeSongAsArtist(
   }
 
   console.log(`[Search] No direct matches, searching Discogs for releases by '${songAsArtist}'`);
-  const discogsReleases = await discogsService.searchReleasesByArtist(songAsArtist, 10);
+  let discogsReleases: Array<{ artist: string; album: string }>;
+  try {
+    discogsReleases = await discogsService.searchReleasesByArtist(songAsArtist, 10);
+  } catch (e) {
+    console.warn(`[Search] Discogs search by artist failed for '${songAsArtist}':`, e);
+    return [];
+  }
 
   if (discogsReleases.length === 0) {
     console.log(`[Search] No Discogs releases found for '${songAsArtist}'`);
