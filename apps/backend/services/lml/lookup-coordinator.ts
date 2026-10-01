@@ -6,20 +6,39 @@
  *
  *   1. **In-flight coalescing.** Concurrent callers asking for the same
  *      `(artist, album, song)` await one Promise; the first caller's wire
- *      call services every coalescer.
- *   2. **Short-TTL response cache, with a budget-relative admission rule
+ *      call services every coalescer. Caveat: a caller that coalesces onto
+ *      an in-flight request still receives THAT request's reply verbatim,
+ *      including a caller-relative one — first-caller-wins on the wire
+ *      (see below) is unchanged by BS#2528. Only the POST-SETTLE replay
+ *      window (a later, independent lookup served from the LRU) is closed
+ *      by strategy 2.
+ *   2. **Short-TTL response cache, with a caller-relative admission rule
  *      (BS#2528).** Successful `LookupResponse` payloads memoize for 5 min
  *      in a process-local LRU, keyed only on `(artist, album, song)` — not
- *      on which caller asked or with what budget. LML's PG cache remains
- *      the source of truth; this is "we asked LML 30 s ago, the answer
- *      hasn't changed yet." A reply whose outcome instead depends on the
- *      CALLING request's own budget (`timeout: true`, or `degraded: true`
- *      with a `degraded_reason` outside the allow-list
- *      `{'upstream_unavailable', 'cache_only'}` — see
- *      `isBudgetRelativeDegradation`) is still returned to that caller but
- *      is never written to the LRU, so a caller with a short budget can't
- *      have its "ran out of time" reply replayed to a caller with a longer
- *      one for the rest of the TTL.
+ *      on which caller asked, with what budget, or in what caller class.
+ *      LML's PG cache remains the source of truth; this is "we asked LML
+ *      30 s ago, the answer hasn't changed yet." A reply whose outcome
+ *      instead depends on the CALLING request itself — its budget
+ *      (`timeout: true`, or `degraded: true` with `degraded_reason:
+ *      'deadline_exceeded'`), or its caller class (`degraded_reason:
+ *      'cache_only'`, which LML's admission shed returns only to
+ *      low-priority callers — an interactive caller asking at the same
+ *      instant gets a full answer) — or where that can't be ruled out (an
+ *      unrecognized or missing `degraded_reason`; see
+ *      `isCallerRelativeDegradation`) is still returned to the asking
+ *      caller but is never written to the LRU, so a reply that only
+ *      exists because of who asked (or under what deadline) can't be
+ *      replayed to an unrelated caller for the rest of the TTL.
+ *
+ *      Accepted cost: a caller-relative reply is re-asked on the very next
+ *      lookup for that key rather than served from cache until the TTL
+ *      expires. Bounded in practice by in-flight coalescing (a burst
+ *      arriving while the first caller's request is still open shares its
+ *      one wire call regardless), the artwork-warm path's own
+ *      `ARTWORK_WARM_MAX_ROWS` (5) cap on lookups per call, and the shared
+ *      `@wxyc/lml-client` limiter/breaker every LML call already routes
+ *      through — a re-ask is one more gated call, not an unbounded retry
+ *      storm.
  *
  * Cross-instance coalescing (Redis / PG advisory locks) is out of scope —
  * dj-site session stickiness collapses most same-key bursts onto one
@@ -55,7 +74,7 @@
  *
  * **No error caching.** Throws propagate to all waiters; the next request
  * for the same key issues a fresh wire call. LML's own short cache TTL
- * on errors handles avalanche. A budget-relative degraded/timeout reply
+ * on errors handles avalanche. A caller-relative degraded/timeout reply
  * (BS#2528, see above) follows the same non-caching rule without throwing —
  * it resolves normally and is simply never written to the LRU.
  */
@@ -65,7 +84,7 @@ import { LRUCache } from 'lru-cache';
 import {
   lookupMetadata,
   shedReasonOf,
-  isBudgetRelativeDegradation,
+  isCallerRelativeDegradation,
   LimiterShedError,
   isTrustedLmlAlbumMatch,
   type GatedLookupResponse,
@@ -85,11 +104,12 @@ export type CoordinatorLookupOptions = Pick<
   /**
    * When set, the coordinator returns `null` if the resolved response's
    * `search_type` doesn't match, after projecting
-   * `lml.coordinator.trust_reject_reason` onto the per-lookup span. The
-   * raw response is still cached — the gate runs per-call so a permissive
-   * caller and a strict caller can share a cached payload and reach
-   * different verdicts. Used by librarian-typed write paths where
-   * non-direct results would persist the wrong release. BS#1355.
+   * `lml.coordinator.trust_reject_reason` onto the per-lookup span. This
+   * gate runs per-call, independent of cache admission (BS#2528) — a
+   * response that does get written to the LRU is written raw, so a
+   * permissive caller and a strict caller can share that cached payload
+   * and reach different verdicts. Used by librarian-typed write paths
+   * where non-direct results would persist the wrong release. BS#1355.
    */
   requireSearchType?: 'direct';
 };
@@ -114,14 +134,18 @@ export class LmlLookupCoordinator {
 
   /**
    * Look up metadata for an artist/album/song triple. Coalesces concurrent
-   * same-key calls; serves cached responses within TTL. Errors are not
-   * cached — and a BS#1748 limiter shed (which the client resolves as an
-   * empty response, not a throw) is treated AS an error here: re-thrown, not
+   * same-key calls; serves cached responses within TTL. Three shapes never
+   * reach the LRU: errors (throws propagate to all waiters and are not
+   * cached); a BS#1748 limiter shed (which the client resolves as an empty
+   * response, not a throw) is treated AS an error here — re-thrown, not
    * cached, so a transient breaker-open window can't poison the LRU or the
-   * downstream artwork negative cache (BS#1089). When `requireSearchType` is
-   * set, returns `null` on mismatch
-   * after projecting `lml.coordinator.trust_reject_reason` onto the span;
-   * otherwise the return is the raw `LookupResponse`.
+   * downstream artwork negative cache (BS#1089); and a settled reply that
+   * is caller-relative (BS#2528, `isCallerRelativeDegradation`) — that one
+   * resolves normally to the asking caller but is withheld from the LRU so
+   * it can't be replayed to an unrelated caller. When `requireSearchType`
+   * is set, returns `null` on mismatch after projecting
+   * `lml.coordinator.trust_reject_reason` onto the span; otherwise the
+   * return is the raw `LookupResponse`.
    */
   async lookup(
     artist: string | undefined,
@@ -171,10 +195,16 @@ export class LmlLookupCoordinator {
       // gap where a same-key caller arriving in the gap sees neither
       // cache nor inflight and issues a redundant wire call. Sequencing
       // cache.set → inflight.delete inside the settle chain itself
-      // closes the gap — an arriving caller always sees the cache hit
-      // by the next event-loop turn. Rejections skip the success arm
-      // and propagate through `.finally`; the in-flight entry is then
-      // cleared without caching the error, so the next request retries.
+      // closes the gap for a response that DOES get cached — an arriving
+      // caller then always sees the cache hit by the next event-loop
+      // turn. BS#2528: this is no longer every settled response — a
+      // caller-relative reply (`isCallerRelativeDegradation`) skips the
+      // `cache.set` below on purpose, so a caller arriving after that
+      // settle sees neither cache nor inflight and reissues a fresh wire
+      // call, same as it would after an error. Rejections skip the
+      // success arm and propagate through `.finally`; the in-flight
+      // entry is then cleared without caching the error, so the next
+      // request retries.
       //
       // **Read-only contract**: the cached `LookupResponse` is returned
       // by reference to every coalesced + cache-hit caller for up to 5
@@ -206,16 +236,19 @@ export class LmlLookupCoordinator {
             throw new LimiterShedError(shedReason);
           }
           // BS#2528: a degraded/timeout reply whose outcome depends on the
-          // CALLING request's own budget (a short-budget caller's deadline
-          // exhausted, or LML's own hard cap firing mid-search) is not
-          // evidence about the catalog — writing it here would replay one
-          // caller's "ran out of time" result to every other caller sharing
-          // this key for up to 5 min. Still returned, never thrown: the
-          // asking caller's own degraded-reply handling (`enrichWithArtwork`,
-          // `applyTrustGate`, etc.) sees it exactly as LML sent it.
-          // `upstream_unavailable` / `cache_only` describe LML's own load,
-          // equally true for every caller, and keep caching as before.
-          if (!isBudgetRelativeDegradation(result)) {
+          // CALLING request itself — a short-budget caller's deadline
+          // exhausted, LML's admission shed returning `cache_only` only to
+          // a low-priority caller class, or an internal timeout source the
+          // wire shape can't distinguish from either of those — is not
+          // evidence about the catalog. Writing it here would replay one
+          // caller's circumstances to every other caller sharing this key
+          // for up to 5 min. Still returned, never thrown: the asking
+          // caller's own degraded-reply handling (`enrichWithArtwork`,
+          // `applyTrustGate`, etc.) sees it exactly as LML sent it. Only
+          // `degraded_reason: 'upstream_unavailable'` describes LML's own
+          // load — equally true for every caller — and keeps caching as
+          // before.
+          if (!isCallerRelativeDegradation(result)) {
             this.cache.set(key, result);
           }
           return result;
