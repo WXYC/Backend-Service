@@ -1985,19 +1985,23 @@ describe('library.service', () => {
         throw new Error('sentry boom');
       });
 
-      const results = await searchLibraryByTrack('Back, Baby', 10);
-
-      expect(results).toHaveLength(1);
-      expect(results[0].id).toBe(101);
-
       // `clearMocks` (jest.unit.config.ts) clears call history before every
       // test but not a `mockImplementation` override, and this block has no
       // `beforeEach` that restores one. Left as-is, this throwing stub would
       // bleed into every later `describe` in this file that reaches
       // `Sentry.getActiveSpan()?.setAttributes(...)` — harmless while nothing
       // downstream called it, but BS#2766's `enrichWithArtwork` telemetry
-      // now does, so restore the default (non-throwing) double explicitly.
-      mockSpanSetAttributes.mockReset();
+      // now does, so restore the default (non-throwing) double in `finally`
+      // — not after the assertions — so a failing assertion here still
+      // cleans it up instead of leaking a broken span double forward.
+      try {
+        const results = await searchLibraryByTrack('Back, Baby', 10);
+
+        expect(results).toHaveLength(1);
+        expect(results[0].id).toBe(101);
+      } finally {
+        mockSpanSetAttributes.mockReset();
+      }
     });
   });
 
@@ -2947,40 +2951,137 @@ describe('library.service', () => {
      * BS#2766: the pure classifier `enrichWithArtwork` calls once per row to
      * decide which `artwork_enrich.*` bucket a settled lookup falls into.
      * Table-tested directly (no Sentry/DB mocks needed) because it's a pure
-     * function of (trusted, hasCover, degraded, timeout) — mirrors
+     * function of (trusted, hasCover, response) — mirrors
      * `classifyPickerLmlOutcome`'s role for `picker.lml_outcome` (BS#2731),
      * except that one has no standalone test and this one does, since the
      * issue asks for the classifier to be verified in isolation from the
      * span-projection plumbing below.
+     *
+     * Review follow-up: `trusted` alone is not enough to decide the
+     * `retryable_trusted*` buckets — LML can answer `search_type: 'direct'`
+     * with `results: []` on a budget-exhausted reply, so the classifier also
+     * reads `response.results.length` and `response.degraded_reason`. The
+     * cases below exercise both axes, including the three reasons that must
+     * NOT count as the `retryable_trusted_deadline` decision-gate population
+     * (`cache_only`, `upstream_unavailable`, a bare `timeout` with no
+     * `degraded` flag).
      */
     describe('classifyArtworkEnrichOutcome (pure classifier)', () => {
-      const response = (degraded: boolean, timeout: boolean): LookupResponse =>
-        ({ degraded, timeout }) as LookupResponse;
+      const response = (fields: {
+        degraded?: boolean;
+        timeout?: boolean;
+        degraded_reason?: 'deadline_exceeded' | 'cache_only' | 'upstream_unavailable';
+        results?: unknown[];
+      }): LookupResponse =>
+        ({
+          degraded: fields.degraded ?? false,
+          timeout: fields.timeout ?? false,
+          degraded_reason: fields.degraded_reason,
+          results: fields.results ?? [],
+        }) as LookupResponse;
 
       it.each([
-        ['trusted cover, clean reply', true, true, false, false, 'persisted'],
-        ['trusted cover, degraded reply', true, true, true, false, 'persisted_degraded'],
-        ['trusted cover, timed-out reply', true, true, false, true, 'persisted_degraded'],
-        ['untrusted match, no cover, clean reply', false, false, false, false, 'stamped'],
-        ['trusted match, no cover (e.g. spacer gif), clean reply', true, false, false, false, 'stamped'],
-        ['untrusted match, no cover, degraded reply', false, false, true, false, 'retryable_degraded'],
-        ['untrusted match, no cover, timed-out reply', false, false, false, true, 'retryable_degraded'],
-        ['trusted match, no cover, degraded reply', true, false, true, false, 'retryable_degraded_trusted'],
-        ['trusted match, no cover, timed-out reply', true, false, false, true, 'retryable_degraded_trusted'],
-      ] as const)('%s', (_label, trusted, hasCover, degraded, timeout, expected) => {
-        expect(classifyArtworkEnrichOutcome(trusted, hasCover, response(degraded, timeout))).toBe(expected);
+        { label: 'trusted cover, clean reply', trusted: true, hasCover: true, fields: {}, expected: 'persisted' },
+        {
+          label: 'trusted cover, degraded (deadline_exceeded) reply',
+          trusted: true,
+          hasCover: true,
+          fields: { degraded: true, degraded_reason: 'deadline_exceeded' },
+          expected: 'persisted_degraded',
+        },
+        {
+          label: 'trusted cover, timed-out reply',
+          trusted: true,
+          hasCover: true,
+          fields: { timeout: true },
+          expected: 'persisted_degraded',
+        },
+        {
+          label: 'untrusted match, no cover, clean reply',
+          trusted: false,
+          hasCover: false,
+          fields: {},
+          expected: 'stamped',
+        },
+        {
+          label: 'trusted match, no cover (e.g. spacer gif), clean reply',
+          trusted: true,
+          hasCover: false,
+          fields: {},
+          expected: 'stamped',
+        },
+        {
+          label: 'untrusted match, no cover, degraded reply',
+          trusted: false,
+          hasCover: false,
+          fields: { degraded: true, degraded_reason: 'upstream_unavailable', results: [{}] },
+          expected: 'retryable_untrusted',
+        },
+        {
+          label: 'untrusted match, no cover, timed-out reply',
+          trusted: false,
+          hasCover: false,
+          fields: { timeout: true },
+          expected: 'retryable_untrusted',
+        },
+        {
+          label:
+            'trusted "direct" match but budget-exhausted EMPTY results, degraded (deadline_exceeded) — not a cut-off trusted match',
+          trusted: true,
+          hasCover: false,
+          fields: { degraded: true, degraded_reason: 'deadline_exceeded', results: [] },
+          expected: 'retryable_untrusted',
+        },
+        {
+          label: 'trusted candidate, no cover, degraded (deadline_exceeded) — the decision-gate population',
+          trusted: true,
+          hasCover: false,
+          fields: { degraded: true, degraded_reason: 'deadline_exceeded', results: [{}] },
+          expected: 'retryable_trusted_deadline',
+        },
+        {
+          label: 'trusted candidate, no cover, bare timeout (no degraded flag) — ran the whole tail',
+          trusted: true,
+          hasCover: false,
+          fields: { timeout: true, results: [{}] },
+          expected: 'retryable_trusted',
+        },
+        {
+          label: 'trusted candidate, no cover, degraded (cache_only) — shed before any tail step',
+          trusted: true,
+          hasCover: false,
+          fields: { degraded: true, degraded_reason: 'cache_only', results: [{}] },
+          expected: 'retryable_trusted',
+        },
+        {
+          label: 'trusted candidate, no cover, degraded (upstream_unavailable) — the Discogs breaker was open',
+          trusted: true,
+          hasCover: false,
+          fields: { degraded: true, degraded_reason: 'upstream_unavailable', results: [{}] },
+          expected: 'retryable_trusted',
+        },
+      ] as const)('$label', ({ trusted, hasCover, fields, expected }) => {
+        expect(classifyArtworkEnrichOutcome(trusted, hasCover, response(fields))).toBe(expected);
       });
     });
 
     /**
      * BS#2766: `enrichWithArtwork` tallies the `ArtworkEnrichOutcome` of
      * every row in its `Promise.allSettled` batch and projects the sums onto
-     * the active span ONCE, after the batch settles — a per-row attribute
-     * would overwrite itself under one shared span. Each case below drives a
-     * single-row batch through one exit and asserts the full six-attribute
-     * object `projectArtworkEnrichOutcomes` sets, so a case that lands in
-     * the wrong bucket (or sums a subset into the wrong parent) fails here
-     * rather than only in production Sentry data weeks later.
+     * a span THIS CALL OWNS, once, after the batch settles.
+     *
+     * Review follow-up (the span fix): a plain detached `getActiveSpan()`
+     * attribute never reaches Sentry from this call site — probed and
+     * confirmed against the real SDK — because both call sites
+     * (`library.controller.ts`) run `enrichWithArtwork` detached from the
+     * response, and by the time this function's first LML round-trip
+     * resolves, the request's own Express span has already ended and gone
+     * `_frozen`. `enrichWithArtwork` therefore opens its own
+     * `forceTransaction: true` span and writes onto the `span` callback
+     * parameter, never `Sentry.getActiveSpan()`. The tests below pin both
+     * halves: the span is opened with the right shape (and NOT opened on an
+     * early return), and the attributes land on that span specifically, not
+     * on whatever happens to be "active".
      */
     describe('artwork_enrich outcome span telemetry (BS#2766)', () => {
       beforeEach(() => {
@@ -2989,6 +3090,7 @@ describe('library.service', () => {
         // below installs one, so every test in this block restores the
         // default (non-throwing) span double first, regardless of run order.
         mockSpanSetAttributes.mockReset();
+        mockGetActiveSpan.mockImplementation(() => spanInstance);
       });
 
       const directMatchWith = (artworkUrl: string | null, flags: Record<string, unknown> = {}) => ({
@@ -3024,63 +3126,170 @@ describe('library.service', () => {
         'artwork_enrich.stamped': 0,
         'artwork_enrich.retryable_degraded': 0,
         'artwork_enrich.retryable_degraded_trusted': 0,
+        'artwork_enrich.retryable_deadline_trusted': 0,
         'artwork_enrich.rejected': 0,
       };
 
+      it('opens its own forceTransaction span with the exact expected shape', async () => {
+        mockLookupMetadata.mockResolvedValue(cleanMiss);
+        mockStampWrite();
+
+        await enrichWithArtwork([
+          { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
+        ]);
+
+        expect(mockStartSpan).toHaveBeenCalledTimes(1);
+        expect(mockStartSpan.mock.calls[0][0]).toEqual({
+          name: 'enrichWithArtwork',
+          op: 'catalog.artwork_enrich',
+          forceTransaction: true,
+        });
+      });
+
+      it('opens no span at all on an early return (every row already has artwork)', async () => {
+        const results = [
+          {
+            id: 7,
+            artist_name: 'Jessica Pratt',
+            album_title: 'Quiet Signs',
+            artwork_url: 'https://i.discogs.com/quiet-signs.jpg',
+          },
+        ];
+
+        await enrichWithArtwork(results);
+
+        expect(mockStartSpan).not.toHaveBeenCalled();
+        expect(mockLookupMetadata).not.toHaveBeenCalled();
+      });
+
+      it('writes attributes onto the span this call owns, not onto whatever span happens to be active', async () => {
+        const decoySetAttributes = jest.fn();
+        const decoySpan = { setAttribute: jest.fn(), setAttributes: decoySetAttributes };
+        mockGetActiveSpan.mockImplementation(() => decoySpan);
+        mockLookupMetadata.mockResolvedValue(cleanMiss);
+        mockStampWrite();
+
+        try {
+          await enrichWithArtwork([
+            { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
+          ]);
+
+          expect(decoySetAttributes).not.toHaveBeenCalled();
+          expect(mockSpanSetAttributes).toHaveBeenCalledWith({ ...zeroTally, 'artwork_enrich.stamped': 1 });
+        } finally {
+          mockGetActiveSpan.mockImplementation(() => spanInstance);
+        }
+      });
+
       it.each([
-        [
-          'a degraded reply WITH trusted artwork',
-          () =>
+        {
+          label: 'a degraded (deadline_exceeded) reply WITH trusted artwork',
+          setup: () =>
             mockLookupMetadata.mockResolvedValue(
               directMatchWith('https://i.discogs.com/quiet-signs.jpg', {
                 degraded: true,
                 degraded_reason: 'deadline_exceeded',
               })
             ),
-          { ...zeroTally, 'artwork_enrich.persisted': 1, 'artwork_enrich.persisted_degraded': 1 },
-        ],
-        [
-          'a degraded reply without trusted artwork (trusted match, no cover)',
-          () =>
+          expected: { ...zeroTally, 'artwork_enrich.persisted': 1, 'artwork_enrich.persisted_degraded': 1 },
+        },
+        {
+          label:
+            'a degraded (deadline_exceeded) reply WITHOUT trusted artwork (trusted candidate, no cover) — the decision-gate population',
+          setup: () =>
             mockLookupMetadata.mockResolvedValue(
               directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' })
             ),
-          { ...zeroTally, 'artwork_enrich.retryable_degraded': 1, 'artwork_enrich.retryable_degraded_trusted': 1 },
-        ],
-        [
-          'a timeout with no usable match',
-          () => mockLookupMetadata.mockResolvedValue({ ...cleanMiss, timeout: true }),
-          { ...zeroTally, 'artwork_enrich.retryable_degraded': 1 },
-        ],
-        [
-          'a clean hit',
-          () => mockLookupMetadata.mockResolvedValue(directMatchWith('https://i.discogs.com/quiet-signs.jpg')),
-          { ...zeroTally, 'artwork_enrich.persisted': 1 },
-        ],
-        [
-          'a clean miss',
-          () => mockLookupMetadata.mockResolvedValue(cleanMiss),
-          { ...zeroTally, 'artwork_enrich.stamped': 1 },
-        ],
-        [
-          'an untrusted match',
-          () =>
+          expected: {
+            ...zeroTally,
+            'artwork_enrich.retryable_degraded': 1,
+            'artwork_enrich.retryable_degraded_trusted': 1,
+            'artwork_enrich.retryable_deadline_trusted': 1,
+            'artwork_enrich.retryable_deadline_trusted_ids': '7',
+          },
+        },
+        {
+          label:
+            'a trusted "direct" match with budget-exhausted EMPTY results, degraded (deadline_exceeded) — plain retryable_degraded only',
+          setup: () =>
+            mockLookupMetadata.mockResolvedValue({
+              results: [],
+              search_type: 'direct',
+              song_not_found: false,
+              found_on_compilation: false,
+              degraded: true,
+              degraded_reason: 'deadline_exceeded',
+            }),
+          expected: { ...zeroTally, 'artwork_enrich.retryable_degraded': 1 },
+        },
+        {
+          label: 'degraded (upstream_unavailable), trusted candidate, no cover — the Discogs breaker was open',
+          setup: () =>
+            mockLookupMetadata.mockResolvedValue(
+              directMatchWith(null, { degraded: true, degraded_reason: 'upstream_unavailable' })
+            ),
+          expected: {
+            ...zeroTally,
+            'artwork_enrich.retryable_degraded': 1,
+            'artwork_enrich.retryable_degraded_trusted': 1,
+          },
+        },
+        {
+          label: 'degraded (cache_only), trusted candidate, no cover — shed before any tail step',
+          setup: () =>
+            mockLookupMetadata.mockResolvedValue(
+              directMatchWith(null, { degraded: true, degraded_reason: 'cache_only' })
+            ),
+          expected: {
+            ...zeroTally,
+            'artwork_enrich.retryable_degraded': 1,
+            'artwork_enrich.retryable_degraded_trusted': 1,
+          },
+        },
+        {
+          label: 'a bare timeout (no degraded flag) with no usable match, untrusted',
+          setup: () => mockLookupMetadata.mockResolvedValue({ ...cleanMiss, timeout: true }),
+          expected: { ...zeroTally, 'artwork_enrich.retryable_degraded': 1 },
+        },
+        {
+          label: 'a bare timeout (no degraded flag), trusted candidate, no cover — ran the whole tail',
+          setup: () => mockLookupMetadata.mockResolvedValue(directMatchWith(null, { timeout: true })),
+          expected: {
+            ...zeroTally,
+            'artwork_enrich.retryable_degraded': 1,
+            'artwork_enrich.retryable_degraded_trusted': 1,
+          },
+        },
+        {
+          label: 'a clean hit',
+          setup: () => mockLookupMetadata.mockResolvedValue(directMatchWith('https://i.discogs.com/quiet-signs.jpg')),
+          expected: { ...zeroTally, 'artwork_enrich.persisted': 1 },
+        },
+        {
+          label: 'a clean miss',
+          setup: () => mockLookupMetadata.mockResolvedValue(cleanMiss),
+          expected: { ...zeroTally, 'artwork_enrich.stamped': 1 },
+        },
+        {
+          label: 'an untrusted match',
+          setup: () =>
             mockLookupMetadata.mockResolvedValue(
               directMatchWith('https://i.discogs.com/quiet-signs.jpg', { search_type: 'fallback' })
             ),
-          { ...zeroTally, 'artwork_enrich.stamped': 1 },
-        ],
-        [
-          'a spacer-gif result',
-          () => mockLookupMetadata.mockResolvedValue(directMatchWith('https://st.discogs.com/images/spacer.gif')),
-          { ...zeroTally, 'artwork_enrich.stamped': 1 },
-        ],
-        [
-          'a thrown shed',
-          () => mockLookupMetadata.mockRejectedValue(new MockLimiterShedError('breaker_open')),
-          { ...zeroTally, 'artwork_enrich.rejected': 1 },
-        ],
-      ] as const)('projects the right artwork_enrich attributes for %s', async (_label, setup, expectedAttrs) => {
+          expected: { ...zeroTally, 'artwork_enrich.stamped': 1 },
+        },
+        {
+          label: 'a spacer-gif result',
+          setup: () =>
+            mockLookupMetadata.mockResolvedValue(directMatchWith('https://st.discogs.com/images/spacer.gif')),
+          expected: { ...zeroTally, 'artwork_enrich.stamped': 1 },
+        },
+        {
+          label: 'a thrown shed',
+          setup: () => mockLookupMetadata.mockRejectedValue(new MockLimiterShedError('breaker_open')),
+          expected: { ...zeroTally, 'artwork_enrich.rejected': 1 },
+        },
+      ])('projects the right artwork_enrich attributes for $label', async ({ setup, expected }) => {
         setup();
         mockStampWrite();
         const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -3089,11 +3298,100 @@ describe('library.service', () => {
           { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
         ]);
 
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith(expectedAttrs);
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith(expected);
         consoleSpy.mockRestore();
       });
 
-      it('resolves successfully and leaves persist/stamp behavior unchanged when span.setAttributes throws', async () => {
+      /**
+       * Acceptance criterion: one call's batch, covering every bucket, with
+       * at least two rows landing in the same bucket — fails if the tally
+       * loop used `= 1` instead of `+= 1`. WXYC-representative artists
+       * (org CLAUDE.md "Example Music Data"), keyed by album title through
+       * `mockLookupMetadata.mockImplementation` so each row gets its own
+       * reply.
+       */
+      it('tallies a multi-row batch, with more than one row per bucket, into the exact attribute object', async () => {
+        mockStampWrite();
+        const responsesByAlbum: Record<string, unknown> = {
+          'Quiet Signs': directMatchWith('https://i.discogs.com/quiet-signs.jpg'),
+          DOGA: directMatchWith('https://i.discogs.com/doga.jpg', {
+            degraded: true,
+            degraded_reason: 'deadline_exceeded',
+          }),
+          Edits: directMatchWith('https://i.discogs.com/edits.jpg', { timeout: true }),
+          'Duke Ellington & John Coltrane': cleanMiss,
+          'Aluminum Tunes': directMatchWith('https://i.discogs.com/aluminum.jpg', {
+            search_type: 'fallback',
+            degraded: true,
+            degraded_reason: 'upstream_unavailable',
+          }),
+          'Moon Pix': directMatchWith(null, { timeout: true }),
+          'Miss Universe': directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' }),
+          'El Bueno y El Malo': directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' }),
+        };
+        mockLookupMetadata.mockImplementation((_artist: unknown, album: string | undefined) => {
+          if (album === 'Live at Trafó') return Promise.reject(new MockLimiterShedError('breaker_open'));
+          const response = album !== undefined ? responsesByAlbum[album] : undefined;
+          if (!response) return Promise.reject(new Error(`no fixture for album ${album ?? '(undefined)'}`));
+          return Promise.resolve(response);
+        });
+        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        await enrichWithArtwork([
+          { id: 1, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
+          { id: 2, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null },
+          { id: 3, artist_name: 'Chuquimamani-Condori', album_title: 'Edits', artwork_url: null },
+          {
+            id: 4,
+            artist_name: 'Duke Ellington & John Coltrane',
+            album_title: 'Duke Ellington & John Coltrane',
+            artwork_url: null,
+          },
+          { id: 5, artist_name: 'Stereolab', album_title: 'Aluminum Tunes', artwork_url: null },
+          { id: 6, artist_name: 'Cat Power', album_title: 'Moon Pix', artwork_url: null },
+          { id: 7, artist_name: 'Nilüfer Yanya', album_title: 'Miss Universe', artwork_url: null },
+          { id: 8, artist_name: 'Hermanos Gutiérrez', album_title: 'El Bueno y El Malo', artwork_url: null },
+          { id: 9, artist_name: 'Csillagrablók', album_title: 'Live at Trafó', artwork_url: null },
+        ]);
+
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          'artwork_enrich.persisted': 3,
+          'artwork_enrich.persisted_degraded': 2,
+          'artwork_enrich.stamped': 1,
+          'artwork_enrich.retryable_degraded': 4,
+          'artwork_enrich.retryable_degraded_trusted': 3,
+          'artwork_enrich.retryable_deadline_trusted': 2,
+          'artwork_enrich.rejected': 1,
+          'artwork_enrich.retryable_deadline_trusted_ids': '7,8',
+        });
+        consoleSpy.mockRestore();
+      });
+
+      it('caps the retryable_deadline_trusted_ids attribute at 20 while the count attribute reflects the full tally', async () => {
+        mockStampWrite();
+        mockLookupMetadata.mockResolvedValue(
+          directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' })
+        );
+        const rowCount = 25;
+        const rows = Array.from({ length: rowCount }, (_, i) => ({
+          id: i + 1,
+          artist_name: 'Jessica Pratt',
+          album_title: `Quiet Signs ${i + 1}`,
+          artwork_url: null,
+        }));
+
+        await enrichWithArtwork(rows);
+
+        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+          ...zeroTally,
+          'artwork_enrich.retryable_degraded': rowCount,
+          'artwork_enrich.retryable_degraded_trusted': rowCount,
+          'artwork_enrich.retryable_deadline_trusted': rowCount,
+          'artwork_enrich.retryable_deadline_trusted_ids': Array.from({ length: 20 }, (_, i) => i + 1).join(','),
+        });
+      });
+
+      it('resolves successfully and leaves persist/stamp behavior unchanged when the callback span setAttributes throws', async () => {
         mockSpanSetAttributes.mockImplementation(() => {
           throw new Error('sentry boom');
         });
