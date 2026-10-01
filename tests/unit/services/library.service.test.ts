@@ -1750,9 +1750,10 @@ describe('library.service', () => {
         'degraded: true, degraded_reason: deadline_exceeded',
         { degraded: true, degraded_reason: 'deadline_exceeded' },
         false,
+        1,
       ],
-      ['degraded: true, degraded_reason: cache_only', { degraded: true, degraded_reason: 'cache_only' }, false],
-      ['timeout: true (degraded false)', { timeout: true, degraded: false }, false],
+      ['degraded: true, degraded_reason: cache_only', { degraded: true, degraded_reason: 'cache_only' }, false, 1],
+      ['timeout: true (degraded false)', { timeout: true, degraded: false }, false, 1],
       [
         'degraded: true, unrecognized degraded_reason',
         // Cast through the real DTO's `degraded_reason` type: LML's wire
@@ -1762,14 +1763,52 @@ describe('library.service', () => {
         // "don't cache" side rather than typechecking this fixture away.
         { degraded: true, degraded_reason: 'embargo_window' as unknown as LookupResponse['degraded_reason'] },
         false,
+        1,
       ],
       [
         'degraded: true, degraded_reason: upstream_unavailable',
         { degraded: true, degraded_reason: 'upstream_unavailable' },
         true,
+        1,
       ],
-      ['plain non-degraded reply', {}, true],
-    ])('%s -> trackSearchCache admits it: %s', async (_label, responseOverrides, shouldCache) => {
+      ['plain non-degraded reply', {}, true, 1],
+      // A shed is resolved, not thrown (`shedLookupResponse`), and carries no
+      // `timeout`/`degraded` shape — only `isCallerRelativeDegradation` would
+      // see it as cacheable (`false`/`false` reads as a plain non-degraded
+      // reply to that predicate alone). `shedReasonOf` is what catches it;
+      // dropping that term from `cacheable`'s computation leaves these two
+      // rows as the only failures. `results: []` mirrors the real
+      // `buildShedLookupResponse` shape, so `second` is empty, not the
+      // fixture's usual one row.
+      [
+        'shed: outcome=shed_breaker_open',
+        {
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+          timeout: false,
+          degraded: false,
+          outcome: 'shed_breaker_open',
+        },
+        false,
+        0,
+      ],
+      [
+        'shed: outcome=shed_limiter_saturated',
+        {
+          results: [],
+          search_type: 'none',
+          song_not_found: false,
+          found_on_compilation: false,
+          timeout: false,
+          degraded: false,
+          outcome: 'shed_limiter_saturated',
+        },
+        false,
+        0,
+      ],
+    ])('%s -> trackSearchCache admits it: %s', async (_label, responseOverrides, shouldCache, expectedLength) => {
       primeMocks(responseOverrides);
       await searchLibraryByTrack('Back, Baby', 10);
       const callsAfterFirst = mockLookupBySong.mock.calls.length;
@@ -1781,7 +1820,7 @@ describe('library.service', () => {
       const second = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(mockLookupBySong.mock.calls.length).toBe(shouldCache ? callsAfterFirst : callsAfterFirst + 1);
-      expect(second).toHaveLength(1);
+      expect(second).toHaveLength(expectedLength);
     });
 
     it('a timeout: true reply with non-empty results still returns those results to the first caller unchanged', async () => {

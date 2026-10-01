@@ -980,8 +980,10 @@ function buildShedLookupResponse(reason: LookupShedOutcome): GatedLookupResponse
  * downstream `ArtworkFinder` — must tell a transient shed apart from a
  * confirmed no-match (the BS#1089 discrimination) and treat the shed as a
  * transient failure instead of caching it. Accepts any object with an optional
- * `outcome` so a plain `LookupResponse` (no `outcome` in its type) can be
- * passed without a cast.
+ * `outcome` — but a plain `LookupResponse` CANNOT be passed without a cast:
+ * `LookupResponse` has no `outcome` field at all, so TS's weak-type
+ * detection rejects the call outright ("no properties in common"). Pass a
+ * `GatedLookupResponse` (which declares `outcome?`), or cast, instead.
  */
 export function shedReasonOf(response: {
   outcome?: LookupSkippedOutcome | LookupShedOutcome;
@@ -1162,7 +1164,7 @@ export async function lookupMetadata(
 export async function lookupBySong(
   song: string,
   options?: Pick<LookupOptions, 'limiter' | 'budgetMs' | 'caller'>
-): Promise<LookupResponse> {
+): Promise<GatedLookupResponse> {
   return postLookup(
     { song, raw_message: song },
     { limiter: options?.limiter, budgetMs: options?.budgetMs, caller: options?.caller }
