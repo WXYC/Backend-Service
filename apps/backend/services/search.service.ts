@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/node';
 import { sql, type SQL } from 'drizzle-orm';
-import { db, flowsheet, rotation, library } from '@wxyc/database';
+import { db, flowsheet, rotation, library, extractSqlState } from '@wxyc/database';
 import {
   parseSearchQuery,
   FLOWSHEET_PARSER_CONFIG,
@@ -21,29 +21,51 @@ export type SearchParams = {
    * Opaque cursor token from a previous response's `nextCursor`. When provided
    * with `sort: 'date'`, replaces offset pagination with a `WHERE add_time` /
    * `id` predicate so each page costs O(limit) instead of O(page * limit).
-   * Ignored for non-date sorts (no compound index supports them).
+   * Ignored for non-date sorts (no compound index supports them). Also pins
+   * which `Tier` the request runs — see {@link Cursor} and
+   * docs/playlist-search/README.md.
    */
   cursor?: string;
 };
 
-export type Cursor = { addTime: string; id: number };
+/**
+ * Which predicate shape `buildWhereClause` compiles for the query's typing
+ * term. See "Tiered matching and the cascade" in
+ * docs/playlist-search/README.md. `'substring'` (a third tier) is not yet
+ * implemented, so it is omitted from this union rather than left unreachable.
+ */
+export type Tier = 'word' | 'prefix';
 
-/** Encode a cursor for the next page. Format: `${ISO timestamp}_${id}`. */
-export function encodeCursor(addTime: string, id: number): string {
-  return `${addTime}_${id}`;
+export type Cursor = { addTime: string; id: number; tier: Tier };
+
+/** Cursor-token suffix marking a non-`'word'` tier. An unmarked cursor — every one issued before this existed — parses as `'word'`. */
+const TIER_CURSOR_SUFFIX: Record<Exclude<Tier, 'word'>, string> = {
+  prefix: '_pfx',
+};
+
+/** Encode a cursor for the next page. Format: `${ISO timestamp}_${id}[_pfx]`. */
+export function encodeCursor(addTime: string, id: number, tier: Tier): string {
+  const suffix = tier === 'word' ? '' : TIER_CURSOR_SUFFIX[tier];
+  return `${addTime}_${id}${suffix}`;
 }
 
 /** Parse a cursor token, or return null if malformed. */
 export function parseCursor(cursor: string): Cursor | null {
-  const lastUnderscore = cursor.lastIndexOf('_');
+  let working = cursor;
+  let tier: Tier = 'word';
+  if (working.endsWith(TIER_CURSOR_SUFFIX.prefix)) {
+    tier = 'prefix';
+    working = working.slice(0, -TIER_CURSOR_SUFFIX.prefix.length);
+  }
+  const lastUnderscore = working.lastIndexOf('_');
   if (lastUnderscore <= 0) return null;
-  const addTime = cursor.slice(0, lastUnderscore);
-  const idStr = cursor.slice(lastUnderscore + 1);
+  const addTime = working.slice(0, lastUnderscore);
+  const idStr = working.slice(lastUnderscore + 1);
   if (!addTime || !idStr) return null;
   const id = Number(idStr);
   if (!Number.isInteger(id) || id <= 0) return null;
   if (Number.isNaN(Date.parse(addTime))) return null;
-  return { addTime, id };
+  return { addTime, id, tier };
 }
 
 type SearchResultRow = {
@@ -155,13 +177,41 @@ const COLUMN_MAP: Record<string, SQL> = {
 };
 
 /**
- * Build and run the data + count queries for one request. Pure extraction
- * from `searchFlowsheet` — no behaviour change, byte-identical SQL — so the
- * follow-up ticket that makes this callable more than once per request (one
- * predicate per tier) has a single, already-isolated seam to extend.
+ * Postgres SQLSTATE for a statement cancelled by `statement_timeout` — the
+ * ONLY error class a fallback tier may swallow, see `searchFlowsheet`.
+ *
+ * Read via `extractSqlState` (`@wxyc/database`), not a bare `error.code`:
+ * `db.execute` goes through drizzle-orm, which wraps every query rejection in
+ * `DrizzleQueryError` whose own `.code` is `undefined` — the SQLSTATE is on
+ * `.cause.code`. Confirmed empirically through a real `db.execute` call
+ * against a real Postgres (per-connection `statement_timeout: 50`,
+ * `select pg_sleep(1)`): `code: '57014'` on `.cause`, not on the thrown error
+ * itself. `extractSqlState`'s own header has the full mechanics and the
+ * BS#2409-class failure mode of a classifier that reads only `.code`.
+ */
+const STATEMENT_TIMEOUT_SQLSTATE = '57014';
+
+function isStatementTimeout(error: unknown): boolean {
+  return extractSqlState(error) === STATEMENT_TIMEOUT_SQLSTATE;
+}
+
+/** One tier's data + count attempt — the shape `searchFlowsheet`'s cascade tries in turn. */
+type TierAttempt = {
+  tier: Tier;
+  dataSettled: PromiseSettledResult<unknown>;
+  countSettled: PromiseSettledResult<unknown>;
+};
+
+/**
+ * Build and run one tier's data + count queries. Everything here is
+ * identical across tiers except `buildWhereClause`'s own `tier` argument —
+ * the FROM/JOIN/ORDER BY/LIMIT shape, the cursor predicate, and the capped
+ * count are all today's unchanged machinery (BS#1681, BS#2344, BS#2699).
  */
 async function runTierQuery(
-  whereClause: SQL | null,
+  tier: Tier,
+  conditions: SearchCondition<FlowsheetField>[],
+  typingTermIndex: number,
   ctx: {
     sort: SearchParams['sort'];
     order: SearchParams['order'];
@@ -170,8 +220,9 @@ async function runTierQuery(
     parsedCursor: Cursor | null;
     cursorEligible: boolean;
   }
-) {
+): Promise<TierAttempt> {
   const { sort, order, limit, offset, parsedCursor, cursorEligible } = ctx;
+  const whereClause = buildWhereClause(conditions, tier, typingTermIndex);
   const orderDirection = order === 'asc' ? sql`ASC` : sql`DESC`;
   const sortExpr = SORT_MAP[sort];
 
@@ -209,33 +260,8 @@ async function runTierQuery(
 
   // Add id as a tiebreaker whenever a cursor could be involved — received OR
   // handed out — so the ORDER BY matches the cursor predicate's compound key.
-  //
-  // This is deliberately NOT gated on an INBOUND cursor (BS#2344). `add_time`
-  // alone is not a total order: batch-imported legacy entries carry one shared
-  // import timestamp, so tie groups are large and routinely straddle a page
-  // boundary. Under the untied clause Postgres may return such a group in any
-  // order, which is harmless while the page is only ever addressed by OFFSET
-  // but not once the last row of the page becomes the cursor for the next one
-  // — that row is then an arbitrary member of its tie group, and the rest of
-  // the group is either re-served (duplicate) or stepped over (skipped). The
-  // first page emits a cursor now, so the first page has to be totally ordered
-  // too.
-  //
-  // Cost: the partial `flowsheet_track_add_time_idx` (migration 0050) still
-  // drives the scan — its `WHERE entry_type = 'track'` predicate is this
-  // query's own, which is what 0050's header means by "matches the exact
-  // predicate in apps/backend/services/search.service.ts" — and Postgres adds
-  // an Incremental Sort over each timestamp group. (The unpartitioned ASC
-  // `flowsheet_add_time_idx` from migration 0144 is a different index, built
-  // for `GET /flowsheet/range`.) `getEntriesByPage` (BS#2133) and
-  // `fetchRecentRows` (BS#2132) measured that sort node in production and
-  // found it cheap, but neither measurement covers this query: both are
-  // DESC-only, unfiltered, and over small timestamp groups, where this one
-  // also serves `order=asc` and can carry a text predicate that changes which
-  // rows reach the sort. Read them as evidence that the plan SHAPE is
-  // affordable, not as a measurement of this query. Non-date sorts keep the
-  // untied clause: they never emit or accept a cursor, so a tiebreaker there
-  // would buy nothing and only add sort work.
+  // See docs/playlist-search/README.md ("Where the chain starts", BS#2344)
+  // for why this is not gated on an inbound cursor.
   const orderByClause = cursorEligible
     ? sql`${sortExpr} ${orderDirection}, ${flowsheet.id} ${orderDirection}`
     : sql`${sortExpr} ${orderDirection}`;
@@ -271,17 +297,39 @@ async function runTierQuery(
   const countQuery = sql`SELECT COUNT(*)::int AS total FROM (SELECT 1 ${countWhere} LIMIT ${COUNT_CAP + 1}) AS capped`;
 
   const [dataSettled, countSettled] = await Promise.allSettled([db.execute(dataQuery), db.execute(countQuery)]);
-  return { dataSettled, countSettled };
+  return { tier, dataSettled, countSettled };
 }
 
-/** Search historical flowsheet entries with filtering, sorting, and pagination. */
+/**
+ * Search historical flowsheet entries with filtering, sorting, and
+ * pagination. Tries `tiersFor`'s tiers in order, stopping at the first with
+ * rows — see "Tiered matching and the cascade" in
+ * docs/playlist-search/README.md for the cascade rule and two accepted
+ * limitations: a phrase-forming typing term re-runs a `'prefix'`-tier
+ * predicate equivalent to the `'word'` tier's (one redundant statement pair
+ * on a zero-result query — Postgres decides the routing at plan time, which
+ * JS cannot know in advance), and offset-mode paging (no cursor) decides its
+ * tier fresh on every request, so date-sort clients should page by cursor,
+ * not `page`.
+ *
+ * **Fallback-tier failure.** Only a tier reached BY CASCADING — i.e. a prior
+ * tier in this same request already settled with a result in hand — may
+ * degrade to that prior result instead of failing the request, and only for
+ * a statement timeout (`isStatementTimeout`): the expected case is the cold
+ * `add_time` walk WXYC/Backend-Service#2688 records. Every other case is
+ * fatal (throws, a 500): the `'word'` tier's own failure, a cursor pinned
+ * directly to a non-`'word'` tier with nothing to fall back to, and any
+ * non-timeout error at any point (a broken fallback-tier predicate must
+ * surface as a real error, not hide under one fixed-fingerprint Sentry
+ * capture). A swallowed timeout reports once under the fingerprint
+ * `flowsheet-search-fallback-tier` rather than once per query.
+ */
 export async function searchFlowsheet(
   params: SearchParams
 ): Promise<{ results: SearchResult[]; total: number; nextCursor?: string }> {
   const { q, page, limit, sort, order, cursor } = params;
   const conditions = parseSearchQuery(q, FLOWSHEET_PARSER_CONFIG);
-
-  const whereClause = buildWhereClause(conditions);
+  const typingTermIndex = findTypingTermIndex(conditions);
 
   // Whether this request can take part in cursor pagination at all — as the
   // page that RECEIVES a cursor, as the page that EMITS one, or both. Date
@@ -295,27 +343,72 @@ export async function searchFlowsheet(
   const parsedCursor = cursorEligible && cursor !== undefined ? parseCursor(cursor) : null;
   const offset = parsedCursor !== null ? 0 : page * limit;
 
-  const { dataSettled, countSettled } = await runTierQuery(whereClause, {
-    sort,
-    order,
-    limit,
-    offset,
-    parsedCursor,
-    cursorEligible,
-  });
+  // A cursor pins its own tier and never cascades — EXCEPT a `_pfx` cursor
+  // whose query no longer has a typing term (e.g. the DJ deleted characters
+  // since the link was issued): there is nothing for the 'prefix' tier to
+  // change, so treat the request as the 'word' tier. Its own nextCursor, if
+  // any, comes back unmarked, which self-corrects every later page.
+  const tiers =
+    parsedCursor !== null
+      ? [parsedCursor.tier === 'prefix' && typingTermIndex === -1 ? 'word' : parsedCursor.tier]
+      : tiersFor(typingTermIndex, sort);
 
-  if (dataSettled.status === 'rejected') {
-    // No data page means nothing to serve — a data-query failure stays fatal
-    // and propagates to the error handler as a 500.
-    throw dataSettled.reason;
+  let lastGood: TierAttempt | null = null;
+  for (let i = 0; i < tiers.length; i++) {
+    const tier = tiers[i];
+    const attempt = await runTierQuery(tier, conditions, typingTermIndex, {
+      sort,
+      order,
+      limit,
+      offset,
+      parsedCursor,
+      cursorEligible,
+    });
+
+    if (attempt.dataSettled.status === 'rejected') {
+      const reason: unknown = attempt.dataSettled.reason;
+      if (i === 0 || !isStatementTimeout(reason)) {
+        throw reason;
+      }
+      console.warn(`flowsheet search: '${tier}' tier timed out, falling back to the prior tier's result`, reason);
+      Sentry.captureException(reason, {
+        fingerprint: ['flowsheet-search-fallback-tier'],
+        tags: { subsystem: 'flowsheet-search', tier },
+        extra: { q, page, limit, cursor },
+      });
+      break;
+    }
+
+    lastGood = attempt;
+    const rows = attempt.dataSettled.value as SearchResultRow[];
+    const isLastTier = i === tiers.length - 1;
+    if (rows.length > 0 || isLastTier) break;
+
+    const countTotal =
+      attempt.countSettled.status === 'fulfilled' ? ((attempt.countSettled.value as CountRow[])[0]?.total ?? 0) : null;
+    if (!(offset === 0 || countTotal === 0)) break;
   }
 
-  const rows = dataSettled.value as unknown as SearchResultRow[];
+  if (lastGood === null) {
+    // Unreachable: a rejection with no prior successful attempt (i === 0)
+    // always throws above instead of reaching here.
+    throw new Error('searchFlowsheet: no tier produced a result');
+  }
+
+  const resolvedTier = lastGood.tier;
+  // lastGood.dataSettled is always the fulfilled attempt that won the
+  // cascade -- the rejected branch above always throws or breaks before
+  // lastGood is assigned from it.
+  const rows = (lastGood.dataSettled as PromiseFulfilledResult<unknown>).value as SearchResultRow[];
   const results = rows.map(transformRow);
 
+  // allSettled, not all: the count is cheap enough that it should never time
+  // out, but if it (or a future predicate) does, the data page is already in
+  // hand — degrade to a lower-bound total rather than 500-ing the whole
+  // request the way the pre-BS#1681 `Promise.all` did.
   let total: number;
-  if (countSettled.status === 'fulfilled') {
-    total = (countSettled.value as unknown as CountRow[])[0]?.total ?? 0;
+  if (lastGood.countSettled.status === 'fulfilled') {
+    total = (lastGood.countSettled.value as CountRow[])[0]?.total ?? 0;
   } else {
     // Best-effort total when the count is unavailable: the rows we've already
     // paged past plus this page. Exact for a partial final page, a lower bound
@@ -323,18 +416,20 @@ export async function searchFlowsheet(
     // an over-estimate bounded by `offset`. In cursor mode `offset` is 0, so
     // this collapses to the current page size.
     total = offset + results.length;
-    Sentry.captureException(countSettled.reason, {
+    const reason: unknown = lastGood.countSettled.reason;
+    Sentry.captureException(reason, {
       tags: { subsystem: 'flowsheet-search' },
       // `cursor`, not just `page`: in cursor mode `page` is always 0, so
       // without the token there is nothing in this report that says WHERE in
       // a walk the count gave out.
       extra: { q, page, limit, cursor },
     });
-    console.error('flowsheet search count query failed; returning lower-bound total', countSettled.reason);
+    console.error('flowsheet search count query failed; returning lower-bound total', reason);
   }
 
   // nextCursor whenever this sort supports cursors AND we got a full page —
-  // a short page means there are no more rows.
+  // a short page means there are no more rows. Carries `resolvedTier` so the
+  // next request stays pinned to the tier that actually produced this page.
   //
   // The gate is `cursorEligible`, not "a cursor was passed in" (BS#2344).
   // Conditioning the emit on an inbound cursor meant the first request of
@@ -351,7 +446,7 @@ export async function searchFlowsheet(
   // exact counts are what this endpoint cannot afford.
   const nextCursor =
     cursorEligible && rows.length === limit
-      ? encodeCursor(rows[rows.length - 1].cursor_time, rows[rows.length - 1].id)
+      ? encodeCursor(rows[rows.length - 1].cursor_time, rows[rows.length - 1].id, resolvedTier)
       : undefined;
 
   return nextCursor !== undefined ? { results, total, nextCursor } : { results, total };
@@ -376,13 +471,47 @@ function transformRow(row: SearchResultRow): SearchResult {
   };
 }
 
-function buildWhereClause(conditions: SearchCondition<FlowsheetField>[]): SQL | null {
+/**
+ * Index of the query's typing term, or -1 if none. Scans back from the end:
+ * skips field conditions and negated or quoted bare terms, then at the
+ * first positive unquoted bare `all` term, returns its index if
+ * `shouldUseTsvector(value)`, else -1. A short or otherwise ineligible
+ * trailing term ENDS the search rather than being skipped past —
+ * `autechre am` has no typing term, because `am` is what the DJ is typing.
+ * See docs/playlist-search/README.md.
+ */
+function findTypingTermIndex(conditions: SearchCondition<FlowsheetField>[]): number {
+  for (let i = conditions.length - 1; i >= 0; i--) {
+    const condition = conditions[i];
+    if (condition.field !== 'all' || condition.negated || condition.exact) continue;
+    return shouldUseTsvector(condition.value) ? i : -1;
+  }
+  return -1;
+}
+
+/** Tiers to try in order: `['word']` for a non-date sort or no typing term, else `['word', 'prefix']`. See docs/playlist-search/README.md. */
+function tiersFor(typingTermIndex: number, sort: SearchParams['sort']): Tier[] {
+  if (sort !== 'date') return ['word'];
+  return typingTermIndex === -1 ? ['word'] : ['word', 'prefix'];
+}
+
+function buildWhereClause(
+  conditions: SearchCondition<FlowsheetField>[],
+  tier: Tier,
+  typingTermIndex: number
+): SQL | null {
   if (conditions.length === 0) return null;
+
+  // Only the 'prefix' tier prefix-matches the typing term; the 'word' tier
+  // ignores `typingTermIndex` entirely, which keeps its compiled SQL
+  // byte-identical to pre-#2712 `main`.
+  const prefixIndex = tier === 'prefix' ? typingTermIndex : -1;
 
   const parts: { operator: 'AND' | 'OR'; fragment: SQL }[] = [];
 
-  for (const condition of conditions) {
-    const fragment = buildConditionFragment(condition);
+  for (let i = 0; i < conditions.length; i++) {
+    const condition = conditions[i];
+    const fragment = buildConditionFragment(condition, { prefix: i === prefixIndex });
     if (fragment) {
       parts.push({ operator: condition.operator, fragment });
     }
@@ -403,14 +532,14 @@ function buildWhereClause(conditions: SearchCondition<FlowsheetField>[]): SQL | 
   return sql`(${result})`;
 }
 
-function buildConditionFragment(condition: SearchCondition<FlowsheetField>): SQL | null {
+function buildConditionFragment(condition: SearchCondition<FlowsheetField>, options: { prefix: boolean }): SQL | null {
   const { field, value, exact, negated } = condition;
 
   let fragment: SQL;
 
   switch (field) {
     case 'all':
-      fragment = buildAllFieldMatch(value, exact);
+      fragment = buildAllFieldMatch(value, { exact, prefix: options.prefix });
       break;
     case 'dj_name':
       fragment = buildDjNameMatch(value, exact);
@@ -439,105 +568,16 @@ function buildColumnMatch(column: string, value: string, exact: boolean): SQL {
 }
 
 /**
- * Decide whether an `all`-field bare-term query should use the tsvector path
- * or the trigram ILIKE path. Tsvector handles whole-word matching cleanly via
- * `buildPrefixTsquery(value).exactTsquery` (BS#670's catalog builder, shared
- * here since BS#2726), but it tokenizes — so pure-punctuation strings
- * (`!!!`, `$$$`) and single-character fragments are better served by trigram,
- * which can match arbitrary substrings.
- *
- * **The `/[a-zA-Z0-9]/` test is ASCII-only, and that routes every non-Latin
- * script to the trigram branch too** (WXYC/Backend-Service#2739) — Cyrillic,
- * Greek, CJK, Arabic, Hebrew queries never reach the tsvector branch at all,
- * since they have no character this regex matches. That is a deliberate
- * choice, not an oversight, but the choice is NOT "the `simple` config can't
- * tokenize these scripts" — it can. Verified on PG 18.6:
- * `to_tsvector('simple', 'Кино')` -> `'кино':1`, and
- * `to_tsvector('simple', 'Кино Группа крови') @@ to_tsquery('simple', $$'Кино'$$)`
- * -> `true` (`to_tsquery('simple', $$'Кино'$$)` is what `buildPrefixTsquery('Кино').exactTsquery`
- * itself builds, checked against the real builder). The tsvector path could
- * serve every non-Latin query in `tests/fixtures/charset-torture.json`'s 33
- * no-ASCII-alphanumeric entries; this predicate does not ask that question.
- * It stays ASCII-only because the alternative is unmeasured, not because it
- * is known to be worse: trigram substring-matches a partial word inside a
- * longer one, tsvector matches whole lexemes only, and nobody knows which of
- * those non-Latin DJ queries usually need. Swapping the test for
- * `/[\p{L}\p{N}]/u` (matching `hasAlphanumeric` in
- * `apps/backend/utils/text-query.ts`) is a user-visible recall change on the
- * live `GET /flowsheet/search` surface (33 charset classes move from
- * ILIKE-substring to tsvector-whole-lexeme), and evaluating it needs a
- * before/after row-count measurement against flowsheet-bearing data, which no
- * local environment has (`dev_env/seed-clone.sql` is catalog-only, zero
- * flowsheet rows). `tests/unit/services/search.service.test.ts` pins the
- * current (a)-decision routing for every no-ASCII-alphanumeric entry in the
- * corpus, so a future switch to the script-aware regex fails loudly here
- * instead of silently reaching production.
- *
- * **`buildPrefixTsquery(value).exactTsquery` does NOT do prefix matching**
- * (it never suffixes `:*` — that is `.tsquery`'s job, and this branch reads
- * `.exactTsquery` only), and an earlier version of this comment, written
- * against the `websearch_to_tsquery` predecessor, used to say the predecessor
- * did. `to_tsquery('simple', $$'autec'$$)` lexes to the lexeme `autec`; the
- * flowsheet holds `autechre`. Two different lexemes, no overlap, zero rows.
- * So the `< 3` floor below is NOT the boundary between "tsvector can serve
- * this" and "it cannot" — every partially-typed term is on the wrong side of
- * that line, the floor just happens to route the shortest ones elsewhere.
- * Correcting the claim only; the behavior is WXYC/Backend-Service#2712,
- * which also carries the harder half: unlike the catalog's
- * `searchLibraryByTsvector`, `buildAllFieldMatch` returns a single predicate
- * with no zero-row fallback, so a 3+ character partial returns a hard,
- * silent zero rather than a slow answer.
- *
- * WXYC/Backend-Service#670 landed the catalog's last-token prefix builder
- * (`apps/backend/utils/tsquery.ts`). `flowsheet.search_doc` concatenates FIVE
- * weighted segments (artist A, track B, dj_name B, album C, label D —
- * migration 0054 added dj_name to 0052's original four), and `tsvector ||
- * tsvector` leaves no position gap, so a phrase query built from a
- * punctuation-bearing token can straddle any of the four field seams and
- * match text that was never adjacent in any real row.
- *
- * `library.search_doc` had the same defect across its single seam, and
- * migration 0178 (WXYC/Backend-Service#2714) closed it at the column: a
- * sentinel between the segments, removed by `ts_delete`, which shifts
- * positions without leaving a queryable lexeme behind. Flowsheet cannot take
- * that fix — the same `DROP COLUMN` / `ADD COLUMN` rewrite measured about
- * 8 m 06 s of ACCESS EXCLUSIVE on a restored production snapshot (db.t4g.small,
- * PG 14.22, 2.65M rows), which blocks every flowsheet read and write for the
- * duration and has no quiet hour to hide in.
- *
- * WXYC/Backend-Service#2726 closes the four seams at the READER instead: this
- * branch switched from `websearch_to_tsquery` to the catalog's
- * `buildPrefixTsquery(value).exactTsquery` (never negation, never a user
- * operator — see docs/playlist-search/README.md), and `buildAllFieldMatch`
- * ANDs in a second predicate against a gapped rebuild of the same five
- * segments (the 0178 sentinel mechanism, applied at read time) guarded by
- * `strpos(q::text, '<') = 0` — a SQL-side question, not a JS prediction; see
- * that guard's docstring at the bottom of `buildAllFieldMatch` for why. A GIN
- * tsvector index stores lexemes, not positions, so the gapped expression
- * yields exactly the same candidate rows as the existing
- * `flowsheet_search_doc_idx` — the AND only narrows what the stored-column
- * recheck already fetched. Measured warm on production (pre-#2753, under the
- * earlier JS-routed guard, which only emitted the second predicate's SQL text
- * at all for a token the JS rule flagged): the ordinary bitmap-on-GIN-index
- * path costs more with the guard than without it (a cursor page carrying a
- * guarded token went from 105 ms to 280-465 ms depending on token), so "the
- * guard is free" is not the honest claim for the common case — see
- * docs/playlist-search/README.md for the full cost table. What IS free is the
- * worst case: a query whose predicate forces a full `add_time`-ordered walk
- * instead of the bitmap scan pays almost nothing extra for the guard, because
- * the planner evaluates the cheap `search_doc @@` clause before the (also
- * cheap, once reached) gapped one — `b_side` measured 11,688 ms column-only
- * vs 11,660 ms with the AND, on production. Under the current SQL-routed
- * guard a PLAIN word pays even less than that measurement: BS#2753 confirmed
- * via `EXPLAIN (ANALYZE, BUFFERS)` on a 200k-row local clone that Postgres's
- * custom-plan constant-folds `strpos((to_tsquery('simple', $1))::text, '<')`
- * at plan time whenever `$1` is a literal (which it always is on this
- * connection — see that guard's docstring), collapsing the Filter clause to
- * byte-identical text, and byte-identical cost, as the bare `search_doc @@ q`
- * predicate; a guarded (phrase-forming) token's Filter clause folds the other
- * way, to byte-identical text as the unconditional AND. See
- * `gappedSearchDocSql`'s docstring for why the AND form is exactly the gapped
- * semantics rather than an approximation of it.
+ * Whether an `all`-field bare term reads the tsvector path (in any tier) or
+ * stays on trigram ILIKE. The `< 3` floor counts INPUT characters, not the
+ * lexeme(s) Postgres resolves them to — `..a` clears the floor and reaches
+ * this branch, but re-lexes to the single lexeme `a` (leading punctuation
+ * dropped, the same mechanism that drops a leading `-`; see
+ * docs/adr/0015-catalog-search-query-operators.md). The floor is therefore a
+ * semantics choice — trigram substring matching (`tv` matches `mtv`) vs
+ * tsvector word matching for a short typed-so-far term — not a correctness
+ * boundary. ASCII-only routing is a second, independent, deliberate decision
+ * (WXYC/Backend-Service#2739). See docs/playlist-search/README.md for both.
  */
 export function shouldUseTsvector(value: string): boolean {
   if (value.length < 3) return false;
@@ -545,86 +585,59 @@ export function shouldUseTsvector(value: string): boolean {
 }
 
 /**
- * Rebuild `flowsheet.search_doc`'s five weighted segments WITH a position
- * gap between each pair, so a `<->` phrase query cannot straddle a field
- * seam (WXYC/Backend-Service#2726) — the migration 0178 mechanism
- * (WXYC/Backend-Service#2714), applied at read time instead of baked into a
- * `STORED GENERATED` column, because flowsheet cannot afford that column
- * rewrite's lock (see `shouldUseTsvector`'s docstring).
- *
- * Each segment is `setweight(to_tsvector('simple', coalesce(<col>, '')),
- * '<w>')`, copied verbatim from `search_doc`'s own generation expression
- * (`schema.ts`, migration 0065) — same five columns, same weights, same
- * order (artist A, track B, dj_name B, album C, label D). `coalesce` is
- * required on every segment: all five columns are nullable, and without it a
- * NULL `album_title` or `record_label` would make the whole `||` chain NULL
- * rather than merely contributing no lexemes.
- *
- * The four gaps are `to_tsvector('simple', 'wxycsearchdocgap
- * wxycsearchdocgap wxycsearchdocgap')`, and `ts_delete(…, 'wxycsearchdocgap')`
- * wraps the whole chain — `ts_delete` removes a lexeme's position entries
- * WITHOUT renumbering the survivors, so three repeats of the sentinel buy a
- * cross-seam distance of 4 and every `<->`/`<2>`/`<3>` fails while the
- * sentinel itself is never left behind to become a spurious prefix match
- * (`0178`'s header has the full mechanics and the sentinel-collision
- * analysis; `wxycsearchdocgap` appears in 0 of 2.65M production flowsheet
- * rows).
- *
- * An EXPRESSION INDEX over this rebuild — rather than calling it inline as
- * `buildAllFieldMatch` does — was considered and rejected: a GIN tsvector
- * index stores lexemes, not positions, so an index built on this same
- * expression would return exactly the same candidate rows
- * `flowsheet_search_doc_idx` already returns, and its own phrase recheck
- * would recompute this expression from the row's raw columns anyway (there
- * is no materialized value for it to read the way a STORED column's recheck
- * reads the stored value cheaply — the rewrite cost that column shape would
- * need is exactly what this whole function exists to avoid). That is why
- * `buildAllFieldMatch` ANDs this expression onto `search_doc @@ q` rather
- * than building a second index for it: the AND gets its candidates from the
- * existing index and evaluates this expression only on rows that already
- * passed the stored-column recheck. For `q` built by
- * `buildPrefixTsquery` — quoted lexemes AND'd together, never negated, never
- * a user operator — a positive match against the gapped vector is a SUBSET
- * of a positive match against the ungapped one (gapping can only lengthen a
- * cross-seam distance, never shorten a within-segment one), so `search_doc @@
- * q AND gapped @@ q` is exactly `gapped @@ q`'s semantics, computed cheaply.
- * Verified read-only on production (2026-09-29 PDT): the AND form returns
- * exactly the gapped counts (`it's` 19,235 -> 19,234; `i'm` 19,104 -> 19,103;
- * `b_side` 620 -> 612; `pratt'back` — a token built to straddle the
- * artist->track seam — 62 -> 0; `o'rourke`, `rock'n'roll` and `don't`
- * unchanged).
- *
- * A factory, not a module-level const, matching the `rotationActiveSql`
- * precedent in `shared/database/src/schema.ts` — a shared const would
- * compile correctly too (drizzle's `dialect.sqlToQuery` rebuilds the bound
- * parameter list fresh on every compile, confirmed by reusing one `SQL`
- * object across repeated compiles), so this is a style choice for
- * consistency with that precedent, not a correctness requirement.
- */
-/**
- * The sentinel `gappedSearchDocSql` concatenates between segments, named once
- * so a test can pin it against `library.search_doc`'s own copy of the same
- * mechanism (`shared/database/src/schema.ts`, migration 0178) rather than two
- * source files each hand-typing the literal and drifting silently —
+ * Read-time rebuild of `flowsheet.search_doc`'s five weighted segments WITH
+ * a position gap between each pair (the migration 0178 mechanism, applied
+ * per query rather than baked into a `STORED GENERATED` column because
+ * flowsheet cannot afford that rewrite's lock), so a `<->` phrase query
+ * cannot straddle a field seam. Named as a sentinel constant so a test can
+ * pin it against `library.search_doc`'s own copy of the same mechanism —
  * `tests/unit/services/search.service.gapped-vector-schema-drift.test.ts`.
- * Value and three-repeat width are migration 0178's own choice (`0 of 2.65M`
- * production flowsheet rows and, per that migration's header, 0 of the
- * catalog's rows contain it); this file does not re-derive either, only
- * reuses them.
+ * See docs/playlist-search/README.md ("The segments touch") for the
+ * mechanism and the verified counts.
  */
 export const SEARCH_DOC_GAP_SENTINEL = 'wxycsearchdocgap';
 
 function gappedSearchDocSql(): SQL {
   // Literal SQL text, not a bound parameter -- matching migration 0178's own
-  // shape (and the BS#2753 benchmark, which measured this exact text) rather
-  // than introducing an extra param the planner has no reason to see.
+  // shape rather than introducing an extra param the planner has no reason
+  // to see.
   const gapVector = `${SEARCH_DOC_GAP_SENTINEL} ${SEARCH_DOC_GAP_SENTINEL} ${SEARCH_DOC_GAP_SENTINEL}`;
   const gap = sql.raw(`to_tsvector('simple', '${gapVector}')`);
   const sentinel = sql.raw(`'${SEARCH_DOC_GAP_SENTINEL}'`);
   return sql`ts_delete(setweight(to_tsvector('simple', coalesce(${flowsheet.artist_name}, '')), 'A') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.track_title}, '')), 'B') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.dj_name}, '')), 'B') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.album_title}, '')), 'C') || ${gap} || setweight(to_tsvector('simple', coalesce(${flowsheet.record_label}, '')), 'D'), ${sentinel})`;
 }
 
-function buildAllFieldMatch(value: string, exact: boolean): SQL {
+/**
+ * Predicate for an `all`-field (bare-term) condition. `options.exact` means
+ * quoted — whole-value ILIKE, the same in every tier. `options.prefix` is
+ * true for exactly one condition per `'prefix'`-tier query, the typing term
+ * `searchFlowsheet` resolves via `findTypingTermIndex`; always false in the
+ * `'word'` tier.
+ *
+ * **Word tier:** `search_doc @@ E AND (strpos((E)::text, '<') = 0 OR gapped
+ * @@ E)`, where `E = buildPrefixTsquery(value).exactTsquery` matches whole
+ * lexemes only. The `strpos` guard closes the field-seam gaps
+ * `flowsheet.search_doc` cannot close at the column (WXYC/Backend-Service#2726)
+ * — see docs/playlist-search/README.md for the mechanism and the EXPLAIN
+ * evidence that Postgres folds it away for a plain word.
+ *
+ * **Prefix tier:** one outer boolean CASE, `CASE WHEN strpos((E)::text, '<')
+ * = 0 THEN search_doc @@ P ELSE (search_doc @@ E AND gapped @@ E) END`,
+ * where `P = buildPrefixTsquery(value).tsquery` (last token suffixed `:*`).
+ * A single-lexeme `E` takes THEN (no gapped recheck needed — one prefix
+ * operand cannot straddle a seam); a phrase-forming `E` takes ELSE and is
+ * NEVER prefixed: Postgres's `:*` lands on every lexeme such a phrase
+ * re-lexes into, not just the last one, and a capped count against that
+ * shape measured 15.6s on production against the endpoint's 5s timeout — a
+ * cost reason, not a recall one. See docs/playlist-search/README.md for the
+ * full design and the EXPLAIN verification that both arms fold cleanly.
+ *
+ * `built` is `null` only when no token carries a letter or digit —
+ * `shouldUseTsvector` already guarantees one, so the trigram fallback below
+ * only actually triggers if that guarantee ever loosens.
+ */
+function buildAllFieldMatch(value: string, options: { exact: boolean; prefix: boolean }): SQL {
+  const { exact, prefix } = options;
   if (exact) {
     // Whole-value, but case-insensitively: quoting narrows "contains" to "is",
     // and nothing about it is meant to start distinguishing "hi scores" from
@@ -634,69 +647,15 @@ function buildAllFieldMatch(value: string, exact: boolean): SQL {
     return sql`(${ilikeEscaped(flowsheet.artist_name, value, 'exact')} OR ${ilikeEscaped(flowsheet.track_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.album_title, value, 'exact')} OR ${ilikeEscaped(flowsheet.record_label, value, 'exact')})`;
   }
   if (shouldUseTsvector(value)) {
-    // Tsvector path: tokenized whole-word matching across all five weighted
-    // fields via the GIN index on flowsheet.search_doc. `buildPrefixTsquery`
-    // (BS#670's catalog builder, WXYC/Backend-Service#2726) never emits
-    // negation or a user operator — see docs/playlist-search/README.md — and
-    // matches WHOLE LEXEMES only, so a partially-typed term reaches this
-    // branch and returns nothing. See shouldUseTsvector's docstring and
-    // WXYC/Backend-Service#2712.
-    //
-    // `built` can be `null` only when no token in `value` carries a letter or
-    // digit — `shouldUseTsvector` already guarantees an ASCII alphanumeric,
-    // so this branch cannot see that shape, but the fallthrough to the
-    // trigram branch below handles it if that guarantee ever loosens.
     const built = buildPrefixTsquery(value);
     if (built !== null) {
       const q = built.exactTsquery;
-      // The seam guard, routed in SQL rather than predicted in JS (BS#2753
-      // review of the original BS#2726 shape, which computed a `phraseCapable`
-      // boolean in `apps/backend/utils/tsquery.ts` by re-implementing enough
-      // of `to_tsquery`'s word-boundary rules to GUESS whether it would split
-      // a token into a `<->` chain). `strpos(q::text, '<') = 0` asks Postgres
-      // the same question directly, against the tsquery it actually built,
-      // instead of predicting the answer from the pre-tokenization input:
-      // `<` is the one character that can appear in a tsquery's `::text`
-      // rendering ONLY as part of the `<->` / `<N>` phrase-distance operator
-      // Postgres's own lexer inserts when it splits a quoted lexeme — never as
-      // literal lexeme content, because `buildPrefixTsquery`'s own
-      // `TSQUERY_METACHARACTERS` strips `<` and `>` from the raw input before
-      // any token is quoted, so no lexeme this builder emits can contain one.
-      // Verified against the real builder (BS#2753): 20 adversarial inputs,
-      // including raw `<`, `>`, `<->` and `<2>` sequences the metacharacter
-      // strip neutralizes before quoting, produce an `exactTsquery` parameter
-      // string containing no `<` in any case; running each of those (plus
-      // `o'rourke`, `it's`, `4e4abyss`, `pratt-back`, superscript-digit, and
-      // every token this file's predecessor test fixture covered) through
-      // `to_tsquery('simple', $1)::text` on a real PG 18.6 confirms `<`
-      // appears in the rendered OUTPUT if and only if the lexer actually split
-      // the token. There is no Unicode table, locale, or Postgres major
-      // version this can disagree with — it is Postgres's own tsquery output,
-      // not a second implementation of its parsing rules.
-      //
-      // `to_tsquery(regconfig, text)` is IMMUTABLE, so when the bound
-      // parameter's actual value is known at plan time, Postgres's planner
-      // constant-folds `strpos((to_tsquery('simple', $1))::text, '<') = 0` to
-      // a literal `true`/`false` during planning, before execution — the
-      // whole `(... = 0 OR gapped @@ q)` branch collapses to no runtime cost
-      // at all. That is the custom-plan behavior, and it is the ONLY plan
-      // this connection ever uses: `db.execute` compiles to postgres-js's
-      // `client.unsafe(query, params)` (`node_modules/drizzle-orm/postgres-js/session.js`),
-      // and postgres-js's own `unsafe()` hard-codes `{ prepare: false }`
-      // unless overridden (`node_modules/postgres/src/index.js`), which
-      // neither this file nor `shared/database/src/client.ts` does — so every
-      // query this service sends is a one-shot, unnamed statement that
-      // Postgres always plans against the literal bound value, never a cached
-      // generic plan. BS#2753 confirmed this is not just a theoretical
-      // distinction: `EXPLAIN (ANALYZE, BUFFERS)` on a 200k-row local clone
-      // under `PREPARE`/`EXECUTE` with `plan_cache_mode = force_custom_plan`
-      // showed the Filter clause for a plain word collapse to byte-identical
-      // text and cost as the bare `search_doc @@ q` predicate, and for a
-      // guarded word collapse to byte-identical text and cost as the
-      // unconditional `AND gapped @@ q`. Only `force_generic_plan` (a mode
-      // this connection never requests) showed the extra per-row cost a
-      // naive reading of `strpos` might expect — see
-      // docs/playlist-search/README.md for the full measurement.
+      if (prefix) {
+        // One outer boolean CASE (see docstring): THEN picks the prefix
+        // form directly, ELSE is exactly the word tier's own predicate.
+        return sql`(CASE WHEN strpos((${q})::text, '<') = 0 THEN ${flowsheet.search_doc} @@ ${built.tsquery} ELSE (${flowsheet.search_doc} @@ ${q} AND ${gappedSearchDocSql()} @@ ${q}) END)`;
+      }
+      // Word tier: byte-identical to pre-#2712 `main`.
       return sql`(${flowsheet.search_doc} @@ ${q} AND (strpos((${q})::text, '<') = 0 OR ${gappedSearchDocSql()} @@ ${q}))`;
     }
   }

@@ -293,4 +293,184 @@ describe('GET /flowsheet/search — gapped-vector seam guard (BS#2726)', () => {
       expect(a).toBe(b);
     });
   });
+
+  /**
+   * Tiered matching and the cascade (WXYC/Backend-Service#2712): the
+   * `'word'` tier runs first (today's whole-lexeme-only predicate,
+   * byte-identical to pre-#2712 `main`), and `searchFlowsheet` only tries
+   * the `'prefix'` tier when the `'word'` tier's page comes back EMPTY.
+   * Every fixture below is deliberately disambiguated (a `wxycprefixprobe*`
+   * vocabulary unique to this describe block) so the word tier is
+   * provably empty or provably non-empty for the exact query under test,
+   * rather than relying on luck against the rest of this file's shared
+   * dateRange data. Reuses this file's `seedRow` / `search` / `idsOf` /
+   * `dateRange` helpers and the same real-Postgres GIN index this whole
+   * spec exercises.
+   */
+  describe('tiered matching and the cascade (WXYC/Backend-Service#2712)', () => {
+    let autechreId, warpaintId, artFormId, artifactsId, canId, candyId, prattBaWithinFieldId, trailingShortTermId;
+
+    beforeAll(async () => {
+      autechreId = await seedRow({
+        artist: 'Wxycprefixprobe Autechre',
+        track: 'Unrelated Track Six',
+        album: 'Unrelated Album Six',
+        label: 'Unrelated Label Six',
+      });
+      // Dedicated fixture for the "trailing short term ends the search"
+      // case: "am" is a genuine whole-word lexeme here (not just filler),
+      // so under the OLD rule (skip past an ineligible trailing term)
+      // "autec" would still be reachable as the typing term and the row
+      // would match via the 'prefix' tier cascade; under the NEW rule the
+      // search ends at "am" (too short for shouldUseTsvector), so there is
+      // no typing term, no cascade is attempted at all, and "autec" never
+      // gets the chance to prefix-match "autechretrailing".
+      trailingShortTermId = await seedRow({
+        artist: 'Wxycprefixprobetrailing Autechretrailing',
+        track: 'Am Unrelated Track Fourteen',
+        album: 'Unrelated Album Fourteen',
+        label: 'Unrelated Label Fourteen',
+      });
+      warpaintId = await seedRow({
+        artist: 'Wxycprefixprobedeeper Warpaintprobe',
+        track: 'Unrelated Track Seven',
+        album: 'Unrelated Album Seven',
+        label: 'Unrelated Label Seven',
+      });
+      // Two-word-query pair, the plan's own worked example ("art ens does
+      // not match artifacts"): the query term "wxycprefixprobeart" is a
+      // true STRING prefix of both "wxycprefixprobeart" (artFormId's whole
+      // first word) and "wxycprefixprobeartifacts" (artifactsId's whole
+      // first word, which merely STARTS WITH the query term); the second
+      // query term "wxycprefixprobeens" is a true prefix of both rows'
+      // track first word. Neither row matches BOTH conditions as complete
+      // words, so the 'word' tier is empty for this query and the cascade
+      // reaches 'prefix'; there, only the LAST term (the typing term) is
+      // prefix-matched, so only artFormId -- whose first word is an EXACT
+      // match on the first (non-typing) term -- should return.
+      artFormId = await seedRow({
+        artist: 'Wxycprefixprobeart Form',
+        track: 'Wxycprefixprobeensemble Live',
+        album: 'Unrelated Album Eight',
+        label: 'Unrelated Label Eight',
+      });
+      artifactsId = await seedRow({
+        artist: 'Wxycprefixprobeartifacts Collective',
+        track: 'Wxycprefixprobeensemble Suite',
+        album: 'Unrelated Album Nine',
+        label: 'Unrelated Label Nine',
+      });
+      // The "can"/"candy" case from the plan: canId's artist IS the exact
+      // word "wxycprefixprobecan"; candyId's artist merely STARTS WITH it
+      // ("wxycprefixprobecandy"). Querying the bare word must return ONLY
+      // canId -- the 'word' tier already matches it (non-empty page), so
+      // the cascade stops there and never reaches the 'prefix' tier that
+      // would (wrongly) also prefix-match candyId.
+      canId = await seedRow({
+        artist: 'Wxycprefixprobecan',
+        track: 'Unrelated Track Eleven',
+        album: 'Unrelated Album Eleven',
+        label: 'Unrelated Label Eleven',
+      });
+      candyId = await seedRow({
+        artist: 'Wxycprefixprobecandy',
+        track: 'Unrelated Track Twelve',
+        album: 'Unrelated Album Twelve',
+        label: 'Unrelated Label Twelve',
+      });
+      // WITHIN-FIELD phrase fixture (not the cross-seam artist->track one
+      // above): "wxycprefixprobepratt'back" lives entirely inside
+      // track_title, so no field-seam gap is in play at all -- the gapped
+      // guard cannot be what keeps this row out. "wxycprefixprobepratt'ba"
+      // tokenizes to the phrase 'wxycprefixprobepratt' <-> 'ba' (two
+      // lexemes -- `exactTsquery` contains `<`), so the 'prefix' tier's
+      // CASE must take the ELSE arm (exact phrase, unprefixed) rather than
+      // prefix the phrase's last lexeme ('ba':*), which WOULD match
+      // '...back' and wrongly return this row. Proven by mutation: see the
+      // test below.
+      prattBaWithinFieldId = await seedRow({
+        artist: 'Unrelated Artist Thirteen',
+        track: "Wxycprefixprobepratt'back Suite",
+        album: 'Unrelated Album Thirteen',
+        label: 'Unrelated Label Thirteen',
+      });
+    });
+
+    test('a partial of a seeded artist returns the row via the prefix-tier cascade ("autec" matches "Autechre")', async () => {
+      const res = await search(`${dateRange} wxycprefixprobe autec`).expect(200);
+      expect(idsOf(res)).toContain(autechreId);
+    });
+
+    test('the word tier stops the cascade: a completed word returns only the whole-word row, never a same-prefix row ("can" vs "candy")', async () => {
+      const res = await search(`${dateRange} wxycprefixprobecan`).expect(200);
+      const ids = idsOf(res);
+      expect(ids).toContain(canId);
+      // candyId would ALSO match if the cascade reached the 'prefix' tier
+      // (a true string prefix of "wxycprefixprobecandy") -- it must not,
+      // because the 'word' tier already matched canId and the cascade
+      // never advances past a non-empty page.
+      expect(ids).not.toContain(candyId);
+    });
+
+    test('a partial of the first word in a two-word query does not match by prefix (matches only the row whose first word is the complete word)', async () => {
+      const res = await search(`${dateRange} wxycprefixprobeart wxycprefixprobeens`).expect(200);
+      const ids = idsOf(res);
+      expect(ids).toContain(artFormId);
+      expect(ids).not.toContain(artifactsId);
+    });
+
+    test('NOT <partial> does not exclude the full word, even via the prefix-tier cascade ("NOT warp" does not exclude "Warpaintprobe")', async () => {
+      // Sanity: the row is reachable at all.
+      const sanity = await search(`${dateRange} warpaintprobe`).expect(200);
+      expect(idsOf(sanity)).toContain(warpaintId);
+
+      // "wxycprefixprobedeep" (dropping the row's trailing "er") is only a
+      // PREFIX of the row's actual first word "wxycprefixprobedeeper", not
+      // a complete word anywhere -- the 'word' tier is empty for this
+      // query, forcing the cascade into 'prefix', so this exercises the
+      // negation skip under the SAME tier the earlier tests do.
+      const negated = await search(`${dateRange} wxycprefixprobedeep NOT warp`).expect(200);
+      // A negated term is never the typing term (`findTypingTermIndex`
+      // skips it), so "warp" stays an exact lexeme in EVERY tier and does
+      // not match "warpaintprobe" -- `NOT warp` is true for this row, not
+      // false.
+      expect(idsOf(negated)).toContain(warpaintId);
+    });
+
+    test('a within-field phrase-shaped partial ("pratt\'ba") is not prefix-matched', async () => {
+      const res = await search(`${dateRange} wxycprefixprobepratt'ba`).expect(200);
+      expect(idsOf(res)).not.toContain(prattBaWithinFieldId);
+    });
+
+    test('a trailing 1-2 char bare term ENDS the search rather than being skipped past ("wxycprefixprobetrailing autec am" has no typing term)', async () => {
+      // "am" is a real word in this row's track_title, so under the OLD
+      // rule the row WOULD match (the cascade reaches 'prefix', "autec"
+      // prefix-matches "autechretrailing", and the un-skipped "am"
+      // condition is satisfied as an exact word on its own). Under the NEW
+      // rule the search ends at "am" -- too short for shouldUseTsvector --
+      // so there is no typing term, no cascade is attempted, and the
+      // 'word' tier alone can never match "autec" against "autechretrailing".
+      const res = await search(`${dateRange} wxycprefixprobetrailing autec am`).expect(200);
+      expect(idsOf(res)).not.toContain(trailingShortTermId);
+    });
+
+    // Mutation proof (manual; run during implementation, against this real
+    // backend + Postgres, not just the unit mocks): swapping `E` for `P`
+    // throughout the 'prefix' tier's ELSE arm -- `(search_doc @@ P AND
+    // gapped @@ P)` instead of `(search_doc @@ E AND gapped @@ E)`, keeping
+    // the AND-gapped STRUCTURE but prefixing the phrase instead of falling
+    // back to the exact form -- makes ONLY the within-field phrase test
+    // above go red (22 passed, 1 failed, confirmed): "ba":* prefix-matches
+    // "...back" even inside one field, where there is no seam gap to stop
+    // it. The four CROSS-SEAM tests above do NOT catch this mutation --
+    // confirmed by running it -- because the gapped vector's position
+    // shift still defeats `gapped @@ P` across a field seam exactly as it
+    // defeats `gapped @@ E`; that half of the guard is prefix-agnostic. A
+    // CRUDER mutation that also drops the `AND gapped @@` half entirely
+    // (bare `search_doc @@ P`) does NOT isolate the two questions -- it
+    // breaks the seam guard too and all four cross-seam tests go red
+    // alongside this one (5 of 23 failed, confirmed) -- which is why this
+    // fixture exists: it is the only one of the two that proves the
+    // prefix-vs-exact choice specifically, independent of the seam guard.
+  });
 });

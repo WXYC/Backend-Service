@@ -315,3 +315,106 @@ describe('GET /flowsheet/search cursors over microsecond add_time (BS#2344)', ()
     }
   );
 });
+
+/**
+ * WXYC/Backend-Service#2712 — a cursor walk that starts in the 'prefix'
+ * fallback tier has to stay there for every later page, carrying the `_pfx`
+ * marker, rather than drifting onto the 'word' tier (which would end the
+ * walk early at whatever the 'word' tier's own, unrelated match set holds)
+ * or re-cascading from 'word' on every page (which would re-discover the
+ * SAME already-served row forever, since the 'word' tier never matches this
+ * marker at all).
+ *
+ * Two rows share a common prefix but neither is a whole-word match for the
+ * bare marker query, so the 'word' tier is empty on page 0 and the cascade
+ * reaches 'prefix' there; at `limit: 1` the walk needs two pages to see both
+ * rows plus a third, empty page to terminate.
+ */
+const PREFIX_WALK_MARKER = 'bs2712cursorwalkprobe';
+const PREFIX_WALK_SUFFIXES = ['alpha', 'beta'];
+
+describe('GET /flowsheet/search prefix-tier cascade cursor walk (WXYC/Backend-Service#2712)', () => {
+  let sql;
+  let insertedIds = [];
+
+  beforeAll(async () => {
+    sql = makeSql();
+
+    const rows = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".flowsheet (entry_type, artist_name, track_title, album_title, play_order, add_time)
+       SELECT 'track', $1::text || suffix, $1::text || suffix || ' track', 'Prefix Cursor Walk Probe', n,
+              TIMESTAMPTZ '2019-03-04 12:00:00+00' + ((n - 1) * INTERVAL '1 minute')
+       FROM unnest($2::text[]) WITH ORDINALITY AS t(suffix, n)
+       RETURNING id`,
+      [PREFIX_WALK_MARKER, PREFIX_WALK_SUFFIXES]
+    );
+    insertedIds = rows.map((r) => r.id);
+    expect(insertedIds).toHaveLength(PREFIX_WALK_SUFFIXES.length);
+
+    // Premise: neither row's artist_name IS the bare marker -- both only
+    // START WITH it -- so the 'word' tier has nothing to match and every
+    // page below reaches this spec's row set only via the 'prefix' tier.
+    const exact = await sql.unsafe(
+      `SELECT count(*)::int AS n FROM "${SCHEMA}".flowsheet
+       WHERE entry_type = 'track' AND search_doc @@ to_tsquery('simple', $1)`,
+      [`'${PREFIX_WALK_MARKER}'`]
+    );
+    expect(exact[0].n).toBe(0);
+  });
+
+  afterAll(async () => {
+    if (insertedIds.length > 0) {
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE id = ANY($1::int[])`, [insertedIds]);
+    }
+    if (sql) await sql.end();
+  });
+
+  test('a limit-1 walk cascades into the prefix tier on page 0, stays pinned to it, returns both distinct rows, and terminates', async () => {
+    const page1 = await request
+      .get('/flowsheet/search')
+      .query({ q: PREFIX_WALK_MARKER, page: 0, limit: 1, sort: 'date', order: 'desc' })
+      .send()
+      .expect(200);
+
+    expect(page1.body.results).toHaveLength(1);
+    expect(insertedIds).toContain(page1.body.results[0].id);
+    expect(typeof page1.body.nextCursor).toBe('string');
+    expect(page1.body.nextCursor).toMatch(/_pfx$/);
+
+    const page2 = await request
+      .get('/flowsheet/search')
+      .query({
+        q: PREFIX_WALK_MARKER,
+        page: 0,
+        limit: 1,
+        sort: 'date',
+        order: 'desc',
+        cursor: page1.body.nextCursor,
+      })
+      .send()
+      .expect(200);
+
+    expect(page2.body.results).toHaveLength(1);
+    expect(insertedIds).toContain(page2.body.results[0].id);
+    // Distinct from page 1 -- the walk advanced, it did not re-serve or loop.
+    expect(page2.body.results[0].id).not.toBe(page1.body.results[0].id);
+    // Still pinned to the prefix tier (the cursor decides, never cascades).
+    expect(page2.body.nextCursor).toMatch(/_pfx$/);
+
+    const page3 = await request
+      .get('/flowsheet/search')
+      .query({
+        q: PREFIX_WALK_MARKER,
+        page: 0,
+        limit: 1,
+        sort: 'date',
+        order: 'desc',
+        cursor: page2.body.nextCursor,
+      })
+      .send()
+      .expect(200);
+
+    // Both rows already served -- the walk terminates rather than looping.
+    expect(page3.body.results).toHaveLength(0);
+  });
+});

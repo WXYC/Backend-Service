@@ -214,5 +214,22 @@ describe('searchFlowsheetEndpoint', () => {
       expect(res._status).toBe(400);
       expect(searchFlowsheet).not.toHaveBeenCalled();
     });
+
+    it('returns 400 (not a 500) for a repeated cursor param, which Express parses as an array', async () => {
+      // `?cursor=a&cursor=b` arrives as string[] under Express 5's default
+      // query parser, not a string -- parseCursor's `.endsWith` would throw
+      // a TypeError on an array, which propagated past this controller's
+      // own try/catch (the validation runs before it) as an uncaught
+      // exception, 500ing where `main` 400ed. Cast through `unknown` since
+      // `invoke`'s own query type doesn't admit an array -- that mismatch is
+      // the point: Express can hand this controller a shape its own
+      // declared query type says is impossible.
+      const { res, run } = invoke({ cursor: ['a', 'b'] } as unknown as Record<string, string | undefined>);
+
+      await run();
+
+      expect(res._status).toBe(400);
+      expect(searchFlowsheet).not.toHaveBeenCalled();
+    });
   });
 });
