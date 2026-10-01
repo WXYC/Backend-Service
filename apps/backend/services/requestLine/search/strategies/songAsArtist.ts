@@ -5,12 +5,17 @@
  * This handles cases where the AI parser misinterpreted an artist name
  * as a song title (e.g., "Laid Back" parsed as song instead of artist).
  *
+ * A failed Discogs/LML lookup degrades to no results rather than failing the
+ * request, so it still reaches Slack (BS#2764).
+ *
  * Ported from request-parser routers/request.py search_song_as_artist()
  */
 
+import * as Sentry from '@sentry/node';
 import { ParsedRequest, EnrichedLibraryResult, SearchState, SearchStrategyType } from '../../types.js';
 import { searchLibrary, filterResultsByArtist, searchAlbumsByTitle } from '../../../library.service.js';
 import { isCompilationArtist, MAX_SEARCH_RESULTS } from '../../matching/index.js';
+import { shouldCaptureExpressError } from '../../../../middleware/sentryErrorFilter.js';
 
 // Forward declaration - will be imported when Discogs service is ready
 type DiscogsService = {
@@ -56,11 +61,23 @@ export async function executeSongAsArtist(
   }
 
   console.log(`[Search] No direct matches, searching Discogs for releases by '${songAsArtist}'`);
-  let discogsReleases: Array<{ artist: string; album: string }>;
+  let discogsReleases: Awaited<ReturnType<DiscogsService['searchReleasesByArtist']>>;
   try {
     discogsReleases = await discogsService.searchReleasesByArtist(songAsArtist, 10);
   } catch (e) {
     console.warn(`[Search] Discogs search by artist failed for '${songAsArtist}':`, e);
+    // This catch used to be absent, so a bug here (e.g. a TypeError in the
+    // mapping closure the caller wires up around `searchReleasesByArtist`)
+    // reached the express error handler and got captured to Sentry there.
+    // Re-run the same classifier (`shouldHandleError` in app.ts) so that
+    // stays true: an expected LML transport failure (`LmlClientError`,
+    // including a BS#1748 `LimiterShedError`) is excluded -- it's already
+    // quiet by design -- but anything else is still reported instead of
+    // this catch becoming a silent sink for real defects.
+    const error = e instanceof Error ? e : new Error(String(e));
+    if (shouldCaptureExpressError(error)) {
+      Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'request-line' } });
+    }
     return [];
   }
 
