@@ -991,6 +991,46 @@ export function shedReasonOf(response: {
 }
 
 /**
+ * `degraded_reason` values that describe LML's OWN load rather than the
+ * calling request's budget — a Discogs breaker open, admission shedding —
+ * and are therefore equally true for every caller. Listed as the cacheable
+ * set (not the uncacheable one) because `degraded_reason` is documented
+ * non-exhaustive on the wire contract (LML may add reasons in a later minor
+ * version): an unrecognized future value then falls on the "budget-relative,
+ * don't cache" side by construction, rather than silently passing through a
+ * stale allow-list check.
+ */
+const BUDGET_INDEPENDENT_DEGRADED_REASONS = new Set<string>(['upstream_unavailable', 'cache_only']);
+
+/**
+ * BS#2528: true when `response`'s outcome depends on the CALLING request's
+ * own budget rather than on the catalog or on LML's load, so it must not be
+ * written to a shared cache keyed only on `(artist, album, song)` — doing so
+ * would replay one caller's short deadline (or LML's own hard cap) to every
+ * other caller sharing that key for the rest of the TTL. Two shapes qualify:
+ * `response.timeout === true` (LML's server-side hard cap or a per-strategy
+ * ceiling fired mid-search, independent of which caller asked), and
+ * `response.degraded === true` with a `degraded_reason` outside the
+ * allow-list `{'upstream_unavailable', 'cache_only'}` — most commonly
+ * `deadline_exceeded` (the caller's own `X-Caller-Budget-Ms` ran out), but
+ * also a missing or unrecognized reason, treated as budget-relative
+ * fail-safe. `upstream_unavailable` and `cache_only` describe LML's own
+ * load and are equally true for every caller, so they are NOT
+ * budget-relative and stay cacheable. Exported (not private to
+ * `LmlLookupCoordinator`) because WXYC/Backend-Service#2765 needs the same
+ * predicate for `library-track-search`'s separate cache.
+ */
+export function isBudgetRelativeDegradation(response: {
+  timeout?: boolean;
+  degraded?: boolean;
+  degraded_reason?: string;
+}): boolean {
+  if (response.timeout === true) return true;
+  if (response.degraded !== true) return false;
+  return !BUDGET_INDEPENDENT_DEGRADED_REASONS.has(response.degraded_reason ?? '');
+}
+
+/**
  * Build the shed `GatedLookupResponse` inside a Sentry span that carries the
  * `lml.shed_reason` attribute, so a shed is queryable in the trace explorer
  * (`lml.shed_reason:shed_breaker_open`) the same way the BS#1293 skip is.
