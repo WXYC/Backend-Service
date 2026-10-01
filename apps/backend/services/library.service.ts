@@ -2238,8 +2238,8 @@ async function resolveRotationDiscogsReleaseViaLml(
 
     // Only the negative branch is gated on degraded/timeout — a trusted
     // match extracted above is real and already sitting in `source`
-    // regardless of this flag (BS#1890-style: LML's `_build_degraded_response`
-    // still runs `fetch_artwork` before shedding later pipeline steps). A
+    // regardless of this flag (BS#1890-style: a degraded reply packages
+    // whatever state LML reached before it shed, so anything in it is real). A
     // `null` source from a degraded/timed-out reply says nothing about the
     // catalog ("couldn't ask", not "asked and missed") — leave it exactly as
     // retryable as a thrown error: no cache, no stamp.
