@@ -59,7 +59,7 @@ Because only `fill` leaves the cohort, this job differs from `streaming-columns-
 
 - **"Done" is `stopped_early: false`.** The cohort does not approach zero. `cohortBefore - cohortAfter` is the number of fills and nothing else. Expect roughly 5,000 rows to remain.
 - **Resume by cursor, not by re-running.** A re-run with no cursor re-asks the whole residue. Set `BIO_FILL_ALBUM_AFTER_ID` to the previous run's `resume_after_album_id`, then retry what the cursor stopped at by id. See "Resuming" below.
-- **`resume_after_album_id` is the safe cursor.** It is the last album at or below which every row was settled, and it stops advancing at the first row that was not: one LML did not answer for (`indeterminate`) or one whose write threw (`write_failed`). Resuming from `last_album_id` instead would skip every such album, unless those albums are retried by id. `indeterminate_album_ids` lists up to 200 of them, both kinds together; `indeterminate` and `write_failed` are always the exact counts.
+- **`resume_after_album_id` is the safe cursor.** It is the last album at or below which every row was settled, and it stops advancing at the first row that was not: one LML did not answer for (`indeterminate`) or one whose write threw (`write_failed`). Resuming from `last_album_id` instead would skip every such album. `indeterminate_album_ids` lists up to 200 of them, both kinds together; `indeterminate` and `write_failed` are always the exact counts.
 
 A run exits non-zero, after logging a `summary` line with its partial totals and resume point, when:
 
@@ -86,7 +86,7 @@ Chain by cursor, then retry by id what the chain left unsettled.
 
    The cohort predicate and the eligibility conditions still apply, so an id that got a bio in the meantime simply does not appear, and `enumerated` can be smaller than the list. A list holds at most 200 ids, which is the most one summary reports. It cannot be combined with a non-zero `BIO_FILL_ALBUM_AFTER_ID`, and `BIO_FILL_MAX_ALBUMS` still caps it. A list run has no cursor and reports `resume_after_album_id: null`; never carry a cursor out of one into the chain. What it could not settle is in its own `indeterminate_album_ids`, ready for the next retry.
 
-The retry is always needed after the last run of a chain, since no later cursor run follows it. It can also spare a long re-ask in the middle of one. When a run's `indeterminate_album_ids` holds every unsettled row, meaning its length equals `indeterminate + write_failed`, the next run may start from that run's `last_album_id`, with the listed ids retried on their own. When the list was cut off at 200, or the run ended on the no-bio guard (the rows of that streak are not listed, and `last_album_id` is past them), resume from `resume_after_album_id`.
+The retry is needed after the last run of a chain, since no later cursor run follows it. Mid-chain it is optional: the next cursor run starts below the unsettled rows and re-asks them anyway. Every cursor run starts from `resume_after_album_id`, never from `last_album_id`, whatever the list holds.
 
 ## Knobs
 
