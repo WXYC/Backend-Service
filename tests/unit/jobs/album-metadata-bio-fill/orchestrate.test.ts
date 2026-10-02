@@ -331,3 +331,41 @@ describe('runFill — batches that settle nothing', () => {
     expect(summary.stopped_early).toBe(false);
   });
 });
+
+describe('runFill — the accounting itself cannot read the database', () => {
+  const down = new Error('connect ECONNREFUSED');
+
+  beforeEach(() => {
+    countCohort.mockReset();
+    countCohort.mockResolvedValueOnce(100 as never).mockRejectedValue(down as never);
+  });
+
+  it('still logs the summary, and rejects with the abort it was carrying rather than the re-count error', async () => {
+    const outcomes = { 1: 'write_fails', 2: 'write_fails', 3: 'write_fails', 4: 'write_fails' } as const;
+
+    // The database that failed the writes fails the re-count too. Without the
+    // summary line the resume point of an aborted run is lost with it.
+    await expect(run([1, 2, 3, 4, 5, 6], outcomes, { maxConsecutiveFailedBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveFailedBatchesError
+    );
+
+    expect(loggedSummary()).toMatchObject({
+      stopped_early: true,
+      write_failed: 4,
+      resume_after_album_id: 0,
+      accounting_failed: true,
+    });
+  });
+
+  it('logs the summary and rejects when a run that finished its loop cannot re-count', async () => {
+    await expect(run([1, 2])).rejects.toBe(down);
+
+    // The loop did finish, so this is not `stopped_early`: nothing is left to resume.
+    expect(loggedSummary()).toMatchObject({
+      stopped_early: false,
+      filled: 2,
+      resume_after_album_id: 2,
+      accounting_failed: true,
+    });
+  });
+});

@@ -60,6 +60,8 @@ A run exits non-zero, after logging a `summary` line with its partial totals and
 - the cumulative live-DJ pause exceeds `LIVE_ACTIVITY_MAX_PAUSE_MS` (resume later from the logged cursor), or
 - `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES` batches in a row settled nothing: LML answered for no album in them, or every write they attempted threw. Either LML or the database is down. The `lml_batch_failed` and `lml_indeterminate` lines point at LML and the `write_failed` lines at the database; fix that first.
 
+The `summary` line is logged even when the closing `ANALYZE` or re-count fails, as they will if the database is what went away. It then carries `accounting_failed: true`, and `cohortAfter` is the before-count, not a measurement.
+
 SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0.
 
 ## Knobs
