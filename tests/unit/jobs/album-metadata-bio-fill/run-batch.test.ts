@@ -147,8 +147,19 @@ describe('runBatch — only a fill writes', () => {
     }
   );
 
-  it('leaves the whole batch indeterminate when the bulk call throws', async () => {
-    bulkLookupMetadata.mockRejectedValue(new Error('ECONNRESET') as never);
+  it.each([
+    ['the bulk call throws', () => bulkLookupMetadata.mockRejectedValue(new Error('ECONNRESET') as never)],
+    // A 2xx whose body is not the bulk shape: a proxy's error page parsed as
+    // JSON, or a contract break. It is no answer for any album in the batch.
+    ['a 2xx body has no results', () => bulkLookupMetadata.mockResolvedValue({} as never)],
+    ['a 2xx body has null results', () => bulkLookupMetadata.mockResolvedValue({ results: null } as never)],
+    [
+      'a 2xx body has results that are not an array',
+      () => bulkLookupMetadata.mockResolvedValue({ results: { 0: filling(JUANA, 0) } } as never),
+    ],
+    ['a 2xx body is null', () => bulkLookupMetadata.mockResolvedValue(null as never)],
+  ])('leaves the whole batch indeterminate when %s', async (_label, arrange) => {
+    arrange();
 
     const result = await runBatch([JUANA, JESSICA], OPTS);
 
