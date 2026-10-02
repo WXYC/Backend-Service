@@ -88,6 +88,9 @@ describe('lml-client policy', () => {
         // its `album-level-backfill` donor's, so drain traffic is
         // attributable on the `lml.caller` span and LML's per-caller metrics.
         'streaming-columns-drain': 5,
+        // BS#2775: the bio fill. Its own label for the same attribution
+        // reason as the streaming-columns drain above.
+        'album-metadata-bio-fill': 5,
       };
       for (const [caller, expectedClass] of Object.entries(expected) as [LmlCaller, LmlCallerClass][]) {
         expect(resolveLmlPolicy(caller).class).toBe(expectedClass);
