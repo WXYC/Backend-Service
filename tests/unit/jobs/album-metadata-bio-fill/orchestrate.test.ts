@@ -25,22 +25,13 @@ jest.mock('@wxyc/lml-client', () => ({
   ...jest.requireActual('@wxyc/lml-client'),
   bulkLookupMetadata: jest.fn(),
 }));
-jest.mock('@wxyc/database', () => {
-  // Mirrors `shared/database/src/live-activity.ts`, declared inside the
-  // factory (jest forbids out-of-scope references) and re-exported so the
-  // tests throw the REAL type the job branches on.
-  class LiveActivityPauseCeilingExceededError extends Error {
-    constructor(message: string) {
-      super(message);
-      this.name = 'LiveActivityPauseCeilingExceededError';
-    }
-  }
-  return {
-    buildWaitForQuietPeriod: () => waitForQuietPeriod,
-    LiveActivityPauseCeilingExceededError,
-    closeDatabaseConnection: jest.fn(),
-  };
-});
+// The unit suite's `@wxyc/database` double (`tests/mocks/database.mock.ts`)
+// already carries `LiveActivityPauseCeilingExceededError` verbatim, so the
+// tests throw the type the job branches on; only the pause is scripted here.
+jest.mock('@wxyc/database', () => ({
+  ...jest.requireActual<Record<string, unknown>>('@wxyc/database'),
+  buildWaitForQuietPeriod: () => waitForQuietPeriod,
+}));
 jest.mock('../../../../jobs/album-metadata-bio-fill/cohort', () => ({
   READ_TIMEOUT_DEFAULT: 1000,
   countCohort: jest.fn(),
@@ -71,6 +62,7 @@ const enumerateCohort = cohort.enumerateCohort as unknown as jest.Mock;
 const applyBioFill = cohort.applyBioFill as unknown as jest.Mock;
 const analyzeAlbumMetadata = cohort.analyzeAlbumMetadata as unknown as jest.Mock;
 const log = jest.spyOn(logger, 'log');
+const captureError = jest.spyOn(logger, 'captureError');
 
 const OPTIONS: FillOptions = {
   batchSize: 2,
@@ -97,9 +89,10 @@ type Outcome = 'fill' | 'no_match' | 'no_bio' | 'shed' | 'write_fails';
 type Outcomes = Record<number, Outcome | 'throw'>;
 
 /**
- * Script LML's answers by album id. Each bulk call is answered from the
- * `artist`/`album` items it was sent, in order, so the script survives any
- * batching. An album with no entry gets a `fill`.
+ * Script LML's answers by album id. Every candidate carries the same artist
+ * and album, so the items cannot say which album they are; each bulk call is
+ * instead matched to the next `items.length` ids of `enumerated`, in order,
+ * which holds for any batch size. An album with no entry gets a `fill`.
  */
 const scriptLml = (outcomes: Outcomes = {}, enumerated: number[]) => {
   let cursor = 0;
@@ -333,6 +326,23 @@ describe('runFill — batches that settle nothing', () => {
 
     expect(bulkLookupMetadata).toHaveBeenCalledTimes(4);
     expect(summary.stopped_early).toBe(false);
+  });
+});
+
+describe('runFill — what an abort reports to Sentry', () => {
+  // Both guards end through one capture site; each must keep its own step so
+  // the two causes stay separable in Sentry.
+  it.each([
+    ['consecutive_failed_batches', { 1: 'shed', 2: 'shed', 3: 'shed', 4: 'shed' }, { maxConsecutiveFailedBatches: 2 }],
+    [
+      'consecutive_no_bio_batches',
+      { 1: 'no_bio', 2: 'no_bio', 3: 'no_bio', 4: 'no_bio' },
+      { maxConsecutiveNoBioBatches: 2 },
+    ],
+  ] as const)('captures the abort under %s', async (step, outcomes, options) => {
+    await expect(run([1, 2, 3, 4], outcomes, options)).rejects.toThrow();
+
+    expect(captureError).toHaveBeenCalledWith(expect.any(Error), step, { batches_done: 2, of: 2 });
   });
 });
 
