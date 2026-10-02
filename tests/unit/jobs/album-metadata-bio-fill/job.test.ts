@@ -30,7 +30,7 @@ jest.mock('../../../../jobs/album-metadata-bio-fill/cohort', () => ({
 import { db } from '@wxyc/database';
 import { BULK_LOOKUP_INPUT_CAP, bulkLookupMetadata as bulkLookupMetadataImport } from '@wxyc/lml-client';
 import * as cohort from '../../../../jobs/album-metadata-bio-fill/cohort';
-import { resolveOptions, runFill } from '../../../../jobs/album-metadata-bio-fill/job';
+import { INDETERMINATE_IDS_REPORT_CAP, resolveOptions, runFill } from '../../../../jobs/album-metadata-bio-fill/job';
 
 const bulkLookupMetadata = bulkLookupMetadataImport as unknown as jest.Mock;
 const countCohort = cohort.countCohort as unknown as jest.Mock;
@@ -61,6 +61,7 @@ describe('resolveOptions', () => {
       afterAlbumId: 0,
       maxConsecutiveFailedBatches: 3,
       maxConsecutiveNoBioBatches: 10,
+      albumIds: [],
     });
   });
 
@@ -106,12 +107,46 @@ describe('resolveOptions', () => {
     ['BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES', '0'],
     ['BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES', '-1'],
     ['BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES', 'ten'],
+    // A list that does not parse must not fall back to "no list": that would
+    // turn a three-album retry into a run over the whole cohort.
+    ['BIO_FILL_ALBUM_IDS', 'retry'],
+    ['BIO_FILL_ALBUM_IDS', '101,,102'],
+    ['BIO_FILL_ALBUM_IDS', '101,102,'],
+    ['BIO_FILL_ALBUM_IDS', '0'],
+    ['BIO_FILL_ALBUM_IDS', '-101'],
+    ['BIO_FILL_ALBUM_IDS', '101.5'],
+    ['BIO_FILL_ALBUM_IDS', '1e3'],
+    ['BIO_FILL_ALBUM_IDS', '2147483648'],
+    ['BIO_FILL_ALBUM_IDS', '[101,102]'],
   ])('rejects %s=%s instead of falling back to a default', (name, value) => {
     expect(() => resolveOptions({ [name]: value }, [])).toThrow(name);
   });
 
   it('takes 0 for the no-bio guard as "disabled", the one failure guard an operator may need to turn off', () => {
     expect(resolveOptions({ BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES: '0' }, []).maxConsecutiveNoBioBatches).toBe(0);
+  });
+
+  it.each([
+    ['a list', '101,102', [101, 102]],
+    ['a single id', '101', [101]],
+    ['spaces, a repeat and any order', ' 102 , 7,102 ', [7, 102]],
+    ['blank as no list', '  ', []],
+  ])('reads BIO_FILL_ALBUM_IDS: %s', (_label, raw, albumIds) => {
+    expect(resolveOptions({ BIO_FILL_ALBUM_IDS: raw }, []).albumIds).toEqual(albumIds);
+  });
+
+  it('bounds the id list at what one summary can report, and says what the bound is', () => {
+    const ids = (n: number) => Array.from({ length: n }, (_, i) => i + 1).join(',');
+
+    expect(resolveOptions({ BIO_FILL_ALBUM_IDS: ids(INDETERMINATE_IDS_REPORT_CAP) }, []).albumIds).toHaveLength(200);
+    expect(() => resolveOptions({ BIO_FILL_ALBUM_IDS: ids(201) }, [])).toThrow(/at most 200/);
+  });
+
+  it('refuses an id list together with a cursor, which would silently drop the listed ids below it', () => {
+    const both = { BIO_FILL_ALBUM_IDS: '101,102', BIO_FILL_ALBUM_AFTER_ID: '101' };
+
+    expect(() => resolveOptions(both, [])).toThrow(/BIO_FILL_ALBUM_IDS.*BIO_FILL_ALBUM_AFTER_ID/);
+    expect(resolveOptions({ ...both, BIO_FILL_ALBUM_AFTER_ID: '0' }, []).albumIds).toEqual([101, 102]);
   });
 
   it('bounds the batch size at the LML client cap, and says what the cap is', () => {
@@ -155,6 +190,14 @@ describe('runFill — dry run', () => {
 
     await runFill(options);
 
-    expect(enumerateCohort).toHaveBeenCalledWith(25, 53799, options.readTimeoutMs);
+    expect(enumerateCohort).toHaveBeenCalledWith(25, 53799, options.readTimeoutMs, []);
+  });
+
+  it('enumerates only the listed ids when given a list, still under the cap', async () => {
+    const options = resolveOptions({ BIO_FILL_ALBUM_IDS: '102,7', BIO_FILL_MAX_ALBUMS: '25' }, []);
+
+    await runFill(options);
+
+    expect(enumerateCohort).toHaveBeenCalledWith(25, 0, options.readTimeoutMs, [7, 102]);
   });
 });

@@ -72,17 +72,22 @@ const nonNegativeInt = (value: number, name: string): number => {
 
 /**
  * Enumerate the drainable cohort above `afterAlbumId`, ordered by `album_id`.
- * `limit` 0 means no cap. Both are validated because they are interpolated.
+ * `limit` 0 means no cap. A non-empty `albumIds` narrows it to those albums
+ * (BS#2786): one more conjunct after the shared block, so a listed id is
+ * still subject to the cohort predicate and the eligibility conditions, and
+ * one that has a bio by now is simply not returned. Every argument is
+ * validated because it is interpolated.
  */
-export const enumerateCohortSql = (limit: number, afterAlbumId: number): string => {
+export const enumerateCohortSql = (limit: number, afterAlbumId: number, albumIds: readonly number[] = []): string => {
   const cap = nonNegativeInt(limit, 'limit');
   const cursor = nonNegativeInt(afterAlbumId, 'afterAlbumId');
+  const only = albumIds.map((id) => nonNegativeInt(id, 'albumIds'));
   return `SELECT am."album_id" AS album_id,
        l."legacy_release_id" AS legacy_release_id,
        ${ARTIST_NAME} AS artist_name,
        l."album_title" AS album_title
   ${eligibleFromWhereSql()}
-    AND am."album_id" > ${cursor}
+    AND am."album_id" > ${cursor}${only.length > 0 ? `\n    AND am."album_id" IN (${only.join(', ')})` : ''}
   ORDER BY am."album_id"${cap > 0 ? `\n  LIMIT ${cap}` : ''}`;
 };
 
@@ -115,9 +120,10 @@ export const countEligible = (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise
 export const enumerateCohort = async (
   limit: number,
   afterAlbumId: number,
-  timeoutMs: number = READ_TIMEOUT_DEFAULT
+  timeoutMs: number = READ_TIMEOUT_DEFAULT,
+  albumIds: readonly number[] = []
 ): Promise<FillCandidate[]> => {
-  const rows = await read<FillCandidate>(enumerateCohortSql(limit, afterAlbumId), timeoutMs);
+  const rows = await read<FillCandidate>(enumerateCohortSql(limit, afterAlbumId, albumIds), timeoutMs);
   return rows.map((r) => ({
     album_id: Number(r.album_id),
     legacy_release_id: Number(r.legacy_release_id),

@@ -11,7 +11,8 @@
  *   1. The predicate selects a row with a Discogs match and no bio, and is not
  *      fooled by the `''` synthetic-match sentinel in `discogs_url`.
  *   2. The enumeration returns the artist name the catalog export would, skips
- *      what it should, and honours the cursor and the cap.
+ *      what it should, and honours the cursor and the cap. Given an id list
+ *      (BS#2786) it returns only those ids, under the same conditions.
  *   3. The write is fill-null, touches two columns and `updated_at`, and is a
  *      no-op on any row that is not in the cohort at write time.
  *
@@ -147,6 +148,50 @@ describe('BS#2775 bio fill (REAL statements, real PG)', () => {
 
       const capped = await enumerateCohort(1, first - 1);
       expect(capped.map((c) => c.album_id)).toEqual([first]);
+    });
+
+    describe('with an id list (BS#2786)', () => {
+      /** `undefined` takes the default statement timeout; the list is the fourth argument. */
+      const enumerateIds = async (ids, limit = 0) =>
+        (await enumerateCohort(limit, 0, undefined, ids)).map((c) => c.album_id);
+
+      test('returns only the listed ids, in album_id order, whatever order they were given in', async () => {
+        const first = await seed('listed-a');
+        const unlisted = await seed('listed-unlisted');
+        const last = await seed('listed-b');
+
+        // No `enumerateOwn` filter: the list is the whole result, in a table
+        // that holds every other test's rows too.
+        expect(await enumerateIds([last, first])).toEqual([first, last]);
+        expect(await enumerateIds([unlisted])).toEqual([unlisted]);
+      });
+
+      test('gives a listed id no exemption from the cohort predicate or the eligibility conditions', async () => {
+        const eligible = await seed('listed-eligible');
+        const hasBio = await seed('listed-has-bio', { artist_bio: 'Already here.' });
+        const sentinel = await seed('listed-sentinel', { discogs_url: '' });
+        const unavailable = await seed('listed-unavailable', {}, { discogs_unavailable: true });
+        // An id no library row has: the largest value an `integer` holds.
+        const absent = 2147483647;
+
+        expect(await enumerateIds([eligible, hasBio, sentinel, unavailable, absent])).toEqual([eligible]);
+      });
+
+      test('drops a listed id once its bio is filled, so a retry cannot re-ask a settled row', async () => {
+        const id = await seed('listed-then-filled');
+        expect(await enumerateIds([id])).toEqual([id]);
+
+        await applyBioFill(id, FILL);
+
+        expect(await enumerateIds([id])).toEqual([]);
+      });
+
+      test('still applies the cap', async () => {
+        const first = await seed('listed-cap-a');
+        const second = await seed('listed-cap-b');
+
+        expect(await enumerateIds([first, second], 1)).toEqual([first]);
+      });
     });
   });
 

@@ -32,7 +32,8 @@
  * `stopped_early: false`, not a cohort near zero. It resumes by cursor
  * (`BIO_FILL_ALBUM_AFTER_ID`), and because a cursor walks past rows LML failed
  * to answer for, the summary reports `resume_after_album_id`: the last album
- * at or below which every row got a definitive verdict.
+ * at or below which every row got a definitive verdict. The rows it stopped
+ * at are listed, and `BIO_FILL_ALBUM_IDS` retries exactly that list.
  *
  * @see WXYC/Backend-Service#2775
  */
@@ -118,6 +119,42 @@ export const MAX_ALBUMS_DEFAULT = 0;
 export const ALBUM_AFTER_ID_ENV = 'BIO_FILL_ALBUM_AFTER_ID';
 export const ALBUM_AFTER_ID_DEFAULT = 0;
 
+/**
+ * Retry list (BS#2786): a comma-separated list of album ids. When set, only
+ * those albums are enumerated, still under the cohort predicate and the
+ * eligibility conditions. It is what consumes a summary's
+ * `indeterminate_album_ids`, so it holds at most as many ids as one summary
+ * reports. Not combinable with the cursor.
+ */
+export const ALBUM_IDS_ENV = 'BIO_FILL_ALBUM_IDS';
+
+/** `album_id` is a Postgres `integer`. */
+const ALBUM_ID_MAX = 2_147_483_647;
+
+/**
+ * Unset or blank is no list. Anything else is a list or an error, never a
+ * fallback: a typo read as "no list" would turn a three-album retry into a
+ * run over the whole cohort.
+ */
+const resolveAlbumIds = (raw: string | undefined): number[] => {
+  if (raw === undefined || raw.trim() === '') return [];
+  const invalid = (why: string): Error =>
+    new Error(`[${JOB_NAME}] Invalid ${ALBUM_IDS_ENV}=${JSON.stringify(raw)}: ${why}`);
+  const ids = raw.split(',').map((token) => {
+    const text = token.trim();
+    const id = Number(text);
+    if (!/^\d+$/.test(text) || id < 1 || id > ALBUM_ID_MAX) {
+      throw invalid(`${JSON.stringify(text)} is not an album id; expected comma-separated positive integers.`);
+    }
+    return id;
+  });
+  const distinct = [...new Set(ids)].sort((a, b) => a - b);
+  if (distinct.length > INDETERMINATE_IDS_REPORT_CAP) {
+    throw invalid(`at most ${INDETERMINATE_IDS_REPORT_CAP} ids per run, got ${distinct.length}.`);
+  }
+  return distinct;
+};
+
 /** Abort after this many consecutive batches that settled nothing: LML
  * answered for no album, or every write the batch attempted threw. Either LML
  * or the database is down, and carrying on only walks the run past rows it
@@ -149,6 +186,7 @@ export interface FillOptions {
   readTimeoutMs: number;
   maxAlbums: number;
   afterAlbumId: number;
+  albumIds: number[];
   maxConsecutiveFailedBatches: number;
   maxConsecutiveNoBioBatches: number;
   liveActivityLookbackSeconds: number;
@@ -160,13 +198,20 @@ export interface FillOptions {
 /** Dry-run is the DEFAULT. `--execute` is the only way to write. */
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): FillOptions => {
   const ctx = { context: JOB_NAME };
+  const afterAlbumId = requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, ALBUM_AFTER_ID_DEFAULT, ctx);
+  const albumIds = resolveAlbumIds(env[ALBUM_IDS_ENV]);
+  if (albumIds.length > 0 && afterAlbumId > 0) {
+    // A cursor would silently drop every listed id at or below it.
+    throw new Error(`[${JOB_NAME}] ${ALBUM_IDS_ENV} cannot be combined with a non-zero ${ALBUM_AFTER_ID_ENV}.`);
+  }
   return {
     batchSize: resolveBatchSize(env[BATCH_SIZE_ENV]),
     ratePerMin: requirePositiveInt(env[RATE_PER_MIN_ENV], RATE_PER_MIN_ENV, RATE_PER_MIN_DEFAULT, ctx),
     budgetMs: requirePositiveInt(env[BUDGET_MS_ENV], BUDGET_MS_ENV, BUDGET_MS_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     maxAlbums: requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, MAX_ALBUMS_DEFAULT, ctx),
-    afterAlbumId: requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, ALBUM_AFTER_ID_DEFAULT, ctx),
+    afterAlbumId,
+    albumIds,
     maxConsecutiveFailedBatches: requirePositiveInt(
       env[MAX_CONSECUTIVE_FAILED_BATCHES_ENV],
       MAX_CONSECUTIVE_FAILED_BATCHES_ENV,
@@ -399,8 +444,10 @@ export interface FillSummary extends VerdictTotals {
   last_album_id: number | null;
   /** Pass this as `BIO_FILL_ALBUM_AFTER_ID` to resume. Every enumerated row at
    * or below it was settled; it stops advancing at the first row LML did not
-   * answer for or whose write threw, so a resume never skips one. */
-  resume_after_album_id: number;
+   * answer for or whose write threw, so a resume never skips one. `null` on a
+   * `BIO_FILL_ALBUM_IDS` run: a cursor that walked a hand-picked list says
+   * nothing about the rows between its ids. */
+  resume_after_album_id: number | null;
   /** Up to `INDETERMINATE_IDS_REPORT_CAP` of the albums counted in
    * `indeterminate` or `write_failed`. */
   indeterminate_album_ids: number[];
@@ -453,12 +500,18 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     rate_per_min: options.ratePerMin,
     max_albums: options.maxAlbums,
     after_album_id: options.afterAlbumId,
+    album_ids: options.albumIds.length,
     execute: options.execute,
   });
 
   const cohortBefore = await countCohort(options.readTimeoutMs);
   const eligible = await countEligible(options.readTimeoutMs);
-  const candidates = await enumerateCohort(options.maxAlbums, options.afterAlbumId, options.readTimeoutMs);
+  const candidates = await enumerateCohort(
+    options.maxAlbums,
+    options.afterAlbumId,
+    options.readTimeoutMs,
+    options.albumIds
+  );
   const batches: FillCandidate[][] = [];
   for (let i = 0; i < candidates.length; i += options.batchSize) {
     batches.push(candidates.slice(i, i + options.batchSize));
@@ -473,7 +526,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     enumerated: candidates.length,
     batches: batches.length,
     last_album_id: null,
-    resume_after_album_id: options.afterAlbumId,
+    resume_after_album_id: options.albumIds.length > 0 ? null : options.afterAlbumId,
     indeterminate_album_ids: [],
     execute: options.execute,
     stopped_early: false,
@@ -556,7 +609,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     summary.indeterminate_album_ids.push(...indeterminateAlbumIds.slice(0, Math.max(0, room)));
     summary.last_album_id = batch[batch.length - 1].album_id;
     if (consecutiveNoBioBatches === 0) resumeBeforeNoBioStreak = summary.resume_after_album_id;
-    if (!resumeFrozen) {
+    if (!resumeFrozen && summary.resume_after_album_id !== null) {
       summary.resume_after_album_id = settledThrough(batch, indeterminateAlbumIds, summary.resume_after_album_id);
       resumeFrozen = indeterminateAlbumIds.length > 0;
     }
