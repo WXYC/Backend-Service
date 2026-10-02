@@ -181,13 +181,16 @@ export interface BatchResult {
   card_mismatch: number;
   no_bio: number;
   indeterminate: number;
-  /** Of `fill`: rows actually updated, and rows that had a bio by write time. */
+  /** Of `fill`: rows actually updated, rows that had a bio by write time, and
+   * rows whose UPDATE threw. The three sum to `fill`. */
   filled: number;
   skipped_raced: number;
+  write_failed: number;
   /** Of `indeterminate`: results that arrived out of input order. */
   unexpected_index: number;
-  /** The albums LML did not answer for, so a run can report exactly which
-   * rows a cursor resume would walk past. */
+  /** The albums to ask again: LML did not answer for them, or their write
+   * threw. A run reports these as exactly the rows a cursor resume would walk
+   * past, so its length is `indeterminate + write_failed`. */
   indeterminateAlbumIds: number[];
 }
 
@@ -201,6 +204,7 @@ export const emptyBatchResult = (batchSize: number): BatchResult => ({
   indeterminate: 0,
   filled: 0,
   skipped_raced: 0,
+  write_failed: 0,
   unexpected_index: 0,
   indeterminateAlbumIds: [],
 });
@@ -223,7 +227,9 @@ const buildBulkItems = (candidates: FillCandidate[]): BulkLookupItem[] =>
  * Never called on a dry run.
  *
  * Only `fill` writes. A thrown bulk call (timeout, 5xx, network), or a 2xx
- * with no `results` array, leaves the whole chunk indeterminate.
+ * with no `results` array, leaves the whole chunk indeterminate. A write that
+ * throws is counted `write_failed` for its own album and does not stop the
+ * chunk.
  * `allowReleaseResolutionFallback` is deliberately not passed: like every
  * offline drain this stays off LML's per-row live Discogs path (BS#1815), at
  * the cost of the albums only a release pin can resolve.
@@ -275,8 +281,21 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
         error_message: item?.message ?? null,
       });
     } else if (verdict.kind === 'fill') {
-      if (await applyBioFill(candidate.album_id, verdict.fill)) result.filled += 1;
-      else result.skipped_raced += 1;
+      try {
+        if (await applyBioFill(candidate.album_id, verdict.fill)) result.filled += 1;
+        else result.skipped_raced += 1;
+      } catch (err) {
+        // One row's database error (a reset connection, a lock wait) is not
+        // the run's. The album joins the retry list, which holds the resume
+        // cursor at it, and the loop moves on to the next album.
+        result.write_failed += 1;
+        result.indeterminateAlbumIds.push(candidate.album_id);
+        log('warn', 'write_failed', `UPDATE threw for album_id=${candidate.album_id}; not written`, {
+          album_id: candidate.album_id,
+          error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        });
+        captureError(err, 'write_failed', { album_id: candidate.album_id });
+      }
     }
   }
 
