@@ -95,7 +95,7 @@ Precondition: `LML_ARTIST_IDENTITY_SPLIT_GATE` is not set false on the LML servi
 1. **Build the image.** `deploy-manual.yml` with this job as the target. A one-shot job is built and pushed, never scheduled.
 2. **Dry run.** No flags. It makes zero LML calls. Check `cohortBefore` against the figure above and note `batches`.
 3. **Canary.** `--execute` with `BIO_FILL_MAX_ALBUMS=25`. Read the verdict totals: `untrusted` and `card_mismatch` are expected to be zero or close to it. Then read the 25 rows back and confirm that bios are present and every other column is unchanged.
-4. **The full cohort**, as a chain of bounded runs. At the defaults the cohort is about 2,600 batches at one a minute, which is 43 hours and not a window. Instead:
+4. **The full cohort**, as a chain of bounded runs. At the defaults the cohort is about 2,600 batches at one a minute, which is more than 43 hours and not a window. Instead:
 
    ```sh
    docker run --rm --stop-timeout 60 --env-file ~/.env \
@@ -107,7 +107,7 @@ Precondition: `LML_ARTIST_IDENTITY_SPLIT_GATE` is not set false on the LML servi
 
    `--stop-timeout` is not optional. `docker stop` sends SIGTERM and kills the container 10 seconds later by default, while the job stops only between batches and a batch in flight can take up to its bulk timeout: 5 seconds per album plus 5, so 30 seconds at the default batch size of 5. **The stop timeout must exceed the bulk timeout for the batch size in use**, or the kill lands mid-batch and the run ends with no `summary` line and no resume point. 60 covers the default with room for the writes; a batch size of 10 already needs more than 55.
 
-   That is 20 albums a minute, about two hours a run, six runs. LML measured 0.2 to 0.55 seconds per item for this cohort, so a batch is about 3 seconds of LML time in every 15. Keep `LIVE_ACTIVITY_MAX_PAUSE_MS` finite: `0` is uncapped and lets a run sit paused through a whole show.
+   The 15-second interval is slept after each batch finishes, so a cycle is the batch plus 15 seconds. LML measured 0.2 to 0.55 seconds per item for this cohort, so a batch is 1 to 3 seconds of LML time in every 16 to 18: about 17 to 19 albums a minute, two to two and a half hours a run before any live-DJ pause, six runs. Keep `LIVE_ACTIVITY_MAX_PAUSE_MS` finite: `0` is uncapped and lets a run sit paused through a whole show.
 
 5. **Report** the before and after counts and the verdict totals on BS#2775.
 
