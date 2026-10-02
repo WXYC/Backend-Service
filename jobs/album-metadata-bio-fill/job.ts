@@ -40,6 +40,7 @@ import {
   resolveLiveActivityPauseMs,
   LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
 } from '@wxyc/database';
+import { BULK_LOOKUP_INPUT_CAP } from '@wxyc/lml-client';
 import { READ_TIMEOUT_DEFAULT, countCohort, countEligible, enumerateCohort } from './cohort.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
@@ -48,9 +49,25 @@ const JOB_NAME = 'album-metadata-bio-fill';
 // -- Knobs -------------------------------------------------------------------
 
 /** Items per LML bulk request. 5 is the BS#1197 ceiling under live
- * `enrichment-worker` contention; LML hard-caps at 100. */
+ * `enrichment-worker` contention; LML hard-caps at `BULK_LOOKUP_INPUT_CAP`. */
 export const BATCH_SIZE_ENV = 'BIO_FILL_BULK_BATCH_SIZE';
 export const BATCH_SIZE_DEFAULT = 5;
+
+/**
+ * The batch size, refused above the LML client's cap. `bulkLookupMetadata`
+ * throws client-side past it, and a dry run never calls it, so without this
+ * an oversize value plans cleanly and then aborts the execute run as
+ * consecutive failed batches.
+ */
+const resolveBatchSize = (raw: string | undefined): number => {
+  const batchSize = requirePositiveInt(raw, BATCH_SIZE_ENV, BATCH_SIZE_DEFAULT, { context: JOB_NAME });
+  if (batchSize > BULK_LOOKUP_INPUT_CAP) {
+    throw new Error(
+      `[${JOB_NAME}] Invalid ${BATCH_SIZE_ENV}=${JSON.stringify(raw)}: must be at most ${BULK_LOOKUP_INPUT_CAP}, LML's per-request bulk cap.`
+    );
+  }
+  return batchSize;
+};
 
 /** Batches per minute. The default is the donor's conservative 5 albums/min;
  * the README sizes a real run. */
@@ -107,7 +124,7 @@ export interface FillOptions {
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): FillOptions => {
   const ctx = { context: JOB_NAME };
   return {
-    batchSize: requirePositiveInt(env[BATCH_SIZE_ENV], BATCH_SIZE_ENV, BATCH_SIZE_DEFAULT, ctx),
+    batchSize: resolveBatchSize(env[BATCH_SIZE_ENV]),
     ratePerMin: requirePositiveInt(env[RATE_PER_MIN_ENV], RATE_PER_MIN_ENV, RATE_PER_MIN_DEFAULT, ctx),
     budgetMs: requirePositiveInt(env[BUDGET_MS_ENV], BUDGET_MS_ENV, BUDGET_MS_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
