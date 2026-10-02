@@ -13,7 +13,10 @@
 
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 
-jest.mock('@wxyc/lml-client', () => ({ bulkLookupMetadata: jest.fn() }));
+jest.mock('@wxyc/lml-client', () => ({
+  ...jest.requireActual('@wxyc/lml-client'),
+  bulkLookupMetadata: jest.fn(),
+}));
 jest.mock('../../../../jobs/album-metadata-bio-fill/cohort', () => ({
   countCohort: jest.fn(),
   countEligible: jest.fn(),
@@ -21,7 +24,7 @@ jest.mock('../../../../jobs/album-metadata-bio-fill/cohort', () => ({
 }));
 
 import { db } from '@wxyc/database';
-import { bulkLookupMetadata as bulkLookupMetadataImport } from '@wxyc/lml-client';
+import { BULK_LOOKUP_INPUT_CAP, bulkLookupMetadata as bulkLookupMetadataImport } from '@wxyc/lml-client';
 import * as cohort from '../../../../jobs/album-metadata-bio-fill/cohort';
 import { resolveOptions, runFill } from '../../../../jobs/album-metadata-bio-fill/job';
 
@@ -88,12 +91,21 @@ describe('resolveOptions', () => {
   it.each([
     ['BIO_FILL_BULK_BATCH_SIZE', '0'],
     ['BIO_FILL_BULK_BATCH_SIZE', 'five'],
+    ['BIO_FILL_BULK_BATCH_SIZE', '101'],
     ['BIO_FILL_BULK_RATE_PER_MIN', '-1'],
     ['BIO_FILL_MAX_ALBUMS', '-25'],
     ['BIO_FILL_ALBUM_AFTER_ID', '1.5'],
     ['BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES', '0'],
   ])('rejects %s=%s instead of falling back to a default', (name, value) => {
     expect(() => resolveOptions({ [name]: value }, [])).toThrow(name);
+  });
+
+  it('bounds the batch size at the LML client cap, and says what the cap is', () => {
+    // `bulkLookupMetadata` throws client-side above the cap. A dry run never
+    // calls it, so an oversize batch would plan cleanly and then abort the
+    // execute run as consecutive failed batches.
+    expect(resolveOptions({ BIO_FILL_BULK_BATCH_SIZE: String(BULK_LOOKUP_INPUT_CAP) }, []).batchSize).toBe(100);
+    expect(() => resolveOptions({ BIO_FILL_BULK_BATCH_SIZE: '500' }, [])).toThrow(/at most 100/);
   });
 });
 
