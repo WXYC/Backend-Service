@@ -13,6 +13,7 @@ import {
   assertSafeExpression,
   collectSqlClaims,
   createClaimRole,
+  runThenCleanUp,
   evaluateClaim,
   scramSha256Verifier,
   mentionsSqlClaim,
@@ -421,50 +422,126 @@ describe('scramSha256Verifier — the password never reaches SQL in cleartext (r
 });
 
 describe('createClaimRole — a per-run role, never a cleartext password in SQL (round 3)', () => {
-  type Call = string;
+  // `pool` is the handle passed in; `reserved` is the single connection
+  // `reserve()` hands out, the only place the role DDL may run.
+  type Call = { on: 'pool' | 'reserved'; q: string };
   const fakeSql = (rolsuper: boolean, createError?: Error) => {
     const calls: Call[] = [];
-    const run = (q: string) => {
-      calls.push(q);
+    const run = (on: Call['on']) => (q: string) => {
+      calls.push({ on, q });
       if (q.startsWith('CREATE ROLE') && createError) return Promise.reject(createError);
       return Promise.resolve(q.includes('rolsuper') ? [{ rolsuper }] : []);
     };
-    const tx = { unsafe: run };
-    return {
-      calls,
-      unsafe: run,
-      begin: (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
-    };
+    const release = jest.fn();
+    const reserve = jest.fn(() => Promise.resolve({ unsafe: run('reserved'), release }));
+    const on = (handle: Call['on']) => calls.filter((c) => c.on === handle).map(({ q }) => q);
+    return { calls, on, unsafe: run('pool'), reserve, release };
   };
 
-  it('creates a uniquely named non-superuser LOGIN role from a SCRAM verifier, with statement logging off', async () => {
+  // Written out here, not read from the module, so dropping a setting from
+  // the module fails this test instead of quietly shrinking it.
+  const QUIET_BATCH =
+    "SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'; " +
+    'SET LOCAL log_min_duration_statement = -1; SET LOCAL log_min_duration_sample = -1; ' +
+    "SET LOCAL track_activities = off; SET LOCAL pg_stat_statements.track = 'none'; " +
+    'SET LOCAL debug_print_parse = off; SET LOCAL debug_print_rewritten = off; SET LOCAL debug_print_plan = off';
+
+  it('creates a uniquely named non-superuser LOGIN role from a SCRAM verifier', async () => {
     const sql = fakeSql(true);
     const a = await createClaimRole(sql);
     const b = await createClaimRole(fakeSql(true));
     expect(a.user).toMatch(/^wxyc_sql_claim_\d{10}_[0-9a-f]{16}$/);
     expect(b.user).not.toBe(a.user);
-    const create = sql.calls.find((q) => q.startsWith('CREATE ROLE'));
-    expect(create).toMatch(
+    const create = sql.calls.find(({ q }) => q.startsWith('CREATE ROLE'));
+    expect(create?.q).toMatch(
       new RegExp(
         `^CREATE ROLE ${a.user} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'SCRAM-SHA-256\\$4096:[^']+'$`
       )
     );
-    expect(sql.calls.join('\n')).not.toContain(a.password);
-    expect(sql.calls).toContain(
-      "SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'; " +
-        'SET LOCAL log_min_duration_statement = -1; SET LOCAL log_min_duration_sample = -1; ' +
-        'SET LOCAL log_transaction_sample_rate = 0'
-    );
+    expect(sql.calls.map(({ q }) => q).join('\n')).not.toContain(a.password);
   });
 
-  it('refuses up front, and says why, when the DB user is not a superuser', async () => {
+  it('switches every sink off BEFORE the CREATE ROLE, each as its own statement on one reserved connection', async () => {
+    const sql = fakeSql(true);
+    await createClaimRole(sql);
+    expect(sql.reserve).toHaveBeenCalledTimes(1);
+    const reserved = sql.on('reserved');
+    // Transaction sampling is decided at BEGIN, so that one setting goes out
+    // at session level ahead of it; the rest are SET LOCAL inside.
+    expect(reserved.slice(0, 3)).toEqual(['SET log_transaction_sample_rate = 0', 'BEGIN', QUIET_BATCH]);
+    expect(reserved[3]).toMatch(/^CREATE ROLE /);
+    expect(reserved.slice(4)).toEqual(['COMMIT', 'RESET log_transaction_sample_rate']);
+    expect(sql.release).toHaveBeenCalledTimes(1);
+    // Nothing but the superuser probe may go out on the pool: another
+    // connection has none of the settings, so a CREATE ROLE there is logged.
+    expect(sql.on('pool')).toEqual(['SELECT rolsuper FROM pg_roles WHERE rolname = current_user']);
+  });
+
+  it('does not set debug_print_raw_parse, which is unknown on 18.x and would abort the transaction', async () => {
+    const sql = fakeSql(true);
+    await createClaimRole(sql);
+    expect(sql.calls.map(({ q }) => q).join('\n')).not.toContain('debug_print_raw_parse');
+  });
+
+  it('refuses up front, naming the rolsuper check, when the DB user is not a superuser', async () => {
     const sql = fakeSql(false);
-    await expect(createClaimRole(sql)).rejects.toThrow(/must be a superuser.*log_statement/s);
-    expect(sql.calls.some((q) => q.startsWith('CREATE ROLE'))).toBe(false);
+    const message = await createClaimRole(sql).then(
+      () => 'resolved',
+      (e: Error) => e.message
+    );
+    expect(message).toMatch(/must be a superuser.*rolsuper/s);
+    expect(message).not.toMatch(/42501|only a superuser|superuser-context/);
+    expect(sql.reserve).not.toHaveBeenCalled();
+    expect(sql.calls.some(({ q }) => q.startsWith('CREATE ROLE'))).toBe(false);
   });
 
-  it('rewrites a 42501 from CREATE ROLE into the same setup message', async () => {
+  it('passes a 42501 from CREATE ROLE through unchanged: the user is already known to be a superuser', async () => {
     const denied = Object.assign(new Error('permission denied to create role'), { code: '42501' });
-    await expect(createClaimRole(fakeSql(true, denied))).rejects.toThrow(/must be a superuser/);
+    const sql = fakeSql(true, denied);
+    await expect(createClaimRole(sql)).rejects.toBe(denied);
+    expect(denied.message).toBe('permission denied to create role');
+    // The failed transaction is rolled back, the session setting restored and
+    // the connection handed back, so the caller's pool is left as it was.
+    expect(sql.on('reserved').slice(4)).toEqual(['ROLLBACK', 'RESET log_transaction_sample_rate']);
+    expect(sql.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runThenCleanUp — every cleanup step runs, and the first failure is the one reported', () => {
+  const boom = (label: string) => new Error(label);
+  const cases: Array<[string, { body?: string; steps: Array<string | null> }, string | null]> = [
+    ['body and steps succeed', { steps: [null, null] }, null],
+    ['the body fails and so does a step', { body: 'body', steps: ['step 1', null] }, 'body'],
+    ['the first step fails', { steps: ['step 1', null] }, 'step 1'],
+    ['both steps fail', { steps: ['step 1', 'step 2'] }, 'step 1'],
+  ];
+
+  it.each(cases)('%s', async (_label, { body, steps }, expected) => {
+    const ran: number[] = [];
+    const run = runThenCleanUp(
+      () => (body ? Promise.reject(boom(body)) : Promise.resolve('result')),
+      steps.map((failure, i) => () => {
+        ran.push(i);
+        return failure ? Promise.reject(boom(failure)) : Promise.resolve();
+      })
+    );
+    if (expected === null) await expect(run).resolves.toBe('result');
+    else await expect(run).rejects.toThrow(expected);
+    expect(ran).toEqual(steps.map((_, i) => i));
+  });
+
+  it('runs a step that throws synchronously like one that rejects', async () => {
+    const second = jest.fn();
+    const run = runThenCleanUp(
+      () => 'result',
+      [
+        () => {
+          throw boom('sync');
+        },
+        second,
+      ]
+    );
+    await expect(run).rejects.toThrow('sync');
+    expect(second).toHaveBeenCalledTimes(1);
   });
 });
