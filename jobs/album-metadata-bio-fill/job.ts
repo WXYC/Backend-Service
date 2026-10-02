@@ -41,7 +41,12 @@ import {
   resolveLiveActivityPauseMs,
   LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
 } from '@wxyc/database';
-import { BULK_LOOKUP_INPUT_CAP, bulkLookupMetadata, type BulkLookupItem } from '@wxyc/lml-client';
+import {
+  BULK_LOOKUP_INPUT_CAP,
+  bulkLookupMetadata,
+  type BulkLookupItem,
+  type BulkLookupResultItem,
+} from '@wxyc/lml-client';
 import * as Sentry from '@sentry/node';
 import {
   READ_TIMEOUT_DEFAULT,
@@ -217,30 +222,35 @@ const buildBulkItems = (candidates: FillCandidate[]): BulkLookupItem[] =>
  * Resolve one chunk through LML and write the bio for each `fill` verdict.
  * Never called on a dry run.
  *
- * Only `fill` writes. A thrown bulk call (timeout, 5xx, network) leaves the
- * whole chunk indeterminate. `allowReleaseResolutionFallback` is deliberately
- * not passed: like every offline drain this stays off LML's per-row live
- * Discogs path (BS#1815), at the cost of the albums only a release pin can
- * resolve.
+ * Only `fill` writes. A thrown bulk call (timeout, 5xx, network), or a 2xx
+ * with no `results` array, leaves the whole chunk indeterminate.
+ * `allowReleaseResolutionFallback` is deliberately not passed: like every
+ * offline drain this stays off LML's per-row live Discogs path (BS#1815), at
+ * the cost of the albums only a release pin can resolve.
  */
 export const runBatch = async (candidates: FillCandidate[], options: { budgetMs: number }): Promise<BatchResult> => {
   const result = emptyBatchResult(candidates.length);
   if (candidates.length === 0) return result;
 
-  let response: Awaited<ReturnType<typeof bulkLookupMetadata>>;
+  let results: BulkLookupResultItem[];
   try {
-    response = await bulkLookupMetadata(buildBulkItems(candidates), {
+    const response: { results?: unknown } | null = await bulkLookupMetadata(buildBulkItems(candidates), {
       caller: JOB_NAME,
       budgetMs: options.budgetMs,
       timeoutMs: computeBulkTimeoutMs(candidates.length),
     });
+    // The client types `results` as an array but does not check it. A 2xx
+    // whose body is not the bulk shape is no answer for any album, so it
+    // takes the same path as a thrown call instead of failing the read below.
+    if (!Array.isArray(response?.results)) throw new Error('LML bulk response carried no results array');
+    results = response.results as BulkLookupResultItem[];
   } catch (err) {
     const extra = {
       size: candidates.length,
       first_album_id: candidates[0]?.album_id ?? null,
       last_album_id: candidates[candidates.length - 1]?.album_id ?? null,
     };
-    log('warn', 'lml_batch_failed', 'bulkLookupMetadata threw; whole batch left unwritten', {
+    log('warn', 'lml_batch_failed', 'no usable bulk response; whole batch left unwritten', {
       ...extra,
       error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
@@ -251,7 +261,7 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
   }
 
   for (const [position, candidate] of candidates.entries()) {
-    const item = response.results[position];
+    const item = results[position];
     const verdict = decideBioFill(candidate, item, position);
     result[verdict.kind] += 1;
 
