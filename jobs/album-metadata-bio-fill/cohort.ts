@@ -1,0 +1,127 @@
+/**
+ * Every statement the bio fill issues (BS#2775).
+ *
+ * Kept apart from `job.ts` so it can be a second tsup entry emitting CommonJS:
+ * the integration spec `require`s `dist/cohort.cjs` and runs these statements
+ * against real Postgres, rather than testing a hand-copied SQL mirror (the
+ * `jobs/station-signup-review` pattern).
+ *
+ * Each statement is built by a pure `*Sql` function returning text, so the
+ * unit suite can pin its shape without a database; the async wrappers below
+ * only add the transaction and `statement_timeout`.
+ */
+
+import { sql } from 'drizzle-orm';
+import { db } from '@wxyc/database';
+
+/** Statement timeout for the counts and the enumeration scan. */
+export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
+
+// Schema-qualified via `WXYC_SCHEMA_NAME`, never a hardcoded `wxyc_schema.`,
+// so the integration tier's per-worker schema is the one these read.
+const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
+const table = (name: string): string => `"${SCHEMA}"."${name}"`;
+
+/**
+ * A row that needs a bio, as ONE definition: it carries a real Discogs match
+ * and has no `artist_bio`. Reused verbatim by the counts, the enumeration and
+ * the UPDATE's WHERE so they can never describe different populations.
+ *
+ * The `nullif` is load-bearing. The enrichment worker persists `''` in
+ * `discogs_url` as its synthetic-match sentinel (BS#1628), and a synthetic
+ * match has no Discogs identity to hang a bio on.
+ */
+export const cohortPredicateSql = (alias = ''): string => {
+  const q = (col: string) => (alias ? `${alias}."${col}"` : `"${col}"`);
+  return `nullif(${q('discogs_url')}, '') IS NOT NULL\n       AND ${q('artist_bio')} IS NULL`;
+};
+
+export const countCohortSql = (): string =>
+  `SELECT count(*)::int AS n FROM ${table('album_metadata')} WHERE ${cohortPredicateSql()}`;
+
+/**
+ * The artist name sent to LML. `library.artist_name` first, then `artists` —
+ * the catalog export's order, NOT `streaming-columns-drain`'s. `library.db` is
+ * built from that export, so sending the same string keeps LML's
+ * request-artist-to-row-artist hop from failing its floor on a row where the
+ * two columns differ.
+ */
+const ARTIST_NAME = `COALESCE(l."artist_name", a."artist_name")`;
+
+/**
+ * The drainable subset, as one FROM/WHERE shared by the eligible-count and the
+ * enumeration. Drops rows with no usable artist name (`String(null)` would be
+ * POSTed as the literal "null") and albums a music director has marked as not
+ * on Discogs (BS#1294), which are a guaranteed no-match.
+ */
+const eligibleFromWhereSql = (): string => `FROM ${table('album_metadata')} am
+  JOIN ${table('library')} l ON l."id" = am."album_id"
+  LEFT JOIN ${table('artists')} a ON l."artist_id" = a."id"
+  WHERE ${cohortPredicateSql('am')}
+    AND ${ARTIST_NAME} IS NOT NULL
+    AND l."discogs_unavailable" = false`;
+
+export const countEligibleSql = (): string => `SELECT count(*)::int AS n ${eligibleFromWhereSql()}`;
+
+const nonNegativeInt = (value: number, name: string): number => {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`album-metadata-bio-fill: ${name} must be a non-negative integer, got ${String(value)}`);
+  }
+  return value;
+};
+
+/**
+ * Enumerate the drainable cohort above `afterAlbumId`, ordered by `album_id`.
+ * `limit` 0 means no cap. Both are validated because they are interpolated.
+ */
+export const enumerateCohortSql = (limit: number, afterAlbumId: number): string => {
+  const cap = nonNegativeInt(limit, 'limit');
+  const cursor = nonNegativeInt(afterAlbumId, 'afterAlbumId');
+  return `SELECT am."album_id" AS album_id,
+       l."legacy_release_id" AS legacy_release_id,
+       ${ARTIST_NAME} AS artist_name,
+       l."album_title" AS album_title
+  ${eligibleFromWhereSql()}
+    AND am."album_id" > ${cursor}
+  ORDER BY am."album_id"${cap > 0 ? `\n  LIMIT ${cap}` : ''}`;
+};
+
+export interface FillCandidate {
+  album_id: number;
+  /** The catalog card id — the id space LML's `library_item.id` lives in. */
+  legacy_release_id: number;
+  artist_name: string;
+  album_title: string;
+}
+
+/** Run one read inside a transaction so `SET LOCAL statement_timeout` scopes. */
+const read = async <Row>(statement: string, timeoutMs: number): Promise<Row[]> =>
+  await db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${nonNegativeInt(timeoutMs, 'timeoutMs')}ms'`));
+    return (await tx.execute(sql.raw(statement))) as unknown as Row[];
+  });
+
+const countOf = async (statement: string, timeoutMs: number): Promise<number> =>
+  Number((await read<{ n: number }>(statement, timeoutMs))[0]?.n ?? 0);
+
+/** Every bio-less Discogs-matched row, drainable or not. */
+export const countCohort = (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<number> =>
+  countOf(countCohortSql(), timeoutMs);
+
+/** The drainable subset, ignoring the cap and the cursor. */
+export const countEligible = (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<number> =>
+  countOf(countEligibleSql(), timeoutMs);
+
+export const enumerateCohort = async (
+  limit: number,
+  afterAlbumId: number,
+  timeoutMs: number = READ_TIMEOUT_DEFAULT
+): Promise<FillCandidate[]> => {
+  const rows = await read<FillCandidate>(enumerateCohortSql(limit, afterAlbumId), timeoutMs);
+  return rows.map((r) => ({
+    album_id: Number(r.album_id),
+    legacy_release_id: Number(r.legacy_release_id),
+    artist_name: String(r.artist_name),
+    album_title: String(r.album_title),
+  }));
+};
