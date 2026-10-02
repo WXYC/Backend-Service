@@ -53,6 +53,7 @@ jest.mock('../../../../jobs/album-metadata-bio-fill/cohort', () => ({
 import { LiveActivityPauseCeilingExceededError } from '@wxyc/database';
 import { bulkLookupMetadata as bulkLookupMetadataImport } from '@wxyc/lml-client';
 import * as cohort from '../../../../jobs/album-metadata-bio-fill/cohort';
+import * as logger from '../../../../jobs/album-metadata-bio-fill/logger';
 import {
   ConsecutiveFailedBatchesError,
   INDETERMINATE_IDS_REPORT_CAP,
@@ -68,6 +69,7 @@ const countEligible = cohort.countEligible as unknown as jest.Mock;
 const enumerateCohort = cohort.enumerateCohort as unknown as jest.Mock;
 const applyBioFill = cohort.applyBioFill as unknown as jest.Mock;
 const analyzeAlbumMetadata = cohort.analyzeAlbumMetadata as unknown as jest.Mock;
+const log = jest.spyOn(logger, 'log');
 
 const OPTIONS: FillOptions = {
   batchSize: 2,
@@ -87,14 +89,16 @@ const OPTIONS: FillOptions = {
 const albums = (...ids: number[]) =>
   ids.map((id) => ({ album_id: id, legacy_release_id: id + 1000, artist_name: 'Juana Molina', album_title: 'DOGA' }));
 
-type Outcome = 'fill' | 'no_match' | 'shed';
+/** `write_fails` is a `fill` from LML whose UPDATE then throws. */
+type Outcome = 'fill' | 'no_match' | 'shed' | 'write_fails';
+type Outcomes = Record<number, Outcome | 'throw'>;
 
 /**
  * Script LML's answers by album id. Each bulk call is answered from the
  * `artist`/`album` items it was sent, in order, so the script survives any
  * batching. An album with no entry gets a `fill`.
  */
-const scriptLml = (outcomes: Record<number, Outcome | 'throw'> = {}, enumerated: number[]) => {
+const scriptLml = (outcomes: Outcomes = {}, enumerated: number[]) => {
   let cursor = 0;
   bulkLookupMetadata.mockImplementation((items: unknown) => {
     const ids = enumerated.slice(cursor, cursor + (items as unknown[]).length);
@@ -123,11 +127,20 @@ const scriptLml = (outcomes: Record<number, Outcome | 'throw'> = {}, enumerated:
   });
 };
 
-const run = (ids: number[], outcomes: Record<number, Outcome | 'throw'> = {}, options: Partial<FillOptions> = {}) => {
+const run = (ids: number[], outcomes: Outcomes = {}, options: Partial<FillOptions> = {}) => {
   enumerateCohort.mockResolvedValue(albums(...ids) as never);
   scriptLml(outcomes, ids);
+  applyBioFill.mockImplementation((albumId: unknown) =>
+    outcomes[albumId as number] === 'write_fails'
+      ? Promise.reject(new Error('write CONNECTION_CLOSED'))
+      : Promise.resolve(true)
+  );
   return runFill({ ...OPTIONS, ...options });
 };
+
+/** The fields of the `summary` line an aborted run logs before it rethrows. */
+const loggedSummary = (): Record<string, unknown> | undefined =>
+  log.mock.calls.find(([, step]) => step === 'summary')?.[3];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -136,7 +149,6 @@ beforeEach(() => {
   waitForQuietPeriod.mockResolvedValue(false);
   countCohort.mockResolvedValueOnce(100 as never).mockResolvedValue(96 as never);
   countEligible.mockResolvedValue(98 as never);
-  applyBioFill.mockResolvedValue(true as never);
 });
 
 describe('runFill — a completed run', () => {
@@ -159,6 +171,13 @@ describe('runFill — a completed run', () => {
       resume_after_album_id: 5,
       indeterminate_album_ids: [],
     });
+  });
+
+  it('totals a write that threw as write_failed and carries on, without calling it a fill that landed', async () => {
+    const summary = await run([1, 2, 3, 4], { 2: 'write_fails' });
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(2);
+    expect(summary).toMatchObject({ stopped_early: false, fill: 4, filled: 3, write_failed: 1, indeterminate: 0 });
   });
 
   it('runs ANALYZE after a run that wrote, and not after one that did not', async () => {
@@ -188,6 +207,10 @@ describe('runFill — the resume point', () => {
     ['stays at the previous batch when a batch opens with a shed', [1, 2, 3, 4], { 3: 'shed' }, 2, [3]],
     ['never advances again once it has stopped', [1, 2, 3, 4, 5, 6], { 2: 'shed', 5: 'shed' }, 1, [2, 5]],
     ['stays at the previous batch when a whole bulk call throws', [1, 2, 3, 4, 5, 6], { 3: 'throw' }, 2, [3, 4]],
+    // A row whose write threw is not settled either. LML answered for it, but
+    // walking the cursor past it would leave it bio-less with nobody asking.
+    ['stops just before a row whose write threw', [1, 2, 3, 4, 5, 6], { 4: 'write_fails' }, 3, [4]],
+    ['lists unanswered rows and failed writes together', [1, 2, 3, 4], { 2: 'write_fails', 3: 'shed' }, 1, [2, 3]],
   ] as const)('%s', async (_label, ids, outcomes, resume, indeterminateIds) => {
     const summary = await run([...ids], outcomes);
 
@@ -258,23 +281,49 @@ describe('runFill — ending early', () => {
   });
 });
 
-describe('runFill — LML is not answering', () => {
-  it('aborts after N consecutive batches with no answer at all, without asking for the rest', async () => {
-    const outcomes = { 1: 'shed', 2: 'shed', 3: 'throw' } as const;
+describe('runFill — batches that settle nothing', () => {
+  it.each([
+    ['LML answers for no album', { 1: 'shed', 2: 'shed', 3: 'throw' }],
+    // A dead database must end the run the same way a dead LML does: through
+    // the accounting, after N batches, not by failing every write to the end.
+    ['every write throws', { 1: 'write_fails', 2: 'write_fails', 3: 'write_fails', 4: 'write_fails' }],
+    ['every album is unanswered or its write throws', { 1: 'shed', 2: 'write_fails', 3: 'write_fails', 4: 'shed' }],
+    // The usual shape of a dead database: LML keeps returning its ordinary mix
+    // of verdicts, and no write the batch attempts lands.
+    [
+      'every write throws beside albums with nothing to write',
+      { 1: 'no_match', 2: 'write_fails', 3: 'write_fails', 4: 'no_match' },
+    ],
+  ] as const)(
+    'aborts after N consecutive batches in which %s, without asking for the rest',
+    async (_label, outcomes) => {
+      await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveFailedBatches: 2 })).rejects.toBeInstanceOf(
+        ConsecutiveFailedBatchesError
+      );
 
-    await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveFailedBatches: 2 })).rejects.toBeInstanceOf(
-      ConsecutiveFailedBatchesError
-    );
+      // Batches three and four are never sent: carrying on would only walk the
+      // cursor through rows the run cannot settle.
+      expect(bulkLookupMetadata).toHaveBeenCalledTimes(2);
+      expect(countCohort).toHaveBeenCalledTimes(2);
+      expect(loggedSummary()).toMatchObject({ stopped_early: true, filled: 0 });
+    }
+  );
 
-    // Batches three and four are never sent: carrying on would only walk the
-    // cursor through rows LML cannot process.
-    expect(bulkLookupMetadata).toHaveBeenCalledTimes(2);
-    expect(countCohort).toHaveBeenCalledTimes(2);
+  it('names both causes in the abort, since the counter cannot tell which it was', () => {
+    const { message } = new ConsecutiveFailedBatchesError(3);
+
+    expect(message).toMatch(/LML/);
+    expect(message).toMatch(/write/);
   });
 
   it.each([
-    ['a fully answered batch in between', { 1: 'shed', 2: 'shed', 5: 'shed', 6: 'shed' }],
-    ['a batch with even one answer in between', { 1: 'shed', 2: 'shed', 3: 'shed', 5: 'shed', 6: 'shed' }],
+    ['a fully answered batch', { 1: 'shed', 2: 'shed', 5: 'shed', 6: 'shed' }],
+    ['a batch with even one answer', { 1: 'shed', 2: 'shed', 3: 'shed', 5: 'shed', 6: 'shed' }],
+    [
+      'a batch in which one write landed beside one that threw',
+      { 1: 'shed', 2: 'shed', 3: 'write_fails', 5: 'shed', 6: 'shed' },
+    ],
+    ['a batch with nothing to write', { 1: 'shed', 2: 'shed', 3: 'no_match', 4: 'no_match', 5: 'shed', 6: 'shed' }],
   ] as const)('does not abort when the failures are separated by %s', async (_label, outcomes) => {
     const summary = await run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveFailedBatches: 2 });
 

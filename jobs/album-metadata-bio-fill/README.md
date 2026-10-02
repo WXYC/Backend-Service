@@ -43,6 +43,8 @@ Each album gets exactly one verdict (`decide.ts`), and only `fill` writes.
 | `card_mismatch` | LML resolved a different catalog card                                       | yes                           |
 | `indeterminate` | LML did not answer: a shed, an error, an out-of-order result, a thrown call | yes — and must be asked again |
 
+A `fill` then ends one of three ways, each with its own counter: `filled`, `skipped_raced` (the row had a bio by write time), or `write_failed` (the UPDATE threw). A failed write does not stop the run. The row is logged, listed for retry beside the indeterminate ones, and holds the resume cursor exactly as an unanswered row does.
+
 `no_bio` is not a stable verdict. A breaker shed on LML's artist-details step returns a match with a null bio, which looks identical from here. A later run recovers it.
 
 ## Reading a run
@@ -51,12 +53,12 @@ Because only `fill` leaves the cohort, this job differs from `streaming-columns-
 
 - **"Done" is `stopped_early: false`.** The cohort does not approach zero. `cohortBefore - cohortAfter` is the number of fills and nothing else. Expect roughly 5,000 rows to remain.
 - **Resume by cursor, not by re-running.** A re-run with no cursor re-asks the whole residue. Set `BIO_FILL_ALBUM_AFTER_ID` to the previous run's `resume_after_album_id`.
-- **`resume_after_album_id` is the safe cursor.** It is the last album at or below which every row got a definitive verdict, and it stops advancing at the first indeterminate row. Resuming from `last_album_id` instead would skip every album LML failed to answer for. `indeterminate_album_ids` lists up to 200 of them; `indeterminate` is always the exact count.
+- **`resume_after_album_id` is the safe cursor.** It is the last album at or below which every row was settled, and it stops advancing at the first row that was not: one LML did not answer for (`indeterminate`) or one whose write threw (`write_failed`). Resuming from `last_album_id` instead would skip every such album. `indeterminate_album_ids` lists up to 200 of them, both kinds together; `indeterminate` and `write_failed` are always the exact counts.
 
 A run exits non-zero, after logging a `summary` line with its partial totals and resume point, when:
 
 - the cumulative live-DJ pause exceeds `LIVE_ACTIVITY_MAX_PAUSE_MS` (resume later from the logged cursor), or
-- `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES` batches in a row got no answer at all (LML is down; fix that first).
+- `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES` batches in a row settled nothing: LML answered for no album in them, or every write they attempted threw. Either LML or the database is down. The `lml_batch_failed` and `lml_indeterminate` lines point at LML and the `write_failed` lines at the database; fix that first.
 
 SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0.
 
@@ -70,7 +72,7 @@ SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` an
 | `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                       |
 | `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                   |
 | `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | resume cursor: only albums above this id                                   |
-| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many unanswered batches in a row                          |
+| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that settled nothing                |
 | `LIVE_ACTIVITY_LOOKBACK_SECONDS`                       | 300     | a flowsheet track newer than this means a DJ is live; 0 disables the pause |
 | `LIVE_ACTIVITY_PAUSE_MS`, `LIVE_ACTIVITY_MAX_PAUSE_MS` | shared  | see `docs/env-vars.md`                                                     |
 
