@@ -2,6 +2,7 @@ const { randomBytes } = require('crypto');
 const path = require('path');
 const postgres = require('postgres');
 const {
+  ROLE_DDL_QUIET_BATCH,
   claimConnectionOptions,
   collectSqlClaims,
   createClaimRole,
@@ -9,6 +10,7 @@ const {
   dropStaleClaimRoles,
   evaluateClaim,
   evaluateWithoutLexicalCheck,
+  runThenCleanUp,
 } = require('../utils/sql-claims');
 
 /**
@@ -81,12 +83,13 @@ beforeAll(async () => {
   sql = postgres(claimConnectionOptions(connectionBase, credentials));
 });
 afterAll(async () => {
-  // The claim pool must end before its role can be dropped.
-  if (sql) await sql.end();
-  if (plain) {
-    if (credentials) await dropClaimRole(plain, credentials.user);
-    await plain.end();
-  }
+  // The claim pool must end before its role can be dropped. Each step runs
+  // even if an earlier one failed, so a rejecting end() cannot strand the role.
+  await runThenCleanUp(() => {}, [
+    () => sql && sql.end(),
+    () => plain && credentials && dropClaimRole(plain, credentials.user),
+    () => plain && plain.end(),
+  ]);
 });
 
 describe('docs/**/*.md sql-claim blocks', () => {
@@ -166,12 +169,10 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
     const other = await createClaimRole(plain);
     expect(other.user).not.toBe(credentials.user);
     const conn = postgres(claimConnectionOptions(connectionBase, other));
-    try {
-      await expect(evaluateClaim(conn, "to_tsquery('simple', 'a')")).resolves.toBe("'a'");
-    } finally {
-      await conn.end();
-      await dropClaimRole(plain, other.user);
-    }
+    await runThenCleanUp(
+      () => expect(evaluateClaim(conn, "to_tsquery('simple', 'a')")).resolves.toBe("'a'"),
+      [() => conn.end(), () => dropClaimRole(plain, other.user)]
+    );
     const names = (await plain`SELECT rolname FROM pg_roles WHERE rolname IN (${other.user}, ${credentials.user})`).map(
       (r) => r.rolname
     );
@@ -187,7 +188,7 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
     // A just-created role with no session yet: another run between
     // createClaimRole and its first connection. Too young to be touched.
     const fresh = await createClaimRole(plain);
-    try {
+    await runThenCleanUp(async () => {
       const found = await dropStaleClaimRoles(plain);
       expect(found).not.toContain(credentials.user);
       expect(found).not.toContain(fresh.user);
@@ -195,9 +196,40 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
         await plain`SELECT rolname FROM pg_roles WHERE rolname IN (${orphan}, ${credentials.user}, ${fresh.user})`
       ).map((r) => r.rolname);
       expect(names.sort()).toEqual([credentials.user, fresh.user].sort());
-    } finally {
-      await dropClaimRole(plain, fresh.user);
-    }
+    }, [() => dropClaimRole(plain, fresh.user)]);
+  });
+
+  test('the role-DDL quiet batch is accepted by this server and every setting takes effect', async () => {
+    // Listed here, not read from the module, so dropping a setting there
+    // fails this test. A Postgres upgrade that removes or renames one of
+    // these fails here by name instead of inside createClaimRole's setup.
+    const expected = {
+      debug_print_parse: 'off',
+      debug_print_plan: 'off',
+      debug_print_rewritten: 'off',
+      log_min_duration_sample: '-1',
+      log_min_duration_statement: '-1',
+      log_min_error_statement: 'panic',
+      log_statement: 'none',
+      'pg_stat_statements.track': 'none',
+      track_activities: 'off',
+    };
+    const read = async (conn) => {
+      const values = {};
+      for (const name of Object.keys(expected)) {
+        const [row] = await conn`SELECT current_setting(${name}, true) AS value`;
+        values[name] = row.value;
+      }
+      return values;
+    };
+    let inside;
+    const probe = plain.begin(async (tx) => {
+      await tx.unsafe(ROLE_DDL_QUIET_BATCH);
+      inside = await read(tx);
+      throw PROBE_ROLLBACK;
+    });
+    await expect(probe).rejects.toBe(PROBE_ROLLBACK);
+    expect(inside).toEqual(expected);
   });
 
   test('the claim connection logs in as the claim role, which is not a superuser', async () => {
@@ -231,17 +263,19 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
   test('RESIDUAL, pinned: a session advisory lock taken under a lexer bypass outlives the rollback', async () => {
     // The lexer never admits pg_advisory_*; this documents what layer 4 does
     // not cover (see the module header's residual list).
-    try {
-      await expect(evaluateWithoutLexicalCheck(sql, 'pg_advisory_lock(2737)::text')).resolves.toBe('');
+    // Session advisory locks are database-wide, so the key is random per run:
+    // with a fixed one, a concurrent run against the same database would
+    // block here until statement_timeout. 31 bits, so it fits pg_locks.objid.
+    const key = randomBytes(4).readUInt32BE() >>> 1;
+    // The unlock is a cleanup step, so a failing assertion cannot leave the
+    // lock held for the rest of the file.
+    await runThenCleanUp(async () => {
+      await expect(evaluateWithoutLexicalCheck(sql, `pg_advisory_lock(${key})::text`)).resolves.toBe('');
       const [{ held }] = await sql`
         SELECT count(*)::int AS held FROM pg_locks
-        WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND objid = 2737`;
+        WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND classid = 0 AND objid = ${key}`;
       expect(held).toBe(1);
-    } finally {
-      // Unconditional, so a failing assertion cannot leave lock 2737 held for
-      // the rest of the file (or for a concurrent run against the same DB).
-      await sql`SELECT pg_advisory_unlock_all()`;
-    }
+    }, [() => sql`SELECT pg_advisory_unlock_all()`]);
   });
 
   test('the claim transaction pins search_path to pg_catalog on its own', async () => {
@@ -269,13 +303,11 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
     // dedicated connection, closed afterwards, so a regression cannot leak the
     // setting into the connection the other tests share.
     const probe = postgres(claimConnectionOptions(connectionBase, credentials));
-    try {
+    await runThenCleanUp(async () => {
       await evaluateWithoutLexicalCheck(probe, "set_config('application_name', 'sql-claim-leak', false)");
       const [row] = await probe`SHOW application_name`;
       expect(row.application_name).not.toBe('sql-claim-leak');
-    } finally {
-      await probe.end();
-    }
+    }, [() => probe.end()]);
   });
 
   test('a negated match verdict evaluates (`not (` is a keyword, not a function call)', async () => {
