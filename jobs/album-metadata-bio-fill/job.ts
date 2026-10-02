@@ -118,9 +118,10 @@ export const MAX_ALBUMS_DEFAULT = 0;
 export const ALBUM_AFTER_ID_ENV = 'BIO_FILL_ALBUM_AFTER_ID';
 export const ALBUM_AFTER_ID_DEFAULT = 0;
 
-/** Abort after this many consecutive batches with no definitive verdict at
- * all: LML is down, and carrying on only walks the cursor past rows it cannot
- * process. */
+/** Abort after this many consecutive batches that settled nothing: LML
+ * answered for no album, or every write the batch attempted threw. Either LML
+ * or the database is down, and carrying on only walks the run past rows it
+ * cannot process. */
 export const MAX_CONSECUTIVE_FAILED_BATCHES_ENV = 'BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES';
 export const MAX_CONSECUTIVE_FAILED_BATCHES_DEFAULT = 3;
 
@@ -332,16 +333,20 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
 
 // -- Orchestration -----------------------------------------------------------
 
-/** How many indeterminate album ids the summary lists. The count is always
+/** How many unsettled album ids the summary lists. The counts are always
  * exact; the list is for re-running a handful by hand, not for a full outage. */
 export const INDETERMINATE_IDS_REPORT_CAP = 200;
 
-/** Thrown when LML answered nothing for `maxConsecutiveFailedBatches` batches
- * in a row. Carried through the accounting and rethrown, like the pause
- * ceiling, so the run exits non-zero with its partial totals logged. */
+/** Thrown when `maxConsecutiveFailedBatches` batches in a row settled
+ * nothing. Carried through the accounting and rethrown, like the pause
+ * ceiling, so the run exits non-zero with its partial totals logged. The
+ * counter cannot tell a dead LML from a dead database, so the message names
+ * both and points at the log lines that can. */
 export class ConsecutiveFailedBatchesError extends Error {
   constructor(batches: number) {
-    super(`${JOB_NAME}: ${batches} consecutive batches got no usable LML verdict; aborting`);
+    super(
+      `${JOB_NAME}: ${batches} consecutive batches settled nothing (no usable LML verdict, or every write threw); see the lml_batch_failed, lml_indeterminate and write_failed lines for which; aborting`
+    );
     this.name = 'ConsecutiveFailedBatchesError';
   }
 }
@@ -362,10 +367,11 @@ export interface FillSummary extends VerdictTotals {
   /** The last album a batch was sent for, or null if none was. */
   last_album_id: number | null;
   /** Pass this as `BIO_FILL_ALBUM_AFTER_ID` to resume. Every enumerated row at
-   * or below it got a definitive verdict; it stops advancing at the first row
-   * LML did not answer for, so a resume never skips one. */
+   * or below it was settled; it stops advancing at the first row LML did not
+   * answer for or whose write threw, so a resume never skips one. */
   resume_after_album_id: number;
-  /** Up to `INDETERMINATE_IDS_REPORT_CAP` of the albums counted in `indeterminate`. */
+  /** Up to `INDETERMINATE_IDS_REPORT_CAP` of the albums counted in
+   * `indeterminate` or `write_failed`. */
   indeterminate_album_ids: number[];
   execute: boolean;
   /** True when the loop ended before its last batch: a signal, the pause, or
@@ -395,8 +401,8 @@ const stopAwareSleep = async (ms: number): Promise<void> => {
 
 /**
  * Where a cursor resume may safely start, given this batch's outcome.
- * Returns the album just before the batch's first indeterminate row, or the
- * batch's last album when every row was answered.
+ * Returns the album just before the batch's first unsettled row (unanswered,
+ * or its write threw), or the batch's last album when every row was settled.
  */
 const answeredThrough = (batch: FillCandidate[], result: BatchResult, before: number): number => {
   const unanswered = new Set(result.indeterminateAlbumIds);
@@ -525,7 +531,13 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       resume_after_album_id: summary.resume_after_album_id,
     });
 
-    consecutiveFailedBatches = result.indeterminate === batchSize ? consecutiveFailedBatches + 1 : 0;
+    // A batch settled nothing when LML answered for none of it, or when every
+    // write it attempted threw. The second arm is not "every album failed": a
+    // dead database fails the fills while LML still returns its ordinary share
+    // of no_bio and no_match, and that batch must count or the run spins.
+    const settledNothing =
+      result.indeterminate === batchSize || (result.write_failed > 0 && result.write_failed === result.fill);
+    consecutiveFailedBatches = settledNothing ? consecutiveFailedBatches + 1 : 0;
     if (consecutiveFailedBatches >= options.maxConsecutiveFailedBatches) {
       abort = new ConsecutiveFailedBatchesError(consecutiveFailedBatches);
       captureError(abort, 'consecutive_failed_batches', { batches_done: b + 1, of: batches.length });
