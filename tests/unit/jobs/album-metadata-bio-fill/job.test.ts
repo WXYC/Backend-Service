@@ -55,6 +55,7 @@ describe('resolveOptions', () => {
       maxAlbums: 0,
       afterAlbumId: 0,
       maxConsecutiveFailedBatches: 3,
+      maxConsecutiveNoBioBatches: 10,
     });
   });
 
@@ -74,6 +75,7 @@ describe('resolveOptions', () => {
         BIO_FILL_MAX_ALBUMS: '2400',
         BIO_FILL_ALBUM_AFTER_ID: '53799',
         BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES: '5',
+        BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES: '25',
       },
       []
     );
@@ -85,6 +87,7 @@ describe('resolveOptions', () => {
       maxAlbums: 2400,
       afterAlbumId: 53799,
       maxConsecutiveFailedBatches: 5,
+      maxConsecutiveNoBioBatches: 25,
     });
   });
 
@@ -96,8 +99,14 @@ describe('resolveOptions', () => {
     ['BIO_FILL_MAX_ALBUMS', '-25'],
     ['BIO_FILL_ALBUM_AFTER_ID', '1.5'],
     ['BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES', '0'],
+    ['BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES', '-1'],
+    ['BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES', 'ten'],
   ])('rejects %s=%s instead of falling back to a default', (name, value) => {
     expect(() => resolveOptions({ [name]: value }, [])).toThrow(name);
+  });
+
+  it('takes 0 for the no-bio guard as "disabled", the one failure guard an operator may need to turn off', () => {
+    expect(resolveOptions({ BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES: '0' }, []).maxConsecutiveNoBioBatches).toBe(0);
   });
 
   it('bounds the batch size at the LML client cap, and says what the cap is', () => {
