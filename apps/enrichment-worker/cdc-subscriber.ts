@@ -3,15 +3,15 @@
  *
  * The CDC pipeline is documented in docs/cdc.md. Audit completed for #892
  * acceptance: per-process LISTEN connection in `cdc-listener.ts:43-49`
- * (no pool collapse across N workers); `cdc-websocket.ts:89-99` is pure
- * fan-out with no upstream dedup. PG `pg_notify` broadcasts to every
+ * (no pool collapse across N workers), with no upstream dedup. PG
+ * `pg_notify` broadcasts to every
  * `LISTEN`, so each worker instance receives every event. The N×N
  * cardinality from #892 is safe end-to-end.
  *
  * ⚠  pg_notify is fire-and-forget. A worker that drops its LISTEN
  *    connection (network blip, restart, backpressure) misses every event
- *    between disconnect and reconnect, with no replay endpoint
- *    (docs/cdc.md:25). The C6 (#895) cron is the mandatory complement:
+ *    between disconnect and reconnect, with no replay (docs/cdc.md,
+ *    "Fire-and-forget"). The C6 (#895) cron is the mandatory complement:
  *    it sweeps `metadata_status='pending' AND inserted_at < now() -
  *    interval '15 minutes'` to catch what the consumer missed.
  *
