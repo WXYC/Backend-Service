@@ -149,10 +149,3 @@ describe('runFill — dry run', () => {
     expect(enumerateCohort).toHaveBeenCalledWith(25, 53799, options.readTimeoutMs);
   });
 });
-
-describe('runFill — execute', () => {
-  it('refuses until the execute loop exists (BS#2779)', async () => {
-    await expect(runFill(resolveOptions({}, ['--execute']))).rejects.toThrow(/not implemented/);
-    expect(enumerateCohort).not.toHaveBeenCalled();
-  });
-});

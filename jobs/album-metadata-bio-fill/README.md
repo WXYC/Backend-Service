@@ -1,0 +1,110 @@
+# album-metadata-bio-fill
+
+One-shot fill for [BS#2775](https://github.com/WXYC/Backend-Service/issues/2775). Writes `artist_bio` and `artist_wikipedia_url` on `album_metadata` rows that carry a Discogs match and have no bio. **Dry-run is the default; writes require `--execute`.**
+
+## Problem
+
+Measured against prod on 2026-10-01, 12,940 of the 33,023 `album_metadata` rows with a Discogs match (39%) had no `artist_bio`, and for about two thirds of those Discogs has a profile. The listener app shows no bio and no Wikipedia link for any play of those albums.
+
+The live enrichment worker did not cause this. Rows it wrote are bio-less at about the rate Discogs itself lacks a profile. The gap is in rows written by the one-shot backfills of May 2026, and by repairs that rewrote a single column and left the rest of the row as it was.
+
+**Nothing else reaches these rows.** `apps/enrichment-worker/precheck.ts` (BS#1747) skips the LML call for any album whose row already carries `artwork_url` or `discogs_url` plus a streaming URL, and a null bio is not one of the fields that re-opens a row. The CDC consumer fires on flowsheet INSERT only. So the writers that produced the gap no longer run, and the one that could repair it is gated off.
+
+## What it writes, and what it does not
+
+For each row in the cohort it asks LML's bulk lookup for the album and, on a trusted match that carries a bio, runs one statement:
+
+```sql
+UPDATE album_metadata
+   SET artist_bio           = COALESCE(artist_bio, $bio),
+       artist_wikipedia_url = COALESCE(artist_wikipedia_url, $wiki),
+       updated_at           = NOW()
+ WHERE album_id = $id
+   AND nullif(discogs_url, '') IS NOT NULL
+   AND artist_bio IS NULL
+```
+
+The cohort predicate in the `WHERE` is the race guard: a row that got a bio between enumeration and write matches nothing and is counted `skipped_raced`. An existing Wikipedia URL is never replaced.
+
+**Nothing release-scoped is written**, and that is the job's main safety property. LML resolves by search. On a 60-album sample of this cohort it returned the right catalog card 60 times and a _different release_ than the stored one 24 times. So `artwork_url`, `discogs_url`, `release_year` and the streaming columns are left alone, and so are the eight extended columns from BS#1336 (`discogs_artist_id`, `tracklist`, `genres` and the rest), which belong to [BS#1442](https://github.com/WXYC/Backend-Service/issues/1442). A bio is a property of the artist, and LML gates it on artist identity (LML#504) whenever the request sets `extended: true`, which every item here does.
+
+One consequence: dj-site's album panel and the iOS V1 path gate their artist _sub-panel_ on `discogsArtistId`, which this job does not write. The bio appears on the flowsheet feed, which is what the listener app reads. The sub-panel is BS#1442's to fix.
+
+## Verdicts
+
+Each album gets exactly one verdict (`decide.ts`), and only `fill` writes.
+
+| verdict         | meaning                                                                     | stays in the cohort           |
+| --------------- | --------------------------------------------------------------------------- | ----------------------------- |
+| `fill`          | trusted match on this row's card, with a bio                                | no                            |
+| `no_bio`        | trusted match on this row's card, no bio                                    | yes                           |
+| `no_match`      | LML searched and found nothing                                              | yes                           |
+| `untrusted`     | LML matched by a fallback search (`search_type` is not `direct`)            | yes                           |
+| `card_mismatch` | LML resolved a different catalog card                                       | yes                           |
+| `indeterminate` | LML did not answer: a shed, an error, an out-of-order result, a thrown call | yes — and must be asked again |
+
+`no_bio` is not a stable verdict. A breaker shed on LML's artist-details step returns a match with a null bio, which looks identical from here. A later run recovers it.
+
+## Reading a run
+
+Because only `fill` leaves the cohort, this job differs from `streaming-columns-drain` in three ways an operator needs to know.
+
+- **"Done" is `stopped_early: false`.** The cohort does not approach zero. `cohortBefore - cohortAfter` is the number of fills and nothing else. Expect roughly 5,000 rows to remain.
+- **Resume by cursor, not by re-running.** A re-run with no cursor re-asks the whole residue. Set `BIO_FILL_ALBUM_AFTER_ID` to the previous run's `resume_after_album_id`.
+- **`resume_after_album_id` is the safe cursor.** It is the last album at or below which every row got a definitive verdict, and it stops advancing at the first indeterminate row. Resuming from `last_album_id` instead would skip every album LML failed to answer for. `indeterminate_album_ids` lists up to 200 of them; `indeterminate` is always the exact count.
+
+A run exits non-zero, after logging a `summary` line with its partial totals and resume point, when:
+
+- the cumulative live-DJ pause exceeds `LIVE_ACTIVITY_MAX_PAUSE_MS` (resume later from the logged cursor), or
+- `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES` batches in a row got no answer at all (LML is down; fix that first).
+
+SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0.
+
+## Knobs
+
+| variable                                               | default |                                                                            |
+| ------------------------------------------------------ | ------- | -------------------------------------------------------------------------- |
+| `BIO_FILL_BULK_BATCH_SIZE`                             | 5       | albums per LML bulk request                                                |
+| `BIO_FILL_BULK_RATE_PER_MIN`                           | 1       | batches per minute                                                         |
+| `BIO_FILL_BULK_BUDGET_MS`                              | 25000   | per-item budget forwarded to LML                                           |
+| `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                       |
+| `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                   |
+| `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | resume cursor: only albums above this id                                   |
+| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many unanswered batches in a row                          |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`                       | 300     | a flowsheet track newer than this means a DJ is live; 0 disables the pause |
+| `LIVE_ACTIVITY_PAUSE_MS`, `LIVE_ACTIVITY_MAX_PAUSE_MS` | shared  | see `docs/env-vars.md`                                                     |
+
+A value that does not parse is an error, not a silent fallback to the default.
+
+## Running it
+
+Each step below is a separate decision. Do not chain them.
+
+Precondition: `LML_ARTIST_IDENTITY_SPLIT_GATE` is not set false on the LML service. It defaults on; with it off, bulk bios revert to LML's album gate.
+
+1. **Build the image.** `deploy-manual.yml` with this job as the target. A one-shot job is built and pushed, never scheduled.
+2. **Dry run.** No flags. It makes zero LML calls. Check `cohortBefore` against the figure above and note `batches`.
+3. **Canary.** `--execute` with `BIO_FILL_MAX_ALBUMS=25`. Read the verdict totals: `untrusted` and `card_mismatch` are expected to be zero or close to it. Then read the 25 rows back and confirm that bios are present and every other column is unchanged.
+4. **The full cohort**, as a chain of bounded runs. At the defaults the cohort is about 2,600 batches at one a minute, which is 43 hours and not a window. Instead:
+
+   ```sh
+   docker run --rm --env-file ~/.env \
+     -e BIO_FILL_BULK_RATE_PER_MIN=4 \
+     -e BIO_FILL_MAX_ALBUMS=2400 \
+     -e BIO_FILL_ALBUM_AFTER_ID=<previous run's resume_after_album_id> \
+     <image> --execute
+   ```
+
+   That is 20 albums a minute, about two hours a run, six runs. LML measured 0.2 to 0.55 seconds per item for this cohort, so a batch is about 3 seconds of LML time in every 15. Keep `LIVE_ACTIVITY_MAX_PAUSE_MS` finite: `0` is uncapped and lets a run sit paused through a whole show.
+
+5. **Report** the before and after counts and the verdict totals on BS#2775.
+
+## Layout
+
+| file        |                                                                                                                                                                                                          |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cohort.ts` | every statement: the predicate, the counts, the enumeration, the write. Also built as `dist/cohort.cjs` so `tests/integration/album-metadata-bio-fill.spec.js` runs the real statements against Postgres |
+| `decide.ts` | `decideBioFill`, pure                                                                                                                                                                                    |
+| `job.ts`    | knobs, `runBatch`, the loop, `main`                                                                                                                                                                      |
+
+Structural donor: `jobs/streaming-columns-drain`.
