@@ -125,6 +125,19 @@ export const ALBUM_AFTER_ID_DEFAULT = 0;
 export const MAX_CONSECUTIVE_FAILED_BATCHES_ENV = 'BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES';
 export const MAX_CONSECUTIVE_FAILED_BATCHES_DEFAULT = 3;
 
+/**
+ * Abort after this many consecutive batches in which every album came back
+ * `no_bio`; `0` disables. LML answers a breaker shed on its artist-details
+ * step with a match and a null bio (`lookup/enrichment/top1.py`), the same
+ * bytes as an artist with no profile, so a sustained shed fails no batch and
+ * would walk the cursor to the end as a clean run. Its own knob with a
+ * generous default, because a real run of bio-less albums exists too: the
+ * cursor walks `album_id` order, and compilations or one profile-less
+ * artist's albums can sit together.
+ */
+export const MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV = 'BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES';
+export const MAX_CONSECUTIVE_NO_BIO_BATCHES_DEFAULT = 10;
+
 /** Cooperative-pause lookback, shared with every sibling drain (BS#2147). */
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
 export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 300;
@@ -137,6 +150,7 @@ export interface FillOptions {
   maxAlbums: number;
   afterAlbumId: number;
   maxConsecutiveFailedBatches: number;
+  maxConsecutiveNoBioBatches: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
   liveActivityMaxPauseMs: number;
@@ -158,6 +172,12 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
       MAX_CONSECUTIVE_FAILED_BATCHES_ENV,
       MAX_CONSECUTIVE_FAILED_BATCHES_DEFAULT,
       ctx
+    ),
+    maxConsecutiveNoBioBatches: requireNonNegativeInt(
+      env[MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV],
+      MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV,
+      MAX_CONSECUTIVE_NO_BIO_BATCHES_DEFAULT,
+      { ...ctx, note: 'Use 0 to disable.' }
     ),
     liveActivityLookbackSeconds: requireNonNegativeInt(
       env[LIVE_ACTIVITY_LOOKBACK_ENV],
@@ -351,6 +371,17 @@ export class ConsecutiveFailedBatchesError extends Error {
   }
 }
 
+/** Thrown when `maxConsecutiveNoBioBatches` batches in a row came back
+ * entirely `no_bio`. Carried and rethrown like the abort above. */
+export class ConsecutiveNoBioBatchesError extends Error {
+  constructor(batches: number) {
+    super(
+      `${JOB_NAME}: ${batches} consecutive batches came back entirely no_bio. LML's artist-details breaker is probably open: a shed bio reads as "no profile" from here. Resume from resume_after_album_id once LML is healthy, or raise or zero ${MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV} if these albums really have no bios; aborting`
+    );
+    this.name = 'ConsecutiveNoBioBatchesError';
+  }
+}
+
 export interface FillSummary extends VerdictTotals {
   /** Every bio-less Discogs-matched row, before and after. Their difference
    * is the fills and nothing else — the non-fill residue stays in the cohort. */
@@ -483,6 +514,9 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   let abort: Error | undefined;
   let resumeFrozen = false;
   let consecutiveFailedBatches = 0;
+  let consecutiveNoBioBatches = 0;
+  // Where the cursor stood before the current all-`no_bio` streak began.
+  let resumeBeforeNoBioStreak = summary.resume_after_album_id;
 
   for (const [b, batch] of batches.entries()) {
     // The shared pause consults `shouldStop` too, but not when the probe is
@@ -519,6 +553,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     const room = INDETERMINATE_IDS_REPORT_CAP - summary.indeterminate_album_ids.length;
     summary.indeterminate_album_ids.push(...indeterminateAlbumIds.slice(0, Math.max(0, room)));
     summary.last_album_id = batch[batch.length - 1]?.album_id ?? summary.last_album_id;
+    if (consecutiveNoBioBatches === 0) resumeBeforeNoBioStreak = summary.resume_after_album_id;
     if (!resumeFrozen) {
       summary.resume_after_album_id = answeredThrough(batch, result, summary.resume_after_album_id);
       resumeFrozen = indeterminateAlbumIds.length > 0;
@@ -541,6 +576,15 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     if (consecutiveFailedBatches >= options.maxConsecutiveFailedBatches) {
       abort = new ConsecutiveFailedBatchesError(consecutiveFailedBatches);
       captureError(abort, 'consecutive_failed_batches', { batches_done: b + 1, of: batches.length });
+      break;
+    }
+    consecutiveNoBioBatches = result.no_bio === batchSize ? consecutiveNoBioBatches + 1 : 0;
+    if (options.maxConsecutiveNoBioBatches > 0 && consecutiveNoBioBatches >= options.maxConsecutiveNoBioBatches) {
+      // Every row in the streak looked answered, so the cursor walked through
+      // it. Put it back, or a resume would never re-ask what the shed took.
+      summary.resume_after_album_id = resumeBeforeNoBioStreak;
+      abort = new ConsecutiveNoBioBatchesError(consecutiveNoBioBatches);
+      captureError(abort, 'consecutive_no_bio_batches', { batches_done: b + 1, of: batches.length });
       break;
     }
     if (b < batches.length - 1 && interBatchSleepMs > 0) await stopAwareSleep(interBatchSleepMs);

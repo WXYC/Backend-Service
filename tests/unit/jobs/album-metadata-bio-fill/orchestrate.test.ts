@@ -56,6 +56,7 @@ import * as cohort from '../../../../jobs/album-metadata-bio-fill/cohort';
 import * as logger from '../../../../jobs/album-metadata-bio-fill/logger';
 import {
   ConsecutiveFailedBatchesError,
+  ConsecutiveNoBioBatchesError,
   INDETERMINATE_IDS_REPORT_CAP,
   __resetStopForTesting,
   requestStop,
@@ -79,6 +80,7 @@ const OPTIONS: FillOptions = {
   maxAlbums: 0,
   afterAlbumId: 0,
   maxConsecutiveFailedBatches: 3,
+  maxConsecutiveNoBioBatches: 10,
   liveActivityLookbackSeconds: 300,
   liveActivityPauseMs: 30_000,
   liveActivityMaxPauseMs: 1_800_000,
@@ -89,8 +91,9 @@ const OPTIONS: FillOptions = {
 const albums = (...ids: number[]) =>
   ids.map((id) => ({ album_id: id, legacy_release_id: id + 1000, artist_name: 'Juana Molina', album_title: 'DOGA' }));
 
-/** `write_fails` is a `fill` from LML whose UPDATE then throws. */
-type Outcome = 'fill' | 'no_match' | 'shed' | 'write_fails';
+/** `write_fails` is a `fill` from LML whose UPDATE then throws. `no_bio` is a
+ * trusted match with a null bio, which is also what a breaker shed looks like. */
+type Outcome = 'fill' | 'no_match' | 'no_bio' | 'shed' | 'write_fails';
 type Outcomes = Record<number, Outcome | 'throw'>;
 
 /**
@@ -109,6 +112,7 @@ const scriptLml = (outcomes: Outcomes = {}, enumerated: number[]) => {
         const outcome = outcomes[id] ?? 'fill';
         if (outcome === 'shed') return { index, status: 'shed_breaker_open', lookup: { results: [] } };
         if (outcome === 'no_match') return { index, status: 'no_match', lookup: null };
+        const artwork = { release_id: 1, release_url: 'https://www.discogs.com/release/1' };
         return {
           index,
           status: 'match',
@@ -117,7 +121,7 @@ const scriptLml = (outcomes: Outcomes = {}, enumerated: number[]) => {
             results: [
               {
                 library_item: { id: id + 1000 },
-                artwork: { release_id: 1, release_url: 'https://www.discogs.com/release/1', artist_bio: 'A bio.' },
+                artwork: outcome === 'no_bio' ? artwork : { ...artwork, artist_bio: 'A bio.' },
               },
             ],
           },
@@ -329,6 +333,60 @@ describe('runFill — batches that settle nothing', () => {
 
     expect(bulkLookupMetadata).toHaveBeenCalledTimes(4);
     expect(summary.stopped_early).toBe(false);
+  });
+});
+
+describe('runFill — LML answers, but never with a bio', () => {
+  // LML returns a match with a null bio when its artist-details breaker sheds,
+  // which is identical on the wire to an artist with no Discogs profile. A
+  // sustained shed therefore fails no batch: every album is `no_bio`, the
+  // cursor walks to the end, and the run reports success having filled nothing.
+  const noBio = (...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, 'no_bio' as const]));
+
+  it('aborts after N consecutive all-no_bio batches, with the cursor put back before the streak', async () => {
+    await expect(
+      run([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], noBio(3, 4, 5, 6, 7, 8), { maxConsecutiveNoBioBatches: 3 })
+    ).rejects.toBeInstanceOf(ConsecutiveNoBioBatchesError);
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(4);
+    // Every row in the streak looked answered, so the cursor had reached 8. A
+    // resume from there would never re-ask the six rows the shed swallowed.
+    expect(loggedSummary()).toMatchObject({
+      stopped_early: true,
+      filled: 2,
+      no_bio: 6,
+      last_album_id: 8,
+      resume_after_album_id: 2,
+    });
+  });
+
+  it('leaves the cursor where it had already stopped when that is before the streak', async () => {
+    await expect(
+      run([1, 2, 3, 4, 5, 6, 7, 8], { 1: 'shed', ...noBio(3, 4, 5, 6) }, { maxConsecutiveNoBioBatches: 2 })
+    ).rejects.toBeInstanceOf(ConsecutiveNoBioBatchesError);
+
+    expect(loggedSummary()).toMatchObject({ resume_after_album_id: 0, indeterminate_album_ids: [1] });
+  });
+
+  it('says what probably happened and which knob to turn if it did not', () => {
+    const { message } = new ConsecutiveNoBioBatchesError(10);
+
+    expect(message).toMatch(/breaker/);
+    expect(message).toContain('BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES');
+  });
+
+  it.each([
+    // [label, outcomes, guard setting]
+    ['a batch with one fill in it breaks the streak', noBio(1, 2, 3, 5, 6, 7), 2],
+    ['a batch with any other verdict in it breaks the streak', { ...noBio(1, 2, 3, 5, 6), 4: 'no_match' }, 2],
+    ['the streak is shorter than the limit', noBio(1, 2, 3, 4, 5, 6), 4],
+    // A real cluster of bio-less albums: the operator turns the guard off and resumes.
+    ['the guard is disabled with 0', noBio(1, 2, 3, 4, 5, 6, 7, 8), 0],
+  ] as const)('does not abort when %s', async (_label, outcomes, maxConsecutiveNoBioBatches) => {
+    const summary = await run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveNoBioBatches });
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(4);
+    expect(summary).toMatchObject({ stopped_early: false, resume_after_album_id: 8 });
   });
 });
 
