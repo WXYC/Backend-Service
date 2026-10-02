@@ -290,9 +290,12 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
         // cursor at it, and the loop moves on to the next album.
         result.write_failed += 1;
         result.indeterminateAlbumIds.push(candidate.album_id);
+        // Drizzle's own message is the statement and its parameters, the
+        // whole bio included. What the database said is on `.cause`.
+        const reason = (err as { cause?: unknown } | null)?.cause ?? err;
         log('warn', 'write_failed', `UPDATE threw for album_id=${candidate.album_id}; not written`, {
           album_id: candidate.album_id,
-          error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          error_message: reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
         });
         captureError(err, 'write_failed', { album_id: candidate.album_id });
       }

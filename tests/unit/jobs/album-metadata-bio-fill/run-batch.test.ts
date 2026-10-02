@@ -114,7 +114,12 @@ describe('runBatch — only a fill writes', () => {
 
   it('counts a write that throws as write_failed, reports the album for retry, and carries on', async () => {
     const captureError = jest.spyOn(logger, 'captureError');
-    const reset = new Error('write CONNECTION_CLOSED');
+    const log = jest.spyOn(logger, 'log');
+    // The shape drizzle rejects with: its own message is the statement and
+    // its parameters, and what the database actually said is on `.cause`.
+    const reset = Object.assign(new Error(`Failed query: UPDATE album_metadata SET ... params: ${BIO},,10`), {
+      cause: new Error('write CONNECTION_CLOSED'),
+    });
     bulkLookupMetadata.mockResolvedValue({ results: [filling(JUANA, 0), filling(JESSICA, 1)] } as never);
     applyBioFill.mockRejectedValueOnce(reset as never);
 
@@ -135,6 +140,10 @@ describe('runBatch — only a fill writes', () => {
       indeterminateAlbumIds: [10],
     });
     expect(captureError).toHaveBeenCalledWith(reset, 'write_failed', { album_id: 10 });
+    // The log line is what an operator reads to tell a dead database from a
+    // bad row, so it carries the database's reason and not a copy of the bio.
+    const [, , , fields] = log.mock.calls.find(([, step]) => step === 'write_failed') ?? [];
+    expect(fields).toEqual({ album_id: 10, error_message: 'Error: write CONNECTION_CLOSED' });
   });
 
   it.each([
