@@ -67,7 +67,7 @@ A run exits non-zero, after logging a `summary` line with its partial totals and
 
 The `summary` line is logged even when the closing `ANALYZE` or re-count fails, as they will if the database is what went away. It then carries `accounting_failed: true`, and `cohortAfter` is the before-count, not a measurement.
 
-SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0.
+SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0, provided the container is given long enough to finish the batch in flight. See `--stop-timeout` under "Running it".
 
 ## Knobs
 
@@ -98,12 +98,14 @@ Precondition: `LML_ARTIST_IDENTITY_SPLIT_GATE` is not set false on the LML servi
 4. **The full cohort**, as a chain of bounded runs. At the defaults the cohort is about 2,600 batches at one a minute, which is 43 hours and not a window. Instead:
 
    ```sh
-   docker run --rm --env-file ~/.env \
+   docker run --rm --stop-timeout 60 --env-file ~/.env \
      -e BIO_FILL_BULK_RATE_PER_MIN=4 \
      -e BIO_FILL_MAX_ALBUMS=2400 \
      -e BIO_FILL_ALBUM_AFTER_ID=<previous run's resume_after_album_id> \
      <image> --execute
    ```
+
+   `--stop-timeout` is not optional. `docker stop` sends SIGTERM and kills the container 10 seconds later by default, while the job stops only between batches and a batch in flight can take up to its bulk timeout: 5 seconds per album plus 5, so 30 seconds at the default batch size of 5. **The stop timeout must exceed the bulk timeout for the batch size in use**, or the kill lands mid-batch and the run ends with no `summary` line and no resume point. 60 covers the default with room for the writes; a batch size of 10 already needs more than 55.
 
    That is 20 albums a minute, about two hours a run, six runs. LML measured 0.2 to 0.55 seconds per item for this cohort, so a batch is about 3 seconds of LML time in every 15. Keep `LIVE_ACTIVITY_MAX_PAUSE_MS` finite: `0` is uncapped and lets a run sit paused through a whole show.
 
