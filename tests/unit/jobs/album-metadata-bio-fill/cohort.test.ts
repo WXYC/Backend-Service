@@ -86,12 +86,38 @@ describe('enumerateCohortSql', () => {
   });
 
   it.each([
-    ['a fractional limit', 2.5, 0],
-    ['a negative limit', -1, 0],
-    ['a fractional cursor', 0, 1.5],
-    ['a negative cursor', 0, -3],
-    ['a non-finite cursor', 0, Number.NaN],
-  ])('refuses %s rather than interpolating it', (_label, limit, after) => {
-    expect(() => enumerateCohortSql(limit, after)).toThrow(/non-negative integer/);
+    ['a fractional limit', 2.5, 0, []],
+    ['a negative limit', -1, 0, []],
+    ['a fractional cursor', 0, 1.5, []],
+    ['a negative cursor', 0, -3, []],
+    ['a non-finite cursor', 0, Number.NaN, []],
+    ['a fractional id in the list', 0, 0, [10, 1.5]],
+    ['a negative id in the list', 0, 0, [-10]],
+    ['a non-finite id in the list', 0, 0, [Number.NaN]],
+  ])('refuses %s rather than interpolating it', (_label, limit, after, albumIds) => {
+    expect(() => enumerateCohortSql(limit, after, albumIds)).toThrow(/non-negative integer/);
+  });
+
+  describe('with an id list (BS#2786)', () => {
+    const fromOnward = (text: string) => text.slice(text.indexOf('FROM'));
+
+    it('narrows to the listed ids with one more conjunct, after the shared block', () => {
+      const listed = enumerateCohortSql(0, 0, [10, 11]);
+
+      expect(listed).toContain('am."album_id" IN (10, 11)');
+      // The cohort predicate and the eligibility conditions are still the
+      // shared block, word for word: a listed id gets no exemption from them.
+      expect(fromOnward(listed).startsWith(fromOnward(countEligibleSql()))).toBe(true);
+      expect(listed).toContain('ORDER BY am."album_id"');
+    });
+
+    it('leaves the statement byte-identical when the list is empty', () => {
+      expect(enumerateCohortSql(25, 53799, [])).toBe(enumerateCohortSql(25, 53799));
+      expect(enumerateCohortSql(25, 53799)).not.toContain(' IN (');
+    });
+
+    it('still applies the cap', () => {
+      expect(enumerateCohortSql(1, 0, [10, 11])).toContain('LIMIT 1');
+    });
   });
 });
