@@ -253,6 +253,12 @@ export const ALL_LML_CALLERS = [
   // that is not running, on both the `lml.caller` span attribute and LML's
   // per-caller metrics.
   'streaming-columns-drain',
+  // BS#2775: the one-shot fill for `album_metadata` rows carrying a Discogs
+  // match and no `artist_bio`. Class 5 — same offline bulk shape as its
+  // `streaming-columns-drain` donor, and its own label for the same reason:
+  // a ~13k-album drain has to be attributable on the `lml.caller` span and
+  // LML's per-caller metrics rather than hiding under another job's name.
+  'album-metadata-bio-fill',
 ] as const;
 
 export type LmlCaller = (typeof ALL_LML_CALLERS)[number];
@@ -292,6 +298,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'apple-music-url-backfill': 5,
   'va-apple-music-url-remediation': 5,
   'streaming-columns-drain': 5,
+  'album-metadata-bio-fill': 5,
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,
