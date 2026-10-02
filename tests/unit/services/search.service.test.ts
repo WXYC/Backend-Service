@@ -9,6 +9,7 @@ import {
   shouldUseTsvector,
   parseCursor,
   encodeCursor,
+  TIER_CURSOR_SUFFIX,
 } from '../../../apps/backend/services/search.service';
 import { CHARSET_TORTURE_ENTRIES, charsetEntryId } from '../../charset-torture';
 
@@ -326,6 +327,22 @@ describe('cursor codec', () => {
         tier: 'substring',
       });
     });
+
+    it.each(Object.keys(TIER_CURSOR_SUFFIX) as (keyof typeof TIER_CURSOR_SUFFIX)[])(
+      'round-trips every TIER_CURSOR_SUFFIX key automatically (%s)',
+      (tier) => {
+        // Walks TIER_CURSOR_SUFFIX's own keys rather than naming 'prefix'/
+        // 'substring' by hand, so a future tier added to the map is covered
+        // here without anyone remembering to add a case for it.
+        const cursor = encodeCursor('2024-06-15T14:30:00.000Z', 12345, tier);
+        expect(cursor).toBe(`2024-06-15T14:30:00.000Z_12345${TIER_CURSOR_SUFFIX[tier]}`);
+        expect(parseCursor(cursor)).toEqual({
+          addTime: '2024-06-15T14:30:00.000Z',
+          id: 12345,
+          tier,
+        });
+      }
+    );
   });
 });
 

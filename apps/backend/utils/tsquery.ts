@@ -3,24 +3,10 @@ import { hasAlphanumeric } from './text-query.js';
 
 /**
  * Last-token prefix `tsquery` construction for catalog search (BS#670). The
- * flowsheet reads both halves too, as of WXYC/Backend-Service#2712: its
- * `'word'` tier (`buildAllFieldMatch` in `apps/backend/services/search.service.ts`)
- * reads only {@link PrefixTsquery.exactTsquery} for every condition, exactly
- * as it did before #2712 — but when that tier's page comes back empty and a
- * typing term exists, `searchFlowsheet` cascades to a `'prefix'` tier whose
- * predicate for that ONE condition is an outer boolean CASE choosing between
- * `search_doc @@ {@link PrefixTsquery.tsquery}` and the `'word'` tier's own
- * `exactTsquery`-based predicate (gapped seam guard included) — never a
- * tsquery-level choice between the two. The guard that decides which arm
- * runs is routed in SQL — `strpos(exactTsquery::text, '<') = 0` — rather
- * than predicted here, so this module has nothing else to export for it. See
- * `buildAllFieldMatch`'s docstring for the exact CASE shape and why asking
- * Postgres beat an earlier `phraseCapable` field computed in JS. A third
- * tier, `'substring'` (PR 2 of the same issue), reads only
- * {@link PrefixTsquery.exactTsquery} again — the same shape as `'word'`, OR'd
- * against a four-column ILIKE-contains predicate — and never reads
- * {@link PrefixTsquery.tsquery} at all: substring matching already subsumes
- * a prefix match, so there is no CASE to choose an arm of in that tier.
+ * flowsheet's three search tiers (`'word'`, `'prefix'`, `'substring'`) also
+ * read {@link PrefixTsquery}'s two fields, each per its own rule — see
+ * `buildAllFieldMatch`'s docstring in `apps/backend/services/search.service.ts`
+ * (WXYC/Backend-Service#2712) for which tier reads which.
  *
  * ## Why not `websearch_to_tsquery`
  *
@@ -129,51 +115,30 @@ const MAX_OPERANDS = 16;
  * The two tsqueries {@link buildPrefixTsquery} derives from one tokenization.
  * The catalog's `searchLibraryByTsvector` (`apps/backend/services/library.service.ts`,
  * BS#670) reads both on every call. The flowsheet's `buildAllFieldMatch`
- * (`apps/backend/services/search.service.ts`) reads only `exactTsquery` in
- * its `'word'` tier (BS#2726's shape, unchanged) and its `'substring'` tier
- * (WXYC/Backend-Service#2712 PR 2, which OR's that same predicate against an
- * ILIKE-contains fallback rather than ever reading `tsquery`), and reads BOTH
- * only for the one condition its `'prefix'` tier (WXYC/Backend-Service#2712
- * PR 1) prefix-matches — the typing term `findTypingTermIndex` names — where
- * `tsquery` and `exactTsquery` become the two ARMS of an outer boolean CASE
- * rather than two candidate values for one tsquery slot. Neither reader asks
- * this module whether a token *could* produce a `<->` chain (an earlier
- * `phraseCapable` field tried to predict that in JS; see
- * `buildAllFieldMatch`'s docstring for why asking Postgres at query time
- * replaced it) — that question is answered in SQL, against `exactTsquery`, by
- * whichever caller has it in hand.
+ * (`apps/backend/services/search.service.ts`, WXYC/Backend-Service#2712)
+ * reads one or both depending on tier — see that function's own docstring
+ * for the mapping; this module answers only whether a token *could* produce
+ * a `<->` chain by asking Postgres at query time (`strpos(exactTsquery::text,
+ * '<') = 0`), never by predicting it here (an earlier `phraseCapable` field
+ * tried that in JS — see `buildAllFieldMatch`'s docstring for why it was
+ * replaced).
  */
 export interface PrefixTsquery {
   /**
    * Every token an exact quoted lexeme except the last, which is suffixed
    * `:*`. Drives the catalog's WHERE predicate and `album_score`, the
    * secondary within-tier `ts_rank` — it accepts the row the DJ is still
-   * typing toward. Also, as of WXYC/Backend-Service#2712, the THEN arm of the
-   * flowsheet's `'prefix'`-tier CASE (`buildAllFieldMatch`) — taken when
-   * `exactTsquery` is a single lexeme, with no gapped recheck needed (a
-   * single prefix operand cannot straddle a field seam). Deliberately NEVER
-   * read for a typing term whose `exactTsquery` is a `<->` phrase chain: a
-   * phrase's `tsquery` suffixes `:*` onto every lexeme the chain re-lexes
-   * into, not just the last one (`to_tsquery('simple', $$'i''m':*$$)::text`
-   * -> `'i':* <-> 'm':*`), which measured 15.6s for a capped count on
-   * production — over the endpoint's 5s HTTP timeout. Never read by the
-   * flowsheet's `'substring'` tier (PR 2 of the same issue) at all — that
-   * tier never prefix-matches, so it has no CASE arm to pick `tsquery` for.
+   * typing toward. The flowsheet reads this only for its `'prefix'` tier's
+   * CASE — see `buildAllFieldMatch` in search.service.ts.
    */
   tsquery: SQL;
   /**
    * The same token list, quoted, with no `:*` anywhere. Drives the catalog's
    * `searchLibraryByTsvector`'s `match_tier` CASE — a row that matches this
    * matched every token as a complete word, not merely a prefix of one — and
-   * `exact_score`, the first sort key within a tier. Also the flowsheet's
-   * `'word'`-tier predicate (BS#2726, unchanged by #2712) for every
-   * condition, the flowsheet's `'prefix'`-tier CASE's own routing question
-   * (`strpos(exactTsquery::text, '<') = 0`) plus its ELSE arm — the same
-   * `'word'`-tier predicate, reused verbatim, for a typing term whose
-   * `tsquery` would be unaffordable to run — and, as of PR 2, the left
-   * operand of the flowsheet's `'substring'`-tier OR against a four-column
-   * ILIKE-contains predicate, for every eligible condition rather than just
-   * the typing term.
+   * `exact_score`, the first sort key within a tier. The flowsheet reads
+   * this for its `'word'` tier (every condition) and, per
+   * `buildAllFieldMatch`'s own docstring, for `'prefix'` and `'substring'`.
    */
   exactTsquery: SQL;
 }

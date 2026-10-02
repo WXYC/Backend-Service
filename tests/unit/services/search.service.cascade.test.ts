@@ -15,7 +15,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-import { searchFlowsheet, encodeCursor } from '../../../apps/backend/services/search.service';
+import { searchFlowsheet, encodeCursor, CASCADE_BUDGET_MS } from '../../../apps/backend/services/search.service';
 
 const makeRow = (overrides: Partial<Record<string, unknown>> = {}) => ({
   id: 1,
@@ -144,7 +144,7 @@ describe('cascade: advancing to the prefix tier', () => {
   });
 });
 
-describe('cascade: advancing to the substring tier (WXYC/Backend-Service#2712, PR 2)', () => {
+describe('cascade: advancing to the substring tier (WXYC/Backend-Service#2712)', () => {
   it('word empty -> prefix empty -> substring rows: a third statement pair fires and its rows win', async () => {
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([]) // word data
@@ -270,7 +270,7 @@ describe('cascade: a rejected fallback tier is not fatal -- but only a cascaded 
     ).rejects.toThrow('Failed query: select pg_sleep($1)');
   });
 
-  it('a TIMED-OUT prefix tier ends the cascade WITHOUT ever running substring (WXYC/Backend-Service#2712, PR 2)', async () => {
+  it('a TIMED-OUT prefix tier ends the cascade WITHOUT ever running substring (WXYC/Backend-Service#2712)', async () => {
     const captureException = Sentry.captureException as unknown as jest.Mock;
     const consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -378,7 +378,7 @@ describe('cascade: the cursor carries the resolved tier forward', () => {
     expect(result.nextCursor).not.toMatch(/_pfx$/);
   });
 
-  it('a full substring-tier page emits a cursor with the _sub marker (WXYC/Backend-Service#2712, PR 2)', async () => {
+  it('a full substring-tier page emits a cursor with the _sub marker (WXYC/Backend-Service#2712)', async () => {
     const rows = Array.from({ length: 50 }, (_, i) => makeRow({ id: i + 1 }));
     (db.execute as jest.Mock).mockResolvedValueOnce(rows).mockResolvedValueOnce([{ total: 1000 }]);
 
@@ -422,4 +422,156 @@ describe('cascade: the cursor carries the resolved tier forward', () => {
   // statement pair. Replacing `countTotal === 0` with `countTotal != null`
   // (treating an UNPROVEN count as proof) flips "does NOT cascade when the
   // count itself failed to settle" to red for the same reason.
+});
+
+describe('cascade time budget (CASCADE_BUDGET_MS, WXYC/Backend-Service#2712)', () => {
+  let dateNowSpy: jest.SpyInstance<number, []>;
+
+  afterEach(() => {
+    dateNowSpy?.mockRestore();
+  });
+
+  it('under budget: the cascade still advances through all three tiers', async () => {
+    dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([]) // word data
+      .mockResolvedValueOnce([{ total: 0 }]) // word count
+      .mockResolvedValueOnce([]) // prefix data
+      .mockResolvedValueOnce([{ total: 0 }]) // prefix count
+      .mockResolvedValueOnce([makeRow()]) // substring data
+      .mockResolvedValueOnce([{ total: 1 }]); // substring count
+
+    const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    expect(db.execute).toHaveBeenCalledTimes(6);
+    expect(result.results).toHaveLength(1);
+  });
+
+  it('over budget after the word tier: the prefix tier never runs', async () => {
+    dateNowSpy = jest
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(1_000_000) // cascadeStartedAt
+      .mockReturnValueOnce(1_000_000 + CASCADE_BUDGET_MS + 1); // the check before 'prefix'
+    (db.execute as jest.Mock).mockResolvedValueOnce([]).mockResolvedValueOnce([{ total: 0 }]);
+
+    const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+    // Only the word tier's own pair -- the budget stopped the loop before
+    // 'prefix' (and therefore 'substring') ever started.
+    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(result.results).toEqual([]);
+    expect(result.total).toBe(0);
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it('over budget after the prefix tier: the substring tier never runs', async () => {
+    dateNowSpy = jest
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(1_000_000) // cascadeStartedAt
+      .mockReturnValueOnce(1_000_100) // the check before 'prefix' -- comfortably under budget
+      .mockReturnValueOnce(1_000_000 + CASCADE_BUDGET_MS + 1); // the check before 'substring'
+    (db.execute as jest.Mock)
+      .mockResolvedValueOnce([]) // word data
+      .mockResolvedValueOnce([{ total: 0 }]) // word count
+      .mockResolvedValueOnce([]) // prefix data
+      .mockResolvedValueOnce([{ total: 0 }]); // prefix count
+
+    const consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+      // Word + prefix pairs only -- no third pair for 'substring'.
+      expect(db.execute).toHaveBeenCalledTimes(4);
+      expect(result.results).toEqual([]);
+      // Stopping on budget is silent: no warn, no Sentry report, unlike a
+      // genuine rejected-tier fallback.
+      expect(consoleWarn).not.toHaveBeenCalled();
+      expect(Sentry.captureException).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  // Mutation proof (manual; run during implementation, confirmed): removing
+  // the budget check entirely (deleting the `if (i > 0 && ...) break;` line)
+  // flips both "over budget" tests above to red -- `db.execute` is called 6
+  // times instead of the expected 2 and 4, because the cascade ignores the
+  // (still-mocked) elapsed time and runs every tier in `tiers` regardless.
+});
+
+describe('fallback-tier COUNT failures are fingerprinted separately from word-tier COUNT failures (WXYC/Backend-Service#2712)', () => {
+  it("a cascaded tier's count query timing out reports once with the fixed fingerprint and the winning tier's tag", async () => {
+    const captureException = Sentry.captureException as unknown as jest.Mock;
+    const consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (db.execute as jest.Mock)
+        .mockResolvedValueOnce([]) // word data: empty
+        .mockResolvedValueOnce([{ total: 0 }]) // word count: 0
+        .mockResolvedValueOnce([makeRow()]) // prefix data: succeeds, wins the cascade
+        .mockRejectedValueOnce(statementTimeoutError()); // prefix count: times out
+
+      const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+      expect(result.results).toHaveLength(1);
+      expect(result.total).toBe(1); // lower-bound total, same degrade path as today
+      expect(consoleWarn).toHaveBeenCalledTimes(1);
+      expect(captureException).toHaveBeenCalledTimes(1);
+      const [, options] = captureException.mock.calls[0];
+      expect(options.fingerprint).toEqual(['flowsheet-search-fallback-tier-count']);
+      expect(options.tags).toMatchObject({ tier: 'prefix' });
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it("the word tier's own count failure keeps today's un-fingerprinted reporting exactly, even though the error is also a statement timeout", async () => {
+    const captureException = Sentry.captureException as unknown as jest.Mock;
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      (db.execute as jest.Mock)
+        .mockResolvedValueOnce([makeRow()]) // word data: succeeds
+        .mockRejectedValueOnce(statementTimeoutError()); // word count: times out
+
+      const result = await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+      expect(result.results).toHaveLength(1);
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(captureException).toHaveBeenCalledTimes(1);
+      const [, options] = captureException.mock.calls[0];
+      expect(options.fingerprint).toBeUndefined();
+      expect(options.tags).toEqual({ subsystem: 'flowsheet-search' });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('a NON-timeout count failure on a cascaded tier is NOT fingerprinted -- only a statement timeout gets the fixed fingerprint', async () => {
+    const captureException = Sentry.captureException as unknown as jest.Mock;
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      (db.execute as jest.Mock)
+        .mockResolvedValueOnce([]) // word data: empty
+        .mockResolvedValueOnce([{ total: 0 }]) // word count: 0
+        .mockResolvedValueOnce([makeRow()]) // prefix data: succeeds, wins the cascade
+        .mockRejectedValueOnce(new Error('column "total" does not exist')); // prefix count: a real bug, no SQLSTATE
+
+      await searchFlowsheet({ q: 'autec', page: 0, limit: 50, sort: 'date', order: 'desc' });
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const [, options] = captureException.mock.calls[0];
+      expect(options.fingerprint).toBeUndefined();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  // Mutation proof (manual; run during implementation, confirmed): dropping
+  // the `resolvedTier !== 'word' &&` half of the new guard (fingerprinting
+  // ANY tier's timed-out count, including 'word''s) flips the second test
+  // above to red -- the word-tier count failure would get the
+  // `flowsheet-search-fallback-tier-count` fingerprint instead of the
+  // un-fingerprinted report. Dropping the `isStatementTimeout(reason)` half
+  // (fingerprinting every cascaded-tier count failure regardless of cause)
+  // flips the third test above to red -- the non-timeout error would get the
+  // fixed fingerprint too.
 });

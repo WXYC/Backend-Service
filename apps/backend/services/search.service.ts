@@ -40,8 +40,14 @@ export type Tier = 'word' | 'prefix' | 'substring';
 
 export type Cursor = { addTime: string; id: number; tier: Tier };
 
-/** Cursor-token suffix marking a non-`'word'` tier. An unmarked cursor — every one issued before this existed — parses as `'word'`. */
-const TIER_CURSOR_SUFFIX: Record<Exclude<Tier, 'word'>, string> = {
+/**
+ * Cursor-token suffix marking a non-`'word'` tier. An unmarked cursor — every
+ * one issued before this existed — parses as `'word'`. Exported so a test
+ * can round-trip `encodeCursor`/`parseCursor` over every key here, rather
+ * than one hand-written case per tier that a future tier could add without
+ * a matching test.
+ */
+export const TIER_CURSOR_SUFFIX: Record<Exclude<Tier, 'word'>, string> = {
   prefix: '_pfx',
   substring: '_sub',
 };
@@ -56,12 +62,16 @@ export function encodeCursor(addTime: string, id: number, tier: Tier): string {
 export function parseCursor(cursor: string): Cursor | null {
   let working = cursor;
   let tier: Tier = 'word';
-  if (working.endsWith(TIER_CURSOR_SUFFIX.prefix)) {
-    tier = 'prefix';
-    working = working.slice(0, -TIER_CURSOR_SUFFIX.prefix.length);
-  } else if (working.endsWith(TIER_CURSOR_SUFFIX.substring)) {
-    tier = 'substring';
-    working = working.slice(0, -TIER_CURSOR_SUFFIX.substring.length);
+  // Iterate TIER_CURSOR_SUFFIX's own entries rather than one hand-written
+  // `endsWith` branch per tier, so the encoder and parser can never drift —
+  // adding a tier to the map is enough; no suffix here is a suffix of
+  // another, so matching order never matters.
+  for (const [candidateTier, suffix] of Object.entries(TIER_CURSOR_SUFFIX) as [Tier, string][]) {
+    if (working.endsWith(suffix)) {
+      tier = candidateTier;
+      working = working.slice(0, -suffix.length);
+      break;
+    }
   }
   const lastUnderscore = working.lastIndexOf('_');
   if (lastUnderscore <= 0) return null;
@@ -200,6 +210,16 @@ const STATEMENT_TIMEOUT_SQLSTATE = '57014';
 function isStatementTimeout(error: unknown): boolean {
   return extractSqlState(error) === STATEMENT_TIMEOUT_SQLSTATE;
 }
+
+/**
+ * Hard ceiling, in milliseconds, on how long the cascade spends retrying
+ * tiers — measured from when the FIRST tier started, checked only at the
+ * point the loop decides to start the NEXT one. Each tier re-runs the whole
+ * WHERE clause, so a slow unrelated condition (an unindexed `dj:` ILIKE scan,
+ * say) or a slow `'word'` tier is otherwise paid up to three times over, each
+ * holding a connection-pool slot. See docs/playlist-search/README.md.
+ */
+export const CASCADE_BUDGET_MS = 1500;
 
 /** One tier's data + count attempt — the shape `searchFlowsheet`'s cascade tries in turn. */
 type TierAttempt = {
@@ -361,7 +381,15 @@ export async function searchFlowsheet(
       : tiersFor(conditions, typingTermIndex, sort);
 
   let lastGood: TierAttempt | null = null;
+  const cascadeStartedAt = Date.now();
   for (let i = 0; i < tiers.length; i++) {
+    // CASCADE_BUDGET_MS: do not START a later tier once the elapsed time
+    // since the first tier began exceeds the budget. The tier already in
+    // flight always finishes; this only stops the NEXT one. `lastGood` is
+    // already the prior tier's own (empty) result, so breaking here just
+    // returns that page — no warn, no Sentry report, identical to today's
+    // natural end-of-cascade behaviour.
+    if (i > 0 && Date.now() - cascadeStartedAt > CASCADE_BUDGET_MS) break;
     const tier = tiers[i];
     const attempt = await runTierQuery(tier, conditions, typingTermIndex, {
       sort,
@@ -424,14 +452,32 @@ export async function searchFlowsheet(
     // this collapses to the current page size.
     total = offset + results.length;
     const reason: unknown = lastGood.countSettled.reason;
-    Sentry.captureException(reason, {
-      tags: { subsystem: 'flowsheet-search' },
-      // `cursor`, not just `page`: in cursor mode `page` is always 0, so
-      // without the token there is nothing in this report that says WHERE in
-      // a walk the count gave out.
-      extra: { q, page, limit, cursor },
-    });
-    console.error('flowsheet search count query failed; returning lower-bound total', reason);
+    if (resolvedTier !== 'word' && isStatementTimeout(reason)) {
+      // A cascaded tier's COUNT query timing out is the same expected-cold
+      // `add_time` walk as a cascaded tier's DATA query timing out (see
+      // "Fallback-tier failure" above) — fingerprint it the same way so an
+      // expected timeout opens one Sentry issue, not one per distinct query.
+      // The `'word'` tier's own count failure is unaffected: it keeps
+      // today's un-fingerprinted reporting exactly, in the branch below.
+      console.warn(
+        `flowsheet search: '${resolvedTier}' tier's count query timed out; returning lower-bound total`,
+        reason
+      );
+      Sentry.captureException(reason, {
+        fingerprint: ['flowsheet-search-fallback-tier-count'],
+        tags: { subsystem: 'flowsheet-search', tier: resolvedTier },
+        extra: { q, page, limit, cursor },
+      });
+    } else {
+      Sentry.captureException(reason, {
+        tags: { subsystem: 'flowsheet-search' },
+        // `cursor`, not just `page`: in cursor mode `page` is always 0, so
+        // without the token there is nothing in this report that says WHERE in
+        // a walk the count gave out.
+        extra: { q, page, limit, cursor },
+      });
+      console.error('flowsheet search count query failed; returning lower-bound total', reason);
+    }
   }
 
   // nextCursor whenever this sort supports cursors AND we got a full page —
@@ -497,14 +543,24 @@ function findTypingTermIndex(conditions: SearchCondition<FlowsheetField>[]): num
 }
 
 /**
- * Whether any condition would change under the `'substring'` tier: a
- * positive (non-negated), unquoted, bare `all` term that passes
- * `shouldUseTsvector` — the same eligibility `findTypingTermIndex` tests for
- * the typing term, but checked across every condition rather than just the
- * last one, since the substring tier's OR applies to all of them.
+ * The single source of truth for substring-tier eligibility: a condition
+ * whose `'substring'`-tier predicate differs from its `'word'`-tier
+ * predicate at all — a positive (non-negated), unquoted, bare `all`
+ * condition whose value is tsvector-eligible (`shouldUseTsvector`). Read by
+ * `hasSubstringEligibleTerm` (via `tiersFor`/`resolvePinnedTier`) AND by
+ * `buildWhereClause`'s own per-condition `substring` flag, so the
+ * `'substring'` tier is scheduled exactly when at least one condition's SQL
+ * would actually change — never when the whole tier would be byte-identical
+ * to `'word'`'s, and never silently out of step with which conditions
+ * actually get widened.
  */
+export function isSubstringEligible(condition: SearchCondition<FlowsheetField>): boolean {
+  return condition.field === 'all' && !condition.negated && !condition.exact && shouldUseTsvector(condition.value);
+}
+
+/** Whether any condition would change under the `'substring'` tier — see `isSubstringEligible`. */
 function hasSubstringEligibleTerm(conditions: SearchCondition<FlowsheetField>[]): boolean {
-  return conditions.some((c) => c.field === 'all' && !c.negated && !c.exact && shouldUseTsvector(c.value));
+  return conditions.some(isSubstringEligible);
 }
 
 /** Tiers to try in order: always `'word'`; `'prefix'` when a typing term exists; `'substring'` when any term is tsvector-eligible. A non-date sort returns `['word']` only. See docs/playlist-search/README.md. */
@@ -527,7 +583,14 @@ function resolvePinnedTier(tier: Tier, conditions: SearchCondition<FlowsheetFiel
   return tier;
 }
 
-function buildWhereClause(
+/**
+ * Exported so `tests/unit/services/search.service.substring-tier.test.ts`
+ * can render the `'word'` and `'substring'` tiers' WHERE clauses directly
+ * and assert the single-eligibility-predicate invariant (see
+ * `isSubstringEligible`) without reaching through the cascade. Not part of
+ * the HTTP-facing contract.
+ */
+export function buildWhereClause(
   conditions: SearchCondition<FlowsheetField>[],
   tier: Tier,
   typingTermIndex: number
@@ -548,7 +611,7 @@ function buildWhereClause(
     const condition = conditions[i];
     const fragment = buildConditionFragment(condition, {
       prefix: i === prefixIndex,
-      substring: substringTier && !condition.negated,
+      substring: substringTier && isSubstringEligible(condition),
     });
     if (fragment) {
       parts.push({ operator: condition.operator, fragment });
@@ -665,7 +728,7 @@ function ilikeContainsFragment(value: string): SQL {
  * true for exactly one condition per `'prefix'`-tier query, the typing term
  * `searchFlowsheet` resolves via `findTypingTermIndex`; always false in the
  * `'word'` and `'substring'` tiers. `options.substring` is true for every
- * non-negated condition in the `'substring'` tier.
+ * `isSubstringEligible` condition in the `'substring'` tier.
  *
  * **Word tier:** `search_doc @@ E AND (strpos((E)::text, '<') = 0 OR gapped
  * @@ E)`, where `E = buildPrefixTsquery(value).exactTsquery` matches whole
