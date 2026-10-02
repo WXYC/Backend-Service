@@ -23,6 +23,7 @@ jest.mock('../../../../jobs/album-metadata-bio-fill/cohort', () => ({
 import { bulkLookupMetadata as bulkLookupMetadataImport } from '@wxyc/lml-client';
 import * as cohort from '../../../../jobs/album-metadata-bio-fill/cohort';
 import { computeBulkTimeoutMs, runBatch } from '../../../../jobs/album-metadata-bio-fill/job';
+import * as logger from '../../../../jobs/album-metadata-bio-fill/logger';
 
 const bulkLookupMetadata = bulkLookupMetadataImport as unknown as jest.Mock;
 const applyBioFill = cohort.applyBioFill as unknown as jest.Mock;
@@ -109,6 +110,31 @@ describe('runBatch — only a fill writes', () => {
     const result = await runBatch([JUANA], OPTS);
 
     expect(result).toMatchObject({ fill: 1, filled: 0, skipped_raced: 1 });
+  });
+
+  it('counts a write that throws as write_failed, reports the album for retry, and carries on', async () => {
+    const captureError = jest.spyOn(logger, 'captureError');
+    const reset = new Error('write CONNECTION_CLOSED');
+    bulkLookupMetadata.mockResolvedValue({ results: [filling(JUANA, 0), filling(JESSICA, 1)] } as never);
+    applyBioFill.mockRejectedValueOnce(reset as never);
+
+    const result = await runBatch([JUANA, JESSICA], OPTS);
+
+    // The second album is still written: one row's failure is not the batch's.
+    expect(applyBioFill).toHaveBeenCalledTimes(2);
+    expect(applyBioFill).toHaveBeenLastCalledWith(11, expect.anything());
+    // `write_failed` is its own counter, not `indeterminate`: LML did answer.
+    // The album id still goes on the retry list, which is what freezes the
+    // resume cursor at it.
+    expect(result).toMatchObject({
+      fill: 2,
+      filled: 1,
+      skipped_raced: 0,
+      write_failed: 1,
+      indeterminate: 0,
+      indeterminateAlbumIds: [10],
+    });
+    expect(captureError).toHaveBeenCalledWith(reset, 'write_failed', { album_id: 10 });
   });
 
   it.each([
