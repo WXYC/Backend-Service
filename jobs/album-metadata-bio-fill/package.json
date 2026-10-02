@@ -1,0 +1,29 @@
+{
+  "name": "@wxyc/album-metadata-bio-fill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot fill (BS#2775): write artist_bio and artist_wikipedia_url on album_metadata rows that carry a Discogs match and no bio, without touching the release, artwork, year or streaming columns.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_album_metadata_bio_fill:ci -f ../../Dockerfile.album-metadata-bio-fill ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@sentry/node": "^10.75.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

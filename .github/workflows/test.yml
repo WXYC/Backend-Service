@@ -346,6 +346,12 @@ jobs:
       - name: 'Type check: streaming-columns-drain'
         run: npm run typecheck --workspace=jobs/streaming-columns-drain
 
+      # BS#2775: the bio fill writes to the same `album_metadata` rows as the
+      # drain above, behind the same kind of verdict branch. Root typecheck
+      # skips `jobs/**` (BS#2009), so it gets its own step from the scaffold on.
+      - name: 'Type check: album-metadata-bio-fill'
+        run: npm run typecheck --workspace=jobs/album-metadata-bio-fill
+
       # Same narrow, per-job coverage rationale as the step above. This job
       # writes to the live on-air `flowsheet` table under a PII mandate, so a
       # transpile-only build silently shipping a type error is not an
