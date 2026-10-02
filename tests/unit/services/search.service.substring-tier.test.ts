@@ -1,8 +1,8 @@
-// WXYC/Backend-Service#2712 (PR 2): the 'substring' tier's predicate shape —
-// every positive, non-negated, unquoted bare `all` term that passes
+// WXYC/Backend-Service#2712: the 'substring' tier's predicate shape — every
+// positive, non-negated, unquoted bare `all` term that passes
 // `shouldUseTsvector` becomes `(<its word-tier predicate> OR <the four-column
 // ILIKE-contains predicate>)` — and byte-identity of the 'word'/'prefix'
-// tiers' own SQL, which this PR must not touch.
+// tiers' own SQL, which the 'substring' tier must not touch.
 //
 // `searchFlowsheet`'s cascade only reaches 'substring' when every earlier
 // tier comes back empty, so every test here mocks those earlier tiers empty
@@ -32,7 +32,8 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-import { searchFlowsheet } from '../../../apps/backend/services/search.service';
+import { searchFlowsheet, buildWhereClause, isSubstringEligible } from '../../../apps/backend/services/search.service';
+import { parseSearchQuery, FLOWSHEET_PARSER_CONFIG } from '../../../apps/backend/services/search-parser.service';
 
 /** Mocks empty, zero-count 'word' and 'prefix' tiers (forcing the cascade to 'substring' at call index 4). Use only for a query with a typing term. */
 const mockEmptyWordAndPrefixThenSubstring = () => {
@@ -160,7 +161,7 @@ describe("substring tier: every eligible term's predicate is OR'd with the ILIKE
   // file's row data).
 });
 
-describe('word and prefix tiers are byte-identical to PR 1 -- no substring widening leaks upstream', () => {
+describe('word and prefix tiers are byte-identical to their pre-substring-tier shape -- no substring widening leaks upstream', () => {
   it('the word tier (call 0) has no ILIKE for a tsvector-eligible term', async () => {
     mockEmptyWordAndPrefixThenSubstring();
 
@@ -197,4 +198,45 @@ describe('tiersFor: the substring tier is only appended when eligible, and only 
 
     expect(db.execute).toHaveBeenCalledTimes(2);
   });
+});
+
+describe('isSubstringEligible is the single source of truth: the substring tier is scheduled iff its WHERE differs from the word tier', () => {
+  /** Render a tier's WHERE clause text for a raw query, or null for an empty query. */
+  const renderWhere = (q: string, tier: 'word' | 'substring'): string | null => {
+    const conditions = parseSearchQuery(q, FLOWSHEET_PARSER_CONFIG);
+    // typingTermIndex is irrelevant to both 'word' and 'substring' -- only
+    // the 'prefix' tier reads it -- so -1 (no typing term) is safe here.
+    const where = buildWhereClause(conditions, tier, -1);
+    return where ? dialect.sqlToQuery(where).sql : null;
+  };
+
+  it.each([
+    ['', false],
+    ['tv', false], // under the length-3 floor
+    ['Åäöü', false], // no ASCII alphanumeric (BS#2739)
+    ['"autec"', false], // quoted (exact)
+    ['NOT autec', false], // negated
+    ['label:warp', false], // field condition, not 'all'
+    ['autec', true],
+    ['autec power', true],
+    ['autec label:warp', true], // the eligible bare term survives a trailing field condition
+    ['autec NOT power', true], // "autec" is still eligible even though "power" is negated
+  ])('query %j: hasEligible matches (wordWHERE !== substringWHERE) (%s)', (q) => {
+    const conditions = parseSearchQuery(q, FLOWSHEET_PARSER_CONFIG);
+    const hasEligible = conditions.some(isSubstringEligible);
+
+    const wordText = renderWhere(q, 'word');
+    const substringText = renderWhere(q, 'substring');
+
+    expect(hasEligible).toBe(wordText !== substringText);
+  });
+
+  // Mutation proof (manual; run during implementation, confirmed): widening
+  // `isSubstringEligible` to drop the `!condition.exact` check flips the
+  // `'"autec"'` case to red -- `hasEligible` would be `true` (the quoted
+  // condition would count as eligible) while the rendered WHERE stays
+  // IDENTICAL between tiers (a quoted condition's predicate never consults
+  // the `substring` flag at all, inside `buildAllFieldMatch`), so the two
+  // sides of the assertion diverge. Dropping the `shouldUseTsvector` check
+  // flips the `'tv'` case to red the same way.
 });

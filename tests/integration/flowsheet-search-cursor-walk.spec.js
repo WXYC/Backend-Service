@@ -420,7 +420,7 @@ describe('GET /flowsheet/search prefix-tier cascade cursor walk (WXYC/Backend-Se
 });
 
 /**
- * WXYC/Backend-Service#2712, PR 2 -- the `'substring'` tier's own cursor
+ * WXYC/Backend-Service#2712 -- the `'substring'` tier's own cursor
  * walk, mirroring the 'prefix' walk above exactly but one tier deeper.
  * Neither row is reachable by 'word' (no exact-lexeme match) or 'prefix'
  * (the marker is NOT a true string prefix of either row's first word --
@@ -432,7 +432,7 @@ describe('GET /flowsheet/search prefix-tier cascade cursor walk (WXYC/Backend-Se
 const SUBSTRING_WALK_MARKER = 'bs2712subcursorwalkprobe';
 const SUBSTRING_WALK_SUFFIXES = ['alpha', 'beta'];
 
-describe('GET /flowsheet/search substring-tier cascade cursor walk (WXYC/Backend-Service#2712, PR 2)', () => {
+describe('GET /flowsheet/search substring-tier cascade cursor walk (WXYC/Backend-Service#2712)', () => {
   let sql;
   let insertedIds = [];
 
@@ -528,12 +528,13 @@ describe('GET /flowsheet/search substring-tier cascade cursor walk (WXYC/Backend
 });
 
 /**
- * WXYC/Backend-Service#2712, PR 2 -- a 'word'-tier cursor walk whose final
+ * WXYC/Backend-Service#2712 -- a 'word'-tier cursor walk whose final
  * page lands exactly on `limit` must end with a genuinely empty page, not a
- * page of 'substring'-tier rows. Before PR 2 this was automatic (there was
- * nothing past 'prefix' for a query with no typing term to fall into); PR 2
- * adds a tier whose OWN eligibility gate (`hasSubstringEligibleTerm`) does
- * NOT depend on a typing term, so the bare marker here -- a perfectly
+ * page of 'substring'-tier rows. Before the 'substring' tier existed this
+ * was automatic (there was nothing past 'prefix' for a query with no typing
+ * term to fall into); the 'substring' tier's OWN eligibility gate
+ * (`hasSubstringEligibleTerm`) does NOT depend on a typing term, so the bare
+ * marker here -- a perfectly
  * ordinary tsvector-eligible word -- WOULD head a cold request's tier list
  * with 'substring' too. A cursor pinned to 'word' must never reach it: the
  * marker is deliberately chosen so that if it did, the query's own ILIKE-
@@ -546,7 +547,7 @@ const WORD_TIER_WALK_MARKER = 'bs2712wordcursorwalkprobe';
 const WORD_TIER_WALK_ROW_COUNT = 4;
 const WORD_TIER_WALK_PAGE_SIZE = 2;
 
-describe("GET /flowsheet/search 'word'-tier cursor walk with an exactly-full final page (WXYC/Backend-Service#2712, PR 2)", () => {
+describe("GET /flowsheet/search 'word'-tier cursor walk with an exactly-full final page (WXYC/Backend-Service#2712)", () => {
   let sql;
   let insertedIds = [];
 

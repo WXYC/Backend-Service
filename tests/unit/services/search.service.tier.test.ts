@@ -1,4 +1,4 @@
-// WXYC/Backend-Service#2712 (rework, PR 1): the 'prefix' tier's predicate for
+// WXYC/Backend-Service#2712 (rework): the 'prefix' tier's predicate for
 // the query's typing term, and which condition `findTypingTermIndex` selects
 // as that typing term.
 //
@@ -146,7 +146,7 @@ describe('typing-term selection (findTypingTermIndex, consulted only in the pref
     (db.execute as jest.Mock)
       .mockResolvedValueOnce([]) // word data
       .mockResolvedValueOnce([{ total: 0 }]) // word count
-      .mockResolvedValueOnce([]) // substring data (WXYC/Backend-Service#2712 PR 2 -- see below)
+      .mockResolvedValueOnce([]) // substring data (the 'substring' tier -- see below)
       .mockResolvedValueOnce([{ total: 0 }]); // substring count
 
     await searchFlowsheet({ q: 'autechre am', page: 0, limit: 50, sort: 'date', order: 'desc' });
@@ -156,7 +156,7 @@ describe('typing-term selection (findTypingTermIndex, consulted only in the pref
     // skipping "am" -- findTypingTermIndex stops at the first positive bare
     // term scanning backward, so there is no typing term at all here and the
     // 'prefix' tier (the one that would CASE-prefix-match "autechre") never
-    // runs. As of PR 2, `tiersFor`'s 'substring' gate is independent of the
+    // runs. `tiersFor`'s 'substring' gate is independent of the
     // typing term -- "autechre" alone qualifies -- so the cascade still
     // advances from 'word' to 'substring' (4 calls, not 2); see
     // search.service.substring-tier.test.ts for that tier's own coverage.
