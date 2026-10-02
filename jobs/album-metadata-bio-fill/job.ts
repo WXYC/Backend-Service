@@ -412,6 +412,8 @@ export interface FillSummary extends VerdictTotals {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+const toError = (err: unknown): Error => (err instanceof Error ? err : new Error(String(err)));
+
 /** Cooperative stop, flipped by SIGTERM/SIGINT in `main`. The in-flight batch
  * always finishes; its writes are committed per album. */
 let stopRequested = false;
@@ -435,11 +437,11 @@ const stopAwareSleep = async (ms: number): Promise<void> => {
  * Returns the album just before the batch's first unsettled row (unanswered,
  * or its write threw), or the batch's last album when every row was settled.
  */
-const answeredThrough = (batch: FillCandidate[], result: BatchResult, before: number): number => {
-  const unanswered = new Set(result.indeterminateAlbumIds);
+const settledThrough = (batch: FillCandidate[], unsettledIds: number[], before: number): number => {
+  const unsettled = new Set(unsettledIds);
   let through = before;
   for (const candidate of batch) {
-    if (unanswered.has(candidate.album_id)) break;
+    if (unsettled.has(candidate.album_id)) break;
     through = candidate.album_id;
   }
   return through;
@@ -541,7 +543,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
           ? 'live_activity_pause_ceiling_exceeded'
           : 'live_activity_pause_failed';
       captureError(err, step, { batches_done: b, of: batches.length });
-      abort = err instanceof Error ? err : new Error(String(err));
+      abort = toError(err);
       break;
     }
 
@@ -552,10 +554,10 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     }
     const room = INDETERMINATE_IDS_REPORT_CAP - summary.indeterminate_album_ids.length;
     summary.indeterminate_album_ids.push(...indeterminateAlbumIds.slice(0, Math.max(0, room)));
-    summary.last_album_id = batch[batch.length - 1]?.album_id ?? summary.last_album_id;
+    summary.last_album_id = batch[batch.length - 1].album_id;
     if (consecutiveNoBioBatches === 0) resumeBeforeNoBioStreak = summary.resume_after_album_id;
     if (!resumeFrozen) {
-      summary.resume_after_album_id = answeredThrough(batch, result, summary.resume_after_album_id);
+      summary.resume_after_album_id = settledThrough(batch, indeterminateAlbumIds, summary.resume_after_album_id);
       resumeFrozen = indeterminateAlbumIds.length > 0;
     }
     log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, {
@@ -573,21 +575,25 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     const settledNothing =
       result.indeterminate === batchSize || (result.write_failed > 0 && result.write_failed === result.fill);
     consecutiveFailedBatches = settledNothing ? consecutiveFailedBatches + 1 : 0;
+    consecutiveNoBioBatches = result.no_bio === batchSize ? consecutiveNoBioBatches + 1 : 0;
     if (consecutiveFailedBatches >= options.maxConsecutiveFailedBatches) {
       abort = new ConsecutiveFailedBatchesError(consecutiveFailedBatches);
-      captureError(abort, 'consecutive_failed_batches', { batches_done: b + 1, of: batches.length });
-      break;
-    }
-    consecutiveNoBioBatches = result.no_bio === batchSize ? consecutiveNoBioBatches + 1 : 0;
-    if (options.maxConsecutiveNoBioBatches > 0 && consecutiveNoBioBatches >= options.maxConsecutiveNoBioBatches) {
+    } else if (
+      options.maxConsecutiveNoBioBatches > 0 &&
+      consecutiveNoBioBatches >= options.maxConsecutiveNoBioBatches
+    ) {
       // Every row in the streak looked answered, so the cursor walked through
       // it. Put it back, or a resume would never re-ask what the shed took.
       summary.resume_after_album_id = resumeBeforeNoBioStreak;
       abort = new ConsecutiveNoBioBatchesError(consecutiveNoBioBatches);
-      captureError(abort, 'consecutive_no_bio_batches', { batches_done: b + 1, of: batches.length });
+    }
+    if (abort) {
+      const step =
+        abort instanceof ConsecutiveNoBioBatchesError ? 'consecutive_no_bio_batches' : 'consecutive_failed_batches';
+      captureError(abort, step, { batches_done: b + 1, of: batches.length });
       break;
     }
-    if (b < batches.length - 1 && interBatchSleepMs > 0) await stopAwareSleep(interBatchSleepMs);
+    if (b < batches.length - 1) await stopAwareSleep(interBatchSleepMs);
   }
 
   // The accounting reads the database too, and a run that aborted because the
@@ -598,7 +604,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     if (summary.filled > 0) await analyzeAlbumMetadata();
     summary.cohortAfter = await countCohort(options.readTimeoutMs);
   } catch (err) {
-    accountingError = err instanceof Error ? err : new Error(String(err));
+    accountingError = toError(err);
     captureError(err, 'accounting_failed');
   }
 
