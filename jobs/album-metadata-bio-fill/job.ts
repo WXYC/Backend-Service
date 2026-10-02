@@ -546,15 +546,29 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     if (b < batches.length - 1 && interBatchSleepMs > 0) await stopAwareSleep(interBatchSleepMs);
   }
 
-  if (summary.filled > 0) await analyzeAlbumMetadata();
-  summary.cohortAfter = await countCohort(options.readTimeoutMs);
+  // The accounting reads the database too, and a run that aborted because the
+  // database went away will fail here as well. That must not cost the summary
+  // line below, so the error is held; `cohortAfter` then keeps the before-count.
+  let accountingError: Error | undefined;
+  try {
+    if (summary.filled > 0) await analyzeAlbumMetadata();
+    summary.cohortAfter = await countCohort(options.readTimeoutMs);
+  } catch (err) {
+    accountingError = err instanceof Error ? err : new Error(String(err));
+    captureError(err, 'accounting_failed');
+  }
 
-  if (abort) {
+  const failure = abort ?? accountingError;
+  if (failure) {
     // `main`'s `finished` line will not run once this throws, so this log is
     // what preserves the partial totals and the resume point.
-    summary.stopped_early = true;
-    log('error', 'summary', `${JOB_NAME} aborted early: ${abort.message}`, { ...summary });
-    throw abort;
+    summary.stopped_early ||= abort !== undefined;
+    const how = abort ? 'aborted early' : 'could not finish its accounting';
+    log('error', 'summary', `${JOB_NAME} ${how}: ${failure.message}`, {
+      ...summary,
+      accounting_failed: accountingError !== undefined,
+    });
+    throw failure;
   }
   return summary;
 };
