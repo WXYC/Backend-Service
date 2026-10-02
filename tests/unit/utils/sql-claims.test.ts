@@ -441,10 +441,15 @@ describe('createClaimRole — a per-run role, never a cleartext password in SQL 
   // Written out here, not read from the module, so dropping a setting from
   // the module fails this test instead of quietly shrinking it.
   const QUIET_BATCH =
-    "SET LOCAL log_statement = 'none'; SET LOCAL log_min_error_statement = 'panic'; " +
-    'SET LOCAL log_min_duration_statement = -1; SET LOCAL log_min_duration_sample = -1; ' +
-    "SET LOCAL track_activities = off; SET LOCAL pg_stat_statements.track = 'none'; " +
-    'SET LOCAL debug_print_parse = off; SET LOCAL debug_print_rewritten = off; SET LOCAL debug_print_plan = off';
+    "SET log_statement = 'none'; SET log_min_error_statement = 'panic'; " +
+    'SET log_min_duration_statement = -1; SET log_min_duration_sample = -1; ' +
+    'SET log_transaction_sample_rate = 0; SET track_activities = off; ' +
+    "SET pg_stat_statements.track = 'none'; SET debug_print_parse = off; " +
+    'SET debug_print_rewritten = off; SET debug_print_plan = off';
+  const RESET_BATCH =
+    'RESET log_statement; RESET log_min_error_statement; RESET log_min_duration_statement; ' +
+    'RESET log_min_duration_sample; RESET log_transaction_sample_rate; RESET track_activities; ' +
+    'RESET pg_stat_statements.track; RESET debug_print_parse; RESET debug_print_rewritten; RESET debug_print_plan';
 
   it('creates a uniquely named non-superuser LOGIN role from a SCRAM verifier', async () => {
     const sql = fakeSql(true);
@@ -466,15 +471,20 @@ describe('createClaimRole — a per-run role, never a cleartext password in SQL 
     await createClaimRole(sql);
     expect(sql.reserve).toHaveBeenCalledTimes(1);
     const reserved = sql.on('reserved');
-    // Transaction sampling is decided at BEGIN, so that one setting goes out
-    // at session level ahead of it; the rest are SET LOCAL inside.
-    expect(reserved.slice(0, 3)).toEqual(['SET log_transaction_sample_rate = 0', 'BEGIN', QUIET_BATCH]);
-    expect(reserved[3]).toMatch(/^CREATE ROLE /);
-    expect(reserved.slice(4)).toEqual(['COMMIT', 'RESET log_transaction_sample_rate']);
+    expect(reserved).toHaveLength(3);
+    expect(reserved[0]).toBe(QUIET_BATCH);
+    expect(reserved[1]).toMatch(/^CREATE ROLE /);
+    expect(reserved[2]).toBe(RESET_BATCH);
     expect(sql.release).toHaveBeenCalledTimes(1);
     // Nothing but the superuser probe may go out on the pool: another
     // connection has none of the settings, so a CREATE ROLE there is logged.
     expect(sql.on('pool')).toEqual(['SELECT rolsuper FROM pg_roles WHERE rolname = current_user']);
+  });
+
+  it('never wraps the CREATE ROLE in an explicit transaction, whose sampling is decided before any SET in it', async () => {
+    const sql = fakeSql(true);
+    await createClaimRole(sql);
+    expect(sql.calls.map(({ q }) => q).join('\n')).not.toMatch(/\bBEGIN\b|SET LOCAL/);
   });
 
   it('does not set debug_print_raw_parse, which is unknown on 18.x and would abort the transaction', async () => {
@@ -500,9 +510,9 @@ describe('createClaimRole — a per-run role, never a cleartext password in SQL 
     const sql = fakeSql(true, denied);
     await expect(createClaimRole(sql)).rejects.toBe(denied);
     expect(denied.message).toBe('permission denied to create role');
-    // The failed transaction is rolled back, the session setting restored and
-    // the connection handed back, so the caller's pool is left as it was.
-    expect(sql.on('reserved').slice(4)).toEqual(['ROLLBACK', 'RESET log_transaction_sample_rate']);
+    // The session settings are restored and the connection handed back, so
+    // the caller's pool is left as it was.
+    expect(sql.on('reserved').at(-1)).toBe(RESET_BATCH);
     expect(sql.release).toHaveBeenCalledTimes(1);
   });
 });
@@ -528,6 +538,19 @@ describe('runThenCleanUp — every cleanup step runs, and the first failure is t
     if (expected === null) await expect(run).resolves.toBe('result');
     else await expect(run).rejects.toThrow(expected);
     expect(ran).toEqual(steps.map((_, i) => i));
+  });
+
+  it('writes a failure after the first to the console instead of dropping it', async () => {
+    const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const second = boom('second');
+    try {
+      await expect(runThenCleanUp(() => Promise.reject(boom('first')), [() => Promise.reject(second)])).rejects.toThrow(
+        'first'
+      );
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining('runThenCleanUp'), second);
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it('runs a step that throws synchronously like one that rejects', async () => {

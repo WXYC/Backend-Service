@@ -100,7 +100,7 @@
  *    client-computed SCRAM-SHA-256 verifier, so the cleartext is never in
  *    SQL text or the server log, and the DDL that carries the verifier runs
  *    with logging and activity tracking switched off (`createClaimRole` lists
- *    each sink closed and the ones a SET LOCAL cannot reach). Because
+ *    each sink closed and the ones left open). Because
  *    the SESSION user is unprivileged, a claim cannot re-escalate:
  *    `set_config('role', …)`, `set_config('session_authorization', …)`,
  *    `SET ROLE` and `RESET ROLE` all fail or stay on the claim role. So a
@@ -599,30 +599,35 @@ const SUPERUSER_REQUIRED =
   'CI uses the postgres image superuser POSTGRES_USER.';
 
 /**
- * What `createClaimRole` switches off, with SET LOCAL, before the CREATE ROLE
- * that carries the verifier. `[name, value as SQL]`, grouped by sink:
+ * What `createClaimRole` switches off, for the session, before the CREATE
+ * ROLE that carries the verifier. `[name, value as SQL]`, grouped by sink:
  *
  * - server log: the statement itself, the statement attached to an error,
- *   duration and sampled-duration logging, and the parse / rewritten / plan
- *   tree dumps (written at LOG level whatever
+ *   duration, sampled-duration and sampled-transaction logging, and the
+ *   parse / rewritten / plan tree dumps (written at LOG level whatever
  *   log_statement says; the parse tree holds the PASSWORD string);
  * - `pg_stat_activity.query`, which any role with pg_read_all_stats can poll;
  * - `pg_stat_statements.query`. The extension's parameter is set whether or
  *   not the extension is loaded: Postgres accepts a dotted name it does not
- *   know as a placeholder.
+ *   know as a placeholder. That also means a misspelt dotted name is accepted
+ *   silently, and no test here can tell, because the suite never loads the
+ *   extension. The name and value were checked by hand with it loaded.
  *
  * Every non-dotted name here must exist on each Postgres the suite runs on:
- * SET LOCAL on an unknown one raises and aborts the transaction.
+ * SET on an unknown one raises, and the role is then not created.
  *
- * `log_transaction_sample_rate` is not here. Whether a transaction is sampled
- * is decided when it begins, so a SET LOCAL inside it comes too late:
- * `createClaimRole` sets that one at session level before BEGIN instead.
+ * These are session-level SETs, not SET LOCAL in a transaction around the
+ * CREATE ROLE. Whether a transaction is sampled by
+ * `log_transaction_sample_rate` is decided when it begins, so a SET LOCAL
+ * inside it comes too late for that one (measured on 18.6: the CREATE ROLE
+ * was logged with its duration).
  */
 const ROLE_DDL_QUIET_SETTINGS = [
   ['log_statement', "'none'"],
   ['log_min_error_statement', "'panic'"],
   ['log_min_duration_statement', '-1'],
   ['log_min_duration_sample', '-1'],
+  ['log_transaction_sample_rate', '0'],
   ['track_activities', 'off'],
   ['pg_stat_statements.track', "'none'"],
   ['debug_print_parse', 'off'],
@@ -630,7 +635,9 @@ const ROLE_DDL_QUIET_SETTINGS = [
   ['debug_print_plan', 'off'],
 ];
 /** ROLE_DDL_QUIET_SETTINGS as one `;`-separated statement batch. */
-const ROLE_DDL_QUIET_BATCH = ROLE_DDL_QUIET_SETTINGS.map(([name, value]) => `SET LOCAL ${name} = ${value}`).join('; ');
+const ROLE_DDL_QUIET_BATCH = ROLE_DDL_QUIET_SETTINGS.map(([name, value]) => `SET ${name} = ${value}`).join('; ');
+/** Puts every ROLE_DDL_QUIET_SETTINGS parameter back to the session's default. */
+const ROLE_DDL_RESET_BATCH = ROLE_DDL_QUIET_SETTINGS.map(([name]) => `RESET ${name}`).join('; ');
 
 /**
  * A SCRAM-SHA-256 verifier for `password` (RFC 5802 / RFC 7677), in the form
@@ -655,57 +662,55 @@ function scramSha256Verifier(password, salt = randomBytes(16), iterations = 4096
  * Call `dropClaimRole` once every connection logged in as it has ended.
  *
  * The verifier is kept out of the server's records as well. On one reserved
- * connection, `log_transaction_sample_rate` is set to 0 for the session, and
- * then the CREATE ROLE runs in a transaction whose first statement is
- * ROLE_DDL_QUIET_BATCH. Together they close the server log,
+ * connection, ROLE_DDL_QUIET_BATCH goes first, then the CREATE ROLE, then
+ * ROLE_DDL_RESET_BATCH, which together keep the DDL out of the server log,
  * `pg_stat_activity` and `pg_stat_statements` (see ROLE_DDL_QUIET_SETTINGS).
  * The batch has to stay a separate statement sent before the CREATE ROLE:
  * the server logs a message's text, and reports it to `pg_stat_activity`,
  * when the message arrives, before any SET inside it has run.
  *
- * Not closed, because a SET LOCAL here cannot close them:
+ * Not closed:
  * - an extension that logs utility statements through its own hook under its
- *   own parameter (pgaudit is the usual one). The suite loads none, so a
- *   setting for one would be untested;
+ *   own parameter (pgaudit is the usual one). A setting for it could be added
+ *   the way `pg_stat_statements.track` is, but the suite loads no such
+ *   extension, so it would be untested;
  * - `debug_print_raw_parse`, which does not exist on 18.x, so setting it
- *   would abort the transaction. Add it to ROLE_DDL_QUIET_SETTINGS when the
- *   suite moves to a major that has it.
+ *   would fail the batch. Add it to ROLE_DDL_QUIET_SETTINGS when the suite
+ *   moves to a major that has it.
  * In either case what would be recorded is a verifier for a random 192-bit
  * password on a grant-less role dropped seconds later, not the password.
  *
- * Needs a writable connection whose user is a superuser, checked up front so
- * the failure names the requirement (see SUPERUSER_REQUIRED).
+ * If the role is created but the RESET or the release then fails, this
+ * rejects and the caller never learns the role's name. `dropStaleClaimRoles`
+ * is what removes it, on a later run.
+ *
+ * `sql` must be a postgres.js pool handle (this calls `sql.reserve()`), not a
+ * transaction or an already-reserved connection, and its user must be a
+ * superuser, checked up front so the failure names the requirement (see
+ * SUPERUSER_REQUIRED).
  */
 async function createClaimRole(sql) {
   const [{ rolsuper }] = await sql.unsafe('SELECT rolsuper FROM pg_roles WHERE rolname = current_user');
   if (!rolsuper) throw new Error(SUPERUSER_REQUIRED);
   const user = `${CLAIM_ROLE_PREFIX}${Math.floor(Date.now() / 1000)}_${randomBytes(8).toString('hex')}`;
   const password = randomBytes(24).toString('hex');
-  // One reserved connection, because the session-level setting, the
-  // transaction and the RESET must all land on the same backend.
+  // One reserved connection: on a pool, the settings and the CREATE ROLE
+  // could otherwise land on different backends.
   const conn = await sql.reserve();
   return runThenCleanUp(async () => {
-    await conn.unsafe('SET log_transaction_sample_rate = 0');
-    await conn.unsafe('BEGIN');
-    try {
-      await conn.unsafe(ROLE_DDL_QUIET_BATCH);
-      await conn.unsafe(
-        `CREATE ROLE ${user} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${scramSha256Verifier(password)}'`
-      );
-      await conn.unsafe('COMMIT');
-    } catch (e) {
-      // The original failure is the one to report, whatever ROLLBACK does.
-      await conn.unsafe('ROLLBACK').catch(() => {});
-      throw e;
-    }
+    await conn.unsafe(ROLE_DDL_QUIET_BATCH);
+    await conn.unsafe(
+      `CREATE ROLE ${user} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${scramSha256Verifier(password)}'`
+    );
     return { user, password };
-  }, [() => conn.unsafe('RESET log_transaction_sample_rate'), () => conn.release()]);
+  }, [() => conn.unsafe(ROLE_DDL_RESET_BATCH), () => conn.release()]);
 }
 
 /**
  * Run `body`, then every cleanup step in order, whether or not the body or an
  * earlier step failed. Rejects with the first failure: the body's if it
- * failed, otherwise the first failing step's. Resolves to the body's result.
+ * failed, otherwise the first failing step's. Any later failure is written to
+ * the console, so it is not lost. Resolves to the body's result.
  *
  * A `finally` holding two awaits does neither: a rejecting first await skips
  * the second, and either one replaces the error that actually failed the
@@ -723,6 +728,7 @@ async function runThenCleanUp(body, steps) {
       failures.push(e);
     }
   }
+  for (const later of failures.slice(1)) console.error('runThenCleanUp: a further failure after the first:', later);
   if (failures.length > 0) throw failures[0];
   return result;
 }
@@ -803,6 +809,7 @@ module.exports = {
   SESSION_PARAMETERS,
   CLAIM_ROLE_PREFIX,
   ROLE_DDL_QUIET_BATCH,
+  ROLE_DDL_QUIET_SETTINGS,
   ClaimSyntaxError,
   assertSafeExpression,
   parseClaimLine,
