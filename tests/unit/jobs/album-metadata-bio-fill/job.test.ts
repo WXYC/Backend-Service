@@ -146,7 +146,7 @@ describe('runFill — dry run', () => {
 });
 
 describe('runFill — execute', () => {
-  it('refuses until the write path exists (BS#2778, BS#2779)', async () => {
+  it('refuses until the execute loop exists (BS#2779)', async () => {
     await expect(runFill(resolveOptions({}, ['--execute']))).rejects.toThrow(/not implemented/);
     expect(enumerateCohort).not.toHaveBeenCalled();
   });
