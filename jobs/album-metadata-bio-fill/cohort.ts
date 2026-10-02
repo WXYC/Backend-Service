@@ -125,3 +125,43 @@ export const enumerateCohort = async (
     album_title: String(r.album_title),
   }));
 };
+
+// -- The write ---------------------------------------------------------------
+
+export interface BioFill {
+  artist_bio: string;
+  artist_wikipedia_url: string | null;
+}
+
+/**
+ * Write one album's bio, fill-null only. Returns true when a row changed.
+ *
+ * The cohort predicate is re-asserted in the WHERE, which is the TOCTOU guard:
+ * if anything gave the row a bio between enumeration and write, zero rows
+ * match and the caller counts it as raced rather than overwriting. That makes
+ * the COALESCE on `artist_bio` redundant; it is kept so the statement reads as
+ * fill-null on its face. The COALESCE on `artist_wikipedia_url` is not
+ * redundant — the predicate says nothing about that column, and an existing
+ * URL must survive.
+ *
+ * Nothing else on the row is touched. LML resolves by search and often lands
+ * on a different release than the stored one, so the release-scoped columns
+ * are not this job's to write.
+ */
+export const applyBioFill = async (albumId: number, fill: BioFill): Promise<boolean> => {
+  const rows = (await db.execute(sql`
+    UPDATE ${sql.raw(table('album_metadata'))}
+       SET "artist_bio"           = COALESCE("artist_bio", ${fill.artist_bio}),
+           "artist_wikipedia_url" = COALESCE("artist_wikipedia_url", ${fill.artist_wikipedia_url}),
+           "updated_at"           = NOW()
+     WHERE "album_id" = ${albumId}
+       AND ${sql.raw(cohortPredicateSql())}
+    RETURNING "album_id"
+  `)) as unknown as Array<{ album_id: number }>;
+  return rows.length > 0;
+};
+
+/** ANALYZE after a run that wrote, per `docs/bulk-update-playbook.md`. */
+export const analyzeAlbumMetadata = async (): Promise<void> => {
+  await db.execute(sql.raw(`ANALYZE ${table('album_metadata')}`));
+};

@@ -23,8 +23,9 @@
  *
  * ## State of this file
  *
- * The cohort and the dry run (BS#2777). The verdict and write are BS#2778 and
- * the execute loop is BS#2779; until then `--execute` is refused.
+ * The cohort, the dry run, and `runBatch` (BS#2777, BS#2781, BS#2778). The
+ * execute loop that calls `runBatch` is BS#2779; until then `--execute` is
+ * refused.
  *
  * Dry-run is the DEFAULT and makes zero LML calls: it reports the counts and
  * the batch plan and stops.
@@ -40,11 +41,20 @@ import {
   resolveLiveActivityPauseMs,
   LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
 } from '@wxyc/database';
-import { BULK_LOOKUP_INPUT_CAP } from '@wxyc/lml-client';
-import { READ_TIMEOUT_DEFAULT, countCohort, countEligible, enumerateCohort } from './cohort.js';
+import { BULK_LOOKUP_INPUT_CAP, bulkLookupMetadata, type BulkLookupItem } from '@wxyc/lml-client';
+import * as Sentry from '@sentry/node';
+import {
+  READ_TIMEOUT_DEFAULT,
+  applyBioFill,
+  countCohort,
+  countEligible,
+  enumerateCohort,
+  type FillCandidate,
+} from './cohort.js';
+import { decideBioFill } from './decide.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
-const JOB_NAME = 'album-metadata-bio-fill';
+const JOB_NAME = 'album-metadata-bio-fill' as const;
 
 // -- Knobs -------------------------------------------------------------------
 
@@ -148,6 +158,130 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
   };
 };
 
+/** Per-item slice of the bulk fetch timeout, plus fixed slack. The shared LML
+ * client's 30s default would otherwise fire mid-batch on a cascade-heavy chunk
+ * (BS#1178). Mirrors `streaming-columns-drain`. */
+export const PER_ITEM_TIMEOUT_MS = 5_000;
+export const TIMEOUT_SLACK_MS = 5_000;
+export const computeBulkTimeoutMs = (batchSize: number): number => batchSize * PER_ITEM_TIMEOUT_MS + TIMEOUT_SLACK_MS;
+
+// -- Batch -------------------------------------------------------------------
+
+export interface BatchResult {
+  batchSize: number;
+  /** One counter per `decideBioFill` verdict. */
+  fill: number;
+  no_match: number;
+  untrusted: number;
+  card_mismatch: number;
+  no_bio: number;
+  indeterminate: number;
+  /** Of `fill`: rows actually updated, and rows that had a bio by write time. */
+  filled: number;
+  skipped_raced: number;
+  /** Of `indeterminate`: results that arrived out of input order. */
+  unexpected_index: number;
+  /** The albums LML did not answer for, so a run can report exactly which
+   * rows a cursor resume would walk past. */
+  indeterminateAlbumIds: number[];
+}
+
+export const emptyBatchResult = (batchSize: number): BatchResult => ({
+  batchSize,
+  fill: 0,
+  no_match: 0,
+  untrusted: 0,
+  card_mismatch: 0,
+  no_bio: 0,
+  indeterminate: 0,
+  filled: 0,
+  skipped_raced: 0,
+  unexpected_index: 0,
+  indeterminateAlbumIds: [],
+});
+
+/**
+ * `extended: true` on every item is load-bearing: it is one of the conditions
+ * of LML's artist-identity gate (LML#504), which is the right gate for an
+ * artist-scoped fill. Without it the bio rides LML's album gate instead.
+ */
+const buildBulkItems = (candidates: FillCandidate[]): BulkLookupItem[] =>
+  candidates.map((c) => ({
+    artist: c.artist_name,
+    album: c.album_title,
+    raw_message: `${c.artist_name} - ${c.album_title}`,
+    extended: true,
+  }));
+
+/**
+ * Resolve one chunk through LML and write the bio for each `fill` verdict.
+ * Never called on a dry run.
+ *
+ * Only `fill` writes. A thrown bulk call (timeout, 5xx, network) leaves the
+ * whole chunk indeterminate. `allowReleaseResolutionFallback` is deliberately
+ * not passed: like every offline drain this stays off LML's per-row live
+ * Discogs path (BS#1815), at the cost of the albums only a release pin can
+ * resolve.
+ */
+export const runBatch = async (candidates: FillCandidate[], options: { budgetMs: number }): Promise<BatchResult> => {
+  const result = emptyBatchResult(candidates.length);
+  if (candidates.length === 0) return result;
+
+  let response: Awaited<ReturnType<typeof bulkLookupMetadata>>;
+  try {
+    response = await bulkLookupMetadata(buildBulkItems(candidates), {
+      caller: JOB_NAME,
+      budgetMs: options.budgetMs,
+      timeoutMs: computeBulkTimeoutMs(candidates.length),
+    });
+  } catch (err) {
+    const extra = {
+      size: candidates.length,
+      first_album_id: candidates[0]?.album_id ?? null,
+      last_album_id: candidates[candidates.length - 1]?.album_id ?? null,
+    };
+    log('warn', 'lml_batch_failed', 'bulkLookupMetadata threw; whole batch left unwritten', {
+      ...extra,
+      error_message: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+    captureError(err, 'lml_batch_failed', extra);
+    result.indeterminate = candidates.length;
+    result.indeterminateAlbumIds = candidates.map((c) => c.album_id);
+    return result;
+  }
+
+  for (const [position, candidate] of candidates.entries()) {
+    const item = response.results[position];
+    const verdict = decideBioFill(candidate, item, position);
+    result[verdict.kind] += 1;
+
+    if (verdict.kind === 'indeterminate') {
+      result.indeterminateAlbumIds.push(candidate.album_id);
+      if (verdict.unexpectedIndex) result.unexpected_index += 1;
+      log('warn', 'lml_indeterminate', `no usable LML verdict for album_id=${candidate.album_id}; not written`, {
+        album_id: candidate.album_id,
+        status: item?.status ?? null,
+        got_index: item?.index ?? null,
+        error_message: item?.message ?? null,
+      });
+    } else if (verdict.kind === 'fill') {
+      if (await applyBioFill(candidate.album_id, verdict.fill)) result.filled += 1;
+      else result.skipped_raced += 1;
+    }
+  }
+
+  if (result.unexpected_index > 0) {
+    Sentry.captureMessage(`${JOB_NAME}.unexpected_index`, {
+      level: 'warning',
+      tags: { source: JOB_NAME },
+      extra: { unexpected_index: result.unexpected_index, batch_size: candidates.length },
+      fingerprint: [JOB_NAME, 'unexpected_index'],
+    });
+  }
+
+  return result;
+};
+
 // -- Orchestration -----------------------------------------------------------
 
 export interface FillSummary {
@@ -166,7 +300,7 @@ export interface FillSummary {
 
 export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   if (options.execute) {
-    throw new Error(`${JOB_NAME}: --execute is not implemented yet (BS#2778, BS#2779); run without it for the plan`);
+    throw new Error(`${JOB_NAME}: --execute is not implemented yet (BS#2779); run without it for the plan`);
   }
 
   log('info', 'started', `${JOB_NAME} starting`, {
