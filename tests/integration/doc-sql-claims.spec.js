@@ -3,6 +3,7 @@ const path = require('path');
 const postgres = require('postgres');
 const {
   ROLE_DDL_QUIET_BATCH,
+  ROLE_DDL_QUIET_SETTINGS,
   claimConnectionOptions,
   collectSqlClaims,
   createClaimRole,
@@ -199,10 +200,11 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
     }, [() => dropClaimRole(plain, fresh.user)]);
   });
 
-  test('the role-DDL quiet batch is accepted by this server and every setting takes effect', async () => {
+  test('the role-DDL quiet batch is accepted by this server, takes effect, and is undone afterwards', async () => {
     // Listed here, not read from the module, so dropping a setting there
     // fails this test. A Postgres upgrade that removes or renames one of
-    // these fails here by name instead of inside createClaimRole's setup.
+    // the non-dotted names fails here by name. The dotted one cannot fail
+    // that way: without its extension loaded it is only a placeholder.
     const expected = {
       debug_print_parse: 'off',
       debug_print_plan: 'off',
@@ -211,25 +213,36 @@ describe('sql-claim runner — read-only layers hold without the lexer', () => {
       log_min_duration_statement: '-1',
       log_min_error_statement: 'panic',
       log_statement: 'none',
+      log_transaction_sample_rate: '0',
       'pg_stat_statements.track': 'none',
       track_activities: 'off',
     };
-    const read = async (conn) => {
-      const values = {};
-      for (const name of Object.keys(expected)) {
-        const [row] = await conn`SELECT current_setting(${name}, true) AS value`;
-        values[name] = row.value;
-      }
-      return values;
-    };
+    // Both directions: a setting added to the module must be listed here too.
+    expect(ROLE_DDL_QUIET_SETTINGS.map(([name]) => name).sort()).toEqual(Object.keys(expected));
     let inside;
     const probe = plain.begin(async (tx) => {
       await tx.unsafe(ROLE_DDL_QUIET_BATCH);
-      inside = await read(tx);
+      inside = {};
+      for (const name of Object.keys(expected)) {
+        const [row] = await tx`SELECT current_setting(${name}) AS value`;
+        inside[name] = row.value;
+      }
       throw PROBE_ROLLBACK;
     });
     await expect(probe).rejects.toBe(PROBE_ROLLBACK);
     expect(inside).toEqual(expected);
+
+    // The batch is session-level, so createClaimRole has to undo it. `plain`
+    // has one connection and has already run createClaimRole in beforeAll; a
+    // missing or partial RESET leaves these away from their session defaults.
+    const left = await plain`
+      SELECT name, setting, reset_val FROM pg_settings
+      WHERE name IN ${plain(Object.keys(expected))} AND setting IS DISTINCT FROM reset_val`;
+    expect(left.map((r) => [r.name, r.setting, r.reset_val])).toEqual([]);
+    // log_transaction_sample_rate is 0 by default, so the check above cannot
+    // see whether it was reset; `source` can.
+    const [rate] = await plain`SELECT source FROM pg_settings WHERE name = 'log_transaction_sample_rate'`;
+    expect(rate.source).not.toBe('session');
   });
 
   test('the claim connection logs in as the claim role, which is not a superuser', async () => {
