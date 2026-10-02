@@ -1352,8 +1352,12 @@ export interface BulkLookupResponse {
   results: BulkLookupResultItem[];
 }
 
-/** LML's per-request hard cap on bulk items (kept in sync with `LML#368`). */
-const BULK_LOOKUP_INPUT_CAP = 100;
+/**
+ * LML's per-request hard cap on bulk items (kept in sync with `LML#368`).
+ * Exported so a caller can reject an oversize batch size when it reads its
+ * options, against the same constant `bulkLookupMetadata` throws on.
+ */
+export const BULK_LOOKUP_INPUT_CAP = 100;
 
 /**
  * Bulk variant of `/api/v1/lookup`. LML's handler runs `perform_lookup` for

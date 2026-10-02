@@ -25,6 +25,7 @@ import {
   lookupMetadata,
   lookupBySong,
   bulkLookupMetadata,
+  BULK_LOOKUP_INPUT_CAP,
   getRelease,
   getArtistDetails,
   resolveEntity,
@@ -1081,6 +1082,10 @@ describe('lml.client', () => {
       const items = Array.from({ length: 101 }, (_, i) => itemFor(`A${i}`, 'X'));
       await expect(bulkLookupMetadata(items)).rejects.toThrow(/cap of 100 items/);
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('exports BULK_LOOKUP_INPUT_CAP as the LML#368 hard contract value (100)', () => {
+      expect(BULK_LOOKUP_INPUT_CAP).toBe(100);
     });
 
     it('forwards X-Caller-Budget-Ms when budgetMs is provided', async () => {
