@@ -58,8 +58,8 @@ A `fill` then ends one of three ways, each with its own counter: `filled`, `skip
 Because only `fill` leaves the cohort, this job differs from `streaming-columns-drain` in three ways an operator needs to know.
 
 - **"Done" is `stopped_early: false`.** The cohort does not approach zero. `cohortBefore - cohortAfter` is the number of fills and nothing else. Expect roughly 5,000 rows to remain.
-- **Resume by cursor, not by re-running.** A re-run with no cursor re-asks the whole residue. Set `BIO_FILL_ALBUM_AFTER_ID` to the previous run's `resume_after_album_id`.
-- **`resume_after_album_id` is the safe cursor.** It is the last album at or below which every row was settled, and it stops advancing at the first row that was not: one LML did not answer for (`indeterminate`) or one whose write threw (`write_failed`). Resuming from `last_album_id` instead would skip every such album. `indeterminate_album_ids` lists up to 200 of them, both kinds together; `indeterminate` and `write_failed` are always the exact counts.
+- **Resume by cursor, not by re-running.** A re-run with no cursor re-asks the whole residue. Set `BIO_FILL_ALBUM_AFTER_ID` to the previous run's `resume_after_album_id`, then retry what the cursor stopped at by id. See "Resuming" below.
+- **`resume_after_album_id` is the safe cursor.** It is the last album at or below which every row was settled, and it stops advancing at the first row that was not: one LML did not answer for (`indeterminate`) or one whose write threw (`write_failed`). Resuming from `last_album_id` instead would skip every such album, unless those albums are retried by id. `indeterminate_album_ids` lists up to 200 of them, both kinds together; `indeterminate` and `write_failed` are always the exact counts.
 
 A run exits non-zero, after logging a `summary` line with its partial totals and resume point, when:
 
@@ -71,20 +71,38 @@ The `summary` line is logged even when the closing `ANALYZE` or re-count fails, 
 
 SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0, provided the container is given long enough to finish the batch in flight. See `--stop-timeout` under "Running it".
 
+### Resuming
+
+Chain by cursor, then retry by id what the chain left unsettled.
+
+1. **Chain by cursor.** Start each run with `BIO_FILL_ALBUM_AFTER_ID` set to the previous run's `resume_after_album_id`. That cursor never skips an unsettled row. The price is that it stops at the first one, so the next run re-asks everything above it, including albums the previous run had already settled as non-fills.
+2. **Retry the listed ids.** `BIO_FILL_ALBUM_IDS` takes a comma-separated list and runs only those albums. It is what consumes a summary's `indeterminate_album_ids`:
+
+   ```sh
+   docker run --rm --stop-timeout 60 --env-file ~/.env \
+     -e BIO_FILL_ALBUM_IDS=53812,53977,54020 \
+     <image> --execute
+   ```
+
+   The cohort predicate and the eligibility conditions still apply, so an id that got a bio in the meantime simply does not appear, and `enumerated` can be smaller than the list. A list holds at most 200 ids, which is the most one summary reports. It cannot be combined with a non-zero `BIO_FILL_ALBUM_AFTER_ID`, and `BIO_FILL_MAX_ALBUMS` still caps it. A list run has no cursor and reports `resume_after_album_id: null`; never carry a cursor out of one into the chain. What it could not settle is in its own `indeterminate_album_ids`, ready for the next retry.
+
+The retry is always needed after the last run of a chain, since no later cursor run follows it. It can also spare a long re-ask in the middle of one. When a run's `indeterminate_album_ids` holds every unsettled row, meaning its length equals `indeterminate + write_failed`, the next run may start from that run's `last_album_id`, with the listed ids retried on their own. When the list was cut off at 200, or the run ended on the no-bio guard (the rows of that streak are not listed, and `last_album_id` is past them), resume from `resume_after_album_id`.
+
 ## Knobs
 
-| variable                                               | default |                                                                                |
-| ------------------------------------------------------ | ------- | ------------------------------------------------------------------------------ |
-| `BIO_FILL_BULK_BATCH_SIZE`                             | 5       | albums per LML bulk request                                                    |
-| `BIO_FILL_BULK_RATE_PER_MIN`                           | 1       | batches per minute                                                             |
-| `BIO_FILL_BULK_BUDGET_MS`                              | 25000   | per-item budget forwarded to LML                                               |
-| `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                           |
-| `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                       |
-| `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | resume cursor: only albums above this id                                       |
-| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that settled nothing                    |
-| `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES`              | 10      | abort after this many batches in a row that were entirely `no_bio`; 0 disables |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`                       | 300     | a flowsheet track newer than this means a DJ is live; 0 disables the pause     |
-| `LIVE_ACTIVITY_PAUSE_MS`, `LIVE_ACTIVITY_MAX_PAUSE_MS` | shared  | see `docs/env-vars.md`                                                         |
+| variable                                               | default |                                                                                           |
+| ------------------------------------------------------ | ------- | ----------------------------------------------------------------------------------------- |
+| `BIO_FILL_BULK_BATCH_SIZE`                             | 5       | albums per LML bulk request                                                               |
+| `BIO_FILL_BULK_RATE_PER_MIN`                           | 1       | batches per minute                                                                        |
+| `BIO_FILL_BULK_BUDGET_MS`                              | 25000   | per-item budget forwarded to LML                                                          |
+| `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                                      |
+| `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                                  |
+| `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | resume cursor: only albums above this id                                                  |
+| `BIO_FILL_ALBUM_IDS`                                   | unset   | retry list: only these comma-separated album ids, at most 200; not with a non-zero cursor |
+| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that settled nothing                               |
+| `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES`              | 10      | abort after this many batches in a row that were entirely `no_bio`; 0 disables            |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`                       | 300     | a flowsheet track newer than this means a DJ is live; 0 disables the pause                |
+| `LIVE_ACTIVITY_PAUSE_MS`, `LIVE_ACTIVITY_MAX_PAUSE_MS` | shared  | see `docs/env-vars.md`                                                                    |
 
 A value that does not parse is an error, not a silent fallback to the default.
 

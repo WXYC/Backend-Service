@@ -73,6 +73,7 @@ const OPTIONS: FillOptions = {
   afterAlbumId: 0,
   maxConsecutiveFailedBatches: 3,
   maxConsecutiveNoBioBatches: 10,
+  albumIds: [],
   liveActivityLookbackSeconds: 300,
   liveActivityPauseMs: 30_000,
   liveActivityMaxPauseMs: 1_800_000,
@@ -230,6 +231,35 @@ describe('runFill — the resume point', () => {
 
     expect(summary.indeterminate).toBe(ids.length);
     expect(summary.indeterminate_album_ids).toHaveLength(INDETERMINATE_IDS_REPORT_CAP);
+  });
+});
+
+describe('runFill — retrying a list of album ids (BS#2786)', () => {
+  it('asks for exactly the listed ids and reports no cursor', async () => {
+    const summary = await run([40, 900], {}, { albumIds: [40, 900] });
+
+    expect(enumerateCohort).toHaveBeenCalledWith(0, 0, OPTIONS.readTimeoutMs, [40, 900]);
+    // A cursor that walked a hand-picked list says nothing about the rows in
+    // between. Reporting 900 here would invite resuming the chain from it and
+    // skipping every album from 41 to 899.
+    expect(summary).toMatchObject({ stopped_early: false, filled: 2, last_album_id: 900, resume_after_album_id: null });
+  });
+
+  it('still lists what stayed unsettled, for the next retry', async () => {
+    const summary = await run([40, 900, 901], { 900: 'shed', 901: 'write_fails' }, { albumIds: [40, 900, 901] });
+
+    expect(summary).toMatchObject({ resume_after_album_id: null, indeterminate_album_ids: [900, 901] });
+  });
+
+  it('keeps reporting no cursor when the no-bio guard aborts it', async () => {
+    const ids = [40, 41, 900, 901];
+    const outcomes: Outcomes = { 40: 'no_bio', 41: 'no_bio', 900: 'no_bio', 901: 'no_bio' };
+
+    await expect(run(ids, outcomes, { albumIds: ids, maxConsecutiveNoBioBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveNoBioBatchesError
+    );
+
+    expect(loggedSummary()).toMatchObject({ stopped_early: true, resume_after_album_id: null });
   });
 });
 
