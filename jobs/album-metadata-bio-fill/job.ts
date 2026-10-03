@@ -21,19 +21,25 @@
  * `discogs_url`, year, streaming links, and the BS#1336 extended columns that
  * WXYC/Backend-Service#1442 owns — is deliberately left alone.
  *
- * ## State of this file
- *
- * The cohort, the dry run, and `runBatch` (BS#2777, BS#2781, BS#2778). The
- * execute loop that calls `runBatch` is BS#2779; until then `--execute` is
- * refused.
+ * ## How a run ends, and how to resume one
  *
  * Dry-run is the DEFAULT and makes zero LML calls: it reports the counts and
- * the batch plan and stops.
+ * the batch plan and stops. `--execute` writes.
+ *
+ * Only a `fill` leaves the cohort. A no-match, a bio-less match and the rest
+ * stay, so unlike `streaming-columns-drain` this job cannot resume by
+ * re-enumerating — that would re-ask the whole residue — and "done" is
+ * `stopped_early: false`, not a cohort near zero. It resumes by cursor
+ * (`BIO_FILL_ALBUM_AFTER_ID`), and because a cursor walks past rows LML failed
+ * to answer for, the summary reports `resume_after_album_id`: the last album
+ * at or below which every row got a definitive verdict.
  *
  * @see WXYC/Backend-Service#2775
  */
 
 import {
+  buildWaitForQuietPeriod,
+  LiveActivityPauseCeilingExceededError,
   closeDatabaseConnection,
   requireNonNegativeInt,
   requirePositiveInt,
@@ -50,6 +56,7 @@ import {
 import * as Sentry from '@sentry/node';
 import {
   READ_TIMEOUT_DEFAULT,
+  analyzeAlbumMetadata,
   applyBioFill,
   countCohort,
   countEligible,
@@ -111,11 +118,25 @@ export const MAX_ALBUMS_DEFAULT = 0;
 export const ALBUM_AFTER_ID_ENV = 'BIO_FILL_ALBUM_AFTER_ID';
 export const ALBUM_AFTER_ID_DEFAULT = 0;
 
-/** Abort after this many consecutive batches with no definitive verdict at
- * all: LML is down, and carrying on only walks the cursor past rows it cannot
- * process. Consumed by the execute loop (BS#2779). */
+/** Abort after this many consecutive batches that settled nothing: LML
+ * answered for no album, or every write the batch attempted threw. Either LML
+ * or the database is down, and carrying on only walks the run past rows it
+ * cannot process. */
 export const MAX_CONSECUTIVE_FAILED_BATCHES_ENV = 'BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES';
 export const MAX_CONSECUTIVE_FAILED_BATCHES_DEFAULT = 3;
+
+/**
+ * Abort after this many consecutive batches in which every album came back
+ * `no_bio`; `0` disables. LML answers a breaker shed on its artist-details
+ * step with a match and a null bio (`lookup/enrichment/top1.py`), the same
+ * bytes as an artist with no profile, so a sustained shed fails no batch and
+ * would walk the cursor to the end as a clean run. Its own knob with a
+ * generous default, because a real run of bio-less albums exists too: the
+ * cursor walks `album_id` order, and compilations or one profile-less
+ * artist's albums can sit together.
+ */
+export const MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV = 'BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES';
+export const MAX_CONSECUTIVE_NO_BIO_BATCHES_DEFAULT = 10;
 
 /** Cooperative-pause lookback, shared with every sibling drain (BS#2147). */
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
@@ -129,6 +150,7 @@ export interface FillOptions {
   maxAlbums: number;
   afterAlbumId: number;
   maxConsecutiveFailedBatches: number;
+  maxConsecutiveNoBioBatches: number;
   liveActivityLookbackSeconds: number;
   liveActivityPauseMs: number;
   liveActivityMaxPauseMs: number;
@@ -150,6 +172,12 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
       MAX_CONSECUTIVE_FAILED_BATCHES_ENV,
       MAX_CONSECUTIVE_FAILED_BATCHES_DEFAULT,
       ctx
+    ),
+    maxConsecutiveNoBioBatches: requireNonNegativeInt(
+      env[MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV],
+      MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV,
+      MAX_CONSECUTIVE_NO_BIO_BATCHES_DEFAULT,
+      { ...ctx, note: 'Use 0 to disable.' }
     ),
     liveActivityLookbackSeconds: requireNonNegativeInt(
       env[LIVE_ACTIVITY_LOOKBACK_ENV],
@@ -194,8 +222,10 @@ export interface BatchResult {
   indeterminateAlbumIds: number[];
 }
 
-export const emptyBatchResult = (batchSize: number): BatchResult => ({
-  batchSize,
+/** The per-verdict counters, shared by one batch's result and the run summary. */
+type VerdictTotals = Omit<BatchResult, 'batchSize' | 'indeterminateAlbumIds'>;
+
+const emptyTotals = (): VerdictTotals => ({
   fill: 0,
   no_match: 0,
   untrusted: 0,
@@ -206,6 +236,11 @@ export const emptyBatchResult = (batchSize: number): BatchResult => ({
   skipped_raced: 0,
   write_failed: 0,
   unexpected_index: 0,
+});
+
+export const emptyBatchResult = (batchSize: number): BatchResult => ({
+  batchSize,
+  ...emptyTotals(),
   indeterminateAlbumIds: [],
 });
 
@@ -318,25 +353,101 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
 
 // -- Orchestration -----------------------------------------------------------
 
-export interface FillSummary {
-  /** Every bio-less Discogs-matched row. */
+/** How many unsettled album ids the summary lists. The counts are always
+ * exact; the list is for re-running a handful by hand, not for a full outage. */
+export const INDETERMINATE_IDS_REPORT_CAP = 200;
+
+/** Thrown when `maxConsecutiveFailedBatches` batches in a row settled
+ * nothing. Carried through the accounting and rethrown, like the pause
+ * ceiling, so the run exits non-zero with its partial totals logged. The
+ * counter cannot tell a dead LML from a dead database, so the message names
+ * both and points at the log lines that can. */
+export class ConsecutiveFailedBatchesError extends Error {
+  constructor(batches: number) {
+    super(
+      `${JOB_NAME}: ${batches} consecutive batches settled nothing (no usable LML verdict, or every write threw); see the lml_batch_failed, lml_indeterminate and write_failed lines for which; aborting`
+    );
+    this.name = 'ConsecutiveFailedBatchesError';
+  }
+}
+
+/** Thrown when `maxConsecutiveNoBioBatches` batches in a row came back
+ * entirely `no_bio`. Carried and rethrown like the abort above. */
+export class ConsecutiveNoBioBatchesError extends Error {
+  constructor(batches: number) {
+    super(
+      `${JOB_NAME}: ${batches} consecutive batches came back entirely no_bio. LML's artist-details breaker is probably open: a shed bio reads as "no profile" from here. Resume from resume_after_album_id once LML is healthy, or raise or zero ${MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV} if these albums really have no bios; aborting`
+    );
+    this.name = 'ConsecutiveNoBioBatchesError';
+  }
+}
+
+export interface FillSummary extends VerdictTotals {
+  /** Every bio-less Discogs-matched row, before and after. Their difference
+   * is the fills and nothing else — the non-fill residue stays in the cohort. */
   cohortBefore: number;
+  cohortAfter: number;
   /** The drainable subset, ignoring the cap and the cursor. */
   eligible: number;
   /** Permanently excluded: no usable artist name, or marked not-on-Discogs.
    * Never the cap's remainder — that is remaining work, not exclusion. */
   excluded: number;
-  /** Rows this run would process: above the cursor, under the cap. */
+  /** Rows this run set out to process: above the cursor, under the cap. */
   enumerated: number;
   batches: number;
+  /** The last album a batch was sent for, or null if none was. */
+  last_album_id: number | null;
+  /** Pass this as `BIO_FILL_ALBUM_AFTER_ID` to resume. Every enumerated row at
+   * or below it was settled; it stops advancing at the first row LML did not
+   * answer for or whose write threw, so a resume never skips one. */
+  resume_after_album_id: number;
+  /** Up to `INDETERMINATE_IDS_REPORT_CAP` of the albums counted in
+   * `indeterminate` or `write_failed`. */
+  indeterminate_album_ids: number[];
   execute: boolean;
+  /** True when the loop ended before its last batch: a signal, the pause, or
+   * an abort. Without it those are indistinguishable from a completed run. */
+  stopped_early: boolean;
 }
 
-export const runFill = async (options: FillOptions): Promise<FillSummary> => {
-  if (options.execute) {
-    throw new Error(`${JOB_NAME}: --execute is not implemented yet (BS#2779); run without it for the plan`);
-  }
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+const toError = (err: unknown): Error => (err instanceof Error ? err : new Error(String(err)));
+
+/** Cooperative stop, flipped by SIGTERM/SIGINT in `main`. The in-flight batch
+ * always finishes; its writes are committed per album. */
+let stopRequested = false;
+export const requestStop = (): void => {
+  stopRequested = true;
+};
+export const __resetStopForTesting = (): void => {
+  stopRequested = false;
+};
+
+/** `sleep`, but wakes early once a stop has been requested. */
+const stopAwareSleep = async (ms: number): Promise<void> => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !stopRequested) {
+    await sleep(Math.min(500, deadline - Date.now()));
+  }
+};
+
+/**
+ * Where a cursor resume may safely start, given this batch's outcome.
+ * Returns the album just before the batch's first unsettled row (unanswered,
+ * or its write threw), or the batch's last album when every row was settled.
+ */
+const settledThrough = (batch: FillCandidate[], unsettledIds: number[], before: number): number => {
+  const unsettled = new Set(unsettledIds);
+  let through = before;
+  for (const candidate of batch) {
+    if (unsettled.has(candidate.album_id)) break;
+    through = candidate.album_id;
+  }
+  return through;
+};
+
+export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: options.batchSize,
     rate_per_min: options.ratePerMin,
@@ -348,28 +459,182 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   const cohortBefore = await countCohort(options.readTimeoutMs);
   const eligible = await countEligible(options.readTimeoutMs);
   const candidates = await enumerateCohort(options.maxAlbums, options.afterAlbumId, options.readTimeoutMs);
+  const batches: FillCandidate[][] = [];
+  for (let i = 0; i < candidates.length; i += options.batchSize) {
+    batches.push(candidates.slice(i, i + options.batchSize));
+  }
+
   const summary: FillSummary = {
+    ...emptyTotals(),
     cohortBefore,
+    cohortAfter: cohortBefore,
     eligible,
     excluded: cohortBefore - eligible,
     enumerated: candidates.length,
-    batches: Math.ceil(candidates.length / options.batchSize),
+    batches: batches.length,
+    last_album_id: null,
+    resume_after_album_id: options.afterAlbumId,
+    indeterminate_album_ids: [],
     execute: options.execute,
+    stopped_early: false,
   };
 
-  // A dry run stops here, before any LML call. An operator sizing the job
-  // must not be able to spend the Discogs quota by asking for a plan.
-  log(
-    'info',
-    'dry_run_plan',
-    `DRY RUN — no LML calls, no writes. Would run ${summary.batches} batches of up to ${options.batchSize}. Pass --execute to write.`,
-    { ...summary, estimated_minutes: Math.ceil(summary.batches / options.ratePerMin) }
-  );
+  if (!options.execute) {
+    // A dry run stops here, before any LML call. An operator sizing the job
+    // must not be able to spend the Discogs quota by asking for a plan.
+    log(
+      'info',
+      'dry_run_plan',
+      `DRY RUN — no LML calls, no writes. Would run ${batches.length} batches of up to ${options.batchSize}. Pass --execute to write.`,
+      { ...summary, estimated_minutes: Math.ceil(batches.length / options.ratePerMin) }
+    );
+    return summary;
+  }
+
+  // Shared cooperative pause (BS#2147): carries the cumulative
+  // `LIVE_ACTIVITY_MAX_PAUSE_MS` ceiling and a fail-open probe.
+  const waitForQuietPeriod = buildWaitForQuietPeriod({
+    lookbackSeconds: options.liveActivityLookbackSeconds,
+    pauseMs: options.liveActivityPauseMs,
+    maxTotalPauseMs: options.liveActivityMaxPauseMs,
+    shouldStop: () => stopRequested,
+    onPause: (info) =>
+      log('info', 'live_activity_pause', `DJ activity detected; pausing ${info.pauseMs}ms`, {
+        paused_ms_so_far: info.pausedMs,
+      }),
+    onProbeError: (err) => captureError(err, 'live_activity_probe'),
+    onBudgetExhausted: (pausedMs) =>
+      log('warn', 'live_activity_budget_exhausted', 'cumulative pause ceiling hit; stopping the run', {
+        paused_ms: pausedMs,
+      }),
+  });
+
+  const interBatchSleepMs = Math.floor(60_000 / options.ratePerMin);
+  // An abort is carried, not thrown from inside the loop, so the ANALYZE and
+  // the cohort re-count below still run against rows already written. It is
+  // rethrown after that accounting.
+  let abort: Error | undefined;
+  let resumeFrozen = false;
+  let consecutiveFailedBatches = 0;
+  let consecutiveNoBioBatches = 0;
+  // Where the cursor stood before the current all-`no_bio` streak began.
+  let resumeBeforeNoBioStreak = summary.resume_after_album_id;
+
+  for (const [b, batch] of batches.entries()) {
+    // The shared pause consults `shouldStop` too, but not when the probe is
+    // disabled (LIVE_ACTIVITY_LOOKBACK_SECONDS=0), so the loop has its own guard.
+    if (stopRequested) {
+      log('warn', 'stopped', 'graceful stop requested; ending before the next batch', { batches_done: b });
+      summary.stopped_early = true;
+      break;
+    }
+    // `waitForQuietPeriod()` returns a STOP signal: true means stop the loop.
+    // The donor's first cut had this inverted and exited 0 having done nothing.
+    try {
+      if (await waitForQuietPeriod()) {
+        summary.stopped_early = true;
+        break;
+      }
+    } catch (err) {
+      // Deliberately not narrowed to the ceiling class: anything escaping the
+      // pause must reach the accounting below. The class only picks the label.
+      const step =
+        err instanceof LiveActivityPauseCeilingExceededError
+          ? 'live_activity_pause_ceiling_exceeded'
+          : 'live_activity_pause_failed';
+      captureError(err, step, { batches_done: b, of: batches.length });
+      abort = toError(err);
+      break;
+    }
+
+    const result = await runBatch(batch, { budgetMs: options.budgetMs });
+    const { batchSize, indeterminateAlbumIds, ...counts } = result;
+    for (const [key, value] of Object.entries(counts) as Array<[keyof VerdictTotals, number]>) {
+      summary[key] += value;
+    }
+    const room = INDETERMINATE_IDS_REPORT_CAP - summary.indeterminate_album_ids.length;
+    summary.indeterminate_album_ids.push(...indeterminateAlbumIds.slice(0, Math.max(0, room)));
+    summary.last_album_id = batch[batch.length - 1].album_id;
+    if (consecutiveNoBioBatches === 0) resumeBeforeNoBioStreak = summary.resume_after_album_id;
+    if (!resumeFrozen) {
+      summary.resume_after_album_id = settledThrough(batch, indeterminateAlbumIds, summary.resume_after_album_id);
+      resumeFrozen = indeterminateAlbumIds.length > 0;
+    }
+    log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, {
+      batch: b + 1,
+      of: batches.length,
+      ...counts,
+      last_album_id: summary.last_album_id,
+      resume_after_album_id: summary.resume_after_album_id,
+    });
+
+    // A batch settled nothing when LML answered for none of it, or when every
+    // write it attempted threw. The second arm is not "every album failed": a
+    // dead database fails the fills while LML still returns its ordinary share
+    // of no_bio and no_match, and that batch must count or the run spins.
+    const settledNothing =
+      result.indeterminate === batchSize || (result.write_failed > 0 && result.write_failed === result.fill);
+    consecutiveFailedBatches = settledNothing ? consecutiveFailedBatches + 1 : 0;
+    consecutiveNoBioBatches = result.no_bio === batchSize ? consecutiveNoBioBatches + 1 : 0;
+    if (consecutiveFailedBatches >= options.maxConsecutiveFailedBatches) {
+      abort = new ConsecutiveFailedBatchesError(consecutiveFailedBatches);
+    } else if (
+      options.maxConsecutiveNoBioBatches > 0 &&
+      consecutiveNoBioBatches >= options.maxConsecutiveNoBioBatches
+    ) {
+      // Every row in the streak looked answered, so the cursor walked through
+      // it. Put it back, or a resume would never re-ask what the shed took.
+      summary.resume_after_album_id = resumeBeforeNoBioStreak;
+      abort = new ConsecutiveNoBioBatchesError(consecutiveNoBioBatches);
+    }
+    if (abort) {
+      const step =
+        abort instanceof ConsecutiveNoBioBatchesError ? 'consecutive_no_bio_batches' : 'consecutive_failed_batches';
+      captureError(abort, step, { batches_done: b + 1, of: batches.length });
+      break;
+    }
+    if (b < batches.length - 1) await stopAwareSleep(interBatchSleepMs);
+  }
+
+  // The accounting reads the database too, and a run that aborted because the
+  // database went away will fail here as well. That must not cost the summary
+  // line below, so the error is held; `cohortAfter` then keeps the before-count.
+  let accountingError: Error | undefined;
+  try {
+    if (summary.filled > 0) await analyzeAlbumMetadata();
+    summary.cohortAfter = await countCohort(options.readTimeoutMs);
+  } catch (err) {
+    accountingError = toError(err);
+    captureError(err, 'accounting_failed');
+  }
+
+  const failure = abort ?? accountingError;
+  if (failure) {
+    // `main`'s `finished` line will not run once this throws, so this log is
+    // what preserves the partial totals and the resume point.
+    summary.stopped_early ||= abort !== undefined;
+    const how = abort ? 'aborted early' : 'could not finish its accounting';
+    log('error', 'summary', `${JOB_NAME} ${how}: ${failure.message}`, {
+      ...summary,
+      accounting_failed: accountingError !== undefined,
+    });
+    throw failure;
+  }
   return summary;
+};
+
+const registerSignalHandlers = (): void => {
+  const onSignal = (signal: NodeJS.Signals) => {
+    log('warn', 'signal', `received ${signal}; requesting graceful stop`, { signal });
+    requestStop();
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
 };
 
 export const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
+  registerSignalHandlers();
 
   try {
     const summary = await runFill(resolveOptions());
