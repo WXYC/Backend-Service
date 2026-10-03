@@ -182,6 +182,32 @@ describe('runBatch — only a fill writes', () => {
     }
   );
 
+  it('reports a degraded match as indeterminate and logs why, since its status alone says match', async () => {
+    const log = jest.spyOn(logger, 'log');
+    const shed = {
+      index: 0,
+      status: 'match',
+      lookup: {
+        search_type: 'direct',
+        degraded: true,
+        degraded_reason: 'cache_only',
+        results: [{ library_item: { id: 1010 } }],
+      },
+    };
+    bulkLookupMetadata.mockResolvedValue({ results: [shed] } as never);
+
+    const result = await runBatch([JUANA], OPTS);
+
+    expect(applyBioFill).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ no_bio: 0, indeterminate: 1, indeterminateAlbumIds: [10] });
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      'lml_indeterminate',
+      expect.any(String),
+      expect.objectContaining({ status: 'match', degraded_reason: 'cache_only' })
+    );
+  });
+
   it.each([
     ['the bulk call throws', () => bulkLookupMetadata.mockRejectedValue(new Error('ECONNRESET') as never)],
     // A 2xx whose body is not the bulk shape: a proxy's error page parsed as
