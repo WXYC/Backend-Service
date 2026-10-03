@@ -5363,6 +5363,36 @@ const RESTORE_PLAN: Record<
 };
 
 /**
+ * Every nullable `ON DELETE SET NULL` foreign key on a table `RESTORE_PLAN`
+ * replays, keyed by the replayed table's name and then by the referencing
+ * column, valued by the column it points at. The replay writes NULL in place of
+ * a captured value whose target row no longer exists: the outcome the delete
+ * rule would have produced had the target been deleted while the row was live.
+ * Without this the restore's own FK check fails and rolls the batch back, and
+ * the snapshot is permanent, so the release could never be restored.
+ *
+ * `rotation.card_id` is reachable when a rotation card is deleted after the
+ * release that used it; `compilation_track_artist.track_artist_id` when the
+ * track's artist is deleted. The schema-derived guard in
+ * `tests/unit/services/library.restoreSetNull.test.ts` fails when a new `SET NULL`
+ * column on a replayed table is not declared here.
+ */
+export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
+  rotation: { card_id: rotation_cards.id },
+  compilation_track_artist: { track_artist_id: artists.id },
+};
+
+/**
+ * Every table `RESTORE_PLAN` replays, parent and children, by table name.
+ * Exported only so the schema-derived guard can check `SET_NULL_REFERENCES`
+ * against the real foreign keys of exactly those tables.
+ */
+export const RESTORE_PLAN_REPLAYED_TABLE_NAMES: readonly string[] = Object.keys(RESTORE_PLAN).flatMap((parent) => [
+  parent,
+  ...RESTORE_PLAN[parent].children.map(([name]) => name),
+]);
+
+/**
  * `entity_kind` -> the table name its captured envelope stores in
  * `entity.table` (BS#2616 follow-up review, finding 3). `RESTORE_PLAN` above
  * is keyed on `entity.table`, not `entity_kind` — see its own docstring for
@@ -5650,6 +5680,32 @@ export const findLibrarySlotOccupant = async (
 };
 
 /**
+ * NULLs out any `SET_NULL_REFERENCES` column on `records` whose captured
+ * value no longer resolves to a live row — the outcome `ON DELETE SET NULL`
+ * would have produced had the target been deleted while this row was live.
+ * One existence query per declared column, covering every record's captured
+ * value for that column, not one query per row. Mutates `records` in place
+ * so `replayCapturedRows` can insert them unchanged afterward.
+ */
+const nullDanglingSetNullReferences = async (
+  tx: DbTransaction,
+  tableName: string,
+  records: Record<string, unknown>[]
+): Promise<void> => {
+  for (const [column, target] of Object.entries(SET_NULL_REFERENCES[tableName] ?? {})) {
+    const captured = [...new Set(records.map((record) => record[column]).filter((value) => value != null))];
+    if (captured.length === 0) continue;
+    const live = await tx.select({ value: target }).from(target.table).where(inArray(target, captured));
+    const liveValues = new Set(live.map((row) => row.value));
+    for (const record of records) {
+      if (record[column] != null && !liveValues.has(record[column])) {
+        record[column] = null;
+      }
+    }
+  }
+};
+
+/**
  * Replays captured rows into one table and answers how many went in.
  *
  * `jsonb_populate_recordset` does the typing, not TypeScript: `captured` is
@@ -5679,15 +5735,24 @@ export const findLibrarySlotOccupant = async (
  * A column the schema has since dropped, or gained as NOT NULL with no
  * default, makes this INSERT fail, which rolls the whole batch back. That is
  * the right outcome for an envelope that no longer fits the schema: a
- * half-restored card is worse than a declined one.
+ * half-restored card is worse than a declined one. A dangling `SET_NULL_REFERENCES`
+ * value is not that case — `nullDanglingSetNullReferences` resolves it before
+ * the insert runs, rather than letting the FK check fail the batch.
  */
-const replayCapturedRows = async (tx: DbTransaction, table: PgTable, rows: unknown[]): Promise<number> => {
+const replayCapturedRows = async (
+  tx: DbTransaction,
+  tableName: string,
+  table: PgTable,
+  rows: unknown[]
+): Promise<number> => {
   const records = rows.filter(
     (row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row)
   );
   if (records.length === 0) return 0;
   const columns = Object.keys(records[0]);
   if (columns.length === 0) return 0;
+
+  await nullDanglingSetNullReferences(tx, tableName, records);
 
   const columnList = sql.join(
     columns.map((column) => sql.identifier(column)),
@@ -5906,13 +5971,13 @@ const runRestoreBatchTransaction = async (
     const entities: RestoredEntity[] = [];
     for (const { row, plan, tableName, capturedRow, children } of plans) {
       const relocated = relocations.get(row.entity_id);
-      await replayCapturedRows(tx, plan.parent, [
+      await replayCapturedRows(tx, tableName, plan.parent, [
         relocated === undefined ? capturedRow : { ...capturedRow, code_number: relocated },
       ]);
 
       const replayed: Record<string, number> = {};
       for (const [name, table] of plan.children) {
-        replayed[name] = await replayCapturedRows(tx, table, children[name] ?? []);
+        replayed[name] = await replayCapturedRows(tx, name, table, children[name] ?? []);
       }
 
       // A surviving denylist row would make `jobs/library-etl`'s
