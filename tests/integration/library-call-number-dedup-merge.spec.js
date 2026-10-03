@@ -5,7 +5,7 @@
  * The headline invariant is an ORDERING one that no unit test can prove,
  * because it only exists in the database's own constraint behaviour: every FK
  * referencing `library.id` must be repointed to the survivor BEFORE the losing
- * row is deleted. Five of the reference sites cascade and two null the
+ * row is deleted. Nine of the reference sites cascade and three null the
  * reference out, so a merge that deleted first would silently destroy
  * rotation history, album metadata, and reviews — no error, no exception, just
  * missing rows. These tests seed exactly that shape and assert the data

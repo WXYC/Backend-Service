@@ -24,8 +24,8 @@
  *     let straight through.
  *
  * Every FK referencing `library.id` is repointed to the survivor BEFORE the
- * losing row is deleted. That ordering is not stylistic: seven of the sites
- * cascade and two null the reference out, so deleting first would silently
+ * losing row is deleted. That ordering is not stylistic: nine of the sites
+ * cascade and three null the reference out, so deleting first would silently
  * destroy rotation history, album metadata, reviews, and artist
  * cross-references, and silently unlink plays, with no error raised.
  *
@@ -198,7 +198,7 @@ type RawRow = {
  * Every `library` row sharing a slot with at least one other row, grouped.
  *
  * Reference counts are gathered with one query PER FK SITE over the whole
- * candidate id set (14 queries), not one per candidate row (14 × ~1,500) — the
+ * candidate id set (one per FK_TARGETS entry), not one per candidate row (that count × ~1,500) — the
  * counts only exist to rank survivors, and the per-row shape would turn a
  * seconds-long read into a minutes-long one for the same answer.
  */

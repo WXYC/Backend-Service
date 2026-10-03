@@ -2336,6 +2336,13 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     `NON_BLOCKING_DIGITAL_ASSET_STATUS` in `library.service.ts`, and
  *     `jobs/library-call-number-dedup/merge.ts`, which already deletes through
  *     this table on a merge for the same recoverability reason.
+ *   - `intake_items` references `library.id` twice, with different rules.
+ *     `album_id` is `onDelete: 'cascade'` (an item is meaningless without the
+ *     release it was filed as) and is NOT YET CAPTURED by the release delete: a
+ *     known, temporary gap that WXYC/Backend-Service#2801 closes by capturing
+ *     `intake_items` through `album_id`. `cited_album_id` is
+ *     `onDelete: 'set null'`: the item survives the delete unlinked, and a
+ *     restore does not re-link it, so it stays NULL.
  * `library_identity_history`, `album_popularity.representative_library_id` and
  * `flowsheet_linkage_review.candidate_library_ids` are the THREE FK-LESS
  * pointers at `library.id` (a new FK-less pointer is a fifth thing worth
@@ -2838,11 +2845,13 @@ export const intakeItemStateEnum = wxyc_schema.enum('intake_item_state', [
 /**
  * A record that has arrived and is waiting for a DJ review (slice 5 of
  * WXYC/Backend-Service#2791). `artist_name`/`album_title` are what the music
- * director typed on the slip; `album_id` is set only when filing creates the
- * catalog row, so it is NULL for every item still in `pool` through `reviewed`.
+ * director typed on the slip; `album_id` is set only by filing (it points at the
+ * release the item was filed as, which may be an existing release or a newly
+ * created one), so it is NULL for every item still in `pool` through `reviewed`.
  *
  * Two foreign keys point at `library` with DIFFERENT delete rules, which is why
- * `jobs/library-call-number-dedup` keys them `table.column`: `album_id` CASCADEs
+ * `jobs/library-call-number-dedup`'s integration spec keys them `table.column`
+ * so the second FK on one table cannot hide: `album_id` CASCADEs
  * (an item is meaningless without the release it was filed as) while
  * `cited_album_id` SETs NULL (the citation of another release's reviews must
  * not take the item with it). Every `auth_user` reference SETs NULL so deleting
