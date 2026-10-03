@@ -705,9 +705,10 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
  * Returns null if the library release ID is 0 or not found.
  *
  * Thin wrapper over `library.service.getAlbumIdByLegacyId` — the legacy→serial
- * bridge now lives in one place (BS#1880). Kept as a named helper so the
- * flowsheet webhook's `Promise.all` above reads as resolving three parallel
- * ids by name, not two inline queries plus one named call.
+ * bridge now lives in one place (BS#1880). Kept as a named function, alongside
+ * its `resolveRotationId` sibling below, so the flowsheet webhook's
+ * `Promise.all` above reads as three named id resolutions, not two named
+ * calls and one inline wrapper call.
  */
 function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | null> {
   return getAlbumIdByLegacyId(legacyLibraryReleaseId);
