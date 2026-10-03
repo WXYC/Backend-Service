@@ -148,6 +148,46 @@ describe('computeCallNumber', () => {
       'Hiphop cd V/A-651',
     ],
     [
+      'legacy Z-<letter> on Soundtracks renders the bare bin from codeLetters',
+      { artist: 'Raw Tubafrenzy Export', codeLetters: 'Z-K', codeNumber: 12, genre: 'Soundtracks' },
+      'Soundtracks cd K-12',
+    ],
+    [
+      'legacy Z-- on Rock has no bin and does not fall through to the name',
+      { artist: 'Various Artists - Rock - M', codeLetters: 'Z--', codeNumber: 121, genre: 'Rock' },
+      'Rock cd V/A-121',
+    ],
+    [
+      'legacy Z-M on a single-bin genre drops the bin (Java renders it only for Rock/Soundtracks)',
+      { codeLetters: 'Z-M', codeNumber: 651, genre: 'Hiphop' },
+      'Hiphop cd V/A-651',
+    ],
+    [
+      'legacy Z- code takes any non-hyphen character at index 2, as substring(2, 3) does',
+      { codeLetters: 'Z-1', codeNumber: 121, genre: 'Rock' },
+      'Rock cd V/A 1-121',
+    ],
+    [
+      'a Rock bin heading in the name is ignored under a non-Rock genre',
+      { artist: 'Various Artists - Rock - M', codeNumber: 651, genre: 'Hiphop' },
+      'Hiphop cd V/A-651',
+    ],
+    [
+      'a multi-letter name suffix is not a bin letter',
+      { artist: 'Various Artists - Rock - Africa', codeNumber: 121, genre: 'Rock' },
+      'Rock cd V/A-121',
+    ],
+    [
+      'the name is trimmed at both ends before the bin suffix is read',
+      { artist: ' - M', codeNumber: 121, genre: 'Rock' },
+      'Rock cd V/A-121',
+    ],
+    [
+      'null genre and format are skipped, leaving the bare compilation locator',
+      { artist: 'Various Artists - Rock - M', codeNumber: 121, genre: null, format: null },
+      'V/A-121',
+    ],
+    [
       'unchanged named-artist row is untouched by the compilation branch',
       {
         artist: 'Stereolab',
