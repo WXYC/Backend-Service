@@ -8,8 +8,11 @@
  *
  * The mechanism differs from the flowsheet sibling's, so don't reason by
  * analogy. There is no rotation mirror: `legacy_rotation_id` is written only
- * by tubafrenzy-sourced writers — the now-retired rotation webhook, and this
- * ETL's own insert (`job.ts`'s `legacy_rotation_id: release.id`) — never
+ * by tubafrenzy-sourced writers — the now-retired rotation webhook, this
+ * ETL's own insert (`job.ts`'s `legacy_rotation_id: release.id`), and the
+ * catalog restore's verbatim replay (`replayCapturedRows` in
+ * `library.service.ts`, which re-inserts captured rotation rows with their
+ * original ids) — never
  * back-stamped onto a dj-site-originated row (the mirror's rotation-badge
  * probe, removed in BS#2403, only ever read rotation — it was never a
  * writer). So this job cannot reach a pure dj-site row. What it does reach

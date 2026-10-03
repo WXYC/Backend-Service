@@ -659,8 +659,7 @@ export type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * settled newest card).
  *
  * The comparison normalizes the request bin through `parseRotationBin`
- * rather than comparing raw: the controller validates the bin's spelling but
- * forwards it as received, so `'h'` must match a card filed in `'H'`.
+ * rather than comparing raw, so `'h'` matches a card filed in `'H'`.
  */
 const resolveRotationCardId = async (
   tx: DbTransaction,

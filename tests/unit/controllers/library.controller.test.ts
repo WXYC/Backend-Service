@@ -2333,6 +2333,23 @@ describe('library.controller', () => {
 
       expect(picked).toEqual({ album_id: 5, rotation_bin: 'M' });
     });
+
+    // BS#2203: the picker emits the parsed bin, never the raw client value, so
+    // a non-canonical spelling cannot reach the `freq` enum column.
+    it.each([
+      ['lowercase', 'h', 'H'],
+      ['padded', ' H ', 'H'],
+    ])('emits the canonical bin for a %s rotation_bin', (_label, raw, canonical) => {
+      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: raw as 'H' });
+
+      expect(picked).toEqual({ album_id: 5, rotation_bin: canonical });
+    });
+
+    it('omits rotation_bin rather than emitting an unrecognized value', () => {
+      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: 'X' as 'H' });
+
+      expect(picked).toEqual({ album_id: 5 });
+    });
   });
 
   describe('getRotation (BS#2473 status param)', () => {
@@ -2405,6 +2422,22 @@ describe('library.controller', () => {
       await addRotation(req, res, next);
 
       expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, undefined);
+      expect(res.status).toHaveBeenCalledWith(201);
+    });
+
+    // BS#2203: the gate accepts these spellings, so the persisted value must be
+    // the canonical bin, and the request must succeed rather than 500 on 22P02.
+    it.each([
+      ['lowercase', 'h'],
+      ['padded', ' H '],
+    ])('persists the canonical bin for a %s rotation_bin rather than 500ing', async (_label, raw) => {
+      mockAddToRotation.mockResolvedValue({ id: 1, album_id: 5, rotation_bin: 'H' });
+      const req = { body: { album_id: 5, rotation_bin: raw } } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'H' }, undefined);
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -6412,6 +6445,25 @@ describe('library.controller', () => {
         release: { id: 42, artist_id: 55, album_title: 'DOGA' },
         rotation: { id: 9, album_id: 42, rotation_bin: 'S' },
       });
+    });
+
+    // BS#2203: `fileLibraryRelease` receives the parsed bin, so the persisted
+    // rotation row carries the canonical spelling.
+    it.each([
+      ['lowercase', 'h'],
+      ['padded', ' H '],
+    ])('persists the canonical bin for a %s rotation.rotation_bin', async (_label, raw) => {
+      mockAddToRotation.mockResolvedValue({ id: 9, album_id: 42, rotation_bin: 'H' });
+      const res = mockResponse();
+
+      await createLibraryFiling(req({ rotation: { rotation_bin: raw } }), res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        { rotation_bin: 'H', album_id: 42, card_id: undefined },
+        undefined,
+        expect.anything()
+      );
+      expect(res.status).toHaveBeenCalledWith(200);
     });
 
     it('answers artist_code_conflict with the full contract Artist and writes nothing', async () => {

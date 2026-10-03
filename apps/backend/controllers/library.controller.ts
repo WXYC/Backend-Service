@@ -2264,7 +2264,11 @@ type AddRotationAllowlist = Pick<
 export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
   const picked = {} as AddRotationAllowlist;
   if (body.album_id != null) picked.album_id = body.album_id;
-  if (body.rotation_bin != null) picked.rotation_bin = body.rotation_bin;
+  // BS#2203: the parsed bin, never the raw client value. `addRotation`'s gate
+  // has already rejected anything unrecognized; this keeps the picker from
+  // reintroducing a spelling the `freq` enum column cannot store.
+  const parsedBin = parseRotationBin(body.rotation_bin);
+  if (parsedBin.kind === 'bin') picked.rotation_bin = parsedBin.bin;
   // BS#2472: which physical card the row is filed under. Unconditional —
   // unlike the snapshot trio and the pre-catalog FKs below, a card
   // assignment is the rotation row's own state on linked and unlinked rows
@@ -2716,7 +2720,10 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
   // omitted-rotation filing, not a TypeError from the property reads below.
   if (body.rotation != null) {
     const rot = body.rotation;
-    if (rot.rotation_bin == null || parseRotationBin(rot.rotation_bin).kind !== 'bin') {
+    // BS#2203: parse once and forward the canonical bin, so `fileLibraryRelease`
+    // receives a `RotationBin` the enum column can store, never a raw cast.
+    const parsedBin = parseRotationBin(rot.rotation_bin);
+    if (parsedBin.kind !== 'bin') {
       throw new WxycError(
         `Invalid rotation.rotation_bin ${JSON.stringify(rot.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
         400
@@ -2729,7 +2736,7 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
       );
     }
     rotationBody = {
-      rotation_bin: rot.rotation_bin as RotationBin,
+      rotation_bin: parsedBin.bin,
       card_id: rot.card_id ?? undefined,
       urls: rot.urls !== undefined ? parseRotationUrls(rot.urls) : undefined,
     };

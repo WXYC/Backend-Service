@@ -266,13 +266,14 @@ describe('addToRotation card resolution (BS#2472)', () => {
   });
 
   test('bin agreement is checked against the NORMALIZED request bin', async () => {
-    // The controller validates the bin's spelling but forwards it raw, so a
-    // lowercase 'm' must still match a card filed in 'M'.
+    // Both HTTP writers hand the service a parsed bin, but the service
+    // normalizes again so a non-canonical spelling from any other caller
+    // still matches a card filed in 'M'.
     db.execute.mockResolvedValueOnce([{ bin: 'M' }]);
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: 7 }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ rotation_bin: 'm' as 'M', card_id: 7, ...UNCATALOGUED });
+    await addToRotation({ rotation_bin: 'm' as unknown as 'M', card_id: 7, ...UNCATALOGUED });
 
     expect(insertChain.values).toHaveBeenCalled();
   });
