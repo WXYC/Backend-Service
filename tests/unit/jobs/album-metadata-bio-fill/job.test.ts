@@ -137,12 +137,17 @@ describe('resolveOptions', () => {
     expect(() => resolveOptions({ BIO_FILL_ALBUM_IDS: ids(201) }, [])).toThrow(/at most 200/);
   });
 
-  it('refuses an id list together with a cursor, which would silently drop the listed ids below it', () => {
-    const both = { BIO_FILL_ALBUM_IDS: '101,102', BIO_FILL_ALBUM_AFTER_ID: '101' };
+  // Each would drop listed ids without reporting them: a cursor the ones below
+  // it, a cap the ones past it (a canary's leftover BIO_FILL_MAX_ALBUMS=25).
+  it.each([['BIO_FILL_ALBUM_AFTER_ID'], ['BIO_FILL_MAX_ALBUMS']])(
+    'refuses an id list together with a non-zero %s',
+    (name) => {
+      const both = { BIO_FILL_ALBUM_IDS: '101,102', [name]: '25' };
 
-    expect(() => resolveOptions(both, [])).toThrow(/BIO_FILL_ALBUM_IDS.*BIO_FILL_ALBUM_AFTER_ID/);
-    expect(resolveOptions({ ...both, BIO_FILL_ALBUM_AFTER_ID: '0' }, []).albumIds).toEqual([101, 102]);
-  });
+      expect(() => resolveOptions(both, [])).toThrow(`BIO_FILL_ALBUM_IDS cannot be combined with a non-zero ${name}`);
+      expect(resolveOptions({ ...both, [name]: '0' }, []).albumIds).toEqual([101, 102]);
+    }
+  );
 
   it('bounds the batch size at the LML client cap, and says what the cap is', () => {
     // `bulkLookupMetadata` throws client-side above the cap. A dry run never
@@ -193,13 +198,13 @@ describe('runFill — dry run', () => {
     });
   });
 
-  it('enumerates only the listed ids when given a list, still under the cap', async () => {
-    const options = resolveOptions({ BIO_FILL_ALBUM_IDS: '102,7', BIO_FILL_MAX_ALBUMS: '25' }, []);
+  it('enumerates only the listed ids when given a list', async () => {
+    const options = resolveOptions({ BIO_FILL_ALBUM_IDS: '102,7' }, []);
 
     await runFill(options);
 
     expect(enumerateCohort).toHaveBeenCalledWith({
-      limit: 25,
+      limit: 0,
       afterAlbumId: 0,
       albumIds: [7, 102],
       timeoutMs: options.readTimeoutMs,

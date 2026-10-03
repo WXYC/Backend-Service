@@ -84,25 +84,25 @@ Chain by cursor, then retry by id what the chain left unsettled.
      <image> --execute
    ```
 
-   The cohort predicate and the eligibility conditions still apply, so an id that got a bio in the meantime simply does not appear, and `enumerated` can be smaller than the list. A list holds at most 200 ids, which is the most one summary reports. It cannot be combined with a non-zero `BIO_FILL_ALBUM_AFTER_ID`, and `BIO_FILL_MAX_ALBUMS` still caps it. A list run has no cursor and reports `resume_after_album_id: null`; never carry a cursor out of one into the chain. What it could not settle is in its own `indeterminate_album_ids`, ready for the next retry.
+   The cohort predicate and the eligibility conditions still apply, so an id that got a bio in the meantime, or is not eligible, is not asked: it is named on a `listed_ids_not_in_cohort` line, and `enumerated` is smaller than the list. A list holds at most 200 ids, which is the most one summary reports. It cannot be combined with a non-zero `BIO_FILL_ALBUM_AFTER_ID` or `BIO_FILL_MAX_ALBUMS`: either would drop listed ids without reporting them. A list run has no cursor and reports `resume_after_album_id: null`; never carry a cursor out of one into the chain. What it could not settle is in its own `indeterminate_album_ids`, ready for the next retry: the unanswered and `write_failed` albums, every listed album it never reached because it stopped or aborted, and after a no-bio abort the albums of that streak.
 
-The retry is needed after the last run of a chain, since no later cursor run follows it. Mid-chain it is optional: the next cursor run starts below the unsettled rows and re-asks them anyway. Every cursor run starts from `resume_after_album_id`, never from `last_album_id`, whatever the list holds.
+The retry is needed after the last run of a chain, since no later cursor run follows it. It is complete only when that run's `indeterminate_album_ids` holds `indeterminate + write_failed` ids. When it holds fewer, the list was cut at 200: run the chain once more from `resume_after_album_id` instead, and retry by list only from a run whose list is complete. Mid-chain it is optional: the next cursor run starts below the unsettled rows and re-asks them anyway. Every cursor run starts from `resume_after_album_id`, never from `last_album_id`, whatever the list holds.
 
 ## Knobs
 
-| variable                                               | default |                                                                                           |
-| ------------------------------------------------------ | ------- | ----------------------------------------------------------------------------------------- |
-| `BIO_FILL_BULK_BATCH_SIZE`                             | 5       | albums per LML bulk request                                                               |
-| `BIO_FILL_BULK_RATE_PER_MIN`                           | 1       | batches per minute                                                                        |
-| `BIO_FILL_BULK_BUDGET_MS`                              | 25000   | per-item budget forwarded to LML                                                          |
-| `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                                      |
-| `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                                  |
-| `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | resume cursor: only albums above this id                                                  |
-| `BIO_FILL_ALBUM_IDS`                                   | unset   | retry list: only these comma-separated album ids, at most 200; not with a non-zero cursor |
-| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that settled nothing                               |
-| `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES`              | 10      | abort after this many batches in a row that were entirely `no_bio`; 0 disables            |
-| `LIVE_ACTIVITY_LOOKBACK_SECONDS`                       | 300     | a flowsheet track newer than this means a DJ is live; 0 disables the pause                |
-| `LIVE_ACTIVITY_PAUSE_MS`, `LIVE_ACTIVITY_MAX_PAUSE_MS` | shared  | see `docs/env-vars.md`                                                                    |
+| variable                                               | default |                                                                                                  |
+| ------------------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------ |
+| `BIO_FILL_BULK_BATCH_SIZE`                             | 5       | albums per LML bulk request                                                                      |
+| `BIO_FILL_BULK_RATE_PER_MIN`                           | 1       | batches per minute                                                                               |
+| `BIO_FILL_BULK_BUDGET_MS`                              | 25000   | per-item budget forwarded to LML                                                                 |
+| `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                                             |
+| `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                                         |
+| `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | resume cursor: only albums above this id                                                         |
+| `BIO_FILL_ALBUM_IDS`                                   | unset   | retry list: only these comma-separated album ids, at most 200; not with a non-zero cursor or cap |
+| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that settled nothing                                      |
+| `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES`              | 10      | abort after this many batches in a row that were entirely `no_bio`; 0 disables                   |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`                       | 300     | a flowsheet track newer than this means a DJ is live; 0 disables the pause                       |
+| `LIVE_ACTIVITY_PAUSE_MS`, `LIVE_ACTIVITY_MAX_PAUSE_MS` | shared  | see `docs/env-vars.md`                                                                           |
 
 A value that does not parse is an error, not a silent fallback to the default.
 
