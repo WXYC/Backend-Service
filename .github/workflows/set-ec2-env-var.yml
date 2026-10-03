@@ -249,6 +249,23 @@ jobs:
           # in the run's log is not redacted. (Only a single-origin value masks the
           # origin itself.) Harmless either way — these are public origins.
           BETTER_AUTH_TRUSTED_ORIGINS: ${{ secrets.BETTER_AUTH_TRUSTED_ORIGINS }}
+          # dj-site's Cloudflare Pages preview origins, unioned onto whichever
+          # primary list won by `resolveCorsOrigin` (both services' Express CORS)
+          # and by `auth.definition.ts` (better-auth's `trustedOrigins`). Not
+          # sensitive: public origins. Production value: `https://*.dj-site.pages.dev`.
+          # The `wxyc-dj` Pages project serves its deployments under
+          # `dj-site.pages.dev`, not under its project name, and
+          # `wxyc-dj.pages.dev` does not resolve to it.
+          #
+          # Both services read it once at startup, so run this twice with the same
+          # secret: restart_target=auth (sign-in's origin check and the auth CORS
+          # layer), then restart_target=backend (the API's CORS layer). The
+          # restart caveat above, on BETTER_AUTH_TRUSTED_ORIGINS, applies to both.
+          #
+          # WHOLE-VALUE OVERWRITE, as above: the secret holds the complete list.
+          # Never a wildcard over a multi-tenant apex such as `https://*.pages.dev`,
+          # which would trust every Cloudflare Pages project (docs/env-vars.md).
+          CORS_PREVIEW_ORIGINS: ${{ secrets.CORS_PREVIEW_ORIGINS }}
           # Station self-signup review cron (BS#2364, jobs/station-signup-review).
           # Neither is sensitive; both are carried through the allowlist for the
           # same reason as DONATE_* above — the resolve step's `case` below
@@ -378,6 +395,7 @@ jobs:
             STATION_SIGNUP_IP_HMAC_KEY) VALUE="$STATION_SIGNUP_IP_HMAC_KEY" ;;
             ACCOUNT_AUDIT_RETENTION_DAYS) VALUE="$ACCOUNT_AUDIT_RETENTION_DAYS" ;;
             BETTER_AUTH_TRUSTED_ORIGINS) VALUE="$BETTER_AUTH_TRUSTED_ORIGINS" ;;
+            CORS_PREVIEW_ORIGINS) VALUE="$CORS_PREVIEW_ORIGINS" ;;
             STATION_SIGNUP_ALERT_EMAIL) VALUE="$STATION_SIGNUP_ALERT_EMAIL" ;;
             STATION_SIGNUP_DOWNGRADE_ENABLED) VALUE="$STATION_SIGNUP_DOWNGRADE_ENABLED" ;;
             STATION_SIGNUP_ENABLED) VALUE="$STATION_SIGNUP_ENABLED" ;;
