@@ -5,10 +5,11 @@
  * Two things here have no equivalent in the `streaming-columns-drain` donor.
  *
  * That job's cohort empties as it runs, so "re-run it" is its resume. This
- * one keeps every row that did not get a bio, so it resumes by cursor — and a
- * cursor walks straight past any row LML failed to answer for. Hence
- * `resume_after_album_id`, which stops advancing at the first indeterminate
- * row, and the abort after N consecutive batches with no answer at all.
+ * one keeps every row that did not get a bio, so it resumes — and a cursor
+ * alone walks straight past any row LML failed to answer for. Hence
+ * `next_run`, which moves the cursor on and carries those rows as a list
+ * (`planResume`, table-tested in `resume-plan.test.ts`), and the aborts when
+ * LML or the database stops answering.
  *
  * The rest pins the loop itself, for the reason the donor's own test gives:
  * its first cut had the pause polarity inverted, broke out on batch one, and
@@ -260,6 +261,23 @@ describe('runFill — what the next run should be (BS#2786)', () => {
       resume_after_album_id: 8,
       next_run: { BIO_FILL_ALBUM_AFTER_ID: 8, BIO_FILL_ALBUM_IDS: '' },
     });
+  });
+
+  it('logs next_run on every batch line, so a killed run still leaves one', async () => {
+    await run([1, 2, 3, 4], { 1: 'shed' });
+
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'batch_done',
+      expect.any(String),
+      expect.objectContaining({ batch: 1, next_run: { BIO_FILL_ALBUM_AFTER_ID: 2, BIO_FILL_ALBUM_IDS: '1' } })
+    );
+  });
+
+  it('reports reached_end for a retry whose cap equals its list', async () => {
+    const summary = await run([1, 2, 3], {}, { albumIds: [1, 2, 3], maxAlbums: 3 });
+
+    expect(summary.reached_end).toBe(true);
   });
 
   it('reports no next run when a retry leaves nothing to ask', async () => {

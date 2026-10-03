@@ -385,8 +385,8 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
         else result.skipped_raced += 1;
       } catch (err) {
         // One row's database error (a reset connection, a lock wait) is not
-        // the run's. The album joins the retry list, which holds the resume
-        // cursor at it, and the loop moves on to the next album.
+        // the run's. The album is carried into the next run like an unanswered
+        // one, and the loop moves on to the next album.
         result.write_failed += 1;
         result.indeterminateAlbumIds.push(candidate.album_id);
         // Drizzle's own message is the statement and its parameters, the
@@ -467,9 +467,9 @@ export interface FillSummary extends VerdictTotals {
    * reached. `indeterminate` and `write_failed` are always the exact counts. */
   indeterminate_album_ids: number[];
   /** What to run next: the cursor past everything this run asked, carrying the
-   * albums it left as the list. When those outgrow one list, the list-free
-   * `resume_after_album_id` and no list. `null` when a retry run left nothing,
-   * and on a dry run. */
+   * albums it left as the list. When those outgrow one list, the first 200 are
+   * carried and the cursor stops just below the first album that did not fit.
+   * `null` when a retry run left nothing, and on a dry run. */
   next_run: NextRun | null;
   execute: boolean;
   /** True when the loop ended before its last batch: a signal, the pause, or
@@ -500,8 +500,9 @@ export interface ResumePlan {
  * the last album asked, and everything the run asked but could not settle rides
  * along as the next run's list: an album LML never answers for then costs one
  * retry per run, where a frozen cursor made every later run re-ask the whole
- * stretch above it. Pure; called after each batch, so the summary is current
- * however the run ends, and once more after the loop.
+ * stretch above it. More than one list's worth carries the first list and
+ * stops the cursor below the rest. Pure; called after each batch, so the
+ * summary is current however the run ends, and once more after the loop.
  */
 export const planResume = (state: {
   /** Enumerated album ids, in the order they were asked. */
@@ -538,13 +539,17 @@ export const planResume = (state: {
     };
   }
   const resumeAfterAlbumId = pending.length > 0 ? pending[0] - 1 : cursor;
+  // More than one list holds: carry the first full list and stop the cursor
+  // just below the first album that did not fit, so every pending album at or
+  // below it is listed and the rest are above it. Rewinding to the first
+  // pending album instead re-asked the whole residue and, under a sustained
+  // shed, overflowed again every run.
+  const carried = pending.slice(0, INDETERMINATE_IDS_REPORT_CAP);
+  const nextCursor = pending.length > carried.length ? pending[carried.length] - 1 : cursor;
   return {
     pending,
     resumeAfterAlbumId,
-    nextRun:
-      pending.length <= INDETERMINATE_IDS_REPORT_CAP
-        ? { BIO_FILL_ALBUM_AFTER_ID: cursor, BIO_FILL_ALBUM_IDS: pending.join(',') }
-        : { BIO_FILL_ALBUM_AFTER_ID: resumeAfterAlbumId, BIO_FILL_ALBUM_IDS: '' },
+    nextRun: { BIO_FILL_ALBUM_AFTER_ID: nextCursor, BIO_FILL_ALBUM_IDS: carried.join(',') },
   };
 };
 
@@ -723,6 +728,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       ...counts,
       last_album_id: summary.last_album_id,
       resume_after_album_id: summary.resume_after_album_id,
+      // So a run killed without a summary line still leaves a next run.
+      next_run: summary.next_run,
     });
 
     // A batch settled nothing when LML answered for none of it, or when every
@@ -758,7 +765,9 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   // a batch. A capped run that used its whole cap may have more above it.
   applyResumePlan();
   summary.reached_end =
-    abort === undefined && !summary.stopped_early && (options.maxAlbums === 0 || candidates.length < options.maxAlbums);
+    abort === undefined &&
+    !summary.stopped_early &&
+    (retryOnly || options.maxAlbums === 0 || candidates.length < options.maxAlbums);
 
   // The accounting reads the database too, and a run that aborted because the
   // database went away will fail here as well. That must not cost the summary
