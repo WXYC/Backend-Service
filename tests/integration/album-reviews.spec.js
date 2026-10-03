@@ -146,8 +146,9 @@ describe('GET /album-reviews (ADR 0011)', () => {
       norm_album: 'doga',
     });
 
-    // Second review of the SAME album (the multi-review invariant that
-    // separates this archive from ADR 0006's one-per-album reviews), and the
+    // Second review of the SAME album (this archive's own multi-review
+    // invariant — see ADR 0011; ADR 0006's `reviews` is many-per-release
+    // too, so cardinality alone no longer separates the two), and the
     // `social_consent = false` arm: this reviewer declined SOCIAL-MEDIA
     // publication. It must still appear on the internal surface — that is the
     // decision this endpoint encodes.

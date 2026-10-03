@@ -19,8 +19,9 @@ const postgres = require('postgres');
  *   - A changed field fires the UPDATE (xmax != 0) and advances
  *     `last_modified`.
  *   - Multi-review invariant: two submissions for the same album under
- *     different source_keys are DISTINCT rows (the reason this table is
- *     not ADR 0006's one-per-album `reviews`).
+ *     different source_keys are DISTINCT rows (this table's own append-only,
+ *     free-text-identity shape — see ADR 0011; ADR 0006's `reviews` is
+ *     many-per-release too, so cardinality alone no longer separates them).
  *   - The link pass's guarded UPDATE (`WHERE album_id IS NULL`) never
  *     overwrites an existing link.
  *   - FK `ON DELETE SET NULL`: deleting the library row orphans the link,
