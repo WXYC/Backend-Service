@@ -2,13 +2,11 @@
  * Legacy linkage resolve: link `flowsheet` / `rotation` rows to their library
  * album once the library row exists.
  *
- * Both writer paths resolve `album_id` exactly once, at write time, against
- * whatever `library` held at that instant:
- *
- *   - `/internal/flowsheet-webhook` resolves on INSERT and deliberately never
- *     refreshes on conflict — "linkage is anchored to the first delivery"
- *     (apps/backend/routes/internal.route.ts).
- *   - `/internal/rotation-webhook` resolves once via `resolveAlbumId(rawLibraryId)`.
+ * `/internal/flowsheet-webhook` resolves `album_id` exactly once, at write time,
+ * against whatever `library` held at that instant: it resolves on INSERT and
+ * deliberately never refreshes on conflict — "linkage is anchored to the first
+ * delivery" (apps/backend/routes/internal.route.ts). The rotation webhook that
+ * once shared this path is retired.
  *
  * That is a race against `jobs/library-etl/`, which imports the catalog on its
  * own half-hourly schedule, and against the librarian, who routinely files the

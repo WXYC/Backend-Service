@@ -9,8 +9,8 @@ import { epochMsToDate } from '@wxyc/database';
 
 /**
  * Classify a tubafrenzy ROTATION_TYPE. Re-exported from `@wxyc/database` so
- * this job, the rotation webhook, and `POST /library/rotation` share one
- * normalization rule.
+ * this job and every other `rotation_bin` writer (`POST /library/rotation`,
+ * `PATCH /library/rotation/:id`) share one normalization rule.
  *
  * BS#2173: this used to fall back to `'N'` for anything unrecognized, which is
  * not a rotation bin — see `freqEnum` in shared/database/src/schema.ts. It also

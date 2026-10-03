@@ -1222,11 +1222,11 @@ export type UpdateRotationOutcome =
  * `rotation_bin` divergence (two writers, one column, drifting SET clauses)
  * is the failure mode a shared writer forecloses.
  *
- * NOT the only writer of `rotation.kill_date` process-wide: the tubafrenzy
- * webhook in `apps/backend/routes/internal.route.ts` sets it directly on its
- * kill/unkill branches, keyed on `legacy_rotation_id` rather than `id`. That
- * is a deliberately separate write path (a legacy-id-keyed mirror, not an
- * HTTP edit surface) — grep before assuming exclusivity.
+ * NOT the only writer of `rotation.kill_date` process-wide: a hand-run
+ * `jobs/rotation-etl` sets it directly on conflict, keyed on
+ * `legacy_rotation_id` rather than `id`. That is a deliberately separate
+ * write path (a legacy-id-keyed, unscheduled ETL, not an HTTP edit surface)
+ * — grep before assuming exclusivity.
  *
  * Two review findings folded into this one function rather than left as two
  * separate patches:
@@ -1253,9 +1253,10 @@ export type UpdateRotationOutcome =
  *   - **Finding 4 (TOCTOU).** The pre-catalog set — the trio plus
  *     `format_id`/`label_id` since BS#2410, i.e. `ROTATION_PRECATALOG_FIELDS`
  *     — may only be set on an unlinked row (`album_id IS NULL`). `rotation`
- *     is a live ingest target — the tubafrenzy rotation webhook
- *     (`POST /internal/rotation-webhook`) can link this exact row in the
- *     window between a caller's read and a naive write — so the precondition
+ *     is a live link target — `jobs/legacy-linkage-resolve`'s recurring cron,
+ *     or a concurrent `PATCH /library/rotation/:id/link` call, can link this
+ *     exact row in the window between a caller's read and a naive write —
+ *     so the precondition
  *     is asserted in the UPDATE's own WHERE, never trusted from an earlier
  *     SELECT. A zero-row result while one of those fields is present means
  *     "this row is linked as of right now", not "this row doesn't exist" or
@@ -1338,13 +1339,13 @@ export const updateRotation = async (
     // `RotationCardBinMismatchError` (409, wrong bin); an explicit `null`
     // (uncard) skips validation entirely, same as `format_id`/`label_id`.
     //
-    // `FOR UPDATE` on the bin read, because `rotation` is a live ingest
-    // target (this function's own docstring rule): the tubafrenzy rotation
-    // webhook upsert sets `rotation_bin` unconditionally on conflict, so a
-    // re-bin landing between an unlocked read and the UPDATE below would
-    // file the row cross-bin — the exact state `RotationCardBinMismatchError`
-    // exists to prevent — behind a 200. The lock holds the bin still until
-    // this transaction's write commits.
+    // `FOR UPDATE` on the bin read, because `rotation` is a live link
+    // target (this function's own docstring rule): `jobs/rotation-etl`'s
+    // upsert sets `rotation_bin` unconditionally on conflict when hand-run,
+    // so a re-bin landing between an unlocked read and the UPDATE below
+    // would file the row cross-bin — the exact state
+    // `RotationCardBinMismatchError` exists to prevent — behind a 200. The
+    // lock holds the bin still until this transaction's write commits.
     if (touchesCardId && set.card_id !== null) {
       const [current] = await tx
         .select({ rotation_bin: rotation.rotation_bin })
@@ -1734,11 +1735,10 @@ export type LinkRotationOutcome =
  *
  * This produces the "`album_id` set AND snapshot set" shape — and, unlike an
  * earlier revision, it now simply persists. That earlier revision paired
- * this function with a `POST /internal/rotation-webhook` SET clause that
+ * this function with a rotation-webhook SET clause (since retired) that
  * nulled the trio out on the row's next `/wxycdb` edit; that CASE-based
  * gating was itself the bug (it starved both self-heal paths above of the
- * columns they need) and has been removed — the webhook's UPDATE path now
- * writes `excluded.*` unconditionally for the trio, same as this function.
+ * columns they need) and has been removed.
  * So the shape lasts until `jobs/rotation-release-id-backfill` mints a
  * `discogs_release_id` for the row (its candidate query has no `album_id`
  * predicate, so a linked row with a populated snapshot is picked up the same
