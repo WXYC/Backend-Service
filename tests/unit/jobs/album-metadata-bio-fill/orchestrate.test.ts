@@ -18,7 +18,7 @@
  * @see WXYC/Backend-Service#2775
  */
 
-import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 
 const waitForQuietPeriod = jest.fn<() => Promise<boolean>>();
 
@@ -90,6 +90,12 @@ const albums = (...ids: number[]) =>
  * trusted match with a null bio, which is also what a breaker shed looks like. */
 type Outcome = 'fill' | 'no_match' | 'no_bio' | 'shed' | 'write_fails';
 type Outcomes = Record<number, Outcome | 'throw'>;
+
+/** The same outcome for each of the given album ids. */
+const outcomesOf = (outcome: Outcome, ...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, outcome]));
+
+/** Album ids 1 to n. */
+const idsTo = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
 
 /**
  * Script LML's answers by album id. Every candidate carries the same artist
@@ -519,7 +525,7 @@ describe('runFill — LML answers, but never with a bio', () => {
   // which is identical on the wire to an artist with no Discogs profile. A
   // sustained shed therefore fails no batch: every album is `no_bio`, the
   // cursor walks to the end, and the run reports success having filled nothing.
-  const noBio = (...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, 'no_bio' as const]));
+  const noBio = (...ids: number[]): Outcomes => outcomesOf('no_bio', ...ids);
 
   it('aborts after N consecutive all-no_bio batches, with the cursor put back before the streak', async () => {
     await expect(
@@ -609,17 +615,13 @@ describe('runFill — only a fill breaks a no-bio streak (BS#2789)', () => {
     // Batches of 5, each one no_bio beside four unanswered: both guards trip on
     // the second batch, and the failed-batch abort is the one thrown.
     const outcomes: Outcomes = {
-      ...Object.fromEntries([2, 3, 4, 5, 7, 8, 9, 10].map((id) => [id, 'shed' as const])),
+      ...outcomesOf('shed', 2, 3, 4, 5, 7, 8, 9, 10),
       1: 'no_bio',
       6: 'no_bio',
     };
 
     await expect(
-      run(
-        [...Array(15).keys()].map((i) => i + 1),
-        outcomes,
-        { batchSize: 5, maxConsecutiveFailedBatches: 2, maxConsecutiveNoBioBatches: 2 }
-      )
+      run(idsTo(15), outcomes, { batchSize: 5, maxConsecutiveFailedBatches: 2, maxConsecutiveNoBioBatches: 2 })
     ).rejects.toBeInstanceOf(ConsecutiveFailedBatchesError);
 
     expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
@@ -645,16 +647,11 @@ describe('runFill — the failed-batch guard under partial failure (BS#2789)', (
   });
 
   it('counts a batch in which LML answered for at most a fifth of the albums', async () => {
-    const shed = (...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, 'shed' as const]));
-    const outcomes: Outcomes = { ...shed(1, 2, 3, 4, 6, 7, 8, 9), 5: 'no_match', 10: 'no_match' };
+    const outcomes: Outcomes = { ...outcomesOf('shed', 1, 2, 3, 4, 6, 7, 8, 9), 5: 'no_match', 10: 'no_match' };
 
-    await expect(
-      run(
-        [...Array(15).keys()].map((i) => i + 1),
-        outcomes,
-        { batchSize: 5, maxConsecutiveFailedBatches: 2 }
-      )
-    ).rejects.toBeInstanceOf(ConsecutiveFailedBatchesError);
+    await expect(run(idsTo(15), outcomes, { batchSize: 5, maxConsecutiveFailedBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveFailedBatchesError
+    );
 
     expect(bulkLookupMetadata).toHaveBeenCalledTimes(2);
   });
@@ -662,118 +659,123 @@ describe('runFill — the failed-batch guard under partial failure (BS#2789)', (
   it('does not count a batch with two answers in five', async () => {
     const outcomes: Outcomes = { 1: 'shed', 2: 'shed', 3: 'shed', 6: 'shed', 7: 'shed', 8: 'shed' };
 
-    const summary = await run(
-      [...Array(10).keys()].map((i) => i + 1),
-      outcomes,
-      {
-        batchSize: 5,
-        maxConsecutiveFailedBatches: 2,
-      }
-    );
+    const summary = await run(idsTo(10), outcomes, {
+      batchSize: 5,
+      maxConsecutiveFailedBatches: 2,
+    });
 
     expect(summary.stopped_early).toBe(false);
   });
 });
 
 describe('runFill — a second stop signal (BS#2789)', () => {
-  /** `process.exit` and the logger flush, stubbed; the exit runs after the flush. */
-  const stubExit = () => ({
-    exit: jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never),
-    flush: jest.spyOn(logger, 'closeLogger').mockResolvedValue(undefined),
+  // `process.exit` and the logger flush, stubbed; the exit runs after the flush.
+  let exit: ReturnType<typeof jest.spyOn>;
+  let flush: ReturnType<typeof jest.spyOn>;
+  beforeEach(() => {
+    exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    flush = jest.spyOn(logger, 'closeLogger').mockResolvedValue(undefined);
+  });
+  afterEach(() => {
+    exit.mockRestore();
+    flush.mockRestore();
+    process.exitCode = undefined;
   });
   const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const forcedSummaries = () =>
+    log.mock.calls.filter(([, step, , fields]) => step === 'summary' && fields?.forced_exit);
 
   it('logs the summary as it stands, next_run included, and exits non-zero without waiting for the batch', async () => {
-    const { exit, flush } = stubExit();
-    try {
-      enumerateCohort.mockResolvedValue(albums(1, 2, 3, 4) as never);
-      scriptLml({ 3: 'shed' }, [1, 2, 3, 4]);
-      const answer = bulkLookupMetadata.getMockImplementation() as (items: unknown) => Promise<unknown>;
-      bulkLookupMetadata.mockImplementationOnce(answer).mockImplementationOnce((items: unknown) => {
-        // The operator presses Ctrl-C twice while the second batch is in flight.
-        handleStopSignal('SIGINT');
-        handleStopSignal('SIGINT');
-        return answer(items);
-      });
-      applyBioFill.mockResolvedValue(true as never);
+    enumerateCohort.mockResolvedValue(albums(1, 2, 3, 4) as never);
+    scriptLml({ 3: 'shed' }, [1, 2, 3, 4]);
+    const answer = bulkLookupMetadata.getMockImplementation() as (items: unknown) => Promise<unknown>;
+    bulkLookupMetadata.mockImplementationOnce(answer).mockImplementationOnce((items: unknown) => {
+      // The operator presses Ctrl-C three times while the second batch is in flight.
+      handleStopSignal('SIGINT');
+      handleStopSignal('SIGINT');
+      handleStopSignal('SIGINT');
+      return answer(items);
+    });
+    applyBioFill.mockResolvedValue(true as never);
 
-      await runFill({ ...OPTIONS, batchSize: 2 });
-      await settle();
+    await runFill({ ...OPTIONS, batchSize: 2 });
+    await settle();
 
-      // Sentry is flushed first, within closeLogger's own bound.
-      expect(flush).toHaveBeenCalled();
-      expect(exit).toHaveBeenCalledWith(1);
-      expect(log).toHaveBeenCalledWith(
-        'error',
-        'summary',
-        expect.stringContaining('second SIGINT'),
-        expect.objectContaining({
-          stopped_early: true,
-          forced_exit: true,
-          filled: 2,
-          next_run: { BIO_FILL_ALBUM_AFTER_ID: 2, BIO_FILL_ALBUM_IDS: '' },
-        })
-      );
-    } finally {
-      exit.mockRestore();
-      flush.mockRestore();
-    }
+    // Sentry is flushed first, within closeLogger's own bound.
+    expect(flush).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      'error',
+      'summary',
+      expect.stringContaining('second SIGINT'),
+      expect.objectContaining({
+        stopped_early: true,
+        forced_exit: true,
+        filled: 2,
+        next_run: { BIO_FILL_ALBUM_AFTER_ID: 2, BIO_FILL_ALBUM_IDS: '' },
+      })
+    );
+    // The third signal finds the forced exit under way: one summary, one exit.
+    expect(forcedSummaries()).toHaveLength(1);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
   });
 
   it('says the accounting was cut short, not that a batch was abandoned, when it lands after the loop', async () => {
-    const { exit, flush } = stubExit();
-    try {
-      countCohort.mockReset();
-      countCohort.mockResolvedValueOnce(100 as never).mockImplementationOnce(() => {
-        handleStopSignal('SIGTERM');
-        handleStopSignal('SIGTERM');
-        return Promise.resolve(98);
-      });
+    countCohort.mockReset();
+    countCohort.mockResolvedValueOnce(100 as never).mockImplementationOnce(() => {
+      handleStopSignal('SIGTERM');
+      handleStopSignal('SIGTERM');
+      return Promise.resolve(98);
+    });
 
-      await run([1, 2]);
-      await settle();
+    await run([1, 2]);
+    await settle();
 
-      expect(exit).toHaveBeenCalledWith(1);
-      expect(log).toHaveBeenCalledWith(
-        'error',
-        'summary',
-        expect.stringContaining('accounting'),
-        expect.objectContaining({ forced_exit: true, stopped_early: false, reached_end: true, filled: 2 })
-      );
-      expect(log).not.toHaveBeenCalledWith('error', 'summary', expect.stringContaining('abandoned'), expect.anything());
-    } finally {
-      exit.mockRestore();
-      flush.mockRestore();
-    }
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(log).toHaveBeenCalledWith(
+      'error',
+      'summary',
+      expect.stringContaining('accounting'),
+      expect.objectContaining({ forced_exit: true, stopped_early: false, reached_end: true, filled: 2 })
+    );
+    expect(log).not.toHaveBeenCalledWith('error', 'summary', expect.stringContaining('abandoned'), expect.anything());
+  });
+
+  it('reports an aborted run as stopped early, with its reason, when it lands during the closing count', async () => {
+    countCohort.mockReset();
+    countCohort.mockResolvedValueOnce(100 as never).mockImplementationOnce(() => {
+      handleStopSignal('SIGTERM');
+      handleStopSignal('SIGTERM');
+      return Promise.resolve(100);
+    });
+
+    await expect(
+      run([1, 2, 3, 4], { 1: 'shed', 2: 'shed', 3: 'shed', 4: 'shed' }, { maxConsecutiveFailedBatches: 2 })
+    ).rejects.toBeInstanceOf(ConsecutiveFailedBatchesError);
+
+    const [[, , message, fields]] = forcedSummaries();
+    expect(message).toMatch(/the run had aborted: .*LML answered for at most a fifth/);
+    expect(fields).toMatchObject({ stopped_early: true, reached_end: false });
   });
 
   it('logs no summary, and keeps the exit code, once the run has ended', async () => {
-    const { exit, flush } = stubExit();
-    try {
-      await run([1, 2]);
-      handleStopSignal('SIGINT');
-      handleStopSignal('SIGINT');
-      await settle();
+    await run([1, 2]);
+    // What `main` sets after the finished line.
+    process.exitCode = 0;
+    handleStopSignal('SIGINT');
+    handleStopSignal('SIGINT');
+    await settle();
 
-      expect(exit).toHaveBeenCalledWith(0);
-      expect(log).toHaveBeenCalledWith('warn', 'forced_exit', expect.any(String), { signal: 'SIGINT' });
-      expect(log).not.toHaveBeenCalledWith('error', 'summary', expect.any(String), expect.anything());
-    } finally {
-      exit.mockRestore();
-      flush.mockRestore();
-    }
+    expect(exit).toHaveBeenCalledWith(0);
+    expect(log).toHaveBeenCalledWith('warn', 'forced_exit', expect.any(String), { signal: 'SIGINT' });
+    expect(forcedSummaries()).toHaveLength(0);
   });
 
   it('only requests a stop on the first signal', () => {
-    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
-    try {
-      handleStopSignal('SIGTERM');
+    handleStopSignal('SIGTERM');
 
-      expect(exit).not.toHaveBeenCalled();
-      expect(log).toHaveBeenCalledWith('warn', 'signal', expect.any(String), { signal: 'SIGTERM' });
-    } finally {
-      exit.mockRestore();
-    }
+    expect(exit).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('warn', 'signal', expect.any(String), { signal: 'SIGTERM' });
   });
 });
 
