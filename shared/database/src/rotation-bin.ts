@@ -34,9 +34,10 @@ export type RotationBin = (typeof ROTATION_BINS)[number];
 /**
  * The three states an inbound `rotation_bin` can be in. Callers share this
  * classification but keep their own policy, because "no bin supplied" means
- * genuinely different things to different writers: to the rotation webhook it
- * is a linkage-only partial update (BS#1082/#1312), to the ETL it is a release
- * to skip, and to `POST /library/rotation` it is a missing required field.
+ * genuinely different things to different writers: to the tubafrenzy rotation
+ * webhook (since retired) it was a linkage-only partial update
+ * (BS#1082/#1312), to the ETL it is a release to skip, and to
+ * `POST /library/rotation` it is a missing required field.
  *
  * Keeping `missing` and `invalid` distinct is the point. Collapsing them —
  * which an earlier version of the ETL did — silently swallows genuine bad data

@@ -2483,9 +2483,9 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   }
   // BS#2173: this checked PRESENCE but never VALUE, so an unrecognized bin
   // reached the INSERT and surfaced as a Postgres 22P02 — a 500 for what is
-  // plainly bad input. Shared with the rotation webhook via `parseRotationBin`
-  // so the two cannot disagree about normalization (they did: `'h'` was
-  // accepted by one and rejected by the other).
+  // plainly bad input. Shared with the rotation webhook (since retired) via
+  // `parseRotationBin` so the two could not disagree about normalization
+  // (they did: `'h'` was accepted by one and rejected by the other).
   if (parseRotationBin(body.rotation_bin).kind !== 'bin') {
     throw new WxycError(
       `Invalid rotation_bin ${JSON.stringify(body.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
@@ -3158,10 +3158,11 @@ function buildLinkedSnapshotConflictMessage(
  *
  * The linked/unlinked precondition on the trio is enforced as a
  * compare-and-set inside `libraryService.updateRotation`, not from a read
- * taken here first: `rotation` is a live ingest target (the tubafrenzy
- * rotation webhook writes it continuously), so a row this handler read as
- * unlinked can be linked by the time the write lands. The service carries
- * `album_id IS NULL` into the UPDATE's own WHERE and reports a zero-row
+ * taken here first: `rotation` is a live link target (`jobs/legacy-linkage-resolve`'s
+ * recurring cron, or a concurrent `PATCH /library/rotation/:id/link` call, can
+ * link it), so a row this handler read as unlinked can be linked by the time
+ * the write lands. The service carries `album_id IS NULL` into the UPDATE's
+ * own WHERE and reports a zero-row
  * result as a conflict — this handler never makes the linked/unlinked call
  * itself.
  */

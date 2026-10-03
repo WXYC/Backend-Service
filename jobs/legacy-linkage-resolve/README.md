@@ -4,10 +4,7 @@ Links `flowsheet` and `rotation` rows to their library album once the `library` 
 
 ## Why this job exists
 
-Both webhook writers resolve `album_id` exactly once, at write time, against whatever `library` held at that instant:
-
-- `/internal/flowsheet-webhook` resolves on INSERT and deliberately **never** refreshes on conflict — linkage is anchored to the first delivery.
-- `/internal/rotation-webhook` resolves once via `resolveAlbumId(rawLibraryId)`.
+`/internal/flowsheet-webhook` resolves `album_id` exactly once, at write time, against whatever `library` held at that instant. It resolves on INSERT and deliberately **never** refreshes on conflict — linkage is anchored to the first delivery. (`/internal/rotation-webhook` did the same until it was retired.)
 
 That is a race against `jobs/library-etl/`, which imports the catalog on its own `*/30` schedule, and against the librarian, who routinely files the physical release _after_ the music director bins it. A row whose library row lands second keeps `album_id = NULL` — and, on `rotation`, keeps its denormalized `artist_name` / `album_title` / `record_label` — permanently, because nothing else ever re-runs the join.
 

@@ -353,7 +353,7 @@ describe('updateRotation (BS#2113)', () => {
 
       const outcome = await updateRotation(42, { card_id: 5 });
 
-      // FOR UPDATE on the bin read: the tubafrenzy rotation webhook can
+      // FOR UPDATE on the bin read: a hand-run `jobs/rotation-etl` can
       // re-bin this exact row mid-request, and an unlocked read would let
       // the UPDATE file the row cross-bin behind a 200.
       expect(binReadChain.for).toHaveBeenCalledWith('update');

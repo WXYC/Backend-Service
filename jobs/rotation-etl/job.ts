@@ -83,9 +83,9 @@ const runIncremental = async (): Promise<SyncResult> => {
     //
     // Blank and unrecognized are counted separately on purpose. A blank
     // ROTATION_TYPE is a legitimate upstream state (15 releases have one); an
-    // unrecognized value is bad data the rotation webhook considers loud enough
-    // to reject an entire event over, and folding it into "no bin upstream"
-    // would hide it behind a log line that says the opposite.
+    // unrecognized value is bad data worth rejecting loudly, and folding it
+    // into "no bin upstream" would hide it behind a log line that says the
+    // opposite.
     const parsedBin = parseRotationBin(release.rotationType);
     if (parsedBin.kind !== 'bin') {
       if (parsedBin.kind === 'invalid') {
