@@ -2261,14 +2261,14 @@ type AddRotationAllowlist = Pick<
   'album_id' | 'rotation_bin' | 'artist_name' | 'album_title' | 'record_label' | 'format_id' | 'label_id' | 'card_id'
 >;
 
-export function pickAddRotationFields(body: Partial<NewRotationRelease>): AddRotationAllowlist {
-  const picked = {} as AddRotationAllowlist;
+export function pickAddRotationFields(
+  body: Partial<NewRotationRelease>,
+  rotationBin: RotationBin
+): AddRotationAllowlist {
+  const picked = { rotation_bin: rotationBin } as AddRotationAllowlist;
   if (body.album_id != null) picked.album_id = body.album_id;
-  // BS#2203: the parsed bin, never the raw client value. `addRotation`'s gate
-  // has already rejected anything unrecognized; this keeps the picker from
-  // reintroducing a spelling the `freq` enum column cannot store.
-  const parsedBin = parseRotationBin(body.rotation_bin);
-  if (parsedBin.kind === 'bin') picked.rotation_bin = parsedBin.bin;
+  // BS#2203: the parsed bin, never the raw client value — `addRotation`'s gate
+  // parses once and hands the result in, so the picker cannot drop a bin.
   // BS#2472: which physical card the row is filed under. Unconditional —
   // unlike the snapshot trio and the pre-catalog FKs below, a card
   // assignment is the rotation row's own state on linked and unlinked rows
@@ -2490,7 +2490,8 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   // plainly bad input. Shared with the rotation webhook (since retired) via
   // `parseRotationBin` so the two could not disagree about normalization
   // (they did: `'h'` was accepted by one and rejected by the other).
-  if (parseRotationBin(body.rotation_bin).kind !== 'bin') {
+  const parsedRotationBin = parseRotationBin(body.rotation_bin);
+  if (parsedRotationBin.kind !== 'bin') {
     throw new WxycError(
       `Invalid rotation_bin ${JSON.stringify(body.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
       400
@@ -2553,7 +2554,7 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   // a bad entry never reaches the insert transaction.
   const urls = body.urls !== undefined ? parseRotationUrls(body.urls) : undefined;
 
-  const picked = pickAddRotationFields(body);
+  const picked = pickAddRotationFields(body, parsedRotationBin.bin);
   let rotationRelease: RotationRelease;
   try {
     rotationRelease = await libraryService.addToRotation(picked, urls);

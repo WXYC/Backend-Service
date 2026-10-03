@@ -275,7 +275,15 @@ describe('addToRotation card resolution (BS#2472)', () => {
 
     await addToRotation({ rotation_bin: 'm' as unknown as 'M', card_id: 7, ...UNCATALOGUED });
 
-    expect(insertChain.values).toHaveBeenCalled();
+    expect(insertChain.values.mock.calls[0][0]).toMatchObject({ rotation_bin: 'M' });
+  });
+
+  test('rejects a value that is not a bin with a 400 and inserts nothing', async () => {
+    await expect(addToRotation({ rotation_bin: 'X' as unknown as 'M', ...UNCATALOGUED })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('Invalid rotation_bin "X"'),
+    });
+    expect(db.insert).not.toHaveBeenCalled();
   });
 
   test('throws RotationCardBinMismatchError when the card lives in a different bin', async () => {

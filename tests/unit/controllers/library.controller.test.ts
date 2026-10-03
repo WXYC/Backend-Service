@@ -2186,8 +2186,12 @@ describe('library.controller', () => {
   });
 
   describe('pickAddRotationFields (BS#2109)', () => {
+    // The controller's gate hands the picker the bin it already parsed.
+    const pick = (body: Parameters<typeof pickAddRotationFields>[0]) =>
+      pickAddRotationFields(body, body.rotation_bin);
+
     it('picks album_id and rotation_bin, dropping the snapshot trio, when album_id is present', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         album_id: 5,
         rotation_bin: 'M',
         artist_name: 'Forged Artist',
@@ -2199,7 +2203,7 @@ describe('library.controller', () => {
     });
 
     it('picks the snapshot trio when album_id is absent', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         rotation_bin: 'L',
         artist_name: 'Jockstrap',
         album_title: 'I Love You Jennifer B',
@@ -2215,7 +2219,7 @@ describe('library.controller', () => {
     });
 
     it('omits record_label from the picked fields when not supplied (album_id absent)', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         rotation_bin: 'S',
         artist_name: 'Jockstrap',
         album_title: 'I Love You Jennifer B',
@@ -2228,7 +2232,7 @@ describe('library.controller', () => {
     // behave identically to omitting the key. An `=== undefined` test took
     // the has-an-album_id branch and dropped the free text on the floor.
     it('treats an explicit album_id: null exactly as absent and still picks the snapshot trio', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         album_id: null,
         rotation_bin: 'L',
         artist_name: 'Jockstrap',
@@ -2246,7 +2250,7 @@ describe('library.controller', () => {
     });
 
     it('drops explicitly-null snapshot fields rather than writing NULL over them', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         album_id: null,
         rotation_bin: 'L',
         artist_name: 'Jockstrap',
@@ -2262,7 +2266,7 @@ describe('library.controller', () => {
     // and label come from the library row, and a rotation-side copy invites
     // the drift `record_label` would.
     it('picks format_id and label_id when album_id is absent', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         rotation_bin: 'L',
         artist_name: 'Jockstrap',
         album_title: 'I Love You Jennifer B',
@@ -2280,7 +2284,7 @@ describe('library.controller', () => {
     });
 
     it('drops format_id and label_id when album_id is present, exactly like the trio', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         album_id: 5,
         rotation_bin: 'M',
         artist_name: 'Forged Artist',
@@ -2292,7 +2296,7 @@ describe('library.controller', () => {
     });
 
     it('drops explicitly-null FKs rather than writing NULL over them', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         rotation_bin: 'L',
         artist_name: 'Jockstrap',
         album_title: 'I Love You Jennifer B',
@@ -2307,13 +2311,13 @@ describe('library.controller', () => {
     // rotation row's own state on linked and unlinked rows alike, so
     // `album_id` does not gate it the way it gates the trio and the FKs.
     it('picks card_id on a linked add (album_id present)', () => {
-      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: 'M', card_id: 7 });
+      const picked = pick({ album_id: 5, rotation_bin: 'M', card_id: 7 });
 
       expect(picked).toEqual({ album_id: 5, rotation_bin: 'M', card_id: 7 });
     });
 
     it('picks card_id on an uncatalogued add (album_id absent)', () => {
-      const picked = pickAddRotationFields({
+      const picked = pick({
         rotation_bin: 'L',
         artist_name: 'Jockstrap',
         album_title: 'I Love You Jennifer B',
@@ -2329,7 +2333,7 @@ describe('library.controller', () => {
     });
 
     it('drops an explicitly-null card_id exactly as absent (the selected?.id ?? null shape)', () => {
-      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: 'M', card_id: null });
+      const picked = pick({ album_id: 5, rotation_bin: 'M', card_id: null });
 
       expect(picked).toEqual({ album_id: 5, rotation_bin: 'M' });
     });
@@ -2340,15 +2344,9 @@ describe('library.controller', () => {
       ['lowercase', 'h', 'H'],
       ['padded', ' H ', 'H'],
     ])('emits the canonical bin for a %s rotation_bin', (_label, raw, canonical) => {
-      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: raw as 'H' });
+      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: raw as 'H' }, canonical as 'H');
 
       expect(picked).toEqual({ album_id: 5, rotation_bin: canonical });
-    });
-
-    it('omits rotation_bin rather than emitting an unrecognized value', () => {
-      const picked = pickAddRotationFields({ album_id: 5, rotation_bin: 'X' as 'H' });
-
-      expect(picked).toEqual({ album_id: 5 });
     });
   });
 
