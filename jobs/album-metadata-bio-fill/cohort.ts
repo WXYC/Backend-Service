@@ -117,12 +117,23 @@ export const countCohort = (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<n
 export const countEligible = (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<number> =>
   countOf(countEligibleSql(), timeoutMs);
 
-export const enumerateCohort = async (
-  limit: number,
-  afterAlbumId: number,
-  timeoutMs: number = READ_TIMEOUT_DEFAULT,
-  albumIds: readonly number[] = []
-): Promise<FillCandidate[]> => {
+export interface EnumerateOptions {
+  /** 0 is no cap. */
+  limit: number;
+  afterAlbumId: number;
+  /** Non-empty narrows the enumeration to these albums (BS#2786). */
+  albumIds?: readonly number[];
+  timeoutMs?: number;
+}
+
+/** Named options rather than positions: `albumIds` and `timeoutMs` are both
+ * optional, so a positional list had to pass `undefined` to reach the ids. */
+export const enumerateCohort = async ({
+  limit,
+  afterAlbumId,
+  albumIds = [],
+  timeoutMs = READ_TIMEOUT_DEFAULT,
+}: EnumerateOptions): Promise<FillCandidate[]> => {
   const rows = await read<FillCandidate>(enumerateCohortSql(limit, afterAlbumId, albumIds), timeoutMs);
   return rows.map((r) => ({
     album_id: Number(r.album_id),
