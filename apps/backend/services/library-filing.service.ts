@@ -623,15 +623,17 @@ export function fireAndForgetCanonicalEntity(libraryId: number, artistName: stri
  * (BS#2474; extracted from `createLibraryFiling`, BS#2819): request
  * validation, then artist resolution and the conflict pre-checks, all on the
  * plain pool. Returns the validated input `fileLibraryRelease` runs, or the
- * `LibraryFilingConflictError` body a pre-check answers 409 with; every other
- * failure throws `WxycError(…, 400)`.
+ * `LibraryFilingConflictError` body a pre-check answers 409 with. Validation
+ * failures throw `WxycError(…, 400)`; database errors from its plain-pool
+ * lookups propagate unchanged.
  *
  * Conflict pre-checks mirror `addArtist`'s exact sequence and residual-race
  * posture. The `kind: 'existing'` arm resolves the referenced artist's
  * crossreference IN `release.genre_id` specifically, not the lowest-genre
  * collapse `GET /library/artists/:id` answers with: the release is filed
  * under that genre, so the artist code echoed back must be the code for
- * that shelf. An artist with no membership in the release's genre is a 400
+ * that shelf — a multi-genre artist's lowest membership can carry a
+ * different genre's call number. An artist with no membership in the release's genre is a 400
  * (the create arm's mirror guard is the `artist.genre_id === release.genre_id`
  * equality check), as is a dangling `artist_id` — the contract declares no
  * 404 on this route.

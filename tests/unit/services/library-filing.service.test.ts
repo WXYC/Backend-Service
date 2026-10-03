@@ -26,6 +26,17 @@ const mockGetArtistByCode = jest.fn<(letters: string, genreId: number, n: number
 const mockArtistIdFromName = jest.fn<(name: string, genreId: number) => Promise<number | null>>();
 const mockGetArtistCardByIdInGenre = jest.fn<(id: number, genreId: number) => Promise<unknown>>();
 const mockGetArtistById = jest.fn<(id: number) => Promise<unknown>>();
+const mockCheckStreamingAvailability = jest.fn<(artist: string, album: string, opts?: unknown) => Promise<unknown>>();
+const mockLmlLookup = jest.fn<(artist: string, album: string, song?: unknown, opts?: unknown) => Promise<unknown>>();
+
+jest.mock('@wxyc/lml-client', () => ({
+  isLmlConfigured: () => !!process.env.LIBRARY_METADATA_URL,
+  checkStreamingAvailability: mockCheckStreamingAvailability,
+}));
+jest.mock('../../../apps/backend/services/lml/index', () => ({
+  lmlLookupCoordinator: { lookup: mockLmlLookup },
+}));
+
 const mockReconcileLibraryUrlsToLml = jest.fn<(urls: string[]) => Promise<void>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
@@ -185,6 +196,21 @@ describe('fileLibraryRelease transaction handles', () => {
     expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(expect.anything(), 3, 5, tx);
   });
 
+  it('files the release under the supplied call number and volume letters, generating a number only when none is supplied', async () => {
+    await fileLibraryRelease(
+      { ...input, release: { ...input.release, supplied_code_number: 12, code_volume_letters: 'ab' } },
+      {} as never
+    );
+    expect(mockInsertAlbum).toHaveBeenCalledWith(
+      expect.objectContaining({ code_number: 12, code_volume_letters: 'ab' }),
+      expect.anything()
+    );
+    expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+
+    await fileLibraryRelease(input, {} as never);
+    expect(mockInsertAlbum).toHaveBeenLastCalledWith(expect.objectContaining({ code_number: 4 }), expect.anything());
+  });
+
   it('threads a given outer handle through the code-number generator and the rotation write', async () => {
     const outerTx = { marker: 'outer-tx' };
 
@@ -229,6 +255,30 @@ describe('completeLibraryFiling', () => {
 
     expect(mockReconcileLibraryUrlsToLml).toHaveBeenCalledWith(urls);
     expect(body).toEqual({ ...result, release: album });
+  });
+
+  it('enriches under the credited alternate artist name, not the catalog name', async () => {
+    process.env.LIBRARY_METADATA_URL = 'http://lml.test';
+    mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: null });
+    mockLmlLookup.mockResolvedValue(null);
+
+    await completeLibraryFiling(result as never, {
+      filingPlan: existingPlan,
+      release: { ...release, alternate_artist_name: 'Molina, Juana' },
+    });
+
+    expect(mockCheckStreamingAvailability).toHaveBeenCalledWith('Molina, Juana', 'DOGA', expect.anything());
+    expect(mockLmlLookup).toHaveBeenCalledWith('Molina, Juana', 'DOGA', undefined, expect.anything());
+  });
+
+  it('enriches under the catalog artist name when no alternate name is given', async () => {
+    process.env.LIBRARY_METADATA_URL = 'http://lml.test';
+    mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: null });
+    mockLmlLookup.mockResolvedValue(null);
+
+    await completeLibraryFiling(result as never, { filingPlan: existingPlan, release });
+
+    expect(mockCheckStreamingAvailability).toHaveBeenCalledWith('Juana Molina', 'DOGA', expect.anything());
   });
 
   it.each([
@@ -301,6 +351,27 @@ describe('planLibraryFiling', () => {
     expect(mockGenerateArtistNumber).toHaveBeenCalledTimes(2);
     expect(mockGetArtistByCode).toHaveBeenNthCalledWith(2, 'JU', 3, 7);
     expect(plan).toMatchObject({ kind: 'ok', input: { filingPlan: { kind: 'create', code_number: 7 } } });
+  });
+
+  it('hands on the validated call-code values, not the raw release values it spreads', async () => {
+    mockGenerateArtistNumber.mockResolvedValue(6);
+    mockGetArtistByCode.mockResolvedValue(undefined);
+    mockArtistIdFromName.mockResolvedValue(null);
+
+    const trimmed = await planLibraryFiling({
+      artist: createArtist,
+      release: { ...release, code_number: 12, code_volume_letters: '  ab  ' },
+    });
+    const blank = await planLibraryFiling({
+      artist: createArtist,
+      release: { ...release, code_volume_letters: '' },
+    });
+
+    if (trimmed.kind !== 'ok' || blank.kind !== 'ok') throw new Error('expected ok plans');
+    expect(trimmed.input.release.code_volume_letters).toBe('ab');
+    expect(trimmed.input.release.supplied_code_number).toBe(12);
+    expect(blank.input.release.code_volume_letters).toBeUndefined();
+    expect(blank.input.release.supplied_code_number).toBeUndefined();
   });
 
   it('answers an artist_code_conflict body naming the holder of a supplied code', async () => {
