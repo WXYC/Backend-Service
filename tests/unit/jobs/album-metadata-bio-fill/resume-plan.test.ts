@@ -100,7 +100,10 @@ describe('planResume', () => {
     expect(plan.pending).toEqual([3, 4, 5, 6]);
   });
 
-  it('falls back to the list-free cursor when the carried list would outgrow one list', () => {
+  // Rewinding to the first pending album when the list overflowed made the
+  // next run re-ask the whole residue above it; at a sustained 9% unanswered
+  // rate that overflowed again every run and the chain never finished.
+  it('carries the first full list and sets the cursor just below the first album it could not carry', () => {
     const plan = planResume({
       candidateIds: ids(1, 300),
       processed: 300,
@@ -110,8 +113,14 @@ describe('planResume', () => {
     });
 
     expect(plan.pending).toHaveLength(INDETERMINATE_IDS_REPORT_CAP + 1);
+    // Every pending album at or below the cursor is listed, and the one that
+    // did not fit is above it, so nothing is skipped.
+    expect(plan.nextRun).toEqual({
+      BIO_FILL_ALBUM_AFTER_ID: 50 + INDETERMINATE_IDS_REPORT_CAP - 1,
+      BIO_FILL_ALBUM_IDS: ids(50, 50 + INDETERMINATE_IDS_REPORT_CAP - 1).join(','),
+    });
+    // The list-free fallback is unchanged: below the first pending album.
     expect(plan.resumeAfterAlbumId).toBe(49);
-    expect(plan.nextRun).toEqual({ BIO_FILL_ALBUM_AFTER_ID: 49, BIO_FILL_ALBUM_IDS: '' });
   });
 
   it.each([

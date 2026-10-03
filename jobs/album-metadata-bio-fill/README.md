@@ -75,7 +75,7 @@ SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` an
 
 Start every run with the previous run's `next_run`. Nothing is skipped: everything above its cursor is asked because it is above the cursor, and everything below it that the previous run left is asked because it is listed. The listed albums are asked first.
 
-- **When the list would outgrow 200 ids**, as after a long LML outage, `next_run` carries no list and its cursor is the list-free fallback, `resume_after_album_id`: just below the first album left unsettled. That run re-asks everything above it, settled or not, and then the chain carries on as before.
+- **When more than 200 albums are left**, as after a long LML outage, `next_run` carries the first 200 and its cursor stops just below the first album that did not fit. Every unsettled album at or below the cursor is listed, and the rest are above it, so nothing is skipped; the next run re-asks the settled rows between that album and the previous cursor, and the chain moves on.
 - **`resume_after_album_id` on its own is always safe and never skips**, but it stalls: an album that is never answered holds it in place, and each run above it re-asks rows that were already settled. Use it only when `next_run` itself says so. Never resume from `last_album_id`.
 - **A list with no cursor is a retry of just those albums**, under the cohort predicate and the eligibility conditions. An id that got a bio in the meantime, or is not eligible, is not asked: it is named on a `listed_ids_not_in_cohort` line. A retry's `next_run` is the next retry, or `null` when it left nothing.
 
@@ -96,7 +96,7 @@ A list holds at most 200 ids. Carried into a cursor run, every listed id must be
 | `BIO_FILL_BULK_BUDGET_MS`                              | 25000   | per-item budget forwarded to LML                                                                               |
 | `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                                                           |
 | `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                                                       |
-| `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | resume cursor: only albums above this id                                                                       |
+| `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | cursor: every album above this id, plus any listed at or below it                                              |
 | `BIO_FILL_ALBUM_IDS`                                   | unset   | album list, at most 200: with no cursor, a retry of just these; with one, asked as well as everything above it |
 | `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that settled nothing                                                    |
 | `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES`              | 10      | abort after this many batches in a row that were entirely `no_bio`; 0 disables                                 |
