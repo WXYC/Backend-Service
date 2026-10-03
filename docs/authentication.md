@@ -26,11 +26,11 @@ The `shared/authentication` workspace package wraps better-auth and provides JWT
 | musicDirector  | read/write | read/write | read/write + manage                           | read          | listen          | read/write + manage |
 | stationManager | read/write | read/write | read/write + manage (plus org administration) | read          | listen          | read/write + manage |
 
-`album_reviews: read` gates `GET /album-reviews` (ADR 0011) — the internal surface over the whole DJ form-review archive, without the public `wxycReviews` attach's `social_consent = true` filter, because the form's consent question asked only about social media and internal station tools were never in its scope. The key is deliberately not called `reviews`: ADR 0006 reserves that name for the in-app Review model, a different resource. `member` decides the key as `[]`, an explicit denial rather than an omission; `stripEmpty` drops it before better-auth sees it, so the constructed role is byte-identical to one that never mentioned it.
-
-`reviews` gates the in-app review workflow (ADR 0006) and is deliberately a separate key from `album_reviews`, which gates the Google Form archive (ADR 0011). `dj` gets `read` and `write`, so first-semester DJs can review records as part of their assignments; `musicDirector` and `stationManager` add `manage`. No routes consume it yet; the endpoints arrive in later slices of WXYC/Backend-Service#2791. `member` decides it as `[]`.
+`album_reviews: read` gates `GET /album-reviews` (ADR 0011) — the internal surface over the whole DJ form-review archive, without the public `wxycReviews` attach's `social_consent = true` filter, because the form's consent question asked only about social media and internal station tools were never in its scope. It is deliberately a different key from `reviews` (below), which gates the in-app review workflow, a different resource with a different consent posture. `member` decides the key as `[]`, an explicit denial rather than an omission; `stripEmpty` drops it before better-auth sees it, so the constructed role is byte-identical to one that never mentioned it.
 
 `digital_archive: listen` gates `GET /digital-archive/albums/:id/playback` (BS#2320) — presigned playback manifests into the auto-DJ Space. Same tier and same `member: []` denial shape as `album_reviews`: the legal boundary is "authenticated DJs", not `catalog: read` (which `member` already holds).
+
+`reviews` gates the in-app review workflow (ADR 0006) and is deliberately a separate key from `album_reviews`, which gates the Google Form archive (ADR 0011). `dj` gets `read` and `write`, so first-semester DJs can review records as part of their assignments; `musicDirector` and `stationManager` add `manage`. `member` decides it as `[]`.
 
 **JWT payload**: `sub` (user ID), `email`, `role` (queried from the organization member table, not `user.role`).
 
