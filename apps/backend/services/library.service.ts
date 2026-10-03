@@ -1256,14 +1256,14 @@ export type UpdateRotationOutcome =
  *     is a live link target — `jobs/legacy-linkage-resolve`'s recurring cron,
  *     or a concurrent `PATCH /library/rotation/:id/link` call, can link this
  *     exact row in the window between a caller's read and a naive write —
- *     so the precondition
- *     is asserted in the UPDATE's own WHERE, never trusted from an earlier
- *     SELECT. A zero-row result while one of those fields is present means
- *     "this row is linked as of right now", not "this row doesn't exist" or
- *     "the write silently no-opped". Mirrors the re-guarded-WHERE discipline in
- *     `linkRotationToAlbum` / `legacy-linkage-resolve`: a guarded write, then
- *     one more read — inside the same transaction — to tell "no such row"
- *     apart from "row changed under us" when the write matches nothing.
+ *     so the precondition is asserted in the UPDATE's own WHERE, never
+ *     trusted from an earlier SELECT. A zero-row result while one of those
+ *     fields is present means "this row is linked as of right now", not
+ *     "this row doesn't exist" or "the write silently no-opped". Mirrors the
+ *     re-guarded-WHERE discipline in `linkRotationToAlbum` /
+ *     `legacy-linkage-resolve`: a guarded write, then one more read — inside
+ *     the same transaction — to tell "no such row" apart from "row changed
+ *     under us" when the write matches nothing.
  */
 export const updateRotation = async (
   rotation_id: number,
@@ -1345,9 +1345,10 @@ export const updateRotation = async (
     // between an unlocked read and the UPDATE below would file the row
     // cross-bin — the exact state `RotationCardBinMismatchError` exists to
     // prevent — behind a 200. The lock holds the bin still until this
-    // transaction's write commits. (Linking — `legacy-linkage-resolve` or
-    // `PATCH /library/rotation/:id/link` — only ever touches `album_id`
-    // and never races this read.)
+    // transaction's write commits. (Linking never writes `rotation_bin`, so
+    // it never races this read: `PATCH /library/rotation/:id/link` sets only
+    // `album_id`, and `legacy-linkage-resolve` sets `album_id` and clears the
+    // `artist_name`/`album_title`/`record_label` snapshot.)
     if (touchesCardId && set.card_id !== null) {
       const [current] = await tx
         .select({ rotation_bin: rotation.rotation_bin })
