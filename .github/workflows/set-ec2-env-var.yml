@@ -313,10 +313,12 @@ jobs:
           # Album-review intake gate cutover date (epic WXYC/Backend-Service#2791,
           # prep issue #2811). Format is `YYYY-MM-DD` in station time (NY_TIME_ZONE).
           # Not sensitive; carried through the allowlist so the date can be set
-          # without a code PR, same reason as DONATE_* above. apps/backend is the
-          # sole reader (the intake-gate check gating `POST /library` /
-          # `POST /library/rotation`), so restart_target=backend (the default) is
-          # the one needed.
+          # without a code PR once the gate lands, same reason as DONATE_* above.
+          # No var here is read by any app route yet (this issue only ships the
+          # allowlist entry) — a later #2791 slice makes apps/backend the sole
+          # reader (the intake-gate check gating `POST /library` /
+          # `POST /library/rotation`); restart_target=backend (the default) will
+          # be the one needed once that lands.
           #
           # Rollback is NOT an empty value — the resolve step below hard-fails on
           # empty, but the gate's own off state is "unset or in the future"
@@ -324,6 +326,13 @@ jobs:
           # gate is concerned and is what this workflow can actually write. Only a
           # genuine unset requires a hand edit of the host's `.env` plus a manual
           # container recreate, bypassing this workflow.
+          #
+          # Caveat on this workflow's restart (pre-existing, not introduced here —
+          # see docs/env-vars.md's ENRICHMENT_SUPPRESS_LML_BUDGET entry for the
+          # full mechanics): it drops the `-e SENTRY_RELEASE`, heap-ceiling, and
+          # `--health-*` flags deploy-base sets, so backend comes back with no
+          # Docker healthcheck, no explicit heap ceiling, and Sentry events
+          # unattributed to a release, until the next real deploy.
           REVIEW_GATE_CUTOVER_DATE: ${{ secrets.REVIEW_GATE_CUTOVER_DATE }}
         run: |
           set -euo pipefail
