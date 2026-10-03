@@ -71,7 +71,7 @@ A run exits non-zero, after logging a `summary` line with its partial totals and
 
 The `summary` line is logged even when the closing `ANALYZE` or re-count fails, as they will if the database is what went away. It then carries `accounting_failed: true`, and `cohortAfter` is the before-count, not a measurement.
 
-SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0, provided the container is given long enough to finish the batch in flight. See `--stop-timeout` under "Running it". A second signal does not wait for that batch: it logs the `summary` line as it stands, with `forced_exit: true` and `next_run`, flushes Sentry for up to 2 seconds, and exits 1. The abandoned batch is safe to lose, since its writes are fill-null and `next_run` predates it. A second signal during the closing count logs the finished loop's summary and says the count was cut short; one before the first batch, or after the run has logged its outcome, logs no summary.
+SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0, provided the container is given long enough to finish the batch in flight. See `--stop-timeout` under "Running it". A second signal does not wait for that batch: it logs the `summary` line as it stands, with `forced_exit: true` and `next_run`, flushes Sentry for up to 2 seconds, and exits 1. The abandoned batch is safe to lose, since its writes are fill-null and `next_run` predates it. A second signal during the closing count logs the finished loop's summary, says the count was cut short and, if the run had aborted, why; one before the first batch, or after the run has logged its outcome, logs no summary. A third signal does nothing more.
 
 ### Resuming
 
