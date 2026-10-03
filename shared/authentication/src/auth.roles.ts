@@ -65,14 +65,12 @@ const stationStatement = {
   // records above: a future re-grant of a borrowed key would silently move who
   // can read non-consented review bodies.
   //
-  // Named `album_reviews`, NOT `reviews`, for the same reason the route is
-  // `/album-reviews`: ADR 0006 reserves `/reviews` and the `reviews` table for
-  // the in-app Review model — author-owned, MD-queued, one-per-album, a
-  // different resource with a different consent posture. A key named `reviews`
-  // would be the obvious one to reach for when that model ships, and reusing
-  // it would hand whoever gets in-app review read the full non-consented form
-  // archive. This file's rule is that a key belongs to the resource it names;
-  // the name has to match the resource for that rule to mean anything.
+  // `album_reviews` gates the Google Form archive (ADR 0011); `reviews` below
+  // gates the in-app review workflow (ADR 0006). They are separate resources
+  // with separate consent postures, so they are separate keys: reusing one for
+  // the other would hand whoever reads the in-app workflow the full
+  // non-consented form archive, or the reverse. A key belongs to the resource
+  // it names.
   album_reviews: ['read'],
   // `digital_archive: listen` backs `GET /digital-archive/albums/:id/playback`
   // (BS#2320, epic WXYC/wxyc-dj-ios#135) — presigned playback manifests into
@@ -84,6 +82,13 @@ const stationStatement = {
   // to `member` the next time `catalog: read` is re-granted for an unrelated
   // reason.
   digital_archive: ['listen'],
+  // `reviews` gates the in-app review workflow (ADR 0006): the pile, checkout,
+  // accept/pass, and authoring for DJs; logging, release, delete, and editing
+  // any review for musicDirector and stationManager. Opens at `dj`, so
+  // first-semester DJs review records as part of their assignments. Its own
+  // key rather than `album_reviews` (the Google Form archive) — see that
+  // comment for why the two must not share a grant.
+  reviews: ['read', 'write', 'manage'],
 } as const;
 
 /**
@@ -248,6 +253,7 @@ const WXYC_GRANTS = {
     // the pre-DJ tier and the legal boundary for digital-archive playback is
     // "authenticated DJs".
     digital_archive: [],
+    reviews: [],
   },
   dj: {
     bin: ['read', 'write'],
@@ -255,6 +261,7 @@ const WXYC_GRANTS = {
     flowsheet: ['read', 'write'],
     album_reviews: ['read'],
     digital_archive: ['listen'],
+    reviews: ['read', 'write'],
   },
   musicDirector: {
     bin: ['read', 'write'],
@@ -262,6 +269,7 @@ const WXYC_GRANTS = {
     flowsheet: ['read', 'write', 'manage'],
     album_reviews: ['read'],
     digital_archive: ['listen'],
+    reviews: ['read', 'write', 'manage'],
   },
   stationManager: {
     bin: ['read', 'write'],
@@ -269,6 +277,7 @@ const WXYC_GRANTS = {
     flowsheet: ['read', 'write', 'manage'],
     album_reviews: ['read'],
     digital_archive: ['listen'],
+    reviews: ['read', 'write', 'manage'],
   },
 } as const satisfies Record<WXYCRole, StationGrants>;
 

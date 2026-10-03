@@ -108,6 +108,7 @@ describe('role statements (pinned)', () => {
       flowsheet: ['read', 'write'],
       album_reviews: ['read'],
       digital_archive: ['listen'],
+      reviews: ['read', 'write'],
     },
     musicDirector: {
       bin: ['read', 'write'],
@@ -115,6 +116,7 @@ describe('role statements (pinned)', () => {
       flowsheet: ['read', 'write', 'manage'],
       album_reviews: ['read'],
       digital_archive: ['listen'],
+      reviews: ['read', 'write', 'manage'],
     },
   } as const;
 
@@ -133,6 +135,7 @@ describe('role statements (pinned)', () => {
       flowsheet: ['read', 'write', 'manage'],
       album_reviews: ['read'],
       digital_archive: ['listen'],
+      reviews: ['read', 'write', 'manage'],
     });
   });
 
