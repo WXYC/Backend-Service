@@ -4187,11 +4187,19 @@ paths:
 
         Rows come back under the primary keys they had before the delete, so
         every captured FK into the batch stays valid with no rewriting. The
-        one rewrite is a nullable `ON DELETE SET NULL` reference whose target
-        was deleted after the batch was (`rotation.card_id`,
-        `compilation_track_artist.track_artist_id`): it comes back NULL, as
-        its delete rule would have left it, rather than failing the restore —
-        so a 200 does not mean a restored rotation row kept its card filing.
+        one rewrite is any nullable `ON DELETE SET NULL` reference whose target
+        was deleted after the batch was: it comes back NULL, as its delete
+        rule would have left it, rather than failing the restore. A restored
+        rotation row can therefore come back without its card filing, and the
+        200 does not say which references were nulled.
+
+
+        The converse also holds: a reference cleared by the delete itself —
+        an intake item's `cited_album_id`, for example — stays NULL after the
+        release is restored, because the restore replays only the batch's own
+        rows and never touches the rows that pointed at it.
+
+
         `unrecoverable` depends on the batch's `entity_kind`.
 
 

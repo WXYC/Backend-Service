@@ -162,6 +162,12 @@ export const FK_TARGETS: readonly FkTarget[] = [
   // `position` before it fires, or a loser row repointed onto a slot the
   // survivor already holds violates the unique index (23505).
   { table: 'library_urls', column: 'library_id', uniqueKey: ['library_id', 'position'] },
+  // BS#2794. `intake_items` is the first table with TWO FKs into `library`, and
+  // their delete rules differ (`album_id` cascades, `cited_album_id` sets
+  // null), so they are separate entries. Neither column is unique, so a repoint
+  // cannot collide.
+  { table: 'intake_items', column: 'album_id', uniqueKey: null },
+  { table: 'intake_items', column: 'cited_album_id', uniqueKey: null },
 ];
 
 export interface SlotRow extends SlotMember {
