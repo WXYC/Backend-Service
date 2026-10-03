@@ -102,7 +102,14 @@ export interface LibraryResult {
  * Extended library result with computed fields.
  */
 export interface EnrichedLibraryResult extends LibraryResult {
-  /** Full call number for shelf lookup: <Genre> <Format> <Letters> <ArtistNum>/<ReleaseNum> */
+  /**
+   * Full call number for shelf lookup: `<Genre> <Format> <Letters>
+   * <ArtistNum>/<ReleaseNum>` for a named artist. A Various Artists
+   * compilation (BS#2822) renders in its shelf form instead:
+   * `<Genre> <Format> V/A-<ReleaseNum>` for a single-bin genre,
+   * `Rock <Format> V/A <Bin>-<ReleaseNum>`, or
+   * `Soundtracks <Format> <Bin>-<ReleaseNum>` -- see `computeCallNumber`.
+   */
   callNumber: string;
   /** URL to view this release in the WXYC library */
   libraryUrl: string;
@@ -124,9 +131,101 @@ export interface EnrichedLibraryResult extends LibraryResult {
 }
 
 /**
+ * The literal `codeLetters` the catalog import collapses every Various
+ * Artists `Z-<letter>` code to (BS#2822). Matches dj-site's
+ * `VARIOUS_ARTISTS_CODE_LETTERS` (`lib/features/catalog/libraryCode.ts`).
+ */
+const VARIOUS_ARTISTS_CODE_LETTERS = 'V/A';
+
+/**
+ * True for a Various Artists compilation row, detected structurally rather
+ * than by artist name (BS#2822). Two spellings:
+ *
+ * - `V/A` -- what the catalog import actually writes, matched case- and
+ *   whitespace-insensitively. This is the only form Backend-Service serves.
+ * - `Z-<letter>` (or the single-bin `Z--`) -- the legacy tubafrenzy spelling,
+ *   kept so a row that predates or bypasses the import's rewrite still reads
+ *   as a compilation.
+ *
+ * Matches dj-site's `isVariousArtists` (`lib/features/catalog/libraryCode.ts`).
+ */
+function isVariousArtists(codeLetters: string): boolean {
+  const trimmed = codeLetters.trim();
+  return trimmed.toUpperCase() === VARIOUS_ARTISTS_CODE_LETTERS || trimmed.startsWith('Z-');
+}
+
+/**
+ * Recover the Rock/Soundtracks sub-bucket letter for a compilation row that
+ * has already passed `isVariousArtists`. Release numbers restart in each of
+ * the 26 letter bins, so the letter disambiguates the shelf locator rather
+ * than merely decorating it (BS#2822).
+ *
+ * Two naming schemes carry the letter in two different places:
+ *
+ * - The legacy `Z-<letter>` spelling carries it in `codeLetters` itself, at
+ *   index 2 (`Z--` has no letter there -- single-bin genres).
+ * - The modern `V/A` spelling -- what the catalog import collapses every
+ *   `Z-<letter>` to -- has already lost the letter from `codeLetters`. It
+ *   survives only as a trailing ` - <letter>` on the artist name (`Various
+ *   Artists - Rock - M`, `Soundtracks - M`), so that's the narrow exception
+ *   where this function reads the name instead of the structural fields, and
+ *   only for genre Rock or Soundtracks -- the only genres the shelf splits
+ *   into letter bins.
+ */
+function recoverCompilationBin(codeLetters: string, artist: string | null, genre: string | null): string | null {
+  const trimmed = codeLetters.trim();
+  if (trimmed.startsWith('Z-')) {
+    const letter = trimmed[2];
+    return letter && /[A-Za-z]/.test(letter) ? letter.toUpperCase() : null;
+  }
+  if ((genre === 'Rock' || genre === 'Soundtracks') && artist) {
+    const match = / - ([A-Za-z])$/.exec(artist.trimEnd());
+    if (match) return match[1].toUpperCase();
+  }
+  return null;
+}
+
+/**
+ * The compilation branch of `computeCallNumber` (BS#2822): the shelf form
+ * for a Various Artists row, matching LML#1427's `LibraryItem.call_number`
+ * character for character --
+ *
+ * - `<Genre> <Format> V/A-<ReleaseNum>` for a single-bin genre
+ * - `Rock <Format> V/A <Bin>-<ReleaseNum>`
+ * - `Soundtracks <Format> <Bin>-<ReleaseNum>`
+ * - no recoverable bin on Rock/Soundtracks: falls back to
+ *   `V/A-<ReleaseNum>`, never the artist-number form
+ * - null `codeNumber`: no release half and no trailing hyphen
+ *
+ * Reachable only once `computeCallNumber` has already confirmed
+ * `isVariousArtists`.
+ */
+function computeCompilationCallNumber(result: LibraryResult): string {
+  const parts: string[] = [];
+  if (result.genre) parts.push(result.genre);
+  if (result.format) parts.push(result.format);
+
+  const bin = recoverCompilationBin(result.codeLetters ?? '', result.artist, result.genre);
+  let artistHalf: string;
+  if (result.genre === 'Soundtracks' && bin) {
+    artistHalf = bin;
+  } else if (result.genre === 'Rock' && bin) {
+    artistHalf = `${VARIOUS_ARTISTS_CODE_LETTERS} ${bin}`;
+  } else {
+    artistHalf = VARIOUS_ARTISTS_CODE_LETTERS;
+  }
+
+  parts.push(result.codeNumber !== null ? `${artistHalf}-${result.codeNumber}` : artistHalf);
+  return parts.join(' ');
+}
+
+/**
  * Compute the call number from library result fields.
  */
 export function computeCallNumber(result: LibraryResult): string {
+  if (result.codeLetters && isVariousArtists(result.codeLetters)) {
+    return computeCompilationCallNumber(result);
+  }
   const parts: string[] = [];
   if (result.genre) parts.push(result.genre);
   if (result.format) parts.push(result.format);
