@@ -256,15 +256,68 @@ describe('runFill — retrying a list of album ids (BS#2786)', () => {
     expect(summary).toMatchObject({ resume_after_album_id: null, indeterminate_album_ids: [900, 901] });
   });
 
-  it('keeps reporting no cursor when the no-bio guard aborts it', async () => {
-    const ids = [40, 41, 900, 901];
+  // With no cursor, `indeterminate_album_ids` is the only record of what a
+  // list run left to ask. Every way out of it must leave that list complete,
+  // or the ids it never reached are dropped without a trace.
+  it.each([
+    ['a stop', () => waitForQuietPeriod.mockResolvedValueOnce(false).mockResolvedValueOnce(true), {}, [41, 900, 901]],
+    [
+      'the pause ceiling',
+      () =>
+        waitForQuietPeriod
+          .mockResolvedValueOnce(false)
+          .mockRejectedValueOnce(new LiveActivityPauseCeilingExceededError('Cooperative-pause budget exceeded')),
+      {},
+      [41, 900, 901],
+    ],
+    ['the failed-batch abort', () => undefined, { 40: 'shed' as const }, [40, 41, 900, 901]],
+  ] as const)(
+    'lists every id it did not settle or reach when it ends on %s',
+    async (_label, arrange, extra, listed) => {
+      arrange();
+      const ids = [40, 41, 900, 901];
+
+      const summary = await run(ids, { 41: 'shed', ...extra }, { albumIds: ids, maxConsecutiveFailedBatches: 1 }).catch(
+        () => loggedSummary()
+      );
+
+      expect(summary).toMatchObject({
+        stopped_early: true,
+        resume_after_album_id: null,
+        indeterminate_album_ids: listed,
+      });
+    }
+  );
+
+  it('lists the streak it walked through, and what it never reached, when the no-bio guard aborts it', async () => {
+    const ids = [30, 31, 40, 41, 900, 901, 902, 903];
     const outcomes: Outcomes = { 40: 'no_bio', 41: 'no_bio', 900: 'no_bio', 901: 'no_bio' };
 
     await expect(run(ids, outcomes, { albumIds: ids, maxConsecutiveNoBioBatches: 2 })).rejects.toBeInstanceOf(
       ConsecutiveNoBioBatchesError
     );
 
-    expect(loggedSummary()).toMatchObject({ stopped_early: true, resume_after_album_id: null });
+    // There is no cursor to put back before the streak, so its albums go on
+    // the list; 30 and 31 were filled and stay off it.
+    expect(loggedSummary()).toMatchObject({
+      stopped_early: true,
+      resume_after_album_id: null,
+      indeterminate_album_ids: [40, 41, 900, 901, 902, 903],
+    });
+  });
+
+  it('logs the requested list, and the listed ids that were no longer in the cohort', async () => {
+    await run([40, 900], {}, { albumIds: [40, 500, 900] });
+
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'started',
+      expect.any(String),
+      expect.objectContaining({ album_ids: [40, 500, 900] })
+    );
+    // Filled since, or excluded by the eligibility conditions: either way not
+    // asked, and the summary's `enumerated` alone cannot say which ids.
+    expect(log).toHaveBeenCalledWith('warn', 'listed_ids_not_in_cohort', expect.any(String), { album_ids: [500] });
   });
 });
 
