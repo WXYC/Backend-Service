@@ -16,6 +16,7 @@ import {
   orderBatchEntities,
   parseCapturedEnvelope,
   parseRotationBin,
+  ROTATION_BINS,
   rotationActiveSql,
   rotationKilledSql,
   SUB_DEADLOCK_LOCK_TIMEOUT_MS,
@@ -755,6 +756,17 @@ const resolveRotationCardId = async (
  */
 export const addToRotation = async (newRotation: RotationAddRequest, urls?: string[], outerTx?: DbTransaction) => {
   const values: RotationAddRequest = { ...newRotation };
+
+  // Parse once, before any read: every later step and the INSERT use the
+  // canonical bin, and a non-bin is a 400 rather than a 22P02 / 23502 500.
+  const parsedBin = parseRotationBin(values.rotation_bin);
+  if (parsedBin.kind !== 'bin') {
+    throw new WxycError(
+      `Invalid rotation_bin ${JSON.stringify(values.rotation_bin)}. Expected one of: ${ROTATION_BINS.join(', ')}.`,
+      400
+    );
+  }
+  values.rotation_bin = parsedBin.bin;
 
   // Allowlist guard already runs at the controller layer, but the server-
   // derived fields below must always come from this function, not the
