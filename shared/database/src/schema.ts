@@ -2826,6 +2826,103 @@ export const album_review_submissions = wxyc_schema.table(
 export type AlbumReviewSubmission = InferSelectModel<typeof album_review_submissions>;
 export type NewAlbumReviewSubmission = InferInsertModel<typeof album_review_submissions>;
 
+export const intakeItemStateEnum = wxyc_schema.enum('intake_item_state', [
+  'pool',
+  'requested',
+  'checked_out',
+  'reviewed',
+  'filed',
+  'finalized',
+]);
+
+/**
+ * A record that has arrived and is waiting for a DJ review (slice 5 of
+ * WXYC/Backend-Service#2791). `artist_name`/`album_title` are what the music
+ * director typed on the slip; `album_id` is set only when filing creates the
+ * catalog row, so it is NULL for every item still in `pool` through `reviewed`.
+ *
+ * Two foreign keys point at `library` with DIFFERENT delete rules, which is why
+ * `jobs/library-call-number-dedup` keys them `table.column`: `album_id` CASCADEs
+ * (an item is meaningless without the release it was filed as) while
+ * `cited_album_id` SETs NULL (the citation of another release's reviews must
+ * not take the item with it). Every `auth_user` reference SETs NULL so deleting
+ * an account never fails because that DJ once reviewed or checked out a record.
+ */
+export const intake_items = wxyc_schema.table(
+  'intake_items',
+  {
+    id: serial('id').primaryKey(),
+    artist_name: varchar('artist_name', { length: 128 }).notNull(),
+    album_title: varchar('album_title', { length: 128 }).notNull(),
+    record_label: varchar('record_label', { length: 128 }),
+    label_id: integer('label_id').references(() => labels.id),
+    format_id: integer('format_id')
+      .references(() => format.id)
+      .notNull(),
+    discogs_release_id: integer('discogs_release_id'),
+    state: intakeItemStateEnum('state').notNull().default('pool'),
+    logged_by: varchar('logged_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    logged_at: timestamp('logged_at', { withTimezone: true }).defaultNow().notNull(),
+    requested_dj_id: varchar('requested_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    requested_at: timestamp('requested_at', { withTimezone: true }),
+    checked_out_by: varchar('checked_out_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    checked_out_at: timestamp('checked_out_at', { withTimezone: true }),
+    // A second format or replacement copy covered by an existing release's
+    // reviews. Mutually exclusive with `cited_submission_id`.
+    cited_album_id: integer('cited_album_id').references(() => library.id, { onDelete: 'set null' }),
+    // A review written on the Google Form before it closed. Form rows can be
+    // deleted by hand, hence SET NULL.
+    cited_submission_id: integer('cited_submission_id').references(() => album_review_submissions.id, {
+      onDelete: 'set null',
+    }),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
+    filed_by: varchar('filed_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    filed_at: timestamp('filed_at', { withTimezone: true }),
+    rotation_id: integer('rotation_id').references(() => rotation.id, { onDelete: 'set null' }),
+    printed_by: varchar('printed_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    printed_at: timestamp('printed_at', { withTimezone: true }),
+    finalized_by: varchar('finalized_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    finalized_at: timestamp('finalized_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('intake_items_state_idx').on(table.state),
+    index('intake_items_album_id_idx').on(table.album_id),
+    index('intake_items_cited_album_id_idx').on(table.cited_album_id),
+    index('intake_items_requested_dj_id_idx').on(table.requested_dj_id),
+    index('intake_items_checked_out_by_idx').on(table.checked_out_by),
+    check(
+      'intake_items_citation_exclusive_ck',
+      sql`${table.cited_album_id} IS NULL OR ${table.cited_submission_id} IS NULL`
+    ),
+    check(
+      'intake_items_filed_requires_album_ck',
+      sql`${table.state} NOT IN ('filed', 'finalized') OR ${table.album_id} IS NOT NULL`
+    ),
+  ]
+);
+
+export type IntakeItem = InferSelectModel<typeof intake_items>;
+export type NewIntakeItem = InferInsertModel<typeof intake_items>;
+
+// A DJ declining a pooled item. Gone with the item or with the DJ's account.
+export const intake_item_passes = wxyc_schema.table(
+  'intake_item_passes',
+  {
+    id: serial('id').primaryKey(),
+    intake_item_id: integer('intake_item_id')
+      .references(() => intake_items.id, { onDelete: 'cascade' })
+      .notNull(),
+    dj_id: varchar('dj_id', { length: 255 })
+      .references(() => user.id, { onDelete: 'cascade' })
+      .notNull(),
+    passed_at: timestamp('passed_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('intake_item_passes_intake_item_id_idx').on(table.intake_item_id)]
+);
+
+export type IntakeItemPass = InferSelectModel<typeof intake_item_passes>;
+export type NewIntakeItemPass = InferInsertModel<typeof intake_item_passes>;
+
 /**
  * External critic-review snippets (ADR 0012) — short attributed excerpts
  * of published third-party album reviews, surfaced in the iOS playcut

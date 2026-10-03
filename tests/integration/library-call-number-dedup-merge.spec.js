@@ -329,17 +329,17 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
   // database or the FK_TARGETS list moves out from under the README's table.
   describe('enforced-fk-actions', () => {
     const EXPECTED = {
-      rotation: 'CASCADE',
-      album_metadata: 'CASCADE',
-      reviews: 'CASCADE',
-      album_critic_reviews: 'CASCADE',
-      uncovered_release_search_markers: 'CASCADE',
-      compilation_track_artist: 'CASCADE',
+      'rotation.album_id': 'CASCADE',
+      'album_metadata.album_id': 'CASCADE',
+      'reviews.album_id': 'CASCADE',
+      'album_critic_reviews.album_id': 'CASCADE',
+      'uncovered_release_search_markers.album_id': 'CASCADE',
+      'compilation_track_artist.library_id': 'CASCADE',
       // Release-scoped links FK is ON DELETE cascade; deleting a release takes
       // its links with it, so a merge must repoint them before the loser goes.
-      library_urls: 'CASCADE',
-      flowsheet: 'SET NULL',
-      album_review_submissions: 'SET NULL',
+      'library_urls.library_id': 'CASCADE',
+      'flowsheet.album_id': 'SET NULL',
+      'album_review_submissions.album_id': 'SET NULL',
       // Repaired by migration 0147. schema.ts and every snapshot from 0022
       // forward declared this FK `onDelete: 'cascade'`, but 0022 created it
       // ON DELETE NO ACTION — and because drizzle-kit diffs schema.ts against
@@ -347,10 +347,10 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       // corrective diff, so the drift was self-perpetuating. This assertion
       // is what makes the repair observable; it reads the enforced action out
       // of information_schema, not the declaration.
-      artist_library_crossreference: 'CASCADE',
-      bins: 'NO ACTION',
-      library_identity: 'NO ACTION',
-      library_identity_source: 'NO ACTION',
+      'artist_library_crossreference.library_id': 'CASCADE',
+      'bins.album_id': 'NO ACTION',
+      'library_identity.library_id': 'NO ACTION',
+      'library_identity_source.library_id': 'NO ACTION',
       // BS#2318. NO ACTION is deliberate: an incomplete repoint here must fail
       // loudly rather than cascade, because `digital_asset_file.asset_id` DOES
       // cascade off this row -- so a silent delete would take the file rows
@@ -358,16 +358,27 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       // for the reason the 0147 note above gives: drizzle-kit diffs schema.ts
       // against the snapshot, never the database, so declared-vs-enforced drift
       // is self-perpetuating and only this assertion can observe it.
-      digital_asset: 'NO ACTION',
+      'digital_asset.library_id': 'NO ACTION',
+      // Slice 5 of BS#2791. `intake_items` is the first table with TWO foreign
+      // keys into `library`, and they differ: `album_id` cascades (an intake
+      // item is meaningless without the release it was filed as) while
+      // `cited_album_id` nulls (a citation of another release's reviews must
+      // not take the item with it). Keyed by table alone, one rule would
+      // silently overwrite the other.
+      'intake_items.album_id': 'CASCADE',
+      'intake_items.cited_album_id': 'SET NULL',
     };
 
     it('matches the delete actions the database actually enforces', async () => {
       const rows = await sql`
-        SELECT tc.table_name, rc.delete_rule
+        SELECT tc.table_name, kcu.column_name, rc.delete_rule
           FROM information_schema.table_constraints tc
           JOIN information_schema.referential_constraints rc
             ON rc.constraint_name = tc.constraint_name
            AND rc.constraint_schema = tc.table_schema
+          JOIN information_schema.key_column_usage kcu
+            ON kcu.constraint_name = tc.constraint_name
+           AND kcu.constraint_schema = tc.table_schema
           JOIN information_schema.constraint_column_usage ccu
             ON ccu.constraint_name = tc.constraint_name
            AND ccu.constraint_schema = tc.table_schema
@@ -376,9 +387,11 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
            AND ccu.table_name = 'library'
            AND ccu.column_name = 'id'
       `;
-      const actual = Object.fromEntries(rows.map((r) => [r.table_name, r.delete_rule]));
-      for (const [table, rule] of Object.entries(EXPECTED)) {
-        expect({ table, rule: actual[table] }).toEqual({ table, rule });
+      // Keyed `table.column`, not table: `intake_items` has two FKs into
+      // `library` with different delete rules.
+      const actual = Object.fromEntries(rows.map((r) => [`${r.table_name}.${r.column_name}`, r.delete_rule]));
+      for (const [fk, rule] of Object.entries(EXPECTED)) {
+        expect({ fk, rule: actual[fk] }).toEqual({ fk, rule });
       }
     });
 
@@ -387,18 +400,23 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
     // FK the database has and FK_TARGETS lacks passed green.
     it('finds no FK on library.id that FK_TARGETS does not repoint', async () => {
       const rows = await sql`
-        SELECT tc.table_name
+        SELECT tc.table_name, kcu.column_name
           FROM information_schema.table_constraints tc
           JOIN information_schema.constraint_column_usage ccu
             ON ccu.constraint_name = tc.constraint_name
            AND ccu.constraint_schema = tc.table_schema
+          JOIN information_schema.key_column_usage kcu
+            ON kcu.constraint_name = tc.constraint_name
+           AND kcu.constraint_schema = tc.table_schema
          WHERE tc.constraint_type = 'FOREIGN KEY'
            AND tc.table_schema = ${SCHEMA}
            AND ccu.table_name = 'library'
            AND ccu.column_name = 'id'
       `;
-      const found = [...new Set(rows.map((r) => r.table_name))];
-      const targets = new Set(merge.FK_TARGETS.map((t) => t.table));
+      // `table.column`, so a second FK on an already-listed table (the
+      // `intake_items.cited_album_id` case) cannot hide behind its sibling.
+      const found = [...new Set(rows.map((r) => `${r.table_name}.${r.column_name}`))];
+      const targets = new Set(merge.FK_TARGETS.map((t) => `${t.table}.${t.column}`));
       const missing = found.filter((t) => !targets.has(t)).sort();
       expect(missing).toEqual([]);
       // ...and the same direction against EXPECTED. BS#2318 added an FK plus its
@@ -407,7 +425,7 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       // EXPECTED, so it can only check what is already listed. Asserting the
       // catalog against BOTH is what makes the omission impossible rather than
       // merely noticeable in review.
-      const unpinned = found.filter((t) => !(t in EXPECTED)).sort();
+      const unpinned = found.filter((fk) => !(fk in EXPECTED)).sort();
       expect(unpinned).toEqual([]);
     });
 

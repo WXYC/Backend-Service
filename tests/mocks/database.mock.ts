@@ -611,6 +611,41 @@ export const uncovered_release_search_markers = {
   last_handed_off_at: 'uncovered_release_search_markers.last_handed_off_at',
   handoff_count: 'uncovered_release_search_markers.handoff_count',
 };
+// Slice 5 of BS#2791 (intake_items / intake_item_passes). See schema.ts for the
+// delete rules: album_id cascades, cited_album_id and every auth_user reference
+// set null.
+export const intake_items = {
+  id: 'intake_items.id',
+  artist_name: 'intake_items.artist_name',
+  album_title: 'intake_items.album_title',
+  record_label: 'intake_items.record_label',
+  label_id: 'intake_items.label_id',
+  format_id: 'intake_items.format_id',
+  discogs_release_id: 'intake_items.discogs_release_id',
+  state: 'intake_items.state',
+  logged_by: 'intake_items.logged_by',
+  logged_at: 'intake_items.logged_at',
+  requested_dj_id: 'intake_items.requested_dj_id',
+  requested_at: 'intake_items.requested_at',
+  checked_out_by: 'intake_items.checked_out_by',
+  checked_out_at: 'intake_items.checked_out_at',
+  cited_album_id: 'intake_items.cited_album_id',
+  cited_submission_id: 'intake_items.cited_submission_id',
+  album_id: 'intake_items.album_id',
+  filed_by: 'intake_items.filed_by',
+  filed_at: 'intake_items.filed_at',
+  rotation_id: 'intake_items.rotation_id',
+  printed_by: 'intake_items.printed_by',
+  printed_at: 'intake_items.printed_at',
+  finalized_by: 'intake_items.finalized_by',
+  finalized_at: 'intake_items.finalized_at',
+};
+export const intake_item_passes = {
+  id: 'intake_item_passes.id',
+  intake_item_id: 'intake_item_passes.intake_item_id',
+  dj_id: 'intake_item_passes.dj_id',
+  passed_at: 'intake_item_passes.passed_at',
+};
 export const flowsheet_linkage_review = {
   id: 'flowsheet_linkage_review.id',
   flowsheet_id: 'flowsheet_linkage_review.flowsheet_id',
