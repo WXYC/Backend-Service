@@ -50,7 +50,7 @@ export function buildLoginPage(env: NodeJS.ProcessEnv): string {
   }
   if (raw.includes(',')) {
     // A comma-joined list is the one malformed value that gets past every
-    // guard below: `new URL('https://dj.wxyc.org,https://*.wxyc-dj.pages.dev')`
+    // guard below: `new URL('https://dj.wxyc.org,https://*.dj-site.pages.dev')`
     // does not throw — it parses, with host `dj.wxyc.org,https` and protocol
     // `https:`. So the try/catch and the scheme check both pass and this
     // function happily returns `https://dj.wxyc.org,https/login`, while

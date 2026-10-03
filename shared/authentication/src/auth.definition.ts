@@ -163,7 +163,7 @@ export const auth = betterAuth({
   // `CORS_PREVIEW_ORIGINS` is unioned on rather than being another `||` rung:
   // it must widen the primary list, never replace it, and it must apply
   // whichever of the two primaries won. Wildcard entries (e.g.
-  // `https://*.wxyc-dj.pages.dev` for the dj-site Cloudflare Pages preview
+  // `https://*.dj-site.pages.dev` for the dj-site Cloudflare Pages preview
   // deployments) pass straight through — better-auth matches each entry with
   // `matchesOriginPattern`, which understands `*`/`?` globs. The Express CORS
   // layer compiles the same wildcards via `resolveCorsOrigin` reading the same

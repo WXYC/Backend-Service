@@ -35,7 +35,7 @@
  *     the wildcard preview origins and the primary origin cannot share a
  *     variable: `FRONTEND_SOURCE` is read as a SINGLE origin by
  *     `oidc-login-page.ts`, `url-rewrite.ts`, and `provision-user.ts`, and
- *     `new URL('https://dj.wxyc.org,https://*.wxyc-dj.pages.dev')` does not
+ *     `new URL('https://dj.wxyc.org,https://*.dj-site.pages.dev')` does not
  *     throw — it parses, yielding host `dj.wxyc.org,https`. A comma-joined
  *     value therefore sails through every guard on those paths and silently
  *     points the OIDC login page, every password-reset email, and every DJ
@@ -66,15 +66,15 @@ const splitOrigins = (raw: string | undefined): string[] =>
  * consumes. Literal origins pass through as strings (exact match). Wildcard
  * origins (containing `*` or `?`) become an anchored RegExp: `*` matches any
  * run of non-separator characters and `?` matches exactly one, so
- * `https://*.wxyc-dj.pages.dev` matches `https://abc123.wxyc-dj.pages.dev` but
+ * `https://*.dj-site.pages.dev` matches `https://abc123.dj-site.pages.dev` but
  * not `https://evil.com` or a suffix like `…pages.dev.evil.com` (the `$`
  * anchor). `[^/\\]` as the wildcard class mirrors better-auth's
  * `wildcardMatch` default separator so both trust layers agree.
  *
  * Breadth caveat — `/` and `\` are the ONLY separators, so `*` DOES cross
- * dots: `https://*.wxyc-dj.pages.dev` also trusts arbitrarily-deep subdomains
- * (`https://a.b.wxyc-dj.pages.dev`). That is safe here only because WXYC owns
- * the entire `wxyc-dj.pages.dev` zone — every host under it is a WXYC Pages
+ * dots: `https://*.dj-site.pages.dev` also trusts arbitrarily-deep subdomains
+ * (`https://a.b.dj-site.pages.dev`). That is safe here only because WXYC owns
+ * the entire `dj-site.pages.dev` zone — every host under it is a WXYC Pages
  * deployment, so a wildcard can only widen the subdomains WXYC controls.
  * Do NOT configure a wildcard over a multi-tenant apex (e.g.
  * `https://*.pages.dev`): that would trust every Cloudflare Pages project,
