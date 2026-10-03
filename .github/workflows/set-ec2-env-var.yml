@@ -310,6 +310,9 @@ jobs:
           FLOWSHEET_TAKEOVER_ENABLED: ${{ secrets.FLOWSHEET_TAKEOVER_ENABLED }}
           SES_ACCESS_KEY_ID: ${{ secrets.SES_ACCESS_KEY_ID }}
           SES_SECRET_ACCESS_KEY: ${{ secrets.SES_SECRET_ACCESS_KEY }}
+          # Album-review gate cutover date (WXYC/Backend-Service#2811). Not sensitive;
+          # carried through the allowlist so the date can be set without a code PR.
+          REVIEW_GATE_CUTOVER_DATE: ${{ secrets.REVIEW_GATE_CUTOVER_DATE }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -365,6 +368,7 @@ jobs:
             # error rather than "Unsupported secret_name".
             SES_ACCESS_KEY_ID) VALUE="$SES_ACCESS_KEY_ID" ;;
             SES_SECRET_ACCESS_KEY) VALUE="$SES_SECRET_ACCESS_KEY" ;;
+            REVIEW_GATE_CUTOVER_DATE) VALUE="$REVIEW_GATE_CUTOVER_DATE" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
