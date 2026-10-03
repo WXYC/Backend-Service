@@ -163,7 +163,8 @@ function isVariousArtists(codeLetters: string): boolean {
  * Two naming schemes carry the letter in two different places:
  *
  * - The legacy `Z-<letter>` spelling carries it in `codeLetters` itself, at
- *   index 2 (`Z--` has no letter there -- single-bin genres).
+ *   index 2 (`Z--` has no letter there -- single-bin genres). Any other
+ *   character there is the bin, as tubafrenzy's `substring(2, 3)` takes it.
  * - The modern `V/A` spelling -- what the catalog import collapses every
  *   `Z-<letter>` to -- has already lost the letter from `codeLetters`. It
  *   survives only as a trailing ` - <letter>` on the artist name (`Various
@@ -176,10 +177,10 @@ function recoverCompilationBin(codeLetters: string, artist: string | null, genre
   const trimmed = codeLetters.trim();
   if (trimmed.startsWith('Z-')) {
     const letter = trimmed[2];
-    return letter && /[A-Za-z]/.test(letter) ? letter.toUpperCase() : null;
+    return letter && letter !== '-' ? letter.toUpperCase() : null;
   }
   if ((genre === 'Rock' || genre === 'Soundtracks') && artist) {
-    const match = / - ([A-Za-z])$/.exec(artist.trimEnd());
+    const match = / - ([A-Za-z])$/.exec(artist.trim());
     if (match) return match[1].toUpperCase();
   }
   return null;
