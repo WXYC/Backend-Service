@@ -191,6 +191,20 @@ describe('BS#2775 bio fill (REAL statements, real PG)', () => {
 
         expect(await enumerateIds([first, second], 1)).toEqual([first]);
       });
+
+      test('with a cursor, returns the carried ids first, then every row above the cursor, and nothing between', async () => {
+        const carried = await seed('carried');
+        const between = await seed('carried-between');
+        const cursor = await seed('carried-cursor');
+        const above = await seed('carried-above');
+
+        const rows = await enumerateCohort({ limit: 2, afterAlbumId: cursor, albumIds: [carried] });
+
+        // `above` is the newest seed, so it is the lowest id past the cursor in
+        // a table that holds every other test's rows.
+        expect(rows.map((c) => c.album_id)).toEqual([carried, above]);
+        expect(rows.map((c) => c.album_id)).not.toContain(between);
+      });
     });
   });
 

@@ -234,6 +234,59 @@ describe('runFill — the resume point', () => {
   });
 });
 
+describe('runFill — what the next run should be (BS#2786)', () => {
+  // The frozen cursor never skips, but on its own it stalls: an album LML
+  // never answers for pins every later run below it. `next_run` moves the
+  // cursor past what this run asked and carries the unsettled albums along.
+  it('moves the next cursor past an unsettled album and carries it as the list', async () => {
+    const first = await run([1, 2, 3, 4, 5, 6], { 3: 'shed' });
+
+    expect(first).toMatchObject({
+      resume_after_album_id: 2,
+      next_run: { BIO_FILL_ALBUM_AFTER_ID: 6, BIO_FILL_ALBUM_IDS: '3' },
+    });
+
+    // The next run asks the carried album first, then everything above the cursor.
+    const second = await run([3, 7, 8], {}, { afterAlbumId: 6, albumIds: [3] });
+
+    expect(enumerateCohort).toHaveBeenLastCalledWith({
+      limit: 0,
+      afterAlbumId: 6,
+      albumIds: [3],
+      timeoutMs: OPTIONS.readTimeoutMs,
+    });
+    expect(second).toMatchObject({
+      filled: 3,
+      resume_after_album_id: 8,
+      next_run: { BIO_FILL_ALBUM_AFTER_ID: 8, BIO_FILL_ALBUM_IDS: '' },
+    });
+  });
+
+  it('reports no next run when a retry leaves nothing to ask', async () => {
+    const summary = await run([40, 900], {}, { albumIds: [40, 900] });
+
+    expect(summary.next_run).toBeNull();
+  });
+
+  it.each([
+    ['it asked every album above its cursor', [1, 2, 3], {}, true],
+    ['the cap may have cut the enumeration', [1, 2, 3], { maxAlbums: 3 }, false],
+    ['the cap was not reached', [1, 2], { maxAlbums: 3 }, true],
+  ] as const)('reports reached_end: %s', async (_label, ids, options, reachedEnd) => {
+    const summary = await run([...ids], {}, options);
+
+    expect(summary.reached_end).toBe(reachedEnd);
+  });
+
+  it('does not report reached_end for a run that stopped early', async () => {
+    waitForQuietPeriod.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    const summary = await run([1, 2, 3, 4]);
+
+    expect(summary).toMatchObject({ stopped_early: true, reached_end: false });
+  });
+});
+
 describe('runFill — retrying a list of album ids (BS#2786)', () => {
   it('asks for exactly the listed ids and reports no cursor', async () => {
     const summary = await run([40, 900], {}, { albumIds: [40, 900] });
@@ -463,7 +516,9 @@ describe('runFill — LML answers, but never with a bio', () => {
       run([1, 2, 3, 4, 5, 6, 7, 8], { 1: 'shed', ...noBio(3, 4, 5, 6) }, { maxConsecutiveNoBioBatches: 2 })
     ).rejects.toBeInstanceOf(ConsecutiveNoBioBatchesError);
 
-    expect(loggedSummary()).toMatchObject({ resume_after_album_id: 0, indeterminate_album_ids: [1] });
+    // The streak's albums are listed too: each looked settled, and the shed may
+    // have hit any of them.
+    expect(loggedSummary()).toMatchObject({ resume_after_album_id: 0, indeterminate_album_ids: [1, 3, 4, 5, 6] });
   });
 
   it('says what probably happened and which knob to turn if it did not', () => {

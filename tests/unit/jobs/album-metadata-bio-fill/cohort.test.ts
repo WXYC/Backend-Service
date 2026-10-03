@@ -119,5 +119,13 @@ describe('enumerateCohortSql', () => {
     it('still applies the cap', () => {
       expect(enumerateCohortSql(1, 0, [10, 11])).toContain('LIMIT 1');
     });
+
+    it('with a cursor, asks the listed ids as well as every album above it, not only those', () => {
+      const carried = enumerateCohortSql(2400, 500, [40, 90]);
+
+      expect(carried).toContain('AND (am."album_id" > 500 OR am."album_id" IN (40, 90))');
+      expect(fromOnward(carried).startsWith(fromOnward(countEligibleSql()))).toBe(true);
+      expect(carried).toContain('LIMIT 2400');
+    });
   });
 });
