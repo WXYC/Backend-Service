@@ -5,10 +5,11 @@
  * Two things here have no equivalent in the `streaming-columns-drain` donor.
  *
  * That job's cohort empties as it runs, so "re-run it" is its resume. This
- * one keeps every row that did not get a bio, so it resumes by cursor — and a
- * cursor walks straight past any row LML failed to answer for. Hence
- * `resume_after_album_id`, which stops advancing at the first indeterminate
- * row, and the abort after N consecutive batches with no answer at all.
+ * one keeps every row that did not get a bio, so it resumes — and a cursor
+ * alone walks straight past any row LML failed to answer for. Hence
+ * `next_run`, which moves the cursor on and carries those rows as a list
+ * (`planResume`, table-tested in `resume-plan.test.ts`), and the aborts when
+ * LML or the database stops answering.
  *
  * The rest pins the loop itself, for the reason the donor's own test gives:
  * its first cut had the pause polarity inverted, broke out on batch one, and
@@ -17,7 +18,7 @@
  * @see WXYC/Backend-Service#2775
  */
 
-import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 
 const waitForQuietPeriod = jest.fn<() => Promise<boolean>>();
 
@@ -50,6 +51,7 @@ import {
   ConsecutiveNoBioBatchesError,
   INDETERMINATE_IDS_REPORT_CAP,
   __resetStopForTesting,
+  handleStopSignal,
   requestStop,
   runFill,
   type FillOptions,
@@ -73,6 +75,7 @@ const OPTIONS: FillOptions = {
   afterAlbumId: 0,
   maxConsecutiveFailedBatches: 3,
   maxConsecutiveNoBioBatches: 10,
+  albumIds: [],
   liveActivityLookbackSeconds: 300,
   liveActivityPauseMs: 30_000,
   liveActivityMaxPauseMs: 1_800_000,
@@ -87,6 +90,12 @@ const albums = (...ids: number[]) =>
  * trusted match with a null bio, which is also what a breaker shed looks like. */
 type Outcome = 'fill' | 'no_match' | 'no_bio' | 'shed' | 'write_fails';
 type Outcomes = Record<number, Outcome | 'throw'>;
+
+/** The same outcome for each of the given album ids. */
+const outcomesOf = (outcome: Outcome, ...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, outcome]));
+
+/** Album ids 1 to n. */
+const idsTo = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
 
 /**
  * Script LML's answers by album id. Every candidate carries the same artist
@@ -233,6 +242,163 @@ describe('runFill — the resume point', () => {
   });
 });
 
+describe('runFill — what the next run should be (BS#2786)', () => {
+  // The frozen cursor never skips, but on its own it stalls: an album LML
+  // never answers for pins every later run below it. `next_run` moves the
+  // cursor past what this run asked and carries the unsettled albums along.
+  it('moves the next cursor past an unsettled album and carries it as the list', async () => {
+    const first = await run([1, 2, 3, 4, 5, 6], { 3: 'shed' });
+
+    expect(first).toMatchObject({
+      resume_after_album_id: 2,
+      next_run: { BIO_FILL_ALBUM_AFTER_ID: 6, BIO_FILL_ALBUM_IDS: '3' },
+    });
+
+    // The next run asks the carried album first, then everything above the cursor.
+    const second = await run([3, 7, 8], {}, { afterAlbumId: 6, albumIds: [3] });
+
+    expect(enumerateCohort).toHaveBeenLastCalledWith({
+      limit: 0,
+      afterAlbumId: 6,
+      albumIds: [3],
+      timeoutMs: OPTIONS.readTimeoutMs,
+    });
+    expect(second).toMatchObject({
+      filled: 3,
+      resume_after_album_id: 8,
+      next_run: { BIO_FILL_ALBUM_AFTER_ID: 8, BIO_FILL_ALBUM_IDS: '' },
+    });
+  });
+
+  it('logs next_run on every batch line, so a killed run still leaves one', async () => {
+    await run([1, 2, 3, 4], { 1: 'shed' });
+
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'batch_done',
+      expect.any(String),
+      expect.objectContaining({ batch: 1, next_run: { BIO_FILL_ALBUM_AFTER_ID: 2, BIO_FILL_ALBUM_IDS: '1' } })
+    );
+  });
+
+  it('reports reached_end for a retry whose cap equals its list', async () => {
+    const summary = await run([1, 2, 3], {}, { albumIds: [1, 2, 3], maxAlbums: 3 });
+
+    expect(summary.reached_end).toBe(true);
+  });
+
+  it('reports no next run when a retry leaves nothing to ask', async () => {
+    const summary = await run([40, 900], {}, { albumIds: [40, 900] });
+
+    expect(summary.next_run).toBeNull();
+  });
+
+  it.each([
+    ['it asked every album above its cursor', [1, 2, 3], {}, true],
+    ['the cap may have cut the enumeration', [1, 2, 3], { maxAlbums: 3 }, false],
+    ['the cap was not reached', [1, 2], { maxAlbums: 3 }, true],
+  ] as const)('reports reached_end: %s', async (_label, ids, options, reachedEnd) => {
+    const summary = await run([...ids], {}, options);
+
+    expect(summary.reached_end).toBe(reachedEnd);
+  });
+
+  it('does not report reached_end for a run that stopped early', async () => {
+    waitForQuietPeriod.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    const summary = await run([1, 2, 3, 4]);
+
+    expect(summary).toMatchObject({ stopped_early: true, reached_end: false });
+  });
+});
+
+describe('runFill — retrying a list of album ids (BS#2786)', () => {
+  it('asks for exactly the listed ids and reports no cursor', async () => {
+    const summary = await run([40, 900], {}, { albumIds: [40, 900] });
+
+    expect(enumerateCohort).toHaveBeenCalledWith({
+      limit: 0,
+      afterAlbumId: 0,
+      albumIds: [40, 900],
+      timeoutMs: OPTIONS.readTimeoutMs,
+    });
+    // A cursor that walked a hand-picked list says nothing about the rows in
+    // between. Reporting 900 here would invite resuming the chain from it and
+    // skipping every album from 41 to 899.
+    expect(summary).toMatchObject({ stopped_early: false, filled: 2, last_album_id: 900, resume_after_album_id: null });
+  });
+
+  it('still lists what stayed unsettled, for the next retry', async () => {
+    const summary = await run([40, 900, 901], { 900: 'shed', 901: 'write_fails' }, { albumIds: [40, 900, 901] });
+
+    expect(summary).toMatchObject({ resume_after_album_id: null, indeterminate_album_ids: [900, 901] });
+  });
+
+  // With no cursor, `indeterminate_album_ids` is the only record of what a
+  // list run left to ask. Every way out of it must leave that list complete,
+  // or the ids it never reached are dropped without a trace.
+  it.each([
+    ['a stop', () => waitForQuietPeriod.mockResolvedValueOnce(false).mockResolvedValueOnce(true), {}, [41, 900, 901]],
+    [
+      'the pause ceiling',
+      () =>
+        waitForQuietPeriod
+          .mockResolvedValueOnce(false)
+          .mockRejectedValueOnce(new LiveActivityPauseCeilingExceededError('Cooperative-pause budget exceeded')),
+      {},
+      [41, 900, 901],
+    ],
+    ['the failed-batch abort', () => undefined, { 40: 'shed' as const }, [40, 41, 900, 901]],
+  ] as const)(
+    'lists every id it did not settle or reach when it ends on %s',
+    async (_label, arrange, extra, listed) => {
+      arrange();
+      const ids = [40, 41, 900, 901];
+
+      const summary = await run(ids, { 41: 'shed', ...extra }, { albumIds: ids, maxConsecutiveFailedBatches: 1 }).catch(
+        () => loggedSummary()
+      );
+
+      expect(summary).toMatchObject({
+        stopped_early: true,
+        resume_after_album_id: null,
+        indeterminate_album_ids: listed,
+      });
+    }
+  );
+
+  it('lists the streak it walked through, and what it never reached, when the no-bio guard aborts it', async () => {
+    const ids = [30, 31, 40, 41, 900, 901, 902, 903];
+    const outcomes: Outcomes = { 40: 'no_bio', 41: 'no_bio', 900: 'no_bio', 901: 'no_bio' };
+
+    await expect(run(ids, outcomes, { albumIds: ids, maxConsecutiveNoBioBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveNoBioBatchesError
+    );
+
+    // There is no cursor to put back before the streak, so its albums go on
+    // the list; 30 and 31 were filled and stay off it.
+    expect(loggedSummary()).toMatchObject({
+      stopped_early: true,
+      resume_after_album_id: null,
+      indeterminate_album_ids: [40, 41, 900, 901, 902, 903],
+    });
+  });
+
+  it('logs the requested list, and the listed ids that were no longer in the cohort', async () => {
+    await run([40, 900], {}, { albumIds: [40, 500, 900] });
+
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'started',
+      expect.any(String),
+      expect.objectContaining({ album_ids: [40, 500, 900] })
+    );
+    // Filled since, or excluded by the eligibility conditions: either way not
+    // asked, and the summary's `enumerated` alone cannot say which ids.
+    expect(log).toHaveBeenCalledWith('warn', 'listed_ids_not_in_cohort', expect.any(String), { album_ids: [500] });
+  });
+});
+
 describe('runFill — ending early', () => {
   it('STOPS without calling LML when the pause signals stop (returns true)', async () => {
     waitForQuietPeriod.mockResolvedValue(true);
@@ -306,11 +472,13 @@ describe('runFill — batches that settle nothing', () => {
     }
   );
 
-  it('names both causes in the abort, since the counter cannot tell which it was', () => {
-    const { message } = new ConsecutiveFailedBatchesError(3);
+  it.each([
+    ['lml', /LML answered for at most a fifth/],
+    ['database', /every attempted write threw/],
+  ] as const)('names the streak that tripped, here %s', (cause, wording) => {
+    const { message } = new ConsecutiveFailedBatchesError(3, cause);
 
-    expect(message).toMatch(/LML/);
-    expect(message).toMatch(/write/);
+    expect(message).toMatch(wording);
   });
 
   it.each([
@@ -333,16 +501,22 @@ describe('runFill — what an abort reports to Sentry', () => {
   // Both guards end through one capture site; each must keep its own step so
   // the two causes stay separable in Sentry.
   it.each([
-    ['consecutive_failed_batches', { 1: 'shed', 2: 'shed', 3: 'shed', 4: 'shed' }, { maxConsecutiveFailedBatches: 2 }],
+    [
+      'consecutive_failed_batches',
+      { 1: 'shed', 2: 'shed', 3: 'shed', 4: 'shed' },
+      { maxConsecutiveFailedBatches: 2 },
+      { batches_done: 2, of: 2, cause: 'lml' },
+    ],
     [
       'consecutive_no_bio_batches',
       { 1: 'no_bio', 2: 'no_bio', 3: 'no_bio', 4: 'no_bio' },
       { maxConsecutiveNoBioBatches: 2 },
+      { batches_done: 2, of: 2 },
     ],
-  ] as const)('captures the abort under %s', async (step, outcomes, options) => {
+  ] as const)('captures the abort under %s', async (step, outcomes, options, extra) => {
     await expect(run([1, 2, 3, 4], outcomes, options)).rejects.toThrow();
 
-    expect(captureError).toHaveBeenCalledWith(expect.any(Error), step, { batches_done: 2, of: 2 });
+    expect(captureError).toHaveBeenCalledWith(expect.any(Error), step, extra);
   });
 });
 
@@ -351,7 +525,7 @@ describe('runFill — LML answers, but never with a bio', () => {
   // which is identical on the wire to an artist with no Discogs profile. A
   // sustained shed therefore fails no batch: every album is `no_bio`, the
   // cursor walks to the end, and the run reports success having filled nothing.
-  const noBio = (...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, 'no_bio' as const]));
+  const noBio = (...ids: number[]): Outcomes => outcomesOf('no_bio', ...ids);
 
   it('aborts after N consecutive all-no_bio batches, with the cursor put back before the streak', async () => {
     await expect(
@@ -375,7 +549,9 @@ describe('runFill — LML answers, but never with a bio', () => {
       run([1, 2, 3, 4, 5, 6, 7, 8], { 1: 'shed', ...noBio(3, 4, 5, 6) }, { maxConsecutiveNoBioBatches: 2 })
     ).rejects.toBeInstanceOf(ConsecutiveNoBioBatchesError);
 
-    expect(loggedSummary()).toMatchObject({ resume_after_album_id: 0, indeterminate_album_ids: [1] });
+    // The streak's albums are listed too: each looked settled, and the shed may
+    // have hit any of them.
+    expect(loggedSummary()).toMatchObject({ resume_after_album_id: 0, indeterminate_album_ids: [1, 3, 4, 5, 6] });
   });
 
   it('says what probably happened and which knob to turn if it did not', () => {
@@ -388,7 +564,6 @@ describe('runFill — LML answers, but never with a bio', () => {
   it.each([
     // [label, outcomes, guard setting]
     ['a batch with one fill in it breaks the streak', noBio(1, 2, 3, 5, 6, 7), 2],
-    ['a batch with any other verdict in it breaks the streak', { ...noBio(1, 2, 3, 5, 6), 4: 'no_match' }, 2],
     ['the streak is shorter than the limit', noBio(1, 2, 3, 4, 5, 6), 4],
     // A real cluster of bio-less albums: the operator turns the guard off and resumes.
     ['the guard is disabled with 0', noBio(1, 2, 3, 4, 5, 6, 7, 8), 0],
@@ -397,6 +572,210 @@ describe('runFill — LML answers, but never with a bio', () => {
 
     expect(bulkLookupMetadata).toHaveBeenCalledTimes(4);
     expect(summary).toMatchObject({ stopped_early: false, resume_after_album_id: 8 });
+  });
+});
+
+describe('runFill — a shed that leaves other verdicts standing (BS#2789)', () => {
+  // A breaker shed blanks the bio and nothing else: albums that would have
+  // been no_match, untrusted or card_mismatch still are. Requiring an
+  // all-no_bio batch let any one of them reset the streak.
+  it('aborts after N batches that filled nothing and returned a no_bio, whatever else they held', async () => {
+    const outcomes: Outcomes = { 1: 'no_bio', 2: 'no_match', 3: 'no_bio', 4: 'shed', 5: 'no_bio', 6: 'no_match' };
+
+    await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveNoBioBatches: 3 })).rejects.toBeInstanceOf(
+      ConsecutiveNoBioBatchesError
+    );
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(3);
+    // The whole streak is carried, the unanswered album included, once.
+    expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6] });
+  });
+});
+
+describe('runFill — only a fill breaks a no-bio streak (BS#2789)', () => {
+  // A batch that filled nothing and returned no no_bio says nothing either way:
+  // LML answered for none of it, or every answer was no_match and the like.
+  // Resetting on it let a breaker shed hide behind an occasional timed-out call.
+  it.each([
+    ['a batch LML answered for none of', { 1: 'no_bio', 2: 'no_bio', 3: 'throw', 5: 'no_bio', 6: 'no_bio' }],
+    [
+      'a batch of other verdicts only',
+      { 1: 'no_bio', 2: 'no_bio', 3: 'no_match', 4: 'no_match', 5: 'no_bio', 6: 'no_bio' },
+    ],
+  ] as const)('carries the streak across %s, and lists it from where it began', async (_label, outcomes) => {
+    await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveNoBioBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveNoBioBatchesError
+    );
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(3);
+    expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6] });
+  });
+
+  it('carries a no-bio streak even when the failed-batch abort ends the run on the same batch', async () => {
+    // Batches of 5, each one no_bio beside four unanswered: both guards trip on
+    // the second batch, and the failed-batch abort is the one thrown.
+    const outcomes: Outcomes = {
+      ...outcomesOf('shed', 2, 3, 4, 5, 7, 8, 9, 10),
+      1: 'no_bio',
+      6: 'no_bio',
+    };
+
+    await expect(
+      run(idsTo(15), outcomes, { batchSize: 5, maxConsecutiveFailedBatches: 2, maxConsecutiveNoBioBatches: 2 })
+    ).rejects.toBeInstanceOf(ConsecutiveFailedBatchesError);
+
+    expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
+  });
+});
+
+describe('runFill — the failed-batch guard under partial failure (BS#2789)', () => {
+  it('keeps counting a database outage across a batch that attempted no write', async () => {
+    const outcomes: Outcomes = {
+      1: 'write_fails',
+      2: 'write_fails',
+      3: 'no_match',
+      4: 'no_match',
+      5: 'write_fails',
+      6: 'write_fails',
+    };
+
+    await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveFailedBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveFailedBatchesError
+    );
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(3);
+  });
+
+  it('counts a batch in which LML answered for at most a fifth of the albums', async () => {
+    const outcomes: Outcomes = { ...outcomesOf('shed', 1, 2, 3, 4, 6, 7, 8, 9), 5: 'no_match', 10: 'no_match' };
+
+    await expect(run(idsTo(15), outcomes, { batchSize: 5, maxConsecutiveFailedBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveFailedBatchesError
+    );
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not count a batch with two answers in five', async () => {
+    const outcomes: Outcomes = { 1: 'shed', 2: 'shed', 3: 'shed', 6: 'shed', 7: 'shed', 8: 'shed' };
+
+    const summary = await run(idsTo(10), outcomes, {
+      batchSize: 5,
+      maxConsecutiveFailedBatches: 2,
+    });
+
+    expect(summary.stopped_early).toBe(false);
+  });
+});
+
+describe('runFill — a second stop signal (BS#2789)', () => {
+  // `process.exit` and the logger flush, stubbed; the exit runs after the flush.
+  let exit: ReturnType<typeof jest.spyOn>;
+  let flush: ReturnType<typeof jest.spyOn>;
+  beforeEach(() => {
+    exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    flush = jest.spyOn(logger, 'closeLogger').mockResolvedValue(undefined);
+  });
+  afterEach(() => {
+    exit.mockRestore();
+    flush.mockRestore();
+    process.exitCode = undefined;
+  });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const forcedSummaries = () =>
+    log.mock.calls.filter(([, step, , fields]) => step === 'summary' && fields?.forced_exit);
+
+  it('logs the summary as it stands, next_run included, and exits non-zero without waiting for the batch', async () => {
+    enumerateCohort.mockResolvedValue(albums(1, 2, 3, 4) as never);
+    scriptLml({ 3: 'shed' }, [1, 2, 3, 4]);
+    const answer = bulkLookupMetadata.getMockImplementation() as (items: unknown) => Promise<unknown>;
+    bulkLookupMetadata.mockImplementationOnce(answer).mockImplementationOnce((items: unknown) => {
+      // The operator presses Ctrl-C three times while the second batch is in flight.
+      handleStopSignal('SIGINT');
+      handleStopSignal('SIGINT');
+      handleStopSignal('SIGINT');
+      return answer(items);
+    });
+    applyBioFill.mockResolvedValue(true as never);
+
+    await runFill({ ...OPTIONS, batchSize: 2 });
+    await settle();
+
+    // Sentry is flushed first, within closeLogger's own bound.
+    expect(flush).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      'error',
+      'summary',
+      expect.stringContaining('second SIGINT'),
+      expect.objectContaining({
+        stopped_early: true,
+        forced_exit: true,
+        filled: 2,
+        next_run: { BIO_FILL_ALBUM_AFTER_ID: 2, BIO_FILL_ALBUM_IDS: '' },
+      })
+    );
+    // The third signal finds the forced exit under way: one summary, one exit.
+    expect(forcedSummaries()).toHaveLength(1);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it('says the accounting was cut short, not that a batch was abandoned, when it lands after the loop', async () => {
+    countCohort.mockReset();
+    countCohort.mockResolvedValueOnce(100 as never).mockImplementationOnce(() => {
+      handleStopSignal('SIGTERM');
+      handleStopSignal('SIGTERM');
+      return Promise.resolve(98);
+    });
+
+    await run([1, 2]);
+    await settle();
+
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(log).toHaveBeenCalledWith(
+      'error',
+      'summary',
+      expect.stringContaining('accounting'),
+      expect.objectContaining({ forced_exit: true, stopped_early: false, reached_end: true, filled: 2 })
+    );
+    expect(log).not.toHaveBeenCalledWith('error', 'summary', expect.stringContaining('abandoned'), expect.anything());
+  });
+
+  it('reports an aborted run as stopped early, with its reason, when it lands during the closing count', async () => {
+    countCohort.mockReset();
+    countCohort.mockResolvedValueOnce(100 as never).mockImplementationOnce(() => {
+      handleStopSignal('SIGTERM');
+      handleStopSignal('SIGTERM');
+      return Promise.resolve(100);
+    });
+
+    await expect(
+      run([1, 2, 3, 4], { 1: 'shed', 2: 'shed', 3: 'shed', 4: 'shed' }, { maxConsecutiveFailedBatches: 2 })
+    ).rejects.toBeInstanceOf(ConsecutiveFailedBatchesError);
+
+    const [[, , message, fields]] = forcedSummaries();
+    expect(message).toMatch(/the run had aborted: .*LML answered for at most a fifth/);
+    expect(fields).toMatchObject({ stopped_early: true, reached_end: false });
+  });
+
+  it('logs no summary, and keeps the exit code, once the run has ended', async () => {
+    await run([1, 2]);
+    // What `main` sets after the finished line.
+    process.exitCode = 0;
+    handleStopSignal('SIGINT');
+    handleStopSignal('SIGINT');
+    await settle();
+
+    expect(exit).toHaveBeenCalledWith(0);
+    expect(log).toHaveBeenCalledWith('warn', 'forced_exit', expect.any(String), { signal: 'SIGINT' });
+    expect(forcedSummaries()).toHaveLength(0);
+  });
+
+  it('only requests a stop on the first signal', () => {
+    handleStopSignal('SIGTERM');
+
+    expect(exit).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('warn', 'signal', expect.any(String), { signal: 'SIGTERM' });
   });
 });
 

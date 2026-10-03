@@ -72,17 +72,31 @@ const nonNegativeInt = (value: number, name: string): number => {
 
 /**
  * Enumerate the drainable cohort above `afterAlbumId`, ordered by `album_id`.
- * `limit` 0 means no cap. Both are validated because they are interpolated.
+ * `limit` 0 means no cap. A non-empty `albumIds` (BS#2786) is one more
+ * conjunct after the shared block, so a listed id is still subject to the
+ * cohort predicate and the eligibility conditions, and one that has a bio by
+ * now is simply not returned. With no cursor the list is the whole run (a
+ * retry); with one, the listed ids are asked as well as everything above it (a
+ * run carrying the previous one's unsettled albums). Every argument is
+ * validated because it is interpolated.
  */
-export const enumerateCohortSql = (limit: number, afterAlbumId: number): string => {
+export const enumerateCohortSql = (limit: number, afterAlbumId: number, albumIds: readonly number[] = []): string => {
   const cap = nonNegativeInt(limit, 'limit');
   const cursor = nonNegativeInt(afterAlbumId, 'afterAlbumId');
+  const only = albumIds.map((id) => nonNegativeInt(id, 'albumIds'));
+  const listed = `am."album_id" IN (${only.join(', ')})`;
+  const range =
+    only.length === 0
+      ? `am."album_id" > ${cursor}`
+      : cursor === 0
+        ? `am."album_id" > 0\n    AND ${listed}`
+        : `(am."album_id" > ${cursor} OR ${listed})`;
   return `SELECT am."album_id" AS album_id,
        l."legacy_release_id" AS legacy_release_id,
        ${ARTIST_NAME} AS artist_name,
        l."album_title" AS album_title
   ${eligibleFromWhereSql()}
-    AND am."album_id" > ${cursor}
+    AND ${range}
   ORDER BY am."album_id"${cap > 0 ? `\n  LIMIT ${cap}` : ''}`;
 };
 
@@ -112,12 +126,24 @@ export const countCohort = (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<n
 export const countEligible = (timeoutMs: number = READ_TIMEOUT_DEFAULT): Promise<number> =>
   countOf(countEligibleSql(), timeoutMs);
 
-export const enumerateCohort = async (
-  limit: number,
-  afterAlbumId: number,
-  timeoutMs: number = READ_TIMEOUT_DEFAULT
-): Promise<FillCandidate[]> => {
-  const rows = await read<FillCandidate>(enumerateCohortSql(limit, afterAlbumId), timeoutMs);
+export interface EnumerateOptions {
+  /** 0 is no cap. */
+  limit: number;
+  afterAlbumId: number;
+  /** Non-empty narrows the enumeration to these albums (BS#2786). */
+  albumIds?: readonly number[];
+  timeoutMs?: number;
+}
+
+/** Named options rather than positions: `albumIds` and `timeoutMs` are both
+ * optional, so a positional list had to pass `undefined` to reach the ids. */
+export const enumerateCohort = async ({
+  limit,
+  afterAlbumId,
+  albumIds = [],
+  timeoutMs = READ_TIMEOUT_DEFAULT,
+}: EnumerateOptions): Promise<FillCandidate[]> => {
+  const rows = await read<FillCandidate>(enumerateCohortSql(limit, afterAlbumId, albumIds), timeoutMs);
   return rows.map((r) => ({
     album_id: Number(r.album_id),
     legacy_release_id: Number(r.legacy_release_id),
