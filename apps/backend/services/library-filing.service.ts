@@ -111,20 +111,25 @@ export type LibraryFilingRequestBody = {
 };
 
 /**
- * The validated plan `createLibraryFiling` resolves before this function
- * runs: either the fields to create a new artist under, or the already-
- * catalogued artist it referenced. Conflict pre-checks and their 409 mapping
- * stay in the controller — see its doc comment.
+ * The plan `planLibraryFiling` resolves before `fileLibraryRelease` runs:
+ * either the fields to create a new artist under, or the already-catalogued
+ * artist it referenced. The conflict pre-checks that produce it live in
+ * `planLibraryFiling`, and `mapLibraryFilingError` maps the transaction's
+ * own failures onto the route's 409/400.
  */
 export type LibraryFilingPlan =
   | { kind: 'create'; artist_name: string; alphabetical_name: string; code_letters: string; code_number: number }
   | { kind: 'existing'; artist: FilingArtist };
 
 /**
- * The request's release fields once validated: the three required ids/title
- * narrowed to their checked types, the call-code pair already parsed
- * (`supplied_code_number` is the operator's `code_number`), and the rest of
- * `FilingReleaseBody` passed through untouched.
+ * The request's release fields as `planLibraryFiling` hands them on: the
+ * three required fields are typed as present (`album_title` is checked to be
+ * a non-blank string; `genre_id` and `format_id` are only checked to be
+ * defined), `code_volume_letters` and `supplied_code_number` (the operator's
+ * `code_number`) have been through `validateCodeVolumeLetters` /
+ * `validateCodeNumber`, and every other `FilingReleaseBody` field is the
+ * request's value, unchecked. The object is built by spreading the raw
+ * release body, so it can also carry keys the type does not name.
  */
 export type ValidatedFilingRelease = Omit<FilingReleaseBody, 'code_number'> & {
   album_title: string;
@@ -133,10 +138,10 @@ export type ValidatedFilingRelease = Omit<FilingReleaseBody, 'code_number'> & {
   supplied_code_number?: number;
 };
 
-/** The request's rotation entry once validated: `rotation_bin` is the canonical enum value, `urls` parsed. */
+/** The request's rotation entry as `planLibraryFiling` hands it on: `rotation_bin` is the canonical enum value (via `parseRotationBin`) and `urls` has been through `parseRotationUrls`, and `card_id`, when present, is checked to be a positive integer. */
 export type ValidatedFilingRotation = { rotation_bin: RotationBin; card_id?: number; urls?: string[] };
 
-/** Everything `fileLibraryRelease` and `completeLibraryFiling` read, all of it already validated. */
+/** Everything `fileLibraryRelease` and `completeLibraryFiling` read, as produced by `planLibraryFiling`; see the field types for what each part has been checked for. */
 export type ValidatedFilingInput = {
   filingPlan: LibraryFilingPlan;
   release: ValidatedFilingRelease;
@@ -162,6 +167,13 @@ export type LibraryFilingConflictError = {
  * `insertAlbum` / `addToRotation`), each threaded onto this function's own
  * `tx` (see `DbTransaction`'s doc comment for why a nested bare
  * `db.transaction()` inside those functions would NOT roll back with it).
+ * The reads inside the transaction ride the same `tx` — a bare `db` read
+ * there borrows a SECOND pool connection while this one sits reserved, and
+ * enough concurrent filings would each hold a connection while waiting on a
+ * read none of them can be granted (`addToRotation`'s identity-read comment
+ * has the mechanics). Everything with no write to protect — the conflict
+ * pre-checks — runs BEFORE the transaction, in `planLibraryFiling`, on the
+ * plain pool.
  *
  * Extracted from `createLibraryFiling` (BS#2793) so slice 11 (filing an
  * intake item) can run this same transaction as one step of its own, larger
@@ -269,7 +281,7 @@ const artistCardToFilingArtist = (row: libraryService.ArtistCardRow): FilingArti
   genre_id: row.genre_id,
 });
 
-/** Unicode-code-point length — see `ROTATION_SNAPSHOT_MAX_LENGTH` above. */
+/** Unicode-code-point length, matching OpenAPI `maxLength` semantics (a UTF-16 `.length` over-counts astral characters). */
 export function codePointLength(value: string): number {
   return [...value].length;
 }
@@ -299,7 +311,7 @@ const ROTATION_URL_MAX_LENGTH = 2048;
  * expect unstorable. What IS enforced is exactly the contract's declared
  * bounds: at most 20 entries, each a non-blank string of at most 2048
  * characters (code points, matching OpenAPI `maxLength` semantics and the
- * snapshot fields' `codePointLength` convention above). Entries are stored
+ * rotation snapshot fields' `codePointLength` convention in the controller). Entries are stored
  * trimmed and otherwise verbatim.
  */
 export function parseRotationUrls(value: unknown): string[] {
@@ -395,7 +407,7 @@ export type NewArtistRequest = {
  * The floor is **0**, below the published `AddArtistRequest.code_number`
  * minimum of 1 (`wxyc-shared/api.yaml`), deliberately: the whole
  * Various-Artists surface is filed at `artist_genre_code = 0` — 68 rows in
- * the production clone (see `resolveArtistByCode` below, which accepts 0 for
+ * the production clone (see `resolveArtistByCode` in the library controller, which accepts 0 for
  * the same reason) — and this endpoint accepted 0 unvalidated for its whole
  * life before BS#2475. The write path must not refuse a value the catalog
  * demonstrably holds and the read path resolves; the contract's floor is the
@@ -417,7 +429,7 @@ const MAX_ARTIST_CODE_LETTERS_LENGTH = 4;
 /**
  * Validate `code_letters` for the artist-create paths (`POST /library/artists`
  * and `POST /library/filings`' create arm) and return the NFC form every read
- * and write below must key on (see `addArtist`'s normalization comment).
+ * and write in the create path must key on (see the normalization comment in `addArtist`, in the library controller).
  *
  * The bound counts code points of the NFC form — the composition that is
  * actually stored — not UTF-16 units of the raw input, per
@@ -455,7 +467,7 @@ export const validateArtistCodeLetters = (code_letters: unknown): string => {
  *
  * No collision check here: the caller's own `getArtistByCode` pre-check is
  * the collision detector, and re-invoking this helper on a pre-check hit is
- * the whole retry — see the recompute branch in `addArtist` below.
+ * the whole retry — see the recompute branch in `planLibraryFiling` and in `addArtist`, in the library controller.
  */
 export const assignArtistCodeNumber = async (code_letters: string, genre_id: number): Promise<number> => {
   const code_number = await libraryService.generateArtistNumber(code_letters, genre_id);
@@ -687,7 +699,7 @@ export async function planLibraryFiling(
     release.code_volume_letters === undefined ? undefined : validateCodeVolumeLetters(release.code_volume_letters);
   const supplied_code_number = release.code_number === undefined ? undefined : validateCodeNumber(release.code_number);
 
-  let rotationBody: { rotation_bin: RotationBin; card_id?: number; urls?: string[] } | undefined;
+  let rotationBody: ValidatedFilingRotation | undefined;
   // != null: clients that serialize "no rotation" as an explicit null get the
   // omitted-rotation filing, not a TypeError from the property reads below.
   if (body.rotation != null) {
@@ -851,8 +863,9 @@ export async function completeLibraryFiling(
 
   // BS#2491: a filing always produces a catalogued release, so any provided
   // urls were written release-scoped into `library_urls` inside the
-  // transaction above. Reconcile them to LML after the commit — fail-open,
-  // and outside the transaction so no row lock is held across the hop.
+  // transaction (`fileLibraryRelease`). Reconcile them to LML after the
+  // commit — fail-open, and outside the transaction so no row lock is held
+  // across the hop.
   if (rotationBody?.urls && rotationBody.urls.length > 0) {
     await libraryService.reconcileLibraryUrlsToLml(rotationBody.urls);
   }

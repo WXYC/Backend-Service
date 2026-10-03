@@ -26,6 +26,7 @@ const mockGetArtistByCode = jest.fn<(letters: string, genreId: number, n: number
 const mockArtistIdFromName = jest.fn<(name: string, genreId: number) => Promise<number | null>>();
 const mockGetArtistCardByIdInGenre = jest.fn<(id: number, genreId: number) => Promise<unknown>>();
 const mockGetArtistById = jest.fn<(id: number) => Promise<unknown>>();
+const mockReconcileLibraryUrlsToLml = jest.fn<(urls: string[]) => Promise<void>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   RotationCardBinMismatchError: class RotationCardBinMismatchError extends Error {},
@@ -38,6 +39,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
   insertAlbum: mockInsertAlbum,
   addToRotation: mockAddToRotation,
+  reconcileLibraryUrlsToLml: mockReconcileLibraryUrlsToLml,
 }));
 
 import { db } from '@wxyc/database';
@@ -46,6 +48,7 @@ import WxycError from '../../../apps/backend/utils/error';
 import {
   resolveNewAlbumLabel,
   fileLibraryRelease,
+  completeLibraryFiling,
   planLibraryFiling,
   mapLibraryFilingError,
 } from '../../../apps/backend/services/library-filing.service';
@@ -157,6 +160,31 @@ describe('fileLibraryRelease transaction handles', () => {
     expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), undefined, tx);
   });
 
+  it('threads the transaction it opens through the create arm artist insert when no outer handle is given', async () => {
+    const tx = { marker: 'own-tx' };
+    (db.transaction as jest.Mock).mockImplementationOnce((cb: unknown) => (cb as (t: unknown) => unknown)(tx));
+    mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+      id: 9,
+      artist_name: 'Stereolab',
+      alphabetical_name: 'Stereolab',
+      code_letters: 'ST',
+    });
+
+    await fileLibraryRelease({
+      filingPlan: {
+        kind: 'create',
+        artist_name: 'Stereolab',
+        alphabetical_name: 'Stereolab',
+        code_letters: 'ST',
+        code_number: 5,
+      },
+      release: input.release,
+    });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(expect.anything(), 3, 5, tx);
+  });
+
   it('threads a given outer handle through the code-number generator and the rotation write', async () => {
     const outerTx = { marker: 'outer-tx' };
 
@@ -165,6 +193,52 @@ describe('fileLibraryRelease transaction handles', () => {
     expect(db.transaction).not.toHaveBeenCalled();
     expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(9, 3, outerTx);
     expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), undefined, outerTx);
+  });
+});
+
+describe('completeLibraryFiling', () => {
+  const album = { id: 70, album_title: 'DOGA' };
+  const result = {
+    artist: { id: 9, artist_name: 'Juana Molina', code_letters: 'JU', code_artist_number: 2, genre_id: 3 },
+    release: album,
+    rotation: undefined,
+  };
+  const existingPlan = { kind: 'existing' as const, artist: result.artist };
+  const release = { album_title: 'DOGA', genre_id: 3, format_id: 1 };
+  const originalLmlUrl = process.env.LIBRARY_METADATA_URL;
+
+  beforeEach(() => {
+    // Unconfigured LML makes `enrichNewAlbum` return the inserted row as-is.
+    delete process.env.LIBRARY_METADATA_URL;
+    mockReconcileLibraryUrlsToLml.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    if (originalLmlUrl === undefined) delete process.env.LIBRARY_METADATA_URL;
+    else process.env.LIBRARY_METADATA_URL = originalLmlUrl;
+  });
+
+  it('reconciles the rotation urls to LML after the commit and returns the enriched release', async () => {
+    const urls = ['https://sonamos.example/doga'];
+
+    const body = await completeLibraryFiling(result as never, {
+      filingPlan: existingPlan,
+      release,
+      rotation: { rotation_bin: 'S', urls },
+    });
+
+    expect(mockReconcileLibraryUrlsToLml).toHaveBeenCalledWith(urls);
+    expect(body).toEqual({ ...result, release: album });
+  });
+
+  it.each([
+    ['no rotation', undefined],
+    ['a rotation without urls', { rotation_bin: 'S' as const }],
+    ['an empty urls list', { rotation_bin: 'S' as const, urls: [] }],
+  ])('does not reconcile with %s', async (_name, rotation) => {
+    await completeLibraryFiling(result as never, { filingPlan: existingPlan, release, rotation });
+
+    expect(mockReconcileLibraryUrlsToLml).not.toHaveBeenCalled();
   });
 });
 
@@ -213,6 +287,20 @@ describe('planLibraryFiling', () => {
         rotation: { rotation_bin: 'S', card_id: undefined, urls: undefined },
       },
     });
+  });
+
+  it('recomputes a server-assigned code number once when the first one is already taken', async () => {
+    mockGenerateArtistNumber.mockResolvedValueOnce(6).mockResolvedValueOnce(7);
+    mockGetArtistByCode
+      .mockResolvedValueOnce({ artist_id: 9, artist_name: 'Jessica Pratt', code_letters: 'JU' })
+      .mockResolvedValueOnce(undefined);
+    mockArtistIdFromName.mockResolvedValue(null);
+
+    const plan = await planLibraryFiling({ artist: createArtist, release });
+
+    expect(mockGenerateArtistNumber).toHaveBeenCalledTimes(2);
+    expect(mockGetArtistByCode).toHaveBeenNthCalledWith(2, 'JU', 3, 7);
+    expect(plan).toMatchObject({ kind: 'ok', input: { filingPlan: { kind: 'create', code_number: 7 } } });
   });
 
   it('answers an artist_code_conflict body naming the holder of a supplied code', async () => {
