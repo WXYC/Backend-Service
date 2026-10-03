@@ -4200,6 +4200,12 @@ paths:
         rows and never touches the rows that pointed at it.
 
 
+        A filed intake item (`intake_items.album_id`, `ON DELETE CASCADE`) is
+        not yet captured by the delete or replayed by this endpoint: the table
+        has no writer today, so nothing can be lost. Capturing it is WXYC/Backend-Service#2801,
+        which must land before intake items can be filed.
+
+
         `unrecoverable` depends on the batch's `entity_kind`.
 
 

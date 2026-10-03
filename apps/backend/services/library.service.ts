@@ -7024,6 +7024,14 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     //
     // Reason 2 is not answerable by adding a projection here, because reason
     // 1 means there is nothing to restore in the first place.
+    //
+    // `intake_items` is absent because nothing writes it yet (BS#2794 added the
+    // table with no writer), and that is temporary, not a decision to leave it
+    // out. Its `album_id` is `onDelete: 'cascade'`, so once filing exists a
+    // delete here would destroy the filed item and its `intake_item_passes`
+    // with no way back. BS#2801 (slice 9) adds the capture, the `RESTORE_PLAN`
+    // entries and the `SET_NULL_REFERENCES` for its `auth_user`, `rotation_id`
+    // and `cited_*` columns; it must land before any writer does.
     await captureCatalogDeleteSnapshot(tx, {
       entityKind: 'library',
       entityId: album_id,
