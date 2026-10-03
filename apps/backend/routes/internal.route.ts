@@ -700,6 +700,39 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
   }
 });
 
+/**
+ * Resolve a Backend-Service album_id from a tubafrenzy LIBRARY_RELEASE_ID.
+ * Returns null if the library release ID is 0 or not found.
+ *
+ * Thin wrapper over `library.service.getAlbumIdByLegacyId` — the legacy→serial
+ * bridge now lives in one place (BS#1880). Kept as a named helper so the
+ * flowsheet webhook's `Promise.all` above reads as resolving three parallel
+ * ids by name, not two inline queries plus one named call.
+ */
+function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | null> {
+  return getAlbumIdByLegacyId(legacyLibraryReleaseId);
+}
+
+/**
+ * Resolve a Backend-Service rotation_id from a tubafrenzy ROTATION_RELEASE_ID
+ * (the `entry.rotationReleaseId` field on the flowsheet webhook payload, set
+ * by tubafrenzy's `FlowsheetEntryAddServlet.populateRotationRelease()`).
+ * Returns null if the legacy id is 0 / unset or no rotation row matches.
+ *
+ * Single indexed SELECT via `rotation_legacy_rotation_id_idx` (unique by the
+ * tubafrenzy invariant — one rotation row per legacy_rotation_id). BS#1268.
+ */
+async function resolveRotationId(legacyRotationId: number): Promise<number | null> {
+  if (!legacyRotationId) return null;
+
+  const [row] = await db
+    .select({ id: rotation.id })
+    .from(rotation)
+    .where(eq(rotation.legacy_rotation_id, legacyRotationId))
+    .limit(1);
+  return row?.id ?? null;
+}
+
 // ---- Rotation Endpoints ----
 
 /**
@@ -739,38 +772,6 @@ internal_route.post('/artist-identity-sync-notify', (req, res) => {
 
   res.json({ ok: true });
 });
-
-/**
- * Resolve a Backend-Service album_id from a tubafrenzy LIBRARY_RELEASE_ID.
- * Returns null if the library release ID is 0 or not found.
- *
- * Thin wrapper over `library.service.getAlbumIdByLegacyId` — the legacy→serial
- * bridge now lives in one place (BS#1880). Kept so the inbound call sites below
- * read unchanged.
- */
-function resolveAlbumId(legacyLibraryReleaseId: number): Promise<number | null> {
-  return getAlbumIdByLegacyId(legacyLibraryReleaseId);
-}
-
-/**
- * Resolve a Backend-Service rotation_id from a tubafrenzy ROTATION_RELEASE_ID
- * (the `entry.rotationReleaseId` field on the flowsheet webhook payload, set
- * by tubafrenzy's `FlowsheetEntryAddServlet.populateRotationRelease()`).
- * Returns null if the legacy id is 0 / unset or no rotation row matches.
- *
- * Single indexed SELECT via `rotation_legacy_rotation_id_idx` (unique by the
- * tubafrenzy invariant — one rotation row per legacy_rotation_id). BS#1268.
- */
-async function resolveRotationId(legacyRotationId: number): Promise<number | null> {
-  if (!legacyRotationId) return null;
-
-  const [row] = await db
-    .select({ id: rotation.id })
-    .from(rotation)
-    .where(eq(rotation.legacy_rotation_id, legacyRotationId))
-    .limit(1);
-  return row?.id ?? null;
-}
 
 // ---- Streaming Status Webhook ----
 
