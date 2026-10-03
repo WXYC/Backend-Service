@@ -204,17 +204,24 @@ export interface FillOptions {
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): FillOptions => {
   const ctx = { context: JOB_NAME };
   const afterAlbumId = requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, ALBUM_AFTER_ID_DEFAULT, ctx);
+  const maxAlbums = requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, MAX_ALBUMS_DEFAULT, ctx);
   const albumIds = resolveAlbumIds(env[ALBUM_IDS_ENV]);
-  if (albumIds.length > 0 && afterAlbumId > 0) {
-    // A cursor would silently drop every listed id at or below it.
-    throw new Error(`[${JOB_NAME}] ${ALBUM_IDS_ENV} cannot be combined with a non-zero ${ALBUM_AFTER_ID_ENV}.`);
+  // Either would drop listed ids without reporting them: a cursor every one at
+  // or below it, a cap every one past it.
+  for (const [name, value] of [
+    [ALBUM_AFTER_ID_ENV, afterAlbumId],
+    [MAX_ALBUMS_ENV, maxAlbums],
+  ] as const) {
+    if (albumIds.length > 0 && value > 0) {
+      throw new Error(`[${JOB_NAME}] ${ALBUM_IDS_ENV} cannot be combined with a non-zero ${name}.`);
+    }
   }
   return {
     batchSize: resolveBatchSize(env[BATCH_SIZE_ENV]),
     ratePerMin: requirePositiveInt(env[RATE_PER_MIN_ENV], RATE_PER_MIN_ENV, RATE_PER_MIN_DEFAULT, ctx),
     budgetMs: requirePositiveInt(env[BUDGET_MS_ENV], BUDGET_MS_ENV, BUDGET_MS_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
-    maxAlbums: requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, MAX_ALBUMS_DEFAULT, ctx),
+    maxAlbums,
     afterAlbumId,
     albumIds,
     maxConsecutiveFailedBatches: requirePositiveInt(
@@ -450,7 +457,9 @@ export interface FillSummary extends VerdictTotals {
    * nothing about the rows between its ids. */
   resume_after_album_id: number | null;
   /** Up to `INDETERMINATE_IDS_REPORT_CAP` of the albums counted in
-   * `indeterminate` or `write_failed`. */
+   * `indeterminate` or `write_failed`. On a `BIO_FILL_ALBUM_IDS` run, which
+   * has no cursor, it is the whole retry list: also every listed album the run
+   * never reached, and after a no-bio abort the albums of that streak. */
   indeterminate_album_ids: number[];
   execute: boolean;
   /** True when the loop ended before its last batch: a signal, the pause, or
@@ -501,7 +510,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     rate_per_min: options.ratePerMin,
     max_albums: options.maxAlbums,
     after_album_id: options.afterAlbumId,
-    album_ids: options.albumIds.length,
+    album_ids: options.albumIds,
     execute: options.execute,
   });
 
@@ -513,6 +522,19 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     albumIds: options.albumIds,
     timeoutMs: options.readTimeoutMs,
   });
+  const listRun = options.albumIds.length > 0;
+  if (listRun) {
+    const enumeratedIds = new Set(candidates.map((c) => c.album_id));
+    const missing = options.albumIds.filter((id) => !enumeratedIds.has(id));
+    if (missing.length > 0) {
+      log(
+        'warn',
+        'listed_ids_not_in_cohort',
+        `${missing.length} listed albums have a bio by now or are not eligible; not asked`,
+        { album_ids: missing }
+      );
+    }
+  }
   const batches: FillCandidate[][] = [];
   for (let i = 0; i < candidates.length; i += options.batchSize) {
     batches.push(candidates.slice(i, i + options.batchSize));
@@ -573,6 +595,10 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   let consecutiveNoBioBatches = 0;
   // Where the cursor stood before the current all-`no_bio` streak began.
   let resumeBeforeNoBioStreak = summary.resume_after_album_id;
+  // Candidates whose batch came back, and, after a no-bio abort, the index of
+  // the streak's first album. A list run relists everything from there on.
+  let processed = 0;
+  let noBioStreakStart: number | undefined;
 
   for (const [b, batch] of batches.entries()) {
     // The shared pause consults `shouldStop` too, but not when the probe is
@@ -602,6 +628,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     }
 
     const result = await runBatch(batch, { budgetMs: options.budgetMs });
+    processed += batch.length;
     const { batchSize, indeterminateAlbumIds, ...counts } = result;
     for (const [key, value] of Object.entries(counts) as Array<[keyof VerdictTotals, number]>) {
       summary[key] += value;
@@ -639,6 +666,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       // Every row in the streak looked answered, so the cursor walked through
       // it. Put it back, or a resume would never re-ask what the shed took.
       summary.resume_after_album_id = resumeBeforeNoBioStreak;
+      noBioStreakStart = processed - batches.slice(b + 1 - consecutiveNoBioBatches, b + 1).flat().length;
       abort = new ConsecutiveNoBioBatchesError(consecutiveNoBioBatches);
     }
     if (abort) {
@@ -648,6 +676,15 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       break;
     }
     if (b < batches.length - 1) await stopAwareSleep(interBatchSleepMs);
+  }
+
+  // A list run has no cursor, so its `indeterminate_album_ids` is the whole
+  // retry list: add what it never reached and, after a no-bio abort, the streak
+  // it walked through. The streak's batches hold no unanswered row and every
+  // earlier one is already listed, so nothing repeats; the list never exceeds
+  // the cap, which bounds the run's own list.
+  if (listRun) {
+    summary.indeterminate_album_ids.push(...candidates.slice(noBioStreakStart ?? processed).map((c) => c.album_id));
   }
 
   // The accounting reads the database too, and a run that aborted because the
