@@ -161,16 +161,16 @@ const resolveAlbumIds = (raw: string | undefined): number[] => {
   return distinct;
 };
 
-/** Abort after this many consecutive batches that settled nothing: LML
- * answered for no album, or every write the batch attempted threw. Either LML
- * or the database is down, and carrying on only walks the run past rows it
- * cannot process. */
+/** Abort after this many consecutive failed batches, counted separately for
+ * LML (it answered for at most a fifth of the batch) and the database (every
+ * write the batch attempted threw). Either is down, and carrying on only walks
+ * the run past rows it cannot process. */
 export const MAX_CONSECUTIVE_FAILED_BATCHES_ENV = 'BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES';
 export const MAX_CONSECUTIVE_FAILED_BATCHES_DEFAULT = 3;
 
 /**
- * Abort after this many consecutive batches in which every album came back
- * `no_bio`; `0` disables. LML answers a breaker shed on its artist-details
+ * Abort after this many consecutive batches that filled nothing and came back
+ * with at least one `no_bio`; `0` disables. LML answers a breaker shed on its artist-details
  * step with a match and a null bio (`lookup/enrichment/top1.py`), the same
  * bytes as an artist with no profile, so a sustained shed fails no batch and
  * would walk the cursor to the end as a clean run. Its own knob with a
@@ -423,18 +423,18 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
 export class ConsecutiveFailedBatchesError extends Error {
   constructor(batches: number) {
     super(
-      `${JOB_NAME}: ${batches} consecutive batches settled nothing (no usable LML verdict, or every write threw); see the lml_batch_failed, lml_indeterminate and write_failed lines for which; aborting`
+      `${JOB_NAME}: ${batches} consecutive batches failed (LML answered for at most a fifth of each, or every write threw); see the lml_batch_failed, lml_indeterminate and write_failed lines for which; aborting`
     );
     this.name = 'ConsecutiveFailedBatchesError';
   }
 }
 
-/** Thrown when `maxConsecutiveNoBioBatches` batches in a row came back
- * entirely `no_bio`. Carried and rethrown like the abort above. */
+/** Thrown when `maxConsecutiveNoBioBatches` batches in a row filled nothing
+ * and came back with `no_bio`. Carried and rethrown like the abort above. */
 export class ConsecutiveNoBioBatchesError extends Error {
   constructor(batches: number) {
     super(
-      `${JOB_NAME}: ${batches} consecutive batches came back entirely no_bio. LML's artist-details breaker is probably open: a shed bio reads as "no profile" from here. The streak's albums are carried in next_run; run it once LML is healthy, or raise or zero ${MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV} if these albums really have no bios; aborting`
+      `${JOB_NAME}: ${batches} consecutive batches filled nothing and came back with no_bio. LML's artist-details breaker is probably open: a shed bio reads as "no profile" from here. The streak's albums are carried in next_run; run it once LML is healthy, or raise or zero ${MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV} if these albums really have no bios; aborting`
     );
     this.name = 'ConsecutiveNoBioBatchesError';
   }
@@ -560,11 +560,16 @@ const toError = (err: unknown): Error => (err instanceof Error ? err : new Error
 /** Cooperative stop, flipped by SIGTERM/SIGINT in `main`. The in-flight batch
  * always finishes; its writes are committed per album. */
 let stopRequested = false;
+/** Stop signals received, and the running summary a second one logs. */
+let stopSignals = 0;
+let runningSummary: FillSummary | undefined;
 export const requestStop = (): void => {
   stopRequested = true;
 };
 export const __resetStopForTesting = (): void => {
   stopRequested = false;
+  stopSignals = 0;
+  runningSummary = undefined;
 };
 
 /** `sleep`, but wakes early once a stop has been requested. */
@@ -663,7 +668,11 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   // the cohort re-count below still run against rows already written. It is
   // rethrown after that accounting.
   let abort: Error | undefined;
-  let consecutiveFailedBatches = 0;
+  // Two failed-batch streaks, because LML and the database fail differently.
+  // A batch that attempted no write says nothing about the database, so it
+  // must neither count toward that streak nor reset it.
+  let lmlFailedBatches = 0;
+  let writeFailedBatches = 0;
   let consecutiveNoBioBatches = 0;
   // What `planResume` needs: how many candidates were in a batch that came
   // back, which of those were not settled, and, after a no-bio abort, where
@@ -685,6 +694,9 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     summary.indeterminate_album_ids = plan.pending.slice(0, INDETERMINATE_IDS_REPORT_CAP);
     summary.next_run = plan.nextRun;
   };
+  // Current before the first batch, so a forced exit always has a resume point.
+  applyResumePlan();
+  runningSummary = summary;
 
   for (const [b, batch] of batches.entries()) {
     // The shared pause consults `shouldStop` too, but not when the probe is
@@ -732,16 +744,20 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       next_run: summary.next_run,
     });
 
-    // A batch settled nothing when LML answered for none of it, or when every
-    // write it attempted threw. The second arm is not "every album failed": a
-    // dead database fails the fills while LML still returns its ordinary share
-    // of no_bio and no_match, and that batch must count or the run spins.
-    const settledNothing =
-      result.indeterminate === batchSize || (result.write_failed > 0 && result.write_failed === result.fill);
-    consecutiveFailedBatches = settledNothing ? consecutiveFailedBatches + 1 : 0;
-    consecutiveNoBioBatches = result.no_bio === batchSize ? consecutiveNoBioBatches + 1 : 0;
-    if (consecutiveFailedBatches >= options.maxConsecutiveFailedBatches) {
-      abort = new ConsecutiveFailedBatchesError(consecutiveFailedBatches);
+    // LML failed a batch when it answered for at most a fifth of it (4 of 5 at
+    // the default size), so a partial shed counts and not only a total one.
+    lmlFailedBatches = 5 * result.indeterminate >= 4 * batchSize ? lmlFailedBatches + 1 : 0;
+    // The database failed a batch when every write it attempted threw, which a
+    // dead database does while LML still returns its usual no_bio and no_match.
+    if (result.fill > 0) writeFailedBatches = result.write_failed === result.fill ? writeFailedBatches + 1 : 0;
+    // A breaker shed blanks the bio and nothing else, so a shed batch still
+    // holds its no_match, untrusted and card_mismatch albums. What it cannot
+    // hold is a fill: in normal running a fill-less batch of 5 is about 1 in
+    // 100. The no_bio requirement keeps an all-unanswered batch out of it.
+    consecutiveNoBioBatches = result.fill === 0 && result.no_bio > 0 ? consecutiveNoBioBatches + 1 : 0;
+    const failedBatches = Math.max(lmlFailedBatches, writeFailedBatches);
+    if (failedBatches >= options.maxConsecutiveFailedBatches) {
+      abort = new ConsecutiveFailedBatchesError(failedBatches);
     } else if (
       options.maxConsecutiveNoBioBatches > 0 &&
       consecutiveNoBioBatches >= options.maxConsecutiveNoBioBatches
@@ -796,13 +812,33 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   return summary;
 };
 
-const registerSignalHandlers = (): void => {
-  const onSignal = (signal: NodeJS.Signals) => {
+/**
+ * SIGTERM/SIGINT. The first requests a stop between batches. A second does not
+ * wait out the batch in flight, which can take the whole bulk timeout: it logs
+ * the summary as it stands and exits 1, rather than leave `kill -9` as the way
+ * out and lose the summary with it. The abandoned batch is safe to lose: its
+ * writes are fill-null, and its albums are above `next_run`'s cursor or in its
+ * list, since the summary dates from before it.
+ */
+export const handleStopSignal = (signal: NodeJS.Signals): void => {
+  stopSignals += 1;
+  if (stopSignals === 1) {
     log('warn', 'signal', `received ${signal}; requesting graceful stop`, { signal });
     requestStop();
-  };
-  process.on('SIGTERM', onSignal);
-  process.on('SIGINT', onSignal);
+    return;
+  }
+  log('error', 'summary', `${JOB_NAME} forced to exit by a second ${signal}; the batch in flight was abandoned`, {
+    ...runningSummary,
+    stopped_early: true,
+    reached_end: false,
+    forced_exit: true,
+  });
+  process.exit(1);
+};
+
+const registerSignalHandlers = (): void => {
+  process.on('SIGTERM', handleStopSignal);
+  process.on('SIGINT', handleStopSignal);
 };
 
 export const main = async (): Promise<void> => {

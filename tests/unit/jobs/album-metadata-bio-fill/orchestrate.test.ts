@@ -51,6 +51,7 @@ import {
   ConsecutiveNoBioBatchesError,
   INDETERMINATE_IDS_REPORT_CAP,
   __resetStopForTesting,
+  handleStopSignal,
   requestStop,
   runFill,
   type FillOptions,
@@ -549,7 +550,11 @@ describe('runFill — LML answers, but never with a bio', () => {
   it.each([
     // [label, outcomes, guard setting]
     ['a batch with one fill in it breaks the streak', noBio(1, 2, 3, 5, 6, 7), 2],
-    ['a batch with any other verdict in it breaks the streak', { ...noBio(1, 2, 3, 5, 6), 4: 'no_match' }, 2],
+    [
+      'a fill-less batch with no no_bio in it breaks the streak',
+      { ...noBio(1, 2, 5, 6), 3: 'no_match', 4: 'no_match' },
+      2,
+    ],
     ['the streak is shorter than the limit', noBio(1, 2, 3, 4, 5, 6), 4],
     // A real cluster of bio-less albums: the operator turns the guard off and resumes.
     ['the guard is disabled with 0', noBio(1, 2, 3, 4, 5, 6, 7, 8), 0],
@@ -558,6 +563,119 @@ describe('runFill — LML answers, but never with a bio', () => {
 
     expect(bulkLookupMetadata).toHaveBeenCalledTimes(4);
     expect(summary).toMatchObject({ stopped_early: false, resume_after_album_id: 8 });
+  });
+});
+
+describe('runFill — a shed that leaves other verdicts standing (BS#2789)', () => {
+  // A breaker shed blanks the bio and nothing else: albums that would have
+  // been no_match, untrusted or card_mismatch still are. Requiring an
+  // all-no_bio batch let any one of them reset the streak.
+  it('aborts after N batches that filled nothing and returned a no_bio, whatever else they held', async () => {
+    const outcomes: Outcomes = { 1: 'no_bio', 2: 'no_match', 3: 'no_bio', 4: 'shed', 5: 'no_bio', 6: 'no_match' };
+
+    await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveNoBioBatches: 3 })).rejects.toBeInstanceOf(
+      ConsecutiveNoBioBatchesError
+    );
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(3);
+    // The whole streak is carried, the unanswered album included, once.
+    expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6] });
+  });
+});
+
+describe('runFill — the failed-batch guard under partial failure (BS#2789)', () => {
+  it('keeps counting a database outage across a batch that attempted no write', async () => {
+    const outcomes: Outcomes = {
+      1: 'write_fails',
+      2: 'write_fails',
+      3: 'no_match',
+      4: 'no_match',
+      5: 'write_fails',
+      6: 'write_fails',
+    };
+
+    await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveFailedBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveFailedBatchesError
+    );
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(3);
+  });
+
+  it('counts a batch in which LML answered for at most a fifth of the albums', async () => {
+    const shed = (...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, 'shed' as const]));
+    const outcomes: Outcomes = { ...shed(1, 2, 3, 4, 6, 7, 8, 9), 5: 'no_match', 10: 'no_match' };
+
+    await expect(
+      run(
+        [...Array(15).keys()].map((i) => i + 1),
+        outcomes,
+        { batchSize: 5, maxConsecutiveFailedBatches: 2 }
+      )
+    ).rejects.toBeInstanceOf(ConsecutiveFailedBatchesError);
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not count a batch with two answers in five', async () => {
+    const outcomes: Outcomes = { 1: 'shed', 2: 'shed', 3: 'shed', 6: 'shed', 7: 'shed', 8: 'shed' };
+
+    const summary = await run(
+      [...Array(10).keys()].map((i) => i + 1),
+      outcomes,
+      {
+        batchSize: 5,
+        maxConsecutiveFailedBatches: 2,
+      }
+    );
+
+    expect(summary.stopped_early).toBe(false);
+  });
+});
+
+describe('runFill — a second stop signal (BS#2789)', () => {
+  it('logs the summary as it stands, next_run included, and exits non-zero without waiting for the batch', async () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    try {
+      enumerateCohort.mockResolvedValue(albums(1, 2, 3, 4) as never);
+      scriptLml({ 3: 'shed' }, [1, 2, 3, 4]);
+      const answer = bulkLookupMetadata.getMockImplementation() as (items: unknown) => Promise<unknown>;
+      bulkLookupMetadata.mockImplementationOnce(answer).mockImplementationOnce((items: unknown) => {
+        // The operator presses Ctrl-C twice while the second batch is in flight.
+        handleStopSignal('SIGINT');
+        handleStopSignal('SIGINT');
+        return answer(items);
+      });
+      applyBioFill.mockResolvedValue(true as never);
+
+      await runFill({ ...OPTIONS, batchSize: 2 });
+
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(log).toHaveBeenCalledWith(
+        'error',
+        'summary',
+        expect.stringContaining('second SIGINT'),
+        expect.objectContaining({
+          stopped_early: true,
+          forced_exit: true,
+          filled: 2,
+          next_run: { BIO_FILL_ALBUM_AFTER_ID: 2, BIO_FILL_ALBUM_IDS: '' },
+        })
+      );
+    } finally {
+      exit.mockRestore();
+    }
+  });
+
+  it('only requests a stop on the first signal', () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    try {
+      handleStopSignal('SIGTERM');
+
+      expect(exit).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith('warn', 'signal', expect.any(String), { signal: 'SIGTERM' });
+    } finally {
+      exit.mockRestore();
+    }
   });
 });
 
