@@ -18,6 +18,9 @@
  *      by reading the catalog back, not by trusting the status code;
  *   4. a failed replay rolls the entire batch back, leaving no observable
  *      partial restore.
+ *   5. a captured `SET_NULL_REFERENCES` column (BS#2799) whose target row is
+ *      gone restores as NULL rather than 500ing the whole batch on a real FK
+ *      check no mocked transaction enforces.
  *
  * `catalog_delete_snapshot` is permanently retained and this suite shares a
  * database with every other integration spec, so every fixture is scoped to a
@@ -265,6 +268,66 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
       [album.id]
     );
     expect(urls).toHaveLength(1);
+  });
+
+  test('replays a rotation row whose card was deleted after the release, as card_id null (BS#2799)', async () => {
+    const album = await createAlbum({ album_title: `${marker} Dangling Card` });
+    const card = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation_cards (bin, number) VALUES ('H', $1) RETURNING id`,
+      [1_000_000 + (uniq % 900_000)]
+    );
+    const cardId = card[0].id;
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date, card_id) VALUES ($1, 'H', now(), $2)`,
+      [album.id, cardId]
+    );
+
+    const batchId = await deleteAlbum(album.id);
+
+    // The card is gone BEFORE the restore runs -- the captured `card_id` no
+    // longer resolves, which is exactly the shape SET_NULL_REFERENCES
+    // (library.service.ts) exists to heal rather than let fail the insert's
+    // own FK check and roll the whole batch back.
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".rotation_cards WHERE id = $1`, [cardId]);
+
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+    expect(res.body.entities[0].children.rotation).toBe(1);
+
+    const restored = await sql.unsafe(`SELECT card_id FROM "${SCHEMA}".rotation WHERE album_id = $1`, [album.id]);
+    expect(restored).toHaveLength(1);
+    expect(restored[0].card_id).toBeNull();
+  });
+
+  test('replays a compilation track credit whose artist was deleted after the release, as track_artist_id null (BS#2799)', async () => {
+    const album = await createAlbum({ album_title: `${marker} Dangling Track Artist` });
+    const trackArtistName = `${marker} Track Artist`;
+    const trackArtist = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
+       VALUES ($1, $1, 'ZZ') RETURNING id`,
+      [trackArtistName]
+    );
+    const trackArtistId = trackArtist[0].id;
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".compilation_track_artist (library_id, artist_name, track_title, track_artist_id)
+       VALUES ($1, $2, 'Side A', $3)`,
+      [album.id, trackArtistName, trackArtistId]
+    );
+
+    const batchId = await deleteAlbum(album.id);
+
+    // Same shape as the rotation card above: the credited artist is gone
+    // before the restore runs.
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id = $1`, [trackArtistId]);
+
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+    expect(res.body.entities[0].children.compilation_track_artist).toBe(1);
+
+    const restored = await sql.unsafe(
+      `SELECT track_artist_id FROM "${SCHEMA}".compilation_track_artist WHERE library_id = $1`,
+      [album.id]
+    );
+    expect(restored).toHaveLength(1);
+    expect(restored[0].track_artist_id).toBeNull();
   });
 
   test('refuses an ambiguous request with a 400 and writes nothing', async () => {
