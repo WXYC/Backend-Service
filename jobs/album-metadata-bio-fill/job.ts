@@ -29,11 +29,11 @@
  * Only a `fill` leaves the cohort. A no-match, a bio-less match and the rest
  * stay, so unlike `streaming-columns-drain` this job cannot resume by
  * re-enumerating — that would re-ask the whole residue — and "done" is
- * `stopped_early: false`, not a cohort near zero. It resumes by cursor
- * (`BIO_FILL_ALBUM_AFTER_ID`), and because a cursor walks past rows LML failed
- * to answer for, the summary reports `resume_after_album_id`: the last album
- * at or below which every row got a definitive verdict. The rows it stopped
- * at are listed, and `BIO_FILL_ALBUM_IDS` retries exactly that list.
+ * `reached_end: true` with nothing carried, not a cohort near zero. Each run
+ * starts from the previous summary's `next_run` (`planResume`): a cursor
+ * (`BIO_FILL_ALBUM_AFTER_ID`) past everything that run asked, and a list
+ * (`BIO_FILL_ALBUM_IDS`) of what it could not settle, so nothing is skipped and
+ * an album LML never answers for does not hold the chain in place.
  *
  * @see WXYC/Backend-Service#2775
  */
@@ -120,11 +120,12 @@ export const ALBUM_AFTER_ID_ENV = 'BIO_FILL_ALBUM_AFTER_ID';
 export const ALBUM_AFTER_ID_DEFAULT = 0;
 
 /**
- * Retry list (BS#2786): a comma-separated list of album ids. When set, only
- * those albums are enumerated, still under the cohort predicate and the
- * eligibility conditions. It is what consumes a summary's
- * `indeterminate_album_ids`, so it holds at most as many ids as one summary
- * reports. Not combinable with the cursor.
+ * Album list (BS#2786): a comma-separated list of album ids, still under the
+ * cohort predicate and the eligibility conditions. With no cursor it is a
+ * retry of just those albums. With a cursor it is carried into the cursor run:
+ * the listed albums are asked first, then everything above the cursor, and
+ * every listed id must be at or below it. A summary's `next_run` is exactly
+ * such a pair, so the list holds at most as many ids as one summary lists.
  */
 export const ALBUM_IDS_ENV = 'BIO_FILL_ALBUM_IDS';
 
@@ -206,15 +207,19 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
   const afterAlbumId = requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, ALBUM_AFTER_ID_DEFAULT, ctx);
   const maxAlbums = requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, MAX_ALBUMS_DEFAULT, ctx);
   const albumIds = resolveAlbumIds(env[ALBUM_IDS_ENV]);
-  // Either would drop listed ids without reporting them: a cursor every one at
-  // or below it, a cap every one past it.
-  for (const [name, value] of [
-    [ALBUM_AFTER_ID_ENV, afterAlbumId],
-    [MAX_ALBUMS_ENV, maxAlbums],
-  ] as const) {
-    if (albumIds.length > 0 && value > 0) {
-      throw new Error(`[${JOB_NAME}] ${ALBUM_IDS_ENV} cannot be combined with a non-zero ${name}.`);
-    }
+  // A listed id above the cursor would be asked by the cursor run anyway, so it
+  // means the wrong cursor was copied. The listed ids sort first, so a cap
+  // drops some of them only when it is smaller than the list.
+  const aboveCursor = afterAlbumId > 0 ? albumIds.find((id) => id > afterAlbumId) : undefined;
+  if (aboveCursor !== undefined) {
+    throw new Error(
+      `[${JOB_NAME}] ${ALBUM_IDS_ENV}: ${aboveCursor} is above ${ALBUM_AFTER_ID_ENV}=${afterAlbumId}; a list carried into a cursor run must be at or below the cursor.`
+    );
+  }
+  if (maxAlbums > 0 && maxAlbums < albumIds.length) {
+    throw new Error(
+      `[${JOB_NAME}] ${MAX_ALBUMS_ENV}=${maxAlbums} is smaller than the ${albumIds.length} listed ids in ${ALBUM_IDS_ENV}; it would drop some of them unreported.`
+    );
   }
   return {
     batchSize: resolveBatchSize(env[BATCH_SIZE_ENV]),
@@ -429,7 +434,7 @@ export class ConsecutiveFailedBatchesError extends Error {
 export class ConsecutiveNoBioBatchesError extends Error {
   constructor(batches: number) {
     super(
-      `${JOB_NAME}: ${batches} consecutive batches came back entirely no_bio. LML's artist-details breaker is probably open: a shed bio reads as "no profile" from here. Resume from resume_after_album_id once LML is healthy, or raise or zero ${MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV} if these albums really have no bios; aborting`
+      `${JOB_NAME}: ${batches} consecutive batches came back entirely no_bio. LML's artist-details breaker is probably open: a shed bio reads as "no profile" from here. The streak's albums are carried in next_run; run it once LML is healthy, or raise or zero ${MAX_CONSECUTIVE_NO_BIO_BATCHES_ENV} if these albums really have no bios; aborting`
     );
     this.name = 'ConsecutiveNoBioBatchesError';
   }
@@ -450,22 +455,98 @@ export interface FillSummary extends VerdictTotals {
   batches: number;
   /** The last album a batch was sent for, or null if none was. */
   last_album_id: number | null;
-  /** Pass this as `BIO_FILL_ALBUM_AFTER_ID` to resume. Every enumerated row at
-   * or below it was settled; it stops advancing at the first row LML did not
-   * answer for or whose write threw, so a resume never skips one. `null` on a
-   * `BIO_FILL_ALBUM_IDS` run: a cursor that walked a hand-picked list says
-   * nothing about the rows between its ids. */
+  /** The list-free fallback: safe to pass as `BIO_FILL_ALBUM_AFTER_ID` on its
+   * own, because it sits below every album this run left unsettled, so a
+   * resume never skips one. It stalls where `next_run` does not: an album that
+   * is never answered holds it in place. `null` on a retry run, which has no
+   * cursor. */
   resume_after_album_id: number | null;
-  /** Up to `INDETERMINATE_IDS_REPORT_CAP` of the albums counted in
-   * `indeterminate` or `write_failed`. On a `BIO_FILL_ALBUM_IDS` run, which
-   * has no cursor, it is the whole retry list: also every listed album the run
-   * never reached, and after a no-bio abort the albums of that streak. */
+  /** Up to `INDETERMINATE_IDS_REPORT_CAP` of the albums this run leaves for
+   * the next one below `next_run`'s cursor: unanswered, `write_failed`, the
+   * albums of a no-bio streak that aborted it, and listed albums it never
+   * reached. `indeterminate` and `write_failed` are always the exact counts. */
   indeterminate_album_ids: number[];
+  /** What to run next: the cursor past everything this run asked, carrying the
+   * albums it left as the list. When those outgrow one list, the list-free
+   * `resume_after_album_id` and no list. `null` when a retry run left nothing,
+   * and on a dry run. */
+  next_run: NextRun | null;
   execute: boolean;
   /** True when the loop ended before its last batch: a signal, the pause, or
    * an abort. Without it those are indistinguishable from a completed run. */
   stopped_early: boolean;
+  /** True when the run asked every album its cursor and list covered: it was
+   * not stopped or aborted, and the cap did not cut the enumeration. A capped
+   * run that used its whole cap reports false, since more may lie above. */
+  reached_end: boolean;
 }
+
+/** The environment that starts the next run where this one left off. */
+export interface NextRun {
+  BIO_FILL_ALBUM_AFTER_ID: number;
+  BIO_FILL_ALBUM_IDS: string;
+}
+
+export interface ResumePlan {
+  /** Every album the next run must ask that its cursor does not reach, in
+   * `album_id` order. */
+  pending: number[];
+  resumeAfterAlbumId: number | null;
+  nextRun: NextRun | null;
+}
+
+/**
+ * Where a run leaves its work for the next one (BS#2786). The cursor moves past
+ * the last album asked, and everything the run asked but could not settle rides
+ * along as the next run's list: an album LML never answers for then costs one
+ * retry per run, where a frozen cursor made every later run re-ask the whole
+ * stretch above it. Pure; called after each batch, so the summary is current
+ * however the run ends, and once more after the loop.
+ */
+export const planResume = (state: {
+  /** Enumerated album ids, in the order they were asked. */
+  candidateIds: readonly number[];
+  /** How many of them were in a batch that came back. */
+  processed: number;
+  /** Asked but not settled: unanswered, or the write threw. */
+  unsettledIds: readonly number[];
+  /** Index of a no-bio streak's first album, when that guard aborted the run.
+   * Every album in it looked settled, and a breaker shed may have hit any. */
+  noBioStreakStart?: number;
+  afterAlbumId: number;
+  /** A list with no cursor: only the listed albums, and no cursor to move. */
+  retryOnly: boolean;
+}): ResumePlan => {
+  const { candidateIds, processed, afterAlbumId, retryOnly } = state;
+  const cursor = processed > 0 ? Math.max(afterAlbumId, candidateIds[processed - 1]) : afterAlbumId;
+  // Albums never reached above the cursor are the cursor's; below it, only a
+  // carried list's albums can be, and those have to be listed again.
+  const unreached = candidateIds.slice(processed).filter((id) => retryOnly || id <= cursor);
+  const pending = [
+    ...new Set([
+      ...state.unsettledIds,
+      ...candidateIds.slice(state.noBioStreakStart ?? processed, processed),
+      ...unreached,
+    ]),
+  ].sort((a, b) => a - b);
+
+  if (retryOnly) {
+    return {
+      pending,
+      resumeAfterAlbumId: null,
+      nextRun: pending.length > 0 ? { BIO_FILL_ALBUM_AFTER_ID: 0, BIO_FILL_ALBUM_IDS: pending.join(',') } : null,
+    };
+  }
+  const resumeAfterAlbumId = pending.length > 0 ? pending[0] - 1 : cursor;
+  return {
+    pending,
+    resumeAfterAlbumId,
+    nextRun:
+      pending.length <= INDETERMINATE_IDS_REPORT_CAP
+        ? { BIO_FILL_ALBUM_AFTER_ID: cursor, BIO_FILL_ALBUM_IDS: pending.join(',') }
+        : { BIO_FILL_ALBUM_AFTER_ID: resumeAfterAlbumId, BIO_FILL_ALBUM_IDS: '' },
+  };
+};
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -489,21 +570,6 @@ const stopAwareSleep = async (ms: number): Promise<void> => {
   }
 };
 
-/**
- * Where a cursor resume may safely start, given this batch's outcome.
- * Returns the album just before the batch's first unsettled row (unanswered,
- * or its write threw), or the batch's last album when every row was settled.
- */
-const settledThrough = (batch: FillCandidate[], unsettledIds: number[], before: number): number => {
-  const unsettled = new Set(unsettledIds);
-  let through = before;
-  for (const candidate of batch) {
-    if (unsettled.has(candidate.album_id)) break;
-    through = candidate.album_id;
-  }
-  return through;
-};
-
 export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   log('info', 'started', `${JOB_NAME} starting`, {
     batch_size: options.batchSize,
@@ -522,8 +588,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     albumIds: options.albumIds,
     timeoutMs: options.readTimeoutMs,
   });
-  const listRun = options.albumIds.length > 0;
-  if (listRun) {
+  const retryOnly = options.albumIds.length > 0 && options.afterAlbumId === 0;
+  if (options.albumIds.length > 0) {
     const enumeratedIds = new Set(candidates.map((c) => c.album_id));
     const missing = options.albumIds.filter((id) => !enumeratedIds.has(id));
     if (missing.length > 0) {
@@ -549,10 +615,12 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     enumerated: candidates.length,
     batches: batches.length,
     last_album_id: null,
-    resume_after_album_id: options.albumIds.length > 0 ? null : options.afterAlbumId,
+    resume_after_album_id: retryOnly ? null : options.afterAlbumId,
     indeterminate_album_ids: [],
+    next_run: null,
     execute: options.execute,
     stopped_early: false,
+    reached_end: false,
   };
 
   if (!options.execute) {
@@ -590,15 +658,28 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   // the cohort re-count below still run against rows already written. It is
   // rethrown after that accounting.
   let abort: Error | undefined;
-  let resumeFrozen = false;
   let consecutiveFailedBatches = 0;
   let consecutiveNoBioBatches = 0;
-  // Where the cursor stood before the current all-`no_bio` streak began.
-  let resumeBeforeNoBioStreak = summary.resume_after_album_id;
-  // Candidates whose batch came back, and, after a no-bio abort, the index of
-  // the streak's first album. A list run relists everything from there on.
+  // What `planResume` needs: how many candidates were in a batch that came
+  // back, which of those were not settled, and, after a no-bio abort, where
+  // the streak began.
+  const candidateIds = candidates.map((c) => c.album_id);
+  const unsettledIds: number[] = [];
   let processed = 0;
   let noBioStreakStart: number | undefined;
+  const applyResumePlan = (): void => {
+    const plan = planResume({
+      candidateIds,
+      processed,
+      unsettledIds,
+      noBioStreakStart,
+      afterAlbumId: options.afterAlbumId,
+      retryOnly,
+    });
+    summary.resume_after_album_id = plan.resumeAfterAlbumId;
+    summary.indeterminate_album_ids = plan.pending.slice(0, INDETERMINATE_IDS_REPORT_CAP);
+    summary.next_run = plan.nextRun;
+  };
 
   for (const [b, batch] of batches.entries()) {
     // The shared pause consults `shouldStop` too, but not when the probe is
@@ -633,14 +714,9 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     for (const [key, value] of Object.entries(counts) as Array<[keyof VerdictTotals, number]>) {
       summary[key] += value;
     }
-    const room = INDETERMINATE_IDS_REPORT_CAP - summary.indeterminate_album_ids.length;
-    summary.indeterminate_album_ids.push(...indeterminateAlbumIds.slice(0, Math.max(0, room)));
+    unsettledIds.push(...indeterminateAlbumIds);
     summary.last_album_id = batch[batch.length - 1].album_id;
-    if (consecutiveNoBioBatches === 0) resumeBeforeNoBioStreak = summary.resume_after_album_id;
-    if (!resumeFrozen && summary.resume_after_album_id !== null) {
-      summary.resume_after_album_id = settledThrough(batch, indeterminateAlbumIds, summary.resume_after_album_id);
-      resumeFrozen = indeterminateAlbumIds.length > 0;
-    }
+    applyResumePlan();
     log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, {
       batch: b + 1,
       of: batches.length,
@@ -664,8 +740,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       consecutiveNoBioBatches >= options.maxConsecutiveNoBioBatches
     ) {
       // Every row in the streak looked answered, so the cursor walked through
-      // it. Put it back, or a resume would never re-ask what the shed took.
-      summary.resume_after_album_id = resumeBeforeNoBioStreak;
+      // it. `planResume` lists its albums for the next run, or a resume would
+      // never re-ask what the shed took.
       noBioStreakStart = processed - batches.slice(b + 1 - consecutiveNoBioBatches, b + 1).flat().length;
       abort = new ConsecutiveNoBioBatchesError(consecutiveNoBioBatches);
     }
@@ -678,14 +754,11 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     if (b < batches.length - 1) await stopAwareSleep(interBatchSleepMs);
   }
 
-  // A list run has no cursor, so its `indeterminate_album_ids` is the whole
-  // retry list: add what it never reached and, after a no-bio abort, the streak
-  // it walked through. The streak's batches hold no unanswered row and every
-  // earlier one is already listed, so nothing repeats; the list never exceeds
-  // the cap, which bounds the run's own list.
-  if (listRun) {
-    summary.indeterminate_album_ids.push(...candidates.slice(noBioStreakStart ?? processed).map((c) => c.album_id));
-  }
+  // Once more after the loop, for a no-bio streak or a run that never reached
+  // a batch. A capped run that used its whole cap may have more above it.
+  applyResumePlan();
+  summary.reached_end =
+    abort === undefined && !summary.stopped_early && (options.maxAlbums === 0 || candidates.length < options.maxAlbums);
 
   // The accounting reads the database too, and a run that aborted because the
   // database went away will fail here as well. That must not cost the summary

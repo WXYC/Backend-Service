@@ -137,17 +137,35 @@ describe('resolveOptions', () => {
     expect(() => resolveOptions({ BIO_FILL_ALBUM_IDS: ids(201) }, [])).toThrow(/at most 200/);
   });
 
-  // Each would drop listed ids without reporting them: a cursor the ones below
-  // it, a cap the ones past it (a canary's leftover BIO_FILL_MAX_ALBUMS=25).
-  it.each([['BIO_FILL_ALBUM_AFTER_ID'], ['BIO_FILL_MAX_ALBUMS']])(
-    'refuses an id list together with a non-zero %s',
-    (name) => {
-      const both = { BIO_FILL_ALBUM_IDS: '101,102', [name]: '25' };
+  // A list with a cursor is carried into that cursor run, which asks the
+  // listed albums first and then everything above the cursor (a summary's
+  // next_run). A listed id above the cursor would be asked by the cursor run
+  // anyway, so it means the wrong cursor was copied.
+  it('carries a list into a cursor run when every listed id is at or below the cursor', () => {
+    const options = resolveOptions({ BIO_FILL_ALBUM_IDS: '101,102', BIO_FILL_ALBUM_AFTER_ID: '102' }, []);
 
-      expect(() => resolveOptions(both, [])).toThrow(`BIO_FILL_ALBUM_IDS cannot be combined with a non-zero ${name}`);
-      expect(resolveOptions({ ...both, [name]: '0' }, []).albumIds).toEqual([101, 102]);
-    }
-  );
+    expect(options).toMatchObject({ albumIds: [101, 102], afterAlbumId: 102 });
+  });
+
+  it('refuses a listed id above the cursor, and names it', () => {
+    const both = { BIO_FILL_ALBUM_IDS: '101,102', BIO_FILL_ALBUM_AFTER_ID: '101' };
+
+    expect(() => resolveOptions(both, [])).toThrow('102 is above BIO_FILL_ALBUM_AFTER_ID=101');
+  });
+
+  // The listed albums sort first, so a cap drops them only when it is smaller
+  // than the list (a canary's leftover BIO_FILL_MAX_ALBUMS=25 against a long list).
+  it('refuses a cap smaller than the list', () => {
+    const env = { BIO_FILL_ALBUM_IDS: '101,102,103', BIO_FILL_MAX_ALBUMS: '2' };
+
+    expect(() => resolveOptions(env, [])).toThrow('BIO_FILL_MAX_ALBUMS=2 is smaller than the 3 listed ids');
+  });
+
+  it.each([['3'], ['2400']])('allows BIO_FILL_MAX_ALBUMS=%s with a list of three', (cap) => {
+    const env = { BIO_FILL_ALBUM_IDS: '101,102,103', BIO_FILL_MAX_ALBUMS: cap };
+
+    expect(resolveOptions(env, []).maxAlbums).toBe(Number(cap));
+  });
 
   it('bounds the batch size at the LML client cap, and says what the cap is', () => {
     // `bulkLookupMetadata` throws client-side above the cap. A dry run never
