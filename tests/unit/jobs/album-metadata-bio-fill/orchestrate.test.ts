@@ -466,11 +466,13 @@ describe('runFill — batches that settle nothing', () => {
     }
   );
 
-  it('names both causes in the abort, since the counter cannot tell which it was', () => {
-    const { message } = new ConsecutiveFailedBatchesError(3);
+  it.each([
+    ['lml', /LML answered for at most a fifth/],
+    ['database', /every attempted write threw/],
+  ] as const)('names the streak that tripped, here %s', (cause, wording) => {
+    const { message } = new ConsecutiveFailedBatchesError(3, cause);
 
-    expect(message).toMatch(/LML/);
-    expect(message).toMatch(/write/);
+    expect(message).toMatch(wording);
   });
 
   it.each([
@@ -493,16 +495,22 @@ describe('runFill — what an abort reports to Sentry', () => {
   // Both guards end through one capture site; each must keep its own step so
   // the two causes stay separable in Sentry.
   it.each([
-    ['consecutive_failed_batches', { 1: 'shed', 2: 'shed', 3: 'shed', 4: 'shed' }, { maxConsecutiveFailedBatches: 2 }],
+    [
+      'consecutive_failed_batches',
+      { 1: 'shed', 2: 'shed', 3: 'shed', 4: 'shed' },
+      { maxConsecutiveFailedBatches: 2 },
+      { batches_done: 2, of: 2, cause: 'lml' },
+    ],
     [
       'consecutive_no_bio_batches',
       { 1: 'no_bio', 2: 'no_bio', 3: 'no_bio', 4: 'no_bio' },
       { maxConsecutiveNoBioBatches: 2 },
+      { batches_done: 2, of: 2 },
     ],
-  ] as const)('captures the abort under %s', async (step, outcomes, options) => {
+  ] as const)('captures the abort under %s', async (step, outcomes, options, extra) => {
     await expect(run([1, 2, 3, 4], outcomes, options)).rejects.toThrow();
 
-    expect(captureError).toHaveBeenCalledWith(expect.any(Error), step, { batches_done: 2, of: 2 });
+    expect(captureError).toHaveBeenCalledWith(expect.any(Error), step, extra);
   });
 });
 
@@ -550,11 +558,6 @@ describe('runFill — LML answers, but never with a bio', () => {
   it.each([
     // [label, outcomes, guard setting]
     ['a batch with one fill in it breaks the streak', noBio(1, 2, 3, 5, 6, 7), 2],
-    [
-      'a fill-less batch with no no_bio in it breaks the streak',
-      { ...noBio(1, 2, 5, 6), 3: 'no_match', 4: 'no_match' },
-      2,
-    ],
     ['the streak is shorter than the limit', noBio(1, 2, 3, 4, 5, 6), 4],
     // A real cluster of bio-less albums: the operator turns the guard off and resumes.
     ['the guard is disabled with 0', noBio(1, 2, 3, 4, 5, 6, 7, 8), 0],
@@ -580,6 +583,46 @@ describe('runFill — a shed that leaves other verdicts standing (BS#2789)', () 
     expect(bulkLookupMetadata).toHaveBeenCalledTimes(3);
     // The whole streak is carried, the unanswered album included, once.
     expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6] });
+  });
+});
+
+describe('runFill — only a fill breaks a no-bio streak (BS#2789)', () => {
+  // A batch that filled nothing and returned no no_bio says nothing either way:
+  // LML answered for none of it, or every answer was no_match and the like.
+  // Resetting on it let a breaker shed hide behind an occasional timed-out call.
+  it.each([
+    ['a batch LML answered for none of', { 1: 'no_bio', 2: 'no_bio', 3: 'throw', 5: 'no_bio', 6: 'no_bio' }],
+    [
+      'a batch of other verdicts only',
+      { 1: 'no_bio', 2: 'no_bio', 3: 'no_match', 4: 'no_match', 5: 'no_bio', 6: 'no_bio' },
+    ],
+  ] as const)('carries the streak across %s, and lists it from where it began', async (_label, outcomes) => {
+    await expect(run([1, 2, 3, 4, 5, 6, 7, 8], outcomes, { maxConsecutiveNoBioBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveNoBioBatchesError
+    );
+
+    expect(bulkLookupMetadata).toHaveBeenCalledTimes(3);
+    expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6] });
+  });
+
+  it('carries a no-bio streak even when the failed-batch abort ends the run on the same batch', async () => {
+    // Batches of 5, each one no_bio beside four unanswered: both guards trip on
+    // the second batch, and the failed-batch abort is the one thrown.
+    const outcomes: Outcomes = {
+      ...Object.fromEntries([2, 3, 4, 5, 7, 8, 9, 10].map((id) => [id, 'shed' as const])),
+      1: 'no_bio',
+      6: 'no_bio',
+    };
+
+    await expect(
+      run(
+        [...Array(15).keys()].map((i) => i + 1),
+        outcomes,
+        { batchSize: 5, maxConsecutiveFailedBatches: 2, maxConsecutiveNoBioBatches: 2 }
+      )
+    ).rejects.toBeInstanceOf(ConsecutiveFailedBatchesError);
+
+    expect(loggedSummary()).toMatchObject({ indeterminate_album_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
   });
 });
 
@@ -633,8 +676,15 @@ describe('runFill — the failed-batch guard under partial failure (BS#2789)', (
 });
 
 describe('runFill — a second stop signal (BS#2789)', () => {
+  /** `process.exit` and the logger flush, stubbed; the exit runs after the flush. */
+  const stubExit = () => ({
+    exit: jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never),
+    flush: jest.spyOn(logger, 'closeLogger').mockResolvedValue(undefined),
+  });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
   it('logs the summary as it stands, next_run included, and exits non-zero without waiting for the batch', async () => {
-    const exit = jest.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const { exit, flush } = stubExit();
     try {
       enumerateCohort.mockResolvedValue(albums(1, 2, 3, 4) as never);
       scriptLml({ 3: 'shed' }, [1, 2, 3, 4]);
@@ -648,7 +698,10 @@ describe('runFill — a second stop signal (BS#2789)', () => {
       applyBioFill.mockResolvedValue(true as never);
 
       await runFill({ ...OPTIONS, batchSize: 2 });
+      await settle();
 
+      // Sentry is flushed first, within closeLogger's own bound.
+      expect(flush).toHaveBeenCalled();
       expect(exit).toHaveBeenCalledWith(1);
       expect(log).toHaveBeenCalledWith(
         'error',
@@ -663,6 +716,51 @@ describe('runFill — a second stop signal (BS#2789)', () => {
       );
     } finally {
       exit.mockRestore();
+      flush.mockRestore();
+    }
+  });
+
+  it('says the accounting was cut short, not that a batch was abandoned, when it lands after the loop', async () => {
+    const { exit, flush } = stubExit();
+    try {
+      countCohort.mockReset();
+      countCohort.mockResolvedValueOnce(100 as never).mockImplementationOnce(() => {
+        handleStopSignal('SIGTERM');
+        handleStopSignal('SIGTERM');
+        return Promise.resolve(98);
+      });
+
+      await run([1, 2]);
+      await settle();
+
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(log).toHaveBeenCalledWith(
+        'error',
+        'summary',
+        expect.stringContaining('accounting'),
+        expect.objectContaining({ forced_exit: true, stopped_early: false, reached_end: true, filled: 2 })
+      );
+      expect(log).not.toHaveBeenCalledWith('error', 'summary', expect.stringContaining('abandoned'), expect.anything());
+    } finally {
+      exit.mockRestore();
+      flush.mockRestore();
+    }
+  });
+
+  it('logs no summary, and keeps the exit code, once the run has ended', async () => {
+    const { exit, flush } = stubExit();
+    try {
+      await run([1, 2]);
+      handleStopSignal('SIGINT');
+      handleStopSignal('SIGINT');
+      await settle();
+
+      expect(exit).toHaveBeenCalledWith(0);
+      expect(log).toHaveBeenCalledWith('warn', 'forced_exit', expect.any(String), { signal: 'SIGINT' });
+      expect(log).not.toHaveBeenCalledWith('error', 'summary', expect.any(String), expect.anything());
+    } finally {
+      exit.mockRestore();
+      flush.mockRestore();
     }
   });
 
