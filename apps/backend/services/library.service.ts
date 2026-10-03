@@ -7031,7 +7031,8 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // delete here would destroy the filed item and its `intake_item_passes`
     // with no way back. BS#2801 (slice 9) adds the capture, the `RESTORE_PLAN`
     // entries and the `SET_NULL_REFERENCES` for its `auth_user`, `rotation_id`
-    // and `cited_*` columns; it must land before any writer does.
+    // and `cited_*` columns; nothing may set `intake_items.album_id` before it
+    // lands (only filing, BS#2803, sets it, and it waits on #2801 through #2802).
     await captureCatalogDeleteSnapshot(tx, {
       entityKind: 'library',
       entityId: album_id,
