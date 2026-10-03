@@ -253,6 +253,8 @@ const WXYC_GRANTS = {
     // the pre-DJ tier and the legal boundary for digital-archive playback is
     // "authenticated DJs".
     digital_archive: [],
+    // Explicit denial, same reasoning again: `member` is the pre-DJ tier, and
+    // the in-app review workflow opens at `dj`.
     reviews: [],
   },
   dj: {
@@ -347,8 +349,9 @@ deepFreeze(statement);
  * produces (`unknownResourceResponse` vs `unauthorizedResourceResponse`), and
  * the organization plugin surfaces those strings through its own
  * `hasPermission`. Stripping keeps every constructed role byte-identical to
- * the pre-matrix construction. No `[]` cells exist today; this is what makes a
- * future explicit denial free of side effects.
+ * the pre-matrix construction. This is what keeps the explicit denials
+ * (`member`'s `album_reviews`, `digital_archive` and `reviews`) free of side
+ * effects.
  */
 const stripEmpty = (grants: Record<string, readonly string[]>): Record<string, readonly string[]> =>
   Object.fromEntries(Object.entries(grants).filter(([, actions]) => actions.length > 0));
