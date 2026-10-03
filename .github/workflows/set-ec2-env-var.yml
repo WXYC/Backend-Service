@@ -316,9 +316,10 @@ jobs:
           # without a code PR once the gate lands, same reason as DONATE_* above.
           # No var here is read by any app route yet (this issue only ships the
           # allowlist entry) — a later #2791 slice makes apps/backend the sole
-          # reader (the intake-gate check gating `POST /library` /
-          # `POST /library/rotation`); restart_target=backend (the default) will
-          # be the one needed once that lands.
+          # reader (the intake-gate check gating `POST /library`,
+          # `POST /library/rotation` and `POST /library/filings`);
+          # restart_target=backend (the default) will be the one needed once
+          # that lands.
           #
           # Rollback is NOT an empty value — the resolve step below hard-fails on
           # empty, but the gate's own off state is "unset or in the future"
