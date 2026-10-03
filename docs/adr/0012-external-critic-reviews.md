@@ -4,7 +4,7 @@ Short attributed excerpts from external music-critic reviews (Pitchfork, The Qui
 
 The four concepts and why none of them is this one:
 
-- **`reviews`** ([ADR 0006](0006-reviews-model-extension.md)) — the one-per-album, author-owned (`author_dj_id` FK to `auth_user`), MD-queued in-app Review model at `/reviews`. Authored by WXYC DJs, mutable, library-bound. Critic reviews are third-party, not DJ-authored, and there are many per album.
+- **`reviews`** ([ADR 0006](0006-reviews-model-extension.md)) — the many-per-release in-app review model at `/reviews`, authored as text with an optional account link (`author_user_id`) and bound to an intake item or a library release. Authored by WXYC DJs and station staff, mutable until the item's slip is printed, library-bound. Critic reviews are third-party, not DJ-authored, and there are many per album.
 - **`album_review_submissions`** ([ADR 0011](0011-album-review-submissions-separate-archive.md)) — the ~1,650 DJ-written Google-Form reviews, an append-only PII-internal archive. Also WXYC-authored; critic reviews carry no PII and are meant to be shown with attribution, the opposite posture.
 - **`AlbumReview` DTO** (wxyc-shared #229, closed) — reserved for the ADR 0006 in-app model's wire shape. `CriticReviewItem` is deliberately named to avoid colliding with it.
 - **`album_critic_reviews`** (this ADR) — external, third-party, attributed, multiple per album, keyed on `library.id`.
