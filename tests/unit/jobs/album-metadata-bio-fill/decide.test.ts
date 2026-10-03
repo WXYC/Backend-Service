@@ -87,6 +87,50 @@ describe('decideBioFill', () => {
     expect(decide(item)).toEqual({ kind });
   });
 
+  // A degraded lookup shed its Discogs work (LML#755 / LML#930): the library
+  // rows are real, nothing Discogs-derived is, and bulk still labels it
+  // `match` (or `no_match` when no row came back). Short of a fill it says
+  // nothing about this album, so it must be asked again, not settled.
+  const degraded = (reason: string, body: Record<string, unknown>) => ({
+    ...body,
+    degraded: true,
+    degraded_reason: reason,
+  });
+
+  it.each([
+    ['a load shed with no artwork', matchItem(degraded('cache_only', lookup(null)))],
+    ['a deadline shed with no artwork', matchItem(degraded('deadline_exceeded', lookup(null)))],
+    ['a saturated Discogs with no artwork', matchItem(degraded('upstream_unavailable', lookup(null)))],
+    ['a degraded match with artwork but no bio', matchItem(degraded('upstream_unavailable', lookup({})))],
+    [
+      'a degraded no_match',
+      { index: 0, status: 'no_match', lookup: degraded('cache_only', { search_type: 'none', results: [] }) },
+    ],
+    [
+      'a degraded match on a fallback search type',
+      matchItem(degraded('deadline_exceeded', lookup({ artist_bio: BIO }, { search_type: 'alternative' }))),
+    ],
+    [
+      'a degraded match on a different card',
+      matchItem(
+        degraded('cache_only', {
+          search_type: 'direct',
+          results: [{ library_item: { id: 9999 }, artwork: { artist_bio: BIO } }],
+        })
+      ),
+    ],
+  ])('is indeterminate on %s', (_label, item) => {
+    expect(decide(item)).toEqual({ kind: 'indeterminate', unexpectedIndex: false });
+  });
+
+  it('still fills from a degraded lookup that carries a bio for this card', () => {
+    // Degradation sheds work; it does not make what did come back untrue.
+    expect(decide(matchItem(degraded('deadline_exceeded', lookup({ artist_bio: BIO }))))).toEqual({
+      kind: 'fill',
+      fill: { artist_bio: BIO, artist_wikipedia_url: null },
+    });
+  });
+
   it('fills the bio and the Wikipedia URL when both come back', () => {
     expect(decide(matchItem(lookup({ artist_bio: BIO, wikipedia_url: WIKI })))).toEqual({
       kind: 'fill',

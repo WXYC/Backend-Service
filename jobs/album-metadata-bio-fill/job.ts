@@ -277,6 +277,8 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
       log('warn', 'lml_indeterminate', `no usable LML verdict for album_id=${candidate.album_id}; not written`, {
         album_id: candidate.album_id,
         status: item?.status ?? null,
+        // A degraded lookup is labelled `match`; this says what was shed.
+        degraded_reason: item?.lookup?.degraded_reason ?? null,
         got_index: item?.index ?? null,
         error_message: item?.message ?? null,
       });
