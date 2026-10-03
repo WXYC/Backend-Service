@@ -185,7 +185,12 @@ describe('runFill — dry run', () => {
 
     await runFill(options);
 
-    expect(enumerateCohort).toHaveBeenCalledWith(25, 53799, options.readTimeoutMs, []);
+    expect(enumerateCohort).toHaveBeenCalledWith({
+      limit: 25,
+      afterAlbumId: 53799,
+      albumIds: [],
+      timeoutMs: options.readTimeoutMs,
+    });
   });
 
   it('enumerates only the listed ids when given a list, still under the cap', async () => {
@@ -193,6 +198,11 @@ describe('runFill — dry run', () => {
 
     await runFill(options);
 
-    expect(enumerateCohort).toHaveBeenCalledWith(25, 0, options.readTimeoutMs, [7, 102]);
+    expect(enumerateCohort).toHaveBeenCalledWith({
+      limit: 25,
+      afterAlbumId: 0,
+      albumIds: [7, 102],
+      timeoutMs: options.readTimeoutMs,
+    });
   });
 });

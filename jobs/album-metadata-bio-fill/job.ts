@@ -128,6 +128,11 @@ export const ALBUM_AFTER_ID_DEFAULT = 0;
  */
 export const ALBUM_IDS_ENV = 'BIO_FILL_ALBUM_IDS';
 
+/** How many unsettled album ids the summary lists, and so how many one retry
+ * list may hold. The counts are always exact; the list is for re-running a
+ * handful by hand, not for a full outage. */
+export const INDETERMINATE_IDS_REPORT_CAP = 200;
+
 /** `album_id` is a Postgres `integer`. */
 const ALBUM_ID_MAX = 2_147_483_647;
 
@@ -398,10 +403,6 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
 
 // -- Orchestration -----------------------------------------------------------
 
-/** How many unsettled album ids the summary lists. The counts are always
- * exact; the list is for re-running a handful by hand, not for a full outage. */
-export const INDETERMINATE_IDS_REPORT_CAP = 200;
-
 /** Thrown when `maxConsecutiveFailedBatches` batches in a row settled
  * nothing. Carried through the accounting and rethrown, like the pause
  * ceiling, so the run exits non-zero with its partial totals logged. The
@@ -506,12 +507,12 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
 
   const cohortBefore = await countCohort(options.readTimeoutMs);
   const eligible = await countEligible(options.readTimeoutMs);
-  const candidates = await enumerateCohort(
-    options.maxAlbums,
-    options.afterAlbumId,
-    options.readTimeoutMs,
-    options.albumIds
-  );
+  const candidates = await enumerateCohort({
+    limit: options.maxAlbums,
+    afterAlbumId: options.afterAlbumId,
+    albumIds: options.albumIds,
+    timeoutMs: options.readTimeoutMs,
+  });
   const batches: FillCandidate[][] = [];
   for (let i = 0; i < candidates.length; i += options.batchSize) {
     batches.push(candidates.slice(i, i + options.batchSize));
