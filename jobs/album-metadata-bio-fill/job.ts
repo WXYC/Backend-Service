@@ -300,6 +300,13 @@ const emptyTotals = (): VerdictTotals => ({
   unexpected_index: 0,
 });
 
+/** A batch result's verdict totals, without its size or its unsettled ids. */
+const totalsOf = (result: BatchResult): VerdictTotals => {
+  const totals = emptyTotals();
+  for (const key of Object.keys(totals) as Array<keyof VerdictTotals>) totals[key] = result[key];
+  return totals;
+};
+
 export const emptyBatchResult = (batchSize: number): BatchResult => ({
   batchSize,
   ...emptyTotals(),
@@ -447,6 +454,84 @@ export class ConsecutiveNoBioBatchesError extends Error {
   }
 }
 
+/** The streaks a run stops itself on. `noBioFrom` is the candidate index of
+ * the no-bio streak's first album. */
+export interface Streaks {
+  lml: number;
+  database: number;
+  noBio: number;
+  noBioFrom: number;
+}
+
+export const NO_STREAKS: Streaks = { lml: 0, database: 0, noBio: 0, noBioFrom: 0 };
+
+/** The abort a batch tripped, with what its Sentry event carries. */
+export type StreakTrip =
+  | { error: ConsecutiveFailedBatchesError; step: 'consecutive_failed_batches'; extra: { cause: FailedBatchStreak } }
+  | { error: ConsecutiveNoBioBatchesError; step: 'consecutive_no_bio_batches'; extra: Record<string, never> };
+
+/**
+ * One batch's effect on the streaks a run stops itself on (BS#2789). Pure, so
+ * each rule is a row in `streaks.test.ts`.
+ *
+ * - **LML** failed a batch when it answered for at most a fifth of it (4 of 5
+ *   at the default size), so a partial shed counts, not only a total one.
+ * - **The database** failed a batch when every write it attempted threw, which
+ *   a dead database does while LML still returns its usual no_bio and no_match.
+ *   A batch that attempted no write says nothing about the database, so it
+ *   neither counts nor resets.
+ * - **No-bio.** A breaker shed blanks the bio and nothing else, so a shed batch
+ *   still holds its no_match, untrusted and card_mismatch albums. What it
+ *   cannot hold is a fill: in normal running a fill-less batch of 5 is about 1
+ *   in 100. So a fill-less batch with a no_bio counts and only a fill resets. A
+ *   batch with neither (LML answered for none of it, or only with other
+ *   verdicts) leaves the streak as it is, or a shed could hide behind an
+ *   occasional timed-out call.
+ *
+ * Returns the new streaks and the abort to throw, the failed-batch one first.
+ * When the no-bio limit is reached it also returns where that streak began,
+ * whichever abort is thrown: every album in it looked settled, so `planResume`
+ * has to list them all.
+ */
+export const advanceStreaks = (
+  streaks: Streaks,
+  result: Pick<BatchResult, 'batchSize' | 'fill' | 'no_bio' | 'indeterminate' | 'write_failed'>,
+  batchStart: number,
+  limits: Pick<FillOptions, 'maxConsecutiveFailedBatches' | 'maxConsecutiveNoBioBatches'>
+): { streaks: Streaks; noBioStreakStart?: number; trip?: StreakTrip } => {
+  const lml = 5 * result.indeterminate >= 4 * result.batchSize ? streaks.lml + 1 : 0;
+  const database =
+    result.fill === 0 ? streaks.database : result.write_failed === result.fill ? streaks.database + 1 : 0;
+  const noBio = result.fill > 0 ? 0 : result.no_bio > 0 ? streaks.noBio + 1 : streaks.noBio;
+  const noBioFrom = streaks.noBio === 0 && noBio === 1 ? batchStart : streaks.noBioFrom;
+  const next = { lml, database, noBio, noBioFrom };
+
+  const noBioTripped = limits.maxConsecutiveNoBioBatches > 0 && noBio >= limits.maxConsecutiveNoBioBatches;
+  const noBioStreakStart = noBioTripped ? noBioFrom : undefined;
+  const max = limits.maxConsecutiveFailedBatches;
+  const failed: { on: FailedBatchStreak; count: number } | undefined =
+    lml >= max ? { on: 'lml', count: lml } : database >= max ? { on: 'database', count: database } : undefined;
+  if (failed) {
+    return {
+      streaks: next,
+      noBioStreakStart,
+      trip: {
+        error: new ConsecutiveFailedBatchesError(failed.count, failed.on),
+        step: 'consecutive_failed_batches',
+        extra: { cause: failed.on },
+      },
+    };
+  }
+  if (noBioTripped) {
+    return {
+      streaks: next,
+      noBioStreakStart,
+      trip: { error: new ConsecutiveNoBioBatchesError(noBio), step: 'consecutive_no_bio_batches', extra: {} },
+    };
+  }
+  return { streaks: next };
+};
+
 export interface FillSummary extends VerdictTotals {
   /** Every bio-less Discogs-matched row, before and after. Their difference
    * is the fills and nothing else — the non-fill residue stays in the cohort. */
@@ -567,20 +652,21 @@ const toError = (err: unknown): Error => (err instanceof Error ? err : new Error
 /** Cooperative stop, flipped by SIGTERM/SIGINT in `main`. The in-flight batch
  * always finishes; its writes are committed per album. */
 let stopRequested = false;
-/** Stop signals received, where the run is, and the running summary: what a
- * second signal reports. */
+/** Stop signals received, and what a second one logs: `runFill` keeps it
+ * current for the stretch of a run that has a summary to give, and clears it
+ * once the run has logged its own outcome. */
 let stopSignals = 0;
-let runPhase: 'starting' | 'running' | 'finishing' | 'done' = 'starting';
-let runningSummary: FillSummary | undefined;
+let forcedExitReport: ((signal: NodeJS.Signals) => void) | undefined;
 export const requestStop = (): void => {
   stopRequested = true;
 };
 export const __resetStopForTesting = (): void => {
   stopRequested = false;
   stopSignals = 0;
-  runPhase = 'starting';
-  runningSummary = undefined;
+  forcedExitReport = undefined;
 };
+
+const forcedBy = (signal: NodeJS.Signals): string => `${JOB_NAME} forced to exit by a second ${signal}`;
 
 /** `sleep`, but wakes early once a stop has been requested. */
 const stopAwareSleep = async (ms: number): Promise<void> => {
@@ -678,14 +764,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   // the cohort re-count below still run against rows already written. It is
   // rethrown after that accounting.
   let abort: Error | undefined;
-  // Two failed-batch streaks, because LML and the database fail differently.
-  // A batch that attempted no write says nothing about the database, so it
-  // must neither count toward that streak nor reset it.
-  let lmlFailedBatches = 0;
-  let writeFailedBatches = 0;
-  // The no-bio streak, and the index of its first album.
-  let consecutiveNoBioBatches = 0;
-  let noBioStreakFrom = 0;
+  let streaks = NO_STREAKS;
   // What `planResume` needs: how many candidates were in a batch that came
   // back, which of those were not settled, and, after a no-bio abort, where
   // the streak began.
@@ -707,9 +786,16 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     summary.next_run = plan.nextRun;
   };
   // Current before the first batch, so a forced exit always has a resume point.
+  // The batch in flight is safe to abandon: its writes are fill-null, and its
+  // albums are above `next_run`'s cursor or in its list.
   applyResumePlan();
-  runningSummary = summary;
-  runPhase = 'running';
+  forcedExitReport = (signal) =>
+    log('error', 'summary', `${forcedBy(signal)}; the batch in flight was abandoned`, {
+      ...summary,
+      stopped_early: true,
+      reached_end: false,
+      forced_exit: true,
+    });
 
   for (const [b, batch] of batches.entries()) {
     // The shared pause consults `shouldStop` too, but not when the probe is
@@ -740,11 +826,11 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
 
     const result = await runBatch(batch, { budgetMs: options.budgetMs });
     processed += batch.length;
-    const { batchSize, indeterminateAlbumIds, ...counts } = result;
+    const counts = totalsOf(result);
     for (const [key, value] of Object.entries(counts) as Array<[keyof VerdictTotals, number]>) {
       summary[key] += value;
     }
-    unsettledIds.push(...indeterminateAlbumIds);
+    unsettledIds.push(...result.indeterminateAlbumIds);
     summary.last_album_id = batch[batch.length - 1].album_id;
     applyResumePlan();
     log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, {
@@ -757,64 +843,32 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       next_run: summary.next_run,
     });
 
-    // LML failed a batch when it answered for at most a fifth of it (4 of 5 at
-    // the default size), so a partial shed counts and not only a total one.
-    lmlFailedBatches = 5 * result.indeterminate >= 4 * batchSize ? lmlFailedBatches + 1 : 0;
-    // The database failed a batch when every write it attempted threw, which a
-    // dead database does while LML still returns its usual no_bio and no_match.
-    if (result.fill > 0) writeFailedBatches = result.write_failed === result.fill ? writeFailedBatches + 1 : 0;
-    // A breaker shed blanks the bio and nothing else, so a shed batch still
-    // holds its no_match, untrusted and card_mismatch albums. What it cannot
-    // hold is a fill: in normal running a fill-less batch of 5 is about 1 in
-    // 100. So a fill-less batch with a no_bio counts and only a fill resets.
-    // A batch with neither (LML answered for none of it, or only with other
-    // verdicts) leaves the streak as it is, or a shed could hide behind an
-    // occasional timed-out call.
-    if (result.fill > 0) consecutiveNoBioBatches = 0;
-    else if (result.no_bio > 0) {
-      if (consecutiveNoBioBatches === 0) noBioStreakFrom = processed - batch.length;
-      consecutiveNoBioBatches += 1;
-    }
-    const noBioTripped =
-      options.maxConsecutiveNoBioBatches > 0 && consecutiveNoBioBatches >= options.maxConsecutiveNoBioBatches;
-    // Every row in the streak looked answered, so the cursor walked through it.
-    // `planResume` lists its albums for the next run whichever abort ends this
-    // one, or a resume would never re-ask what the shed took.
-    if (noBioTripped) noBioStreakStart = noBioStreakFrom;
-    const failedOn: FailedBatchStreak | undefined =
-      lmlFailedBatches >= options.maxConsecutiveFailedBatches
-        ? 'lml'
-        : writeFailedBatches >= options.maxConsecutiveFailedBatches
-          ? 'database'
-          : undefined;
-    if (failedOn) {
-      abort = new ConsecutiveFailedBatchesError(failedOn === 'lml' ? lmlFailedBatches : writeFailedBatches, failedOn);
-    } else if (noBioTripped) {
-      abort = new ConsecutiveNoBioBatchesError(consecutiveNoBioBatches);
-    }
-    if (abort instanceof ConsecutiveFailedBatchesError) {
-      captureError(abort, 'consecutive_failed_batches', {
-        batches_done: b + 1,
-        of: batches.length,
-        cause: abort.streak,
-      });
-      break;
-    }
-    if (abort) {
-      captureError(abort, 'consecutive_no_bio_batches', { batches_done: b + 1, of: batches.length });
+    const step = advanceStreaks(streaks, result, processed - batch.length, options);
+    streaks = step.streaks;
+    if (step.trip) {
+      noBioStreakStart = step.noBioStreakStart;
+      abort = step.trip.error;
+      captureError(abort, step.trip.step, { batches_done: b + 1, of: batches.length, ...step.trip.extra });
       break;
     }
     if (b < batches.length - 1) await stopAwareSleep(interBatchSleepMs);
   }
 
-  // Once more after the loop, for a no-bio streak or a run that never reached
-  // a batch. A capped run that used its whole cap may have more above it.
-  runPhase = 'finishing';
+  // Once more after the loop, to carry the albums of a no-bio streak that
+  // aborted it. A capped run that used its whole cap may have more above it.
   applyResumePlan();
+  summary.stopped_early ||= abort !== undefined;
   summary.reached_end =
     abort === undefined &&
     !summary.stopped_early &&
     (retryOnly || options.maxAlbums === 0 || candidates.length < options.maxAlbums);
+  forcedExitReport = (signal) =>
+    log(
+      'error',
+      'summary',
+      `${forcedBy(signal)} during the closing accounting; cohortAfter is the before-count${abort ? `; the run had aborted: ${abort.message}` : ''}`,
+      { ...summary, forced_exit: true }
+    );
 
   // The accounting reads the database too, and a run that aborted because the
   // database went away will fail here as well. That must not cost the summary
@@ -829,13 +883,11 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   }
 
   // From here the run's own summary or finished line is its record.
-  runPhase = 'done';
-  runningSummary = undefined;
+  forcedExitReport = undefined;
   const failure = abort ?? accountingError;
   if (failure) {
     // `main`'s `finished` line will not run once this throws, so this log is
     // what preserves the partial totals and the resume point.
-    summary.stopped_early ||= abort !== undefined;
     const how = abort ? 'aborted early' : 'could not finish its accounting';
     log('error', 'summary', `${JOB_NAME} ${how}: ${failure.message}`, {
       ...summary,
@@ -849,12 +901,11 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
 /**
  * SIGTERM/SIGINT. The first requests a stop between batches. A second does not
  * wait out the batch in flight, which can take the whole bulk timeout: it logs
- * the summary as it stands and exits 1, rather than leave `kill -9` as the way
- * out and lose the summary with it. The abandoned batch is safe to lose: its
- * writes are fill-null, and its albums are above `next_run`'s cursor or in its
- * list, since the summary dates from before it. During the closing accounting
- * the summary is complete but for `cohortAfter`; before the first batch, or
- * once the run has logged its own outcome, there is no summary to give.
+ * what `runFill` has left for it (the summary as it stands) and exits 1, rather
+ * than leave `kill -9` as the way out and lose the summary with it. Before the
+ * first batch, or once the run has logged its own outcome, there is no summary
+ * to give, and a finished run's exit code stands. A third signal and on find
+ * the forced exit already under way.
  */
 export const handleStopSignal = (signal: NodeJS.Signals): void => {
   stopSignals += 1;
@@ -863,23 +914,13 @@ export const handleStopSignal = (signal: NodeJS.Signals): void => {
     requestStop();
     return;
   }
+  if (stopSignals > 2) return;
   let exitCode = 1;
-  const forced = `${JOB_NAME} forced to exit by a second ${signal}`;
-  if (runPhase === 'running') {
-    log('error', 'summary', `${forced}; the batch in flight was abandoned`, {
-      ...runningSummary,
-      stopped_early: true,
-      reached_end: false,
-      forced_exit: true,
-    });
-  } else if (runPhase === 'finishing') {
-    log('error', 'summary', `${forced} during the closing accounting; cohortAfter is the before-count`, {
-      ...runningSummary,
-      forced_exit: true,
-    });
+  if (forcedExitReport) {
+    forcedExitReport(signal);
   } else {
-    log('warn', 'forced_exit', forced, { signal });
-    if (runPhase === 'done') exitCode = Number(process.exitCode ?? 0);
+    log('warn', 'forced_exit', forcedBy(signal), { signal });
+    exitCode = Number(process.exitCode ?? 1);
   }
   // Sentry first, within closeLogger's own 2 s bound, so the events of the
   // abandoned batch are not dropped with the process.
@@ -900,6 +941,8 @@ export const main = async (): Promise<void> => {
   try {
     const summary = await runFill(resolveOptions());
     log('info', 'finished', `${JOB_NAME} done`, { ...summary });
+    // Set, not left undefined, so a forced exit after this keeps it.
+    process.exitCode = 0;
   } catch (err) {
     captureError(err, 'main');
     log('error', 'failed', `${JOB_NAME} failed: ${err instanceof Error ? err.message : String(err)}`, {
@@ -908,6 +951,8 @@ export const main = async (): Promise<void> => {
     });
     process.exitCode = 1;
   } finally {
+    // A run that threw from inside its loop never cleared its report.
+    forcedExitReport = undefined;
     await closeLogger();
     await closeDatabaseConnection();
   }
