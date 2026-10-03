@@ -41,7 +41,6 @@ import type { CatalogSort, CatalogOrder } from '../services/library-search.servi
 import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
-import { getPostHogClient } from '../utils/posthog.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
 
@@ -286,7 +285,7 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
 
   // Omitted or JSON-`null` `code_number` (BS#2475): server-assigns it below.
   // `!= null` rather than a falsy check because `code_number: 0` is a real
-  // filing (the V/A shelves — see `validateArtistCodeNumber` above) and must
+  // filing (the V/A shelves — see `validateArtistCodeNumber` in the filing service) and must
   // take the supplied arm. Supplied: an MD's deliberate choice, validated but
   // never rewritten -- a collision on that arm is reported as a straight 409,
   // not silently recomputed.
@@ -2276,9 +2275,11 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
 
   try {
     const result = await fileLibraryRelease(plan.input);
-    res.status(200).json(await completeLibraryFiling(result, plan.input));
+    const filed = await completeLibraryFiling(result, plan.input);
+    res.status(200).json(filed);
   } catch (err) {
-    res.status(409).json(mapLibraryFilingError(err));
+    const conflict = mapLibraryFilingError(err);
+    res.status(409).json(conflict);
   }
 };
 
@@ -3017,8 +3018,8 @@ type UpdateAlbumRequest = {
   discogsUnavailable?: boolean;
   discogsUnavailableNote?: string | null;
   // BS#2564: the PATCH half of BS#2410's release call-code fields. Reuses
-  // `validateCodeNumber`/`validateCodeVolumeLetters` verbatim (defined above
-  // for `addAlbum`), so the two write surfaces can't disagree on bounds.
+  // `validateCodeNumber`/`validateCodeVolumeLetters` verbatim (defined in the
+  // filing service, imported for `addAlbum`), so the two write surfaces can't disagree on bounds.
   // `code_volume_letters` additionally accepts an explicit `null` here (a
   // create has no prior value to clear, so `addAlbum` never needed this) —
   // see the clearing block below.
