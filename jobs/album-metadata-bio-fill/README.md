@@ -34,18 +34,20 @@ One consequence: dj-site's album panel and the iOS V1 path gate their artist _su
 
 Each album gets exactly one verdict (`decide.ts`), and only `fill` writes.
 
-| verdict         | meaning                                                                     | stays in the cohort           |
-| --------------- | --------------------------------------------------------------------------- | ----------------------------- |
-| `fill`          | trusted match on this row's card, with a bio                                | no                            |
-| `no_bio`        | trusted match on this row's card, no bio                                    | yes                           |
-| `no_match`      | LML searched and found nothing                                              | yes                           |
-| `untrusted`     | LML matched by a fallback search (`search_type` is not `direct`)            | yes                           |
-| `card_mismatch` | LML resolved a different catalog card                                       | yes                           |
-| `indeterminate` | LML did not answer: a shed, an error, an out-of-order result, a thrown call | yes — and must be asked again |
+| verdict         | meaning                                                                                                           | stays in the cohort           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `fill`          | trusted match on this row's card, with a bio                                                                      | no                            |
+| `no_bio`        | trusted match on this row's card, no bio                                                                          | yes                           |
+| `no_match`      | LML searched and found nothing                                                                                    | yes                           |
+| `untrusted`     | LML matched by a fallback search (`search_type` is not `direct`)                                                  | yes                           |
+| `card_mismatch` | LML resolved a different catalog card                                                                             | yes                           |
+| `indeterminate` | LML did not answer: a shed, an error, an out-of-order result, a thrown call, or a degraded lookup short of a fill | yes — and must be asked again |
 
 A `fill` then ends one of three ways, each with its own counter: `filled`, `skipped_raced` (the row had a bio by write time), or `write_failed` (the UPDATE threw). A failed write does not stop the run. The row is logged, listed for retry beside the indeterminate ones, and holds the resume cursor exactly as an unanswered row does.
 
-`no_bio` is not a stable verdict. When the circuit breaker on LML's artist-details step is open, LML still returns the match, with a null bio, and that is identical on the wire to an artist with no Discogs profile. For one album the job cannot tell the two apart. For a streak it can: `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES` (default 10; `0` disables) aborts the run once that many batches in a row came back entirely `no_bio`.
+**A degraded lookup is asked again.** LML treats every bulk item as low priority, and when it sheds a lookup's Discogs work it still answers: the library rows alone, flagged `degraded` with a `degraded_reason` of `cache_only` (its admission shed), `deadline_exceeded` (the per-item budget) or `upstream_unavailable` (a saturated Discogs). Bulk labels that item `match`, or `no_match` when no row came back. Short of a fill it is `indeterminate`, so it holds the cursor and is retried; the `lml_indeterminate` log line names the reason. A degraded lookup that does carry a bio for the row's card still fills.
+
+`no_bio` is not a stable verdict. When the circuit breaker on LML's artist-details step is open, LML still returns the match, with a null bio and without the `degraded` flag, and that is identical on the wire to an artist with no Discogs profile. For one album the job cannot tell the two apart. For a streak it can: `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES` (default 10; `0` disables) aborts the run once that many batches in a row came back entirely `no_bio`.
 
 - **What the guard catches:** a sustained shed. Without it every album lands `no_bio`, no batch fails, the cursor walks to the end, and the run reports success having skipped real fills.
 - **What it cannot catch:** a shed shorter than the streak (under 10 batches, which is 50 albums at the defaults), or one in which some album in each batch got another verdict, since anything but `no_bio` in a batch resets the count. Those rows are recorded `no_bio` and the cursor passes them. The remedy is a final pass over the residue: when the chain is done, run it once more from cursor 0. Only rows that still have no bio are in the cohort, so that pass re-asks exactly them.
