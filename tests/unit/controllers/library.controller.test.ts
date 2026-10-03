@@ -2187,8 +2187,7 @@ describe('library.controller', () => {
 
   describe('pickAddRotationFields (BS#2109)', () => {
     // The controller's gate hands the picker the bin it already parsed.
-    const pick = (body: Parameters<typeof pickAddRotationFields>[0]) =>
-      pickAddRotationFields(body, body.rotation_bin);
+    const pick = (body: Parameters<typeof pickAddRotationFields>[0]) => pickAddRotationFields(body, body.rotation_bin);
 
     it('picks album_id and rotation_bin, dropping the snapshot trio, when album_id is present', () => {
       const picked = pick({
