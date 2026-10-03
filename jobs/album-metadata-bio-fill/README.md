@@ -47,10 +47,10 @@ A `fill` then ends one of three ways, each with its own counter: `filled`, `skip
 
 **A degraded lookup is asked again.** LML treats every bulk item as low priority, and when it sheds a lookup's Discogs work it still answers: the library rows alone, flagged `degraded` with a `degraded_reason` of `cache_only` (its admission shed), `deadline_exceeded` (the per-item budget) or `upstream_unavailable` (a saturated Discogs). Bulk labels that item `match`, or `no_match` when no row came back. Short of a fill it is `indeterminate`, so it is carried into the next run and asked again; the `lml_indeterminate` log line names the reason. A degraded lookup that does carry a bio for the row's card still fills.
 
-`no_bio` is not a stable verdict. When the circuit breaker on LML's artist-details step is open, LML still returns the match, with a null bio and without the `degraded` flag, and that is identical on the wire to an artist with no Discogs profile. For one album the job cannot tell the two apart. For a streak it can: `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES` (default 10; `0` disables) aborts the run once that many batches in a row came back entirely `no_bio`.
+`no_bio` is not a stable verdict. When the circuit breaker on LML's artist-details step is open, LML still returns the match, with a null bio and without the `degraded` flag, and that is identical on the wire to an artist with no Discogs profile. For one album the job cannot tell the two apart. For a streak it can: `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES` (default 10; `0` disables) aborts the run once that many batches in a row filled nothing and came back with at least one `no_bio`. A shed blanks the bio and nothing else, so a shed batch still holds its `no_match`, `untrusted` and `card_mismatch` albums; what it cannot hold is a fill. In normal running a fill-less batch of 5 is about 1 in 100.
 
 - **What the guard catches:** a sustained shed. Without it every album lands `no_bio`, no batch fails, the cursor walks to the end, and the run reports success having skipped real fills.
-- **What it cannot catch:** a shed shorter than the streak (under 10 batches, which is 50 albums at the defaults), or one in which some album in each batch got another verdict, since anything but `no_bio` in a batch resets the count. Those rows are recorded `no_bio` and nothing carries them. The remedy is a final pass over the residue: when the chain is done, run it once more from cursor 0. Only rows that still have no bio are in the cohort, so that pass re-asks exactly them.
+- **What it cannot catch:** a shed shorter than the streak (under 10 batches, which is 50 albums at the defaults), or a partial one that still lets a fill through every few batches, since a fill resets the count. Those rows are recorded `no_bio` and nothing carries them. The remedy is a final pass over the residue: when the chain is done, run it once more from cursor 0. Only rows that still have no bio are in the cohort, so that pass re-asks exactly them.
 - **When it fires on a real cluster:** the cursor walks `album_id` order, so compilations, or the albums of one artist with no profile, can sit together. Raise the knob or set it to `0`, and resume.
 
 ## Reading a run
@@ -64,12 +64,12 @@ Because only `fill` leaves the cohort, this job differs from `streaming-columns-
 A run exits non-zero, after logging a `summary` line with its partial totals and `next_run`, when:
 
 - the cumulative live-DJ pause exceeds `LIVE_ACTIVITY_MAX_PAUSE_MS` (resume later with `next_run`), or
-- `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES` batches in a row settled nothing: LML answered for no album in them, or every write they attempted threw. Either LML or the database is down. The `lml_batch_failed` and `lml_indeterminate` lines point at LML and the `write_failed` lines at the database; fix that first. Or
-- `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES` batches in a row came back entirely `no_bio`: LML's artist-details breaker is probably open (see Verdicts). Every album in the streak looked settled, so `next_run` carries them all, to be asked again once LML is healthy. Take `next_run` from the `summary` line, not from the streak's `batch_done` lines, which do not include the streak.
+- `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES` batches in a row failed, counted separately for LML and the database. LML failed a batch when it answered for at most a fifth of it (4 of 5 at the default size). The database failed one when every write it attempted threw; a batch that attempted no write neither counts nor resets that count. Either LML or the database is down. The `lml_batch_failed` and `lml_indeterminate` lines point at LML and the `write_failed` lines at the database; fix that first. Or
+- `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES` batches in a row filled nothing and came back with `no_bio`: LML's artist-details breaker is probably open (see Verdicts). Every album in the streak looked settled, so `next_run` carries them all, to be asked again once LML is healthy. Take `next_run` from the `summary` line, not from the streak's `batch_done` lines, which do not include the streak.
 
 The `summary` line is logged even when the closing `ANALYZE` or re-count fails, as they will if the database is what went away. It then carries `accounting_failed: true`, and `cohortAfter` is the before-count, not a measurement.
 
-SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0, provided the container is given long enough to finish the batch in flight. See `--stop-timeout` under "Running it".
+SIGTERM or SIGINT stops it cleanly between batches with `stopped_early: true` and exit 0, provided the container is given long enough to finish the batch in flight. See `--stop-timeout` under "Running it". A second signal does not wait for that batch: it logs the `summary` line as it stands, with `forced_exit: true` and `next_run`, and exits 1. The abandoned batch is safe to lose, since its writes are fill-null and `next_run` predates it.
 
 ### Resuming
 
@@ -98,8 +98,8 @@ A list holds at most 200 ids. Carried into a cursor run, every listed id must be
 | `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                                                       |
 | `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | cursor: every album above this id, plus any listed at or below it                                              |
 | `BIO_FILL_ALBUM_IDS`                                   | unset   | album list, at most 200: with no cursor, a retry of just these; with one, asked as well as everything above it |
-| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that settled nothing                                                    |
-| `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES`              | 10      | abort after this many batches in a row that were entirely `no_bio`; 0 disables                                 |
+| `BIO_FILL_MAX_CONSECUTIVE_FAILED_BATCHES`              | 3       | abort after this many batches in a row that LML or the database failed                                         |
+| `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES`              | 10      | abort after this many batches in a row that filled nothing and returned a `no_bio`; 0 disables                 |
 | `LIVE_ACTIVITY_LOOKBACK_SECONDS`                       | 300     | a flowsheet track newer than this means a DJ is live; 0 disables the pause                                     |
 | `LIVE_ACTIVITY_PAUSE_MS`, `LIVE_ACTIVITY_MAX_PAUSE_MS` | shared  | see `docs/env-vars.md`                                                                                         |
 
