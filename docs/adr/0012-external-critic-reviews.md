@@ -4,9 +4,9 @@ Short attributed excerpts from external music-critic reviews (Pitchfork, The Qui
 
 The four concepts and why none of them is this one:
 
-- **`reviews`** ([ADR 0006](0006-reviews-model-extension.md)) — the many-per-release in-app review model at `/reviews`, authored as text with an optional account link (`author_user_id`) and bound to an intake item or a library release. Authored by WXYC DJs and station staff, mutable until the item's slip is printed, library-bound. Critic reviews are third-party, not DJ-authored, and there are many per album.
+- **`reviews`** ([ADR 0006](0006-reviews-model-extension.md)) — the many-per-release in-app review model at `/reviews`, authored as text with an optional account link (`author_user_id`) and bound to an intake item until filing, or to a library release after. Authored by WXYC DJs and station staff; author-editable until the intake item's slip is printed, music-director-editable (with reprint) after, and a library-release review stays author-editable indefinitely. Critic reviews are third-party, not DJ-authored.
 - **`album_review_submissions`** ([ADR 0011](0011-album-review-submissions-separate-archive.md)) — the ~1,650 DJ-written Google-Form reviews, an append-only PII-internal archive. Also WXYC-authored; critic reviews carry no PII and are meant to be shown with attribution, the opposite posture.
-- **`AlbumReview` DTO** (wxyc-shared #229, closed) — reserved for the ADR 0006 in-app model's wire shape. `CriticReviewItem` is deliberately named to avoid colliding with it.
+- **`AlbumReview` DTO** (wxyc-shared `api.yaml`) — the form archive's wire shape ([ADR 0011](0011-album-review-submissions-separate-archive.md)), backing `GET /album-reviews`; the in-app model has no DTO of its own yet and needs its own name when it does. `CriticReviewItem` is deliberately named to avoid colliding with it.
 - **`album_critic_reviews`** (this ADR) — external, third-party, attributed, multiple per album, keyed on `library.id`.
 
 ## Departure from "Complement, Don't Confirm"
