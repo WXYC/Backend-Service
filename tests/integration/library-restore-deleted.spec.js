@@ -20,7 +20,8 @@
  *      partial restore.
  *   5. a captured `SET_NULL_REFERENCES` column (BS#2799) whose target row is
  *      gone restores as NULL rather than 500ing the whole batch on a real FK
- *      check no mocked transaction enforces.
+ *      check no mocked transaction enforces, and one whose target is still
+ *      live restores with its captured value.
  *
  * `catalog_delete_snapshot` is permanently retained and this suite shares a
  * database with every other integration spec, so every fixture is scoped to a
@@ -58,6 +59,10 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
   const deletedArtistIds = [];
   let artistId;
   let unrestorableSeq = 0;
+  // BS#2799 fixtures that outlive their test when the target is kept live.
+  const createdCardIds = [];
+  const createdTrackArtistIds = [];
+  let setNullSeq = 0;
 
   /**
    * Creates and immediately deletes a fresh artist so its
@@ -160,6 +165,14 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".library_delete_denylist WHERE library_id = ANY($1::int[])`, [
           touchedAlbumIds,
         ]);
+      }
+      // After `library`: the restored rows that referenced these cascaded
+      // away with it, so nothing still points at them.
+      if (createdCardIds.length > 0) {
+        await sql.unsafe(`DELETE FROM "${SCHEMA}".rotation_cards WHERE id = ANY($1::int[])`, [createdCardIds]);
+      }
+      if (createdTrackArtistIds.length > 0) {
+        await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id = ANY($1::int[])`, [createdTrackArtistIds]);
       }
       if (deletedArtistIds.length > 0) {
         // These artists are already hard-deleted by their own DELETE call --
@@ -270,65 +283,85 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
     expect(urls).toHaveLength(1);
   });
 
-  test('replays a rotation row whose card was deleted after the release, as card_id null (BS#2799)', async () => {
-    const album = await createAlbum({ album_title: `${marker} Dangling Card` });
-    const card = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".rotation_cards (bin, number) VALUES ('H', $1) RETURNING id`,
-      [1_000_000 + (uniq % 900_000)]
-    );
-    const cardId = card[0].id;
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date, card_id) VALUES ($1, 'H', now(), $2)`,
-      [album.id, cardId]
-    );
+  // BS#2799: one body per declared SET_NULL_REFERENCES column
+  // (library.service.ts), run in both directions. With the target deleted
+  // before the restore, the captured value no longer resolves and must come
+  // back NULL instead of failing the insert's real FK check and rolling the
+  // whole batch back. With the target still live, it must come back with its
+  // captured value -- the half a mocked transaction cannot prove, because a
+  // type mismatch between the jsonb-captured value and the driver's would
+  // null every live reference and still pass the dangling case.
+  const setNullReferences = [
+    {
+      column: 'rotation.card_id',
+      child: 'rotation',
+      createTarget: async (seq) => {
+        const rows = await sql.unsafe(
+          `INSERT INTO "${SCHEMA}".rotation_cards (bin, number) VALUES ('H', $1) RETURNING id`,
+          [1_000_000 + ((uniq + seq) % 900_000)]
+        );
+        createdCardIds.push(rows[0].id);
+        return rows[0].id;
+      },
+      insertReferencing: (albumId, targetId) =>
+        sql.unsafe(
+          `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date, card_id) VALUES ($1, 'H', now(), $2)`,
+          [albumId, targetId]
+        ),
+      deleteTarget: (targetId) => sql.unsafe(`DELETE FROM "${SCHEMA}".rotation_cards WHERE id = $1`, [targetId]),
+      readRestored: (albumId) =>
+        sql.unsafe(`SELECT card_id AS value FROM "${SCHEMA}".rotation WHERE album_id = $1`, [albumId]),
+    },
+    {
+      column: 'compilation_track_artist.track_artist_id',
+      child: 'compilation_track_artist',
+      createTarget: async (seq) => {
+        const rows = await sql.unsafe(
+          `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
+           VALUES ($1, $1, 'ZZ') RETURNING id`,
+          [`${marker} Track Artist ${seq}`]
+        );
+        createdTrackArtistIds.push(rows[0].id);
+        return rows[0].id;
+      },
+      insertReferencing: (albumId, targetId) =>
+        sql.unsafe(
+          `INSERT INTO "${SCHEMA}".compilation_track_artist (library_id, artist_name, track_title, track_artist_id)
+           VALUES ($1, $2, 'Side A', $3)`,
+          [albumId, `${marker} Track Artist`, targetId]
+        ),
+      deleteTarget: (targetId) => sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id = $1`, [targetId]),
+      readRestored: (albumId) =>
+        sql.unsafe(`SELECT track_artist_id AS value FROM "${SCHEMA}".compilation_track_artist WHERE library_id = $1`, [
+          albumId,
+        ]),
+    },
+  ];
 
-    const batchId = await deleteAlbum(album.id);
+  test.each(
+    setNullReferences.flatMap((reference) => [
+      { ...reference, targetDeleted: true },
+      { ...reference, targetDeleted: false },
+    ])
+  )(
+    'replays $column with the target deleted=$targetDeleted after the release (BS#2799)',
+    async ({ column, child, createTarget, insertReferencing, deleteTarget, readRestored, targetDeleted }) => {
+      setNullSeq += 1;
+      const album = await createAlbum({ album_title: `${marker} ${column} ${targetDeleted ? 'Gone' : 'Live'}` });
+      const targetId = await createTarget(setNullSeq);
+      await insertReferencing(album.id, targetId);
 
-    // The card is gone BEFORE the restore runs -- the captured `card_id` no
-    // longer resolves, which is exactly the shape SET_NULL_REFERENCES
-    // (library.service.ts) exists to heal rather than let fail the insert's
-    // own FK check and roll the whole batch back.
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".rotation_cards WHERE id = $1`, [cardId]);
+      const batchId = await deleteAlbum(album.id);
+      if (targetDeleted) await deleteTarget(targetId);
 
-    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
-    expect(res.body.entities[0].children.rotation).toBe(1);
+      const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+      expect(res.body.entities[0].children[child]).toBe(1);
 
-    const restored = await sql.unsafe(`SELECT card_id FROM "${SCHEMA}".rotation WHERE album_id = $1`, [album.id]);
-    expect(restored).toHaveLength(1);
-    expect(restored[0].card_id).toBeNull();
-  });
-
-  test('replays a compilation track credit whose artist was deleted after the release, as track_artist_id null (BS#2799)', async () => {
-    const album = await createAlbum({ album_title: `${marker} Dangling Track Artist` });
-    const trackArtistName = `${marker} Track Artist`;
-    const trackArtist = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters)
-       VALUES ($1, $1, 'ZZ') RETURNING id`,
-      [trackArtistName]
-    );
-    const trackArtistId = trackArtist[0].id;
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".compilation_track_artist (library_id, artist_name, track_title, track_artist_id)
-       VALUES ($1, $2, 'Side A', $3)`,
-      [album.id, trackArtistName, trackArtistId]
-    );
-
-    const batchId = await deleteAlbum(album.id);
-
-    // Same shape as the rotation card above: the credited artist is gone
-    // before the restore runs.
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id = $1`, [trackArtistId]);
-
-    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
-    expect(res.body.entities[0].children.compilation_track_artist).toBe(1);
-
-    const restored = await sql.unsafe(
-      `SELECT track_artist_id FROM "${SCHEMA}".compilation_track_artist WHERE library_id = $1`,
-      [album.id]
-    );
-    expect(restored).toHaveLength(1);
-    expect(restored[0].track_artist_id).toBeNull();
-  });
+      const restored = await readRestored(album.id);
+      expect(restored).toHaveLength(1);
+      expect(restored[0].value).toBe(targetDeleted ? null : targetId);
+    }
+  );
 
   test('refuses an ambiguous request with a 400 and writes nothing', async () => {
     const album = await createAlbum({ album_title: `${marker} Taken` });

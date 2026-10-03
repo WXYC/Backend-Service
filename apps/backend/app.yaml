@@ -4186,8 +4186,13 @@ paths:
 
 
         Rows come back under the primary keys they had before the delete, so
-        every captured FK stays valid with no rewriting. `unrecoverable`
-        depends on the batch's `entity_kind`.
+        every captured FK into the batch stays valid with no rewriting. The
+        one rewrite is a nullable `ON DELETE SET NULL` reference whose target
+        was deleted after the batch was (`rotation.card_id`,
+        `compilation_track_artist.track_artist_id`): it comes back NULL, as
+        its delete rule would have left it, rather than failing the restore —
+        so a 200 does not mean a restored rotation row kept its card filing.
+        `unrecoverable` depends on the batch's `entity_kind`.
 
 
         For a `library` batch, the five dependents no envelope ever captures

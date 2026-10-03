@@ -5375,7 +5375,11 @@ const RESTORE_PLAN: Record<
  * release that used it; `compilation_track_artist.track_artist_id` when the
  * track's artist is deleted. The schema-derived guard in
  * `tests/unit/services/library.restoreSetNull.test.ts` fails when a new `SET NULL`
- * column on a replayed table is not declared here.
+ * column on a replayed table is not declared here, when a declared target is
+ * not the column the schema references, and when a target table the restore
+ * also replays comes AFTER its referencing table in `RESTORE_PLAN` (the probe
+ * would read it as gone). A self-referential column is fine: see
+ * `nullDanglingSetNullReferences`.
  */
 export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
   rotation: { card_id: rotation_cards.id },
@@ -5681,27 +5685,66 @@ export const findLibrarySlotOccupant = async (
 
 /**
  * NULLs out any `SET_NULL_REFERENCES` column on `records` whose captured
- * value no longer resolves to a live row — the outcome `ON DELETE SET NULL`
- * would have produced had the target been deleted while this row was live.
- * One existence query per declared column, covering every record's captured
- * value for that column, not one query per row. Mutates `records` in place
- * so `replayCapturedRows` can insert them unchanged afterward.
+ * value no longer resolves — the outcome `ON DELETE SET NULL` would have
+ * produced had the target been deleted while this row was live. Mutates
+ * `records` in place so `replayCapturedRows` can insert them unchanged
+ * afterward. `references` defaults to `tableName`'s `SET_NULL_REFERENCES`
+ * entry; a test passes its own.
+ *
+ * A captured value resolves when its target is live OR is restored by this
+ * same insert. A target from an EARLIER-replayed table is already live by the
+ * time this runs (same transaction), so the probe sees it. A target in
+ * `table` itself (a self-referential column such as slice 16a's
+ * `rotation.moved_from_rotation_id`) is not live yet, but Postgres checks a
+ * non-deferrable FK at the end of the statement, so the insert accepts it in
+ * any row order — answering it from `records` keeps a reference the database
+ * would have accepted. A target table replayed AFTER `table` would be read as
+ * gone; the schema-derived guard in
+ * `tests/unit/services/library.restoreSetNull.test.ts` rejects that order.
+ *
+ * One existence query per declared column, covering every unresolved value,
+ * not one per row. It takes `FOR KEY SHARE` — the lock the insert's own FK
+ * check would take — so a target deleted concurrently either blocks behind
+ * this restore or, once its delete commits, is skipped and nulled here,
+ * instead of slipping in between the probe and the insert as a `23503`.
+ *
+ * A nulled reference is logged: the restore still succeeds, but the row did
+ * not come back exactly as captured (a rotation row restored without its
+ * card filing), and whoever reads the restore record needs to know.
  */
-const nullDanglingSetNullReferences = async (
+export const nullDanglingSetNullReferences = async (
   tx: DbTransaction,
   tableName: string,
-  records: Record<string, unknown>[]
+  table: PgTable,
+  records: Record<string, unknown>[],
+  references: Readonly<Record<string, PgColumn>> = SET_NULL_REFERENCES[tableName] ?? {}
 ): Promise<void> => {
-  for (const [column, target] of Object.entries(SET_NULL_REFERENCES[tableName] ?? {})) {
+  for (const [column, target] of Object.entries(references)) {
     const captured = [...new Set(records.map((record) => record[column]).filter((value) => value != null))];
     if (captured.length === 0) continue;
-    const live = await tx.select({ value: target }).from(target.table).where(inArray(target, captured));
-    const liveValues = new Set(live.map((row) => row.value));
+    const resolved = new Set(target.table === table ? records.map((record) => record[target.name]) : []);
+    const unresolved = captured.filter((value) => !resolved.has(value));
+    if (unresolved.length > 0) {
+      const live = await tx
+        .select({ value: target })
+        .from(target.table)
+        .where(inArray(target, unresolved))
+        .for('key share');
+      for (const row of live) resolved.add(row.value);
+    }
+    const nulled = unresolved.filter((value) => !resolved.has(value));
+    if (nulled.length === 0) continue;
     for (const record of records) {
-      if (record[column] != null && !liveValues.has(record[column])) {
+      if (record[column] != null && !resolved.has(record[column])) {
         record[column] = null;
       }
     }
+    console.warn(
+      '[Library] restore nulled %s.%s for target(s) that no longer exist: %s',
+      tableName,
+      column,
+      JSON.stringify(nulled)
+    );
   }
 };
 
@@ -5752,7 +5795,7 @@ const replayCapturedRows = async (
   const columns = Object.keys(records[0]);
   if (columns.length === 0) return 0;
 
-  await nullDanglingSetNullReferences(tx, tableName, records);
+  await nullDanglingSetNullReferences(tx, tableName, table, records);
 
   const columnList = sql.join(
     columns.map((column) => sql.identifier(column)),
@@ -5778,6 +5821,9 @@ const replayCapturedRows = async (
  * that cannot be resolved, an FK that no longer resolves, a column the schema
  * has since dropped — rolls the entire batch back. No partial restore is
  * observable, because a half-restored artist is worse than a declined one.
+ * The one FK that is NOT a failure is a declared `SET_NULL_REFERENCES`
+ * column whose target is gone: it comes back NULL, as its delete rule would
+ * have left it, and the restore succeeds (BS#2799).
  *
  * **The occupied slot is the ordinary path, not an edge case.** Retention is
  * permanent, so a card deleted three years ago usually finds its slot taken.
