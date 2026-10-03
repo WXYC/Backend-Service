@@ -310,8 +310,20 @@ jobs:
           FLOWSHEET_TAKEOVER_ENABLED: ${{ secrets.FLOWSHEET_TAKEOVER_ENABLED }}
           SES_ACCESS_KEY_ID: ${{ secrets.SES_ACCESS_KEY_ID }}
           SES_SECRET_ACCESS_KEY: ${{ secrets.SES_SECRET_ACCESS_KEY }}
-          # Album-review gate cutover date (WXYC/Backend-Service#2811). Not sensitive;
-          # carried through the allowlist so the date can be set without a code PR.
+          # Album-review intake gate cutover date (epic WXYC/Backend-Service#2791,
+          # prep issue #2811). Format is `YYYY-MM-DD` in station time (NY_TIME_ZONE).
+          # Not sensitive; carried through the allowlist so the date can be set
+          # without a code PR, same reason as DONATE_* above. apps/backend is the
+          # sole reader (the intake-gate check gating `POST /library` /
+          # `POST /library/rotation`), so restart_target=backend (the default) is
+          # the one needed.
+          #
+          # Rollback is NOT an empty value — the resolve step below hard-fails on
+          # empty, but the gate's own off state is "unset or in the future"
+          # (#2791), so a far-future date is the equivalent of unset as far as the
+          # gate is concerned and is what this workflow can actually write. Only a
+          # genuine unset requires a hand edit of the host's `.env` plus a manual
+          # container recreate, bypassing this workflow.
           REVIEW_GATE_CUTOVER_DATE: ${{ secrets.REVIEW_GATE_CUTOVER_DATE }}
         run: |
           set -euo pipefail
