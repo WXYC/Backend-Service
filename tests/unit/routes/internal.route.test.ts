@@ -64,8 +64,6 @@ const mockLimit = jest.fn();
 (mockChain as Record<string, jest.Mock>).limit = mockLimit;
 const mockReturning = jest.fn();
 (mockChain as Record<string, jest.Mock>).returning = mockReturning;
-const mockValues = (mockChain as Record<string, jest.Mock>).values;
-const mockOnConflict = (mockChain as Record<string, jest.Mock>).onConflictDoUpdate;
 
 const app = express();
 app.use(express.json());
@@ -1237,6 +1235,11 @@ describe('POST /internal/rotation-webhook (retired)', () => {
 
     expect(res.status).toBe(404);
     expect(mockBroadcast).not.toHaveBeenCalled();
+    // Pins "no route at all", not "a route that happens to 404 after a
+    // write" — the same shape a partial reintroduction (write then 404)
+    // would still pass if this asserted status alone.
+    expect(mockDb.insert).not.toHaveBeenCalled();
+    expect(mockDb.update).not.toHaveBeenCalled();
   });
 });
 

@@ -1339,13 +1339,15 @@ export const updateRotation = async (
     // `RotationCardBinMismatchError` (409, wrong bin); an explicit `null`
     // (uncard) skips validation entirely, same as `format_id`/`label_id`.
     //
-    // `FOR UPDATE` on the bin read, because `rotation` is a live link
-    // target (this function's own docstring rule): `jobs/rotation-etl`'s
-    // upsert sets `rotation_bin` unconditionally on conflict when hand-run,
-    // so a re-bin landing between an unlocked read and the UPDATE below
-    // would file the row cross-bin — the exact state
-    // `RotationCardBinMismatchError` exists to prevent — behind a 200. The
-    // lock holds the bin still until this transaction's write commits.
+    // `FOR UPDATE` on the bin read, defensive against the one live
+    // re-binner left: a hand-run `jobs/rotation-etl`'s upsert sets
+    // `rotation_bin` unconditionally on conflict, so a re-bin landing
+    // between an unlocked read and the UPDATE below would file the row
+    // cross-bin — the exact state `RotationCardBinMismatchError` exists to
+    // prevent — behind a 200. The lock holds the bin still until this
+    // transaction's write commits. (Linking — `legacy-linkage-resolve` or
+    // `PATCH /library/rotation/:id/link` — only ever touches `album_id`
+    // and never races this read.)
     if (touchesCardId && set.card_id !== null) {
       const [current] = await tx
         .select({ rotation_bin: rotation.rotation_bin })

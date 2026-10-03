@@ -7,16 +7,17 @@
  * window — but invoking it after the SOURCE flip is a BACKWARDS write.
  *
  * The mechanism differs from the flowsheet sibling's, so don't reason by
- * analogy. There is no rotation mirror: `legacy_rotation_id` is written only by
- * the tubafrenzy rotation webhook (retired), never back-stamped onto a
- * dj-site-originated row (the mirror's rotation-badge probe, removed in BS#2403,
- * only ever read rotation — it was never a writer). So this
- * job cannot reach a pure dj-site row. What it does reach is every row that
- * ever came from tubafrenzy — and for those it overwrites `rotation_bin`,
- * `kill_date`, `album_id`, and the denormalized `artist_name` / `album_title` /
- * `record_label` from tubafrenzy's copy. Once the music director manages
- * rotation in dj-site, a Backend-side edit to such a row is silently reverted
- * to whatever tubafrenzy still holds.
+ * analogy. There is no rotation mirror: `legacy_rotation_id` is written only
+ * by tubafrenzy-sourced writers — the now-retired rotation webhook, and this
+ * ETL's own insert (`job.ts`'s `legacy_rotation_id: release.id`) — never
+ * back-stamped onto a dj-site-originated row (the mirror's rotation-badge
+ * probe, removed in BS#2403, only ever read rotation — it was never a
+ * writer). So this job cannot reach a pure dj-site row. What it does reach
+ * is every row that ever came from tubafrenzy — and for those it overwrites
+ * `rotation_bin`, `kill_date`, `album_id`, and the denormalized
+ * `artist_name` / `album_title` / `record_label` from tubafrenzy's copy.
+ * Once the music director manages rotation in dj-site, a Backend-side edit
+ * to such a row is silently reverted to whatever tubafrenzy still holds.
  *
  * Two further hazards, both live even for a single deliberate run:
  *

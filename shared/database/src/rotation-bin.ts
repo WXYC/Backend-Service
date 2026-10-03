@@ -50,11 +50,15 @@ export type RotationBinParse =
  * Classify a raw `rotation_bin` from any inbound source.
  *
  * Absent, null, and blank all classify as `missing`. That is not defensive
- * over-reach: tubafrenzy's `BackendServiceWebhookClient.buildRotationPayload`
- * serializes a null `ROTATION_TYPE` as the empty string rather than omitting
- * the key, so `""` is a real wire form meaning "this release has no bin
- * upstream" — and it is the form that actually occurs, since the releases with
- * a blank `ROTATION_TYPE` are exactly the ones migration 0150 reclassifies.
+ * over-reach: `jobs/rotation-etl/fetch-legacy.ts` normalizes a NULL
+ * upstream `ROTATION_TYPE` to the empty string (`(toNullable(cols[3]) ??
+ * '').trim()`) rather than omitting the field, so `""` is a real input
+ * meaning "this release has no bin upstream" — and it is the form that
+ * actually occurs, since the releases with a blank `ROTATION_TYPE` are
+ * exactly the ones migration 0150 reclassifies. The now-retired rotation
+ * webhook's `BackendServiceWebhookClient.buildRotationPayload` serialized a
+ * null `ROTATION_TYPE` the same way, so this classification held for both
+ * writers; only the ETL exercises it now.
  *
  * Non-strings are stringified rather than classified as `missing`, so a
  * payload like `{"rotationType": 7}` is reported as bad data instead of
