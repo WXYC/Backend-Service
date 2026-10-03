@@ -238,7 +238,12 @@ describe('runFill — retrying a list of album ids (BS#2786)', () => {
   it('asks for exactly the listed ids and reports no cursor', async () => {
     const summary = await run([40, 900], {}, { albumIds: [40, 900] });
 
-    expect(enumerateCohort).toHaveBeenCalledWith(0, 0, OPTIONS.readTimeoutMs, [40, 900]);
+    expect(enumerateCohort).toHaveBeenCalledWith({
+      limit: 0,
+      afterAlbumId: 0,
+      albumIds: [40, 900],
+      timeoutMs: OPTIONS.readTimeoutMs,
+    });
     // A cursor that walked a hand-picked list says nothing about the rows in
     // between. Reporting 900 here would invite resuming the chain from it and
     // skipping every album from 41 to 899.

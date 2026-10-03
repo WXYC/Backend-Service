@@ -92,7 +92,7 @@ describe('BS#2775 bio fill (REAL statements, real PG)', () => {
 
   /** This spec's own rows out of the enumeration, which reads the whole table. */
   const enumerateOwn = async (limit = 0, after = 0) =>
-    (await enumerateCohort(limit, after)).filter((c) => albumIds.includes(c.album_id));
+    (await enumerateCohort({ limit, afterAlbumId: after })).filter((c) => albumIds.includes(c.album_id));
 
   beforeAll(() => {
     sql = getTestDb();
@@ -146,14 +146,13 @@ describe('BS#2775 bio fill (REAL statements, real PG)', () => {
       expect(afterFirst).not.toContain(first);
       expect(afterFirst).toContain(second);
 
-      const capped = await enumerateCohort(1, first - 1);
+      const capped = await enumerateCohort({ limit: 1, afterAlbumId: first - 1 });
       expect(capped.map((c) => c.album_id)).toEqual([first]);
     });
 
     describe('with an id list (BS#2786)', () => {
-      /** `undefined` takes the default statement timeout; the list is the fourth argument. */
       const enumerateIds = async (ids, limit = 0) =>
-        (await enumerateCohort(limit, 0, undefined, ids)).map((c) => c.album_id);
+        (await enumerateCohort({ limit, afterAlbumId: 0, albumIds: ids })).map((c) => c.album_id);
 
       test('returns only the listed ids, in album_id order, whatever order they were given in', async () => {
         const first = await seed('listed-a');
