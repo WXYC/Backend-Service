@@ -13,12 +13,21 @@ const MALFORMED = '0001-01-01';
 
 let reported = false;
 
+/** A real calendar date in `YYYY-MM-DD` shape (year 0001 or later), checked by round-trip so it never throws. */
+const isRealDate = (raw: string): boolean => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return false;
+  const [y, m, d] = raw.split('-').map(Number);
+  if (y < 1) return false;
+  const date = new Date(0);
+  date.setUTCFullYear(y, m - 1, d);
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
+};
+
 /** `null` while unset; otherwise the cutover date, or `MALFORMED`. */
 const cutover = (): string | null => {
   const raw = process.env.REVIEW_GATE_CUTOVER_DATE;
   if (raw === undefined || raw === '') return null;
-  const real = /^\d{4}-\d{2}-\d{2}$/.test(raw) && new Date(`${raw}T00:00:00Z`).toISOString().startsWith(raw);
-  if (real) return raw;
+  if (isRealDate(raw)) return raw;
   if (!reported) {
     reported = true;
     Sentry.captureException(

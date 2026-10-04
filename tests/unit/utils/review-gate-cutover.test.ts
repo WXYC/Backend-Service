@@ -55,13 +55,16 @@ describe('isOnOrBeforeCutover', () => {
 });
 
 describe('a malformed value', () => {
-  it.each(['2027-1-12', '2027-01-12 ', '2027-02-30', 'soon'])('%j is reported once and treated as on', (value) => {
-    const helper = load(value);
-    expect(helper.isGateOn(new Date('2020-01-01T00:00:00Z'))).toBe(true);
-    expect(helper.isOnOrBeforeCutover('2000-01-01')).toBe(false);
-    helper.isGateOn();
-    expect(Sentry.captureException).toHaveBeenCalledTimes(1);
-  });
+  it.each(['2027-1-12', '2027-01-12 ', '2027-02-30', '2027-13-01', '2027-01-32', '2027-00-10', '0000-01-01', 'soon'])(
+    '%j is reported once and treated as on',
+    (value) => {
+      const helper = load(value);
+      expect(helper.isGateOn(new Date('2020-01-01T00:00:00Z'))).toBe(true);
+      expect(helper.isOnOrBeforeCutover('2000-01-01')).toBe(false);
+      helper.isGateOn();
+      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+    }
+  );
 
   it('reports nothing for a well-formed or unset value', () => {
     load('2027-01-12').isGateOn();

@@ -510,6 +510,20 @@ components:
         format_id: { type: integer }
         discogs_release_id: { type: integer, nullable: true }
 
+    IntakeItemPatch:
+      type: object
+      description: >-
+        Any subset of the `IntakeItemFields`, plus setting or clearing the citation. `cited_album_id` and
+        `cited_submission_id` are mutually exclusive as non-null values: a patch may not carry both non-null, but
+        may set one while clearing the other. Setting one citation clears the other, so the single-key form
+        `{cited_submission_id: 12}` is the canonical switch.
+      allOf:
+        - $ref: '#/components/schemas/IntakeItemFields'
+        - type: object
+          properties:
+            cited_album_id: { type: integer, nullable: true }
+            cited_submission_id: { type: integer, nullable: true }
+
     IntakeConflictError:
       type: object
       required: [message, reason]
@@ -5055,7 +5069,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/IntakeItemFields'
+              $ref: '#/components/schemas/IntakeItemPatch'
       responses:
         '200':
           description: 'The updated item'

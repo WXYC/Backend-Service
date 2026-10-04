@@ -123,8 +123,9 @@ export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
 
 /**
  * The zero-row follow-up read, which only chooses the answer and gates nothing.
- * Missing is a 404. For `updateIntakeItem`/`deleteIntakeItem` (the UPDATE's only
- * precondition is "not filed") any surviving item is `already_filed`. For a
+ * Missing is a 404. For `updateIntakeItem`/`deleteIntakeItem` (the UPDATE's
+ * preconditions are "not filed" and, when a citation is set, "the citation is valid") any surviving item is
+ * `already_filed`, except that a PATCH setting a citation (`'citation'`) answers `invalid_citation` for an unfiled one. For a
  * transition, an item still in the right effective state that the identity
  * condition refused belongs to someone else (`forbidden`); every other state,
  * filed included, is `state_changed`.
@@ -163,9 +164,11 @@ const NY = sql.raw(`'${NY_TIME_ZONE}'`);
  * admits any existing row. Mirrors `isOnOrBeforeCutover` (the `timestamptz` → station date conversion).
  */
 export const citationValidSql = ({ cited_album_id: album, cited_submission_id: submission }: IntakeCitations) => {
-  const cutover = reviewGateCutoverDate();
-  const onOrBefore = (column: SQL) =>
-    cutover === null ? sql`true` : sql`(${column} AT TIME ZONE ${NY})::date <= ${cutover}::date`;
+  // Read the cutover date only when a citation is being set, so other edits never touch the variable.
+  const onOrBefore = (column: SQL) => {
+    const cutover = reviewGateCutoverDate();
+    return cutover === null ? sql`true` : sql`(${column} AT TIME ZONE ${NY})::date <= ${cutover}::date`;
+  };
   if (album != null) {
     return sql`(EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.album_id} = ${album} AND ${reviews.status} = 'submitted') OR EXISTS (SELECT 1 FROM ${library} WHERE ${library.id} = ${album} AND ${onOrBefore(sql`${library.add_date}`)}))`;
   }
@@ -174,6 +177,9 @@ export const citationValidSql = ({ cited_album_id: album, cited_submission_id: s
   }
   return undefined;
 };
+
+/** Whether the patch sets a citation to a non-null value (a clear, or no citation key, sets none). */
+const setsCitation = (patch: IntakeCitations) => patch.cited_album_id != null || patch.cited_submission_id != null;
 
 export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) =>
   db
@@ -191,7 +197,7 @@ export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> 
   try {
     const rows = await buildIntakePatch(id, patch);
     if (rows.length === 0) {
-      return { outcome: await refusalFor(id, citationValidSql(patch) ? 'citation' : undefined) };
+      return { outcome: await refusalFor(id, setsCitation(patch) ? 'citation' : undefined) };
     }
     return { outcome: 'updated' as const, item: (await getIntakeItem(id, true))! };
   } catch (error) {
