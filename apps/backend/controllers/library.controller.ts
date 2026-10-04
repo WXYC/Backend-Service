@@ -3574,8 +3574,8 @@ export const getFlowsheetPlayCounts: RequestHandler<{ id: string }> = async (req
  * `flowsheet.album_id` directly, blanked transitively via
  * `flowsheet.rotation_id` → `rotation.album_id`, or, for a play the
  * tubafrenzy webhook wrote that `jobs/legacy-linkage-resolve` had not yet
- * turned into an `album_id`, stranded rather than unlinked once the release
- * is gone — is reasoned about in `libraryService.deleteAlbumFromDB`'s
+ * turned into an `album_id`, stranded (unless the batch is restored) rather
+ * than unlinked once the release is gone — is reasoned about in `libraryService.deleteAlbumFromDB`'s
  * docstring, not reported here (see below for why, and for where it belongs
  * instead).
  * Still refuses with 409 when the release has a bound `digital_asset` row

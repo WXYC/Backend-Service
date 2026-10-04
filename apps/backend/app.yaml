@@ -4126,8 +4126,9 @@ paths:
         For the kind half, `restorable: false` is a hard guarantee: the
         endpoint refuses every batch holding an unrestorable `entity_kind`
         with `409 unrestorable_kind` before any row lock or write. An
-        envelope-corrupt batch also reads `false`, but the endpoint does not
-        refuse it with that 409; it answers 500.
+        envelope-corrupt batch also reads `false`, but the kind check runs
+        first: one holding an unrestorable kind still gets that 409, and only
+        one whose kinds all pass takes the lock and answers 500.
 
 
         `entities[].children` is per-child-table ROW COUNTS, not the rows —
