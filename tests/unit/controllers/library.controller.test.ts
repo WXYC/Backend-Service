@@ -3516,6 +3516,21 @@ describe('library.controller', () => {
         expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
       });
 
+      it.each([
+        ['label', 128, 'label must be 128 characters or fewer'],
+        ['discogsUnavailableNote', 500, 'discogsUnavailableNote must be at most 500 characters'],
+      ])('%s bound counts code points: accepts %i astral, rejects one more', async (field, max, message) => {
+        const extra = field === 'discogsUnavailableNote' ? { discogsUnavailable: true } : {};
+        await updateAlbum(reqFor({ ...extra, [field]: '😀'.repeat(max) }), mockResponse(), next);
+        expect(mockUpdateAlbumInDB).toHaveBeenCalled();
+
+        mockUpdateAlbumInDB.mockClear();
+        await expect(
+          updateAlbum(reqFor({ ...extra, [field]: '😀'.repeat(max + 1) }), mockResponse(), next)
+        ).rejects.toThrow(message);
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
       it('accepts an exactly-128-char album_title', async () => {
         const res = mockResponse();
 

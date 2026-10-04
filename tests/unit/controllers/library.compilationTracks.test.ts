@@ -33,6 +33,17 @@ describe('validateCompilationTracksBody (BS#1964 CTA write validation)', () => {
     expect(validateCompilationTracksBody({ tracks: [{ artist_name: '   ' }] }).ok).toBe(false);
   });
 
+  it.each([
+    ['artist_name', 255],
+    ['track_title', 255],
+    ['track_position', 20],
+  ])('%s bound counts code points: accepts %i astral, rejects one more', (field, max) => {
+    const track = (n: number) => ({ artist_name: 'Juana Molina', [field]: '😀'.repeat(n) });
+    expect(validateCompilationTracksBody({ tracks: [track(max)] }).ok).toBe(true);
+    const over = validateCompilationTracksBody({ tracks: [track(max + 1)] });
+    expect(over).toEqual({ ok: false, message: `tracks[0].${field} exceeds ${max} characters` });
+  });
+
   it('trims artist_name and coerces blank optional fields to null', () => {
     const result = validateCompilationTracksBody({
       tracks: [{ artist_name: '  Juana Molina  ', track_title: '  ', track_position: '' }],

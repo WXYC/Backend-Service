@@ -3248,7 +3248,7 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // long-stable label_id (issue 6). Clearing must be explicit.
       throw new WxycError('label must be a non-empty string; clear the label by sending label_id: null', 400);
     }
-    if (trimmedLabel !== undefined && trimmedLabel.length > MAX_ALBUM_TEXT_LENGTH) {
+    if (trimmedLabel !== undefined && codePointLength(trimmedLabel) > MAX_ALBUM_TEXT_LENGTH) {
       throw new WxycError(`label must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
     }
 
@@ -3297,7 +3297,7 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
         throw new WxycError('discogsUnavailableNote must be a string or null', 400);
       }
       note = body.discogsUnavailableNote === null ? null : body.discogsUnavailableNote.trim() || null;
-      if (note !== null && note.length > MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH) {
+      if (note !== null && codePointLength(note) > MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH) {
         throw new WxycError(
           `discogsUnavailableNote must be at most ${MAX_DISCOGS_UNAVAILABLE_NOTE_LENGTH} characters`,
           400
@@ -3707,15 +3707,15 @@ export function validateCompilationTracksBody(body: CompilationTracksWriteBody):
       return { ok: false, message: `tracks[${i}].artist_name is required and must be a non-empty string` };
     }
     const artist_name = artistRaw.trim();
-    if (artist_name.length > CTA_ARTIST_NAME_MAX) {
+    if (codePointLength(artist_name) > CTA_ARTIST_NAME_MAX) {
       return { ok: false, message: `tracks[${i}].artist_name exceeds ${CTA_ARTIST_NAME_MAX} characters` };
     }
     const track_title = normalizeOptionalCtaText(t.track_title);
-    if (track_title !== null && track_title.length > CTA_TRACK_TITLE_MAX) {
+    if (track_title !== null && codePointLength(track_title) > CTA_TRACK_TITLE_MAX) {
       return { ok: false, message: `tracks[${i}].track_title exceeds ${CTA_TRACK_TITLE_MAX} characters` };
     }
     const track_position = normalizeOptionalCtaText(t.track_position);
-    if (track_position !== null && track_position.length > CTA_TRACK_POSITION_MAX) {
+    if (track_position !== null && codePointLength(track_position) > CTA_TRACK_POSITION_MAX) {
       return { ok: false, message: `tracks[${i}].track_position exceeds ${CTA_TRACK_POSITION_MAX} characters` };
     }
     tracks.push({ artist_name, track_title, track_position });

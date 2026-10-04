@@ -14,6 +14,7 @@ import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
+import { codePointLength } from '../utils/text-fields.js';
 import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
 import { FsEvents, Topics, serverEventsMgr } from '../utils/serverEvents.js';
 
@@ -1184,7 +1185,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     const trimmed = raw_override.trim();
     if (trimmed.length === 0) {
       dj_name_override = undefined;
-    } else if (trimmed.length > DJ_NAME_OVERRIDE_MAX_LENGTH) {
+    } else if (codePointLength(trimmed) > DJ_NAME_OVERRIDE_MAX_LENGTH) {
       throw new WxycError(
         `Bad Request: dj_name_override must be ${DJ_NAME_OVERRIDE_MAX_LENGTH} characters or fewer`,
         400
