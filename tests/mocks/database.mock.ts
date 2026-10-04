@@ -296,6 +296,7 @@ export const catalog_export_flag_state = {
 export const rotation = {
   id: 'rotation.id',
   album_id: 'rotation.album_id',
+  moved_from_rotation_id: 'rotation.moved_from_rotation_id',
   legacy_rotation_id: 'rotation.legacy_rotation_id',
   legacy_library_release_id: 'rotation.legacy_library_release_id',
   rotation_bin: 'rotation.rotation_bin',

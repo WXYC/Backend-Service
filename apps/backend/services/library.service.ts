@@ -5441,7 +5441,7 @@ const RESTORE_PLAN: Record<
  * `nullDanglingSetNullReferences`.
  */
 export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
-  rotation: { card_id: rotation_cards.id },
+  rotation: { card_id: rotation_cards.id, moved_from_rotation_id: rotation.id },
   compilation_track_artist: { track_artist_id: artists.id },
   intake_items: {
     logged_by: auth_user.id,

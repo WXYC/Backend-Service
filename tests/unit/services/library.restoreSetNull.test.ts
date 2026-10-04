@@ -429,6 +429,23 @@ describe('nullDanglingSetNullReferences', () => {
       { id: 3, moved_from_rotation_id: null },
     ]);
   });
+
+  it('reports a moved-from row outside the batch as exactly one nulled deviation', async () => {
+    const records: Record<string, unknown>[] = [
+      { id: 1, moved_from_rotation_id: null },
+      { id: 2, moved_from_rotation_id: 1 },
+      { id: 3, moved_from_rotation_id: 99 },
+    ];
+    const { tx } = probeTx([]);
+
+    const deviations = await nullDanglingSetNullReferences(tx, 'rotation', schema.rotation, records, {
+      moved_from_rotation_id: schema.rotation.id,
+    });
+
+    expect(deviations).toEqual([
+      { kind: 'nulled', table: 'rotation', row_id: 3, column: 'moved_from_rotation_id', captured_value: '99' },
+    ]);
+  });
 });
 
 describe('dropOrphanedCascadeRows', () => {
