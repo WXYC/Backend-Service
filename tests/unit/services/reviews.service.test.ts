@@ -206,29 +206,31 @@ describe('updateReview', () => {
   });
 
   test('the edit is decided on locked rows inside one transaction: item FOR SHARE, then the review FOR UPDATE', async () => {
-    mockQueue.push([{ item: 8 }], [{ id: 8 }], [stored({ intake_item_id: 8 })]);
+    mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored({ intake_item_id: 8 })]);
     mockUpdatedRow = { id: 3 };
     await updateReview(3, { fcc: 'x' }, DJ);
     expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
     expect(mockReads.map((r) => [r.table, r.lock, r.of])).toEqual([
       ['reviews', undefined, undefined],
       ['intake_items', 'share', undefined],
-      ['reviews', 'update', 'reviews'],
+      ['reviews', 'update', undefined],
+      ['reviews', undefined, undefined],
     ]);
     expect(mockReads[1].where).toContain('[8]');
   });
 
   test('a review on a library release alone has no item to lock', async () => {
-    mockQueue.push([{ item: null }], [stored({})]);
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
     await updateReview(3, { fcc: 'x' }, DJ);
     expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
       ['reviews', undefined],
       ['reviews', 'update'],
+      ['reviews', undefined],
     ]);
   });
 
   test('the updated row comes from RETURNING with the locked value already read', async () => {
-    mockQueue.push([{ item: null }], [stored({ locked: false })]);
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({ locked: false })]);
     mockUpdatedRow = { id: 3, fcc: 'x' };
     expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({
       outcome: 'updated',
@@ -242,13 +244,13 @@ describe('updateReview', () => {
   });
 
   test('a lock after print refuses the author without writing', async () => {
-    mockQueue.push([{ item: null }], [stored({ locked: true })]);
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({ locked: true })]);
     expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({ outcome: 'locked' });
     expect(mockWrites.updated).toBeUndefined();
   });
 
   test('a patch that would null a submitted typed review text is text_required', async () => {
-    mockQueue.push([{ item: null }], [stored({})]);
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
     expect(await updateReview(3, { review: null }, DJ)).toEqual({ outcome: 'text_required' });
     expect(mockWrites.updated).toBeUndefined();
   });
@@ -257,18 +259,18 @@ describe('updateReview', () => {
     ['a draft', { status: 'draft' }],
     ['a submitted handwritten review', { medium: 'handwritten' }],
   ])('nulling the text of %s is allowed', async (_name, o) => {
-    mockQueue.push([{ item: null }], [stored(o)]);
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored(o)]);
     expect((await updateReview(3, { review: null }, DJ)).outcome).toBe('updated');
   });
 
   test('leaving review out of a patch keeps the stored text, so other fields still save', async () => {
-    mockQueue.push([{ item: null }], [stored({})]);
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
     expect((await updateReview(3, { fcc: 'x' }, DJ)).outcome).toBe('updated');
     expect(mockWrites.updated).toMatchObject({ fcc: 'x' });
   });
 
   test('a submitted typed review stays editable by its author while text remains', async () => {
-    mockQueue.push([{ item: null }], [stored({})]);
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
     expect((await updateReview(3, { review: 'new' }, DJ)).outcome).toBe('updated');
   });
 });
