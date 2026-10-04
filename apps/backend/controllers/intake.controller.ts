@@ -16,6 +16,8 @@ import { normalizeOptionalText, validateTextField } from '../utils/text-fields.j
  */
 
 const TEXT_MAX = 128;
+/** The integer columns are `integer` (int4); a larger value would be a 22003 → 500 at the UPDATE/INSERT. */
+const INT4_MAX = 2_147_483_647;
 
 /** Callers holding `reviews: manage` see each item's `passes`; nobody else does. */
 const holdsReviewsManage = (req: Pick<Request, 'auth'>): boolean => {
@@ -28,7 +30,7 @@ const parseId = (raw: string) => parsePositiveInt(raw, 'id');
 const intField = (value: unknown, field: string, nullable: boolean): number | null | undefined => {
   if (value === undefined) return undefined;
   if (value === null && nullable) return null;
-  if (!Number.isInteger(value) || (value as number) < 1) {
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > INT4_MAX) {
     throw new WxycError(`${field} must be a positive integer${nullable ? ' or null' : ''}`, 400);
   }
   return value as number;

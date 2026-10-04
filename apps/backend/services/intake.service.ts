@@ -2,6 +2,7 @@ import { and, desc, eq, getTableColumns, notInArray, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import {
   db,
+  extractConstraintName,
   extractSqlState,
   intake_item_passes,
   intake_items,
@@ -90,6 +91,10 @@ export const listIntakeItems = (filters: { state?: IntakeItemState; includePasse
 export const getIntakeItem = async (id: number, includePasses: boolean): Promise<IntakeItemResponse | undefined> =>
   ((await buildIntakeSelect({ id, includePasses })) as unknown as IntakeItemResponse[])[0];
 
+/** A `format_id`/`label_id` FK miss. A `logged_by` miss (the caller's own account is gone) is not the caller's input, so it stays a 500. */
+const isUnknownReference = (error: unknown) =>
+  extractSqlState(error) === '23503' && !extractConstraintName(error)?.includes('logged_by');
+
 /** Logs an item into `pool`; `logged_at` takes its column default. `unknown_reference` is a `format_id`/`label_id` FK miss (23503). */
 export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
   try {
@@ -99,7 +104,7 @@ export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
       .returning({ id: intake_items.id });
     return { outcome: 'logged' as const, item: (await getIntakeItem(id, true))! };
   } catch (error) {
-    if (extractSqlState(error) === '23503') return { outcome: 'unknown_reference' as const };
+    if (isUnknownReference(error)) return { outcome: 'unknown_reference' as const };
     throw error;
   }
 };
@@ -122,7 +127,7 @@ export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields>)
     if (rows.length === 0) return { outcome: await refusalFor(id) };
     return { outcome: 'updated' as const, item: (await getIntakeItem(id, true))! };
   } catch (error) {
-    if (extractSqlState(error) === '23503') return { outcome: 'unknown_reference' as const };
+    if (isUnknownReference(error)) return { outcome: 'unknown_reference' as const };
     throw error;
   }
 };
