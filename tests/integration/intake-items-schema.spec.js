@@ -17,6 +17,7 @@
  */
 
 const { getTestDb } = require('../utils/db');
+const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const GENRE_ID = 11; // exists in the integration fixture
@@ -26,19 +27,9 @@ describe('intake_items schema (real PG)', () => {
   let sql;
   let artistId;
   const libraryIds = [];
-  const userIds = [];
   const submissionIds = [];
 
-  const seedUser = async () => {
-    const tag = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const [row] = await sql`
-      INSERT INTO auth_user (id, name, email, email_verified)
-      VALUES (${`intake-test-${tag}`}, 'Intake Test', ${`intake-${tag}@test.wxyc.org`}, true)
-      RETURNING id
-    `;
-    userIds.push(row.id);
-    return row.id;
-  };
+  const seedUser = async () => (await seedAuthUser()).id;
 
   const seedLibrary = async (title) => {
     const [row] = await sql`
@@ -61,11 +52,7 @@ describe('intake_items schema (real PG)', () => {
   };
 
   /** Insert an item; `extra` is a column → value map layered over the NOT NULLs. */
-  const insertItem = async (extra = {}) => {
-    const row = { artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again', format_id: FORMAT_ID, ...extra };
-    const [item] = await sql`INSERT INTO ${sql(SCHEMA)}.intake_items ${sql(row)} RETURNING *`;
-    return item;
-  };
+  const insertItem = (extra = {}) => seedIntakeItem(extra);
 
   const getItem = async (id) => (await sql`SELECT * FROM ${sql(SCHEMA)}.intake_items WHERE id = ${id}`)[0];
 
@@ -92,13 +79,10 @@ describe('intake_items schema (real PG)', () => {
     if (libraryIds.length > 0) {
       await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
     }
-    if (userIds.length > 0) {
-      await sql`DELETE FROM auth_user WHERE id = ANY(${userIds})`;
-    }
+    await removeSeededAuthUsers();
     await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
     submissionIds.length = 0;
     libraryIds.length = 0;
-    userIds.length = 0;
   });
 
   it('defaults a new item to the pool state', async () => {
@@ -181,7 +165,6 @@ describe('intake_items schema (real PG)', () => {
       const item = await insertItem({ [column]: userId });
 
       await sql`DELETE FROM auth_user WHERE id = ${userId}`;
-      userIds.length = 0;
 
       const after = await getItem(item.id);
       expect(after).toBeDefined();
@@ -193,7 +176,6 @@ describe('intake_items schema (real PG)', () => {
       const item = await insertItem(Object.fromEntries(ATTRIBUTIONS.map((c) => [c, userId])));
 
       await sql`DELETE FROM auth_user WHERE id = ${userId}`;
-      userIds.length = 0;
 
       const after = await getItem(item.id);
       expect(ATTRIBUTIONS.map((c) => after[c])).toEqual(ATTRIBUTIONS.map(() => null));
@@ -223,7 +205,6 @@ describe('intake_items schema (real PG)', () => {
       await insertPass(item.id, userId);
 
       await sql`DELETE FROM auth_user WHERE id = ${userId}`;
-      userIds.length = 0;
 
       expect(await passesFor(item.id)).toHaveLength(0);
       expect(await getItem(item.id)).toBeDefined();
