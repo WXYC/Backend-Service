@@ -13,25 +13,14 @@
  * accepts without a role claim, so they act as non-manager callers with those ids.
  */
 
-const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
-const getAccessToken = require('../utils/better_auth');
+const { getTestDb } = require('../utils/db');
+const { seedIntakeItem, managerAccessToken } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE-TX';
 const MEMBER_ID = 'test-member-id-000000000000000001';
-
-const makeSql = () =>
-  postgres({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
-    database: process.env.DB_NAME || 'wxyc_db',
-    user: process.env.DB_USERNAME || 'test-user',
-    password: process.env.DB_PASSWORD || 'test-pw',
-    onnotice: () => {},
-    max: 4,
-  });
 
 const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
 
@@ -45,8 +34,7 @@ describe('/intake transitions (BS#2798)', () => {
 
   const seed = async (key, overrides = {}) => {
     const row = { artist_name: `${PREFIX} ${key}`, album_title: `Album ${key}`, format_id: formatId, ...overrides };
-    const [{ id }] = await sql`INSERT INTO ${sql(SCHEMA)}.intake_items ${sql(row)} RETURNING id`;
-    return id;
+    return (await seedIntakeItem(row)).id;
   };
   const row = async (id) => (await sql`SELECT * FROM ${sql(SCHEMA)}.intake_items WHERE id = ${id}`)[0];
   const passes = (id) => sql`SELECT dj_id FROM ${sql(SCHEMA)}.intake_item_passes WHERE intake_item_id = ${id}`;
@@ -59,10 +47,10 @@ describe('/intake transitions (BS#2798)', () => {
   };
 
   beforeAll(async () => {
-    manager = createAuthRequest(request, `Bearer ${await getAccessToken('test_station_manager', 'testpassword123')}`);
+    manager = createAuthRequest(request, `Bearer ${await managerAccessToken()}`);
     djA = createAuthRequest(request, `Bearer ${global.primary_dj_id}`);
     djB = createAuthRequest(request, global.secondary_access_token);
-    sql = makeSql();
+    sql = getTestDb();
     await cleanup();
     [{ id: formatId }] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format ORDER BY id LIMIT 1`);
 
@@ -81,7 +69,6 @@ describe('/intake transitions (BS#2798)', () => {
 
   afterAll(async () => {
     await cleanup();
-    await sql.end();
   });
 
   describe('checkout', () => {

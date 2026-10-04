@@ -22,7 +22,7 @@ jest.mock('@wxyc/database', () => {
   return { ...realSchema, db: drizzle({}) };
 });
 
-import { buildIntakeSelect, buildTransition } from '../../../apps/backend/services/intake.service';
+import { buildIntakeSelect, buildTransition, refusalOutcome } from '../../../apps/backend/services/intake.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const render = (opts: Parameters<typeof buildIntakeSelect>[0]) => buildIntakeSelect(opts).toSQL();
@@ -186,5 +186,39 @@ describe('buildTransition (BS#2798)', () => {
       const { params } = render(action, 7, action === 'pass' ? dj : md);
       expect(params.slice(0, 3)).toEqual(['pool', null, null]);
     }
+  });
+});
+
+// The route answers a missing grant 403 before the service runs; once it does, a 409 outranks the identity 403 (BS#2798).
+describe('refusalOutcome — 409 state_changed ranks before the identity 403', () => {
+  it.each([
+    ['a missing item', undefined, { from: 'pool', identityGuarded: true }, 'not_found'],
+    ['no transition (patch/delete) on a surviving item', { effective_state: 'filed' }, undefined, 'already_filed'],
+    [
+      'an identity-guarded refusal on an item still in the from state',
+      { effective_state: 'checked_out' },
+      { from: 'checked_out', identityGuarded: true },
+      'forbidden',
+    ],
+    [
+      'an identity-guarded transition on an item in another state',
+      { effective_state: 'pool' },
+      { from: 'checked_out', identityGuarded: true },
+      'state_changed',
+    ],
+    [
+      'an identity-guarded transition on a filed item',
+      { effective_state: 'filed' },
+      { from: 'requested', identityGuarded: true },
+      'state_changed',
+    ],
+    [
+      'an unguarded transition on an item in the from state',
+      { effective_state: 'pool' },
+      { from: 'pool', identityGuarded: false },
+      'state_changed',
+    ],
+  ] as const)('%s', (_name, item, transition, expected) => {
+    expect(refusalOutcome(item as never, transition as never)).toBe(expected);
   });
 });
