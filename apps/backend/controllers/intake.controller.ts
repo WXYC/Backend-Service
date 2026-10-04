@@ -1,11 +1,12 @@
 import { roleGrants } from '@wxyc/authentication';
 import { intakeItemStateEnum } from '@wxyc/database';
-import type { Request, RequestHandler, Response } from 'express';
+import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
 import type { IntakeAction, IntakeFields, IntakeItemState } from '../services/intake.service.js';
 import { INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
 import { parseInt4PathId } from '../utils/query-params.js';
+import { holdsReviewsManage } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
 /**
@@ -17,9 +18,6 @@ import { normalizeOptionalText, validateTextField } from '../utils/text-fields.j
  */
 
 const TEXT_MAX = 128;
-
-/** Callers holding `reviews: manage` see each item's `passes`; nobody else does. */
-const holdsReviewsManage = (req: Pick<Request, 'auth'>): boolean => roleGrants(req.auth?.role, { reviews: ['manage'] });
 
 const parseId = (raw: string) => parseInt4PathId(raw, 'intake item');
 

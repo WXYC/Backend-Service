@@ -25,6 +25,7 @@ import { concerts_route } from './routes/concerts.route.js';
 import { album_reviews_route } from './routes/album-reviews.route.js';
 import { digital_archive_route } from './routes/digital-archive.route.js';
 import { intake_route } from './routes/intake.route.js';
+import { reviews_route } from './routes/reviews.route.js';
 import { reconcileCatalogExportFlag } from './services/catalog-export-flag-reconcile.service.js';
 import { buildCorsMiddleware } from './middleware/cors.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
@@ -107,6 +108,9 @@ app.use('/digital-archive', digital_archive_route);
 // DJ album-review intake: log, list by effective state, get, patch, delete
 // (role-gated `reviews:*`) — BS#2796. Gates: routes/intake.route.ts.
 app.use('/intake', intake_route);
+
+// In-app reviews: create and edit a draft (role-gated `reviews:write`) — BS#2802. Gates: routes/reviews.route.ts.
+app.use('/reviews', reviews_route);
 
 // Business logic routes
 app.use('/labels', labels_route);
