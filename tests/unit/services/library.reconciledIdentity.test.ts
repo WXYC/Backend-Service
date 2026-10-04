@@ -21,6 +21,7 @@ jest.mock('@wxyc/database', () => ({
   user: {},
   labels: {},
   digital_asset_store: {},
+  album_review_submissions: {},
   // Invoked at module top level (LIBRARY_VIEW_JOINS_RAW), so the import
   // chain needs a callable even though no test here renders SQL.
   rotationActiveSql: () => ({}),

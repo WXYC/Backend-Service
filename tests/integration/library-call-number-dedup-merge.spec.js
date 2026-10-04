@@ -194,21 +194,23 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       expect(rows).toHaveLength(1);
     });
 
-    it('drops the loser’s review rather than violating reviews_album_id_unique', async () => {
+    it('keeps both releases’ reviews and repoints them to the survivor', async () => {
       const a = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 12 });
       const b = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 12 });
       for (const id of [a, b]) {
-        await sql`INSERT INTO ${sql(SCHEMA)}.reviews (album_id, review) VALUES (${id}, 'a review')`;
+        await sql`INSERT INTO ${sql(SCHEMA)}.reviews (album_id, review) VALUES (${id}, ${'review of ' + id})`;
       }
 
       const plan = (await merge.planSlots([await slotFor(12)]))[0];
-      // `reviews.album_id` carries a plain UNIQUE, so a repoint into a survivor
-      // that already has a review raises and aborts the entire run.
+      // Many reviews per release since BS#2801 dropped `UNIQUE (album_id)`, so
+      // `reviews` carries no unique key and nothing is deleted as a duplicate.
       await expect(merge.mergeSlot(plan)).resolves.toBeDefined();
 
-      const rows = await sql`SELECT album_id FROM ${sql(SCHEMA)}.reviews WHERE album_id IN (${a}, ${b})`;
-      expect(rows).toHaveLength(1);
-      expect(rows[0].album_id).toBe(plan.survivorId);
+      const rows = await sql`
+        SELECT album_id, review FROM ${sql(SCHEMA)}.reviews WHERE review IN (${'review of ' + a}, ${'review of ' + b})
+      `;
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.album_id)).toEqual([plan.survivorId, plan.survivorId]);
     });
 
     it('resolves an active rotation collision without destroying killed history', async () => {

@@ -1042,10 +1042,10 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
  * tubafrenzy now reverts Backend-side edits on every row that ever came from
  * there. Its linkage-repair tail pass, the one part that was never a backwards
  * write, survives as the scheduled `jobs/legacy-linkage-resolve/`. Tubafrenzy
- * remains a SECONDARY writer until Phase 6a: `/internal/rotation-webhook`
- * is still live and still accepts pushes from the classic `/wxycdb` UI.
- * Shapes this table carries — from the tubafrenzy-via-ETL era and from that
- * still-open webhook path — that Backend-canonical writes must accept:
+ * is no longer a live writer: `/internal/rotation-webhook` is retired (its one
+ * sender, the classic `/wxycdb` UI, went dark on 2026-09-16) and now returns 404.
+ * Shapes this table carries — from the tubafrenzy-via-ETL era — that
+ * Backend-canonical writes must accept:
  *
  *   - Multiple active rows per (album_id, rotation_bin) over an album's
  *     lifecycle (re-bins, re-adds, label-driven re-promotes). Do NOT add
@@ -1057,11 +1057,10 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
  *     of time and only become "killed" when the date passes).
  *   - Rows with a populated `legacy_rotation_id` that haven't yet been
  *     joined to a library row by id. dj-site-originated rows leave this
- *     NULL, but the still-live rotation webhook keeps landing new
- *     populated values.
+ *     NULL.
  *
  * Constraints added to this table must accept the full shape above, or they
- * will block a Backend-canonical write, a webhook delivery, or the retained
+ * will block a Backend-canonical write or the retained
  * one-shot ETL — which is still meant to run in the Phase 6a maintenance
  * window, so its shape tolerance is not yet dead weight. See
  * WXYC/Backend-Service#702 + CLAUDE.md (`@wxyc/rotation-etl`).
@@ -2340,9 +2339,8 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     this table on a merge for the same recoverability reason.
  *   - `intake_items` references `library.id` twice, with different rules.
  *     `album_id` is `onDelete: 'cascade'` (an item is meaningless without the
- *     release it was filed as) and is NOT YET CAPTURED by the release delete: a
- *     known, temporary gap that WXYC/Backend-Service#2801 closes by capturing
- *     `intake_items` through `album_id`. `cited_album_id` is
+ *     release it was filed as) and is CAPTURED by the release delete, through
+ *     `album_id` (WXYC/Backend-Service#2801). `cited_album_id` is
  *     `onDelete: 'set null'`: the item survives the delete unlinked, and a
  *     restore does not re-link it, so it stays NULL.
  * `library_identity_history`, `album_popularity.representative_library_id` and
@@ -2731,29 +2729,74 @@ export const labels = wxyc_schema.table('labels', {
 
 export type NewReview = InferInsertModel<typeof reviews>;
 export type Review = InferSelectModel<typeof reviews>;
-export const reviews = wxyc_schema.table('reviews', {
-  id: serial('id').primaryKey(),
-  album_id: integer('album_id')
-    .references(() => library.id, { onDelete: 'cascade' })
-    .notNull()
-    .unique(),
-  review: text('review'),
-  add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
-  author: varchar('author', { length: 32 }),
-});
+export const reviewMediumEnum = wxyc_schema.enum('review_medium', ['typed', 'handwritten', 'printed']);
+export const reviewStatusEnum = wxyc_schema.enum('review_status', ['draft', 'submitted']);
+export const reviewCreditEnum = wxyc_schema.enum('review_credit', ['dj_name', 'real_name', 'none']);
+
+/**
+ * A DJ's review of a release (slice 9 of WXYC/Backend-Service#2791): many per
+ * release, and able to exist before the library row does, on an intake item.
+ * Every review points at something the station holds -- `album_id` or
+ * `intake_item_id` -- enforced by `reviews_target_ck`.
+ *
+ * `author` is text because most historical authors have no account;
+ * `author_user_id` links the account when there is one and `recorded_by_user_id`
+ * names who typed an on-behalf review. See `docs/pii.md` for why `author` is
+ * never a published credit. `status` defaults to `submitted` so rows that
+ * predate the column, including `reviews` rows inside delete snapshots written
+ * before it existed, restore as submitted. Consent (`publish_*`, `credit`) is
+ * collected, not acted on, in v1.
+ *
+ * A review is captured in a release's delete snapshot through `album_id`, not
+ * `intake_item_id`. That `intake_item_id` (CASCADE, into a replayed table) is
+ * satisfied at restore time only because an item's reviews are stamped with the
+ * release it was filed as, and `intake_items` replays before `reviews`.
+ */
+export const reviews = wxyc_schema.table(
+  'reviews',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
+    intake_item_id: integer('intake_item_id').references(() => intake_items.id, { onDelete: 'cascade' }),
+    review: text('review'),
+    add_date: date('add_date').defaultNow().notNull(),
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+    author: varchar('author', { length: 128 }),
+    author_user_id: varchar('author_user_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    recorded_by_user_id: varchar('recorded_by_user_id', { length: 255 }).references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    medium: reviewMediumEnum('medium').notNull().default('typed'),
+    artist_blurb: text('artist_blurb'),
+    buzzwords: text('buzzwords'),
+    recommended_tracks: text('recommended_tracks'),
+    fcc: text('fcc'),
+    status: reviewStatusEnum('status').notNull().default('submitted'),
+    submitted_at: timestamp('submitted_at', { withTimezone: true }),
+    publish_website: boolean('publish_website').notNull().default(false),
+    publish_apps: boolean('publish_apps').notNull().default(false),
+    publish_instagram: boolean('publish_instagram').notNull().default(false),
+    credit: reviewCreditEnum('credit'),
+  },
+  (table) => [
+    index('reviews_album_id_idx').on(table.album_id),
+    index('reviews_intake_item_id_idx').on(table.intake_item_id),
+    index('reviews_author_user_id_idx').on(table.author_user_id),
+    check('reviews_target_ck', sql`${table.album_id} IS NOT NULL OR ${table.intake_item_id} IS NOT NULL`),
+  ]
+);
 
 /**
  * Form-sourced album-review ARCHIVE (ADR 0011) — the ~1,650 DJ-written
  * reviews collected since March 2021 in the "Album Review Responses"
  * Google Form, mirrored nightly by `jobs/album-reviews-etl/`.
  *
- * Deliberately separate from the `reviews` table above: ADR 0006 reserves
- * `reviews` as the one-per-album, author-owned (`author_dj_id`), MD-queued
- * in-app Review model at `/reviews`. This archive conflicts with that
- * model on every axis — multiple reviews per album, free-text alumni
- * reviewers with no `auth_user`, immutable submissions — so the two never
- * merge (see docs/adr/0011-album-review-submissions-separate-archive.md).
+ * Deliberately separate from the `reviews` table above, which holds the in-app
+ * reviews (many per release, authored by an account or by free text, and
+ * editable until submitted). This archive differs on the axes that matter —
+ * free-text alumni reviewers with no `auth_user`, immutable submissions, a
+ * promise that reviewer names are never shared — so the two never merge (see
+ * docs/adr/0011-album-review-submissions-separate-archive.md).
  *
  * Identity is free-text: `album_id` is a best-effort link written only by
  * the ETL's singleton-match link pass (never overwritten; ON DELETE SET
@@ -2941,7 +2984,7 @@ export type NewIntakeItemPass = InferInsertModel<typeof intake_item_passes>;
  *
  * This is the FOURTH, deliberately-distinct review concept and must not be
  * merged with any of the others:
- *   - `reviews` (ADR 0006): one-per-album, DJ-authored, in-app Review model.
+ *   - `reviews`: DJ-authored, in-app Review model (many per release).
  *   - `album_review_submissions` (ADR 0011): archived DJ Google-Form reviews.
  *   - the closed `AlbumReview` DTO (WXYC/wxyc-shared#229).
  * Those are all WXYC-authored. This table holds EXTERNAL critic text.
