@@ -2202,7 +2202,9 @@ export const library_watermark = wxyc_schema.table(
  * `flowsheet` plays: the delete blanks `flowsheet.album_id` (and
  * `flowsheet.rotation_id` via the rotation cascade) on every play of the
  * release, `flowsheet` is not captured, and the restore leaves those NULL — so
- * the card returns without its play history. And it does not recreate the five
+ * those plays stay unlinked, except tubafrenzy-era plays carrying a
+ * matching `legacy_release_id`, which `jobs/legacy-linkage-resolve` re-links
+ * (the endpoint itself never does). And it does not recreate the five
  * dependents the capture excludes by design (`album_metadata`,
  * `library_identity`, `library_identity_source`,
  * `uncovered_release_search_markers`, `album_review_submissions`).
