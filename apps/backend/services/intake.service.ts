@@ -121,8 +121,20 @@ export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
  * condition refused belongs to someone else (`forbidden`); every other state,
  * filed included, is `state_changed`.
  */
-const refusalFor = async (id: number, transition?: { from: IntakeItemState; identityGuarded: boolean }) => {
-  const item = await getIntakeItem(id, false);
+const refusalFor = async (id: number, transition?: IntakeTransitionRefusal) =>
+  refusalOutcome(await getIntakeItem(id, false), transition);
+
+type IntakeTransitionRefusal = { from: IntakeItemState; identityGuarded: boolean };
+
+/**
+ * The pure decision behind `refusalFor`, split out so its precedence is testable without a database:
+ * missing is `not_found`; no transition is `already_filed`; otherwise an identity-guarded refusal on an item still in
+ * the `from` effective state is `forbidden` and anything else is `state_changed`, which therefore outranks the identity 403.
+ */
+export const refusalOutcome = (
+  item: Pick<IntakeItemResponse, 'effective_state'> | undefined,
+  transition?: IntakeTransitionRefusal
+) => {
   if (!item) return 'not_found' as const;
   if (!transition) return 'already_filed' as const;
   return transition.identityGuarded && item.effective_state === transition.from
