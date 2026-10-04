@@ -5022,8 +5022,8 @@ export type DeletedArchiveBatch = {
   entities: DeletedArchiveEntity[];
   unrecoverable: readonly string[];
   /**
-   * Whether `POST /library/deleted/{batchId}/restore` can ever bring this
-   * batch back (BS#2616) — `false` for a batch holding any `entity_kind`
+   * Whether `POST /library/deleted/{batchId}/restore` may be attempted on this
+   * batch (BS#2616) — `false` for a batch holding any `entity_kind`
    * outside `RESTORABLE_ENTITY_KINDS`, the same set the restore endpoint
    * refuses against, so the two cannot drift. An `artist` batch reads
    * `false` today: the artist delete writes one, but no replay plan exists
@@ -5039,12 +5039,16 @@ export type DeletedArchiveBatch = {
    * **What this does NOT promise:** that a restore attempt will succeed.
    * `restorable: true` means "this batch's kind has a working replay plan
    * and a parseable envelope", not "this row will restore" — a restorable
-   * batch can still answer `already_present`, `resolution_required` (a
-   * shelf-slot conflict needing a client decision), or `lock_unavailable`.
-   * An `entity_kind` outside `RESTORABLE_ENTITY_KINDS` IS a hard guarantee
-   * in the other direction: the endpoint refuses every such batch with
-   * `409 unrestorable_kind` before any row lock or write (BS#2616
-   * follow-up review finding 7).
+   * batch can still answer `already_restored` (the wire name), `resolution_required`
+   * (a shelf-slot conflict needing a client decision), `lock_unavailable`
+   * (retryable), or `missing_reference` (a restored row's `NO ACTION`
+   * reference to a row deleted since; PERMANENT today, since no endpoint puts
+   * the missing row back under its captured id).
+   * For the kind half, `false` IS a hard guarantee: the endpoint refuses every
+   * batch holding an `entity_kind` outside `RESTORABLE_ENTITY_KINDS` with
+   * `409 unrestorable_kind` before any row lock or write (BS#2616 follow-up
+   * review finding 7). An envelope-corrupt batch also reads `false` but gets
+   * a 500, not that 409.
    */
   restorable: boolean;
 };

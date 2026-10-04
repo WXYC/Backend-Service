@@ -2218,9 +2218,10 @@ paths:
         (`flowsheet.album_id`) or via its rotation entry
         (`flowsheet.rotation_id` -> `rotation.album_id`), a play just loses
         its link; linked only by a bare `flowsheet.legacy_release_id`
-        awaiting the linkage-resolve cron, a play is stranded permanently,
-        since the delete-denylist means no future library row will ever
-        carry that legacy id for the resolver to join to. A pre-delete read
+        awaiting the linkage-resolve cron, a play is stranded unless the batch is
+        restored, since the delete-denylist means no future library row will
+        ever carry that legacy id for the resolver to join to (a restore puts
+        the original row, and its legacy id, back). A pre-delete read
         that surfaces this to the librarian before the delete is a separate
         endpoint, not this one.
         Dependent rows are resolved in the same transaction as the delete, and
@@ -2426,9 +2427,10 @@ paths:
                       delivery can add one, or a catalog edit can move one
                       either way, before the delete this read precedes
                       actually runs. Deleting STRANDS whatever is still in
-                      this arm at delete time permanently rather than
-                      unlinking it, since the delete-denylist guarantees no
-                      future release will ever carry this legacy id again.
+                      this arm at delete time (unless the batch is restored)
+                      rather than unlinking it, since the delete-denylist
+                      guarantees no future release will ever carry this legacy
+                      id again.
         '404':
           description: Album not found
 
@@ -4121,9 +4123,11 @@ paths:
         captured id (a deleted artist, or a removed `auth_user` referenced by
         `digital_asset.ripped_by`), so a batch can read `restorable: true`
         while no restore attempt can succeed.
-        `restorable: false` is the hard guarantee: the endpoint refuses
-        every such batch with `409 unrestorable_kind` before any row lock
-        or write.
+        For the kind half, `restorable: false` is a hard guarantee: the
+        endpoint refuses every batch holding an unrestorable `entity_kind`
+        with `409 unrestorable_kind` before any row lock or write. An
+        envelope-corrupt batch also reads `false`, but the endpoint does not
+        refuse it with that 409; it answers 500.
 
 
         `entities[].children` is per-child-table ROW COUNTS, not the rows —
@@ -4299,10 +4303,12 @@ paths:
         restored release either. The delete cleared `flowsheet.album_id` on
         every play that named the release, and `flowsheet.rotation_id` on
         every play that reached it through its rotation row; `flowsheet` is
-        not captured, so the restore leaves both NULL. A play whose
-        `legacy_release_id` matches the restored row's can get its
-        `album_id` back from `jobs/legacy-linkage-resolve`, not from this
-        endpoint.
+        not captured, so the restore leaves both NULL. A tubafrenzy-era play
+        carrying a `legacy_release_id` that matches the restored row's can get
+        its `album_id` back from `jobs/legacy-linkage-resolve`, within about 30
+        minutes of the restore, never from this endpoint. Backend-native
+        flowsheet inserts never set `legacy_release_id`, so plays made that
+        way stay unlinked.
 
 
         `unrecoverable` depends on the batch's `entity_kind`.
@@ -4497,7 +4503,7 @@ paths:
             the same batch off the identical exported set, so a client can
             render this without pressing the button first. `409`, not `404`,
             because the batch exists and the request is well-formed — this is
-            a refusal on the merits, same posture as the other two reasons
+            a refusal on the merits, same posture as the other reasons
             here. The body is deliberately not this service's standard error
             shape, for the same reason `DELETE /library/{id}`'s 409 is not:
             the specifics ARE the refusal.
