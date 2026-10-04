@@ -2156,7 +2156,10 @@ describe('flowsheet.controller', () => {
         await joinShow(req, res as Response, mockNext);
         expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, override);
       } else {
-        await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+        await expect(joinShow(req, res as Response, mockNext)).rejects.toMatchObject({
+          message: 'Bad Request: dj_name_override must be 255 characters or fewer',
+          statusCode: 400,
+        });
         expect(mockStartShow).not.toHaveBeenCalled();
       }
     });

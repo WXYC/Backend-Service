@@ -3520,6 +3520,9 @@ describe('library.controller', () => {
         ['label', 128, 'label must be 128 characters or fewer'],
         ['discogsUnavailableNote', 500, 'discogsUnavailableNote must be at most 500 characters'],
       ])('%s bound counts code points: accepts %i astral, rejects one more', async (field, max, message) => {
+        // An accepted label is upserted and its id read back, so this row needs
+        // its own createLabel result rather than one left over from another describe.
+        mockCreateLabel.mockResolvedValue({ id: 99 });
         const extra = field === 'discogsUnavailableNote' ? { discogsUnavailable: true } : {};
         await updateAlbum(reqFor({ ...extra, [field]: '😀'.repeat(max) }), mockResponse(), next);
         expect(mockUpdateAlbumInDB).toHaveBeenCalled();

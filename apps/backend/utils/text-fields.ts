@@ -42,7 +42,9 @@ export const validateTextField = (value: unknown, field: string, maxLength: numb
 /**
  * Normalize one optional, nullable free-text field (first callers: BS#2004's
  * `album_artist` and `alternate_artist_name`). Shared by POST and PATCH so the
- * two write verbs cannot disagree on trimming or bounds.
+ * two write verbs cannot disagree on trimming or bounds. (POST still writes
+ * `alternate_artist_name` raw, so for that field they do disagree; that
+ * pre-existing gap is separate.)
  *
  * - `undefined` means "not supplied": a create takes the column default, a
  *   PATCH leaves the stored value alone.
