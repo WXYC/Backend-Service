@@ -215,7 +215,7 @@ describe('/intake/:id and bodies', () => {
   test.each(BY_ID)('%s of an id past int4 (2147483648) is a 400 before any query', async (_m, send, service) => {
     const res = await bearer(send('2147483648'));
     expect(res.status).toBe(400);
-    expect(res.body.message).toBe('id must be a positive integer');
+    expect(res.body.message).toBe('Invalid intake item id');
     expect(service).not.toHaveBeenCalled();
   });
 

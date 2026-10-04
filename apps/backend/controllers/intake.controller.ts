@@ -1,11 +1,11 @@
-import { WXYCRoles, normalizeRole } from '@wxyc/authentication';
+import { roleGrants } from '@wxyc/authentication';
 import { intakeItemStateEnum } from '@wxyc/database';
 import type { Request, RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
-import type { IntakeFields, IntakeItemState } from '../services/intake.service.js';
+import type { IntakeAction, IntakeFields, IntakeItemState } from '../services/intake.service.js';
 import { INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
-import { parsePositiveInt } from '../utils/query-params.js';
+import { parseInt4PathId } from '../utils/query-params.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
 /**
@@ -19,17 +19,9 @@ import { normalizeOptionalText, validateTextField } from '../utils/text-fields.j
 const TEXT_MAX = 128;
 
 /** Callers holding `reviews: manage` see each item's `passes`; nobody else does. */
-const holdsReviewsManage = (req: Pick<Request, 'auth'>): boolean => {
-  const role = req.auth?.role && normalizeRole(req.auth.role);
-  return !!role && WXYCRoles[role].authorize({ reviews: ['manage'] }).success;
-};
+const holdsReviewsManage = (req: Pick<Request, 'auth'>): boolean => roleGrants(req.auth?.role, { reviews: ['manage'] });
 
-/** `intake_items.id` is int4: past `INT4_MAX` the lookup would be a 22003 → 500, so it is the malformed-id 400. */
-const parseId = (raw: string) => {
-  const id = parsePositiveInt(raw, 'id');
-  if (id > INT4_MAX) throw new WxycError('id must be a positive integer', 400);
-  return id;
-};
+const parseId = (raw: string) => parseInt4PathId(raw, 'intake item');
 
 /** The integer body fields are int4 columns; past `INT4_MAX` they would be a 22003 → 500 at the UPDATE/INSERT. */
 const intField = (value: unknown, field: string, nullable: boolean): number | null | undefined => {
@@ -57,8 +49,12 @@ const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partia
   };
 };
 
-const conflict = (res: Response, reason: 'already_filed') =>
-  res.status(409).json({ message: 'Intake item is already filed', reason });
+const CONFLICT_MESSAGES = {
+  already_filed: 'Intake item is already filed',
+  state_changed: 'Intake item is no longer in the state this action needs',
+};
+const conflict = (res: Response, reason: keyof typeof CONFLICT_MESSAGES) =>
+  res.status(409).json({ message: CONFLICT_MESSAGES[reason], reason });
 
 export const listIntake: RequestHandler = async (req, res) => {
   const { state } = req.query;
@@ -108,3 +104,36 @@ export const deleteIntake: RequestHandler<{ id: string }> = async (req, res) => 
   // Reviews can't attach to an item until slice 9; slice 10 names their authors here.
   res.json({ deleted_review_authors: [] });
 };
+
+/** `/request`'s `dj_id` must name an account whose membership role can accept, or the request would sit in `requested` with nobody able to answer it. */
+const parseRequestedDj = async (raw: unknown) => {
+  if (typeof raw !== 'string' || raw === '') throw new WxycError('dj_id is required', 400);
+  const roles = await intakeService.memberRoles(raw);
+  if (!roles.some((role) => roleGrants(role, { reviews: ['write'] }))) {
+    throw new WxycError('dj_id must name an account that can review', 400);
+  }
+  return raw;
+};
+
+/** The six `/intake/:id/<action>` transitions. Route grants run first (403), then the UPDATE's own state precondition (409), then identity (403). */
+const transition =
+  (action: IntakeAction): RequestHandler<{ id: string }> =>
+  async (req, res) => {
+    const id = parseId(req.params.id);
+    const djId = action === 'request' ? await parseRequestedDj(req.body?.dj_id) : undefined;
+    const actor = { id: (req.auth?.id ?? req.auth?.sub) as string, manage: holdsReviewsManage(req) };
+    const result = await intakeService.transitionIntakeItem(action, id, actor, djId);
+    if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
+    if (result.outcome === 'forbidden') throw new WxycError('This intake item belongs to another DJ', 403);
+    if (result.outcome === 'already_filed' || result.outcome === 'state_changed') {
+      return void conflict(res, 'state_changed');
+    }
+    res.json(result.item);
+  };
+
+export const checkoutIntake = transition('checkout');
+export const releaseIntake = transition('release');
+export const requestIntake = transition('request');
+export const cancelIntakeRequest = transition('cancel_request');
+export const acceptIntake = transition('accept');
+export const passIntake = transition('pass');

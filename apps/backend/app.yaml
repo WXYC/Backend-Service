@@ -515,7 +515,7 @@ components:
       required: [message, reason]
       properties:
         message: { type: string }
-        reason: { type: string, enum: [already_filed] }
+        reason: { type: string, enum: [already_filed, state_changed] }
 
     DigitalArchivePlaybackManifest:
       type: object
@@ -5041,6 +5041,213 @@ paths:
           description: 'No such intake item'
         '409':
           description: '`already_filed`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+
+  /intake/{id}/checkout:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Check an item out of the pool (BS#2798)
+      description: >-
+        Grant `reviews: write`. From effective `pool` (an expired request included) to `checked_out`, stamping `checked_out_by` and `checked_out_at` and clearing any stale request fields. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: write`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`state_changed`: the item is not in the state this action needs (an already-filed item included), or another caller got there first'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+
+  /intake/{id}/release:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Return a checked-out item to the pool (BS#2798)
+      description: >-
+        Grant `reviews: write`; a caller without `reviews: manage` must also be the holder. From effective `checked_out` to `pool`, clearing the holder fields. A checkout whose holder account is gone can be released by `reviews: manage`. 403 comes first for the grant, then 409 for the wrong state, then 403 for a non-holder. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: write`, or is not the holder and lacks `reviews: manage`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`state_changed`: the item is not in the state this action needs (an already-filed item included), or another caller got there first'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+
+  /intake/{id}/request:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Request a DJ review a pooled item (BS#2798)
+      description: >-
+        Grant `reviews: manage`. From effective `pool` to `requested`, stamping `requested_dj_id` and `requested_at`. Re-requesting a DJ who already passed is allowed. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dj_id]
+              properties:
+                dj_id: { type: string, description: 'An account whose role grants `reviews: write`' }
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id, or a missing or invalid `dj_id`'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`state_changed`: the item is not in the state this action needs (an already-filed item included), or another caller got there first'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+
+  /intake/{id}/cancel-request:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Cancel a request (BS#2798)
+      description: >-
+        Grant `reviews: manage`. From effective `requested` to `pool`, clearing the request fields. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`state_changed`: the item is not in the state this action needs (an already-filed item included), or another caller got there first'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+
+  /intake/{id}/accept:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Accept a request (BS#2798)
+      description: >-
+        Grant `reviews: write`; only the requested DJ. From effective `requested` (not expired) to `checked_out`, clearing the request fields. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: write`, or is not the requested DJ'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`state_changed`: the item is not in the state this action needs (an already-filed item included), or another caller got there first'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+
+  /intake/{id}/pass:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Pass on a request (BS#2798)
+      description: >-
+        Grant `reviews: write`; only the requested DJ. From effective `requested` (not expired) to `pool`, clearing the request fields and recording a row in `intake_item_passes`. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: write`, or is not the requested DJ'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`state_changed`: the item is not in the state this action needs (an already-filed item included), or another caller got there first'
           content:
             application/json:
               schema:
