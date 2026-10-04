@@ -90,6 +90,7 @@ Express 5 application with these route groups:
 | `/library` | Music library catalog |
 | `/album-reviews` | Form-review archive reads (ADR 0011). Role-gated `album_reviews:read` (dj+), NOT anonymous auth — it serves the whole archive with no `social_consent` filter, so the gate is the safety argument. PII-excluding projection. |
 | `/digital-archive` | Presigned playback manifests into the auto-DJ Space (BS#2320, ADR 0014). Role-gated `digital_archive:listen` (dj+) AND flag-gated `DIGITAL_ARCHIVE_STREAMING_ENABLED`, checked before any DB read. 403 = off/below dj; 404 = permitted but nothing bound and servable — never a 200 with empty tracks. |
+| `/intake` | DJ album-review intake (BS#2796): log, list, get, patch, delete. Role-gated `reviews:read` (dj+) for reads, `reviews:manage` (MD+) for log/patch/delete. `GET` filters on **effective state** (an expired `requested`, or one whose DJ account is gone, reads as `pool`; `checked_out` >14 days is `overdue`), defined once in `services/intake.service.ts`; reads never write. `passes` only for `reviews:manage` callers. 409 `already_filed` on patch/delete once filed. |
 | `/flowsheet` | Flowsheet — serves both the V1 shape and the V2 projection (see below) |
 | `/djs` | DJ bin and playlists |
 | `/request` | Song request line |

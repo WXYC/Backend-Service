@@ -451,6 +451,72 @@ components:
           maxLength: 255
           nullable: true
 
+    IntakeItem:
+      type: object
+      description: >
+        One physical copy logged for a DJ review (BS#2796). `effective_state`
+        equals `state` except a `requested` item whose request is more than 7
+        days old, or whose `requested_dj_id` is null (the DJ's account was
+        deleted), reads as `pool`; `overdue` is true for a `checked_out` item
+        older than 14 days. A read never changes `state`. DJ names are
+        `auth_user.name`, never a real name. `passes` is present only for
+        callers holding `reviews: manage`. Swagger display only; the SSOT is
+        wxyc-shared/api.yaml.
+      properties:
+        id: { type: integer }
+        artist_name: { type: string, maxLength: 128 }
+        album_title: { type: string, maxLength: 128 }
+        record_label: { type: string, nullable: true, maxLength: 128 }
+        label_id: { type: integer, nullable: true }
+        format_id: { type: integer }
+        discogs_release_id: { type: integer, nullable: true }
+        state: { $ref: '#/components/schemas/IntakeItemState' }
+        effective_state: { $ref: '#/components/schemas/IntakeItemState' }
+        overdue: { type: boolean }
+        logged_at: { type: string, format: date-time }
+        requested_dj_id: { type: string, nullable: true }
+        requested_dj_name: { type: string, nullable: true }
+        requested_at: { type: string, format: date-time, nullable: true }
+        checked_out_by: { type: string, nullable: true }
+        checked_out_by_name: { type: string, nullable: true }
+        checked_out_at: { type: string, format: date-time, nullable: true }
+        cited_album_id: { type: integer, nullable: true }
+        cited_submission_id: { type: integer, nullable: true }
+        album_id: { type: integer, nullable: true }
+        rotation_id: { type: integer, nullable: true }
+        filed_at: { type: string, format: date-time, nullable: true }
+        printed_at: { type: string, format: date-time, nullable: true }
+        finalized_at: { type: string, format: date-time, nullable: true }
+        passes:
+          type: array
+          items:
+            type: object
+            properties:
+              dj_name: { type: string }
+              passed_at: { type: string, format: date-time }
+
+    IntakeItemState:
+      type: string
+      enum: [pool, requested, checked_out, reviewed, filed, finalized]
+
+    IntakeItemFields:
+      type: object
+      description: The logging fields. `POST` requires `artist_name`, `album_title` and `format_id`; `PATCH` takes any subset.
+      properties:
+        artist_name: { type: string, maxLength: 128 }
+        album_title: { type: string, maxLength: 128 }
+        record_label: { type: string, nullable: true, maxLength: 128 }
+        label_id: { type: integer, nullable: true }
+        format_id: { type: integer }
+        discogs_release_id: { type: integer, nullable: true }
+
+    IntakeConflictError:
+      type: object
+      required: [message, reason]
+      properties:
+        message: { type: string }
+        reason: { type: string, enum: [already_filed] }
+
     DigitalArchivePlaybackManifest:
       type: object
       description: >
@@ -4731,3 +4797,144 @@ paths:
           description: DIGITAL_ARCHIVE_STREAMING_ENABLED is off, or the caller is below `dj` (anonymous sessions and the `member` role)
         '404':
           description: No bound digital-archive asset with a servable file exists for this album
+
+  /intake:
+    get:
+      summary: List intake items by effective state (BS#2796)
+      description: >-
+        Grant `reviews: read`. Ordered by `logged_at` descending, then `id`
+        descending. `state` filters on `effective_state`, so an expired
+        `requested` item is returned for `state=pool`. Callers holding
+        `reviews: manage` get `passes` on every item.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IntakeItemState'
+      responses:
+        '200':
+          description: 'The matching items'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: '`state` is not an intake item state'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: read`'
+    post:
+      summary: Log an item into the intake pool (BS#2796)
+      description: 'Grant `reviews: manage`. Stamps `logged_by` and `logged_at`; the item starts in `pool`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntakeItemFields'
+      responses:
+        '200':
+          description: 'The logged item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Validation failure, or an unknown `format_id`/`label_id`'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+
+  /intake/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      summary: Get one intake item (BS#2796)
+      description: 'Grant `reviews: read`. `passes` only for callers holding `reviews: manage`.'
+      responses:
+        '200':
+          description: 'The item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: read`'
+        '404':
+          description: 'No such intake item'
+    patch:
+      summary: Edit an intake item before it is filed (BS#2796)
+      description: >-
+        Grant `reviews: manage`. A body carrying `cited_album_id` or
+        `cited_submission_id` is a 400 until the citation slice lands.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntakeItemFields'
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Validation failure, a citation key, or no editable field'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`already_filed`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+    delete:
+      summary: Delete an intake item (BS#2796)
+      description: >-
+        Grant `reviews: manage`. Refused with 409 `already_filed` once the item
+        is filed. `deleted_review_authors` is always empty until reviews can
+        attach to an item.
+      responses:
+        '200':
+          description: 'Deleted'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted_review_authors:
+                    type: array
+                    items: { type: string }
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`already_filed`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
