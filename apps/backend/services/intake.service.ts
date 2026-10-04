@@ -15,6 +15,7 @@ import {
   user,
   type NewIntakeItem,
 } from '@wxyc/database';
+import WxycError from '../utils/error.js';
 import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
 
 /**
@@ -181,8 +182,12 @@ export const citationValidSql = ({ cited_album_id: album, cited_submission_id: s
 /** Whether the patch sets a citation to a non-null value (a clear, or no citation key, sets none). */
 const setsCitation = (patch: IntakeCitations) => patch.cited_album_id != null || patch.cited_submission_id != null;
 
-export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) =>
-  db
+/** Throws a 400 `WxycError` when both citations are non-null: the two are mutually exclusive, so the service refuses it as well as the controller. */
+export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
+  if (patch.cited_album_id != null && patch.cited_submission_id != null) {
+    throw new WxycError('cited_album_id and cited_submission_id cannot both be set', 400);
+  }
+  return db
     .update(intake_items)
     .set({
       ...patch,
@@ -192,10 +197,12 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
     })
     .where(and(eq(intake_items.id, id), notInArray(intake_items.state, FILED_STATES), citationValidSql(patch)))
     .returning({ id: intake_items.id });
+};
 
 export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
+  const query = buildIntakePatch(id, patch); // throws the 400 before any write
   try {
-    const rows = await buildIntakePatch(id, patch);
+    const rows = await query;
     if (rows.length === 0) {
       return { outcome: await refusalFor(id, setsCitation(patch) ? 'citation' : undefined) };
     }

@@ -5063,7 +5063,10 @@ paths:
         the other in the same update; both non-null is a 400. A 409 answers
         `already_filed` before `invalid_citation` (a missing item is a 404 first): a
         filed item can't be edited at all, so `already_filed` outranks an invalid
-        citation.
+        citation. A cited id that doesn't exist also answers 409 `invalid_citation`.
+        A form submission with no `submitted_at` is citable only while the cutover
+        is unset; once any cutover date is set it is refused with
+        `invalid_citation`, because it can't be shown to predate the cutover.
       requestBody:
         required: true
         content:

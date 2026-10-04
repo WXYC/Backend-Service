@@ -342,6 +342,13 @@ describe('/intake (BS#2796)', () => {
         expect(await citationsOf(id)).toEqual({ cited_album_id: citedAlbumId, cited_submission_id: null });
       });
 
+      test('citing an existing release with no review row is a 200 (pre-cutover releases are deemed reviewed)', async () => {
+        const id = await seed('cite-unreviewed');
+        const res = await auth.patch(`/intake/${id}`).send({ cited_album_id: libraryId });
+        expect(res.status).toBe(200);
+        expect(await citationsOf(id)).toEqual({ cited_album_id: libraryId, cited_submission_id: null });
+      });
+
       test('citing an existing form submission is a 200', async () => {
         const id = await seed('cite-submission');
         const res = await auth.patch(`/intake/${id}`).send({ cited_submission_id: submissionId });

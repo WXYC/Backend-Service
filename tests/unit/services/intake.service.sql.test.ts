@@ -253,7 +253,7 @@ describe('buildIntakePatch — citations (BS#2797)', () => {
   it('puts validity in the same UPDATE: a submitted review or a station-date add_date on or before the cutover', () => {
     const { sql: text, params } = render({ cited_album_id: 5 }, '2027-01-12');
     expect(text).toContain(`${T}."intake_items"."state" not in (`);
-    expect(text).toContain(`${T}."reviews"."status" = 'submitted'`);
+    expect(text).toContain(`${T}."reviews"."status" = 'submitted') OR EXISTS (`);
     expect(text).toContain(`(${T}."library"."add_date" AT TIME ZONE 'America/New_York')::date <= $`);
     expect(params).toContain('2027-01-12');
   });
@@ -298,6 +298,23 @@ describe('buildIntakePatch — citations (BS#2797)', () => {
     (reviewGateCutoverDate as jest.Mock).mockClear();
     buildIntakePatch(7, { cited_submission_id: 12 });
     expect(reviewGateCutoverDate).toHaveBeenCalled();
+  });
+});
+
+describe('the service refuses both citations non-null (BS#2797)', () => {
+  it('buildIntakePatch throws a 400 and writes nothing', () => {
+    expect(() => buildIntakePatch(7, { cited_album_id: 5, cited_submission_id: 12 })).toThrow(
+      expect.objectContaining({ statusCode: 400 })
+    );
+  });
+
+  it('updateIntakeItem rejects with the same 400 instead of reporting updated', async () => {
+    const update = jest.spyOn(db, 'update');
+    await expect(updateIntakeItem(7, { cited_album_id: 5, cited_submission_id: 12 })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    expect(update).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
   });
 });
 
