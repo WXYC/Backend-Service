@@ -71,7 +71,7 @@ describe('text-fields', () => {
       ['whitespace', '   ', null],
       ['trims', '  Drag City ', 'Drag City'],
       ['128 astral code points', astral128, astral128],
-      ['measures after trimming', `  ${'a'.repeat(128)}  `, 'a'.repeat(128)],
+      ['a value padded past maxLength that fits once trimmed', `  ${'a'.repeat(128)}  `, 'a'.repeat(128)],
     ])('maps %s', (_name, input, expected) => {
       expect(normalizeOptionalText(input, 'record_label', 128)).toBe(expected);
     });
