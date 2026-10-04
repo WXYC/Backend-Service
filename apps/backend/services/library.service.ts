@@ -5047,8 +5047,9 @@ export type DeletedArchiveBatch = {
    * For the kind half, `false` IS a hard guarantee: the endpoint refuses every
    * batch holding an `entity_kind` outside `RESTORABLE_ENTITY_KINDS` with
    * `409 unrestorable_kind` before any row lock or write (BS#2616 follow-up
-   * review finding 7). An envelope-corrupt batch also reads `false` but gets
-   * a 500, not that 409.
+   * review finding 7). An envelope-corrupt batch also reads `false`, but
+   * the kind check runs first: one holding an unrestorable kind still gets that
+   * 409, and only one whose kinds all pass takes the lock and answers 500.
    */
   restorable: boolean;
 };
@@ -6851,12 +6852,16 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * takes (below) touches it — with no FK there is no RI check for a
  * `FOR UPDATE` to conflict with, so nothing here can detect, block, or even
  * see a webhook INSERT landing in that same instant. For the other two paths
- * that would only mean a slightly staler link; for this one it is permanent,
- * because deleting the release means the denylist guarantees no future
- * `library` row will ever carry that `legacy_release_id` for the resolver to
- * join to. The other two arms just lose their link — the play, and its
- * provenance up to that point, survive with `album_id` or `rotation_id` gone
- * NULL. This arm loses its only remaining path to ever gaining one at all.
+ * that would only mean a slightly staler link; for this one it is stranded
+ * unless the batch is restored, because deleting the release means the
+ * denylist blocks any future `library` row from carrying that
+ * `legacy_release_id` for the resolver to join to. A restore puts the
+ * original row, and its legacy id, back and deletes the denylist row, after
+ * which the resolver's flowsheet pass (`f.legacy_release_id =
+ * l.legacy_release_id AND f.album_id IS NULL`, half-hourly) re-links the play.
+ * The other two arms just lose their link — the play, and its provenance up to
+ * that point, survive with `album_id` or `rotation_id` gone NULL. Until a
+ * restore, this arm loses its only remaining path to ever gaining one at all.
  * That asymmetry is real, and this endpoint does nothing about it: it does
  * not detect the exposure, does not report it, and does not slow down for
  * it. A pre-delete read that tells a librarian what a delete would strand
@@ -6912,9 +6917,10 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * nothing, conflicts with neither lock, and commits freely inside the delete
  * window while naming the release by `legacy_release_id`. The cascade never
  * reaches that row — it matches only on `album_id`/`rotation_id` — and the
- * denylist row written here guarantees the resolver can never join it to a
- * future `library` row. So a play CAN attach to a release mid-deletion and be
- * left naming a release that no longer exists, permanently. No lock available
+ * denylist row written here keeps the resolver from joining it to any future
+ * `library` row. So a play CAN attach to a release mid-deletion and be left
+ * naming a release that no longer exists, unless the batch is restored (the
+ * restore puts the legacy id back, and the resolver then re-links it). No lock available
  * to this transaction prevents it, because there is no FK to lock against;
  * only a pre-delete read that shows a librarian what the delete would strand
  * can (see the controller docstring).
