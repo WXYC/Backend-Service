@@ -670,6 +670,53 @@ describe('library.controller', () => {
       });
     });
 
+    // BS#2844: the create text is bounded at 128 code points, like PATCH.
+    describe('album_title, label and alternate_artist_name bounds (BS#2844)', () => {
+      const astral = (n: number) => '\u{1F600}'.repeat(n);
+      const req = (fields: Record<string, unknown>) =>
+        ({
+          body: { album_title: 'DOGA', artist_id: 42, label: 'Sonamos', genre_id: 11, format_id: 1, ...fields },
+        }) as unknown as Request;
+
+      beforeEach(() => {
+        mockGetArtistNameById.mockResolvedValue('Juana Molina');
+      });
+
+      it.each(['album_title', 'label', 'alternate_artist_name'])('%s: accepts 128 code points', async (field) => {
+        const res = mockResponse();
+
+        await addAlbum(req({ [field]: astral(128) }), res, next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ [field]: astral(128) }));
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it.each(['album_title', 'label', 'alternate_artist_name'])(
+        '%s: refuses 129 code points with a 400 and writes nothing',
+        async (field) => {
+          await expect(addAlbum(req({ [field]: astral(129) }), mockResponse(), next)).rejects.toMatchObject({
+            statusCode: 400,
+            message: `${field} must be 128 characters or fewer`,
+          });
+
+          expect(mockCreateLabel).not.toHaveBeenCalled();
+          expect(mockInsertAlbum).not.toHaveBeenCalled();
+        }
+      );
+
+      it.each(['album_title', 'label'])('%s: trims a value padded past 128 that fits once trimmed', async (field) => {
+        await addAlbum(req({ [field]: `  ${astral(128)}  ` }), mockResponse(), next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ [field]: astral(128) }));
+      });
+
+      it('stores a blank alternate_artist_name as null', async () => {
+        await addAlbum(req({ alternate_artist_name: '   ' }), mockResponse(), next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ alternate_artist_name: null }));
+      });
+    });
+
     it('writes the canonical artist_name from the artists table when artist_id is supplied', async () => {
       mockGetArtistNameById.mockResolvedValue('Juana Molina');
 

@@ -401,6 +401,92 @@ describe('planLibraryFiling', () => {
   });
 });
 
+// BS#2844: the create text is bounded at 128 code points (`varchar(128)`), in
+// code points, and a refusal writes nothing. Astral characters are two UTF-16
+// units, so a bare `.length` would refuse the 128 case.
+describe('create text bounds on POST /library/filings', () => {
+  const astral = (n: number) => '\u{1F600}'.repeat(n);
+  const createArtist = { kind: 'create' as const, artist_name: 'Juana Molina', code_letters: 'JU', genre_id: 3 };
+  const baseRelease = { album_title: 'DOGA', label: 'Sonamos', genre_id: 3, format_id: 1 };
+  const filingInput = (release: Record<string, unknown>) => ({
+    filingPlan: {
+      kind: 'create' as const,
+      artist_name: 'Juana Molina',
+      alphabetical_name: 'Juana Molina',
+      code_letters: 'JU',
+      code_number: 6,
+    },
+    release: { ...baseRelease, ...release } as never,
+  });
+
+  beforeEach(() => {
+    mockGenerateArtistNumber.mockResolvedValue(6);
+    mockGetArtistByCode.mockResolvedValue(undefined);
+    mockArtistIdFromName.mockResolvedValue(null);
+    mockCreateLabel.mockResolvedValue({ id: 12 });
+  });
+
+  // album_title and alternate_artist_name are refused in the plan, before the transaction.
+  it.each(['album_title', 'alternate_artist_name'])(
+    '%s: accepts 128 code points, refuses 129 with a 400',
+    async (field) => {
+      await expect(
+        planLibraryFiling({ artist: createArtist, release: { ...baseRelease, [field]: astral(128) } })
+      ).resolves.toMatchObject({ kind: 'ok' });
+
+      const rejection = expect(
+        planLibraryFiling({ artist: createArtist, release: { ...baseRelease, [field]: astral(129) } })
+      ).rejects;
+      await rejection.toMatchObject({ statusCode: 400 });
+      await rejection.toThrow(`release.${field} must be 128 characters or fewer`);
+      expect(mockInsertAlbum).not.toHaveBeenCalled();
+    }
+  );
+
+  it('trims album_title and nulls a blank alternate_artist_name', async () => {
+    const plan = await planLibraryFiling({
+      artist: createArtist,
+      release: { ...baseRelease, album_title: `  ${astral(128)}  `, alternate_artist_name: '   ' },
+    });
+
+    expect(plan).toMatchObject({
+      input: { release: { album_title: astral(128), alternate_artist_name: null } },
+    });
+  });
+
+  it('refuses a 129-code-point label, minting no labels row and writing no album', async () => {
+    mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+      id: 9,
+      artist_name: 'Juana Molina',
+      alphabetical_name: 'Juana Molina',
+      code_letters: 'JU',
+    });
+    const outerTx = { marker: 'tx' };
+
+    const rejection = expect(fileLibraryRelease(filingInput({ label: astral(129) }), outerTx as never)).rejects;
+    await rejection.toMatchObject({ statusCode: 400 });
+    await rejection.toThrow('release.label must be 128 characters or fewer');
+
+    expect(mockCreateLabel).not.toHaveBeenCalled();
+    expect(mockInsertAlbum).not.toHaveBeenCalled();
+  });
+
+  it('accepts a 128-code-point label, trimmed, on the transaction', async () => {
+    mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+      id: 9,
+      artist_name: 'Juana Molina',
+      alphabetical_name: 'Juana Molina',
+      code_letters: 'JU',
+    });
+    mockInsertAlbum.mockResolvedValue({ id: 1 });
+    const outerTx = { marker: 'tx' };
+
+    await fileLibraryRelease(filingInput({ label: `  ${astral(128)}  ` }), outerTx as never);
+
+    expect(mockCreateLabel).toHaveBeenCalledWith(astral(128), undefined, outerTx);
+  });
+});
+
 describe('mapLibraryFilingError', () => {
   it('maps a rotation card/bin mismatch onto its 409 body', () => {
     const err = new libraryService.RotationCardBinMismatchError(1, 'S', 'A');
