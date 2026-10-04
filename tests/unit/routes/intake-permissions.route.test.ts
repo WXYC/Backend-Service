@@ -205,6 +205,25 @@ describe('/intake/:id and bodies', () => {
     expect((await bearer(request(app).get('/intake/abc'))).status).toBe(400);
   });
 
+  // `intake_items.id` is int4: an id past it would reach Postgres as a 22003 and answer 500.
+  const BY_ID = [
+    ['GET', (id: string) => request(app).get(`/intake/${id}`), mockGetIntakeItem],
+    ['PATCH', (id: string) => request(app).patch(`/intake/${id}`).send({ album_title: 'DOGA' }), mockUpdateIntakeItem],
+    ['DELETE', (id: string) => request(app).delete(`/intake/${id}`), mockDeleteIntakeItem],
+  ] as const;
+
+  test.each(BY_ID)('%s of an id past int4 (2147483648) is a 400 before any query', async (_m, send, service) => {
+    const res = await bearer(send('2147483648'));
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('id must be a positive integer');
+    expect(service).not.toHaveBeenCalled();
+  });
+
+  test.each(BY_ID)('%s accepts the int4 ceiling (2147483647) as an id', async (_m, send, service) => {
+    expect((await bearer(send('2147483647'))).status).toBe(200);
+    expect(service.mock.calls[0][0]).toBe(2147483647);
+  });
+
   test('GET of a missing item is a 404', async () => {
     mockGetIntakeItem.mockResolvedValue(undefined);
     expect((await bearer(request(app).get('/intake/7'))).status).toBe(404);
