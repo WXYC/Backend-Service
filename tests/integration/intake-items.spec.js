@@ -12,15 +12,18 @@
  * is behavior against real SQL — effective state, the filter built on it, the
  * order, and that a read never writes.
  *
- * Callers: the shared access token is the signed-in station account (its JWT
- * carries a role, so it holds `reviews: manage`); `secondary_access_token` is a
- * raw user-id Bearer that AUTH_BYPASS accepts without a role claim, which is
- * how this tier plays a caller who does not hold `reviews: manage`.
+ * Callers: the manager signs in as the seeded `test_station_manager` and sends
+ * its JWT, whose `role` claim (from `auth_member`) holds `reviews: manage` — the
+ * shared `global.access_token` is a plain DJ (`test_dj1`) in CI and would not.
+ * `secondary_access_token` is a raw user-id Bearer that AUTH_BYPASS accepts
+ * without a role claim, which is how this tier plays a caller who does not hold
+ * `reviews: manage`.
  */
 
 const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
+const getAccessToken = require('../utils/better_auth');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE';
@@ -72,7 +75,7 @@ describe('/intake (BS#2796)', () => {
   const keysOf = (body) => mine(body).map((i) => i.artist_name.slice(PREFIX.length + 1));
 
   beforeAll(async () => {
-    auth = createAuthRequest(request, global.access_token);
+    auth = createAuthRequest(request, `Bearer ${await getAccessToken('test_station_manager', 'testpassword123')}`);
     nonManager = createAuthRequest(request, global.secondary_access_token);
     sql = makeSql();
     await cleanup();
@@ -274,10 +277,13 @@ describe('/intake (BS#2796)', () => {
       expect((await auth.get(`/intake/${created.body.id}`)).status).toBe(404);
     });
 
-    test('POST with an unknown format_id is a 400, not a 500', async () => {
+    test.each([
+      ['an unknown format_id', { format_id: 2147483000 }],
+      ['a discogs_release_id past int4', { discogs_release_id: 2147483648 }],
+    ])('POST with %s is a 400, not a 500', async (_name, extra) => {
       const res = await auth
         .post('/intake')
-        .send({ artist_name: `${PREFIX} bad`, album_title: 'x', format_id: 2147483000 });
+        .send({ artist_name: `${PREFIX} bad`, album_title: 'x', format_id: formatId, ...extra });
       expect(res.status).toBe(400);
     });
 

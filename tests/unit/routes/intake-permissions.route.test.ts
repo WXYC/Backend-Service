@@ -237,6 +237,7 @@ describe('/intake/:id and bodies', () => {
     ['missing format_id', { artist_name: 'a', album_title: 'b' }],
     ['non-integer format_id', { ...NEW_ITEM, format_id: 1.5 }],
     ['string label_id', { ...NEW_ITEM, label_id: '3' }],
+    ['discogs_release_id past int4', { ...NEW_ITEM, discogs_release_id: 2147483648 }],
   ])('POST with %s is a 400 and writes nothing', async (_name, body) => {
     expect((await bearer(request(app).post('/intake').send(body))).status).toBe(400);
     expect(mockLogIntakeItem).not.toHaveBeenCalled();

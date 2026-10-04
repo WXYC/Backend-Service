@@ -3,10 +3,8 @@
  * Authenticates with better-auth service and retrieves JWT token for testing
  */
 
-async function signIn() {
+async function signIn(username = process.env.AUTH_USERNAME, password = process.env.AUTH_PASSWORD) {
   const authUrl = process.env.BETTER_AUTH_URL || 'http://localhost:8082/auth';
-  const username = process.env.AUTH_USERNAME;
-  const password = process.env.AUTH_PASSWORD;
 
   if (!username || !password) {
     throw new Error('AUTH_USERNAME and AUTH_PASSWORD environment variables must be set');
@@ -71,9 +69,14 @@ async function signIn() {
   }
 }
 
-async function get_access_token() {
+/**
+ * JWT for the shared integration login (AUTH_USERNAME / AUTH_PASSWORD, a plain
+ * DJ in CI) or, when given credentials, for that seeded account — the way a
+ * spec obtains a token whose `role` claim it needs (e.g. `reviews: manage`).
+ */
+async function get_access_token(username, password) {
   try {
-    const token = await signIn();
+    const token = await signIn(username, password);
     return token;
   } catch (error) {
     console.error('Failed to get access token from better-auth:', error.message);
