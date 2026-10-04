@@ -4089,12 +4089,13 @@ paths:
         list.
 
 
-        `restorable` (BS#2616) says whether `POST
-        /library/deleted/{batchId}/restore` can EVER bring this batch back —
-        `false` for a batch holding any `entity_kind` the restore endpoint has
-        no replay plan for, computed from the exact same exported set the
-        restore's `409 unrestorable_kind` refusal reads, so the two cannot
-        drift. An `artist` batch reads `false` today: the artist delete
+        `restorable` (BS#2616) says whether this batch's kind and captured
+        envelope allow a `POST /library/deleted/{batchId}/restore` attempt,
+        not whether an attempt can succeed — `false` for a batch holding any
+        `entity_kind` the restore endpoint has no replay plan for, computed
+        from the exact same exported set the restore's `409
+        unrestorable_kind` refusal reads, so the two cannot drift. An
+        `artist` batch reads `false` today: the artist delete
         writes a `catalog_delete_snapshot` row, but no replay plan exists for
         it (an artist's shelf slot has no tombstone and needs its own
         conflict probe — full artist restore is unbuilt, not merely
@@ -4110,8 +4111,16 @@ paths:
         `restorable: true` is NOT a promise that a restore attempt will
         succeed — it means this batch's kind has a working replay plan and
         a parseable envelope, nothing more. A restorable batch can still
-        answer `already_present`, `resolution_required` (a shelf-slot
-        conflict a client must resolve), or `lock_unavailable`.
+        answer `already_restored`, `resolution_required` (a shelf-slot
+        conflict a client must resolve), `lock_unavailable`, or
+        `missing_reference` (a restored row's `NO ACTION` reference to a row
+        deleted since). `already_restored` means the batch is already back;
+        `resolution_required` clears once a retry sends `resolution`, and
+        `lock_unavailable` is retryable; `missing_reference` is PERMANENT
+        today, because no endpoint puts the missing row back under its
+        captured id (a deleted artist, or a removed `auth_user` referenced by
+        `digital_asset.ripped_by`), so a batch can read `restorable: true`
+        while no restore attempt can succeed.
         `restorable: false` is the hard guarantee: the endpoint refuses
         every such batch with `409 unrestorable_kind` before any row lock
         or write.
@@ -4284,6 +4293,16 @@ paths:
         an intake item's `cited_album_id`, for example — stays NULL after the
         release is restored, because the restore never re-links rows the
         delete left in place.
+
+
+        The restore does not re-link archived flowsheet plays to the
+        restored release either. The delete cleared `flowsheet.album_id` on
+        every play that named the release, and `flowsheet.rotation_id` on
+        every play that reached it through its rotation row; `flowsheet` is
+        not captured, so the restore leaves both NULL. A play whose
+        `legacy_release_id` matches the restored row's can get its
+        `album_id` back from `jobs/legacy-linkage-resolve`, not from this
+        endpoint.
 
 
         `unrecoverable` depends on the batch's `entity_kind`.
