@@ -32,8 +32,6 @@ import {
   parseRotationUrls,
   enrichNewAlbum,
   fireAndForgetCanonicalEntity,
-  codePointLength,
-  isNonBlankString,
 } from '../services/library-filing.service.js';
 import type { LibraryFilingRequestBody, NewArtistRequest } from '../services/library-filing.service.js';
 import * as librarySearchService from '../services/library-search.service.js';
@@ -42,6 +40,7 @@ import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
+import { codePointLength, isNonBlankString, validateTextField, normalizeOptionalText } from '../utils/text-fields.js';
 import { INT4_MAX } from '../utils/constants.js';
 
 // `genres.id` and `genre_artist_crossreference.artist_genre_code` are Postgres
@@ -67,7 +66,7 @@ type NewAlbumRequest = {
   artist_id?: number;
   alternate_artist_name?: string;
   // BS#2004: credited album artist on a compilation card. Optional and
-  // nullable; `normalizeOptionalAlbumText` (below) owns the trim/bounds
+  // nullable; `normalizeOptionalText` owns the trim/bounds
   // rules for both write verbs.
   album_artist?: string | null;
   // BS#2410: `label` is no longer required on its own — see the either-or
@@ -162,7 +161,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id, body.genre_id)),
     code_volume_letters: code_volume_letters,
     alternate_artist_name: body.alternate_artist_name,
-    album_artist: normalizeOptionalAlbumText(body.album_artist, 'album_artist'),
+    album_artist: normalizeOptionalText(body.album_artist, 'album_artist', MAX_ALBUM_TEXT_LENGTH),
     disc_quantity: body.disc_quantity,
   };
 
@@ -1645,35 +1644,6 @@ export const restoreDeletedBatch: RequestHandler<{ batchId: string }, unknown, {
   }
 };
 
-/**
- * Validate one optional free-text body field: must be a string, must not be
- * blank after trimming, must fit the column. Returns the trimmed value.
- *
- * The three `rotation` snapshot columns and `updateAlbum`'s `album_title`
- * all sit on `varchar(128)` and all want the identical trim / non-empty /
- * max-length shape; over-length input is rejected as a 400 here rather than
- * reaching the UPDATE and tripping PG 22001 ("value too long") → 500.
- * Callers pass their own limit so a future wider column doesn't have to
- * fork the helper.
- */
-const validateTextField = (value: unknown, field: string, maxLength: number): string => {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new WxycError(`${field} must be a non-empty string`, 400);
-  }
-  const trimmed = value.trim();
-  // Code points, not UTF-16 units — `codePointLength`, not `.length`. Postgres
-  // measures `varchar(n)` in characters, so a bare `.length` counts every
-  // astral character (emoji, CJK Ext-B) twice and rejects values PG would
-  // store happily. `addRotation` already measures these same three columns
-  // that way; using `.length` here made a 128-code-point `album_title`
-  // creatable via POST and un-editable via PATCH — a row you cannot fix a
-  // typo in without first shortening a legal title.
-  if (codePointLength(trimmed) > maxLength) {
-    throw new WxycError(`${field} must be ${maxLength} characters or fewer`, 400);
-  }
-  return trimmed;
-};
-
 const ROTATION_STATUSES = ['active', 'killed', 'all'] as const;
 
 /**
@@ -3052,36 +3022,6 @@ const UPDATABLE_ALBUM_FIELDS = [
 const MAX_ALBUM_TEXT_LENGTH = 128;
 
 /**
- * BS#2004: `album_artist` is the credited artist on a compilation card
- * ("Kruder & Dorfmeister" on a DJ-Kicks release filed under Various Artists).
- * Nullable, optional, `varchar(128)`. Shared by POST and PATCH so the two
- * write verbs cannot disagree on trimming or bounds.
- *
- * Also backs `alternate_artist_name`'s PATCH bound (BS#2004 review): that
- * field measured length with `.length` (UTF-16 units) while the rest of this
- * file uses `codePointLength` — the unit Postgres `varchar(n)` actually counts
- * — so an astral-heavy value Postgres would store was wrongly rejected.
- * Routing it here removes the divergence. (POST still writes
- * `alternate_artist_name` raw; that pre-existing gap is separate.)
- *
- * `undefined` means "not supplied": on a create the column takes its default,
- * on a PATCH the stored value is left alone (`updateAlbumInDB` only SETs keys
- * `!== undefined`). `null` and `''` both mean "clear it" and normalize to
- * `null`, so a client round-tripping a GET body can send back what it got.
- */
-const normalizeOptionalAlbumText = (value: unknown, field: string): string | null | undefined => {
-  if (value === undefined) return undefined;
-  if (value !== null && typeof value !== 'string') {
-    throw new WxycError(`${field} must be a string or null`, 400);
-  }
-  const trimmed = value?.trim() || null;
-  if (trimmed !== null && codePointLength(trimmed) > MAX_ALBUM_TEXT_LENGTH) {
-    throw new WxycError(`${field} must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
-  }
-  return trimmed;
-};
-
-/**
  * PATCH /library/:id with true partial semantics (PR #1154 review issues
  * 5–8, 10–13): only fields present in the body are validated and written, so
  * a title-typo fix can't reset disc_quantity, wipe alternate_artist_name, or
@@ -3109,11 +3049,15 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
   }
 
   if ('alternate_artist_name' in body) {
-    updates.alternate_artist_name = normalizeOptionalAlbumText(body.alternate_artist_name, 'alternate_artist_name');
+    updates.alternate_artist_name = normalizeOptionalText(
+      body.alternate_artist_name,
+      'alternate_artist_name',
+      MAX_ALBUM_TEXT_LENGTH
+    );
   }
 
   if ('album_artist' in body) {
-    updates.album_artist = normalizeOptionalAlbumText(body.album_artist, 'album_artist');
+    updates.album_artist = normalizeOptionalText(body.album_artist, 'album_artist', MAX_ALBUM_TEXT_LENGTH);
   }
 
   if (body.disc_quantity !== undefined) {

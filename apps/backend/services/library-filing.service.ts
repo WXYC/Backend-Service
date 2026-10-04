@@ -3,6 +3,7 @@ import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { Album, db, parseRotationBin, RotationBin, RotationRelease, ROTATION_BINS } from '@wxyc/database';
 import { INT2_MAX, INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
+import { codePointLength, isNonBlankString } from '../utils/text-fields.js';
 import { getPostHogClient } from '../utils/posthog.js';
 import { lmlLookupCoordinator } from './lml/index.js';
 import { filterSpacerGif } from './metadata/metadata.service.js';
@@ -280,16 +281,6 @@ const artistCardToFilingArtist = (row: libraryService.ArtistCardRow): FilingArti
   code_artist_number: row.code_artist_number,
   genre_id: row.genre_id,
 });
-
-/** Unicode-code-point length, matching OpenAPI `maxLength` semantics (a UTF-16 `.length` over-counts astral characters). */
-export function codePointLength(value: string): number {
-  return [...value].length;
-}
-
-/** `true` only for a string with at least one non-whitespace character. */
-export function isNonBlankString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
 
 // The request-side bounds RotationCreateFields.urls declares (wxyc-shared
 // 1.55.0). Declared there at publish time because oasdiff treats adding
