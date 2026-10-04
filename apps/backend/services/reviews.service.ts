@@ -37,14 +37,13 @@ export const snapshotAuthor = (name: string | null | undefined) =>
 /** `locked` is the item's slip being printed; a review on a library release alone has no item and no slip. */
 const locked = sql<boolean>`coalesce(${intake_items.printed_at} IS NOT NULL, false)`;
 
-const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db, lock = false) => {
-  const q = executor
+const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db) =>
+  executor
     .select({ ...getTableColumns(reviews), locked: locked.as('locked') })
     .from(reviews)
     .leftJoin(intake_items, eq(intake_items.id, reviews.intake_item_id))
-    .where(eq(reviews.id, id));
-  return (lock ? q.for('update', { of: reviews }) : q).then((rows) => rows[0] as ReviewResponse | undefined);
-};
+    .where(eq(reviews.id, id))
+    .then((rows) => rows[0] as ReviewResponse | undefined);
 
 /**
  * Creates the caller's own `typed` draft about one subject. An intake item must be held by the
@@ -120,8 +119,9 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
     if (subject.item !== null) {
       await tx.select({ id: intake_items.id }).from(intake_items).where(eq(intake_items.id, subject.item)).for('share');
     }
-    const current = await selectReview(id, tx, true);
-    if (!current) return { outcome: 'not_found' as const };
+    const [mine] = await tx.select({ id: reviews.id }).from(reviews).where(eq(reviews.id, id)).for('update');
+    if (!mine) return { outcome: 'not_found' as const };
+    const current = (await selectReview(id, tx))!;
     const decision = editOutcome(current, actor);
     if (decision !== 'allowed') return { outcome: decision };
     // A print must never produce an empty slip, so a submitted typed review keeps its text.
