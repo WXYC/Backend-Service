@@ -2139,6 +2139,28 @@ describe('flowsheet.controller', () => {
       expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, exactly255);
     });
 
+    it.each([
+      ['accepts exactly 255 astral code points (510 UTF-16 units)', 255, true],
+      ['rejects 256 astral code points', 256, false],
+    ])('dj_name_override bound counts code points: %s', async (_name, count, accepted) => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      mockStartShow.mockResolvedValue({ id: 42, primary_dj_id: 'caller-dj' });
+      const override = '😀'.repeat(count);
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', dj_name_override: override },
+      } as unknown as Request;
+      const res = createMockRes();
+
+      if (accepted) {
+        await joinShow(req, res as Response, mockNext);
+        expect(mockStartShow).toHaveBeenCalledWith('caller-dj', undefined, undefined, override);
+      } else {
+        await expect(joinShow(req, res as Response, mockNext)).rejects.toBeInstanceOf(WxycError);
+        expect(mockStartShow).not.toHaveBeenCalled();
+      }
+    });
+
     it('does not forward dj_name_override when joining an existing show (co-host path)', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
       mockAddDJToShow.mockResolvedValue({ id: 99, dj_id: 'caller-dj' });

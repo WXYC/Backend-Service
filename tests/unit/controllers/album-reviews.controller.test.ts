@@ -196,6 +196,19 @@ describe('album-reviews.controller getAlbumReviews', () => {
     });
   });
 
+  it.each([
+    ['accepts exactly 256 astral code points (512 UTF-16 units)', 256, true],
+    ['rejects 257 astral code points', 257, false],
+  ])('artist bound counts code points: %s', async (_name, count, accepted) => {
+    setQuery({ artist: '😀'.repeat(count) });
+    if (accepted) {
+      await invoke();
+      expect(mockGetAlbumReviewsPage).toHaveBeenCalled();
+    } else {
+      await expect(invoke()).rejects.toThrow('artist must be at most 256 characters');
+    }
+  });
+
   it('propagates service failures to the error handler', async () => {
     const failure = new Error('db unavailable');
     mockGetAlbumReviewsPage.mockRejectedValue(failure);

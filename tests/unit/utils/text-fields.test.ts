@@ -20,6 +20,7 @@ describe('text-fields', () => {
 
   it('counts an astral string over 128 UTF-16 units as 128 code points', () => {
     expect(astral128.length).toBeGreaterThan(128);
+    expect(codePointLength(astral128)).toBe(128);
   });
 
   it.each([
@@ -38,6 +39,7 @@ describe('text-fields', () => {
     it.each([
       ['trims', '  Stereolab ', 'Stereolab'],
       ['accepts 128 astral code points', astral128, astral128],
+      ['measures after trimming', `  ${'a'.repeat(128)}  `, 'a'.repeat(128)],
     ])('%s', (_name, input, expected) => {
       expect(validateTextField(input, 'artist_name', 128)).toBe(expected);
     });
@@ -69,6 +71,7 @@ describe('text-fields', () => {
       ['whitespace', '   ', null],
       ['trims', '  Drag City ', 'Drag City'],
       ['128 astral code points', astral128, astral128],
+      ['measures after trimming', `  ${'a'.repeat(128)}  `, 'a'.repeat(128)],
     ])('maps %s', (_name, input, expected) => {
       expect(normalizeOptionalText(input, 'record_label', 128)).toBe(expected);
     });

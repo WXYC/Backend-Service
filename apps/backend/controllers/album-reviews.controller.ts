@@ -2,6 +2,7 @@ import { RequestHandler } from 'express';
 import * as albumReviewsService from '../services/album-reviews.service.js';
 import WxycError from '../utils/error.js';
 import { parsePositiveInt } from '../utils/query-params.js';
+import { codePointLength } from '../utils/text-fields.js';
 import type { AlbumReviewsResponse } from '@wxyc/shared/dtos';
 
 /**
@@ -53,7 +54,7 @@ export const getAlbumReviews: RequestHandler<object, unknown, object, AlbumRevie
     if (typeof query.artist !== 'string' || query.artist.trim() === '') {
       throw new WxycError('artist must be a non-empty string', 400);
     }
-    if (query.artist.length > MAX_ARTIST_LENGTH) {
+    if (codePointLength(query.artist) > MAX_ARTIST_LENGTH) {
       throw new WxycError(`artist must be at most ${MAX_ARTIST_LENGTH} characters`, 400);
     }
     artist = query.artist;
