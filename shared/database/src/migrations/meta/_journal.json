@@ -1247,6 +1247,13 @@
       "when": 1791130234796,
       "tag": "0180_2801-extend-reviews",
       "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1791136422330,
+      "tag": "0181_2809-rotation-moved-from-rotation-id",
+      "breakpoints": true
     }
   ]
 }

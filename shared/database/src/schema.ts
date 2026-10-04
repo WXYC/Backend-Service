@@ -1070,6 +1070,13 @@ export const rotation = wxyc_schema.table(
   {
     id: serial('id').primaryKey(),
     album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
+    // BS#2809: the row this one replaced when dj-site moved a record between
+    // bins (new row in the target bin, old row killed). Lets a moved
+    // pre-cutover typed-text record keep its standing despite the new
+    // `add_date`. NULL for every row that is not a move.
+    moved_from_rotation_id: integer('moved_from_rotation_id').references((): AnyPgColumn => rotation.id, {
+      onDelete: 'set null',
+    }),
     legacy_rotation_id: integer('legacy_rotation_id'),
     legacy_library_release_id: integer('legacy_library_release_id'),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
@@ -1200,6 +1207,7 @@ export const rotation = wxyc_schema.table(
         sql`lower(trim(coalesce(${table.artist_name}, '')))`,
         sql`lower(trim(coalesce(${table.album_title}, '')))`
       ),
+      movedFromRotationIdIdx: index('rotation_moved_from_rotation_id_idx').on(table.moved_from_rotation_id),
       // legacy_rotation_id is the surrogate key tubafrenzy assigns each
       // rotation row; one row per legacy_rotation_id by tubafrenzy's invariant.
       // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
