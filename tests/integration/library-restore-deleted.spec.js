@@ -38,6 +38,7 @@
 const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
+const { seedAuthUser, removeSeededAuthUsers } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const ROCK = 11;
@@ -72,7 +73,6 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
   // BS#2818 fixtures: rows a refusal test deletes to make a target missing,
   // then puts back (or not), which teardown must remove after the library rows.
   const createdFormatIds = [];
-  const createdUserIds = [];
   let refusalSeq = 0;
 
   /**
@@ -185,10 +185,7 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
       if (createdFormatIds.length > 0) {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".format WHERE id = ANY($1::int[])`, [createdFormatIds]);
       }
-      if (createdUserIds.length > 0) {
-        // `auth_user` is better-auth's table, in `public` rather than `${SCHEMA}`.
-        await sql.unsafe(`DELETE FROM auth_user WHERE id = ANY($1::text[])`, [createdUserIds]);
-      }
+      await removeSeededAuthUsers();
       if (createdTrackArtistIds.length > 0) {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id = ANY($1::int[])`, [createdTrackArtistIds]);
       }
@@ -540,8 +537,7 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
   test("restores a release that was in a removed DJ's bin, dropping the bin row and reporting it", async () => {
     const album = await createAlbum({ album_title: `${marker} Removed DJ Bin` });
     const djId = `bs2818-dj-${uniq}`;
-    await sql.unsafe(`INSERT INTO auth_user (id, name, email) VALUES ($1, $1, $2)`, [djId, `${djId}@example.test`]);
-    createdUserIds.push(djId);
+    await seedAuthUser({ id: djId, name: djId, email: `${djId}@example.test` });
     const bin = await sql.unsafe(`INSERT INTO "${SCHEMA}".bins (dj_id, album_id) VALUES ($1, $2) RETURNING id`, [
       djId,
       album.id,

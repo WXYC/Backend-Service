@@ -20,25 +20,14 @@
  * `reviews: manage`.
  */
 
-const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
-const getAccessToken = require('../utils/better_auth');
+const { getTestDb } = require('../utils/db');
+const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem, managerAccessToken } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE';
 const USER_PREFIX = 'itest-intake-user-';
-
-const makeSql = () =>
-  postgres({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
-    database: process.env.DB_NAME || 'wxyc_db',
-    user: process.env.DB_USERNAME || 'test-user',
-    password: process.env.DB_PASSWORD || 'test-pw',
-    onnotice: () => {},
-    max: 2,
-  });
 
 const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
 
@@ -58,7 +47,7 @@ describe('/intake (BS#2796)', () => {
       logged_at: daysAgo(30),
       ...overrides,
     };
-    const [inserted] = await sql`INSERT INTO ${sql(SCHEMA)}.intake_items ${sql(row)} RETURNING id`;
+    const inserted = await seedIntakeItem(row);
     ids[key] = inserted.id;
     return inserted.id;
   };
@@ -68,6 +57,7 @@ describe('/intake (BS#2796)', () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE album_title = $1`, [`${PREFIX} filed`]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1 AND code_letters = 'ZZ'`, [PREFIX]);
     await sql.unsafe(`DELETE FROM auth_user WHERE id LIKE $1`, [`${USER_PREFIX}%`]);
+    await removeSeededAuthUsers();
   };
 
   /** This file's rows out of a list response, in the order the endpoint returned them. */
@@ -75,9 +65,9 @@ describe('/intake (BS#2796)', () => {
   const keysOf = (body) => mine(body).map((i) => i.artist_name.slice(PREFIX.length + 1));
 
   beforeAll(async () => {
-    auth = createAuthRequest(request, `Bearer ${await getAccessToken('test_station_manager', 'testpassword123')}`);
+    auth = createAuthRequest(request, `Bearer ${await managerAccessToken()}`);
     nonManager = createAuthRequest(request, global.secondary_access_token);
-    sql = makeSql();
+    sql = getTestDb();
     await cleanup();
 
     [{ id: formatId }] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format ORDER BY id LIMIT 1`);
@@ -87,9 +77,12 @@ describe('/intake (BS#2796)', () => {
       ['holder', 'Holder DJ Name'],
       ['passer', 'Passing DJ Name'],
     ]) {
-      await sql`
-        INSERT INTO auth_user (id, name, email, real_name)
-        VALUES (${USER_PREFIX + suffix}, ${name}, ${`${USER_PREFIX}${suffix}@test.wxyc.org`}, 'LEAKED REAL NAME')`;
+      await seedAuthUser({
+        id: USER_PREFIX + suffix,
+        name,
+        email: `${USER_PREFIX}${suffix}@test.wxyc.org`,
+        real_name: 'LEAKED REAL NAME',
+      });
     }
 
     await seed('pool', { logged_at: daysAgo(3) });
@@ -159,7 +152,6 @@ describe('/intake (BS#2796)', () => {
 
   afterAll(async () => {
     await cleanup();
-    await sql.end();
   });
 
   describe('GET /intake', () => {
