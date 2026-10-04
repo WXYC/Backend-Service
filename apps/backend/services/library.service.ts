@@ -33,6 +33,7 @@ import {
   RotationRelease,
   album_critic_reviews,
   album_plays,
+  album_review_submissions,
   album_popularity,
   artist_crossreference,
   artist_library_crossreference,
@@ -46,6 +47,7 @@ import {
   genre_artist_crossreference,
   format,
   genres,
+  intake_items,
   library,
   library_delete_denylist,
   library_identity,
@@ -5410,6 +5412,8 @@ const RESTORE_PLAN: Record<
       ['artist_library_crossreference', artist_library_crossreference],
       ['compilation_track_artist', compilation_track_artist],
       ['library_urls', library_urls],
+      // After `rotation` (`rotation_id`) and before `reviews` (`intake_item_id`).
+      ['intake_items', intake_items],
       ['reviews', reviews],
       ['album_critic_reviews', album_critic_reviews],
       ['bins', bins],
@@ -5439,6 +5443,18 @@ const RESTORE_PLAN: Record<
 export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
   rotation: { card_id: rotation_cards.id },
   compilation_track_artist: { track_artist_id: artists.id },
+  intake_items: {
+    logged_by: auth_user.id,
+    requested_dj_id: auth_user.id,
+    checked_out_by: auth_user.id,
+    cited_album_id: library.id,
+    cited_submission_id: album_review_submissions.id,
+    filed_by: auth_user.id,
+    rotation_id: rotation.id,
+    printed_by: auth_user.id,
+    finalized_by: auth_user.id,
+  },
+  reviews: { author_user_id: auth_user.id, recorded_by_user_id: auth_user.id },
 };
 
 /**
@@ -5468,6 +5484,7 @@ export const REFUSE_REFERENCES: Record<string, Record<string, PgColumn>> = {
   rotation: { format_id: format.id, label_id: labels.id },
   digital_asset: { ripped_by: auth_user.id },
   digital_asset_file: { store_id: digital_asset_store.id },
+  intake_items: { label_id: labels.id, format_id: format.id },
   artist_library_crossreference: { artist_id: artists.id },
 };
 
@@ -7228,14 +7245,6 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // Reason 2 is not answerable by adding a projection here, because reason
     // 1 means there is nothing to restore in the first place.
     //
-    // `intake_items` is absent because nothing sets its `album_id` yet, and that
-    // is temporary, not a decision to leave it out. Its `album_id` is
-    // `onDelete: 'cascade'`, so once filing exists a
-    // delete here would destroy the filed item and its `intake_item_passes`
-    // with no way back. BS#2801 (slice 9) adds the capture, the `RESTORE_PLAN`
-    // entries and the `SET_NULL_REFERENCES` for its `auth_user`, `rotation_id`
-    // and `cited_*` columns; nothing may set `intake_items.album_id` before it
-    // lands (only filing, BS#2803, sets it, and it waits on #2801 through #2802).
     await captureCatalogDeleteSnapshot(tx, {
       entityKind: 'library',
       entityId: album_id,
@@ -7244,6 +7253,7 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         compilation_track_artist.library_id,
         library_urls.library_id,
         reviews.album_id,
+        intake_items.album_id,
         album_critic_reviews.album_id,
         bins.album_id,
         rotation.album_id,

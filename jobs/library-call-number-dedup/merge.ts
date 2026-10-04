@@ -112,7 +112,10 @@ export const FK_TARGETS: readonly FkTarget[] = [
   },
   { table: 'flowsheet', column: 'album_id', uniqueKey: null },
   { table: 'album_metadata', column: 'album_id', uniqueKey: ['album_id'] },
-  { table: 'reviews', column: 'album_id', uniqueKey: ['album_id'] },
+  // BS#2801. Many reviews per release since the `UNIQUE (album_id)` was dropped,
+  // so a merge keeps every review and repoints them all. The old key would have
+  // treated every review but one as a duplicate and deleted it.
+  { table: 'reviews', column: 'album_id', uniqueKey: null },
   { table: 'album_review_submissions', column: 'album_id', uniqueKey: null },
   { table: 'album_critic_reviews', column: 'album_id', uniqueKey: ['album_id', 'source_url'] },
   { table: 'uncovered_release_search_markers', column: 'album_id', uniqueKey: ['album_id'] },
@@ -136,8 +139,8 @@ export const FK_TARGETS: readonly FkTarget[] = [
   //
   // This is the only collision-delete in the list that DESTROYS rows in another
   // table. (`rotation` reaches beyond its own row too -- `flowsheet.rotation_id`
-  // references it -- but that FK is ON DELETE set null, so it loses a link and
-  // never a row. The distinction is the whole point of the warning below.) `digital_asset_file.asset_id` REFERENCES `digital_asset(id)` ON DELETE
+  // and `intake_items.rotation_id` reference it -- but both FKs are ON DELETE
+  // set null, so a collision-delete loses a link and never a row. The distinction is the whole point of the warning below.) `digital_asset_file.asset_id` REFERENCES `digital_asset(id)` ON DELETE
   // cascade, so dropping a binding row also drops every file row under it --
   // object_key, the md5/sha256/flac_md5 digests, bitrate, duration, raw tags --
   // and `fillNullsFromLoser` carries none of it across first (the PRESERVED_*

@@ -246,6 +246,54 @@ describe('every foreign key from a replayed table to a non-replayed table (catal
   });
 });
 
+/**
+ * Foreign keys into a replayed table whose delete rule is not SET NULL, minus
+ * those into `library`, the batch root. Neither guard above classifies these:
+ * both skip a CASCADE or NO ACTION key whose target is replayed, on the premise
+ * that the target is live or restored by the same batch. That holds for a key
+ * the plan captures the child through (`rotation_urls.rotation_id` rides
+ * `rotation.album_id`; every `library` key is the root). It is an unchecked
+ * invariant for any other, so each one must be named below with the reason.
+ */
+const derivedNonRootReplayedReferences = (guard: GuardSchema = REAL_SCHEMA): string[] =>
+  guard.replayed.flatMap((name) =>
+    getTableConfig(tableNamed(name, guard))
+      .foreignKeys.filter((foreignKey) => foreignKey.onDelete !== 'set null')
+      .flatMap((foreignKey) => {
+        const { columns, foreignTable } = foreignKey.reference();
+        const targetTable = getTableConfig(foreignTable).name;
+        return guard.replayed.includes(targetTable) && targetTable !== guard.replayed[0]
+          ? columns.map((column) => `${name}.${column.name}`)
+          : [];
+      })
+  );
+
+describe('every CASCADE or NO ACTION foreign key into a replayed non-root table (catalog restore replay)', () => {
+  const ALLOWED = {
+    'rotation_urls.rotation_id': 'captured through rotation.album_id (a depth-2 `via` child)',
+    'digital_asset_file.asset_id': 'captured through digital_asset.library_id (a depth-2 `via` child)',
+    // A review is captured through `album_id`, not `intake_item_id`. Its item is
+    // in the same batch only because an item's reviews are stamped with the
+    // release the item was filed as, and `jobs/library-call-number-dedup`
+    // re-points `reviews.album_id` and `intake_items.album_id` together.
+    // `intake_items` replays before `reviews`, so that is the order that matters.
+    'reviews.intake_item_id': "reviews carry their item's filed album_id; intake_items replays first",
+  };
+
+  it('is a capture-through key or on the stated allow-list', () => {
+    expect(derivedNonRootReplayedReferences().sort()).toEqual(Object.keys(ALLOWED).sort());
+  });
+
+  it('replays intake_items before reviews, so a review finds its item', () => {
+    expect(RESTORE_PLAN_REPLAYED_TABLE_NAMES.indexOf('intake_items')).toBeGreaterThan(
+      RESTORE_PLAN_REPLAYED_TABLE_NAMES.indexOf('rotation')
+    );
+    expect(RESTORE_PLAN_REPLAYED_TABLE_NAMES.indexOf('reviews')).toBeGreaterThan(
+      RESTORE_PLAN_REPLAYED_TABLE_NAMES.indexOf('intake_items')
+    );
+  });
+});
+
 // The two guards above must be satisfiable together. A nullable SET NULL
 // reference whose target table the restore ALSO replays is what #2809
 // (`rotation.moved_from_rotation_id` -> `rotation`, self-referencing) and #2801
