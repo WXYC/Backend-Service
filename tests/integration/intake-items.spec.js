@@ -37,6 +37,8 @@ describe('/intake (BS#2796)', () => {
   let sql;
   let formatId;
   let libraryId;
+  let citedAlbumId;
+  let submissionId;
   const ids = {};
 
   const seed = async (key, overrides = {}) => {
@@ -54,7 +56,8 @@ describe('/intake (BS#2796)', () => {
 
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE album_title = $1`, [`${PREFIX} filed`]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_review_submissions WHERE artist_name = $1`, [PREFIX]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE album_title LIKE $1`, [`${PREFIX} %`]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1 AND code_letters = 'ZZ'`, [PREFIX]);
     await sql.unsafe(`DELETE FROM auth_user WHERE id LIKE $1`, [`${USER_PREFIX}%`]);
     await removeSeededAuthUsers();
@@ -141,6 +144,21 @@ describe('/intake (BS#2796)', () => {
       [artist.id, genre.id, formatId, `${PREFIX} filed`, PREFIX]
     );
     libraryId = lib.id;
+    // A release with a submitted review, and a form submission: the two things an item can cite.
+    const [cited] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+       VALUES ($1, $2, $3, $4, 9103, $5) RETURNING id`,
+      [artist.id, genre.id, formatId, `${PREFIX} cited`, PREFIX]
+    );
+    citedAlbumId = cited.id;
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".reviews (album_id, review, author, status) VALUES ($1, $2, $3, 'submitted')`,
+      [citedAlbumId, 'A submitted review', PREFIX]
+    );
+    [{ id: submissionId }] = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".album_review_submissions (artist_name, album_title, review) VALUES ($1, $2, $3) RETURNING id`,
+      [PREFIX, 'Submitted album', 'A form review']
+    );
     await seed('filed', { state: 'filed', album_id: libraryId, filed_at: daysAgo(1) });
     await seed('finalized', {
       state: 'finalized',
@@ -307,9 +325,79 @@ describe('/intake (BS#2796)', () => {
       expect(res.status).toBe(400);
     });
 
-    test('PATCH carrying a citation is a 400 until slice 7b', async () => {
-      const res = await auth.patch(`/intake/${ids.pool}`).send({ cited_album_id: libraryId });
-      expect(res.status).toBe(400);
+    // REVIEW_GATE_CUTOVER_DATE is deliberately unset here (setting it would break every spec that creates releases, BS#2807): any existing release or submission is citable. The cutover-date arms are pinned in the unit tier.
+    describe('PATCH citations (BS#2797), cutover unset', () => {
+      const citationsOf = async (id) =>
+        (
+          await sql.unsafe(`SELECT cited_album_id, cited_submission_id FROM "${SCHEMA}".intake_items WHERE id = $1`, [
+            id,
+          ])
+        )[0];
+
+      test('citing an existing release with a submitted review is a 200 that stores the citation', async () => {
+        const id = await seed('cite-release');
+        const res = await auth.patch(`/intake/${id}`).send({ cited_album_id: citedAlbumId });
+        expect(res.status).toBe(200);
+        expect(res.body.cited_album_id).toBe(citedAlbumId);
+        expect(await citationsOf(id)).toEqual({ cited_album_id: citedAlbumId, cited_submission_id: null });
+      });
+
+      test('citing an existing form submission is a 200', async () => {
+        const id = await seed('cite-submission');
+        const res = await auth.patch(`/intake/${id}`).send({ cited_submission_id: submissionId });
+        expect(res.status).toBe(200);
+        expect(await citationsOf(id)).toEqual({ cited_album_id: null, cited_submission_id: submissionId });
+      });
+
+      test.each([
+        ['a nonexistent release', { cited_album_id: 2147483000 }],
+        ['a nonexistent submission', { cited_submission_id: 2147483000 }],
+      ])('citing %s is a 409 invalid_citation and changes nothing', async (_name, body) => {
+        const id = await seed('cite-bad');
+        const res = await auth.patch(`/intake/${id}`).send({ ...body, album_title: 'Changed' });
+        expect(res.status).toBe(409);
+        expect(res.body.reason).toBe('invalid_citation');
+        const [row] = await sql.unsafe(`SELECT album_title FROM "${SCHEMA}".intake_items WHERE id = $1`, [id]);
+        expect(row.album_title).toBe('Album cite-bad');
+      });
+
+      test('setting one citation clears the other in the same request, in both directions', async () => {
+        const id = await seed('cite-switch');
+        await auth.patch(`/intake/${id}`).send({ cited_album_id: citedAlbumId });
+        const toSubmission = await auth.patch(`/intake/${id}`).send({ cited_submission_id: submissionId });
+        expect(toSubmission.status).toBe(200);
+        expect(await citationsOf(id)).toEqual({ cited_album_id: null, cited_submission_id: submissionId });
+        const toRelease = await auth.patch(`/intake/${id}`).send({ cited_album_id: citedAlbumId });
+        expect(toRelease.status).toBe(200);
+        expect(await citationsOf(id)).toEqual({ cited_album_id: citedAlbumId, cited_submission_id: null });
+      });
+
+      test('an explicit null clears a citation, and both non-null is a 400', async () => {
+        const id = await seed('cite-clear', { cited_album_id: citedAlbumId });
+        const both = await auth
+          .patch(`/intake/${id}`)
+          .send({ cited_album_id: citedAlbumId, cited_submission_id: submissionId });
+        expect(both.status).toBe(400);
+        const cleared = await auth.patch(`/intake/${id}`).send({ cited_album_id: null });
+        expect(cleared.status).toBe(200);
+        expect(await citationsOf(id)).toEqual({ cited_album_id: null, cited_submission_id: null });
+      });
+
+      test.each(['filed', 'finalized'])(
+        'citing on a %s item is a 409 already_filed, even for a valid citation',
+        async (key) => {
+          const res = await auth.patch(`/intake/${ids[key]}`).send({ cited_album_id: citedAlbumId });
+          expect(res.status).toBe(409);
+          expect(res.body.reason).toBe('already_filed');
+          const bad = await auth.patch(`/intake/${ids[key]}`).send({ cited_album_id: 2147483000 });
+          expect(bad.status).toBe(409);
+          expect(bad.body.reason).toBe('already_filed');
+        }
+      );
+
+      test('citing on a missing item is a 404', async () => {
+        expect((await auth.patch('/intake/2147483000').send({ cited_album_id: citedAlbumId })).status).toBe(404);
+      });
     });
 
     test.each(['filed', 'finalized'])(

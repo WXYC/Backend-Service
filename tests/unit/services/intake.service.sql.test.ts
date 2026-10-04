@@ -23,7 +23,15 @@ jest.mock('@wxyc/database', () => {
   return { ...realSchema, ...nyTime, db: drizzle({}) };
 });
 
+jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
+  const actual = jest.requireActual('../../../apps/backend/utils/review-gate-cutover');
+  return { ...actual, reviewGateCutoverDate: jest.fn(actual.reviewGateCutoverDate) };
+});
+
+import { db } from '@wxyc/database';
+import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
 import {
+  updateIntakeItem,
   buildIntakePatch,
   buildIntakeSelect,
   buildTransition,
@@ -272,7 +280,61 @@ describe('buildIntakePatch — citations (BS#2797)', () => {
 
   it('adds no citation predicate, and clears nothing, for a patch that sets none', () => {
     const { sql: text } = render({ album_title: 'DOGA', cited_album_id: null });
-    expect(text).not.toContain('exists');
+    expect(text).not.toMatch(/exists/i);
     expect(text).not.toContain('cited_submission_id');
+  });
+
+  it.each([
+    ['a title-only patch', { album_title: 'DOGA' }],
+    ['a clear-only patch', { cited_album_id: null }],
+    ['a clear of both citations', { cited_album_id: null, cited_submission_id: null }],
+  ])('never reads the cutover date for %s', (_name, patch) => {
+    (reviewGateCutoverDate as jest.Mock).mockClear();
+    buildIntakePatch(7, patch);
+    expect(reviewGateCutoverDate).not.toHaveBeenCalled();
+  });
+
+  it('reads the cutover date when a patch sets a citation', () => {
+    (reviewGateCutoverDate as jest.Mock).mockClear();
+    buildIntakePatch(7, { cited_submission_id: 12 });
+    expect(reviewGateCutoverDate).toHaveBeenCalled();
+  });
+});
+
+describe('updateIntakeItem — refusal order end to end (BS#2797)', () => {
+  /** A chainable, awaitable stand-in for a drizzle builder that resolves to `rows`. */
+  const builder = (rows: unknown[]): unknown => {
+    const proxy: unknown = new Proxy(() => undefined, {
+      get: (_t, prop) => (prop === 'then' ? (resolve: (v: unknown) => void) => resolve(rows) : () => proxy),
+    });
+    return proxy;
+  };
+
+  const refuse = async (patch: Parameters<typeof updateIntakeItem>[1], effective_state: string) => {
+    jest.spyOn(db, 'update').mockReturnValue(builder([]) as never); // the guarded UPDATE touched no row
+    jest.spyOn(db, 'select').mockReturnValue(builder([{ id: 7, effective_state }]) as never);
+    return (await updateIntakeItem(7, patch)).outcome;
+  };
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    [
+      'an invalid citation on an unfiled item is invalid_citation, not already_filed',
+      { cited_album_id: 5 },
+      'pool',
+      'invalid_citation',
+    ],
+    [
+      'an invalid submission citation on an unfiled item is invalid_citation',
+      { cited_submission_id: 5 },
+      'checked_out',
+      'invalid_citation',
+    ],
+    ['a citation on a filed item is already_filed', { cited_album_id: 5 }, 'filed', 'already_filed'],
+    ['a title-only patch on a surviving item is already_filed', { album_title: 'x' }, 'filed', 'already_filed'],
+    ['a clear on a surviving item is already_filed', { cited_album_id: null }, 'pool', 'already_filed'],
+  ])('%s', async (_name, patch, state, expected) => {
+    expect(await refuse(patch, state)).toBe(expected);
   });
 });
