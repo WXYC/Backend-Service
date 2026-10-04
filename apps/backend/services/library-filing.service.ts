@@ -3,12 +3,37 @@ import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { Album, db, parseRotationBin, RotationBin, RotationRelease, ROTATION_BINS } from '@wxyc/database';
 import { INT2_MAX, INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
-import { codePointLength, isNonBlankString } from '../utils/text-fields.js';
+import {
+  codePointLength,
+  isNonBlankString,
+  normalizeOptionalText,
+  validateTextField,
+  MAX_ALBUM_TEXT_LENGTH,
+} from '../utils/text-fields.js';
 import { getPostHogClient } from '../utils/posthog.js';
 import { lmlLookupCoordinator } from './lml/index.js';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import * as labelsService from './labels.service.js';
 import * as libraryService from './library.service.js';
+
+/**
+ * Validate the create body's `album_title` and `alternate_artist_name` the way
+ * `PATCH /library/:id` does: trimmed, bounded in code points, a blank
+ * `alternate_artist_name` normalized to `null`. `prefix` keeps each route's
+ * field naming in the 400 message (`release.` on filings). The label is bounded
+ * in `resolveNewAlbumLabel`.
+ */
+export const validateAlbumCreateText = (
+  body: { album_title?: unknown; alternate_artist_name?: unknown },
+  prefix: string
+) => ({
+  album_title: validateTextField(body.album_title, `${prefix}album_title`, MAX_ALBUM_TEXT_LENGTH),
+  alternate_artist_name: normalizeOptionalText(
+    body.alternate_artist_name,
+    `${prefix}alternate_artist_name`,
+    MAX_ALBUM_TEXT_LENGTH
+  ),
+});
 
 /**
  * Resolve the `(label_id, label)` pair `POST /library` writes, given a body
@@ -60,8 +85,15 @@ export const resolveNewAlbumLabel = async (
   // everything else vanishes, breaking the endpoint's all-or-nothing
   // contract with exactly the near-duplicate-labels outcome the `label_id`
   // path above exists to prevent. `addAlbum` keeps calling without one.
-  tx?: libraryService.DbTransaction
+  tx?: libraryService.DbTransaction,
+  labelField = 'label'
 ): Promise<{ label_id: number | undefined; label: string | undefined }> => {
+  // Trimmed and bounded before `createLabel`, so a too-long label mints no
+  // `labels` row (`varchar(128)`; PG 22001 would be a 500).
+  const label = typeof body.label === 'string' ? body.label.trim() : body.label;
+  if (typeof label === 'string' && codePointLength(label) > MAX_ALBUM_TEXT_LENGTH) {
+    throw new WxycError(`${labelField} must be ${MAX_ALBUM_TEXT_LENGTH} characters or fewer`, 400);
+  }
   if (body.label_id != null) {
     if (!Number.isInteger(body.label_id) || body.label_id < 1) {
       throw new WxycError('label_id must be a positive integer', 400);
@@ -70,15 +102,15 @@ export const resolveNewAlbumLabel = async (
     if (!labelRow) {
       throw new WxycError('label_id does not reference an existing label', 400);
     }
-    return { label_id: labelRow.id, label: body.label || labelRow.label_name };
+    return { label_id: labelRow.id, label: label || labelRow.label_name };
   }
 
-  if (!body.label) {
-    return { label_id: undefined, label: body.label };
+  if (!label) {
+    return { label_id: undefined, label };
   }
 
-  const resolvedLabel = await labelsService.createLabel(body.label, undefined, tx);
-  return { label_id: resolvedLabel.id, label: body.label };
+  const resolvedLabel = await labelsService.createLabel(label, undefined, tx);
+  return { label_id: resolvedLabel.id, label };
 };
 
 // `POST /library/filings` (BS#2474; wxyc-shared `LibraryFilingRequest`).
@@ -132,8 +164,9 @@ export type LibraryFilingPlan =
  * request's value, unchecked. The object is built by spreading the raw
  * release body, so it can also carry keys the type does not name.
  */
-export type ValidatedFilingRelease = Omit<FilingReleaseBody, 'code_number'> & {
+export type ValidatedFilingRelease = Omit<FilingReleaseBody, 'code_number' | 'alternate_artist_name'> & {
   album_title: string;
+  alternate_artist_name?: string | null;
   genre_id: number;
   format_id: number;
   supplied_code_number?: number;
@@ -190,7 +223,7 @@ export async function fileLibraryRelease(input: ValidatedFilingInput, outerTx?: 
     // Inside the transaction so a later-stage rollback also takes back a
     // `labels` row minted from fresh label text (see `resolveNewAlbumLabel`'s
     // `tx` comment).
-    const { label_id, label } = await resolveNewAlbumLabel(release, tx);
+    const { label_id, label } = await resolveNewAlbumLabel(release, tx, 'release.label');
 
     let artistRow: FilingArtist;
     if (filingPlan.kind === 'create') {
@@ -671,9 +704,7 @@ export async function planLibraryFiling(
       400
     );
   }
-  if (typeof release.album_title !== 'string' || release.album_title.trim() === '') {
-    throw new WxycError('release.album_title must be a non-empty string', 400);
-  }
+  const { album_title, alternate_artist_name } = validateAlbumCreateText(release, 'release.');
   // The create arm files the artist's crossreference in `artist.genre_id`
   // and the release in `release.genre_id`. Diverging, the release's genre
   // would hold no artist code to resolve its shelf position against — the
@@ -685,7 +716,6 @@ export async function planLibraryFiling(
       400
     );
   }
-  const album_title = release.album_title;
   const release_genre_id = release.genre_id;
   const release_format_id = release.format_id;
   const code_volume_letters =
@@ -821,6 +851,7 @@ export async function planLibraryFiling(
       release: {
         ...release,
         album_title,
+        alternate_artist_name,
         genre_id: release_genre_id,
         format_id: release_format_id,
         code_volume_letters,

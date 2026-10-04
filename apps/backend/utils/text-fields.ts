@@ -1,5 +1,8 @@
 import WxycError from './error.js';
 
+/** Width of the `varchar(128)` library text columns (`album_title`, `label`, `alternate_artist_name`, `album_artist`) and `labels.label_name`. */
+export const MAX_ALBUM_TEXT_LENGTH = 128;
+
 /** Unicode-code-point length, matching OpenAPI `maxLength` semantics (a UTF-16 `.length` over-counts astral characters). */
 export function codePointLength(value: string): number {
   return [...value].length;
@@ -42,9 +45,7 @@ export const validateTextField = (value: unknown, field: string, maxLength: numb
 /**
  * Normalize one optional, nullable free-text field (first callers: BS#2004's
  * `album_artist` and `alternate_artist_name`). Shared by POST and PATCH so the
- * two write verbs cannot disagree on trimming or bounds. (POST still writes
- * `alternate_artist_name` raw, so for that field they do disagree; that
- * pre-existing gap is separate.)
+ * two write verbs cannot disagree on trimming or bounds.
  *
  * - `undefined` means "not supplied": a create takes the column default, a
  *   PATCH leaves the stored value alone.

@@ -24,6 +24,7 @@ import {
   planLibraryFiling,
   completeLibraryFiling,
   mapLibraryFilingError,
+  validateAlbumCreateText,
   validateCodeNumber,
   validateCodeVolumeLetters,
   validateArtistCodeNumber,
@@ -40,7 +41,13 @@ import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { lmlLookupCoordinator } from '../services/lml/index.js';
 import { filterSpacerGif } from '../services/metadata/metadata.service.js';
 import WxycError from '../utils/error.js';
-import { codePointLength, isNonBlankString, validateTextField, normalizeOptionalText } from '../utils/text-fields.js';
+import {
+  codePointLength,
+  isNonBlankString,
+  validateTextField,
+  normalizeOptionalText,
+  MAX_ALBUM_TEXT_LENGTH,
+} from '../utils/text-fields.js';
 import { INT4_MAX } from '../utils/constants.js';
 
 // `genres.id` and `genre_artist_crossreference.artist_genre_code` are Postgres
@@ -114,9 +121,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   }
   // '' satisfies the NOT NULL constraint but is never a valid title — reject
   // before it lands in the catalog (PR #1154 review issue 8).
-  if (typeof body.album_title !== 'string' || body.album_title.trim() === '') {
-    throw new WxycError('album_title must be a non-empty string', 400);
-  }
+  const { album_title, alternate_artist_name } = validateAlbumCreateText(body, '');
 
   // BS#2410: validate the operator-supplied call code before any of the
   // artist/label resolution below, so a bad value costs no queries and can't
@@ -152,7 +157,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     artist_name: canonical_artist_name,
     genre_id: body.genre_id,
     format_id: body.format_id,
-    album_title: body.album_title,
+    album_title,
     label: label,
     label_id: label_id,
     // BS#2410: an omitted code_number still takes MAX+1 for the artist, which
@@ -160,7 +165,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
     // genre -- BS#2587).
     code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id, body.genre_id)),
     code_volume_letters: code_volume_letters,
-    alternate_artist_name: body.alternate_artist_name,
+    alternate_artist_name,
     album_artist: normalizeOptionalText(body.album_artist, 'album_artist', MAX_ALBUM_TEXT_LENGTH),
     disc_quantity: body.disc_quantity,
   };
@@ -169,9 +174,9 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 
   const enriched_album = await enrichNewAlbum(
     inserted_album,
-    body.alternate_artist_name || body.artist_name || '',
+    alternate_artist_name || body.artist_name || '',
     canonical_artist_name,
-    body.album_title
+    album_title
   );
 
   res.status(201).json(enriched_album);
@@ -3039,7 +3044,6 @@ const UPDATABLE_ALBUM_FIELDS = [
 // `varchar(128)` in the library schema. Reject over-length input as a 400
 // rather than letting it reach the UPDATE and trip PG 22001 ("value too
 // long") → 500 (#1551).
-const MAX_ALBUM_TEXT_LENGTH = 128;
 
 /**
  * PATCH /library/:id with true partial semantics (PR #1154 review issues
