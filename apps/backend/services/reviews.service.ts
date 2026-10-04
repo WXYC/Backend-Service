@@ -37,13 +37,14 @@ export const snapshotAuthor = (name: string | null | undefined) =>
 /** `locked` is the item's slip being printed; a review on a library release alone has no item and no slip. */
 const locked = sql<boolean>`coalesce(${intake_items.printed_at} IS NOT NULL, false)`;
 
-const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db) =>
-  executor
+const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db, lock = false) => {
+  const q = executor
     .select({ ...getTableColumns(reviews), locked: locked.as('locked') })
     .from(reviews)
     .leftJoin(intake_items, eq(intake_items.id, reviews.intake_item_id))
-    .where(eq(reviews.id, id))
-    .then((rows) => rows[0] as ReviewResponse | undefined);
+    .where(eq(reviews.id, id));
+  return (lock ? q.for('update', { of: reviews }) : q).then((rows) => rows[0] as ReviewResponse | undefined);
+};
 
 /**
  * Creates the caller's own `typed` draft about one subject. An intake item must be held by the
@@ -104,19 +105,34 @@ export const editOutcome = (
   return review.status === 'submitted' && review.locked ? ('locked' as const) : ('allowed' as const);
 };
 
-export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewActor) => {
-  const current = await selectReview(id);
-  if (!current) return { outcome: 'not_found' as const };
-  const decision = editOutcome(current, actor);
-  if (decision !== 'allowed') return { outcome: decision };
-  // A print must never produce an empty slip, so a submitted typed review keeps its text.
-  const text = patch.review === undefined ? current.review : patch.review;
-  if (current.status === 'submitted' && current.medium === 'typed' && text === null) {
-    return { outcome: 'text_required' as const };
-  }
-  await db
-    .update(reviews)
-    .set({ ...patch, last_modified: sql`now()` })
-    .where(eq(reviews.id, id));
-  return { outcome: 'updated' as const, review: (await selectReview(id))! };
-};
+/**
+ * Edits are decided on rows that cannot change before the write commits. Lock order is item,
+ * then review (BS#2854's submit and delete follow it): the item is held FOR SHARE so the print
+ * step's `UPDATE intake_items` (which stamps `printed_at`) waits behind this transaction, then the
+ * review is locked FOR UPDATE so a submit waits too. The edit rules and the text rule are then
+ * evaluated on the locked rows. `intake_item_id` never changes, so reading it unlocked to find
+ * the item to lock is safe.
+ */
+export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewActor) =>
+  db.transaction(async (tx) => {
+    const [subject] = await tx.select({ item: reviews.intake_item_id }).from(reviews).where(eq(reviews.id, id));
+    if (!subject) return { outcome: 'not_found' as const };
+    if (subject.item !== null) {
+      await tx.select({ id: intake_items.id }).from(intake_items).where(eq(intake_items.id, subject.item)).for('share');
+    }
+    const current = await selectReview(id, tx, true);
+    if (!current) return { outcome: 'not_found' as const };
+    const decision = editOutcome(current, actor);
+    if (decision !== 'allowed') return { outcome: decision };
+    // A print must never produce an empty slip, so a submitted typed review keeps its text.
+    const text = patch.review === undefined ? current.review : patch.review;
+    if (current.status === 'submitted' && current.medium === 'typed' && text === null) {
+      return { outcome: 'text_required' as const };
+    }
+    const [row] = await tx
+      .update(reviews)
+      .set({ ...patch, last_modified: sql`now()` })
+      .where(eq(reviews.id, id))
+      .returning();
+    return { outcome: 'updated' as const, review: { ...row, locked: current.locked } as ReviewResponse };
+  });

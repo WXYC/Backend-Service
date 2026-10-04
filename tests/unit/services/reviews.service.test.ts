@@ -7,7 +7,10 @@
 jest.unmock('drizzle-orm');
 
 const mockQueue: unknown[][] = [];
+let mockUpdatedRow: Record<string, unknown> = {};
 const mockWrites: { inserted?: Record<string, unknown>; updated?: Record<string, unknown> } = {};
+/** Every select, in order: which handle ran it (`db` outside the transaction, `tx` inside), its table, its lock and its rendered WHERE. */
+const mockReads: { handle: 'db' | 'tx'; table: string; lock?: string; of?: string; where: string }[] = [];
 
 // The default unit stub for the auth package has no `roleGrants`; `holdsReviewsManage` needs the real one.
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
@@ -15,18 +18,35 @@ jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/auth
 jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../shared/database/src/schema');
   // A thenable chain: whatever the builder is awaited on resolves the next scripted result set.
-  const chain = (): any => {
+  const chain = (handle: 'db' | 'tx'): any => {
+    const { PgDialect, getTableName } = {
+      PgDialect: jest.requireActual('drizzle-orm/pg-core').PgDialect,
+      getTableName: jest.requireActual('drizzle-orm').getTableName,
+    };
+    const read: (typeof mockReads)[number] = { handle, table: '', where: '' };
+    mockReads.push(read);
     const c: any = {
-      from: () => c,
+      from: (t: any) => {
+        read.table = getTableName(t);
+        return c;
+      },
       leftJoin: () => c,
-      where: () => c,
-      for: () => c,
+      where: (w: any) => {
+        const q = new PgDialect().sqlToQuery(w);
+        read.where = `${q.sql} ${JSON.stringify(q.params)}`;
+        return c;
+      },
+      for: (mode: string, config?: { of?: any }) => {
+        read.lock = mode;
+        if (config?.of) read.of = getTableName(config.of);
+        return c;
+      },
       then: (resolve: any, reject: any) => Promise.resolve(mockQueue.shift()).then(resolve, reject),
     };
     return c;
   };
   const tx = {
-    select: () => chain(),
+    select: () => chain('tx'),
     insert: () => ({
       values: (v: Record<string, unknown>) => {
         mockWrites.inserted = v;
@@ -36,11 +56,11 @@ jest.mock('@wxyc/database', () => {
     update: () => ({
       set: (s: Record<string, unknown>) => {
         mockWrites.updated = s;
-        return { where: () => Promise.resolve(undefined) };
+        return { where: () => ({ returning: () => Promise.resolve([mockUpdatedRow]) }) };
       },
     }),
   };
-  return { ...realSchema, db: { ...tx, transaction: (cb: any) => cb(tx) } };
+  return { ...realSchema, db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) } };
 });
 
 import { FILED_STATES, effectiveState } from '../../../apps/backend/services/intake.service';
@@ -58,6 +78,8 @@ const MD = { id: 'md-1', manage: true };
 
 beforeEach(() => {
   mockQueue.length = 0;
+  mockReads.length = 0;
+  mockUpdatedRow = {};
   delete mockWrites.inserted;
   delete mockWrites.updated;
 });
@@ -108,8 +130,6 @@ describe('editOutcome', () => {
     ['the author edits a submitted review before print', review({}), DJ, 'allowed'],
     ['the author edits a submitted review after print: locked', review({ locked: true }), DJ, 'locked'],
     ['the author edits their draft on a printed item', review({ status: 'draft', locked: true }), DJ, 'allowed'],
-    // A library-release review has no slip, so `locked` is false and the author may always edit.
-    ['the author edits a submitted library-release review', review({ locked: false }), DJ, 'allowed'],
     ['another DJ edits a submitted review', review({}), { id: 'dj-2', manage: false }, 'forbidden'],
     ['another DJ edits a draft: not visible', review({ status: 'draft' }), { id: 'dj-2', manage: false }, 'not_found'],
     ['a music director edits any submitted review', review({}), MD, 'allowed'],
@@ -150,6 +170,17 @@ describe('createReview', () => {
     expect(mockWrites.inserted).toBeUndefined();
   });
 
+  test('the hold check reads the item FOR UPDATE inside the transaction, by id, effective state and holder', async () => {
+    mockQueue.push([{ id: 4 }], [{ name: 'n' }], [created]);
+    await createReview({ intake_item_id: 4 }, {}, DJ);
+    const hold = mockReads[0];
+    expect(hold).toMatchObject({ handle: 'tx', table: 'intake_items', lock: 'update' });
+    expect(hold.where).toContain(`'checked_out'`);
+    expect(hold.where).toMatch(/"checked_out_by" = \$\d+/);
+    expect(hold.where).toContain('[4,"dj-1"]');
+    expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
+  });
+
   test('a library release that does not exist is subject_not_held', async () => {
     mockQueue.push([]);
     expect(await createReview({ album_id: 9 }, {}, DJ)).toEqual({ outcome: 'subject_not_held' });
@@ -174,19 +205,50 @@ describe('updateReview', () => {
     ...o,
   });
 
+  test('the edit is decided on locked rows inside one transaction: item FOR SHARE, then the review FOR UPDATE', async () => {
+    mockQueue.push([{ item: 8 }], [{ id: 8 }], [stored({ intake_item_id: 8 })]);
+    mockUpdatedRow = { id: 3 };
+    await updateReview(3, { fcc: 'x' }, DJ);
+    expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
+    expect(mockReads.map((r) => [r.table, r.lock, r.of])).toEqual([
+      ['reviews', undefined, undefined],
+      ['intake_items', 'share', undefined],
+      ['reviews', 'update', 'reviews'],
+    ]);
+    expect(mockReads[1].where).toContain('[8]');
+  });
+
+  test('a review on a library release alone has no item to lock', async () => {
+    mockQueue.push([{ item: null }], [stored({})]);
+    await updateReview(3, { fcc: 'x' }, DJ);
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
+      ['reviews', undefined],
+      ['reviews', 'update'],
+    ]);
+  });
+
+  test('the updated row comes from RETURNING with the locked value already read', async () => {
+    mockQueue.push([{ item: null }], [stored({ locked: false })]);
+    mockUpdatedRow = { id: 3, fcc: 'x' };
+    expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({
+      outcome: 'updated',
+      review: { id: 3, fcc: 'x', locked: false },
+    });
+  });
+
   test('a missing review is not_found', async () => {
     mockQueue.push([]);
     expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({ outcome: 'not_found' });
   });
 
   test('a lock after print refuses the author without writing', async () => {
-    mockQueue.push([stored({ locked: true })]);
+    mockQueue.push([{ item: null }], [stored({ locked: true })]);
     expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({ outcome: 'locked' });
     expect(mockWrites.updated).toBeUndefined();
   });
 
   test('a patch that would null a submitted typed review text is text_required', async () => {
-    mockQueue.push([stored({})]);
+    mockQueue.push([{ item: null }], [stored({})]);
     expect(await updateReview(3, { review: null }, DJ)).toEqual({ outcome: 'text_required' });
     expect(mockWrites.updated).toBeUndefined();
   });
@@ -195,18 +257,18 @@ describe('updateReview', () => {
     ['a draft', { status: 'draft' }],
     ['a submitted handwritten review', { medium: 'handwritten' }],
   ])('nulling the text of %s is allowed', async (_name, o) => {
-    mockQueue.push([stored(o)], [stored({ ...o, review: null })]);
+    mockQueue.push([{ item: null }], [stored(o)]);
     expect((await updateReview(3, { review: null }, DJ)).outcome).toBe('updated');
   });
 
   test('leaving review out of a patch keeps the stored text, so other fields still save', async () => {
-    mockQueue.push([stored({})], [stored({ fcc: 'x' })]);
+    mockQueue.push([{ item: null }], [stored({})]);
     expect((await updateReview(3, { fcc: 'x' }, DJ)).outcome).toBe('updated');
     expect(mockWrites.updated).toMatchObject({ fcc: 'x' });
   });
 
   test('a submitted typed review stays editable by its author while text remains', async () => {
-    mockQueue.push([stored({})], [stored({ review: 'new' })]);
+    mockQueue.push([{ item: null }], [stored({})]);
     expect((await updateReview(3, { review: 'new' }, DJ)).outcome).toBe('updated');
   });
 });
