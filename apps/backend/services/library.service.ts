@@ -5298,7 +5298,9 @@ export type RestoreDeviation = {
   kind: 'nulled' | 'dropped';
   table: string;
   row_id: number | null;
-  column: string;
+  /** The reference column that was nulled; `null` for a dropped row. */
+  column: string | null;
+  /** The referenced id the snapshot carried for that column (for `dropped`, the missing parent's id). */
   captured_value: string;
 };
 
@@ -5847,8 +5849,10 @@ export const nullDanglingSetNullReferences = async (
 
 /**
  * Splits `records` into the rows to replay and a `dropped` deviation for each
- * row whose `CASCADE_DROP_REFERENCES` target is gone. A row is reported once,
- * under the first column (in declaration order) that is missing.
+ * row whose `CASCADE_DROP_REFERENCES` target is gone. The deviation's `column`
+ * is null, because no reference was nulled — the row was left out — and its
+ * `captured_value` is the missing parent's id. A row is reported once, for the
+ * first column (in declaration order) whose target is missing.
  */
 export const dropOrphanedCascadeRows = async (
   tx: DbTransaction,
@@ -5868,7 +5872,7 @@ export const dropOrphanedCascadeRows = async (
           kind: 'dropped',
           table: tableName,
           row_id: capturedRowId(record),
-          column,
+          column: null,
           captured_value: String(record[column]),
         });
       }

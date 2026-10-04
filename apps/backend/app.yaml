@@ -4420,19 +4420,22 @@ paths:
                                   is gone, left out of the replay.
                               table:
                                 type: string
-                                example: bins
+                                description: The table of the affected row.
+                                example: rotation
                               row_id:
                                 type: integer
                                 description: The affected row's primary key (the captured id).
                               column:
                                 type: string
-                                description: The reference column whose target is gone.
-                                example: dj_id
+                                nullable: true
+                                description: The reference column that was nulled; `null` for a dropped row.
+                                example: card_id
                               captured_value:
                                 type: string
                                 description: >-
-                                  The referenced id the snapshot carried, as a string because
-                                  `auth_user.id` is text.
+                                  The referenced id the snapshot carried for that column (for `dropped`,
+                                  the missing parent's id), as a string because some referenced keys
+                                  (`auth_user.id`) are text.
         '400':
           description: >-
             Either a malformed request (non-UUID `batchId`, non-object body,

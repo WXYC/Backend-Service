@@ -262,9 +262,16 @@ type RunOptions = {
   throwOnExecuteIndex?: number;
   /** The referenced ids that still exist; defaults to `LIVE_TARGETS`. */
   liveTargets?: unknown[];
+  /**
+   * Fails the COMMIT: `db.transaction` rejects with this AFTER the callback has
+   * resolved, which is the only way to tell work done after commit from work
+   * done at the end of the callback.
+   */
+  commitError?: Error;
 };
 
-const run = async (options: RunOptions = {}) => {
+/** Queues the SELECT answers and installs the transaction double; `run` without the call. */
+const arrange = (options: RunOptions = {}) => {
   const snapshots = options.snapshots ?? [snapshotRow()];
   const selectResults: unknown[][] = [snapshots];
   if (snapshots.length > 0) {
@@ -277,7 +284,16 @@ const run = async (options: RunOptions = {}) => {
   const { ops, tx } = makeTx(selectResults, options.throwOnExecuteIndex, options.liveTargets);
   (db as unknown as { transaction: unknown }).transaction = jest
     .fn()
-    .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
+    .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => {
+      const result = await cb(tx);
+      if (options.commitError) throw options.commitError;
+      return result;
+    });
+  return { ops };
+};
+
+const run = async (options: RunOptions = {}) => {
+  const { ops } = arrange(options);
   const outcome = await restoreDeletedBatch(BATCH_ID, options.resolution);
   return { outcome, ops };
 };
@@ -531,6 +547,14 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
 
     const restoreRecords = () => warn.mock.calls.filter(([message]) => message === '[Library] restore');
 
+    // A `dropped` row carries `column: null`, per the contract's
+    // `RestoreDeviation.column`: no reference was nulled, the row was left out.
+    // `captured_value` is still the missing parent's id.
+    const EXPECTED_DEVIATIONS = [
+      { kind: 'nulled', table: 'rotation', row_id: 8, column: 'card_id', captured_value: '12' },
+      { kind: 'dropped', table: 'bins', row_id: 1, column: null, captured_value: '99' },
+    ];
+
     it('lists the nulled reference and the dropped row per entity, in replay order, and counts only re-inserted rows', async () => {
       const { outcome } = await run({ snapshots: [withDeviations()] });
 
@@ -539,10 +563,7 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
         entities: [
           {
             children: expect.objectContaining({ bins: 1, rotation: 1 }),
-            deviations: [
-              { kind: 'nulled', table: 'rotation', row_id: 8, column: 'card_id', captured_value: '12' },
-              { kind: 'dropped', table: 'bins', row_id: 1, column: 'dj_id', captured_value: '99' },
-            ],
+            deviations: EXPECTED_DEVIATIONS,
           },
         ],
       });
@@ -561,28 +582,47 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
       expect(outcome).toMatchObject({ outcome: 'restored', entities: [{ deviations: [] }] });
     });
 
-    it('logs exactly one restore record naming both deviations, with the batch id', async () => {
+    it('logs exactly one restore record carrying the same deviations as the 200, with the batch id', async () => {
       await run({ snapshots: [withDeviations()] });
 
       expect(restoreRecords()).toHaveLength(1);
       const record = JSON.parse(restoreRecords()[0][1] as string);
       expect(record.batch_id).toBe(BATCH_ID);
-      expect(record.entities[0].deviations.map((deviation: Row) => deviation.kind)).toEqual(['nulled', 'dropped']);
+      expect(record.entities[0].deviations).toEqual(EXPECTED_DEVIATIONS);
       expect(Sentry.addBreadcrumb).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ batch_id: BATCH_ID, deviations: expect.any(Array) }),
+          data: expect.objectContaining({ batch_id: BATCH_ID, deviations: EXPECTED_DEVIATIONS }),
         })
       );
     });
 
     // A restore that rolls back writes nothing, so it must not say it restored
     // something: the old per-column warning fired before commit.
-    it('logs nothing when the restore rolls back', async () => {
-      // Executes: 0 lock_timeout, 1 advisory lock, 2 parent INSERT, 3 the bins INSERT.
-      await expect(run({ snapshots: [withDeviations()], throwOnExecuteIndex: 3 })).rejects.toThrow('Failed query');
+    it('logs nothing when the restore rolls back after both deviations were found', async () => {
+      // Executes: 0 lock_timeout, 1 advisory lock, 2 parent INSERT, 3 the
+      // rotation INSERT (card 12 already nulled), 4 the bins INSERT (dj 99's
+      // row already probed and dropped). Failing 4 rolls back a batch that had
+      // recorded both deviations.
+      const { ops } = arrange({ snapshots: [withDeviations()], throwOnExecuteIndex: 4 });
 
+      await expect(restoreDeletedBatch(BATCH_ID)).rejects.toThrow('Failed query');
+
+      // The statement that failed is the bins INSERT, already without the dropped row.
+      expect(insertStatements(ops).at(-1)).toMatchObject({ table: 'bins', rows: [{ id: 2, album_id: 42, dj_id: 5 }] });
       expect(restoreRecords()).toHaveLength(0);
       expect(warn).not.toHaveBeenCalled();
+      expect(Sentry.addBreadcrumb).not.toHaveBeenCalled();
+    });
+
+    // The replay finished and the callback returned `restored`, but COMMIT
+    // failed. A record written at the end of the callback would already be out;
+    // one written after `db.transaction` resolves is not.
+    it('logs nothing when the commit fails after the replay returned', async () => {
+      arrange({ snapshots: [withDeviations()], commitError: wrappedPgError('08006') });
+
+      await expect(restoreDeletedBatch(BATCH_ID)).rejects.toThrow('Failed query');
+
+      expect(restoreRecords()).toHaveLength(0);
       expect(Sentry.addBreadcrumb).not.toHaveBeenCalled();
     });
   });

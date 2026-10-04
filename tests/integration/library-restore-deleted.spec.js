@@ -186,7 +186,8 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".format WHERE id = ANY($1::int[])`, [createdFormatIds]);
       }
       if (createdUserIds.length > 0) {
-        await sql.unsafe(`DELETE FROM "${SCHEMA}".auth_user WHERE id = ANY($1::text[])`, [createdUserIds]);
+        // `auth_user` is better-auth's table, in `public` rather than `${SCHEMA}`.
+        await sql.unsafe(`DELETE FROM auth_user WHERE id = ANY($1::text[])`, [createdUserIds]);
       }
       if (createdTrackArtistIds.length > 0) {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id = ANY($1::int[])`, [createdTrackArtistIds]);
@@ -539,23 +540,20 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
   test("restores a release that was in a removed DJ's bin, dropping the bin row and reporting it", async () => {
     const album = await createAlbum({ album_title: `${marker} Removed DJ Bin` });
     const djId = `bs2818-dj-${uniq}`;
-    await sql.unsafe(`INSERT INTO "${SCHEMA}".auth_user (id, name, email) VALUES ($1, $1, $2)`, [
-      djId,
-      `${djId}@example.test`,
-    ]);
+    await sql.unsafe(`INSERT INTO auth_user (id, name, email) VALUES ($1, $1, $2)`, [djId, `${djId}@example.test`]);
     createdUserIds.push(djId);
     const bin = await sql.unsafe(`INSERT INTO "${SCHEMA}".bins (dj_id, album_id) VALUES ($1, $2) RETURNING id`, [
       djId,
       album.id,
     ]);
     const batchId = await deleteAlbum(album.id);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".auth_user WHERE id = $1`, [djId]);
+    await sql.unsafe(`DELETE FROM auth_user WHERE id = $1`, [djId]);
 
     const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
 
     expect(res.body.entities[0].children.bins).toBe(0);
     expect(res.body.entities[0].deviations).toEqual([
-      { kind: 'dropped', table: 'bins', row_id: bin[0].id, column: 'dj_id', captured_value: djId },
+      { kind: 'dropped', table: 'bins', row_id: bin[0].id, column: null, captured_value: djId },
     ]);
     expect(await libraryRow(album.id)).not.toBeNull();
     const bins = await sql.unsafe(`SELECT 1 FROM "${SCHEMA}".bins WHERE album_id = $1`, [album.id]);
