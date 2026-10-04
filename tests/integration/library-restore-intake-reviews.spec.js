@@ -16,7 +16,8 @@
  *      `cited_album_id`;
  *   4. a snapshot whose `reviews` row has the stub's old shape restores, the
  *      new columns taking their defaults;
- *   5. an item whose `format_id` target is gone answers 409
+ *   5. a snapshot with no `intake_items` key at all (every pre-0180 snapshot) restores;
+ *   6. an item whose `format_id` target is gone answers 409
  *      `missing_reference` naming `intake_items`, writing nothing.
  *
  * Fixtures are scoped to a per-run marker; `catalog_delete_snapshot` is
@@ -26,6 +27,7 @@
 const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
+const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const ROCK = 11;
@@ -50,7 +52,6 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
   const uniq = Date.now();
   const marker = `BS#2801 Restore ${uniq}`;
   const touchedAlbumIds = [];
-  const createdUserIds = [];
   const createdFormatIds = [];
   let seq = 0;
 
@@ -81,31 +82,15 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
     return rows[0].batch_id;
   };
 
-  const createUser = async () => {
-    seq += 1;
-    const id = `bs2801-user-${uniq}-${seq}`;
-    await sql.unsafe(`INSERT INTO auth_user (id, name, email) VALUES ($1, $1, $2)`, [id, `${id}@example.test`]);
-    createdUserIds.push(id);
-    return id;
-  };
-
-  /** A filed item for `albumId`; `extra` is a column -> value map layered over the NOT NULLs. */
+  /** A filed item for `albumId`; `extra` is a column -> value map layered over the seeder's NOT NULL defaults. */
   const insertFiledItem = async (albumId, extra = {}) => {
-    const row = {
-      artist_name: 'Jessica Pratt',
+    const item = await seedIntakeItem({
       album_title: `${marker} Item`,
-      format_id: FMT,
       state: 'filed',
       album_id: albumId,
       ...extra,
-    };
-    const columns = Object.keys(row);
-    const rows = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".intake_items (${columns.join(', ')})
-       VALUES (${columns.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`,
-      Object.values(row)
-    );
-    return rows[0].id;
+    });
+    return item.id;
   };
 
   const insertReview = async (columns) => {
@@ -153,10 +138,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
       if (createdFormatIds.length > 0) {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".format WHERE id = ANY($1::int[])`, [createdFormatIds]);
       }
-      if (createdUserIds.length > 0) {
-        // `auth_user` is better-auth's table, in `public` rather than `${SCHEMA}`.
-        await sql.unsafe(`DELETE FROM auth_user WHERE id = ANY($1::text[])`, [createdUserIds]);
-      }
+      await removeSeededAuthUsers();
     } finally {
       await sql.end();
     }
@@ -185,7 +167,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
 
   test('restores as NULL a review author whose account was removed after the delete, and reports it', async () => {
     const album = await createAlbum({ album_title: `${marker} Author Gone` });
-    const authorId = await createUser();
+    const authorId = (await seedAuthUser()).id;
     const reviewId = await insertReview({
       album_id: album.id,
       review: 'DOGA',
@@ -276,6 +258,36 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
       credit: null,
       intake_item_id: null,
     });
+  });
+
+  test('restores a pre-0180 snapshot that has no intake_items key at all (not an empty one)', async () => {
+    const album = await createAlbum({ album_title: `${marker} No Items Key` });
+    const reviewId = await insertReview({
+      album_id: album.id,
+      review: 'Call Your Name',
+      author: 'Chuquimamani-Condori',
+    });
+    const batchId = await deleteAlbum(album.id);
+
+    // Every snapshot written before the migration lacks the key entirely.
+    await sql.unsafe(
+      `UPDATE "${SCHEMA}".catalog_delete_snapshot
+          SET captured = captured #- '{children,intake_items}'
+        WHERE batch_id = $1`,
+      [batchId]
+    );
+    const [probe] = await sql.unsafe(
+      `SELECT captured->'children' ? 'intake_items' AS has_key FROM "${SCHEMA}".catalog_delete_snapshot WHERE batch_id = $1`,
+      [batchId]
+    );
+    expect(probe.has_key).toBe(false);
+
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+
+    expect(res.body.entities[0].children.reviews).toBe(1);
+    expect(res.body.entities[0].deviations).toEqual([]);
+    const [review] = await readReviews(album.id);
+    expect(review.id).toBe(reviewId);
   });
 
   test('refuses with a named 409, writing nothing, when an item’s format is gone', async () => {
