@@ -1,5 +1,5 @@
-import { and, desc, eq, getTableColumns, notInArray, sql } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/pg-core';
+import { and, desc, eq, getTableColumns, notInArray, sql, type SQL } from 'drizzle-orm';
+import { alias, type PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import {
   db,
   extractConstraintName,
@@ -7,6 +7,7 @@ import {
   intake_item_passes,
   intake_items,
   intakeItemStateEnum,
+  member,
   user,
   type NewIntakeItem,
 } from '@wxyc/database';
@@ -18,9 +19,11 @@ import {
  * the `effective_state` the response carries and (from slice 8) every
  * transition's precondition all read this one definition. A `requested` item
  * whose request is more than 7 days old, or whose `requested_dj_id` is NULL
- * because that DJ's account was deleted, reads as `pool`. A `checked_out` item
- * past 14 days is `overdue`. Reads never write: the stale request fields are
- * cleared by the next write to the row, not by a GET.
+ * because that DJ's account was deleted (or whose `requested_at` is NULL, so
+ * there is no age to measure), reads as `pool`. A `checked_out` item
+ * past 14 days is `overdue`. Reads never write, and neither does PATCH:
+ * the stale request fields are cleared by the next transition that writes them —
+ * checkout, request, cancel-request, accept or pass — never by a GET or an edit.
  */
 
 export type IntakeItemState = (typeof intakeItemStateEnum.enumValues)[number];
@@ -31,7 +34,7 @@ const FILED_STATES: IntakeItemState[] = ['filed', 'finalized'];
 /** Audit columns the contract's `IntakeItem` does not carry. */
 const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by']);
 
-const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
+const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
 // coalesce: no CHECK ties checked_out_at to the state, and a NULL stamp must read false, never SQL NULL.
 const overdue = sql<boolean>`coalesce(${intake_items.state} = 'checked_out' AND ${intake_items.checked_out_at} < now() - interval '14 days', false)`;
 
@@ -111,12 +114,21 @@ export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
 };
 
 /**
- * One `UPDATE … WHERE not filed RETURNING`: the precondition is part of the
- * write, never a read first. Zero rows means missing or filed, and a follow-up
- * lookup only chooses between the 404 and the 409 — it gates nothing.
+ * The zero-row follow-up read, which only chooses the answer and gates nothing.
+ * Missing is a 404. For `updateIntakeItem`/`deleteIntakeItem` (the UPDATE's only
+ * precondition is "not filed") any surviving item is `already_filed`. For a
+ * transition, an item still in the right effective state that the identity
+ * condition refused belongs to someone else (`forbidden`); every other state,
+ * filed included, is `state_changed`.
  */
-const refusalFor = async (id: number) =>
-  (await getIntakeItem(id, false)) ? ('already_filed' as const) : ('not_found' as const);
+const refusalFor = async (id: number, transition?: { from: IntakeItemState; identityGuarded: boolean }) => {
+  const item = await getIntakeItem(id, false);
+  if (!item) return 'not_found' as const;
+  if (!transition) return 'already_filed' as const;
+  return transition.identityGuarded && item.effective_state === transition.from
+    ? ('forbidden' as const)
+    : ('state_changed' as const);
+};
 
 export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields>) => {
   try {
@@ -141,3 +153,78 @@ export const deleteIntakeItem = async (id: number) => {
     .returning({ id: intake_items.id });
   return { outcome: rows.length === 0 ? await refusalFor(id) : ('deleted' as const) };
 };
+
+export type IntakeAction = 'checkout' | 'release' | 'request' | 'cancel_request' | 'accept' | 'pass';
+/** The caller; `manage` is whether they hold `reviews: manage`. */
+export type IntakeActor = { id: string; manage: boolean };
+
+const CLEAR_REQUEST = { requested_dj_id: null, requested_at: null };
+const TAKEN = (actor: IntakeActor) => ({
+  state: 'checked_out' as const,
+  ...CLEAR_REQUEST,
+  checked_out_by: actor.id,
+  checked_out_at: sql`now()`,
+});
+const TO_POOL = { state: 'pool' as const, ...CLEAR_REQUEST };
+
+/**
+ * `from` is an EFFECTIVE state. `only` is the identity condition, which goes
+ * in the UPDATE's WHERE: authorizing against a prior read would let A's release
+ * match B's checkout taken in between.
+ */
+const TRANSITIONS: Record<
+  IntakeAction,
+  {
+    from: IntakeItemState;
+    set: (actor: IntakeActor, djId?: string) => PgUpdateSetSource<typeof intake_items>;
+    only?: (actor: IntakeActor) => SQL | undefined;
+  }
+> = {
+  checkout: { from: 'pool', set: TAKEN },
+  release: {
+    from: 'checked_out',
+    set: () => ({ state: 'pool', checked_out_by: null, checked_out_at: null }),
+    only: (actor) => (actor.manage ? undefined : eq(intake_items.checked_out_by, actor.id)),
+  },
+  request: {
+    from: 'pool',
+    set: (_, djId) => ({ state: 'requested', requested_dj_id: djId, requested_at: sql`now()` }),
+  },
+  cancel_request: { from: 'requested', set: () => TO_POOL },
+  accept: { from: 'requested', set: TAKEN, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
+  pass: { from: 'requested', set: () => TO_POOL, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
+};
+
+export const buildTransition = (
+  action: IntakeAction,
+  id: number,
+  actor: IntakeActor,
+  djId?: string,
+  executor: Pick<typeof db, 'update'> = db
+) => {
+  const t = TRANSITIONS[action];
+  return executor
+    .update(intake_items)
+    .set(t.set(actor, djId))
+    .where(and(eq(intake_items.id, id), sql`(${effectiveState}) = ${t.from}`, t.only?.(actor)))
+    .returning({ id: intake_items.id });
+};
+
+/** One `UPDATE … WHERE <effective-state precondition> [AND identity] RETURNING`; a pass records its row in the same transaction. */
+export const transitionIntakeItem = async (action: IntakeAction, id: number, actor: IntakeActor, djId?: string) => {
+  const rows =
+    action === 'pass'
+      ? await db.transaction(async (tx) => {
+          const updated = await buildTransition(action, id, actor, djId, tx);
+          if (updated.length > 0) await tx.insert(intake_item_passes).values({ intake_item_id: id, dj_id: actor.id });
+          return updated;
+        })
+      : await buildTransition(action, id, actor, djId);
+  if (rows.length > 0) return { outcome: 'updated' as const, item: (await getIntakeItem(id, actor.manage))! };
+  const { from, only } = TRANSITIONS[action];
+  return { outcome: await refusalFor(id, { from, identityGuarded: !!only?.(actor) }) };
+};
+
+/** The `auth_member` roles of an account — empty when the account is unknown or has no membership. */
+export const memberRoles = async (userId: string) =>
+  (await db.select({ role: member.role }).from(member).where(eq(member.userId, userId))).map((r) => r.role);

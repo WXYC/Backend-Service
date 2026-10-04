@@ -436,3 +436,16 @@ export type ImplementedRole = keyof typeof WXYC_GRANTS;
 export function normalizeRole(role: string): ImplementedRole | undefined {
   return canonicalizeRole(role);
 }
+
+/**
+ * Whether `role` (a stored role string, possibly absent) holds every action in
+ * `statement`. The one expression behind "may this caller…" checks and "could
+ * this other account…" checks alike; an unknown or missing role grants nothing.
+ */
+export const roleGrants = (
+  role: string | null | undefined,
+  statement: Parameters<(typeof WXYCRoles)['member']['authorize']>[0]
+): boolean => {
+  const normalized = role ? normalizeRole(role) : undefined;
+  return !!normalized && WXYCRoles[normalized].authorize(statement).success;
+};

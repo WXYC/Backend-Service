@@ -1,3 +1,4 @@
+import { INT4_MAX } from './constants.js';
 import WxycError from './error.js';
 
 /**
@@ -27,4 +28,17 @@ export const parsePositiveInt = (raw: string, field: string): number => {
     throw new WxycError(`${field} must be a positive integer`, 400);
   }
   return parsed;
+};
+
+/**
+ * Parse a path-parameter id for an int4 `serial` column: a positive integer no
+ * larger than `INT4_MAX`, else the 400 that keeps a malformed URL from reaching
+ * Postgres (past int4 the lookup would be a 22003 → 500). The message is
+ * neutral on purpose — "must be a positive integer" would be false for 2147483648.
+ */
+export const parseInt4PathId = (raw: string, resource: string): number => {
+  if (!/^\d+$/.test(raw)) throw new WxycError(`Invalid ${resource} id`, 400);
+  const id = Number.parseInt(raw, 10);
+  if (id < 1 || id > INT4_MAX) throw new WxycError(`Invalid ${resource} id`, 400);
+  return id;
 };
