@@ -116,6 +116,16 @@ describe('/intake (BS#2796)', () => {
       checked_out_by: `${USER_PREFIX}holder`,
       checked_out_at: daysAgo(1),
     });
+    // Checked out after a request that is now >7 days old (transitions may leave requested_at set).
+    await seed('checkout-after-old-request', {
+      state: 'checked_out',
+      requested_dj_id: `${USER_PREFIX}requested`,
+      requested_at: daysAgo(10),
+      checked_out_by: `${USER_PREFIX}holder`,
+      checked_out_at: daysAgo(2),
+    });
+    // No CHECK ties checked_out_at to the state, so the schema admits this row.
+    await seed('checkout-no-stamp', { state: 'checked_out', checked_out_by: `${USER_PREFIX}holder` });
 
     // Two rows with the same logged_at must come back in descending id order.
     const tied = daysAgo(2);
@@ -139,6 +149,12 @@ describe('/intake (BS#2796)', () => {
     );
     libraryId = lib.id;
     await seed('filed', { state: 'filed', album_id: libraryId, filed_at: daysAgo(1) });
+    await seed('finalized', {
+      state: 'finalized',
+      album_id: libraryId,
+      filed_at: daysAgo(2),
+      finalized_at: daysAgo(1),
+    });
   });
 
   afterAll(async () => {
@@ -188,6 +204,18 @@ describe('/intake (BS#2796)', () => {
       const byKey = Object.fromEntries(mine(res.body).map((i) => [i.artist_name.slice(PREFIX.length + 1), i]));
       expect(byKey.overdue).toMatchObject({ state: 'checked_out', effective_state: 'checked_out', overdue: true });
       expect(byKey['recent-checkout']).toMatchObject({ overdue: false });
+    });
+
+    test('a checked_out item with an old requested_at stays checked_out — the expiry arms only apply to requested', async () => {
+      const res = await auth.get('/intake').query({ state: 'checked_out' });
+      const item = mine(res.body).find((i) => i.id === ids['checkout-after-old-request']);
+      expect(item).toMatchObject({ state: 'checked_out', effective_state: 'checked_out' });
+    });
+
+    test('a checked_out item with no checked_out_at reads overdue: false, not null', async () => {
+      const res = await auth.get(`/intake/${ids['checkout-no-stamp']}`);
+      expect(res.status).toBe(200);
+      expect(res.body.overdue).toBe(false);
     });
 
     test('orders by logged_at DESC, id DESC — equal timestamps come back highest id first', async () => {
@@ -292,16 +320,19 @@ describe('/intake (BS#2796)', () => {
       expect(res.status).toBe(400);
     });
 
-    test('PATCH and DELETE of a filed item are 409 already_filed and change nothing', async () => {
-      const patch = await auth.patch(`/intake/${ids.filed}`).send({ album_title: 'Nope' });
-      expect(patch.status).toBe(409);
-      expect(patch.body.reason).toBe('already_filed');
-      const del = await auth.delete(`/intake/${ids.filed}`);
-      expect(del.status).toBe(409);
-      expect(del.body.reason).toBe('already_filed');
-      const [row] = await sql.unsafe(`SELECT album_title FROM "${SCHEMA}".intake_items WHERE id = $1`, [ids.filed]);
-      expect(row.album_title).toBe('Album filed');
-    });
+    test.each(['filed', 'finalized'])(
+      'PATCH and DELETE of a %s item are 409 already_filed and change nothing',
+      async (key) => {
+        const patch = await auth.patch(`/intake/${ids[key]}`).send({ album_title: 'Nope' });
+        expect(patch.status).toBe(409);
+        expect(patch.body.reason).toBe('already_filed');
+        const del = await auth.delete(`/intake/${ids[key]}`);
+        expect(del.status).toBe(409);
+        expect(del.body.reason).toBe('already_filed');
+        const [row] = await sql.unsafe(`SELECT album_title FROM "${SCHEMA}".intake_items WHERE id = $1`, [ids[key]]);
+        expect(row.album_title).toBe(`Album ${key}`);
+      }
+    );
 
     test('PATCH and DELETE of a missing item are 404', async () => {
       expect((await auth.patch('/intake/2147483000').send({ album_title: 'x' })).status).toBe(404);

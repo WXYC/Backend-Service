@@ -3,6 +3,7 @@ import { intakeItemStateEnum } from '@wxyc/database';
 import type { Request, RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
 import type { IntakeFields, IntakeItemState } from '../services/intake.service.js';
+import { INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
 import { parsePositiveInt } from '../utils/query-params.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
@@ -16,8 +17,6 @@ import { normalizeOptionalText, validateTextField } from '../utils/text-fields.j
  */
 
 const TEXT_MAX = 128;
-/** The integer columns are `integer` (int4); a larger value would be a 22003 → 500 at the UPDATE/INSERT. */
-const INT4_MAX = 2_147_483_647;
 
 /** Callers holding `reviews: manage` see each item's `passes`; nobody else does. */
 const holdsReviewsManage = (req: Pick<Request, 'auth'>): boolean => {
@@ -25,8 +24,14 @@ const holdsReviewsManage = (req: Pick<Request, 'auth'>): boolean => {
   return !!role && WXYCRoles[role].authorize({ reviews: ['manage'] }).success;
 };
 
-const parseId = (raw: string) => parsePositiveInt(raw, 'id');
+/** `intake_items.id` is int4: past `INT4_MAX` the lookup would be a 22003 → 500, so it is the malformed-id 400. */
+const parseId = (raw: string) => {
+  const id = parsePositiveInt(raw, 'id');
+  if (id > INT4_MAX) throw new WxycError('id must be a positive integer', 400);
+  return id;
+};
 
+/** The integer body fields are int4 columns; past `INT4_MAX` they would be a 22003 → 500 at the UPDATE/INSERT. */
 const intField = (value: unknown, field: string, nullable: boolean): number | null | undefined => {
   if (value === undefined) return undefined;
   if (value === null && nullable) return null;

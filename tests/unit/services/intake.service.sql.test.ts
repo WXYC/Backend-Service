@@ -44,9 +44,25 @@ describe('buildIntakeSelect — effective state (BS#2796)', () => {
     expect(text).toMatch(/then 'pool' else "[^"]+"\."intake_items"\."state"::text end/);
   });
 
+  // Without the parentheses AND binds tighter than OR, and any row whose
+  // requested_at is old — a checked_out item, say — would read as pool.
+  it('groups the two expiry arms so state = requested governs both', () => {
+    const t = `"${SCHEMA}"."intake_items"`;
+    expect(text).toContain(
+      `${t}."state" = 'requested' and (${t}."requested_dj_id" is null or ${t}."requested_at" < now() - interval '7 days') then 'pool'`
+    );
+  });
+
   it('flags overdue only on checked_out rows older than 14 days, without touching state', () => {
     expect(text).toContain(`"${SCHEMA}"."intake_items"."state" = 'checked_out'`);
     expect(text).toContain(`"${SCHEMA}"."intake_items"."checked_out_at" < now() - interval '14 days'`);
+  });
+
+  it('makes overdue false, never NULL, for a checked_out row with no checked_out_at', () => {
+    const t = `"${SCHEMA}"."intake_items"`;
+    expect(text).toContain(
+      `coalesce(${t}."state" = 'checked_out' and ${t}."checked_out_at" < now() - interval '14 days', false) as "overdue"`
+    );
   });
 
   it('is a SELECT — reading never writes', () => {
