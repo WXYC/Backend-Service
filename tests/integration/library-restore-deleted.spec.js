@@ -22,6 +22,12 @@
  *      gone restores as NULL rather than 500ing the whole batch on a real FK
  *      check no mocked transaction enforces, and one whose target is still
  *      live restores with its captured value.
+ *   6. a captured `REFUSE_REFERENCES` column (BS#2818) whose target is gone
+ *      answers 409 `missing_reference` with nothing written -- parent row
+ *      included, even when only a CHILD row holds the missing reference --
+ *      and the same restore succeeds once the target exists again; a
+ *      `CASCADE_DROP_REFERENCES` row (`bins.dj_id`, a removed DJ) is dropped
+ *      and reported in `entities[].deviations` instead of failing the batch.
  *
  * `catalog_delete_snapshot` is permanently retained and this suite shares a
  * database with every other integration spec, so every fixture is scoped to a
@@ -63,6 +69,11 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
   const createdCardIds = [];
   const createdTrackArtistIds = [];
   let setNullSeq = 0;
+  // BS#2818 fixtures: rows a refusal test deletes to make a target missing,
+  // then puts back (or not), which teardown must remove after the library rows.
+  const createdFormatIds = [];
+  const createdUserIds = [];
+  let refusalSeq = 0;
 
   /**
    * Creates and immediately deletes a fresh artist so its
@@ -171,6 +182,12 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
       if (createdCardIds.length > 0) {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".rotation_cards WHERE id = ANY($1::int[])`, [createdCardIds]);
       }
+      if (createdFormatIds.length > 0) {
+        await sql.unsafe(`DELETE FROM "${SCHEMA}".format WHERE id = ANY($1::int[])`, [createdFormatIds]);
+      }
+      if (createdUserIds.length > 0) {
+        await sql.unsafe(`DELETE FROM "${SCHEMA}".auth_user WHERE id = ANY($1::text[])`, [createdUserIds]);
+      }
       if (createdTrackArtistIds.length > 0) {
         await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE id = ANY($1::int[])`, [createdTrackArtistIds]);
       }
@@ -274,6 +291,9 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
     // The FK actually resolves after the replay: `rotation_urls.rotation_id`
     // references `rotation.id`, so a parent written second would have raised
     // 23503 and rolled the whole batch back instead of answering 200.
+    // Nothing departed from the snapshot, so the list is present and empty.
+    expect(res.body.entities[0].deviations).toEqual([]);
+
     const urls = await sql.unsafe(
       `SELECT u.id FROM "${SCHEMA}".rotation_urls u
          JOIN "${SCHEMA}".rotation r ON r.id = u.rotation_id
@@ -356,12 +376,191 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
 
       const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
       expect(res.body.entities[0].children[child]).toBe(1);
+      // The nulled reference is reported, and only when it was actually nulled.
+      expect(res.body.entities[0].deviations).toEqual(
+        targetDeleted
+          ? [
+              {
+                kind: 'nulled',
+                table: child,
+                row_id: expect.any(Number),
+                column: column.split('.')[1],
+                captured_value: String(targetId),
+              },
+            ]
+          : []
+      );
 
       const restored = await readRestored(album.id);
       expect(restored).toHaveLength(1);
       expect(restored[0].value).toBe(targetDeleted ? null : targetId);
     }
   );
+
+  // BS#2818: a captured NO ACTION reference whose target is gone refuses the
+  // whole restore with a named 409 instead of an unexplained, permanent 500.
+  // Each case reads the catalog back to prove NOTHING was written -- not even
+  // the parent `library` row when only a child holds the missing reference.
+  const createDeletableArtist = async () => {
+    refusalSeq += 1;
+    const codeLetters = `${uniq.toString(36).toUpperCase().slice(-2)}Y${refusalSeq}`.slice(0, 4);
+    const created = await auth
+      .post('/library/artists')
+      .send({ artist_name: `${marker} Refusal ${refusalSeq}`, code_letters: codeLetters, genre_id: ROCK })
+      .expect(201);
+    return created.body.id;
+  };
+
+  const deleteArtist = async (id) => {
+    await auth.delete(`/library/artists/${id}`).expect(204);
+    deletedArtistIds.push(id);
+  };
+
+  const insertArtistWithId = async (id) => {
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".artists (id, artist_name, alphabetical_name, code_letters) VALUES ($1, $2, $2, 'ZZ')`,
+      [id, `${marker} Returned ${id}`]
+    );
+    createdTrackArtistIds.push(id);
+  };
+
+  const createFormat = async () => {
+    const rows = await sql.unsafe(`INSERT INTO "${SCHEMA}".format (format_name) VALUES ($1) RETURNING id`, [
+      `${marker} Format ${(refusalSeq += 1)}`,
+    ]);
+    createdFormatIds.push(rows[0].id);
+    return rows[0].id;
+  };
+
+  const snapshotCount = async (batchId) =>
+    (await sql.unsafe(`SELECT 1 FROM "${SCHEMA}".catalog_delete_snapshot WHERE batch_id = $1`, [batchId])).length;
+
+  test('refuses a release whose artist was deleted after it, then restores once that artist id exists again', async () => {
+    const orphanArtistId = await createDeletableArtist();
+    const album = await createAlbum({ album_title: `${marker} Artist Gone`, artist_id: orphanArtistId });
+    const batchId = await deleteAlbum(album.id);
+    await deleteArtist(orphanArtistId);
+
+    const refused = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(409);
+
+    expect(refused.body).toEqual({
+      message: expect.stringContaining('no endpoint does that today'),
+      reason: 'missing_reference',
+      table: 'library',
+      row_id: album.id,
+      column: 'artist_id',
+      target_table: 'artists',
+      captured_value: String(orphanArtistId),
+    });
+    expect(refused.body.message).not.toMatch(/re-?creat/i);
+    // Nothing written, and the snapshot is still there to restore from.
+    expect(await libraryRow(album.id)).toBeNull();
+    expect(await snapshotCount(batchId)).toBe(1);
+
+    // The refusal clears when the target returns, not after any wait.
+    await insertArtistWithId(orphanArtistId);
+    const restored = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+
+    expect(restored.body.entities[0].deviations).toEqual([]);
+    expect((await libraryRow(album.id)).artist_id).toBe(orphanArtistId);
+  });
+
+  test('refuses, writing nothing, when only a CHILD row holds the missing reference', async () => {
+    const album = await createAlbum({ album_title: `${marker} Format Gone` });
+    const formatId = await createFormat();
+    const rotationRows = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date, format_id) VALUES ($1, 'H', now(), $2) RETURNING id`,
+      [album.id, formatId]
+    );
+    const batchId = await deleteAlbum(album.id);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".format WHERE id = $1`, [formatId]);
+
+    const refused = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(409);
+
+    // The parent's own references all resolve, so the parent row is not what
+    // is named -- and it must not be written either.
+    expect(refused.body).toMatchObject({
+      reason: 'missing_reference',
+      table: 'rotation',
+      row_id: rotationRows[0].id,
+      column: 'format_id',
+      target_table: 'format',
+      captured_value: String(formatId),
+    });
+    expect(await libraryRow(album.id)).toBeNull();
+    expect(await snapshotCount(batchId)).toBe(1);
+  });
+
+  test('names a missing artist_library_crossreference.artist_id with a null row_id', async () => {
+    const album = await createAlbum({ album_title: `${marker} Crossref Gone` });
+    const otherArtistId = await createDeletableArtist();
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".artist_library_crossreference (artist_id, library_id) VALUES ($1, $2)`, [
+      otherArtistId,
+      album.id,
+    ]);
+    const batchId = await deleteAlbum(album.id);
+    await deleteArtist(otherArtistId);
+
+    const refused = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(409);
+
+    expect(refused.body).toMatchObject({
+      reason: 'missing_reference',
+      table: 'artist_library_crossreference',
+      row_id: null,
+      column: 'artist_id',
+      target_table: 'artists',
+      captured_value: String(otherArtistId),
+    });
+    expect(await libraryRow(album.id)).toBeNull();
+  });
+
+  test('names the first missing reference in plan order, and the next one after a retry', async () => {
+    const orphanArtistId = await createDeletableArtist();
+    const album = await createAlbum({ album_title: `${marker} Two Gone`, artist_id: orphanArtistId });
+    const formatId = await createFormat();
+    await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date, format_id) VALUES ($1, 'H', now(), $2)`,
+      [album.id, formatId]
+    );
+    const batchId = await deleteAlbum(album.id);
+    await deleteArtist(orphanArtistId);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".format WHERE id = $1`, [formatId]);
+
+    // The parent comes before its children in plan order.
+    const first = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(409);
+    expect(first.body).toMatchObject({ table: 'library', column: 'artist_id' });
+
+    await insertArtistWithId(orphanArtistId);
+    const second = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(409);
+    expect(second.body).toMatchObject({ table: 'rotation', column: 'format_id', captured_value: String(formatId) });
+    expect(await libraryRow(album.id)).toBeNull();
+  });
+
+  test("restores a release that was in a removed DJ's bin, dropping the bin row and reporting it", async () => {
+    const album = await createAlbum({ album_title: `${marker} Removed DJ Bin` });
+    const djId = `bs2818-dj-${uniq}`;
+    await sql.unsafe(`INSERT INTO "${SCHEMA}".auth_user (id, name, email) VALUES ($1, $1, $2)`, [
+      djId,
+      `${djId}@example.test`,
+    ]);
+    createdUserIds.push(djId);
+    const bin = await sql.unsafe(`INSERT INTO "${SCHEMA}".bins (dj_id, album_id) VALUES ($1, $2) RETURNING id`, [
+      djId,
+      album.id,
+    ]);
+    const batchId = await deleteAlbum(album.id);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".auth_user WHERE id = $1`, [djId]);
+
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+
+    expect(res.body.entities[0].children.bins).toBe(0);
+    expect(res.body.entities[0].deviations).toEqual([
+      { kind: 'dropped', table: 'bins', row_id: bin[0].id, column: 'dj_id', captured_value: djId },
+    ]);
+    expect(await libraryRow(album.id)).not.toBeNull();
+    const bins = await sql.unsafe(`SELECT 1 FROM "${SCHEMA}".bins WHERE album_id = $1`, [album.id]);
+    expect(bins).toHaveLength(0);
+  });
 
   test('refuses an ambiguous request with a 400 and writes nothing', async () => {
     const album = await createAlbum({ album_title: `${marker} Taken` });
@@ -483,8 +682,10 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
     const batchId = await deleteAlbum(album.id);
 
     // Corrupt exactly one child row in the archive so its INSERT violates a
-    // real constraint (`bins.dj_id` references `djs.id`), then assert the
-    // PARENT never landed either. A negative id cannot exist in `djs`.
+    // real constraint, then assert the PARENT never landed either. The row has
+    // no `dj_id`, so the insert omits the column and trips its NOT NULL (a
+    // `dj_id` naming a missing user would instead be dropped and reported, see
+    // BS#2818 below).
     await sql.unsafe(
       `UPDATE "${SCHEMA}".catalog_delete_snapshot
           SET captured = jsonb_set(
@@ -493,9 +694,6 @@ describe('POST /library/deleted/:batchId/restore (BS#2585)', () => {
             jsonb_build_array(jsonb_build_object(
               'id', 2147483000,
               'album_id', $2::int,
-              'dj_id', -1,
-              'artist_name', 'x',
-              'album_title', 'x',
               'track_title', 'x'
             ))
           )

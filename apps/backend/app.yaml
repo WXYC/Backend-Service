@@ -4256,14 +4256,34 @@ paths:
         one rewrite is any nullable `ON DELETE SET NULL` reference whose target
         was deleted after the batch was: it comes back NULL, as its delete
         rule would have left it, rather than failing the restore. A restored
-        rotation row can therefore come back without its card filing, and the
-        200 does not say which references were nulled.
+        rotation row can therefore come back without its card filing. Each
+        one is reported in the 200's `entities[].deviations` as a `nulled`
+        deviation.
+
+
+        A captured child row whose `ON DELETE CASCADE` target is gone is left
+        out of the replay, because the delete it would have cascaded from
+        already happened: a release that sat in a DJ's bin restores without
+        the bin row once that DJ's account is removed. Each one is reported
+        in `entities[].deviations` as a `dropped` deviation and is not
+        counted in `entities[].children`.
+
+
+        A captured row whose `NO ACTION` reference (a foreign key with no
+        `ON DELETE` clause, nullable or not) points at a row that no longer
+        exists refuses the whole restore with 409 `missing_reference`, and
+        nothing is written, the parent row included. The most reachable case
+        is the release's own artist, deleted after the release. The refusal
+        names the first missing reference, in replay order, so a retry after
+        a fix can name the next. It clears only once a row with the captured
+        id exists again in the target table; no endpoint does that today, and
+        re-creating an artist mints a new id, so that does not clear it.
 
 
         The converse also holds: a reference cleared by the delete itself —
         an intake item's `cited_album_id`, for example — stays NULL after the
-        release is restored, because the restore replays only the batch's own
-        rows and never touches rows outside the batch.
+        release is restored, because the restore never re-links rows the
+        delete left in place.
 
 
         `unrecoverable` depends on the batch's `entity_kind`.
@@ -4356,7 +4376,7 @@ paths:
                     description: Replayed entities in the order they were written, parent first.
                     items:
                       type: object
-                      required: ['entity_kind', 'entity_id', 'table', 'relocated_code_number', 'children']
+                      required: ['entity_kind', 'entity_id', 'table', 'relocated_code_number', 'children', 'deviations']
                       properties:
                         entity_kind:
                           type: string
@@ -4377,8 +4397,42 @@ paths:
                           type: object
                           additionalProperties:
                             type: integer
-                          description: Child table name -> rows replayed.
+                          description: >-
+                            Child table name -> rows actually re-inserted. A captured row left out
+                            of the replay is not counted here; it is listed in `deviations`.
                           example: { bins: 3, reviews: 1, rotation: 0 }
+                        deviations:
+                          type: array
+                          description: >-
+                            Every way this entity's replay departed from the snapshot, one per nulled
+                            reference or dropped child row. Empty when nothing departed. Ids only,
+                            never names.
+                          items:
+                            type: object
+                            required: ['kind', 'table', 'row_id', 'column', 'captured_value']
+                            properties:
+                              kind:
+                                type: string
+                                enum: ['nulled', 'dropped']
+                                description: >-
+                                  `nulled`: a nullable `ON DELETE SET NULL` reference whose target is gone,
+                                  written NULL. `dropped`: a captured row whose `ON DELETE CASCADE` target
+                                  is gone, left out of the replay.
+                              table:
+                                type: string
+                                example: bins
+                              row_id:
+                                type: integer
+                                description: The affected row's primary key (the captured id).
+                              column:
+                                type: string
+                                description: The reference column whose target is gone.
+                                example: dj_id
+                              captured_value:
+                                type: string
+                                description: >-
+                                  The referenced id the snapshot carried, as a string because
+                                  `auth_user.id` is text.
         '400':
           description: >-
             Either a malformed request (non-UUID `batchId`, non-object body,
@@ -4409,7 +4463,11 @@ paths:
             means the captured parent id is already present in the catalog —
             the idempotent answer to a double-click. `restore_declined` is the
             second arm of the reissued-code decision: the librarian chose to
-            leave the card in the archive. `unrestorable_kind` (BS#2616) is a
+            leave the card in the archive. `missing_reference` (BS#2818)
+            means a captured `NO ACTION` reference — the release's artist,
+            say — points at a row that no longer exists; it names the first
+            such reference and clears only once a row with that id exists
+            again in `target_table`. `unrestorable_kind` (BS#2616) is a
             PERMANENT refusal, not a retryable one: this batch holds an
             `entity_kind` — an `artist` batch, today — that has no replay plan
             at all, answered before any row lock or write. `GET
@@ -4431,7 +4489,7 @@ paths:
                     type: string
                   reason:
                     type: string
-                    enum: ['already_restored', 'restore_declined', 'unrestorable_kind']
+                    enum: ['already_restored', 'restore_declined', 'unrestorable_kind', 'missing_reference']
                   entity_ids:
                     type: array
                     description: Present on `already_restored` — the parent ids already in the catalog.
@@ -4442,6 +4500,26 @@ paths:
                   entity_kind:
                     type: string
                     description: Present on `unrestorable_kind` — the kind this batch holds that has no replay plan.
+                  table:
+                    type: string
+                    description: Present on `missing_reference` — the table of the captured row holding the reference.
+                  row_id:
+                    type: integer
+                    nullable: true
+                    description: >-
+                      Present on `missing_reference` — the captured row's primary key; null for
+                      `artist_library_crossreference`, which has no single-column key.
+                  column:
+                    type: string
+                    description: Present on `missing_reference` — the reference column whose target is missing.
+                  target_table:
+                    type: string
+                    description: Present on `missing_reference` — the table the reference points into.
+                  captured_value:
+                    type: string
+                    description: >-
+                      Present on `missing_reference` — the referenced id the snapshot carried, as a string
+                      because `auth_user.id` is text.
         '503':
           description: >-
             The restore stood down rather than wait on rows (or the restore

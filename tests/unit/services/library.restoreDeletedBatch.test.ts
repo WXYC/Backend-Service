@@ -132,13 +132,20 @@ const TABLE_NAMES = new Map<unknown, string>([
 ]);
 
 /**
+ * The referenced ids that still exist: the captured library row's artist, genre
+ * and format, and the DJ the captured bin row belongs to. Any other id is a
+ * target that has since been deleted.
+ */
+const LIVE_TARGETS: unknown[] = [7, 3, 1, 5];
+
+/**
  * Minimal drizzle-shaped transaction double. `createMockQueryChain` can't be
  * reused: it has no `.for()` and returns one shared chain, which would collapse
  * the per-statement ordering every assertion here depends on. Each builder call
  * records its op, the method chain applied (including `for(<mode>)`) and each
  * method's argument, and is thenable so `await` resolves the next queued SELECT.
  */
-const makeTx = (selectResults: unknown[][], throwOnExecuteIndex?: number) => {
+const makeTx = (selectResults: unknown[][], throwOnExecuteIndex?: number, liveTargets: unknown[] = LIVE_TARGETS) => {
   const ops: RecordedOp[] = [];
   let selectIndex = 0;
   let executeIndex = 0;
@@ -160,6 +167,13 @@ const makeTx = (selectResults: unknown[][], throwOnExecuteIndex?: number) => {
       return chain;
     };
     chain.then = (resolve: (value: unknown) => void) => {
+      // A `FOR KEY SHARE` read is a reference probe (`missingTargetValues`),
+      // answered from `liveTargets` rather than the positional queue so the
+      // probes the replay adds never shift the SELECTs the tests index into.
+      if (record.methods.includes('for(key share)')) {
+        resolve(liveTargets.map((value) => ({ value })));
+        return;
+      }
       resolve(op === 'select' ? (selectResults[selectIndex++] ?? []) : []);
     };
     return chain;
@@ -246,6 +260,8 @@ type RunOptions = {
   shelf?: Row[];
   resolution?: 'next_free_code' | 'decline';
   throwOnExecuteIndex?: number;
+  /** The referenced ids that still exist; defaults to `LIVE_TARGETS`. */
+  liveTargets?: unknown[];
 };
 
 const run = async (options: RunOptions = {}) => {
@@ -258,7 +274,7 @@ const run = async (options: RunOptions = {}) => {
       if ((options.legacyPresent ?? []).length === 0) selectResults.push(options.shelf ?? []);
     }
   }
-  const { ops, tx } = makeTx(selectResults, options.throwOnExecuteIndex);
+  const { ops, tx } = makeTx(selectResults, options.throwOnExecuteIndex, options.liveTargets);
   (db as unknown as { transaction: unknown }).transaction = jest
     .fn()
     .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
@@ -482,6 +498,92 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
       const denylistDeletes = ops.filter((op) => op.op === 'delete' && op.table === library_delete_denylist);
       expect(denylistDeletes).toHaveLength(1);
       expect(denylistDeletes[0].args.where).toEqual(eq(library_delete_denylist.legacy_release_id, 71234));
+    });
+  });
+
+  // BS#2818: every way the replay departs from the snapshot is one
+  // `RestoreDeviation`, returned per entity and written once, after commit.
+  describe('deviations from the snapshot', () => {
+    // A release in a removed DJ's bin (dj 99 is not in LIVE_TARGETS) and a
+    // rotation row whose card has since been deleted (card 12, likewise).
+    const withDeviations = () =>
+      snapshotRow({
+        captured: {
+          entity: { table: 'library', row: capturedLibraryRow() },
+          children: {
+            bins: [
+              { id: 1, album_id: 42, dj_id: 99 },
+              { id: 2, album_id: 42, dj_id: 5 },
+            ],
+            rotation: [{ id: 8, album_id: 42, card_id: 12 }],
+          },
+        },
+      });
+    let warn: jest.SpiedFunction<typeof console.warn>;
+
+    beforeEach(() => {
+      warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    const restoreRecords = () => warn.mock.calls.filter(([message]) => message === '[Library] restore');
+
+    it('lists the nulled reference and the dropped row per entity, in replay order, and counts only re-inserted rows', async () => {
+      const { outcome } = await run({ snapshots: [withDeviations()] });
+
+      expect(outcome).toMatchObject({
+        outcome: 'restored',
+        entities: [
+          {
+            children: expect.objectContaining({ bins: 1, rotation: 1 }),
+            deviations: [
+              { kind: 'nulled', table: 'rotation', row_id: 8, column: 'card_id', captured_value: '12' },
+              { kind: 'dropped', table: 'bins', row_id: 1, column: 'dj_id', captured_value: '99' },
+            ],
+          },
+        ],
+      });
+    });
+
+    it('does not insert a dropped row', async () => {
+      const { ops } = await run({ snapshots: [withDeviations()] });
+
+      const bins = insertStatements(ops).find((statement) => statement.table === 'bins');
+      expect(bins?.rows).toEqual([{ id: 2, album_id: 42, dj_id: 5 }]);
+    });
+
+    it('reports an empty array, not an absent field, when nothing departed', async () => {
+      const { outcome } = await run();
+
+      expect(outcome).toMatchObject({ outcome: 'restored', entities: [{ deviations: [] }] });
+    });
+
+    it('logs exactly one restore record naming both deviations, with the batch id', async () => {
+      await run({ snapshots: [withDeviations()] });
+
+      expect(restoreRecords()).toHaveLength(1);
+      const record = JSON.parse(restoreRecords()[0][1] as string);
+      expect(record.batch_id).toBe(BATCH_ID);
+      expect(record.entities[0].deviations.map((deviation: Row) => deviation.kind)).toEqual(['nulled', 'dropped']);
+      expect(Sentry.addBreadcrumb).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ batch_id: BATCH_ID, deviations: expect.any(Array) }),
+        })
+      );
+    });
+
+    // A restore that rolls back writes nothing, so it must not say it restored
+    // something: the old per-column warning fired before commit.
+    it('logs nothing when the restore rolls back', async () => {
+      // Executes: 0 lock_timeout, 1 advisory lock, 2 parent INSERT, 3 the bins INSERT.
+      await expect(run({ snapshots: [withDeviations()], throwOnExecuteIndex: 3 })).rejects.toThrow('Failed query');
+
+      expect(restoreRecords()).toHaveLength(0);
+      expect(warn).not.toHaveBeenCalled();
+      expect(Sentry.addBreadcrumb).not.toHaveBeenCalled();
     });
   });
 

@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, isNull, ne, sql, SQL, type Column } from 'drizzle-orm';
-import { alias, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
+import { alias, getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
@@ -56,6 +56,9 @@ import {
   rotation_cards,
   rotation_urls,
   library_urls,
+  labels,
+  digital_asset_store,
+  user as auth_user,
   NewRotationCard,
   RotationCard,
   LibraryArtistViewEntry,
@@ -5285,14 +5288,44 @@ export type RestoreSlotConflict = {
   next_free_code_number: number;
 };
 
+/**
+ * One way a restore departed from its snapshot: a `SET_NULL_REFERENCES` column
+ * written NULL, or a captured row left out because its `CASCADE_DROP_REFERENCES`
+ * parent is gone. Ids only, never names — `captured_value` is a string because
+ * `auth_user.id` is text. Mirrors `RestoreDeviation` in `@wxyc/shared`'s `api.yaml`.
+ */
+export type RestoreDeviation = {
+  kind: 'nulled' | 'dropped';
+  table: string;
+  row_id: number | null;
+  column: string;
+  captured_value: string;
+};
+
+/**
+ * The first captured reference whose `REFUSE_REFERENCES` target is gone.
+ * Mirrors `RestoreMissingReferenceRefusal` in `@wxyc/shared`'s `api.yaml`
+ * (this service stays on `@wxyc/shared` 5.x, so the shape is restated here).
+ */
+export type RestoreMissingReference = {
+  table: string;
+  /** The captured row's primary key; null for `artist_library_crossreference`, which has none. */
+  row_id: number | null;
+  column: string;
+  target_table: string;
+  captured_value: string;
+};
+
 export type RestoredEntity = {
   entity_kind: string;
   entity_id: number;
   table: string;
   /** The code the card came back under, non-null ONLY on the `next_free_code` arm. */
   relocated_code_number: number | null;
-  /** Child table name -> rows replayed, mirroring the listing's `children` counts. */
+  /** Child table name -> rows actually re-inserted; a row left out of the replay is in `deviations`, not here. */
   children: Record<string, number>;
+  /** Every way this entity's replay departed from the snapshot; empty when none did. */
+  deviations: RestoreDeviation[];
 };
 
 export type RestoreBatchOutcome =
@@ -5302,6 +5335,7 @@ export type RestoreBatchOutcome =
   | { outcome: 'resolution_required'; conflicts: RestoreSlotConflict[] }
   | { outcome: 'declined'; conflicts: RestoreSlotConflict[] }
   | { outcome: 'lock_unavailable' }
+  | ({ outcome: 'missing_reference' } & RestoreMissingReference)
   | { outcome: 'restored'; entities: RestoredEntity[] };
 
 /**
@@ -5398,6 +5432,36 @@ const RESTORE_PLAN: Record<
 export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
   rotation: { card_id: rotation_cards.id },
   compilation_track_artist: { track_artist_id: artists.id },
+};
+
+/**
+ * Every `ON DELETE CASCADE` foreign key from a replayed table to a table the
+ * restore does not replay, same shape as `SET_NULL_REFERENCES`. A captured row
+ * whose target is gone is left out of the replay and reported as `dropped`: the
+ * delete rule would have removed it along with its parent, and that delete
+ * already happened. `bins.dj_id` is the case — a release in a DJ's bin, after
+ * that DJ's account is removed. A table declared here must not itself be the
+ * target of a replayed table's foreign key, because a dropped row's own
+ * dependents would then have to be dropped too; the guard test checks this.
+ */
+export const CASCADE_DROP_REFERENCES: Record<string, Record<string, PgColumn>> = {
+  bins: { dj_id: auth_user.id },
+};
+
+/**
+ * Every `NO ACTION` foreign key (no `ON DELETE` clause, nullable or not) from a
+ * replayed table to a table the restore does not replay. The delete rule would
+ * have refused to remove the target while the row was live, so a restore
+ * cannot honestly proceed once it is gone: it is refused with 409
+ * `missing_reference` before anything is written (see `findMissingReference`).
+ * Columns are listed in schema order, which is the order the refusal names them.
+ */
+export const REFUSE_REFERENCES: Record<string, Record<string, PgColumn>> = {
+  library: { artist_id: artists.id, genre_id: genres.id, format_id: format.id, label_id: labels.id },
+  rotation: { format_id: format.id, label_id: labels.id },
+  digital_asset: { ripped_by: auth_user.id },
+  digital_asset_file: { store_id: digital_asset_store.id },
+  artist_library_crossreference: { artist_id: artists.id },
 };
 
 /**
@@ -5697,34 +5761,62 @@ export const findLibrarySlotOccupant = async (
   return occupant;
 };
 
+/** The captured rows that are real objects; anything else in a captured array is not a row. */
+const capturedRecords = (rows: unknown[]): Record<string, unknown>[] =>
+  rows.filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row));
+
+/** A captured row's primary key, or null for a row with no single-column `id` (`artist_library_crossreference`). */
+const capturedRowId = (record: Record<string, unknown>): number | null =>
+  typeof record.id === 'number' ? record.id : null;
+
+/**
+ * The captured values of `column` whose `target` row no longer exists. A value
+ * resolves when its target is live OR is restored by this same insert: a target
+ * from an EARLIER-replayed table is already live by now (same transaction), and
+ * one in `table` itself (a self-referential column such as slice 16a's
+ * `rotation.moved_from_rotation_id`) is answered from `records`, since Postgres
+ * checks a non-deferrable FK at the end of the statement and accepts it in any
+ * row order. A target table replayed AFTER `table` would read as gone; the
+ * schema-derived guard in `tests/unit/services/library.restoreSetNull.test.ts`
+ * rejects that order.
+ *
+ * One existence query for the column, covering every unresolved value, not one
+ * per row. It takes `FOR KEY SHARE` — the lock the insert's own FK check would
+ * take — so a target deleted concurrently either blocks behind this restore or,
+ * once its delete commits, is reported missing here, instead of slipping in
+ * between the probe and the insert as a `23503`.
+ */
+const missingTargetValues = async (
+  tx: DbTransaction,
+  table: PgTable,
+  records: Record<string, unknown>[],
+  column: string,
+  target: PgColumn
+): Promise<Set<unknown>> => {
+  const captured = [...new Set(records.map((record) => record[column]).filter((value) => value != null))];
+  const resolved = new Set(target.table === table ? records.map((record) => record[target.name]) : []);
+  const unresolved = captured.filter((value) => !resolved.has(value));
+  if (unresolved.length > 0) {
+    const live = await tx
+      .select({ value: target })
+      .from(target.table)
+      .where(inArray(target, unresolved))
+      .for('key share');
+    for (const row of live) resolved.add(row.value);
+  }
+  return new Set(unresolved.filter((value) => !resolved.has(value)));
+};
+
 /**
  * NULLs out any `SET_NULL_REFERENCES` column on `records` whose captured
  * value no longer resolves — the outcome `ON DELETE SET NULL` would have
  * produced had the target been deleted while this row was live. Mutates
  * `records` in place so `replayCapturedRows` can insert them unchanged
- * afterward. `references` defaults to `tableName`'s `SET_NULL_REFERENCES`
- * entry; a test passes its own.
- *
- * A captured value resolves when its target is live OR is restored by this
- * same insert. A target from an EARLIER-replayed table is already live by the
- * time this runs (same transaction), so the probe sees it. A target in
- * `table` itself (a self-referential column such as slice 16a's
- * `rotation.moved_from_rotation_id`) is not live yet, but Postgres checks a
- * non-deferrable FK at the end of the statement, so the insert accepts it in
- * any row order — answering it from `records` keeps a reference the database
- * would have accepted. A target table replayed AFTER `table` would be read as
- * gone; the schema-derived guard in
- * `tests/unit/services/library.restoreSetNull.test.ts` rejects that order.
- *
- * One existence query per declared column, covering every unresolved value,
- * not one per row. It takes `FOR KEY SHARE` — the lock the insert's own FK
- * check would take — so a target deleted concurrently either blocks behind
- * this restore or, once its delete commits, is skipped and nulled here,
- * instead of slipping in between the probe and the insert as a `23503`.
- *
- * A nulled reference is logged: the restore still succeeds, but the row did
- * not come back exactly as captured (a rotation row restored without its
- * card filing), and whoever reads the restore record needs to know.
+ * afterward, and answers one `nulled` deviation per nulled value: the restore
+ * still succeeds, but the row did not come back exactly as captured (a
+ * rotation row restored without its card filing). `references` defaults to
+ * `tableName`'s `SET_NULL_REFERENCES` entry; a test passes its own. See
+ * `missingTargetValues` for what counts as resolved and how the probe locks.
  */
 export const nullDanglingSetNullReferences = async (
   tx: DbTransaction,
@@ -5732,38 +5824,110 @@ export const nullDanglingSetNullReferences = async (
   table: PgTable,
   records: Record<string, unknown>[],
   references: Readonly<Record<string, PgColumn>> = SET_NULL_REFERENCES[tableName] ?? {}
-): Promise<void> => {
+): Promise<RestoreDeviation[]> => {
+  const deviations: RestoreDeviation[] = [];
   for (const [column, target] of Object.entries(references)) {
-    const captured = [...new Set(records.map((record) => record[column]).filter((value) => value != null))];
-    if (captured.length === 0) continue;
-    const resolved = new Set(target.table === table ? records.map((record) => record[target.name]) : []);
-    const unresolved = captured.filter((value) => !resolved.has(value));
-    if (unresolved.length > 0) {
-      const live = await tx
-        .select({ value: target })
-        .from(target.table)
-        .where(inArray(target, unresolved))
-        .for('key share');
-      for (const row of live) resolved.add(row.value);
-    }
-    const nulled = unresolved.filter((value) => !resolved.has(value));
-    if (nulled.length === 0) continue;
+    const missing = await missingTargetValues(tx, table, records, column, target);
+    if (missing.size === 0) continue;
     for (const record of records) {
-      if (record[column] != null && !resolved.has(record[column])) {
+      if (record[column] != null && missing.has(record[column])) {
+        deviations.push({
+          kind: 'nulled',
+          table: tableName,
+          row_id: capturedRowId(record),
+          column,
+          captured_value: String(record[column]),
+        });
         record[column] = null;
       }
     }
-    console.warn(
-      '[Library] restore nulled %s.%s for target(s) that no longer exist: %s',
-      tableName,
-      column,
-      JSON.stringify(nulled)
-    );
   }
+  return deviations;
 };
 
 /**
- * Replays captured rows into one table and answers how many went in.
+ * Splits `records` into the rows to replay and a `dropped` deviation for each
+ * row whose `CASCADE_DROP_REFERENCES` target is gone. A row is reported once,
+ * under the first column (in declaration order) that is missing.
+ */
+export const dropOrphanedCascadeRows = async (
+  tx: DbTransaction,
+  tableName: string,
+  table: PgTable,
+  records: Record<string, unknown>[],
+  references: Readonly<Record<string, PgColumn>> = CASCADE_DROP_REFERENCES[tableName] ?? {}
+): Promise<{ kept: Record<string, unknown>[]; deviations: RestoreDeviation[] }> => {
+  let kept = records;
+  const deviations: RestoreDeviation[] = [];
+  for (const [column, target] of Object.entries(references)) {
+    const missing = await missingTargetValues(tx, table, kept, column, target);
+    if (missing.size === 0) continue;
+    for (const record of kept) {
+      if (record[column] != null && missing.has(record[column])) {
+        deviations.push({
+          kind: 'dropped',
+          table: tableName,
+          row_id: capturedRowId(record),
+          column,
+          captured_value: String(record[column]),
+        });
+      }
+    }
+    kept = kept.filter((record) => record[column] == null || !missing.has(record[column]));
+  }
+  return { kept, deviations };
+};
+
+/**
+ * The first `REFUSE_REFERENCES` target missing for any captured row of any
+ * entity in the batch, or undefined when every one resolves. Runs BEFORE the
+ * first INSERT so a refusal writes nothing — returning one from inside the
+ * replay would commit the half-restored release already inserted. Order is
+ * fixed: entity, then `RESTORE_PLAN` order (the parent, then its children in
+ * plan order), then column order, then the captured row order, so a retry after
+ * a fix names the next missing reference.
+ */
+const findMissingReference = async (
+  tx: DbTransaction,
+  plans: ReadonlyArray<{
+    tableName: string;
+    plan: (typeof RESTORE_PLAN)[string];
+    capturedRow: Record<string, unknown>;
+    children: Record<string, unknown[]>;
+  }>
+): Promise<RestoreMissingReference | undefined> => {
+  for (const { tableName, plan, capturedRow, children } of plans) {
+    const tables: Array<[string, PgTable, Record<string, unknown>[]]> = [
+      [tableName, plan.parent, [capturedRow]],
+      ...plan.children.map(([name, table]): [string, PgTable, Record<string, unknown>[]] => [
+        name,
+        table,
+        capturedRecords(children[name] ?? []),
+      ]),
+    ];
+    for (const [name, table, records] of tables) {
+      for (const [column, target] of Object.entries(REFUSE_REFERENCES[name] ?? {})) {
+        const missing = await missingTargetValues(tx, table, records, column, target);
+        const record = records.find((candidate) => candidate[column] != null && missing.has(candidate[column]));
+        if (record) {
+          return {
+            table: name,
+            row_id: capturedRowId(record),
+            column,
+            target_table: getTableConfig(target.table).name,
+            captured_value: String(record[column]),
+          };
+        }
+      }
+    }
+  }
+  return undefined;
+};
+
+/**
+ * Replays captured rows into one table and answers how many went in, plus every
+ * deviation from the snapshot it made on the way (rows dropped, references
+ * nulled).
  *
  * `jsonb_populate_recordset` does the typing, not TypeScript: `captured` is
  * `jsonb`, so every timestamp is an ISO string and every smallint a JSON
@@ -5793,23 +5957,23 @@ export const nullDanglingSetNullReferences = async (
  * default, makes this INSERT fail, which rolls the whole batch back. That is
  * the right outcome for an envelope that no longer fits the schema: a
  * half-restored card is worse than a declined one. A dangling `SET_NULL_REFERENCES`
- * value is not that case — `nullDanglingSetNullReferences` resolves it before
- * the insert runs, rather than letting the FK check fail the batch.
+ * value or `CASCADE_DROP_REFERENCES` row is not that case —
+ * `nullDanglingSetNullReferences` and `dropOrphanedCascadeRows` resolve them
+ * before the insert runs, rather than letting the FK check fail the batch.
  */
 const replayCapturedRows = async (
   tx: DbTransaction,
   tableName: string,
   table: PgTable,
   rows: unknown[]
-): Promise<number> => {
-  const records = rows.filter(
-    (row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row)
-  );
-  if (records.length === 0) return 0;
+): Promise<{ replayed: number; deviations: RestoreDeviation[] }> => {
+  // Dropped first, so a row left out of the replay is not also reported nulled.
+  const { kept: records, deviations } = await dropOrphanedCascadeRows(tx, tableName, table, capturedRecords(rows));
+  if (records.length === 0) return { replayed: 0, deviations };
   const columns = Object.keys(records[0]);
-  if (columns.length === 0) return 0;
+  if (columns.length === 0) return { replayed: 0, deviations };
 
-  await nullDanglingSetNullReferences(tx, tableName, table, records);
+  deviations.push(...(await nullDanglingSetNullReferences(tx, tableName, table, records)));
 
   const columnList = sql.join(
     columns.map((column) => sql.identifier(column)),
@@ -5818,7 +5982,7 @@ const replayCapturedRows = async (
   await tx.execute(
     sql`INSERT INTO ${table} (${columnList}) SELECT ${columnList} FROM jsonb_populate_recordset(NULL::${table}, ${JSON.stringify(records)}::jsonb)`
   );
-  return records.length;
+  return { replayed: records.length, deviations };
 };
 
 /**
@@ -5835,9 +5999,12 @@ const replayCapturedRows = async (
  * that cannot be resolved, an FK that no longer resolves, a column the schema
  * has since dropped — rolls the entire batch back. No partial restore is
  * observable, because a half-restored artist is worse than a declined one.
- * The one FK that is NOT a failure is a declared `SET_NULL_REFERENCES`
- * column whose target is gone: it comes back NULL, as its delete rule would
- * have left it, and the restore succeeds (BS#2799).
+ * Two kinds of dangling FK are NOT failures: a declared
+ * `SET_NULL_REFERENCES` column whose target is gone comes back NULL, as its
+ * delete rule would have left it (BS#2799), and a `CASCADE_DROP_REFERENCES` row
+ * whose parent is gone is left out; both are reported as deviations. A
+ * `REFUSE_REFERENCES` target that is gone refuses the batch with
+ * `missing_reference` before the first INSERT (BS#2818).
  *
  * **The occupied slot is the ordinary path, not an edge case.** Retention is
  * permanent, so a card deleted three years ago usually finds its slot taken.
@@ -5908,7 +6075,7 @@ const runRestoreBatchTransaction = async (
   batchId: string,
   resolution?: RestoreCodeResolution
 ): Promise<RestoreBatchOutcome> => {
-  return db.transaction(async (tx) => {
+  const outcome: RestoreBatchOutcome = await db.transaction(async (tx) => {
     // Read and checked BEFORE the advisory lock below (BS#2616 follow-up
     // review, finding 8): this SELECT takes no lock of its own, so a batch
     // this function is about to refuse — permanently, not something a
@@ -6028,16 +6195,25 @@ const runRestoreBatchTransaction = async (
       if (resolution === 'decline') return { outcome: 'declined', conflicts };
     }
 
+    // The last point before the first INSERT. A returned value commits, so a
+    // refusal for a missing NO ACTION target has to be reached here, with every
+    // entity and child row probed, rather than from inside the replay below.
+    const missingReference = await findMissingReference(tx, plans);
+    if (missingReference) return { outcome: 'missing_reference', ...missingReference };
+
     const entities: RestoredEntity[] = [];
     for (const { row, plan, tableName, capturedRow, children } of plans) {
       const relocated = relocations.get(row.entity_id);
-      await replayCapturedRows(tx, tableName, plan.parent, [
+      const parent = await replayCapturedRows(tx, tableName, plan.parent, [
         relocated === undefined ? capturedRow : { ...capturedRow, code_number: relocated },
       ]);
 
       const replayed: Record<string, number> = {};
+      const deviations = [...parent.deviations];
       for (const [name, table] of plan.children) {
-        replayed[name] = await replayCapturedRows(tx, name, table, children[name] ?? []);
+        const child = await replayCapturedRows(tx, name, table, children[name] ?? []);
+        replayed[name] = child.replayed;
+        deviations.push(...child.deviations);
       }
 
       // A surviving denylist row would make `jobs/library-etl`'s
@@ -6084,22 +6260,35 @@ const runRestoreBatchTransaction = async (
         table: tableName,
         relocated_code_number: relocated ?? null,
         children: replayed,
+        deviations,
       });
     }
 
-    // Same two records as the delete, for the same reason: the archive row is
-    // durable but unwatched, and an incident responder works from a time
-    // window rather than a batch id.
+    return { outcome: 'restored', entities };
+  });
+
+  // Same two records as the delete, for the same reason: the archive row is
+  // durable but unwatched, and an incident responder works from a time
+  // window rather than a batch id. Emitted only once the transaction has
+  // committed, so a restore that rolled back — including after a nulled
+  // reference or a dropped row — leaves neither. The record carries every
+  // entity's `deviations`: the one place the departures from the snapshot are
+  // written down besides the 200.
+  if (outcome.outcome === 'restored') {
+    const { entities } = outcome;
     console.warn('[Library] restore', JSON.stringify({ batch_id: batchId, resolution: resolution ?? null, entities }));
     Sentry.addBreadcrumb({
       category: 'library.restore',
       level: 'info',
       message: 'POST /library/deleted/:batchId/restore replayed a batch',
-      data: { batch_id: batchId, entity_ids: entities.map((entity) => entity.entity_id) },
+      data: {
+        batch_id: batchId,
+        entity_ids: entities.map((entity) => entity.entity_id),
+        deviations: entities.flatMap((entity) => entity.deviations),
+      },
     });
-
-    return { outcome: 'restored', entities };
-  });
+  }
+  return outcome;
 };
 
 // `tx` (BS#2474): `POST /library/filings` runs this read inside its own
