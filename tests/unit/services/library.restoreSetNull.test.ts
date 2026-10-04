@@ -16,8 +16,7 @@
  * without declaring it here fails this test.
  */
 
-import { jest } from '@jest/globals';
-import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, integer, PgTable, pgTable, serial, text, type AnyPgColumn } from 'drizzle-orm/pg-core';
 import * as schema from '../../../shared/database/src/schema';
 import {
   CASCADE_DROP_REFERENCES,
@@ -28,10 +27,23 @@ import {
   SET_NULL_REFERENCES,
 } from '../../../apps/backend/services/library.service';
 
-const schemaTables = Object.values(schema).filter((value): value is PgTable => value instanceof PgTable);
+/**
+ * What the guards read: a schema module (export name -> table, the shape of
+ * `shared/database/src/schema`) and the tables the restore replays, in plan
+ * order. Every guard defaults to the real one; the test that the guards can be
+ * satisfied together passes a synthetic one.
+ */
+type GuardSchema = { module: Record<string, unknown>; replayed: readonly string[] };
 
-const tableNamed = (name: string): PgTable => {
-  const table = schemaTables.find((candidate) => getTableConfig(candidate).name === name);
+const REAL_SCHEMA: GuardSchema = { module: schema, replayed: RESTORE_PLAN_REPLAYED_TABLE_NAMES };
+
+/** A declaration map, `table -> column -> target`, as the three service maps are. */
+type DeclaredReferences = Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+
+const tableNamed = (name: string, { module }: GuardSchema = REAL_SCHEMA): PgTable => {
+  const table = Object.values(module).find(
+    (candidate): candidate is PgTable => candidate instanceof PgTable && getTableConfig(candidate).name === name
+  );
   if (!table) throw new Error(`no schema table named ${name}`);
   return table;
 };
@@ -42,16 +54,20 @@ const tableNamed = (name: string): PgTable => {
  * are `'<export name>.<db column>'` (`user.id`, although its table is
  * `auth_user`), so this is the qualifier a declared target reads as here.
  */
-const exportNameOf = (table: unknown): string => {
-  const entry = Object.entries(schema).find(([, value]) => value === table);
+const exportNameOf = (table: unknown, { module }: GuardSchema = REAL_SCHEMA): string => {
+  const entry = Object.entries(module).find(([, value]) => value === table);
   if (!entry) throw new Error('foreign table is not a schema export');
   return entry[0];
 };
 
-/** Every nullable `ON DELETE SET NULL` foreign key on a replayed table, from the real schema. */
-const derivedSetNullReferences = () =>
-  RESTORE_PLAN_REPLAYED_TABLE_NAMES.flatMap((name) =>
-    getTableConfig(tableNamed(name))
+/** The table name a declared `'<export name>.<db column>'` target points into. */
+const declaredTargetTable = (target: string, { module }: GuardSchema = REAL_SCHEMA): string =>
+  getTableConfig(module[target.slice(0, target.indexOf('.'))] as PgTable).name;
+
+/** Every nullable `ON DELETE SET NULL` foreign key on a replayed table, from the schema. */
+const derivedSetNullReferences = (guard: GuardSchema = REAL_SCHEMA) =>
+  guard.replayed.flatMap((name) =>
+    getTableConfig(tableNamed(name, guard))
       .foreignKeys.filter((foreignKey) => foreignKey.onDelete === 'set null')
       .flatMap((foreignKey) => {
         const { columns, foreignColumns, foreignTable } = foreignKey.reference();
@@ -63,7 +79,7 @@ const derivedSetNullReferences = () =>
                   table: name,
                   column: column.name,
                   targetTable: getTableConfig(foreignTable).name,
-                  target: `${exportNameOf(foreignTable)}.${foreignColumns[index].name}`,
+                  target: `${exportNameOf(foreignTable, guard)}.${foreignColumns[index].name}`,
                 },
               ]
         );
@@ -71,8 +87,10 @@ const derivedSetNullReferences = () =>
   );
 
 /** `table.column` -> the target the schema says it references. */
-const derivedSetNullColumns = (): Record<string, string> =>
-  Object.fromEntries(derivedSetNullReferences().map(({ table, column, target }) => [`${table}.${column}`, target]));
+const derivedSetNullColumns = (guard: GuardSchema = REAL_SCHEMA): Record<string, string> =>
+  Object.fromEntries(
+    derivedSetNullReferences(guard).map(({ table, column, target }) => [`${table}.${column}`, target])
+  );
 
 /**
  * `table.column` -> the target `SET_NULL_REFERENCES` declares, which is the
@@ -80,10 +98,10 @@ const derivedSetNullColumns = (): Record<string, string> =>
  * the double's `'<export name>.<db column>'` sentinel string (see
  * `exportNameOf`), not a `PgColumn`, hence the cast.
  */
-const declaredSetNullColumns = (): Record<string, string> =>
+const declaredSetNullColumns = (setNull: DeclaredReferences = SET_NULL_REFERENCES): Record<string, string> =>
   Object.fromEntries(
-    Object.entries(SET_NULL_REFERENCES).flatMap(([table, columns]) =>
-      Object.entries(columns).map(([column, target]) => [`${table}.${column}`, target as unknown as string])
+    Object.entries(setNull).flatMap(([table, columns]) =>
+      Object.entries(columns).map(([column, target]) => [`${table}.${column}`, target as string])
     )
   );
 
@@ -129,12 +147,14 @@ type ReferenceAction = 'set null' | 'cascade drop' | 'refuse';
  * refused. A target the restore replays itself is outside this: it is live or
  * restored by the same batch, never missing.
  */
-const derivedExternalReferences = (): Record<string, { action: ReferenceAction; target: string }> =>
+const derivedExternalReferences = (
+  guard: GuardSchema = REAL_SCHEMA
+): Record<string, { action: ReferenceAction; target: string }> =>
   Object.fromEntries(
-    RESTORE_PLAN_REPLAYED_TABLE_NAMES.flatMap((name) =>
-      getTableConfig(tableNamed(name)).foreignKeys.flatMap((foreignKey) => {
+    guard.replayed.flatMap((name) =>
+      getTableConfig(tableNamed(name, guard)).foreignKeys.flatMap((foreignKey) => {
         const { columns, foreignColumns, foreignTable } = foreignKey.reference();
-        if (RESTORE_PLAN_REPLAYED_TABLE_NAMES.includes(getTableConfig(foreignTable).name)) return [];
+        if (guard.replayed.includes(getTableConfig(foreignTable).name)) return [];
         const action: ReferenceAction =
           foreignKey.onDelete === 'set null'
             ? 'set null'
@@ -143,26 +163,41 @@ const derivedExternalReferences = (): Record<string, { action: ReferenceAction; 
               : 'refuse';
         return columns.map((column, index) => [
           `${name}.${column.name}`,
-          { action, target: `${exportNameOf(foreignTable)}.${foreignColumns[index].name}` },
+          { action, target: `${exportNameOf(foreignTable, guard)}.${foreignColumns[index].name}` },
         ]);
       })
     )
   );
 
-const declaredExternalReferences = (): Record<string, { action: ReferenceAction; target: string }> =>
+const SERVICE_DECLARATIONS: Record<ReferenceAction, DeclaredReferences> = {
+  'set null': SET_NULL_REFERENCES,
+  'cascade drop': CASCADE_DROP_REFERENCES,
+  refuse: REFUSE_REFERENCES,
+};
+
+/**
+ * The three maps' declarations, keyed like `derivedExternalReferences`. A
+ * `SET_NULL_REFERENCES` entry whose target the restore replays itself is left
+ * out: it is not an external reference, and the first describe block, which
+ * requires every nullable SET NULL reference declared whatever its target, owns
+ * it. That is what lets one declaration satisfy both guards — the shape of
+ * #2809's `rotation.moved_from_rotation_id` and #2801's
+ * `intake_items.rotation_id`. A cascade-drop or refuse entry with a replayed
+ * target stays in, so it still fails here as a declaration with no such
+ * external reference.
+ */
+const declaredExternalReferences = (
+  guard: GuardSchema = REAL_SCHEMA,
+  declarations: Record<ReferenceAction, DeclaredReferences> = SERVICE_DECLARATIONS
+): Record<string, { action: ReferenceAction; target: string }> =>
   Object.fromEntries(
-    (
-      [
-        ['set null', SET_NULL_REFERENCES],
-        ['cascade drop', CASCADE_DROP_REFERENCES],
-        ['refuse', REFUSE_REFERENCES],
-      ] as const
-    ).flatMap(([action, references]) =>
+    (Object.entries(declarations) as Array<[ReferenceAction, DeclaredReferences]>).flatMap(([action, references]) =>
       Object.entries(references).flatMap(([table, columns]) =>
-        Object.entries(columns).map(([column, target]) => [
-          `${table}.${column}`,
-          { action, target: target as unknown as string },
-        ])
+        Object.entries(columns).flatMap(([column, declared]) => {
+          const target = declared as string;
+          if (action === 'set null' && guard.replayed.includes(declaredTargetTable(target, guard))) return [];
+          return [[`${table}.${column}`, { action, target }]];
+        })
       )
     )
   );
@@ -208,6 +243,48 @@ describe('every foreign key from a replayed table to a non-replayed table (catal
     );
 
     expect(Object.keys(CASCADE_DROP_REFERENCES).filter((table) => referenced.includes(table))).toEqual([]);
+  });
+});
+
+// The two guards above must be satisfiable together. A nullable SET NULL
+// reference whose target table the restore ALSO replays is what #2809
+// (`rotation.moved_from_rotation_id` -> `rotation`, self-referencing) and #2801
+// (`intake_items.rotation_id` -> `rotation`) declare: the first guard requires
+// it in SET_NULL_REFERENCES, so the second must not reject that declaration as
+// an external reference the schema does not have. Synthetic tables, because no
+// such column exists yet.
+describe('the SET NULL guard and the classification guard together', () => {
+  const owner = pgTable('synthetic_owner', { id: text('id').primaryKey() });
+  const parent = pgTable('synthetic_parent', { id: serial('id').primaryKey() });
+  const child = pgTable('synthetic_child', {
+    id: serial('id').primaryKey(),
+    parent_id: integer('parent_id').references(() => parent.id, { onDelete: 'set null' }),
+    moved_from_id: integer('moved_from_id').references((): AnyPgColumn => child.id, { onDelete: 'set null' }),
+    owner_id: text('owner_id').references(() => owner.id, { onDelete: 'set null' }),
+  });
+  const guard: GuardSchema = {
+    module: { owner, parent, child },
+    replayed: ['synthetic_parent', 'synthetic_child'],
+  };
+  const setNull = { synthetic_child: { parent_id: 'parent.id', moved_from_id: 'child.id', owner_id: 'owner.id' } };
+
+  it('accepts one SET_NULL_REFERENCES declaration of a nullable SET NULL reference to a replayed table', () => {
+    expect(declaredSetNullColumns(setNull)).toEqual(derivedSetNullColumns(guard));
+    expect(declaredExternalReferences(guard, { 'set null': setNull, 'cascade drop': {}, refuse: {} })).toEqual(
+      derivedExternalReferences(guard)
+    );
+  });
+
+  // The exemption is for SET NULL only: a refuse or cascade-drop declaration
+  // naming a replayed target is still a stale one.
+  it('still rejects a refuse declaration whose target the restore replays', () => {
+    expect(
+      declaredExternalReferences(guard, {
+        'set null': setNull,
+        'cascade drop': {},
+        refuse: { synthetic_child: { parent_id: 'parent.id' } },
+      })
+    ).not.toEqual(derivedExternalReferences(guard));
   });
 });
 
@@ -314,11 +391,11 @@ describe('dropOrphanedCascadeRows', () => {
   it.each([
     ['keeps a row whose parent is live', [{ id: 1, dj_id: 'dj-a' }], ['dj-a'], [1], []],
     [
-      'drops a row whose parent is gone, and reports it as dropped with the missing id',
+      'drops a row whose parent is gone, and reports it as dropped with the missing id and no column',
       [{ id: 1, dj_id: 'dj-a' }],
       [],
       [],
-      [{ kind: 'dropped', table: 'bins', row_id: 1, column: 'dj_id', captured_value: 'dj-a' }],
+      [{ kind: 'dropped', table: 'bins', row_id: 1, column: null, captured_value: 'dj-a' }],
     ],
     [
       'drops only the rows whose parent is gone',
@@ -328,7 +405,7 @@ describe('dropOrphanedCascadeRows', () => {
       ],
       ['dj-b'],
       [2],
-      [{ kind: 'dropped', table: 'bins', row_id: 1, column: 'dj_id', captured_value: 'dj-a' }],
+      [{ kind: 'dropped', table: 'bins', row_id: 1, column: null, captured_value: 'dj-a' }],
     ],
   ])('%s', async (_name, records, live, keptIds, expected) => {
     const { tx } = probeTx(live);
