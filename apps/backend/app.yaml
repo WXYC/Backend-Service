@@ -517,6 +517,63 @@ components:
         message: { type: string }
         reason: { type: string, enum: [already_filed, state_changed] }
 
+    ReviewConflictError:
+      type: object
+      required: [message, reason]
+      properties:
+        message: { type: string }
+        reason: { type: string, enum: [locked, not_draft, subject_not_held, last_review] }
+
+    ReviewFields:
+      type: object
+      description: >
+        The slip's fields plus publishing consent (BS#2802). None is required. An empty text
+        field is `null`, never `""`: a blank or whitespace-only value is stored as `null`.
+        Swagger display only; the SSOT is wxyc-shared/api.yaml.
+      properties:
+        buzzwords: { type: string, nullable: true }
+        artist_blurb: { type: string, nullable: true }
+        review: { type: string, nullable: true }
+        recommended_tracks: { type: string, nullable: true }
+        fcc: { type: string, nullable: true }
+        publish_website: { type: boolean }
+        publish_apps: { type: boolean }
+        publish_instagram: { type: boolean }
+        credit: { type: string, enum: [dj_name, real_name, none], nullable: true }
+
+    NewReviewRequest:
+      allOf:
+        - $ref: '#/components/schemas/ReviewFields'
+        - type: object
+          properties:
+            intake_item_id: { type: integer }
+            album_id: { type: integer }
+      description: >
+        Exactly one of `intake_item_id` and `album_id`. `author`, `author_user_id` and `medium`
+        (the on-behalf shape) are not accepted yet.
+
+    Review:
+      allOf:
+        - $ref: '#/components/schemas/ReviewFields'
+        - type: object
+          description: >
+            An in-app review. `author` is a snapshot of the author's `auth_user.name`, cut to its
+            first 128 code points. `locked` is true when the item's slip is printed; always false
+            for a review on a library release alone.
+          properties:
+            id: { type: integer }
+            album_id: { type: integer, nullable: true }
+            intake_item_id: { type: integer, nullable: true }
+            author: { type: string, nullable: true, maxLength: 128 }
+            author_user_id: { type: string, nullable: true }
+            recorded_by_user_id: { type: string, nullable: true }
+            medium: { type: string, enum: [typed, handwritten, printed] }
+            status: { type: string, enum: [draft, submitted] }
+            add_date: { type: string, format: date }
+            submitted_at: { type: string, format: date-time, nullable: true }
+            last_modified: { type: string, format: date-time }
+            locked: { type: boolean }
+
     DigitalArchivePlaybackManifest:
       type: object
       description: >
@@ -5252,3 +5309,73 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IntakeConflictError'
+
+  /reviews:
+    post:
+      summary: Create a review draft (BS#2802)
+      description: >-
+        Grant `reviews: write`. Creates the caller's own `typed` draft about one subject: an intake item the caller currently holds (effective state `checked_out`, `checked_out_by` the caller) or a library release that exists. Answers 200, not 201.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewReviewRequest'
+      responses:
+        '200':
+          description: 'The new draft'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Review'
+        '400':
+          description: 'Validation failure, including both or neither of `intake_item_id` and `album_id`, and `author`/`author_user_id`/`medium` from a caller with `reviews: manage` (not built yet)'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: write`, or sent `author`, `author_user_id` or `medium` without `reviews: manage`'
+        '409':
+          description: '`subject_not_held`: an intake item the caller does not hold, or a subject that is neither an intake item nor a library release'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewConflictError'
+
+  /reviews/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    patch:
+      summary: Edit a review (BS#2802)
+      description: >-
+        Grant `reviews: write`. The author while a draft, or while submitted and the item's slip is not printed; for a library-release review, the author always; `reviews: manage` always. A draft is visible only to its author and whoever recorded it, so anyone else gets a 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewFields'
+      responses:
+        '200':
+          description: 'The updated review'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Review'
+        '400':
+          description: 'Validation failure, an empty patch, or a `review` of `null` that would leave a submitted `typed` review with no text'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: write`, or may not edit this review'
+        '404':
+          description: 'No such review, or a draft the caller may not see'
+        '409':
+          description: '`locked`: the author of a submitted review whose item is printed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewConflictError'

@@ -29,12 +29,12 @@ import {
 export type IntakeItemState = (typeof intakeItemStateEnum.enumValues)[number];
 
 /** States past which an item is catalogued, so it can no longer be edited or deleted. */
-const FILED_STATES: IntakeItemState[] = ['filed', 'finalized'];
+export const FILED_STATES: IntakeItemState[] = ['filed', 'finalized'];
 
 /** Audit columns the contract's `IntakeItem` does not carry. */
 const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by']);
 
-const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
+export const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
 // coalesce: no CHECK ties checked_out_at to the state, and a NULL stamp must read false, never SQL NULL.
 const overdue = sql<boolean>`coalesce(${intake_items.state} = 'checked_out' AND ${intake_items.checked_out_at} < now() - interval '14 days', false)`;
 
