@@ -32,6 +32,7 @@ const RESTORED: libraryService.RestoredEntity = {
   table: 'library',
   relocated_code_number: null,
   children: { bins: 1, reviews: 0 },
+  deviations: [],
 };
 
 const mockedService = libraryService as jest.Mocked<typeof libraryService>;
@@ -123,6 +124,35 @@ describe('POST /library/deleted/:batchId/restore', () => {
     expect(jsonMock).toHaveBeenCalledWith(
       expect.objectContaining({ reason: 'unrestorable_kind', entity_kind: 'artist' })
     );
+  });
+
+  // BS#2818: a missing NO ACTION target is a named refusal carrying ids only,
+  // never a 500. The message must not advise re-creating the artist -- a
+  // re-created artist gets a new id, so the captured one stays missing.
+  it('answers a missing NO ACTION reference with a 409 naming the table, column, target and captured id', async () => {
+    mockedService.restoreDeletedBatch.mockResolvedValue({
+      outcome: 'missing_reference',
+      table: 'library',
+      row_id: 42,
+      column: 'artist_id',
+      target_table: 'artists',
+      captured_value: '7',
+    });
+
+    const { req, res, next, statusMock, jsonMock } = mockReqResNext({ params: { batchId: BATCH_ID } });
+    await restoreDeletedBatch(req, res, next);
+
+    expect(statusMock).toHaveBeenCalledWith(409);
+    expect(jsonMock).toHaveBeenCalledWith({
+      message: expect.stringContaining('no endpoint does that today'),
+      reason: 'missing_reference',
+      table: 'library',
+      row_id: 42,
+      column: 'artist_id',
+      target_table: 'artists',
+      captured_value: '7',
+    });
+    expect(jsonMock.mock.calls[0][0].message).not.toMatch(/re-?creat/i);
   });
 
   // Matches `DELETE /library/:id`: retryable, and deliberately not a 409.

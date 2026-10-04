@@ -1564,6 +1564,13 @@ const RESTORE_RESOLUTIONS: readonly libraryService.RestoreCodeResolution[] = ['n
  * with `reason: 'already_restored'` is the idempotency answer: the captured
  * parent id is present in the catalog, so this batch is already back.
  *
+ * `409 missing_reference` (BS#2818) answers a captured row whose `NO ACTION`
+ * reference points at a row that no longer exists — the release's own artist is
+ * the reachable case. Nothing was written, and it names the first such
+ * reference only; a retry after a fix can name the next. It carries ids, never
+ * names, and does not suggest re-creating the artist: a re-created artist gets a
+ * new id, so the captured one would still be missing.
+ *
  * `409 unrestorable_kind` (BS#2616) answers a batch holding an `entity_kind`
  * `RESTORE_PLAN` has no replay for — an `artist` batch today — instead of
  * falling through to a raw 500. It is permanent, not retryable: `GET
@@ -1634,6 +1641,19 @@ export const restoreDeletedBatch: RequestHandler<{ batchId: string }, unknown, {
         conflicts: result.conflicts,
       });
       return;
+    case 'missing_reference': {
+      const { table, row_id, column, target_table, captured_value } = result;
+      res.status(409).json({
+        message: `Cannot restore: ${table}.${column} references ${target_table} id ${captured_value}, which no longer exists. This clears only once a row with id ${captured_value} exists again in ${target_table}, and no endpoint does that today.`,
+        reason: 'missing_reference',
+        table,
+        row_id,
+        column,
+        target_table,
+        captured_value,
+      });
+      return;
+    }
     case 'restored':
       res.status(200).json({ batch_id: batchId, entities: result.entities });
       return;

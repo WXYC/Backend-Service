@@ -16,6 +16,11 @@ jest.mock('@wxyc/database', () => ({
   library_artist_view: {},
   rotation: {},
   rotation_cards: {},
+  // Read at module top level by the restore's reference declarations
+  // (`CASCADE_DROP_REFERENCES` / `REFUSE_REFERENCES`), so each must exist.
+  user: {},
+  labels: {},
+  digital_asset_store: {},
   // Invoked at module top level (LIBRARY_VIEW_JOINS_RAW), so the import
   // chain needs a callable even though no test here renders SQL.
   rotationActiveSql: () => ({}),

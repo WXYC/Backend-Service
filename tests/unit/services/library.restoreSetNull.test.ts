@@ -20,7 +20,10 @@ import { jest } from '@jest/globals';
 import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
 import * as schema from '../../../shared/database/src/schema';
 import {
+  CASCADE_DROP_REFERENCES,
+  dropOrphanedCascadeRows,
   nullDanglingSetNullReferences,
+  REFUSE_REFERENCES,
   RESTORE_PLAN_REPLAYED_TABLE_NAMES,
   SET_NULL_REFERENCES,
 } from '../../../apps/backend/services/library.service';
@@ -116,6 +119,98 @@ describe('SET_NULL_REFERENCES (catalog restore replay)', () => {
   });
 });
 
+type ReferenceAction = 'set null' | 'cascade drop' | 'refuse';
+
+/**
+ * Every foreign key from a replayed table to a table the restore does NOT
+ * replay, from the real schema, keyed `table.column`. What the replay must do
+ * when the target is gone follows from the delete rule: SET NULL nulls,
+ * CASCADE drops the row, and everything else (NO ACTION, nullable or not) is
+ * refused. A target the restore replays itself is outside this: it is live or
+ * restored by the same batch, never missing.
+ */
+const derivedExternalReferences = (): Record<string, { action: ReferenceAction; target: string }> =>
+  Object.fromEntries(
+    RESTORE_PLAN_REPLAYED_TABLE_NAMES.flatMap((name) =>
+      getTableConfig(tableNamed(name)).foreignKeys.flatMap((foreignKey) => {
+        const { columns, foreignColumns, foreignTable } = foreignKey.reference();
+        if (RESTORE_PLAN_REPLAYED_TABLE_NAMES.includes(getTableConfig(foreignTable).name)) return [];
+        const action: ReferenceAction =
+          foreignKey.onDelete === 'set null'
+            ? 'set null'
+            : foreignKey.onDelete === 'cascade'
+              ? 'cascade drop'
+              : 'refuse';
+        return columns.map((column, index) => [
+          `${name}.${column.name}`,
+          { action, target: `${exportNameOf(foreignTable)}.${foreignColumns[index].name}` },
+        ]);
+      })
+    )
+  );
+
+const declaredExternalReferences = (): Record<string, { action: ReferenceAction; target: string }> =>
+  Object.fromEntries(
+    (
+      [
+        ['set null', SET_NULL_REFERENCES],
+        ['cascade drop', CASCADE_DROP_REFERENCES],
+        ['refuse', REFUSE_REFERENCES],
+      ] as const
+    ).flatMap(([action, references]) =>
+      Object.entries(references).flatMap(([table, columns]) =>
+        Object.entries(columns).map(([column, target]) => [
+          `${table}.${column}`,
+          { action, target: target as unknown as string },
+        ])
+      )
+    )
+  );
+
+describe('every foreign key from a replayed table to a non-replayed table (catalog restore replay)', () => {
+  // The failing case this guards: a new FK on a replayed table that no map
+  // classifies makes a captured row whose target is gone a permanent 500 (23503
+  // at INSERT), because the snapshot never changes. Comparing the whole map
+  // fails on a missing declaration, a stale one, a wrong target, and a
+  // declaration filed under the wrong action for its delete rule.
+  it('is classified exactly once, under the action its delete rule implies, with its real target', () => {
+    expect(declaredExternalReferences()).toEqual(derivedExternalReferences());
+  });
+
+  it('never declares one column under two actions', () => {
+    const declared = [SET_NULL_REFERENCES, CASCADE_DROP_REFERENCES, REFUSE_REFERENCES].flatMap((references) =>
+      Object.entries(references).flatMap(([table, columns]) =>
+        Object.keys(columns).map((column) => `${table}.${column}`)
+      )
+    );
+
+    expect(declared.filter((key, index) => declared.indexOf(key) !== index)).toEqual([]);
+  });
+
+  // The refusal names the first missing reference "in column order", and that
+  // order is the one the schema declares them in.
+  it("lists each refused table's columns in schema order", () => {
+    for (const [table, columns] of Object.entries(REFUSE_REFERENCES)) {
+      const schemaOrder = getTableConfig(tableNamed(table)).columns.map((column) => column.name);
+      const declaredOrder = Object.keys(columns);
+      expect(declaredOrder).toEqual(schemaOrder.filter((name) => declaredOrder.includes(name)));
+    }
+  });
+
+  // A dropped row's own dependents would have to be dropped with it. None of
+  // today's cascade-drop tables has any, and this keeps it that way until the
+  // replay learns transitive drops.
+  it('declares a cascade-drop only on a table no other replayed table references', () => {
+    const referenced = RESTORE_PLAN_REPLAYED_TABLE_NAMES.flatMap((name) =>
+      getTableConfig(tableNamed(name)).foreignKeys.map(
+        (foreignKey) => getTableConfig(foreignKey.reference().foreignTable).name
+      )
+    );
+
+    expect(Object.keys(CASCADE_DROP_REFERENCES).filter((table) => referenced.includes(table))).toEqual([]);
+  });
+});
+
 /**
  * A transaction double for the one existence probe `nullDanglingSetNullReferences`
  * issues per declared column. It answers every probe with `live` (the target
@@ -150,32 +245,24 @@ describe('nullDanglingSetNullReferences', () => {
   // Real Drizzle columns, not the unit tier's sentinels: the self-reference
   // case below depends on `target.table` being the table being replayed.
   const cardReference = { card_id: schema.rotation_cards.id };
-  let warn: jest.SpiedFunction<typeof console.warn>;
-
-  beforeEach(() => {
-    warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    warn.mockRestore();
-  });
 
   // The first row is the preservation direction: a reference whose target is
   // still live must come back with its captured value, not merely "not fail".
   it.each([
     ['keeps a value whose target is live', { id: 8, card_id: 5 }, [5], { id: 8, card_id: 5 }, false],
-    ['nulls a value whose target is gone, and says so', { id: 8, card_id: 5 }, [], { id: 8, card_id: null }, true],
+    ['nulls a value whose target is gone, and reports it', { id: 8, card_id: 5 }, [], { id: 8, card_id: null }, true],
     ['leaves a captured NULL alone', { id: 8, card_id: null }, [], { id: 8, card_id: null }, false],
     ['leaves a row that never captured the column alone', { id: 8 }, [], { id: 8 }, false],
-  ])('%s', async (_name, record, live, expected, logged) => {
+  ])('%s', async (_name, record, live, expected, reported) => {
     const records: Record<string, unknown>[] = [{ ...record }];
     const { tx } = probeTx(live);
 
-    await nullDanglingSetNullReferences(tx, 'rotation', schema.rotation, records, cardReference);
+    const deviations = await nullDanglingSetNullReferences(tx, 'rotation', schema.rotation, records, cardReference);
 
     expect(records).toEqual([expected]);
-    expect(warn).toHaveBeenCalledTimes(logged ? 1 : 0);
-    if (logged) expect(warn.mock.calls[0]).toEqual([expect.any(String), 'rotation', 'card_id', '[5]']);
+    expect(deviations).toEqual(
+      reported ? [{ kind: 'nulled', table: 'rotation', row_id: 8, column: 'card_id', captured_value: '5' }] : []
+    );
   });
 
   it('probes the target under FOR KEY SHARE, so a concurrent delete of it cannot land before the insert', async () => {
@@ -216,5 +303,47 @@ describe('nullDanglingSetNullReferences', () => {
       { id: 2, moved_from_rotation_id: 1 },
       { id: 3, moved_from_rotation_id: null },
     ]);
+  });
+});
+
+describe('dropOrphanedCascadeRows', () => {
+  const djReference = { dj_id: schema.user.id };
+
+  // Preservation first: a bin row whose DJ account is still there must come
+  // back, and the report must be empty.
+  it.each([
+    ['keeps a row whose parent is live', [{ id: 1, dj_id: 'dj-a' }], ['dj-a'], [1], []],
+    [
+      'drops a row whose parent is gone, and reports it as dropped with the missing id',
+      [{ id: 1, dj_id: 'dj-a' }],
+      [],
+      [],
+      [{ kind: 'dropped', table: 'bins', row_id: 1, column: 'dj_id', captured_value: 'dj-a' }],
+    ],
+    [
+      'drops only the rows whose parent is gone',
+      [
+        { id: 1, dj_id: 'dj-a' },
+        { id: 2, dj_id: 'dj-b' },
+      ],
+      ['dj-b'],
+      [2],
+      [{ kind: 'dropped', table: 'bins', row_id: 1, column: 'dj_id', captured_value: 'dj-a' }],
+    ],
+  ])('%s', async (_name, records, live, keptIds, expected) => {
+    const { tx } = probeTx(live);
+
+    const { kept, deviations } = await dropOrphanedCascadeRows(tx, 'bins', schema.bins, records, djReference);
+
+    expect(kept.map((record) => record.id)).toEqual(keptIds);
+    expect(deviations).toEqual(expected);
+  });
+
+  it('probes the parent under FOR KEY SHARE', async () => {
+    const { tx, probes } = probeTx(['dj-a']);
+
+    await dropOrphanedCascadeRows(tx, 'bins', schema.bins, [{ id: 1, dj_id: 'dj-a' }], djReference);
+
+    expect(probes).toEqual([{ table: schema.user, mode: 'key share' }]);
   });
 });
