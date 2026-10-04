@@ -15,6 +15,7 @@
  */
 
 const { getTestDb } = require('../utils/db');
+const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const GENRE_ID = 11; // exists in the integration fixture
@@ -24,18 +25,8 @@ describe('reviews schema (real PG)', () => {
   let sql;
   let artistId;
   const libraryIds = [];
-  const userIds = [];
 
-  const seedUser = async () => {
-    const tag = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const [row] = await sql`
-      INSERT INTO auth_user (id, name, email, email_verified)
-      VALUES (${`reviews-test-${tag}`}, 'Reviews Test', ${`reviews-${tag}@test.wxyc.org`}, true)
-      RETURNING id
-    `;
-    userIds.push(row.id);
-    return row.id;
-  };
+  const seedUser = async () => (await seedAuthUser({ name: 'Reviews Test' })).id;
 
   const seedLibrary = async (title) => {
     const [row] = await sql`
@@ -47,14 +38,7 @@ describe('reviews schema (real PG)', () => {
     return row.id;
   };
 
-  const seedItem = async () => {
-    const [row] = await sql`
-      INSERT INTO ${sql(SCHEMA)}.intake_items (artist_name, album_title, format_id)
-      VALUES ('Juana Molina', 'DOGA', ${FORMAT_ID})
-      RETURNING id
-    `;
-    return row.id;
-  };
+  const seedItem = async () => (await seedIntakeItem({ artist_name: 'Juana Molina', album_title: 'DOGA' })).id;
 
   const insertReview = async (extra = {}) => {
     const [review] =
@@ -82,12 +66,9 @@ describe('reviews schema (real PG)', () => {
     if (libraryIds.length > 0) {
       await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
     }
-    if (userIds.length > 0) {
-      await sql`DELETE FROM auth_user WHERE id = ANY(${userIds})`;
-    }
+    await removeSeededAuthUsers();
     await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
     libraryIds.length = 0;
-    userIds.length = 0;
   });
 
   it('reads back the stub-era defaults on a row that names only the columns the stub had', async () => {
