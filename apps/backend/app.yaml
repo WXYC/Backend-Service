@@ -515,7 +515,7 @@ components:
       required: [message, reason]
       properties:
         message: { type: string }
-        reason: { type: string, enum: [already_filed, state_changed] }
+        reason: { type: string, enum: [already_filed, invalid_citation, state_changed] }
 
     ReviewConflictError:
       type: object
@@ -5042,8 +5042,14 @@ paths:
     patch:
       summary: Edit an intake item before it is filed (BS#2796)
       description: >-
-        Grant `reviews: manage`. A body carrying `cited_album_id` or
-        `cited_submission_id` is a 400 until the citation slice lands.
+        Grant `reviews: manage`. May set or clear a citation. `cited_album_id` is
+        valid for a release with a submitted review or catalogued on or before the
+        cutover date; `cited_submission_id` for a form submission dated, in station
+        time, on or before it (any, while the cutover is unset). Setting one clears
+        the other in the same update; both non-null is a 400. A 409 answers
+        `already_filed` before `invalid_citation` (a missing item is a 404 first): a
+        filed item can't be edited at all, so `already_filed` outranks an invalid
+        citation.
       requestBody:
         required: true
         content:
@@ -5058,7 +5064,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/IntakeItem'
         '400':
-          description: 'Validation failure, a citation key, or no editable field'
+          description: 'Validation failure, both citations set, or no editable field'
         '401':
           description: 'Authentication required'
         '403':
@@ -5066,7 +5072,7 @@ paths:
         '404':
           description: 'No such intake item'
         '409':
-          description: '`already_filed`'
+          description: '`already_filed`, or `invalid_citation` (only for an unfiled item)'
           content:
             application/json:
               schema:

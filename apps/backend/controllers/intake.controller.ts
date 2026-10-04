@@ -2,7 +2,7 @@ import { roleGrants } from '@wxyc/authentication';
 import { intakeItemStateEnum } from '@wxyc/database';
 import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
-import type { IntakeAction, IntakeFields, IntakeItemState } from '../services/intake.service.js';
+import type { IntakeAction, IntakeCitations, IntakeFields, IntakeItemState } from '../services/intake.service.js';
 import { INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
 import { parseInt4PathId } from '../utils/query-params.js';
@@ -32,7 +32,7 @@ const intField = (value: unknown, field: string, nullable: boolean): number | nu
 };
 
 /** The varchar(128) trio plus the two nullable ids; `undefined` means "not supplied". */
-const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partial<IntakeFields> => {
+const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partial<IntakeFields> & IntakeCitations => {
   const required = (key: 'artist_name' | 'album_title') =>
     body[key] === undefined && !requireAll ? undefined : validateTextField(body[key], key, TEXT_MAX);
   const format_id = intField(body.format_id, 'format_id', false) as number | undefined;
@@ -44,11 +44,17 @@ const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partia
     label_id: intField(body.label_id, 'label_id', true),
     format_id,
     discogs_release_id: intField(body.discogs_release_id, 'discogs_release_id', true),
+    // Citations are set by PATCH only; a new item starts uncited.
+    ...(!requireAll && {
+      cited_album_id: intField(body.cited_album_id, 'cited_album_id', true),
+      cited_submission_id: intField(body.cited_submission_id, 'cited_submission_id', true),
+    }),
   };
 };
 
 const CONFLICT_MESSAGES = {
   already_filed: 'Intake item is already filed',
+  invalid_citation: 'The cited release or submission is not a valid citation',
   state_changed: 'Intake item is no longer in the state this action needs',
 };
 const conflict = (res: Response, reason: keyof typeof CONFLICT_MESSAGES) =>
@@ -82,15 +88,15 @@ export const logIntake: RequestHandler = async (req, res) => {
 
 export const patchIntake: RequestHandler<{ id: string }> = async (req, res) => {
   const body = req.body ?? {};
-  // Citations are slice 7b; until then a key's presence (even null) is refused.
-  if ('cited_album_id' in body || 'cited_submission_id' in body) {
-    throw new WxycError('cited_album_id and cited_submission_id cannot be set yet', 400);
-  }
   const patch = Object.fromEntries(Object.entries(parseFields(body, false)).filter(([, v]) => v !== undefined));
+  if (patch.cited_album_id != null && patch.cited_submission_id != null) {
+    throw new WxycError('cited_album_id and cited_submission_id cannot both be set', 400);
+  }
   if (Object.keys(patch).length === 0) throw new WxycError('No editable fields supplied', 400);
   const result = await intakeService.updateIntakeItem(parseId(req.params.id), patch);
   if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
   if (result.outcome === 'already_filed') return void conflict(res, 'already_filed');
+  if (result.outcome === 'invalid_citation') return void conflict(res, 'invalid_citation');
   if (result.outcome === 'unknown_reference') throw new WxycError('format_id or label_id does not exist', 400);
   res.json(result.item);
 };
