@@ -19,10 +19,16 @@ jest.unmock('drizzle-orm');
 jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../shared/database/src/schema');
   const { drizzle } = jest.requireActual('drizzle-orm/postgres-js');
-  return { ...realSchema, db: drizzle({}) };
+  const nyTime = jest.requireActual('../../../shared/database/src/ny-time');
+  return { ...realSchema, ...nyTime, db: drizzle({}) };
 });
 
-import { buildIntakeSelect, buildTransition, refusalOutcome } from '../../../apps/backend/services/intake.service';
+import {
+  buildIntakePatch,
+  buildIntakeSelect,
+  buildTransition,
+  refusalOutcome,
+} from '../../../apps/backend/services/intake.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const render = (opts: Parameters<typeof buildIntakeSelect>[0]) => buildIntakeSelect(opts).toSQL();
@@ -194,6 +200,10 @@ describe('refusalOutcome — 409 state_changed ranks before the identity 403', (
   it.each([
     ['a missing item', undefined, { from: 'pool', identityGuarded: true }, 'not_found'],
     ['no transition (patch/delete) on a surviving item', { effective_state: 'filed' }, undefined, 'already_filed'],
+    ['a citation patch on a missing item', undefined, 'citation', 'not_found'],
+    ['a citation patch on a filed item', { effective_state: 'filed' }, 'citation', 'already_filed'],
+    ['a citation patch on a finalized item', { effective_state: 'finalized' }, 'citation', 'already_filed'],
+    ['a citation patch on an unfiled item', { effective_state: 'pool' }, 'citation', 'invalid_citation'],
     [
       'an identity-guarded refusal on an item still in the from state',
       { effective_state: 'checked_out' },
@@ -220,5 +230,49 @@ describe('refusalOutcome — 409 state_changed ranks before the identity 403', (
     ],
   ] as const)('%s', (_name, item, transition, expected) => {
     expect(refusalOutcome(item as never, transition as never)).toBe(expected);
+  });
+});
+
+describe('buildIntakePatch — citations (BS#2797)', () => {
+  const T = `"${SCHEMA}"`;
+  const render = (patch: Parameters<typeof buildIntakePatch>[1], cutover?: string) => {
+    if (cutover === undefined) delete process.env.REVIEW_GATE_CUTOVER_DATE;
+    else process.env.REVIEW_GATE_CUTOVER_DATE = cutover;
+    return buildIntakePatch(7, patch).toSQL();
+  };
+  afterEach(() => delete process.env.REVIEW_GATE_CUTOVER_DATE);
+
+  it('puts validity in the same UPDATE: a submitted review or a station-date add_date on or before the cutover', () => {
+    const { sql: text, params } = render({ cited_album_id: 5 }, '2027-01-12');
+    expect(text).toContain(`${T}."intake_items"."state" not in (`);
+    expect(text).toContain(`${T}."reviews"."status" = 'submitted'`);
+    expect(text).toContain(`(${T}."library"."add_date" AT TIME ZONE 'America/New_York')::date <= $`);
+    expect(params).toContain('2027-01-12');
+  });
+
+  it('admits any existing release while the cutover is unset', () => {
+    const { sql: text } = render({ cited_album_id: 5 });
+    expect(text).toContain(`${T}."library"."id" = $`);
+    expect(text).not.toContain('AT TIME ZONE');
+  });
+
+  it('checks a submission against its station date', () => {
+    const { sql: text } = render({ cited_submission_id: 12 }, '2027-01-12');
+    expect(text).toContain(`(${T}."album_review_submissions"."submitted_at" AT TIME ZONE 'America/New_York')::date`);
+    expect(text).not.toContain('"reviews"');
+  });
+
+  it.each([
+    ['a release clears the submission', { cited_album_id: 5 }, 'cited_submission_id'],
+    ['a submission clears the release', { cited_submission_id: 12 }, 'cited_album_id'],
+  ])('setting %s in the same statement', (_name, patch, cleared) => {
+    const { sql: text } = render(patch, '2027-01-12');
+    expect(text).toContain(`"${cleared}" = $`);
+  });
+
+  it('adds no citation predicate, and clears nothing, for a patch that sets none', () => {
+    const { sql: text } = render({ album_title: 'DOGA', cited_album_id: null });
+    expect(text).not.toContain('exists');
+    expect(text).not.toContain('cited_submission_id');
   });
 });

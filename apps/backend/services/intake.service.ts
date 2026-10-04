@@ -7,10 +7,15 @@ import {
   intake_item_passes,
   intake_items,
   intakeItemStateEnum,
+  library,
   member,
+  NY_TIME_ZONE,
+  album_review_submissions,
+  reviews,
   user,
   type NewIntakeItem,
 } from '@wxyc/database';
+import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
 
 /**
  * Intake-item service behind `/intake` (BS#2796, slice 7 of BS#2791).
@@ -54,6 +59,9 @@ export type IntakeFields = Pick<
   NewIntakeItem,
   'artist_name' | 'album_title' | 'record_label' | 'label_id' | 'format_id' | 'discogs_release_id'
 >;
+
+/** The two citation kinds, mutually exclusive (the table's CHECK); `null` clears one. */
+export type IntakeCitations = Pick<NewIntakeItem, 'cited_album_id' | 'cited_submission_id'>;
 
 /**
  * Every item column the contract exposes, plus the DJ display names. Names are
@@ -121,35 +129,70 @@ export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
  * condition refused belongs to someone else (`forbidden`); every other state,
  * filed included, is `state_changed`.
  */
-const refusalFor = async (id: number, transition?: IntakeTransitionRefusal) =>
+const refusalFor = async (id: number, transition?: IntakeTransitionRefusal | 'citation') =>
   refusalOutcome(await getIntakeItem(id, false), transition);
 
 type IntakeTransitionRefusal = { from: IntakeItemState; identityGuarded: boolean };
 
 /**
  * The pure decision behind `refusalFor`, split out so its precedence is testable without a database:
- * missing is `not_found`; no transition is `already_filed`; otherwise an identity-guarded refusal on an item still in
+ * missing is `not_found`; no transition is `already_filed`; `'citation'` (a PATCH that sets a citation) is `already_filed`
+ * for a filed item (it can't be edited at all, so that outranks the citation) and otherwise `invalid_citation`; otherwise an identity-guarded refusal on an item still in
  * the `from` effective state is `forbidden` and anything else is `state_changed`, which therefore outranks the identity 403.
  */
 export const refusalOutcome = (
   item: Pick<IntakeItemResponse, 'effective_state'> | undefined,
-  transition?: IntakeTransitionRefusal
+  transition?: IntakeTransitionRefusal | 'citation'
 ) => {
   if (!item) return 'not_found' as const;
+  if (transition === 'citation') {
+    return FILED_STATES.includes(item.effective_state) ? ('already_filed' as const) : ('invalid_citation' as const);
+  }
   if (!transition) return 'already_filed' as const;
   return transition.identityGuarded && item.effective_state === transition.from
     ? ('forbidden' as const)
     : ('state_changed' as const);
 };
 
-export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields>) => {
+const NY = sql.raw(`'${NY_TIME_ZONE}'`);
+
+/**
+ * The citation rule as a WHERE fragment (`undefined` when the patch sets none), so validity is
+ * decided in the write itself. A release is citable with a submitted review (a draft doesn't count) or when
+ * catalogued on or before the cutover; a submission when dated, in station time, on or before it. Unset cutover
+ * admits any existing row. Mirrors `isOnOrBeforeCutover` (the `timestamptz` → station date conversion).
+ */
+export const citationValidSql = ({ cited_album_id: album, cited_submission_id: submission }: IntakeCitations) => {
+  const cutover = reviewGateCutoverDate();
+  const onOrBefore = (column: SQL) =>
+    cutover === null ? sql`true` : sql`(${column} AT TIME ZONE ${NY})::date <= ${cutover}::date`;
+  if (album != null) {
+    return sql`(EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.album_id} = ${album} AND ${reviews.status} = 'submitted') OR EXISTS (SELECT 1 FROM ${library} WHERE ${library.id} = ${album} AND ${onOrBefore(sql`${library.add_date}`)}))`;
+  }
+  if (submission != null) {
+    return sql`EXISTS (SELECT 1 FROM ${album_review_submissions} WHERE ${album_review_submissions.id} = ${submission} AND ${onOrBefore(sql`${album_review_submissions.submitted_at}`)})`;
+  }
+  return undefined;
+};
+
+export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) =>
+  db
+    .update(intake_items)
+    .set({
+      ...patch,
+      // Setting one citation clears the other, in the same UPDATE.
+      ...(patch.cited_album_id != null && { cited_submission_id: null }),
+      ...(patch.cited_submission_id != null && { cited_album_id: null }),
+    })
+    .where(and(eq(intake_items.id, id), notInArray(intake_items.state, FILED_STATES), citationValidSql(patch)))
+    .returning({ id: intake_items.id });
+
+export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
   try {
-    const rows = await db
-      .update(intake_items)
-      .set(patch)
-      .where(and(eq(intake_items.id, id), notInArray(intake_items.state, FILED_STATES)))
-      .returning({ id: intake_items.id });
-    if (rows.length === 0) return { outcome: await refusalFor(id) };
+    const rows = await buildIntakePatch(id, patch);
+    if (rows.length === 0) {
+      return { outcome: await refusalFor(id, citationValidSql(patch) ? 'citation' : undefined) };
+    }
     return { outcome: 'updated' as const, item: (await getIntakeItem(id, true))! };
   } catch (error) {
     if (isUnknownReference(error)) return { outcome: 'unknown_reference' as const };

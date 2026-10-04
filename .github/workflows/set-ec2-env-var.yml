@@ -330,13 +330,10 @@ jobs:
           # Album-review intake gate cutover date (epic WXYC/Backend-Service#2791,
           # prep issue #2811). Format is `YYYY-MM-DD` in station time (NY_TIME_ZONE).
           # Not sensitive; carried through the allowlist so the date can be set
-          # without a code PR once the gate lands, same reason as DONATE_* above.
-          # No var here is read by any app route yet (this issue only ships the
-          # allowlist entry) — a later #2791 slice makes apps/backend the sole
-          # reader (the intake-gate check gating `POST /library`,
-          # `POST /library/rotation` and `POST /library/filings`);
-          # restart_target=backend (the default) will be the one needed once
-          # that lands.
+          # without a code PR, same reason as DONATE_* above.
+          # Read only by apps/backend/utils/review-gate-cutover.ts (the one
+          # reader; a malformed value is reported and treated as gate-on);
+          # restart_target=backend (the default) is the one needed.
           #
           # Rollback is NOT an empty value — the resolve step below hard-fails on
           # empty, but the gate's own off state is "unset or in the future"

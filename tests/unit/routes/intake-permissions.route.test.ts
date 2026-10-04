@@ -267,13 +267,48 @@ describe('/intake/:id and bodies', () => {
     expect((await bearer(request(app).post('/intake').send(NEW_ITEM))).status).toBe(400);
   });
 
-  test.each([{ cited_album_id: 5 }, { cited_submission_id: 5 }, { cited_album_id: null, album_title: 'x' }])(
-    'PATCH carrying a citation key is a 400 until slice 7b: %j',
-    async (body) => {
-      expect((await bearer(request(app).patch('/intake/7').send(body))).status).toBe(400);
-      expect(mockUpdateIntakeItem).not.toHaveBeenCalled();
-    }
-  );
+  test.each([
+    ['a release', { cited_album_id: 5 }],
+    ['a submission', { cited_submission_id: 5 }],
+    ['an explicit-null switch', { cited_album_id: null, cited_submission_id: 5 }],
+    ['a clear', { cited_album_id: null }],
+  ])('PATCH of a citation alone (%s) is passed on as the only field', async (_name, body) => {
+    mockUpdateIntakeItem.mockResolvedValueOnce({ outcome: 'updated', item: ITEM });
+    expect((await bearer(request(app).patch('/intake/7').send(body))).status).toBe(200);
+    expect(mockUpdateIntakeItem).toHaveBeenCalledWith(7, body);
+  });
+
+  test.each([
+    ['both citations set', { cited_album_id: 5, cited_submission_id: 6 }],
+    ['cited_album_id past int4', { cited_album_id: 2147483648 }],
+    ['a non-integer cited_submission_id', { cited_submission_id: 1.5 }],
+  ])('PATCH with %s is a 400 and writes nothing', async (_name, body) => {
+    expect((await bearer(request(app).patch('/intake/7').send(body))).status).toBe(400);
+    expect(mockUpdateIntakeItem).not.toHaveBeenCalled();
+  });
+
+  test('POST ignores citation keys: a new item starts uncited', async () => {
+    mockLogIntakeItem.mockResolvedValue({ outcome: 'logged', item: ITEM });
+    await bearer(
+      request(app)
+        .post('/intake')
+        .send({ ...NEW_ITEM, cited_album_id: 5 })
+    );
+    expect(mockLogIntakeItem.mock.calls[0][0]).not.toHaveProperty('cited_album_id');
+  });
+
+  test('PATCH of an invalid citation is a 409 invalid_citation', async () => {
+    mockUpdateIntakeItem.mockResolvedValueOnce({ outcome: 'invalid_citation' });
+    const res = await bearer(request(app).patch('/intake/7').send({ cited_album_id: 5 }));
+    expect(res.status).toBe(409);
+    expect(res.body.reason).toBe('invalid_citation');
+  });
+
+  test('an invalid citation sent to a filed item is a 409 already_filed', async () => {
+    mockUpdateIntakeItem.mockResolvedValueOnce({ outcome: 'already_filed' });
+    const res = await bearer(request(app).patch('/intake/7').send({ cited_album_id: 5 }));
+    expect(res.body.reason).toBe('already_filed');
+  });
 
   test('PATCH with no editable field is a 400', async () => {
     expect((await bearer(request(app).patch('/intake/7').send({}))).status).toBe(400);
