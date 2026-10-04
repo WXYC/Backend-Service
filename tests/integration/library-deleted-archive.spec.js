@@ -124,7 +124,7 @@ describe('GET /library/deleted (BS#2561)', () => {
     expect(entity.table).toBe('library');
     expect(entity.row.id).toBe(album.id);
     expect(entity.row.album_title).toBe(title);
-    // Every one of the ten children `deleteAlbumFromDB` declares to
+    // Every one of the eleven children `deleteAlbumFromDB` declares to
     // `captureCatalogDeleteSnapshot` is a KEY in `children`, even when this
     // album had no rows in that table -- an absent key vs. an empty array is
     // exactly the ambiguity `captureCatalogDeleteSnapshot`'s own unit suite
@@ -137,6 +137,7 @@ describe('GET /library/deleted (BS#2561)', () => {
         'compilation_track_artist',
         'digital_asset',
         'digital_asset_file',
+        'intake_items',
         'library_urls',
         'reviews',
         'rotation',
