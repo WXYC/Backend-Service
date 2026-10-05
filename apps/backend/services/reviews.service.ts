@@ -1,4 +1,4 @@
-import { and, eq, getTableColumns, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import {
   db,
   intake_items,
