@@ -1,5 +1,6 @@
 import { and, eq, getTableColumns, sql } from 'drizzle-orm';
 import { db, intake_items, library, reviews, user, type NewReview, type Review } from '@wxyc/database';
+import type { ReviewsActor } from '../utils/review-grants.js';
 import { effectiveState } from './intake.service.js';
 
 /**
@@ -27,7 +28,6 @@ export type ReviewFields = Partial<
 >;
 
 /** The caller; `manage` is whether they hold `reviews: manage`. */
-export type ReviewActor = { id: string; manage: boolean };
 
 /** `reviews.author` is `varchar(128)`; `auth_user.name` is 255, so a long name is cut to its first 128 code points (Postgres counts characters, not UTF-16 units). */
 export const AUTHOR_MAX = 128;
@@ -54,7 +54,7 @@ const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db) =>
 export const createReview = async (
   subject: { intake_item_id?: number; album_id?: number },
   fields: ReviewFields,
-  actor: ReviewActor
+  actor: ReviewsActor
 ) =>
   db.transaction(async (tx) => {
     const held =
@@ -95,7 +95,7 @@ export const createReview = async (
  */
 export const editOutcome = (
   review: Pick<ReviewResponse, 'status' | 'author_user_id' | 'recorded_by_user_id' | 'locked'>,
-  actor: ReviewActor
+  actor: ReviewsActor
 ) => {
   const own = review.author_user_id === actor.id;
   if (review.status === 'draft' && !own && review.recorded_by_user_id !== actor.id) return 'not_found' as const;
@@ -112,7 +112,7 @@ export const editOutcome = (
  * evaluated on the locked rows. `intake_item_id` never changes, so reading it unlocked to find
  * the item to lock is safe.
  */
-export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewActor) =>
+export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewsActor) =>
   db.transaction(async (tx) => {
     const [subject] = await tx.select({ item: reviews.intake_item_id }).from(reviews).where(eq(reviews.id, id));
     if (!subject) return { outcome: 'not_found' as const };
