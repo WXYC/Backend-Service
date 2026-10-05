@@ -7293,8 +7293,9 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // row `FOR UPDATE` itself before it reads the highest revision, which
     // conflicts with the `FOR SHARE` the `reviews.album_id` entry below
     // takes on this release's reviews before `review_revisions` is read.
-    // That writer-side lock is the invariant: a writer holding only the FK's `FOR KEY SHARE` on the review
-    // could insert a revision between this capture and the cascade, and the
+    // That writer-side lock is the invariant: a writer holding only the FK's
+    // `FOR KEY SHARE` on the review could insert a revision between this
+    // capture and the cascade, and the
     // revision would be destroyed with nothing in the snapshot. `album_metadata`,
     // `library_identity` + `library_identity_source`, and
     // `uncovered_release_search_markers` are deliberately NOT in this list
