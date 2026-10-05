@@ -3253,8 +3253,22 @@ export const genre_artist_crossreference = wxyc_schema.table(
       .notNull()
       .references(() => genres.id),
     artist_genre_code: integer('artist_genre_code').notNull(),
+    // BS#2833: the section letter of a Rock/Soundtracks compilation shelf slot (tubafrenzy's `rockCompLetters`),
+    // standing where `artist_genre_code` would. Release numbers restart in each lettered section.
+    code_comp_letter: varchar('code_comp_letter', { length: 1 }),
   },
-  (table) => [uniqueIndex('artist_genre_key').on(table.artist_id, table.genre_id)]
+  (table) => [
+    uniqueIndex('artist_genre_key').on(table.artist_id, table.genre_id),
+    uniqueIndex('genre_artist_crossreference_genre_comp_letter_key')
+      .on(table.genre_id, table.code_comp_letter)
+      .where(sql`${table.code_comp_letter} IS NOT NULL`),
+    check('genre_artist_crossreference_code_comp_letter_shape_ck', sql`${table.code_comp_letter} ~ '^[A-Z]$'`),
+    // Stands in for "compilations only", which a CHECK cannot see (`artists.code_letters` is another table).
+    check(
+      'genre_artist_crossreference_code_comp_letter_slot_ck',
+      sql`${table.code_comp_letter} IS NULL OR ${table.artist_genre_code} = 0`
+    ),
+  ]
 );
 
 export type NewArtistLibraryCrossreference = InferInsertModel<typeof artist_library_crossreference>;
