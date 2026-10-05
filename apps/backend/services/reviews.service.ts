@@ -190,9 +190,11 @@ export const writeReviewRevision = async (
  * revision; a draft edit or a consent-only edit does not. A submitted review with no history
  * first gets revision 1: its content before this edit, attributed to its author, at
  * `submitted_at`, or at `last_modified` when `submitted_at` is NULL (a row whose `status` came
- * from the column default has none). `last_modified` is the last time that content was written,
- * so the history never shows the author's text stamped at the moment of someone else's edit.
- * The response is read back through `selectReview` after all writes.
+ * from the column default has none). `last_modified` is the row's last write before this edit, a
+ * consent-only patch included, so it is a bound on the content's age rather than its exact time;
+ * it is NOT NULL and earlier than this edit, so the history never shows the author's text stamped
+ * at the moment of someone else's edit. The response is read back through `selectReview` after
+ * all writes.
  */
 export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewsActor) =>
   db.transaction(async (tx) => {
