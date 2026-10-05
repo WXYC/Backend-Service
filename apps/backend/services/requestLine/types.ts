@@ -83,6 +83,8 @@ export interface LibraryResult {
   codeArtistNumber: number | null;
   /** Release number for this artist */
   codeNumber: number | null;
+  /** Per-release volume letter of a multi-volume set (e.g., "B"); stored case varies */
+  codeVolumeLetters: string | null;
   /** Genre name */
   genre: string | null;
   /** Format name (CD, Vinyl, etc.) */
@@ -104,7 +106,7 @@ export interface LibraryResult {
 export interface EnrichedLibraryResult extends LibraryResult {
   /**
    * Full call number for shelf lookup: `<Genre> <Format> <Letters>
-   * <ArtistNum>/<ReleaseNum>` for a named artist. A Various Artists
+   * <ArtistNum>/<ReleaseNum>[-<VolumeLetter>]` for a named artist. A Various Artists
    * compilation (BS#2822) renders in its shelf form instead:
    * `<Genre> <Format> V/A-<ReleaseNum>` for a single-bin genre,
    * `Rock <Format> V/A <Bin>-<ReleaseNum>`, or
@@ -196,6 +198,19 @@ function compilationArtistHalf(codeLetters: string, artist: string | null, genre
 }
 
 /**
+ * The release half of a call number: `<ReleaseNum>`, plus `-<Letter>` when the
+ * release carries a volume letter (BS#2827). Upper-cased at render time, as
+ * tubafrenzy and dj-site do, so the stored case is irrelevant; a blank letter
+ * renders no hyphen. Null when there is no release number -- a letter alone
+ * names no shelf position.
+ */
+function releaseHalf(result: LibraryResult): string | null {
+  if (result.codeNumber === null) return null;
+  const volume = result.codeVolumeLetters?.trim().toUpperCase();
+  return volume ? `${result.codeNumber}-${volume}` : String(result.codeNumber);
+}
+
+/**
  * Compute the call number from library result fields.
  *
  * A Various Artists compilation (BS#2822) renders in its shelf form,
@@ -205,23 +220,27 @@ function compilationArtistHalf(codeLetters: string, artist: string | null, genre
  * <Bin>-<ReleaseNum>`, and `V/A-<ReleaseNum>` when Rock/Soundtracks has no
  * recoverable bin -- never the `V/A 0/<n>` artist-number form. A null
  * `codeNumber` drops the release half and its hyphen.
+ *
+ * A named artist renders `<Letters> <ArtistNum>/<ReleaseNum>`. The release
+ * half renders whether or not the artist number is present, matching LML
+ * (BS#2827): `ST/3` with letters only, a bare `3` with neither. Either
+ * shape takes the release's volume letter as a `-<Letter>` suffix.
  */
 export function computeCallNumber(result: LibraryResult): string {
   const parts: string[] = [];
   if (result.genre) parts.push(result.genre);
   if (result.format) parts.push(result.format);
+  const release = releaseHalf(result);
   if (result.codeLetters && isVariousArtists(result.codeLetters)) {
     const artistHalf = compilationArtistHalf(result.codeLetters, result.artist, result.genre);
-    parts.push(result.codeNumber !== null ? `${artistHalf}-${result.codeNumber}` : artistHalf);
+    parts.push(release !== null ? `${artistHalf}-${release}` : artistHalf);
     return parts.join(' ');
   }
-  if (result.codeLetters) parts.push(result.codeLetters);
-  if (result.codeArtistNumber !== null) {
-    if (result.codeNumber !== null) {
-      parts.push(`${result.codeArtistNumber}/${result.codeNumber}`);
-    } else {
-      parts.push(String(result.codeArtistNumber));
-    }
+  const artistHalf = [result.codeLetters, result.codeArtistNumber].filter((p) => p !== null && p !== '').join(' ');
+  if (release === null) {
+    if (artistHalf) parts.push(artistHalf);
+  } else {
+    parts.push(artistHalf ? `${artistHalf}/${release}` : release);
   }
   return parts.join(' ');
 }

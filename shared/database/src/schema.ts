@@ -3492,6 +3492,8 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
         code_letters: artists.code_letters,
         code_artist_number: genre_artist_crossreference.artist_genre_code,
         code_number: library.code_number,
+        // BS#2827: the release's volume letter (migration 0184).
+        code_volume_letters: library.code_volume_letters,
         artist_name: artists.artist_name,
         alphabetical_name: artists.alphabetical_name,
         album_title: library.album_title,
@@ -3580,6 +3582,8 @@ export type LibraryArtistViewEntry = {
   code_letters: string;
   code_artist_number: number;
   code_number: number;
+  /** BS#2827: nullable, unlike `code_number` -- most releases are not a volume of a set. */
+  code_volume_letters: string | null;
   artist_name: string;
   alphabetical_name: string;
   album_title: string;
