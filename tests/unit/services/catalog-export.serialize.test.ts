@@ -22,6 +22,7 @@ const sampleRow = (overrides: Partial<CatalogExportRow> = {}): CatalogExportRow 
   album_title: 'DOGA',
   code_letters: 'MO',
   code_number: 42,
+  code_volume_letters: null,
   code_artist_number: 7,
   label: 'Sonamos',
   genre_name: 'Rock',
@@ -48,7 +49,7 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
     expect(JSON.parse(lines[1])).toEqual(rows[1]);
   });
 
-  it('emits exactly the 19 contract fields per line and excludes search_doc', () => {
+  it('emits exactly the 20 contract fields per line and excludes search_doc', () => {
     // The field set is the acceptance criterion for #1468 + the four BS#1965
     // library.db-producer fields. A row carrying an extra server-only field (e.g.
     // search_doc) must not leak into the export.
@@ -71,6 +72,7 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
         'code_artist_number',
         'code_letters',
         'code_number',
+        'code_volume_letters',
         'cross_reference_names',
         'format_name',
         'genre_name',
@@ -87,6 +89,14 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
     );
     expect(parsed).not.toHaveProperty('search_doc');
     expect(parsed).not.toHaveProperty('alphabetical_name');
+  });
+
+  it('ships code_volume_letters raw for a lettered release and as JSON null when unset', () => {
+    const lettered = JSON.parse(serializeCatalogNdjson([sampleRow({ code_volume_letters: 'B' })]));
+    const unlettered = JSON.parse(serializeCatalogNdjson([sampleRow({ code_volume_letters: null })]));
+
+    expect(lettered.code_volume_letters).toBe('B');
+    expect(unlettered).toHaveProperty('code_volume_letters', null);
   });
 
   it('serializes an empty catalog to an empty string', () => {

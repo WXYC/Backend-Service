@@ -387,6 +387,9 @@ components:
           type: string
         code_number:
           type: integer
+        code_volume_letters:
+          type: string
+          nullable: true
         code_artist_number:
           type: integer
         label:
