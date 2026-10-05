@@ -27,8 +27,6 @@ export type ReviewFields = Partial<
   >
 >;
 
-/** The caller; `manage` is whether they hold `reviews: manage`. */
-
 /** `reviews.author` is `varchar(128)`; `auth_user.name` is 255, so a long name is cut to its first 128 code points (Postgres counts characters, not UTF-16 units). */
 export const AUTHOR_MAX = 128;
 export const snapshotAuthor = (name: string | null | undefined) =>

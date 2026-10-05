@@ -50,6 +50,11 @@ export const parseInt4PathId = (raw: string, resource: string): number => {
  */
 export function parseInt4BodyId(value: unknown, field: string, opts: { nullable: true }): number | null | undefined;
 export function parseInt4BodyId(value: unknown, field: string, opts?: { nullable?: false }): number | undefined;
+export function parseInt4BodyId(
+  value: unknown,
+  field: string,
+  opts?: { nullable?: boolean }
+): number | null | undefined;
 export function parseInt4BodyId(value: unknown, field: string, opts: { nullable?: boolean } = {}) {
   if (value === undefined) return undefined;
   if (value === null && opts.nullable) return null;
