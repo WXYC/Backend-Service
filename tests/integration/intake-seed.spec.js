@@ -5,6 +5,8 @@
  * and removal leaves no artist behind.
  */
 
+const fs = require('fs');
+const path = require('path');
 const { getTestDb } = require('../utils/db');
 const {
   seedIntakeItem,
@@ -16,9 +18,19 @@ const {
   seedFccNote,
   seedFormSubmission,
   removeSeededFormSubmissions,
+  SEEDED_CODE_LETTERS,
 } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+/** Every source file under `dir`, recursively (not the generated HTML report). */
+function sourceFilesUnder(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return sourceFilesUnder(full);
+    return /\.(c?js|ts|json|sql)$/.test(entry.name) ? [full] : [];
+  });
+}
 
 describe('intake_seed release, review, revision, print, FCC-note and form-review seeders', () => {
   // Intake items have no remover; the item cases delete theirs, and this catches one left by a failed case.
@@ -88,6 +100,16 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     // 'ZZ' is swept by album-reviews, digital-archive-playback and intake-transitions; 'ZQ' is the BS#2489
     // bucket whose exact membership library.spec.js asserts.
     expect(['ZZ', 'ZQ']).not.toContain(artist.code_letters);
+  });
+
+  test('no other file under tests/ names the seeded code_letters, so no sweep or bucket assertion can meet one', () => {
+    const testsDir = path.resolve(__dirname, '..');
+    const seeder = path.join(testsDir, 'utils', 'intake_seed.js');
+    const needle = `'${SEEDED_CODE_LETTERS}'`;
+    const others = sourceFilesUnder(testsDir).filter(
+      (file) => file !== seeder && fs.readFileSync(file, 'utf8').includes(needle)
+    );
+    expect(others).toEqual([]);
   });
 
   test("a revision's default number is its review's highest plus one, not a count or another review's", async () => {
