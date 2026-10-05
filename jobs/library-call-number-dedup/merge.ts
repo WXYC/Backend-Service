@@ -112,10 +112,6 @@ export const FK_TARGETS: readonly FkTarget[] = [
   },
   { table: 'flowsheet', column: 'album_id', uniqueKey: null },
   { table: 'album_metadata', column: 'album_id', uniqueKey: ['album_id'] },
-  // BS#2801. Many reviews per release since the `UNIQUE (album_id)` was dropped,
-  // so a merge keeps every review and repoints them all. The old key would have
-  // treated every review but one as a duplicate and deleted it.
-  { table: 'reviews', column: 'album_id', uniqueKey: null },
   { table: 'album_review_submissions', column: 'album_id', uniqueKey: null },
   { table: 'album_critic_reviews', column: 'album_id', uniqueKey: ['album_id', 'source_url'] },
   { table: 'uncovered_release_search_markers', column: 'album_id', uniqueKey: ['album_id'] },
@@ -171,6 +167,20 @@ export const FK_TARGETS: readonly FkTarget[] = [
   // cannot collide.
   { table: 'intake_items', column: 'album_id', uniqueKey: null },
   { table: 'intake_items', column: 'cited_album_id', uniqueKey: null },
+  // Lock order (BS#2858): `mergeSlot` re-points these in array order inside one
+  // transaction, and every route that touches an item and its reviews locks the
+  // item row first, then the review (PR #2857). So the item entries above stay
+  // ahead of `reviews`, `review_prints` and `fcc_notes`; reversed, an accept or
+  // a print of a filed item whose release is being merged could deadlock with
+  // the merge.
+  //
+  // BS#2801. Many reviews per release since the `UNIQUE (album_id)` was dropped,
+  // so a merge keeps every review and repoints them all. The old key would have
+  // treated every review but one as a duplicate and deleted it.
+  { table: 'reviews', column: 'album_id', uniqueKey: null },
+  // BS#2858. Neither is unique on `album_id`, so a repoint cannot collide.
+  { table: 'review_prints', column: 'album_id', uniqueKey: null },
+  { table: 'fcc_notes', column: 'album_id', uniqueKey: null },
 ];
 
 export interface SlotRow extends SlotMember {

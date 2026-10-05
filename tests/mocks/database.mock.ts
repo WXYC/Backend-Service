@@ -654,12 +654,51 @@ export const intake_items = {
   printed_at: 'intake_items.printed_at',
   finalized_by: 'intake_items.finalized_by',
   finalized_at: 'intake_items.finalized_at',
+  accepted_review_id: 'intake_items.accepted_review_id',
+  accepted_by: 'intake_items.accepted_by',
+  accepted_at: 'intake_items.accepted_at',
 };
 export const intake_item_passes = {
   id: 'intake_item_passes.id',
   intake_item_id: 'intake_item_passes.intake_item_id',
   dj_id: 'intake_item_passes.dj_id',
   passed_at: 'intake_item_passes.passed_at',
+};
+// Slice 9b of BS#2791. See schema.ts for the delete rules.
+export const review_revisions = {
+  id: 'review_revisions.id',
+  review_id: 'review_revisions.review_id',
+  revision: 'review_revisions.revision',
+  edited_by: 'review_revisions.edited_by',
+  edited_by_user_id: 'review_revisions.edited_by_user_id',
+  edited_at: 'review_revisions.edited_at',
+  review: 'review_revisions.review',
+  artist_blurb: 'review_revisions.artist_blurb',
+  buzzwords: 'review_revisions.buzzwords',
+  recommended_tracks: 'review_revisions.recommended_tracks',
+  fcc: 'review_revisions.fcc',
+};
+export const review_prints = {
+  id: 'review_prints.id',
+  intake_item_id: 'review_prints.intake_item_id',
+  album_id: 'review_prints.album_id',
+  review_id: 'review_prints.review_id',
+  revision_id: 'review_prints.revision_id',
+  printed_by: 'review_prints.printed_by',
+  printed_at: 'review_prints.printed_at',
+};
+export const fcc_notes = {
+  id: 'fcc_notes.id',
+  album_id: 'fcc_notes.album_id',
+  intake_item_id: 'fcc_notes.intake_item_id',
+  track: 'fcc_notes.track',
+  note: 'fcc_notes.note',
+  status: 'fcc_notes.status',
+  reported_by: 'fcc_notes.reported_by',
+  reported_by_user_id: 'fcc_notes.reported_by_user_id',
+  reported_at: 'fcc_notes.reported_at',
+  confirmed_by: 'fcc_notes.confirmed_by',
+  confirmed_at: 'fcc_notes.confirmed_at',
 };
 export const flowsheet_linkage_review = {
   id: 'flowsheet_linkage_review.id',

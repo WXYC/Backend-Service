@@ -213,6 +213,29 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       expect(rows.map((row) => row.album_id)).toEqual([plan.survivorId, plan.survivorId]);
     });
 
+    // BS#2858. Both cascade off `library.id` and neither is unique on
+    // `album_id`, so a merge repoints every print and every note and loses none.
+    it('keeps both releases’ review prints and FCC notes and repoints them to the survivor', async () => {
+      const a = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 13 });
+      const b = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 13 });
+      for (const id of [a, b]) {
+        await sql`INSERT INTO ${sql(SCHEMA)}.review_prints (album_id) VALUES (${id})`;
+        await sql`
+          INSERT INTO ${sql(SCHEMA)}.fcc_notes (album_id, track, note) VALUES (${id}, ${'track of ' + id}, 'a note')
+        `;
+      }
+
+      const plan = (await merge.planSlots([await slotFor(13)]))[0];
+      await merge.mergeSlot(plan);
+
+      const prints = await sql`SELECT album_id FROM ${sql(SCHEMA)}.review_prints WHERE album_id = ${plan.survivorId}`;
+      const notes = await sql`
+        SELECT album_id FROM ${sql(SCHEMA)}.fcc_notes WHERE track IN (${'track of ' + a}, ${'track of ' + b})
+      `;
+      expect(prints).toHaveLength(2);
+      expect(notes.map((row) => row.album_id)).toEqual([plan.survivorId, plan.survivorId]);
+    });
+
     it('resolves an active rotation collision without destroying killed history', async () => {
       const a = await seedAlbum({ title: 'Sonido Cosmico', codeNumber: 13 });
       const b = await seedAlbum({ title: 'Sonido Cosmico', codeNumber: 13 });
@@ -369,6 +392,10 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       // silently overwrite the other.
       'intake_items.album_id': 'CASCADE',
       'intake_items.cited_album_id': 'SET NULL',
+      // Slice 9b of BS#2791: a print or an FCC note of a release is meaningless
+      // without it, so both cascade and a merge must repoint them first.
+      'review_prints.album_id': 'CASCADE',
+      'fcc_notes.album_id': 'CASCADE',
     };
 
     it('matches the delete actions the database actually enforces', async () => {
