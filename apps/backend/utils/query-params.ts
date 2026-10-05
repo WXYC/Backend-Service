@@ -42,3 +42,31 @@ export const parseInt4PathId = (raw: string, resource: string): number => {
   if (id < 1 || id > INT4_MAX) throw new WxycError(`Invalid ${resource} id`, 400);
   return id;
 };
+
+/**
+ * Parse an id from a JSON body for an int4 column: `undefined` (key not supplied) passes through, `null` passes
+ * only when `nullable`, anything else must be an integer from 1 to `INT4_MAX` — no string coercion, so a JSON `"5"`
+ * is a 400. Past int4 the write would be a 22003 → 500.
+ */
+export function parseInt4BodyId(value: unknown, field: string, opts: { nullable: true }): number | null | undefined;
+export function parseInt4BodyId(value: unknown, field: string, opts?: { nullable?: false }): number | undefined;
+export function parseInt4BodyId(value: unknown, field: string, opts: { nullable?: boolean } = {}) {
+  if (value === undefined) return undefined;
+  if (value === null && opts.nullable) return null;
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > INT4_MAX) {
+    throw new WxycError(`${field} must be a positive integer${opts.nullable ? ' or null' : ''}`, 400);
+  }
+  return value as number;
+}
+
+/**
+ * Parse an int4 id from a query string: `undefined` passes through, a repeated key (Express hands over a
+ * `string[]`) is a 400, otherwise all digits and 1..`INT4_MAX`. The message is neutral on purpose — "positive
+ * integer" would be false for 2147483648. See `parsePositiveInt` for why a bare `parseInt` is not enough.
+ */
+export const parseInt4QueryParam = (raw: unknown, field: string): number | undefined => {
+  if (raw === undefined) return undefined;
+  const id = typeof raw === 'string' && /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
+  if (!(id >= 1 && id <= INT4_MAX)) throw new WxycError(`${field} must be an integer from 1 to 2147483647`, 400);
+  return id;
+};

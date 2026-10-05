@@ -16,6 +16,7 @@ import {
   type NewIntakeItem,
 } from '@wxyc/database';
 import WxycError from '../utils/error.js';
+import type { ReviewsActor } from '../utils/review-grants.js';
 import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
 
 /**
@@ -224,10 +225,9 @@ export const deleteIntakeItem = async (id: number) => {
 
 export type IntakeAction = 'checkout' | 'release' | 'request' | 'cancel_request' | 'accept' | 'pass';
 /** The caller; `manage` is whether they hold `reviews: manage`. */
-export type IntakeActor = { id: string; manage: boolean };
 
 const CLEAR_REQUEST = { requested_dj_id: null, requested_at: null };
-const TAKEN = (actor: IntakeActor) => ({
+const TAKEN = (actor: ReviewsActor) => ({
   state: 'checked_out' as const,
   ...CLEAR_REQUEST,
   checked_out_by: actor.id,
@@ -244,8 +244,8 @@ const TRANSITIONS: Record<
   IntakeAction,
   {
     from: IntakeItemState;
-    set: (actor: IntakeActor, djId?: string) => PgUpdateSetSource<typeof intake_items>;
-    only?: (actor: IntakeActor) => SQL | undefined;
+    set: (actor: ReviewsActor, djId?: string) => PgUpdateSetSource<typeof intake_items>;
+    only?: (actor: ReviewsActor) => SQL | undefined;
   }
 > = {
   checkout: { from: 'pool', set: TAKEN },
@@ -266,7 +266,7 @@ const TRANSITIONS: Record<
 export const buildTransition = (
   action: IntakeAction,
   id: number,
-  actor: IntakeActor,
+  actor: ReviewsActor,
   djId?: string,
   executor: Pick<typeof db, 'update'> = db
 ) => {
@@ -279,7 +279,7 @@ export const buildTransition = (
 };
 
 /** One `UPDATE … WHERE <effective-state precondition> [AND identity] RETURNING`; a pass records its row in the same transaction. */
-export const transitionIntakeItem = async (action: IntakeAction, id: number, actor: IntakeActor, djId?: string) => {
+export const transitionIntakeItem = async (action: IntakeAction, id: number, actor: ReviewsActor, djId?: string) => {
   const rows =
     action === 'pass'
       ? await db.transaction(async (tx) => {

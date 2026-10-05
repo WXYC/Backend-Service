@@ -3,10 +3,9 @@ import { intakeItemStateEnum } from '@wxyc/database';
 import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
 import type { IntakeAction, IntakeCitations, IntakeFields, IntakeItemState } from '../services/intake.service.js';
-import { INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
-import { parseInt4PathId } from '../utils/query-params.js';
-import { holdsReviewsManage } from '../utils/review-grants.js';
+import { parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
+import { holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
 /**
@@ -21,33 +20,23 @@ const TEXT_MAX = 128;
 
 const parseId = (raw: string) => parseInt4PathId(raw, 'intake item');
 
-/** The integer body fields are int4 columns; past `INT4_MAX` they would be a 22003 → 500 at the UPDATE/INSERT. */
-const intField = (value: unknown, field: string, nullable: boolean): number | null | undefined => {
-  if (value === undefined) return undefined;
-  if (value === null && nullable) return null;
-  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > INT4_MAX) {
-    throw new WxycError(`${field} must be a positive integer${nullable ? ' or null' : ''}`, 400);
-  }
-  return value as number;
-};
-
 /** The varchar(128) trio plus the two nullable ids; `undefined` means "not supplied". */
 const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partial<IntakeFields> & IntakeCitations => {
   const required = (key: 'artist_name' | 'album_title') =>
     body[key] === undefined && !requireAll ? undefined : validateTextField(body[key], key, TEXT_MAX);
-  const format_id = intField(body.format_id, 'format_id', false) as number | undefined;
+  const format_id = parseInt4BodyId(body.format_id, 'format_id');
   if (requireAll && format_id === undefined) throw new WxycError('format_id is required', 400);
   return {
     artist_name: required('artist_name'),
     album_title: required('album_title'),
     record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
-    label_id: intField(body.label_id, 'label_id', true),
+    label_id: parseInt4BodyId(body.label_id, 'label_id', { nullable: true }),
     format_id,
-    discogs_release_id: intField(body.discogs_release_id, 'discogs_release_id', true),
+    discogs_release_id: parseInt4BodyId(body.discogs_release_id, 'discogs_release_id', { nullable: true }),
     // Citations are set by PATCH only; a new item starts uncited.
     ...(!requireAll && {
-      cited_album_id: intField(body.cited_album_id, 'cited_album_id', true),
-      cited_submission_id: intField(body.cited_submission_id, 'cited_submission_id', true),
+      cited_album_id: parseInt4BodyId(body.cited_album_id, 'cited_album_id', { nullable: true }),
+      cited_submission_id: parseInt4BodyId(body.cited_submission_id, 'cited_submission_id', { nullable: true }),
     }),
   };
 };
@@ -125,7 +114,7 @@ const transition =
   async (req, res) => {
     const id = parseId(req.params.id);
     const djId = action === 'request' ? await parseRequestedDj(req.body?.dj_id) : undefined;
-    const actor = { id: (req.auth?.id ?? req.auth?.sub) as string, manage: holdsReviewsManage(req) };
+    const actor = reviewsActor(req);
     const result = await intakeService.transitionIntakeItem(action, id, actor, djId);
     if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
     if (result.outcome === 'forbidden') throw new WxycError('This intake item belongs to another DJ', 403);
