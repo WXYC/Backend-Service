@@ -536,7 +536,7 @@ components:
       required: [message, reason]
       properties:
         message: { type: string }
-        reason: { type: string, enum: [locked, not_draft, subject_not_held, last_review] }
+        reason: { type: string, enum: [not_draft, subject_not_held, in_use, accepted_review] }
 
     ReviewFields:
       type: object
@@ -572,8 +572,7 @@ components:
         - type: object
           description: >
             An in-app review. `author` is a snapshot of the author's `auth_user.name`, cut to its
-            first 128 code points. `locked` is true when the item's slip is printed; always false
-            for a review on a library release alone.
+            first 128 code points. There is no print lock: the author edits at any time.
           properties:
             id: { type: integer }
             album_id: { type: integer, nullable: true }
@@ -586,7 +585,6 @@ components:
             add_date: { type: string, format: date }
             submitted_at: { type: string, format: date-time, nullable: true }
             last_modified: { type: string, format: date-time }
-            locked: { type: boolean }
 
     DigitalArchivePlaybackManifest:
       type: object
@@ -5374,7 +5372,7 @@ paths:
     patch:
       summary: Edit a review (BS#2802)
       description: >-
-        Grant `reviews: write`. The author while a draft, or while submitted and the item's slip is not printed; for a library-release review, the author always; `reviews: manage` always. A draft is visible only to its author and whoever recorded it, so anyone else gets a 404.
+        Grant `reviews: write`. The author at any time, printed or not; `reviews: manage` always, and a music director's edit is kept in the history under their name. Every edit of a submitted review that changes the slip text (`review`, `artist_blurb`, `buzzwords`, `recommended_tracks`, `fcc`) keeps a version; a draft or a consent-only edit keeps none. `publish_website`, `publish_apps`, `publish_instagram` and `credit` may be set only by the review's author account: anyone else, a music director included, gets a 403 and nothing is written. A draft is visible only to its author and whoever recorded it, so anyone else gets a 404.
       requestBody:
         required: true
         content:
@@ -5389,16 +5387,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/Review'
         '400':
-          description: 'Validation failure, an empty patch, or a `review` of `null` that would leave a submitted `typed` review with no text'
+          description: 'Malformed id, validation failure, an empty patch, or a `review` of `null` that would leave a submitted `typed` review with no text'
         '401':
           description: 'Authentication required'
         '403':
-          description: 'Caller lacks `reviews: write`, or may not edit this review'
+          description: 'Caller lacks `reviews: write`, may not edit this review, or sent a consent field on a review they did not author'
         '404':
           description: 'No such review, or a draft the caller may not see'
-        '409':
-          description: '`locked`: the author of a submitted review whose item is printed'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ReviewConflictError'

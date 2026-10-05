@@ -9,6 +9,10 @@ jest.unmock('drizzle-orm');
 const mockQueue: unknown[][] = [];
 let mockUpdatedRow: Record<string, unknown> = {};
 const mockWrites: { inserted?: Record<string, unknown>; updated?: Record<string, unknown> } = {};
+/** Every insert, in order, with the table it targeted. */
+const mockInserts: { table: string; values: Record<string, unknown> }[] = [];
+/** Every statement that touched the database, in order: `select <table>` / `update` / `insert <table>`. */
+const mockStatements: string[] = [];
 /** Every select, in order: which handle ran it (`db` outside the transaction, `tx` inside), its table, its lock and its rendered WHERE. */
 const mockReads: { handle: 'db' | 'tx'; table: string; lock?: string; of?: string; where: string }[] = [];
 
@@ -25,6 +29,7 @@ jest.mock('@wxyc/database', () => {
     };
     const read: (typeof mockReads)[number] = { handle, table: '', where: '' };
     mockReads.push(read);
+    mockStatements.push(`select#${mockReads.length - 1}`);
     const c: any = {
       from: (t: any) => {
         read.table = getTableName(t);
@@ -47,15 +52,18 @@ jest.mock('@wxyc/database', () => {
   };
   const tx = {
     select: () => chain('tx'),
-    insert: () => ({
+    insert: (t: any) => ({
       values: (v: Record<string, unknown>) => {
         mockWrites.inserted = v;
+        mockInserts.push({ table: jest.requireActual('drizzle-orm').getTableName(t), values: v });
+        mockStatements.push(`insert ${mockInserts[mockInserts.length - 1].table}`);
         return { returning: () => Promise.resolve([{ id: 11 }]) };
       },
     }),
     update: () => ({
       set: (s: Record<string, unknown>) => {
         mockWrites.updated = s;
+        mockStatements.push('update');
         return { where: () => ({ returning: () => Promise.resolve([mockUpdatedRow]) }) };
       },
     }),
@@ -68,8 +76,10 @@ import {
   AUTHOR_MAX,
   createReview,
   editOutcome,
+  lockReviewAfterItem,
   snapshotAuthor,
   updateReview,
+  writeReviewRevision,
 } from '../../../apps/backend/services/reviews.service';
 import { holdsReviewsManage } from '../../../apps/backend/utils/review-grants';
 
@@ -79,6 +89,8 @@ const MD = { id: 'md-1', manage: true };
 beforeEach(() => {
   mockQueue.length = 0;
   mockReads.length = 0;
+  mockInserts.length = 0;
+  mockStatements.length = 0;
   mockUpdatedRow = {};
   delete mockWrites.inserted;
   delete mockWrites.updated;
@@ -121,34 +133,66 @@ describe('editOutcome', () => {
     status: 'submitted' as const,
     author_user_id: 'dj-1',
     recorded_by_user_id: null,
-    locked: false,
     ...o,
   });
+  const OTHER_DJ = { id: 'dj-2', manage: false };
 
   test.each([
-    ['the author edits their draft', review({ status: 'draft' }), DJ, 'allowed'],
-    ['the author edits a submitted review before print', review({}), DJ, 'allowed'],
-    ['the author edits a submitted review after print: locked', review({ locked: true }), DJ, 'locked'],
-    ['the author edits their draft on a printed item', review({ status: 'draft', locked: true }), DJ, 'allowed'],
-    ['another DJ edits a submitted review', review({}), { id: 'dj-2', manage: false }, 'forbidden'],
-    ['another DJ edits a draft: not visible', review({ status: 'draft' }), { id: 'dj-2', manage: false }, 'not_found'],
-    ['a music director edits any submitted review', review({}), MD, 'allowed'],
-    ['a music director edits a printed review', review({ locked: true }), MD, 'allowed'],
+    ['the author edits their draft', review({ status: 'draft' }), DJ, false, 'allowed'],
+    ['the author edits a submitted review, printed or not', review({}), DJ, false, 'allowed'],
+    ['another DJ edits a submitted review', review({}), OTHER_DJ, false, 'forbidden'],
+    ['another DJ edits a draft: not visible', review({ status: 'draft' }), OTHER_DJ, false, 'not_found'],
+    ['a music director edits any submitted review', review({}), MD, false, 'allowed'],
     // Draft privacy outranks manage: only the author and whoever recorded it may see a draft.
-    ["a music director edits another user's draft: not visible", review({ status: 'draft' }), MD, 'not_found'],
+    ["a music director edits another user's draft: not visible", review({ status: 'draft' }), MD, false, 'not_found'],
     [
       'the recorder edits an on-behalf draft',
       review({ status: 'draft', author_user_id: null, recorded_by_user_id: 'md-1' }),
       MD,
+      false,
       'allowed',
     ],
-  ])('%s', (_name, r, actor, expected) => {
-    expect(editOutcome(r, actor)).toBe(expected);
+    // Consent belongs to the author's account, whatever the caller's grants.
+    ['the author sets consent', review({}), DJ, true, 'allowed'],
+    ['the author sets consent on their draft', review({ status: 'draft' }), DJ, true, 'allowed'],
+    ["a music director sets consent on someone else's review", review({}), MD, true, 'forbidden'],
+    [
+      'a music director sets consent on a review with no linked account',
+      review({ author_user_id: null }),
+      MD,
+      true,
+      'forbidden',
+    ],
+    [
+      'the recorder sets consent on an on-behalf draft',
+      review({ status: 'draft', author_user_id: null, recorded_by_user_id: 'md-1' }),
+      MD,
+      true,
+      'forbidden',
+    ],
+    [
+      "another DJ's consent patch on a draft is still not_found",
+      review({ status: 'draft' }),
+      OTHER_DJ,
+      true,
+      'not_found',
+    ],
+    ['a music director edits the text of a review whose consent they may not set', review({}), MD, false, 'allowed'],
+  ])('%s', (_name, r, actor, touchesConsent, expected) => {
+    expect(editOutcome(r, actor, touchesConsent)).toBe(expected);
+  });
+
+  test.each([DJ, MD, { id: 'dj-2', manage: false }])('no outcome is locked, whoever asks (%j)', (actor) => {
+    for (const status of ['draft', 'submitted'] as const) {
+      for (const touchesConsent of [false, true]) {
+        expect(editOutcome(review({ status }), actor, touchesConsent)).not.toBe('locked');
+      }
+    }
   });
 });
 
 describe('createReview', () => {
-  const created = { id: 11, locked: false };
+  const created = { id: 11 };
 
   test('snapshots a 200-code-point account name as its first 128 code points', async () => {
     mockQueue.push([{ id: 4 }], [{ name: 'n'.repeat(200) }], [created]);
@@ -193,20 +237,111 @@ describe('createReview', () => {
   });
 });
 
+describe('lockReviewAfterItem', () => {
+  const lock = (mode: 'share' | 'update', id = 3) =>
+    lockReviewAfterItem({ select: jest.requireMock('@wxyc/database').db.select }, id, mode);
+
+  test.each(['share', 'update'] as const)('item FOR %s, then the review with a plain FOR UPDATE', async (mode) => {
+    mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }]);
+    expect(await lock(mode)).toEqual({ itemId: 8 });
+    expect(mockReads.map((r) => [r.table, r.lock, r.of])).toEqual([
+      ['reviews', undefined, undefined],
+      ['intake_items', mode, undefined],
+      // No `of`: drizzle renders `FOR UPDATE OF "wxyc_schema"."reviews"`, which Postgres rejects.
+      ['reviews', 'update', undefined],
+    ]);
+    expect(mockReads[1].where).toContain('[8]');
+  });
+
+  test('a review on a library release alone has no item to lock', async () => {
+    mockQueue.push([{ item: null }], [{ id: 3 }]);
+    expect(await lock('update')).toEqual({ itemId: null });
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
+      ['reviews', undefined],
+      ['reviews', 'update'],
+    ]);
+  });
+
+  test.each([
+    ['is missing', [[]]],
+    ['vanishes before the lock', [[{ item: null }], []]],
+  ])('a review that %s is undefined', async (_name, results) => {
+    mockQueue.push(...(results as unknown[][]));
+    expect(await lock('share')).toBeUndefined();
+  });
+});
+
+describe('writeReviewRevision', () => {
+  const CONTENT = { review: 'text', artist_blurb: null, buzzwords: 'warm', recommended_tracks: null, fcc: null };
+  const write = (n: number | null) => {
+    mockQueue.push([{ id: 3 }], [{ n }]);
+    return writeReviewRevision(jest.requireMock('@wxyc/database').db, 3, CONTENT, {
+      name: 'Test Reviewer',
+      userId: 'md-1',
+    });
+  };
+
+  test('locks the review FOR UPDATE, reads the highest revision, then inserts the next number', async () => {
+    await write(4);
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
+      ['reviews', 'update'],
+      ['review_revisions', undefined],
+    ]);
+    expect(mockStatements).toEqual(['select#0', 'select#1', 'insert review_revisions']);
+    expect(mockInserts).toEqual([
+      {
+        table: 'review_revisions',
+        values: { ...CONTENT, review_id: 3, revision: 5, edited_by: 'Test Reviewer', edited_by_user_id: 'md-1' },
+      },
+    ]);
+  });
+
+  test('a review with no history gets revision 1', async () => {
+    await write(0);
+    expect(mockInserts[0].values.revision).toBe(1);
+  });
+
+  test('never locks intake_items', async () => {
+    await write(2);
+    expect(mockReads.map((r) => r.table)).not.toContain('intake_items');
+  });
+
+  test('a stamped time is written as edited_at; none lets the column default apply', async () => {
+    mockQueue.push([{ id: 3 }], [{ n: 0 }]);
+    const at = new Date('2026-10-01T12:00:00Z');
+    await writeReviewRevision(jest.requireMock('@wxyc/database').db, 3, CONTENT, {
+      name: null,
+      userId: null,
+      at,
+    });
+    expect(mockInserts[0].values).toMatchObject({ edited_at: at, edited_by: null, edited_by_user_id: null });
+    await write(0);
+    expect(mockInserts[1].values).not.toHaveProperty('edited_at');
+  });
+});
+
 describe('updateReview', () => {
   const stored = (o: object) => ({
     id: 3,
     status: 'submitted',
     medium: 'typed',
     review: 'kept',
+    artist_blurb: null,
+    buzzwords: null,
+    recommended_tracks: null,
+    fcc: null,
+    author: 'Cat Power Fan',
     author_user_id: 'dj-1',
     recorded_by_user_id: null,
-    locked: false,
+    submitted_at: new Date('2026-09-30T12:00:00.000Z'),
     ...o,
   });
+  /** Scripts an edit by `DJ`: lock reads, the current row, then whatever the revision path reads. */
+  const script = (current: object, ...more: unknown[][]) =>
+    mockQueue.push([{ item: null }], [{ id: 3 }], [stored(current)], ...more);
 
-  test('the edit is decided on locked rows inside one transaction: item FOR SHARE, then the review FOR UPDATE', async () => {
-    mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored({ intake_item_id: 8 })]);
+  test('locks only through lockReviewAfterItem: item FOR SHARE, then the review FOR UPDATE, all in the transaction', async () => {
+    mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored({ status: 'draft' })], [stored({})]);
     mockUpdatedRow = { id: 3 };
     await updateReview(3, { fcc: 'x' }, DJ);
     expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
@@ -215,27 +350,35 @@ describe('updateReview', () => {
       ['intake_items', 'share', undefined],
       ['reviews', 'update', undefined],
       ['reviews', undefined, undefined],
+      ['reviews', undefined, undefined],
     ]);
-    expect(mockReads[1].where).toContain('[8]');
   });
 
-  test('a review on a library release alone has no item to lock', async () => {
-    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
+  test('the response is selectReview read after the UPDATE, not the RETURNING row', async () => {
+    const reread = stored({ fcc: 'x', note: 'from selectReview' });
+    script({ status: 'draft' }, [reread]);
+    mockUpdatedRow = { id: 3, fcc: 'x', note: 'from RETURNING' };
+    expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({ outcome: 'updated', review: reread });
+    expect(mockStatements).toEqual(['select#0', 'select#1', 'select#2', 'update', 'select#3']);
+  });
+
+  test('the read-back comes after the revision insert too', async () => {
+    mockQueue.push(
+      [{ item: null }],
+      [{ id: 3 }],
+      [stored({})],
+      [{ name: 'Test Reviewer' }],
+      [{ n: 1 }],
+      [{ id: 3 }],
+      [{ n: 1 }],
+      [stored({})]
+    );
+    mockUpdatedRow = stored({ fcc: 'x' });
     await updateReview(3, { fcc: 'x' }, DJ);
-    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
-      ['reviews', undefined],
-      ['reviews', 'update'],
-      ['reviews', undefined],
-    ]);
-  });
-
-  test('the updated row comes from RETURNING with the locked value already read', async () => {
-    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({ locked: false })]);
-    mockUpdatedRow = { id: 3, fcc: 'x' };
-    expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({
-      outcome: 'updated',
-      review: { id: 3, fcc: 'x', locked: false },
-    });
+    expect(mockStatements.at(-2)).toBe('insert review_revisions');
+    expect(mockStatements.at(-1)).toMatch(/^select#/);
+    expect(mockReads.at(-1)).toMatchObject({ handle: 'tx', table: 'reviews' });
+    expect(mockReads.at(-1)?.lock).toBeUndefined();
   });
 
   test('a missing review is not_found', async () => {
@@ -243,14 +386,20 @@ describe('updateReview', () => {
     expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({ outcome: 'not_found' });
   });
 
-  test('a lock after print refuses the author without writing', async () => {
-    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({ locked: true })]);
-    expect(await updateReview(3, { fcc: 'x' }, DJ)).toEqual({ outcome: 'locked' });
-    expect(mockWrites.updated).toBeUndefined();
+  test('the author of a submitted review edits it and gets 200, whatever the slip', async () => {
+    script({}, [{ name: 'Test Reviewer' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+    mockUpdatedRow = stored({ fcc: 'x' });
+    expect((await updateReview(3, { fcc: 'x' }, DJ)).outcome).toBe('updated');
+  });
+
+  test('a music director edits any submitted review', async () => {
+    script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+    mockUpdatedRow = stored({ fcc: 'x' });
+    expect((await updateReview(3, { fcc: 'x' }, MD)).outcome).toBe('updated');
   });
 
   test('a patch that would null a submitted typed review text is text_required', async () => {
-    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
+    script({});
     expect(await updateReview(3, { review: null }, DJ)).toEqual({ outcome: 'text_required' });
     expect(mockWrites.updated).toBeUndefined();
   });
@@ -259,18 +408,131 @@ describe('updateReview', () => {
     ['a draft', { status: 'draft' }],
     ['a submitted handwritten review', { medium: 'handwritten' }],
   ])('nulling the text of %s is allowed', async (_name, o) => {
-    mockQueue.push([{ item: null }], [{ id: 3 }], [stored(o)]);
+    script(o, [{ name: 'n' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
     expect((await updateReview(3, { review: null }, DJ)).outcome).toBe('updated');
   });
 
   test('leaving review out of a patch keeps the stored text, so other fields still save', async () => {
-    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
+    script({ status: 'draft' }, [stored({})]);
     expect((await updateReview(3, { fcc: 'x' }, DJ)).outcome).toBe('updated');
     expect(mockWrites.updated).toMatchObject({ fcc: 'x' });
   });
 
-  test('a submitted typed review stays editable by its author while text remains', async () => {
-    mockQueue.push([{ item: null }], [{ id: 3 }], [stored({})]);
-    expect((await updateReview(3, { review: 'new' }, DJ)).outcome).toBe('updated');
+  describe('revisions', () => {
+    const editor = [{ name: 'Test Reviewer' }];
+
+    test('an edit of a submitted review writes exactly one revision: next number, content as it now stands, editor snapshot and id', async () => {
+      script({}, editor, [{ n: 2 }], [{ id: 3 }], [{ n: 2 }], [stored({})]);
+      mockUpdatedRow = stored({ review: 'new', fcc: 'x', buzzwords: 'warm' });
+      await updateReview(3, { review: 'new', fcc: 'x' }, DJ);
+      expect(mockInserts).toEqual([
+        {
+          table: 'review_revisions',
+          values: {
+            review_id: 3,
+            revision: 3,
+            review: 'new',
+            artist_blurb: null,
+            buzzwords: 'warm',
+            recommended_tracks: null,
+            fcc: 'x',
+            edited_by: 'Test Reviewer',
+            edited_by_user_id: 'dj-1',
+          },
+        },
+      ]);
+    });
+
+    test("a music director's edit is in the history under the director's name and id", async () => {
+      script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      mockUpdatedRow = stored({ fcc: 'x' });
+      await updateReview(3, { fcc: 'x' }, MD);
+      expect(mockInserts[0].values).toMatchObject({ revision: 2, edited_by: 'Test MD', edited_by_user_id: 'md-1' });
+    });
+
+    test('a long account name is cut to 128 code points like reviews.author', async () => {
+      script({}, [{ name: 'n'.repeat(200) }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      mockUpdatedRow = stored({ fcc: 'x' });
+      await updateReview(3, { fcc: 'x' }, DJ);
+      expect(mockInserts[0].values.edited_by).toBe('n'.repeat(128));
+    });
+
+    test('a draft edit writes none', async () => {
+      script({ status: 'draft' }, [stored({})]);
+      await updateReview(3, { fcc: 'x' }, DJ);
+      expect(mockInserts).toEqual([]);
+    });
+
+    test('a consent-only edit of a submitted review writes none', async () => {
+      script({}, [stored({})]);
+      await updateReview(3, { publish_apps: true, credit: 'dj_name' }, DJ);
+      expect(mockInserts).toEqual([]);
+      expect(mockWrites.updated).toMatchObject({ publish_apps: true, credit: 'dj_name' });
+    });
+
+    test('a patch that sends the stored values writes none', async () => {
+      script({ fcc: 'same' }, [stored({})]);
+      await updateReview(3, { review: 'kept', fcc: 'same' }, DJ);
+      expect(mockInserts).toEqual([]);
+    });
+
+    test('a consent field in the same patch as a content change still writes one revision', async () => {
+      script({}, editor, [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      mockUpdatedRow = stored({ fcc: 'x' });
+      await updateReview(3, { fcc: 'x', credit: 'none' }, DJ);
+      expect(mockInserts).toHaveLength(1);
+    });
+
+    test('the first edit of a submitted review with no history writes revision 1 (the content before the edit, the author, at submitted_at), then revision 2', async () => {
+      script({ review: 'before' }, editor, [{ n: 0 }], [{ id: 3 }], [{ n: 0 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      mockUpdatedRow = stored({ review: 'after' });
+      await updateReview(3, { review: 'after' }, MD);
+      expect(mockInserts.map((i) => i.table)).toEqual(['review_revisions', 'review_revisions']);
+      expect(mockInserts[0].values).toEqual({
+        review_id: 3,
+        revision: 1,
+        review: 'before',
+        artist_blurb: null,
+        buzzwords: null,
+        recommended_tracks: null,
+        fcc: null,
+        edited_by: 'Cat Power Fan',
+        edited_by_user_id: 'dj-1',
+        edited_at: new Date('2026-09-30T12:00:00.000Z'),
+      });
+      expect(mockInserts[1].values).toMatchObject({
+        revision: 2,
+        review: 'after',
+        edited_by: 'Test Reviewer',
+        edited_by_user_id: 'md-1',
+      });
+      // Revision 1 is the pre-edit content, so it is written before the UPDATE.
+      expect(mockStatements.indexOf('insert review_revisions')).toBeLessThan(mockStatements.indexOf('update'));
+      expect(mockStatements.lastIndexOf('insert review_revisions')).toBeGreaterThan(mockStatements.indexOf('update'));
+    });
+  });
+
+  describe('consent belongs to the author', () => {
+    test.each([{ credit: 'dj_name' }, { publish_website: true }, { publish_apps: false }, { publish_instagram: true }])(
+      "a music director's patch carrying %j on someone else's review is forbidden and writes nothing",
+      async (patch) => {
+        script({});
+        expect(await updateReview(3, patch, MD)).toEqual({ outcome: 'forbidden' });
+        expect(mockWrites.updated).toBeUndefined();
+        expect(mockInserts).toEqual([]);
+      }
+    );
+
+    test("a music director's patch of a review's text succeeds", async () => {
+      script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      mockUpdatedRow = stored({ review: 'fixed' });
+      expect((await updateReview(3, { review: 'fixed' }, MD)).outcome).toBe('updated');
+    });
+
+    test('the linked author of an on-behalf review sets their own consent', async () => {
+      script({ author_user_id: 'dj-1', recorded_by_user_id: 'md-1' }, [stored({})]);
+      expect((await updateReview(3, { credit: 'real_name', publish_website: true }, DJ)).outcome).toBe('updated');
+      expect(mockWrites.updated).toMatchObject({ credit: 'real_name', publish_website: true });
+    });
   });
 });

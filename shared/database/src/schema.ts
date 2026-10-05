@@ -2802,11 +2802,10 @@ export const reviews = wxyc_schema.table(
  *
  * Deliberately separate from the `reviews` table above, which holds the in-app
  * reviews (many per release, authored by an account or by free text, and
- * editable by their author until the intake item's slip is printed, then by
- * music directors only; a review of a library release never locks — ADR
- * 0006). This archive differs on the axes that matter — immutable
- * submissions and a promise that reviewer names are never shared — so the
- * two never merge (see
+ * editable by their author at any time and by music directors, every
+ * version of a submitted one kept in `review_revisions`). This archive
+ * differs on the axes that matter — immutable submissions and a promise
+ * that reviewer names are never shared — so the two never merge (see
  * docs/adr/0011-album-review-submissions-separate-archive.md).
  *
  * Identity is free-text: `album_id` is a best-effort link written only by

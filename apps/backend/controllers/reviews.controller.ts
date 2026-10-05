@@ -35,7 +35,7 @@ const parseFields = (body: Record<string, unknown>): ReviewFields => {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
 };
 
-const conflict = (res: Parameters<RequestHandler>[1], reason: 'locked' | 'subject_not_held', message: string) =>
+const conflict = (res: Parameters<RequestHandler>[1], reason: 'subject_not_held', message: string) =>
   res.status(409).json({ message, reason });
 
 export const createReview: RequestHandler = async (req, res) => {
@@ -64,8 +64,6 @@ export const patchReview: RequestHandler<{ id: string }> = async (req, res) => {
   const result = await reviewsService.updateReview(id, patch, reviewsActor(req));
   if (result.outcome === 'not_found') throw new WxycError('Review not found', 404);
   if (result.outcome === 'forbidden') throw new WxycError('You may not edit this review', 403);
-  if (result.outcome === 'locked')
-    return void conflict(res, 'locked', 'The slip is printed, so only a music director may edit');
   if (result.outcome === 'text_required')
     throw new WxycError('A submitted typed review must keep its review text', 400);
   res.json(result.review);

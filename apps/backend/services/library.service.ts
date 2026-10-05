@@ -7288,12 +7288,12 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // `.for('update')` taken on the release's `rotation` rows and on its
     // `digital_asset` rows above, not because of anything here — see the
     // notes on those locks. `review_revisions` has no such lock here: its
-    // capture is atomic only because every revision writer (the edit
-    // BS#2859 adds to `updateReview`, the submit in BS#2854) locks its review
-    // row `FOR UPDATE` before inserting, which conflicts with the `FOR SHARE`
-    // the `reviews.album_id` entry below takes on this release's reviews
-    // before `review_revisions` is read. That writer-side lock is the
-    // invariant: a writer holding only the FK's `FOR KEY SHARE` on the review
+    // capture is atomic only because every revision writer goes through
+    // `writeReviewRevision` (`reviews.service.ts`), which takes the review
+    // row `FOR UPDATE` itself before it reads the highest revision, which
+    // conflicts with the `FOR SHARE` the `reviews.album_id` entry below
+    // takes on this release's reviews before `review_revisions` is read.
+    // That writer-side lock is the invariant: a writer holding only the FK's `FOR KEY SHARE` on the review
     // could insert a revision between this capture and the cascade, and the
     // revision would be destroyed with nothing in the snapshot. `album_metadata`,
     // `library_identity` + `library_identity_source`, and

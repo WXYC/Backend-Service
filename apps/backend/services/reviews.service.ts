@@ -1,5 +1,14 @@
 import { and, eq, getTableColumns, sql } from 'drizzle-orm';
-import { db, intake_items, library, reviews, user, type NewReview, type Review } from '@wxyc/database';
+import {
+  db,
+  intake_items,
+  library,
+  review_revisions,
+  reviews,
+  user,
+  type NewReview,
+  type Review,
+} from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { effectiveState } from './intake.service.js';
 
@@ -9,7 +18,7 @@ import { effectiveState } from './intake.service.js';
  */
 
 /** Mirror of the contract's `Review` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x. */
-export type ReviewResponse = Review & { locked: boolean };
+export type ReviewResponse = Review;
 
 /** The contract's `ReviewFields`: the slip plus publishing consent. `undefined` means "not supplied". */
 export type ReviewFields = Partial<
@@ -32,14 +41,10 @@ export const AUTHOR_MAX = 128;
 export const snapshotAuthor = (name: string | null | undefined) =>
   name == null ? null : [...name].slice(0, AUTHOR_MAX).join('');
 
-/** `locked` is the item's slip being printed; a review on a library release alone has no item and no slip. */
-const locked = sql<boolean>`coalesce(${intake_items.printed_at} IS NOT NULL, false)`;
-
 const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db) =>
   executor
-    .select({ ...getTableColumns(reviews), locked: locked.as('locked') })
+    .select()
     .from(reviews)
-    .leftJoin(intake_items, eq(intake_items.id, reviews.intake_item_id))
     .where(eq(reviews.id, id))
     .then((rows) => rows[0] as ReviewResponse | undefined);
 
@@ -85,52 +90,135 @@ export const createReview = async (
     return { outcome: 'created' as const, review: (await selectReview(id, tx))! };
   });
 
+const CONTENT_FIELDS = ['review', 'artist_blurb', 'buzzwords', 'recommended_tracks', 'fcc'] as const;
+const CONSENT_FIELDS = ['publish_website', 'publish_apps', 'publish_instagram', 'credit'] as const;
+type RevisionContent = Pick<Review, (typeof CONTENT_FIELDS)[number]>;
+type Tx = Pick<typeof db, 'select' | 'insert'>;
+
 /**
  * Who may edit, as a pure decision. A draft is visible only to its author and whoever recorded
- * it, so anyone else gets `not_found` before any grant matters. Then `reviews: manage` always;
- * otherwise only the author, who is locked out of a submitted review once its item's slip is
- * printed (`locked` is always false on a library-release review, so the author always may).
+ * it, so anyone else gets `not_found` before any grant matters. The consent fields
+ * (`touchesConsent`) belong to the author's account alone: anyone else, a music director
+ * included, is `forbidden`, as is everyone when no account is linked. Otherwise `reviews: manage`
+ * always may, and the author may at any time: there is no print lock.
  */
 export const editOutcome = (
-  review: Pick<ReviewResponse, 'status' | 'author_user_id' | 'recorded_by_user_id' | 'locked'>,
-  actor: ReviewsActor
+  review: Pick<ReviewResponse, 'status' | 'author_user_id' | 'recorded_by_user_id'>,
+  actor: ReviewsActor,
+  touchesConsent = false
 ) => {
   const own = review.author_user_id === actor.id;
   if (review.status === 'draft' && !own && review.recorded_by_user_id !== actor.id) return 'not_found' as const;
-  if (actor.manage) return 'allowed' as const;
-  if (!own) return 'forbidden' as const;
-  return review.status === 'submitted' && review.locked ? ('locked' as const) : ('allowed' as const);
+  if (touchesConsent && !own) return 'forbidden' as const;
+  return actor.manage || own ? ('allowed' as const) : ('forbidden' as const);
 };
 
 /**
- * Edits are decided on rows that cannot change before the write commits. Lock order is item,
- * then review (BS#2854's submit and delete follow it): the item is held FOR SHARE so the print
- * step's `UPDATE intake_items` (which stamps `printed_at`) waits behind this transaction, then the
- * review is locked FOR UPDATE so a submit waits too. The edit rules and the text rule are then
- * evaluated on the locked rows. `intake_item_id` never changes, so reading it unlocked to find
- * the item to lock is safe.
+ * Locks a review in the one order every operation on an item and its reviews uses: the intake
+ * item first (`itemMode`: `'share'` for edit and submit, which do not write the item; `'update'`
+ * for delete), then the review row with a plain `SELECT id ... FOR UPDATE`. Never drizzle's
+ * `.for('update', { of: reviews })`, which renders a schema-qualified `FOR UPDATE OF
+ * "wxyc_schema"."reviews"` that Postgres rejects. `intake_item_id` never changes, so reading it
+ * unlocked to find the item to lock is safe. `undefined` when the review does not exist.
+ */
+export const lockReviewAfterItem = async (
+  tx: Pick<typeof db, 'select'>,
+  reviewId: number,
+  itemMode: 'share' | 'update'
+) => {
+  const [subject] = await tx.select({ item: reviews.intake_item_id }).from(reviews).where(eq(reviews.id, reviewId));
+  if (!subject) return undefined;
+  if (subject.item !== null) {
+    await tx.select({ id: intake_items.id }).from(intake_items).where(eq(intake_items.id, subject.item)).for(itemMode);
+  }
+  const [mine] = await tx.select({ id: reviews.id }).from(reviews).where(eq(reviews.id, reviewId)).for('update');
+  return mine ? { itemId: subject.item } : undefined;
+};
+
+const highestRevision = async (tx: Pick<typeof db, 'select'>, reviewId: number) => {
+  const [{ n }] = await tx
+    .select({ n: sql<number>`coalesce(max(${review_revisions.revision}), 0)` })
+    .from(review_revisions)
+    .where(eq(review_revisions.review_id, reviewId));
+  return n;
+};
+
+/**
+ * Appends the next `review_revisions` row for a review. It takes the review lock itself (a plain
+ * `SELECT id ... FOR UPDATE`, before it reads the highest revision) so two writers cannot take
+ * one number, and so `deleteAlbumFromDB`'s capture, which holds `FOR SHARE` on a release's
+ * reviews before it reads their revisions, never misses one: a writer holding only the FK's `FOR
+ * KEY SHARE` could slip a row in. Inside `updateReview` the row is already locked, so this
+ * changes nothing there. It does not lock the intake item: lock order stays the caller's job,
+ * through `lockReviewAfterItem`. `editor.name` is a snapshot (`snapshotAuthor`); `at` defaults
+ * to the column's `now()`.
+ */
+export const writeReviewRevision = async (
+  tx: Tx,
+  reviewId: number,
+  content: RevisionContent,
+  editor: { name: string | null; userId: string | null; at?: Date }
+) => {
+  await tx.select({ id: reviews.id }).from(reviews).where(eq(reviews.id, reviewId)).for('update');
+  const revision = (await highestRevision(tx, reviewId)) + 1;
+  await tx.insert(review_revisions).values({
+    ...content,
+    review_id: reviewId,
+    revision,
+    edited_by: editor.name,
+    edited_by_user_id: editor.userId,
+    ...(editor.at === undefined ? {} : { edited_at: editor.at }),
+  });
+};
+
+/**
+ * Edits are decided on rows that cannot change before the write commits: `lockReviewAfterItem`
+ * (item `FOR SHARE`, then the review `FOR UPDATE`), then the edit rules and the text rule on the
+ * locked row. An edit of a submitted review that changes a content field also appends a
+ * revision; a draft edit or a consent-only edit does not. A submitted review with no history
+ * first gets revision 1: its content before this edit, attributed to its author. The response
+ * is read back through `selectReview` after all writes.
  */
 export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewsActor) =>
   db.transaction(async (tx) => {
-    const [subject] = await tx.select({ item: reviews.intake_item_id }).from(reviews).where(eq(reviews.id, id));
-    if (!subject) return { outcome: 'not_found' as const };
-    if (subject.item !== null) {
-      await tx.select({ id: intake_items.id }).from(intake_items).where(eq(intake_items.id, subject.item)).for('share');
-    }
-    const [mine] = await tx.select({ id: reviews.id }).from(reviews).where(eq(reviews.id, id)).for('update');
-    if (!mine) return { outcome: 'not_found' as const };
+    if (!(await lockReviewAfterItem(tx, id, 'share'))) return { outcome: 'not_found' as const };
     const current = (await selectReview(id, tx))!;
-    const decision = editOutcome(current, actor);
+    const touchesConsent = CONSENT_FIELDS.some((key) => patch[key] !== undefined);
+    const decision = editOutcome(current, actor, touchesConsent);
     if (decision !== 'allowed') return { outcome: decision };
     // A print must never produce an empty slip, so a submitted typed review keeps its text.
     const text = patch.review === undefined ? current.review : patch.review;
     if (current.status === 'submitted' && current.medium === 'typed' && text === null) {
       return { outcome: 'text_required' as const };
     }
+    const revises =
+      current.status === 'submitted' &&
+      CONTENT_FIELDS.some((key) => patch[key] !== undefined && patch[key] !== current[key]);
+    let editor = { name: null as string | null, userId: actor.id };
+    if (revises) {
+      const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
+      editor = { ...editor, name: snapshotAuthor(account?.name) };
+      if ((await highestRevision(tx, id)) === 0) {
+        const before = Object.fromEntries(CONTENT_FIELDS.map((key) => [key, current[key]])) as RevisionContent;
+        await writeReviewRevision(tx, id, before, {
+          name: current.author,
+          userId: current.author_user_id,
+          at: current.submitted_at ?? undefined,
+        });
+      }
+    }
     const [row] = await tx
       .update(reviews)
       .set({ ...patch, last_modified: sql`now()` })
       .where(eq(reviews.id, id))
       .returning();
-    return { outcome: 'updated' as const, review: { ...row, locked: current.locked } as ReviewResponse };
+    if (revises) {
+      await writeReviewRevision(
+        tx,
+        id,
+        Object.fromEntries(CONTENT_FIELDS.map((key) => [key, row[key]])) as RevisionContent,
+        editor
+      );
+    }
+    return { outcome: 'updated' as const, review: (await selectReview(id, tx))! };
   });
