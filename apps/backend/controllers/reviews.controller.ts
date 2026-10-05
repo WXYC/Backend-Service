@@ -64,6 +64,8 @@ export const patchReview: RequestHandler<{ id: string }> = async (req, res) => {
   const result = await reviewsService.updateReview(id, patch, reviewsActor(req));
   if (result.outcome === 'not_found') throw new WxycError('Review not found', 404);
   if (result.outcome === 'forbidden') throw new WxycError('You may not edit this review', 403);
+  if (result.outcome === 'consent_forbidden')
+    throw new WxycError("Only the review's author may set its publishing choices", 403);
   if (result.outcome === 'text_required')
     throw new WxycError('A submitted typed review must keep its review text', 400);
   res.json(result.review);

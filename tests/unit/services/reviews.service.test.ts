@@ -152,24 +152,27 @@ describe('editOutcome', () => {
       false,
       'allowed',
     ],
-    // Consent belongs to the author's account, whatever the caller's grants.
+    // Consent belongs to the author's account, whatever the caller's grants. A caller who may
+    // edit but is not the author gets the distinct consent_forbidden; one who may not edit at
+    // all stays forbidden, so the refusal names the right thing.
     ['the author sets consent', review({}), DJ, true, 'allowed'],
     ['the author sets consent on their draft', review({ status: 'draft' }), DJ, true, 'allowed'],
-    ["a music director sets consent on someone else's review", review({}), MD, true, 'forbidden'],
+    ["a music director sets consent on someone else's review", review({}), MD, true, 'consent_forbidden'],
     [
       'a music director sets consent on a review with no linked account',
       review({ author_user_id: null }),
       MD,
       true,
-      'forbidden',
+      'consent_forbidden',
     ],
     [
       'the recorder sets consent on an on-behalf draft',
       review({ status: 'draft', author_user_id: null, recorded_by_user_id: 'md-1' }),
       MD,
       true,
-      'forbidden',
+      'consent_forbidden',
     ],
+    ["another DJ's consent patch on a submitted review is forbidden outright", review({}), OTHER_DJ, true, 'forbidden'],
     [
       "another DJ's consent patch on a draft is still not_found",
       review({ status: 'draft' }),
@@ -281,11 +284,12 @@ describe('writeReviewRevision', () => {
     });
   };
 
-  test('locks the review FOR UPDATE, reads the highest revision, then inserts the next number', async () => {
-    await write(4);
-    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
-      ['reviews', 'update'],
-      ['review_revisions', undefined],
+  test('locks the review with a plain FOR UPDATE, reads the highest revision, then inserts and returns the next number', async () => {
+    expect(await write(4)).toBe(5);
+    expect(mockReads.map((r) => [r.table, r.lock, r.of])).toEqual([
+      // No `of`: drizzle renders `FOR UPDATE OF "wxyc_schema"."reviews"`, which Postgres rejects.
+      ['reviews', 'update', undefined],
+      ['review_revisions', undefined, undefined],
     ]);
     expect(mockStatements).toEqual(['select#0', 'select#1', 'insert review_revisions']);
     expect(mockInserts).toEqual([
@@ -297,8 +301,20 @@ describe('writeReviewRevision', () => {
   });
 
   test('a review with no history gets revision 1', async () => {
-    await write(0);
+    expect(await write(0)).toBe(1);
     expect(mockInserts[0].values.revision).toBe(1);
+  });
+
+  test('a review that does not exist is undefined, decided on the lock before the highest revision is read, and nothing is inserted', async () => {
+    mockQueue.push([]);
+    const result = await writeReviewRevision(jest.requireMock('@wxyc/database').db, 3, CONTENT, {
+      name: 'Test Reviewer',
+      userId: 'md-1',
+    });
+    expect(result).toBeUndefined();
+    expect(mockStatements).toEqual(['select#0']);
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([['reviews', 'update']]);
+    expect(mockInserts).toEqual([]);
   });
 
   test('never locks intake_items', async () => {
@@ -334,6 +350,7 @@ describe('updateReview', () => {
     author_user_id: 'dj-1',
     recorded_by_user_id: null,
     submitted_at: new Date('2026-09-30T12:00:00.000Z'),
+    last_modified: new Date('2026-09-30T12:30:00.000Z'),
     ...o,
   });
   /** Scripts an edit by `DJ`: lock reads, the current row, then whatever the revision path reads. */
@@ -510,18 +527,49 @@ describe('updateReview', () => {
       expect(mockStatements.indexOf('insert review_revisions')).toBeLessThan(mockStatements.indexOf('update'));
       expect(mockStatements.lastIndexOf('insert review_revisions')).toBeGreaterThan(mockStatements.indexOf('update'));
     });
+
+    test('a submitted review with no history and no submitted_at (status from the column default) stamps revision 1 at last_modified, not at this edit', async () => {
+      script(
+        { submitted_at: null },
+        editor,
+        [{ n: 0 }],
+        [{ id: 3 }],
+        [{ n: 0 }],
+        [{ id: 3 }],
+        [{ n: 1 }],
+        [stored({})]
+      );
+      mockUpdatedRow = stored({ review: 'after' });
+      await updateReview(3, { review: 'after' }, MD);
+      expect(mockInserts[0].values).toMatchObject({ revision: 1, edited_at: new Date('2026-09-30T12:30:00.000Z') });
+      expect(mockInserts[1].values).not.toHaveProperty('edited_at');
+    });
   });
 
   describe('consent belongs to the author', () => {
-    test.each([{ credit: 'dj_name' }, { publish_website: true }, { publish_apps: false }, { publish_instagram: true }])(
-      "a music director's patch carrying %j on someone else's review is forbidden and writes nothing",
+    test.each([
+      { credit: 'dj_name' },
+      { credit: null },
+      { publish_website: true },
+      { publish_apps: false },
+      { publish_instagram: true },
+    ])(
+      "a music director's patch carrying %j on someone else's review is consent_forbidden and writes nothing",
       async (patch) => {
         script({});
-        expect(await updateReview(3, patch, MD)).toEqual({ outcome: 'forbidden' });
+        expect(await updateReview(3, patch, MD)).toEqual({ outcome: 'consent_forbidden' });
         expect(mockWrites.updated).toBeUndefined();
         expect(mockInserts).toEqual([]);
       }
     );
+
+    test("another DJ's consent patch is the plain forbidden: they may not edit the review at all", async () => {
+      script({});
+      expect(await updateReview(3, { credit: 'dj_name' }, { id: 'dj-2', manage: false })).toEqual({
+        outcome: 'forbidden',
+      });
+      expect(mockWrites.updated).toBeUndefined();
+    });
 
     test("a music director's patch of a review's text succeeds", async () => {
       script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);

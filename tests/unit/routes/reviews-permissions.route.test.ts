@@ -140,6 +140,7 @@ describe('PATCH /reviews/:id', () => {
   test.each([
     ['not_found', 404],
     ['forbidden', 403],
+    ['consent_forbidden', 403],
     ['text_required', 400],
   ])('%s is a %i', async (outcome, status) => {
     mockRole('dj');
@@ -147,27 +148,41 @@ describe('PATCH /reviews/:id', () => {
     expect((await patch({ review: null })).status).toBe(status);
   });
 
-  test.each([{ credit: 'dj_name' }, { publish_website: true }, { publish_apps: false }, { publish_instagram: true }])(
-    "a music director's patch carrying consent %j reaches the service as a manager and its forbidden is a 403",
+  test.each([
+    { credit: 'dj_name' },
+    { credit: null },
+    { publish_website: true },
+    { publish_apps: false },
+    { publish_instagram: true },
+  ])(
+    "a music director's patch carrying consent %j reaches the service as a manager, and its consent_forbidden is a 403 naming the consent rule",
     async (body) => {
       mockRole('musicDirector');
-      mockUpdate.mockResolvedValue({ outcome: 'forbidden' });
+      mockUpdate.mockResolvedValue({ outcome: 'consent_forbidden' });
       const res = await patch(body);
-      expect(res.status).toBe(403);
+      expect([res.status, res.body.message]).toEqual([403, "Only the review's author may set its publishing choices"]);
       expect(mockUpdate).toHaveBeenCalledWith(3, body, { id: 'caller-id', manage: true });
     }
   );
 
-  test("the linked author of an on-behalf review sets consent and an update is a 200 without a 'locked' field", async () => {
-    mockRole('dj');
-    const res = await patch({ credit: 'real_name', publish_apps: true });
-    expect(res.status).toBe(200);
-    expect(res.body).not.toHaveProperty('locked');
+  test('the plain forbidden keeps its own message, so a client can tell it from the consent refusal', async () => {
+    mockRole('musicDirector');
+    mockUpdate.mockResolvedValue({ outcome: 'forbidden' });
+    const res = await patch({ credit: 'dj_name', review: 'late edit' });
+    expect([res.status, res.body.message]).toEqual([403, 'You may not edit this review']);
   });
 
-  test("a patch of a printed review's text is a 200: the service has no locked outcome to map", async () => {
+  test("a DJ's consent keys reach the service as a non-manager, and the service's updated review is the 200 body", async () => {
     mockRole('dj');
-    expect((await patch({ review: 'late edit' })).status).toBe(200);
+    const review = { id: 3, status: 'submitted', credit: 'real_name', publish_apps: true };
+    mockUpdate.mockResolvedValue({ outcome: 'updated', review });
+    const res = await patch({ credit: 'real_name', publish_apps: true });
+    expect([res.status, res.body]).toEqual([200, review]);
+    expect(mockUpdate).toHaveBeenCalledWith(
+      3,
+      { credit: 'real_name', publish_apps: true },
+      { id: 'caller-id', manage: false }
+    );
   });
 
   test.each([['abc'], ['0'], ['2147483648']])('id %s is a 400 naming the review, before any query', async (id) => {
