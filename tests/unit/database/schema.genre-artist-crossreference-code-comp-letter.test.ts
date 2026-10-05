@@ -1,8 +1,9 @@
 /**
  * Schema-source assertions for `genre_artist_crossreference.code_comp_letter` (BS#2833, epic BS#2828). The
  * runtime behaviour of the constraints is covered against a real Postgres by
- * `tests/integration/genre-artist-crossreference-code-comp-letter.spec.js`; this guards that `schema.ts` and the
- * migration agree on the column, the two CHECKs and the partial unique index, and that the migration adds no more.
+ * `tests/integration/genre-artist-crossreference-code-comp-letter.spec.js`; this asserts that `schema.ts` declares the
+ * column, that the migration SQL contains the column, the partial unique index and the two CHECKs, and that the
+ * migration is additive (no DROP, UPDATE or SET NOT NULL).
  */
 
 import * as fs from 'fs';

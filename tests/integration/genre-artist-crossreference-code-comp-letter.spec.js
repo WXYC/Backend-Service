@@ -115,14 +115,38 @@ describe('genre_artist_crossreference.code_comp_letter (real PG)', () => {
     await insertSlot(await seedArtist('Other'), GENRE_OTHER, 0, 'M');
   });
 
+  // The V/A-coupling rule as a query over every lettered row; returns the rows that break it.
+  const vaCouplingOffenders = () => sql`
+    SELECT gac.artist_id, gac.genre_id, gac.code_comp_letter, a.code_letters
+      FROM ${sql(SCHEMA)}.genre_artist_crossreference gac
+      JOIN ${sql(SCHEMA)}.artists a ON a.id = gac.artist_id
+     WHERE gac.code_comp_letter IS NOT NULL
+       AND a.code_letters IS DISTINCT FROM 'V/A'
+  `;
+
   test('every row with a code_comp_letter belongs to an artist whose code_letters is V/A', async () => {
-    const offenders = await sql`
-      SELECT gac.artist_id, gac.genre_id, gac.code_comp_letter, a.code_letters
-        FROM ${sql(SCHEMA)}.genre_artist_crossreference gac
-        JOIN ${sql(SCHEMA)}.artists a ON a.id = gac.artist_id
-       WHERE gac.code_comp_letter IS NOT NULL
-         AND a.code_letters IS DISTINCT FROM 'V/A'
-    `;
-    expect(offenders).toEqual([]);
+    // Real V/A probe: must not be reported.
+    await insertSlot(await seedArtist('Coupled'), GENRE_ROCK, 0, 'M');
+
+    expect(await vaCouplingOffenders()).toEqual([]);
+  });
+
+  // Negative control: the database admits a letter on a non-V/A artist (the slot CHECK only needs
+  // artist_genre_code = 0, which UNK shares), so the coupling query has to be the thing that catches it.
+  test('the V/A-coupling query reports a letter seeded on a non-V/A artist (negative control)', async () => {
+    const offenderId = await seedArtist('Offender', 'UNK');
+    await insertSlot(offenderId, GENRE_ROCK, 0, 'Q');
+    await insertSlot(await seedArtist('Coupled'), GENRE_OTHER, 0, 'M');
+
+    const offenders = await vaCouplingOffenders();
+
+    expect(offenders).toEqual([
+      expect.objectContaining({
+        artist_id: offenderId,
+        genre_id: GENRE_ROCK,
+        code_comp_letter: 'Q',
+        code_letters: 'UNK',
+      }),
+    ]);
   });
 });
