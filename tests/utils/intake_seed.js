@@ -1,18 +1,33 @@
 /**
- * Shared seeders for the intake integration specs (`intake-items-schema`,
- * `intake-items`, `library-restore-deleted`, and the intake slices that follow).
+ * Shared seeders for the intake and review integration specs (`tests/integration/intake-*.spec.js`,
+ * `reviews*.spec.js` and `library-restore-*.spec.js`, and the slices that follow). `reviews.spec.js` and
+ * `intake-items.spec.js` take their releases, reviews and form-archive reviews from here, and
+ * `intake-seed.spec.js` covers the seeders themselves. A spec that needs a user, an intake item, a
+ * library release, a review or a form-archive review seeds it here and does not hand-write the INSERT.
  *
  * `auth_user` is better-auth's table and lives in the `public` schema, NOT in
  * `${WXYC_SCHEMA_NAME}` like every domain table. It is therefore written
  * unqualified here, and nowhere else should a spec hand-write
  * `INSERT INTO auth_user` (a `"wxyc_schema".auth_user` qualification fails
- * with "relation does not exist"). `intake_items` is a domain table and is
- * schema-qualified.
+ * with "relation does not exist"). `intake_items`, `artists`, `library`, `genres`, `reviews` and
+ * `album_review_submissions` are domain tables and are schema-qualified.
+ *
+ * Which seeders have a remover: users (`removeSeededAuthUsers`), releases and their artists
+ * (`removeSeededLibraryReleases`) and form-archive reviews (`removeSeededFormSubmissions`). Intake items
+ * (`seedIntakeItem`) and reviews (`seedReview`) have none: an item's cleanup is the caller's, and a review
+ * goes when the release or item it names is deleted (`ON DELETE CASCADE`).
  *
  * Everything runs on the shared `getTestDb()` pool; callers must not end it.
  *
  * Usage:
- *   const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem, managerAccessToken } = require('../utils/intake_seed');
+ *   const {
+ *     seedAuthUser, removeSeededAuthUsers,
+ *     seedIntakeItem,
+ *     seedLibraryRelease, removeSeededLibraryReleases,
+ *     seedReview,
+ *     seedFormSubmission, removeSeededFormSubmissions,
+ *     managerAccessToken,
+ *   } = require('../utils/intake_seed');
  */
 
 const { getTestDb } = require('./db');
@@ -75,20 +90,26 @@ async function seedIntakeItem(overrides = {}) {
  * Insert one `artists` row and one `library` row and return the library row. Defaults: Juana Molina,
  * *DOGA*, the fixture format and the first genre by id. `overrides` may set any `library` column; when it
  * sets `artist_id` that artist is used and no `artists` row is inserted, so two releases can share one
- * artist. `code_number` is random per call (a `smallint`; the schema does not enforce uniqueness, the
- * randomness just keeps seeded rows clear of specs that look at call numbers). Ids are remembered for
- * `removeSeededLibraryReleases`.
+ * artist. The denormalized `library.artist_name` then defaults to that artist's own name, read from
+ * `artists`, unless `overrides` sets `artist_name`. `code_number` is random per call (a `smallint`; the
+ * schema does not enforce uniqueness, the randomness just keeps seeded rows clear of specs that look at
+ * call numbers). Ids are remembered for `removeSeededLibraryReleases`.
  */
 async function seedLibraryRelease(overrides = {}) {
   const sql = getTestDb();
-  const artistName = overrides.artist_name ?? 'Juana Molina';
   let artistId = overrides.artist_id;
+  let artistName = overrides.artist_name;
   if (artistId === undefined) {
+    artistName ??= 'Juana Molina';
     const [artist] = await sql`
       INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
       VALUES (${artistName}, ${artistName}, 'ZZ') RETURNING id`;
     artistId = artist.id;
     seededArtistIds.push(artistId);
+  } else if (artistName === undefined) {
+    const [artist] = await sql`SELECT artist_name FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
+    if (!artist) throw new Error(`seedLibraryRelease: no artists row with id ${artistId}`);
+    artistName = artist.artist_name;
   }
   const [genre] = await sql`SELECT id FROM ${sql(SCHEMA)}.genres ORDER BY id LIMIT 1`;
   const row = {
@@ -109,6 +130,11 @@ async function seedLibraryRelease(overrides = {}) {
  * Delete the `library` rows `seedLibraryRelease` created, by id, then the `artists` rows it created.
  * Deleting a release also removes the reviews and intake items stamped with it: `reviews.album_id` and
  * `intake_items.album_id` are both `ON DELETE CASCADE`.
+ *
+ * Only the seeded `library` rows go first. A `library` row a spec created some other way under a seeded
+ * artist (an API call that files a new release, say) must be deleted by the spec before this runs: the
+ * artists delete would otherwise fail on the `library.artist_id` foreign key (NO ACTION) and fail the
+ * `afterAll` hook, leaking the artist into the rest of the `--runInBand` run.
  */
 async function removeSeededLibraryReleases() {
   const sql = getTestDb();
