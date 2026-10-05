@@ -3,19 +3,21 @@
  * `reviews*.spec.js` and `library-restore-*.spec.js`, and the slices that follow). `reviews.spec.js` and
  * `intake-items.spec.js` take their releases, reviews and form-archive reviews from here, and
  * `intake-seed.spec.js` covers the seeders themselves. A spec that needs a user, an intake item, a
- * library release, a review or a form-archive review seeds it here and does not hand-write the INSERT.
+ * library release, a review, a review revision, a print or an FCC note, or a form-archive review seeds it here and does not hand-write the INSERT.
  *
  * `auth_user` is better-auth's table and lives in the `public` schema, NOT in
  * `${WXYC_SCHEMA_NAME}` like every domain table. It is therefore written
  * unqualified here, and nowhere else should a spec hand-write
  * `INSERT INTO auth_user` (a `"wxyc_schema".auth_user` qualification fails
- * with "relation does not exist"). `intake_items`, `artists`, `library`, `genres`, `reviews` and
- * `album_review_submissions` are domain tables and are schema-qualified.
+ * with "relation does not exist"). `intake_items`, `artists`, `library`, `genres`, `reviews`, `review_revisions`,
+ * `review_prints`, `fcc_notes` and `album_review_submissions` are domain tables and are schema-qualified.
  *
  * Which seeders have a remover: users (`removeSeededAuthUsers`), releases and their artists
  * (`removeSeededLibraryReleases`) and form-archive reviews (`removeSeededFormSubmissions`). Intake items
- * (`seedIntakeItem`) and reviews (`seedReview`) have none: an item's cleanup is the caller's, and a review
- * goes when the release or item it names is deleted (`ON DELETE CASCADE`).
+ * (`seedIntakeItem`) have none: an item's cleanup is the caller's. Reviews (`seedReview`), revisions
+ * (`seedReviewRevision`), prints (`seedReviewPrint`) and FCC notes (`seedFccNote`) have none: a review goes
+ * when the release or item it names is deleted, a revision with its review, and a print or note with its
+ * item or release (all `ON DELETE CASCADE`). `seedReview` writes no revision.
  *
  * Everything runs on the shared `getTestDb()` pool; callers must not end it.
  *
@@ -24,7 +26,7 @@
  *     seedAuthUser, removeSeededAuthUsers,
  *     seedIntakeItem,
  *     seedLibraryRelease, removeSeededLibraryReleases,
- *     seedReview,
+ *     seedReview, seedReviewRevision, seedReviewPrint, seedFccNote,
  *     seedFormSubmission, removeSeededFormSubmissions,
  *     managerAccessToken,
  *   } = require('../utils/intake_seed');
@@ -35,6 +37,9 @@ const getAccessToken = require('./better_auth');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const FORMAT_ID = 1; // exists in the integration fixture
+// `code_letters` of every artist `seedLibraryRelease` creates. Not 'ZZ': album-reviews, digital-archive-playback
+// and intake-transitions sweep their own artists on `code_letters = 'ZZ'` and would delete a seeded one still in use.
+const SEEDED_CODE_LETTERS = 'ZQ';
 
 const seededUserIds = [];
 const seededLibraryIds = [];
@@ -103,7 +108,7 @@ async function seedLibraryRelease(overrides = {}) {
     artistName ??= 'Juana Molina';
     const [artist] = await sql`
       INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
-      VALUES (${artistName}, ${artistName}, 'ZZ') RETURNING id`;
+      VALUES (${artistName}, ${artistName}, ${SEEDED_CODE_LETTERS}) RETURNING id`;
     artistId = artist.id;
     seededArtistIds.push(artistId);
   } else if (artistName === undefined) {
@@ -168,6 +173,56 @@ async function seedReview(overrides = {}) {
 }
 
 /**
+ * Insert a `review_revisions` row and return it. `overrides` must set `review_id`. `revision` defaults to the
+ * review's highest revision plus one (1 for the first). `seedReview` writes no revision: a test that needs a
+ * submitted review's revision 1 (which the submit route writes in production) seeds it here. No remove
+ * function: revisions go with their review (`ON DELETE CASCADE`).
+ */
+async function seedReviewRevision(overrides = {}) {
+  if (overrides.review_id == null) {
+    throw new Error('seedReviewRevision needs review_id in overrides');
+  }
+  const sql = getTestDb();
+  const row = { review: 'A short review.', ...overrides };
+  if (row.revision === undefined) {
+    const [{ next }] = await sql`
+      SELECT COALESCE(MAX(revision), 0) + 1 AS next
+      FROM ${sql(SCHEMA)}.review_revisions WHERE review_id = ${row.review_id}`;
+    row.revision = next;
+  }
+  const [revision] = await sql`INSERT INTO ${sql(SCHEMA)}.review_revisions ${sql(row)} RETURNING *`;
+  return revision;
+}
+
+/**
+ * Insert a `review_prints` row and return it. `overrides` must name `intake_item_id` or `album_id` (CHECK
+ * `review_prints_target_ck`). No remove function: a print goes when its item or release is deleted.
+ */
+async function seedReviewPrint(overrides = {}) {
+  if (overrides.intake_item_id == null && overrides.album_id == null) {
+    throw new Error('seedReviewPrint needs intake_item_id or album_id in overrides (review_prints_target_ck)');
+  }
+  const sql = getTestDb();
+  const [print] = await sql`INSERT INTO ${sql(SCHEMA)}.review_prints ${sql(overrides)} RETURNING *`;
+  return print;
+}
+
+/**
+ * Insert an `fcc_notes` row and return it, with placeholder `track` and `note` text and the column default
+ * for `status`. `overrides` must name `album_id` or `intake_item_id` (CHECK `fcc_notes_target_ck`). No remove
+ * function: a note goes when its release or item is deleted.
+ */
+async function seedFccNote(overrides = {}) {
+  if (overrides.album_id == null && overrides.intake_item_id == null) {
+    throw new Error('seedFccNote needs album_id or intake_item_id in overrides (fcc_notes_target_ck)');
+  }
+  const sql = getTestDb();
+  const row = { track: 'la paradoja', note: 'A placeholder note.', ...overrides };
+  const [note] = await sql`INSERT INTO ${sql(SCHEMA)}.fcc_notes ${sql(row)} RETURNING *`;
+  return note;
+}
+
+/**
  * Insert an `album_review_submissions` row (the Google Form archive) and remember its id for
  * `removeSeededFormSubmissions`. `overrides` may set any column. Returns the inserted row.
  */
@@ -207,6 +262,9 @@ module.exports = {
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
+  seedReviewRevision,
+  seedReviewPrint,
+  seedFccNote,
   seedFormSubmission,
   removeSeededFormSubmissions,
   managerAccessToken,
