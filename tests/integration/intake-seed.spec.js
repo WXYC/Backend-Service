@@ -1,11 +1,13 @@
 /**
  * The release, review, revision, print, FCC-note and form-review seeders in `tests/utils/intake_seed.js`:
- * two default releases are distinct, a review, print or note seeded on a release is removed with it, and
- * removal leaves no artist behind.
+ * two default releases are distinct, a review, print or note seeded on a release is removed with it, a print
+ * or note seeded on an intake item goes with the item, revision numbers continue from the review's own highest,
+ * and removal leaves no artist behind.
  */
 
 const { getTestDb } = require('../utils/db');
 const {
+  seedIntakeItem,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -18,8 +20,13 @@ const {
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
-describe('intake_seed release, review and form-review seeders', () => {
+describe('intake_seed release, review, revision, print, FCC-note and form-review seeders', () => {
+  // Intake items have no remover; the item cases delete theirs, and this catches one left by a failed case.
+  const itemIds = [];
+
   afterAll(async () => {
+    const sql = getTestDb();
+    if (itemIds.length > 0) await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE id = ANY(${itemIds})`;
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
   });
@@ -68,23 +75,36 @@ describe('intake_seed release, review and form-review seeders', () => {
     await expect(seedReview()).rejects.toThrow(/album_id or intake_item_id/);
   });
 
-  test("a draft review leaves submitted_at NULL, and a seeded artist's code_letters is not 'ZZ'", async () => {
-    const sql = getTestDb();
+  test('a draft review leaves submitted_at NULL', async () => {
     const release = await seedLibraryRelease();
     const draft = await seedReview({ album_id: release.id, status: 'draft' });
     expect(draft.submitted_at).toBeNull();
-    const [artist] = await sql`SELECT code_letters FROM ${sql(SCHEMA)}.artists WHERE id = ${release.artist_id}`;
-    expect(artist.code_letters).not.toBe('ZZ');
   });
 
-  test('two revisions seeded on one review are numbered 1 and 2', async () => {
+  test("a seeded artist's code_letters is neither 'ZZ' nor 'ZQ', which other specs sweep or bucket on", async () => {
+    const sql = getTestDb();
+    const release = await seedLibraryRelease();
+    const [artist] = await sql`SELECT code_letters FROM ${sql(SCHEMA)}.artists WHERE id = ${release.artist_id}`;
+    // 'ZZ' is swept by album-reviews, digital-archive-playback and intake-transitions; 'ZQ' is the BS#2489
+    // bucket whose exact membership library.spec.js asserts.
+    expect(['ZZ', 'ZQ']).not.toContain(artist.code_letters);
+  });
+
+  test("a revision's default number is its review's highest plus one, not a count or another review's", async () => {
     const release = await seedLibraryRelease();
     const review = await seedReview({ album_id: release.id });
+    const other = await seedReview({ album_id: release.id, status: 'draft' });
     const first = await seedReviewRevision({ review_id: review.id });
     const second = await seedReviewRevision({ review_id: review.id });
     expect([first.revision, second.revision]).toEqual([1, 2]);
-    const explicit = await seedReviewRevision({ review_id: review.id, revision: 7 });
-    expect(explicit.revision).toBe(7);
+    const explicit = await seedReviewRevision({ review_id: review.id, revision: 5 });
+    expect(explicit.revision).toBe(5);
+    // Over the gap, MAX + 1 gives 6 where COUNT + 1 would give 4.
+    const afterGap = await seedReviewRevision({ review_id: review.id });
+    expect(afterGap.revision).toBe(6);
+    // The other review's first default is still 1 where a table-wide MAX + 1 would give 7.
+    const otherFirst = await seedReviewRevision({ review_id: other.id });
+    expect(otherFirst.revision).toBe(1);
   });
 
   test('the revision, print and note seeders refuse a missing target', async () => {
@@ -105,6 +125,32 @@ describe('intake_seed release, review and form-review seeders', () => {
     const prints = await sql`SELECT id FROM ${sql(SCHEMA)}.review_prints WHERE id = ${print.id}`;
     const notes = await sql`SELECT id FROM ${sql(SCHEMA)}.fcc_notes WHERE id = ${note.id}`;
     expect(prints).toHaveLength(0);
+    expect(notes).toHaveLength(0);
+  });
+
+  test('a print seeded with only an intake item as its target inserts, and goes with the item', async () => {
+    const sql = getTestDb();
+    const item = await seedIntakeItem();
+    itemIds.push(item.id);
+    const print = await seedReviewPrint({ intake_item_id: item.id });
+    expect(print).toMatchObject({ intake_item_id: item.id, album_id: null });
+
+    await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE id = ${item.id}`;
+
+    const prints = await sql`SELECT id FROM ${sql(SCHEMA)}.review_prints WHERE id = ${print.id}`;
+    expect(prints).toHaveLength(0);
+  });
+
+  test('a note seeded with only an intake item as its target inserts, and goes with the item', async () => {
+    const sql = getTestDb();
+    const item = await seedIntakeItem();
+    itemIds.push(item.id);
+    const note = await seedFccNote({ intake_item_id: item.id });
+    expect(note).toMatchObject({ intake_item_id: item.id, album_id: null, status: 'reported' });
+
+    await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE id = ${item.id}`;
+
+    const notes = await sql`SELECT id FROM ${sql(SCHEMA)}.fcc_notes WHERE id = ${note.id}`;
     expect(notes).toHaveLength(0);
   });
 

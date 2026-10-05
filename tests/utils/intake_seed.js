@@ -3,7 +3,8 @@
  * `reviews*.spec.js` and `library-restore-*.spec.js`, and the slices that follow). `reviews.spec.js` and
  * `intake-items.spec.js` take their releases, reviews and form-archive reviews from here, and
  * `intake-seed.spec.js` covers the seeders themselves. A spec that needs a user, an intake item, a
- * library release, a review, a review revision, a print or an FCC note, or a form-archive review seeds it here and does not hand-write the INSERT.
+ * library release, a review, a review revision, a print, an FCC note or a form-archive review seeds it
+ * here and does not hand-write the INSERT.
  *
  * `auth_user` is better-auth's table and lives in the `public` schema, NOT in
  * `${WXYC_SCHEMA_NAME}` like every domain table. It is therefore written
@@ -17,7 +18,11 @@
  * (`seedIntakeItem`) have none: an item's cleanup is the caller's. Reviews (`seedReview`), revisions
  * (`seedReviewRevision`), prints (`seedReviewPrint`) and FCC notes (`seedFccNote`) have none: a review goes
  * when the release or item it names is deleted, a revision with its review, and a print or note with its
- * item or release (all `ON DELETE CASCADE`). `seedReview` writes no revision.
+ * item or release (all `ON DELETE CASCADE`). `seedReview` writes no revision: a test that needs a submitted
+ * review's revision 1 (which the submit route of WXYC/Backend-Service#2854 will write once it lands; no route
+ * writes `review_revisions` yet) seeds it with `seedReviewRevision`, passing the review's fields and
+ * `edited_by` when they must match, since a seeded revision otherwise carries placeholder text and a NULL
+ * `edited_by`.
  *
  * Everything runs on the shared `getTestDb()` pool; callers must not end it.
  *
@@ -37,9 +42,13 @@ const getAccessToken = require('./better_auth');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const FORMAT_ID = 1; // exists in the integration fixture
-// `code_letters` of every artist `seedLibraryRelease` creates. Not 'ZZ': album-reviews, digital-archive-playback
-// and intake-transitions sweep their own artists on `code_letters = 'ZZ'` and would delete a seeded one still in use.
-const SEEDED_CODE_LETTERS = 'ZQ';
+// `code_letters` of every artist `seedLibraryRelease` creates. The seeder removes its artists by id, so the value
+// needs no meaning; what it must not do is collide with a value another spec sweeps on or asserts over. 'ZZ' is
+// what album-reviews, digital-archive-playback and intake-transitions delete their own artists by
+// (`code_letters = 'ZZ'`), and 'ZQ' is the BS#2489 bucket whose exact membership and order library.spec.js asserts.
+// 'SEED' is the column's full four characters, so it sits outside the two-letter space the catalog and the specs'
+// bucket constants draw from, and `git grep -n "'SEED'" tests/` finds nothing else. Check that before reusing it.
+const SEEDED_CODE_LETTERS = 'SEED';
 
 const seededUserIds = [];
 const seededLibraryIds = [];
@@ -133,8 +142,9 @@ async function seedLibraryRelease(overrides = {}) {
 
 /**
  * Delete the `library` rows `seedLibraryRelease` created, by id, then the `artists` rows it created.
- * Deleting a release also removes the reviews and intake items stamped with it: `reviews.album_id` and
- * `intake_items.album_id` are both `ON DELETE CASCADE`.
+ * Deleting a release also removes the reviews, intake items, prints and FCC notes stamped with it
+ * (`reviews.album_id`, `intake_items.album_id`, `review_prints.album_id` and `fcc_notes.album_id` are all
+ * `ON DELETE CASCADE`), and each review's revisions with the review.
  *
  * Only the seeded `library` rows go first. A `library` row a spec created some other way under a seeded
  * artist (an API call that files a new release, say) must be deleted by the spec before this runs: the
@@ -175,8 +185,10 @@ async function seedReview(overrides = {}) {
 /**
  * Insert a `review_revisions` row and return it. `overrides` must set `review_id`. `revision` defaults to the
  * review's highest revision plus one (1 for the first). `seedReview` writes no revision: a test that needs a
- * submitted review's revision 1 (which the submit route writes in production) seeds it here. No remove
- * function: revisions go with their review (`ON DELETE CASCADE`).
+ * submitted review's revision 1 (which the submit route of WXYC/Backend-Service#2854 will write once it lands;
+ * no route writes `review_revisions` yet) seeds it here. The defaults are placeholder `review` text and a NULL
+ * `edited_by`, not the review's own, so a test that needs the revision to match its review passes the review's
+ * fields and `edited_by` in `overrides`. No remove function: revisions go with their review (`ON DELETE CASCADE`).
  */
 async function seedReviewRevision(overrides = {}) {
   if (overrides.review_id == null) {
