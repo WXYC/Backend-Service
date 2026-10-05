@@ -50,7 +50,7 @@ app.use(express.json());
 app.use('/reviews', reviews_route);
 app.use(errorHandler);
 
-const REVIEW = { id: 3, status: 'draft', locked: false };
+const REVIEW = { id: 3, status: 'draft' };
 const post = (body: object) => request(app).post('/reviews').set('Authorization', 'Bearer t').send(body);
 const patch = (body: object, id = '3') =>
   request(app).patch(`/reviews/${id}`).set('Authorization', 'Bearer t').send(body);
@@ -147,12 +147,27 @@ describe('PATCH /reviews/:id', () => {
     expect((await patch({ review: null })).status).toBe(status);
   });
 
-  test('locked is a 409 with the closed reason', async () => {
+  test.each([{ credit: 'dj_name' }, { publish_website: true }, { publish_apps: false }, { publish_instagram: true }])(
+    "a music director's patch carrying consent %j reaches the service as a manager and its forbidden is a 403",
+    async (body) => {
+      mockRole('musicDirector');
+      mockUpdate.mockResolvedValue({ outcome: 'forbidden' });
+      const res = await patch(body);
+      expect(res.status).toBe(403);
+      expect(mockUpdate).toHaveBeenCalledWith(3, body, { id: 'caller-id', manage: true });
+    }
+  );
+
+  test("the linked author of an on-behalf review sets consent and an update is a 200 without a 'locked' field", async () => {
     mockRole('dj');
-    mockUpdate.mockResolvedValue({ outcome: 'locked' });
-    const res = await patch({ review: 'late edit' });
-    expect(res.status).toBe(409);
-    expect(res.body.reason).toBe('locked');
+    const res = await patch({ credit: 'real_name', publish_apps: true });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toHaveProperty('locked');
+  });
+
+  test("a patch of a printed review's text is a 200: the service has no locked outcome to map", async () => {
+    mockRole('dj');
+    expect((await patch({ review: 'late edit' })).status).toBe(200);
   });
 
   test.each([['abc'], ['0'], ['2147483648']])('id %s is a 400 naming the review, before any query', async (id) => {
