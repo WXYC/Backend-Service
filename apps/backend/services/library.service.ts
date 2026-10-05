@@ -7279,14 +7279,23 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // of leaving the subtree unrecoverable. Each child is just its FK column —
     // the table it reads and the JSON key it lands under are derived from that
     // column, so a table/column mismatch is unrepresentable rather than merely
-    // documented (see `CatalogDeleteChild`). `rotation_urls` and
-    // `digital_asset_file` are the depth-2 children — their FKs point at
-    // `rotation.id` and `digital_asset.id`, not at `library.id`, so each rides
-    // along with its own parent's capture via `via` rather than a second
-    // top-level entry keyed on `album_id`. Those grandchild captures are
-    // atomic only because of the `.for('update')` taken on the release's
-    // `rotation` rows and on its `digital_asset` rows above, not because of
-    // anything here — see the notes on those locks. `album_metadata`,
+    // documented (see `CatalogDeleteChild`). `rotation_urls`,
+    // `digital_asset_file` and `review_revisions` are the depth-2 children —
+    // their FKs point at `rotation.id`, `digital_asset.id` and `reviews.id`,
+    // not at `library.id`, so each rides along with its own parent's capture
+    // via `via` rather than a second top-level entry keyed on `album_id`. The
+    // first two grandchild captures are atomic only because of the
+    // `.for('update')` taken on the release's `rotation` rows and on its
+    // `digital_asset` rows above, not because of anything here — see the
+    // notes on those locks. `review_revisions` has no such lock here: its
+    // capture is atomic only because every revision writer (the edit
+    // BS#2859 adds to `updateReview`, the submit in BS#2854) locks its review
+    // row `FOR UPDATE` before inserting, which conflicts with the `FOR SHARE`
+    // the `reviews.album_id` entry below takes on this release's reviews
+    // before `review_revisions` is read. That writer-side lock is the
+    // invariant: a writer holding only the FK's `FOR KEY SHARE` on the review
+    // could insert a revision between this capture and the cascade, and the
+    // revision would be destroyed with nothing in the snapshot. `album_metadata`,
     // `library_identity` + `library_identity_source`, and
     // `uncovered_release_search_markers` are deliberately NOT in this list
     // — see the `catalog_delete_snapshot` docstring in `schema.ts` for why

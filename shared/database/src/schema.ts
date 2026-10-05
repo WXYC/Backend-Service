@@ -3002,8 +3002,12 @@ export type NewIntakeItemPass = InferInsertModel<typeof intake_item_passes>;
 /**
  * Every saved version of a submitted review (slice 9b of
  * WXYC/Backend-Service#2791). Deleting a review deletes its history. `edited_by`
- * is a snapshot of `auth_user.name`, cut to 128 code points like
- * `reviews.author`; `real_name` is never read. Consent fields are not versioned.
+ * is a display-name snapshot cut to 128 code points like `reviews.author`, and
+ * `docs/pii.md` classifies it the same way (Mixed): revision 1 copies
+ * `reviews.author`, which for an on-behalf review is free text a music
+ * director typed and often a real name, and a later edit snapshots the
+ * editor's `auth_user.name`. `real_name` is never read. Consent fields are not
+ * versioned.
  */
 export const review_revisions = wxyc_schema.table(
   'review_revisions',

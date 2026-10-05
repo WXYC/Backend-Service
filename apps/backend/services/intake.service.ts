@@ -38,8 +38,20 @@ export type IntakeItemState = (typeof intakeItemStateEnum.enumValues)[number];
 /** States past which an item is catalogued, so it can no longer be edited or deleted. */
 export const FILED_STATES: IntakeItemState[] = ['filed', 'finalized'];
 
-/** Audit columns the contract's `IntakeItem` does not carry. */
-const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by']);
+/**
+ * Columns the contract's `IntakeItem` does not carry: the audit columns, and the
+ * accepted-review columns, which WXYC/Backend-Service#2860 exposes once
+ * WXYC/wxyc-shared#571 declares them.
+ */
+const UNEXPOSED = new Set([
+  'logged_by',
+  'filed_by',
+  'printed_by',
+  'finalized_by',
+  'accepted_review_id',
+  'accepted_by',
+  'accepted_at',
+]);
 
 export const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
 // coalesce: no CHECK ties checked_out_at to the state, and a NULL stamp must read false, never SQL NULL.
@@ -48,7 +60,7 @@ const overdue = sql<boolean>`coalesce(${intake_items.state} = 'checked_out' AND 
 /** Mirror of the contract's `IntakeItem` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x. Timestamps serialize to ISO strings. */
 export type IntakeItemResponse = Omit<
   typeof intake_items.$inferSelect,
-  'logged_by' | 'filed_by' | 'printed_by' | 'finalized_by'
+  'logged_by' | 'filed_by' | 'printed_by' | 'finalized_by' | 'accepted_review_id' | 'accepted_by' | 'accepted_at'
 > & {
   effective_state: IntakeItemState;
   overdue: boolean;
