@@ -43,11 +43,12 @@ const getAccessToken = require('./better_auth');
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const FORMAT_ID = 1; // exists in the integration fixture
 // `code_letters` of every artist `seedLibraryRelease` creates. The seeder removes its artists by id, so the value
-// needs no meaning; what it must not do is collide with a value another spec sweeps on or asserts over. 'ZZ' is
-// what album-reviews, digital-archive-playback and intake-transitions delete their own artists by
-// (`code_letters = 'ZZ'`), and 'ZQ' is the BS#2489 bucket whose exact membership and order library.spec.js asserts.
-// 'SEED' is the column's full four characters, so it sits outside the two-letter space the catalog and the specs'
-// bucket constants draw from, and `git grep -n "'SEED'" tests/` finds nothing else. Check that before reusing it.
+// needs no meaning; what it must not do is appear in another spec's cleanup sweep or bucket assertion. 'ZZ' is
+// out: album-reviews deletes artists named Juana Molina, this seeder's default, with `code_letters = 'ZZ'`, and
+// digital-archive-playback and intake-transitions sweep on it under their own names. 'ZQ' is out: it is the
+// BS#2489 bucket whose exact membership and order library.spec.js asserts. 'SEED' is four characters, the
+// column's full width, reads as what it is, and no other file under tests/ names it; `intake-seed.spec.js` walks
+// tests/ to keep it that way, so check `git grep -n "'SEED'" tests/` before using the value anywhere else.
 const SEEDED_CODE_LETTERS = 'SEED';
 
 const seededUserIds = [];
@@ -196,7 +197,7 @@ async function seedReviewRevision(overrides = {}) {
   }
   const sql = getTestDb();
   const row = { review: 'A short review.', ...overrides };
-  if (row.revision === undefined) {
+  if (row.revision == null) {
     const [{ next }] = await sql`
       SELECT COALESCE(MAX(revision), 0) + 1 AS next
       FROM ${sql(SCHEMA)}.review_revisions WHERE review_id = ${row.review_id}`;
@@ -280,4 +281,5 @@ module.exports = {
   seedFormSubmission,
   removeSeededFormSubmissions,
   managerAccessToken,
+  SEEDED_CODE_LETTERS,
 };
