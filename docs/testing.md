@@ -25,7 +25,7 @@ npm run test:integration
 - Tests run sequentially (`--runInBand`) because they share show state, DJ sessions, and flowsheet entries
 - 30-second timeout per test
 - Generates HTML report at `tests/report/report.html`
-- Intake and review specs seed users, intake items, library releases, reviews and form reviews through `tests/utils/intake_seed.js` (`seedAuthUser`, `seedIntakeItem`, `seedLibraryRelease`, `seedReview`, `seedFormSubmission` and their `removeSeeded*` pairs) and do not hand-write those `INSERT`s
+- Intake and review specs seed users, intake items, library releases, reviews and form reviews through `tests/utils/intake_seed.js` (`seedAuthUser`, `seedIntakeItem`, `seedLibraryRelease`, `seedReview`, `seedFormSubmission`) and do not hand-write those `INSERT`s. Users, releases (with the artists the seeder created) and form reviews have `removeSeeded*` functions (`removeSeededAuthUsers`, `removeSeededLibraryReleases`, `removeSeededFormSubmissions`); intake items and reviews do not, so the caller cleans up its intake items and a review goes by cascade when its release or item is deleted
 
 ## CI mock
 

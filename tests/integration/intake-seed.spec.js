@@ -45,6 +45,21 @@ describe('intake_seed release, review and form-review seeders', () => {
     expect(second.artist_id).toBe(first.artist_id);
   });
 
+  test("a release given only an artist_id carries that artist's name, not the default", async () => {
+    const sql = getTestDb();
+    const first = await seedLibraryRelease({ artist_name: 'Stereolab', album_title: 'Aluminum Tunes' });
+    const second = await seedLibraryRelease({ artist_id: first.artist_id, album_title: 'Dots and Loops' });
+    const [artist] = await sql`SELECT artist_name FROM ${sql(SCHEMA)}.artists WHERE id = ${second.artist_id}`;
+    expect(artist.artist_name).toBe('Stereolab');
+    expect(second.artist_name).toBe('Stereolab');
+  });
+
+  test("an explicit artist_name wins over the artist's own name", async () => {
+    const first = await seedLibraryRelease({ artist_name: 'Cat Power' });
+    const second = await seedLibraryRelease({ artist_id: first.artist_id, artist_name: 'Cat Power with Test Guest' });
+    expect(second.artist_name).toBe('Cat Power with Test Guest');
+  });
+
   test('seedReview refuses a review with no target', async () => {
     await expect(seedReview()).rejects.toThrow(/album_id or intake_item_id/);
   });
