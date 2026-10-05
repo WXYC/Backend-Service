@@ -839,6 +839,7 @@ export const genre_artist_crossreference = {
   artist_id: 'genre_artist_crossreference.artist_id',
   genre_id: 'genre_artist_crossreference.genre_id',
   artist_genre_code: 'genre_artist_crossreference.artist_genre_code',
+  code_comp_letter: 'genre_artist_crossreference.code_comp_letter',
 };
 
 // Pure ETL utility functions (copied from etl-utils.ts to avoid importing the real DB client)
