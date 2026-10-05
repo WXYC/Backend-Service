@@ -9,7 +9,12 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
-const { seedIntakeItem, managerAccessToken } = require('../utils/intake_seed');
+const {
+  seedIntakeItem,
+  seedLibraryRelease,
+  removeSeededLibraryReleases,
+  managerAccessToken,
+} = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-REVIEWS';
@@ -35,8 +40,7 @@ describe('/reviews create and edit (BS#2802)', () => {
       [global.primary_dj_id, global.secondary_dj_id],
     ]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE album_title = $1`, [`${PREFIX} release`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1 AND code_letters = 'ZY'`, [PREFIX]);
+    await removeSeededLibraryReleases();
   };
 
   beforeAll(async () => {
@@ -45,18 +49,7 @@ describe('/reviews create and edit (BS#2802)', () => {
     djB = createAuthRequest(request, global.secondary_access_token);
     sql = getTestDb();
     await cleanup();
-    const [{ id: formatId }] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format ORDER BY id LIMIT 1`);
-    const [genre] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".genres ORDER BY id LIMIT 1`);
-    const [artist] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters) VALUES ($1, $1, 'ZY') RETURNING id`,
-      [PREFIX]
-    );
-    const [lib] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
-       VALUES ($1, $2, $3, $4, 9104, $5) RETURNING id`,
-      [artist.id, genre.id, formatId, `${PREFIX} release`, PREFIX]
-    );
-    libraryId = lib.id;
+    libraryId = (await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} release` })).id;
   });
 
   afterAll(cleanup);
