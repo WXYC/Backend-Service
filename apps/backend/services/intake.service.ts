@@ -224,7 +224,6 @@ export const deleteIntakeItem = async (id: number) => {
 };
 
 export type IntakeAction = 'checkout' | 'release' | 'request' | 'cancel_request' | 'accept' | 'pass';
-/** The caller; `manage` is whether they hold `reviews: manage`. */
 
 const CLEAR_REQUEST = { requested_dj_id: null, requested_at: null };
 const TAKEN = (actor: ReviewsActor) => ({
