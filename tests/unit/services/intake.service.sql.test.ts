@@ -124,6 +124,19 @@ describe('buildIntakeSelect — passes', () => {
   });
 });
 
+describe('buildIntakeSelect — accepted-review columns (BS#2858)', () => {
+  // BS#2858 lands the columns with no reader; the contract's IntakeItem does not declare them until WXYC/wxyc-shared#571.
+  it('keeps accepted_review_id, accepted_by and accepted_at off the IntakeItem response until BS#2860 exposes them (flip this test there)', () => {
+    for (const includePasses of [false, true]) {
+      const { sql: text } = render({ includePasses });
+      expect(text).toContain(`"${SCHEMA}"."intake_items"."cited_album_id"`);
+      for (const column of ['accepted_review_id', 'accepted_by', 'accepted_at']) {
+        expect(text).not.toContain(`"${column}"`);
+      }
+    }
+  });
+});
+
 describe('buildTransition (BS#2798)', () => {
   const t = `"${SCHEMA}"."intake_items"`;
   const dj = { id: 'dj-1', manage: false };
