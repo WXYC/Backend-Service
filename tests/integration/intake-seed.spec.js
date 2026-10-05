@@ -1,6 +1,7 @@
 /**
- * The release, review and form-review seeders in `tests/utils/intake_seed.js`: two default releases
- * are distinct, a review seeded on one is removed with it, and removal leaves no artist behind.
+ * The release, review, revision, print, FCC-note and form-review seeders in `tests/utils/intake_seed.js`:
+ * two default releases are distinct, a review, print or note seeded on a release is removed with it, and
+ * removal leaves no artist behind.
  */
 
 const { getTestDb } = require('../utils/db');
@@ -8,6 +9,9 @@ const {
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
+  seedReviewRevision,
+  seedReviewPrint,
+  seedFccNote,
   seedFormSubmission,
   removeSeededFormSubmissions,
 } = require('../utils/intake_seed');
@@ -62,6 +66,46 @@ describe('intake_seed release, review and form-review seeders', () => {
 
   test('seedReview refuses a review with no target', async () => {
     await expect(seedReview()).rejects.toThrow(/album_id or intake_item_id/);
+  });
+
+  test("a draft review leaves submitted_at NULL, and a seeded artist's code_letters is not 'ZZ'", async () => {
+    const sql = getTestDb();
+    const release = await seedLibraryRelease();
+    const draft = await seedReview({ album_id: release.id, status: 'draft' });
+    expect(draft.submitted_at).toBeNull();
+    const [artist] = await sql`SELECT code_letters FROM ${sql(SCHEMA)}.artists WHERE id = ${release.artist_id}`;
+    expect(artist.code_letters).not.toBe('ZZ');
+  });
+
+  test('two revisions seeded on one review are numbered 1 and 2', async () => {
+    const release = await seedLibraryRelease();
+    const review = await seedReview({ album_id: release.id });
+    const first = await seedReviewRevision({ review_id: review.id });
+    const second = await seedReviewRevision({ review_id: review.id });
+    expect([first.revision, second.revision]).toEqual([1, 2]);
+    const explicit = await seedReviewRevision({ review_id: review.id, revision: 7 });
+    expect(explicit.revision).toBe(7);
+  });
+
+  test('the revision, print and note seeders refuse a missing target', async () => {
+    await expect(seedReviewRevision()).rejects.toThrow(/review_id/);
+    await expect(seedReviewPrint()).rejects.toThrow(/intake_item_id or album_id/);
+    await expect(seedFccNote()).rejects.toThrow(/album_id or intake_item_id/);
+  });
+
+  test('a print and a note seeded on a release are gone after removal, and a note defaults to reported', async () => {
+    const sql = getTestDb();
+    const release = await seedLibraryRelease();
+    const print = await seedReviewPrint({ album_id: release.id });
+    const note = await seedFccNote({ album_id: release.id });
+    expect(note.status).toBe('reported');
+
+    await removeSeededLibraryReleases();
+
+    const prints = await sql`SELECT id FROM ${sql(SCHEMA)}.review_prints WHERE id = ${print.id}`;
+    const notes = await sql`SELECT id FROM ${sql(SCHEMA)}.fcc_notes WHERE id = ${note.id}`;
+    expect(prints).toHaveLength(0);
+    expect(notes).toHaveLength(0);
   });
 
   test('a form submission is removed by id', async () => {
