@@ -95,12 +95,18 @@ const CONSENT_FIELDS = ['publish_website', 'publish_apps', 'publish_instagram', 
 type RevisionContent = Pick<Review, (typeof CONTENT_FIELDS)[number]>;
 type Tx = Pick<typeof db, 'select' | 'insert'>;
 
+/** The five content fields of a row, as a revision stores them. */
+const pickContent = (row: RevisionContent) =>
+  Object.fromEntries(CONTENT_FIELDS.map((key) => [key, row[key]])) as RevisionContent;
+
 /**
  * Who may edit, as a pure decision. A draft is visible only to its author and whoever recorded
- * it, so anyone else gets `not_found` before any grant matters. The consent fields
- * (`touchesConsent`) belong to the author's account alone: anyone else, a music director
- * included, is `forbidden`, as is everyone when no account is linked. Otherwise `reviews: manage`
- * always may, and the author may at any time: there is no print lock.
+ * it, so anyone else gets `not_found` before any grant matters. Then `reviews: manage` always
+ * may, and the author may at any time (there is no print lock); anyone else is `forbidden`. The
+ * consent fields (`touchesConsent`) belong to the author's account alone: a caller who may edit
+ * but is not the author, a music director included, is `consent_forbidden`, as is everyone when
+ * no account is linked. The two refusals are distinct so a client can tell "drop the consent
+ * keys and retry" from "you have no edit right".
  */
 export const editOutcome = (
   review: Pick<ReviewResponse, 'status' | 'author_user_id' | 'recorded_by_user_id'>,
@@ -109,8 +115,9 @@ export const editOutcome = (
 ) => {
   const own = review.author_user_id === actor.id;
   if (review.status === 'draft' && !own && review.recorded_by_user_id !== actor.id) return 'not_found' as const;
-  if (touchesConsent && !own) return 'forbidden' as const;
-  return actor.manage || own ? ('allowed' as const) : ('forbidden' as const);
+  if (!actor.manage && !own) return 'forbidden' as const;
+  if (touchesConsent && !own) return 'consent_forbidden' as const;
+  return 'allowed' as const;
 };
 
 /**
@@ -144,7 +151,10 @@ const highestRevision = async (tx: Pick<typeof db, 'select'>, reviewId: number) 
 };
 
 /**
- * Appends the next `review_revisions` row for a review. It takes the review lock itself (a plain
+ * Appends the next `review_revisions` row for a review and returns its number, or `undefined`
+ * when the review does not exist (as `lockReviewAfterItem` answers), decided on its own lock
+ * before anything else is read, so a caller that has not locked the review first can answer
+ * `not_found` instead of raising the `review_id` FK. It takes the review lock itself (a plain
  * `SELECT id ... FOR UPDATE`, before it reads the highest revision) so two writers cannot take
  * one number, and so `deleteAlbumFromDB`'s capture, which holds `FOR SHARE` on a release's
  * reviews before it reads their revisions, never misses one: a writer holding only the FK's `FOR
@@ -159,7 +169,8 @@ export const writeReviewRevision = async (
   content: RevisionContent,
   editor: { name: string | null; userId: string | null; at?: Date }
 ) => {
-  await tx.select({ id: reviews.id }).from(reviews).where(eq(reviews.id, reviewId)).for('update');
+  const [locked] = await tx.select({ id: reviews.id }).from(reviews).where(eq(reviews.id, reviewId)).for('update');
+  if (!locked) return undefined;
   const revision = (await highestRevision(tx, reviewId)) + 1;
   await tx.insert(review_revisions).values({
     ...content,
@@ -169,6 +180,7 @@ export const writeReviewRevision = async (
     edited_by_user_id: editor.userId,
     ...(editor.at === undefined ? {} : { edited_at: editor.at }),
   });
+  return revision;
 };
 
 /**
@@ -176,8 +188,11 @@ export const writeReviewRevision = async (
  * (item `FOR SHARE`, then the review `FOR UPDATE`), then the edit rules and the text rule on the
  * locked row. An edit of a submitted review that changes a content field also appends a
  * revision; a draft edit or a consent-only edit does not. A submitted review with no history
- * first gets revision 1: its content before this edit, attributed to its author. The response
- * is read back through `selectReview` after all writes.
+ * first gets revision 1: its content before this edit, attributed to its author, at
+ * `submitted_at`, or at `last_modified` when `submitted_at` is NULL (a row whose `status` came
+ * from the column default has none). `last_modified` is the last time that content was written,
+ * so the history never shows the author's text stamped at the moment of someone else's edit.
+ * The response is read back through `selectReview` after all writes.
  */
 export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewsActor) =>
   db.transaction(async (tx) => {
@@ -194,16 +209,15 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
     const revises =
       current.status === 'submitted' &&
       CONTENT_FIELDS.some((key) => patch[key] !== undefined && patch[key] !== current[key]);
-    let editor = { name: null as string | null, userId: actor.id };
+    let editor: { name: string | null; userId: string } | undefined;
     if (revises) {
       const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
-      editor = { ...editor, name: snapshotAuthor(account?.name) };
+      editor = { name: snapshotAuthor(account?.name), userId: actor.id };
       if ((await highestRevision(tx, id)) === 0) {
-        const before = Object.fromEntries(CONTENT_FIELDS.map((key) => [key, current[key]])) as RevisionContent;
-        await writeReviewRevision(tx, id, before, {
+        await writeReviewRevision(tx, id, pickContent(current), {
           name: current.author,
           userId: current.author_user_id,
-          at: current.submitted_at ?? undefined,
+          at: current.submitted_at ?? current.last_modified,
         });
       }
     }
@@ -212,13 +226,6 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
       .set({ ...patch, last_modified: sql`now()` })
       .where(eq(reviews.id, id))
       .returning();
-    if (revises) {
-      await writeReviewRevision(
-        tx,
-        id,
-        Object.fromEntries(CONTENT_FIELDS.map((key) => [key, row[key]])) as RevisionContent,
-        editor
-      );
-    }
+    if (editor) await writeReviewRevision(tx, id, pickContent(row), editor);
     return { outcome: 'updated' as const, review: (await selectReview(id, tx))! };
   });

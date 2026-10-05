@@ -22,6 +22,7 @@ const PREFIX = 'ITEST-REVIEWS';
 
 describe('/reviews create and edit (BS#2802)', () => {
   let manager;
+  let managerId;
   let djA;
   let djB;
   let sql;
@@ -49,6 +50,9 @@ describe('/reviews create and edit (BS#2802)', () => {
     djA = createAuthRequest(request, `Bearer ${global.primary_dj_id}`);
     djB = createAuthRequest(request, global.secondary_access_token);
     sql = getTestDb();
+    const [managerRow] = await sql`SELECT id FROM auth_user WHERE username = 'test_station_manager'`;
+    if (!managerRow) throw new Error('test_station_manager fixture account is missing');
+    managerId = managerRow.id;
     await cleanup();
     libraryId = (await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} release` })).id;
   });
@@ -98,7 +102,7 @@ describe('/reviews create and edit (BS#2802)', () => {
 
     const revisions = (id) =>
       sql.unsafe(
-        `SELECT revision, review, edited_by, edited_by_user_id FROM "${SCHEMA}".review_revisions WHERE review_id = $1 ORDER BY revision`,
+        `SELECT revision, review, edited_by, edited_by_user_id, edited_at FROM "${SCHEMA}".review_revisions WHERE review_id = $1 ORDER BY revision`,
         [id]
       );
 
@@ -116,30 +120,41 @@ describe('/reviews create and edit (BS#2802)', () => {
       expect((await djB.patch(`/reviews/${seeded.id}`).send({ review: 'Nope.' })).status).toBe(403);
       const md = await manager.patch(`/reviews/${seeded.id}`).send({ review: 'MD fix.' });
       expect([md.status, md.body.review]).toEqual([200, 'MD fix.']);
-      expect((await revisions(seeded.id)).map((r) => [r.revision, r.review, r.edited_by_user_id])).toEqual([
+      const history = await revisions(seeded.id);
+      // Revision 1 is the author's pre-edit text at submitted_at; 2 is the author's edit; 3 is
+      // the manager's, under the manager's own id, not the author's.
+      expect(history.map((r) => [r.revision, r.review, r.edited_by_user_id])).toEqual([
         [1, 'First.', global.primary_dj_id],
         [2, 'Second.', global.primary_dj_id],
-        [3, 'MD fix.', expect.any(String)],
+        [3, 'MD fix.', managerId],
       ]);
+      expect(history.map((r) => r.edited_by)).toEqual([seeded.author, expect.any(String), expect.any(String)]);
+      expect(new Date(history[0].edited_at).toISOString()).toBe(new Date(seeded.submitted_at).toISOString());
     });
 
     test('a draft edit and a consent-only edit write no revision; a content edit of a submitted review writes one', async () => {
       const draft = await seedReview({ album_id: libraryId, author_user_id: global.primary_dj_id, status: 'draft' });
-      await djA.patch(`/reviews/${draft.id}`).send({ fcc: 'draft edit' });
+      const draftEdit = await djA.patch(`/reviews/${draft.id}`).send({ fcc: 'draft edit' });
+      expect([draftEdit.status, draftEdit.body.fcc]).toEqual([200, 'draft edit']);
       const submitted = await seedReview({ album_id: libraryId, author_user_id: global.primary_dj_id });
       const consent = await djA.patch(`/reviews/${submitted.id}`).send({ credit: 'dj_name', publish_apps: true });
       expect([consent.status, consent.body.credit, consent.body.publish_apps]).toEqual([200, 'dj_name', true]);
-      expect((await revisions(draft.id)).length + (await revisions(submitted.id)).length).toBe(0);
-      await djA.patch(`/reviews/${submitted.id}`).send({ review: 'Edited.' });
-      expect((await revisions(submitted.id)).map((r) => r.revision)).toEqual([1, 2]);
+      expect(await revisions(draft.id)).toEqual([]);
+      expect(await revisions(submitted.id)).toEqual([]);
+      expect((await djA.patch(`/reviews/${submitted.id}`).send({ review: 'Edited.' })).status).toBe(200);
+      expect((await revisions(submitted.id)).map((r) => [r.revision, r.review, r.edited_by_user_id])).toEqual([
+        [1, submitted.review, global.primary_dj_id],
+        [2, 'Edited.', global.primary_dj_id],
+      ]);
     });
 
-    test("only the author's account sets consent: a music director's credit patch is 403 and nothing changes", async () => {
+    test("only the author's account sets consent: a music director's credit patch is 403 with its own message and nothing changes", async () => {
       const mine = await seedReview({ album_id: libraryId, author_user_id: global.primary_dj_id });
       const res = await manager.patch(`/reviews/${mine.id}`).send({ credit: 'real_name' });
-      expect(res.status).toBe(403);
+      expect([res.status, res.body.message]).toEqual([403, "Only the review's author may set its publishing choices"]);
       const [row] = await sql.unsafe(`SELECT credit FROM "${SCHEMA}".reviews WHERE id = $1`, [mine.id]);
       expect(row.credit).toBeNull();
+      expect(await revisions(mine.id)).toEqual([]);
       expect((await manager.patch(`/reviews/${mine.id}`).send({ buzzwords: 'warm' })).status).toBe(200);
     });
 
