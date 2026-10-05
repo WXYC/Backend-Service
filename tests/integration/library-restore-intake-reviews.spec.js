@@ -18,7 +18,11 @@
  *      new columns taking their defaults;
  *   5. a snapshot with no `intake_items` key at all (every pre-0180 snapshot) restores;
  *   6. an item whose `format_id` target is gone answers 409
- *      `missing_reference` naming `intake_items`, writing nothing.
+ *      `missing_reference` naming `intake_items`, writing nothing;
+ *   7. (BS#2858) an accepted review comes back with its revisions, a print and
+ *      an FCC note, and the item's `accepted_review_id` is re-pointed at it
+ *      after `reviews` replays; when the review is not in the snapshot the
+ *      pointer stays NULL with one `nulled` deviation.
  *
  * Fixtures are scoped to a per-run marker; `catalog_delete_snapshot` is
  * permanently retained and shared with every other integration spec.
@@ -163,6 +167,82 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
     expect(reviews.map((review) => review.intake_item_id)).toEqual([itemId, itemId]);
     const items = await sql.unsafe(`SELECT album_id, state FROM "${SCHEMA}".intake_items WHERE id = $1`, [itemId]);
     expect(items).toEqual([expect.objectContaining({ album_id: album.id, state: 'filed' })]);
+  });
+
+  // BS#2858: the accept pointer, revisions, prints and FCC notes ride the same
+  // snapshot. `intake_items` replays before `reviews`, so the pointer is
+  // re-attached after the reviews are in.
+  const insertRow = async (table, columns) => {
+    const names = Object.keys(columns);
+    const rows = await sql.unsafe(
+      `INSERT INTO "${SCHEMA}".${table} (${names.join(', ')})
+       VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`,
+      Object.values(columns)
+    );
+    return rows[0].id;
+  };
+  const countWhere = async (table, column, value) =>
+    (await sql.unsafe(`SELECT count(*)::int AS n FROM "${SCHEMA}".${table} WHERE ${column} = $1`, [value]))[0].n;
+
+  test('restores an accepted review with its revisions, a print and an FCC note, the item pointing at the restored review', async () => {
+    const album = await createAlbum({ album_title: `${marker} Accepted` });
+    const itemId = await insertFiledItem(album.id);
+    const reviewId = await insertReview({ album_id: album.id, intake_item_id: itemId, review: 'DOGA' });
+    await insertRow('review_revisions', { review_id: reviewId, revision: 1, review: 'first' });
+    const revisionId = await insertRow('review_revisions', { review_id: reviewId, revision: 2, review: 'second' });
+    await insertRow('review_prints', {
+      album_id: album.id,
+      intake_item_id: itemId,
+      review_id: reviewId,
+      revision_id: revisionId,
+    });
+    await insertRow('fcc_notes', { album_id: album.id, intake_item_id: itemId, track: 'la paradoja', note: 'a note' });
+    await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1 WHERE id = $2`, [reviewId, itemId]);
+    const batchId = await deleteAlbum(album.id);
+    expect(await countWhere('review_revisions', 'review_id', reviewId)).toBe(0);
+
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+
+    expect(res.body.entities[0].children).toMatchObject({
+      intake_items: 1,
+      reviews: 1,
+      review_revisions: 2,
+      review_prints: 1,
+      fcc_notes: 1,
+    });
+    expect(res.body.entities[0].deviations).toEqual([]);
+    const [item] = await sql.unsafe(`SELECT accepted_review_id FROM "${SCHEMA}".intake_items WHERE id = $1`, [itemId]);
+    expect(item.accepted_review_id).toBe(reviewId);
+    const [print] = await sql.unsafe(
+      `SELECT review_id, revision_id FROM "${SCHEMA}".review_prints WHERE album_id = $1`,
+      [album.id]
+    );
+    expect(print).toEqual({ review_id: reviewId, revision_id: revisionId });
+  });
+
+  test('restores an item as NULL-accepted, reporting one nulled deviation, when its accepted review is not in the snapshot', async () => {
+    const album = await createAlbum({ album_title: `${marker} Accepted Gone` });
+    const itemId = await insertFiledItem(album.id);
+    // Stamped with the item but not the release, so the snapshot (which captures
+    // reviews through `album_id`) never holds it.
+    const reviewId = await insertReview({ intake_item_id: itemId, review: 'Back, Baby' });
+    await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1 WHERE id = $2`, [reviewId, itemId]);
+    const batchId = await deleteAlbum(album.id);
+
+    const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);
+
+    expect(res.body.entities[0].children.intake_items).toBe(1);
+    expect(res.body.entities[0].deviations).toEqual([
+      {
+        kind: 'nulled',
+        table: 'intake_items',
+        row_id: itemId,
+        column: 'accepted_review_id',
+        captured_value: String(reviewId),
+      },
+    ]);
+    const [item] = await sql.unsafe(`SELECT accepted_review_id FROM "${SCHEMA}".intake_items WHERE id = $1`, [itemId]);
+    expect(item.accepted_review_id).toBeNull();
   });
 
   test('restores as NULL a review author whose account was removed after the delete, and reports it', async () => {

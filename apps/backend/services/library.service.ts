@@ -43,6 +43,7 @@ import {
   compilation_track_artist,
   digital_asset,
   digital_asset_file,
+  fcc_notes,
   flowsheet,
   genre_artist_crossreference,
   format,
@@ -53,6 +54,8 @@ import {
   library_identity,
   library_identity_source,
   library_watermark,
+  review_prints,
+  review_revisions,
   reviews,
   rotation,
   rotation_cards,
@@ -5415,6 +5418,10 @@ const RESTORE_PLAN: Record<
       // After `rotation` (`rotation_id`) and before `reviews` (`intake_item_id`).
       ['intake_items', intake_items],
       ['reviews', reviews],
+      // After `reviews` (`review_id`); `review_prints.revision_id` needs `review_revisions` first.
+      ['review_revisions', review_revisions],
+      ['review_prints', review_prints],
+      ['fcc_notes', fcc_notes],
       ['album_critic_reviews', album_critic_reviews],
       ['bins', bins],
     ],
@@ -5453,8 +5460,27 @@ export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
     rotation_id: rotation.id,
     printed_by: auth_user.id,
     finalized_by: auth_user.id,
+    accepted_review_id: reviews.id,
+    accepted_by: auth_user.id,
   },
   reviews: { author_user_id: auth_user.id, recorded_by_user_id: auth_user.id },
+  review_revisions: { edited_by_user_id: auth_user.id },
+  review_prints: { review_id: reviews.id, revision_id: review_revisions.id, printed_by: auth_user.id },
+  fcc_notes: { reported_by_user_id: auth_user.id },
+};
+
+/**
+ * The `SET_NULL_REFERENCES` columns whose target table the restore replays
+ * AFTER the referencing one, so the replay cannot probe them in place.
+ * `intake_items.accepted_review_id` is the only one: `reviews.intake_item_id`
+ * is a CASCADE key into `intake_items`, so reviews cannot replay first. The
+ * row is inserted with the column NULL and `reattachDeferredReferences` points
+ * it back once `reviews` is in, reporting a `nulled` deviation for a review
+ * that is gone. The order guard in `library.restoreSetNull.test.ts` names this
+ * same column as its one exemption.
+ */
+export const DEFERRED_SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
+  intake_items: { accepted_review_id: reviews.id },
 };
 
 /**
@@ -5992,14 +6018,28 @@ const replayCapturedRows = async (
   tableName: string,
   table: PgTable,
   rows: unknown[]
-): Promise<{ replayed: number; deviations: RestoreDeviation[] }> => {
+): Promise<{ replayed: number; deviations: RestoreDeviation[]; deferred: DeferredReference[] }> => {
   // Dropped first, so a row left out of the replay is not also reported nulled.
   const { kept: records, deviations } = await dropOrphanedCascadeRows(tx, tableName, table, capturedRecords(rows));
-  if (records.length === 0) return { replayed: 0, deviations };
+  if (records.length === 0) return { replayed: 0, deviations, deferred: [] };
   const columns = Object.keys(records[0]);
-  if (columns.length === 0) return { replayed: 0, deviations };
+  if (columns.length === 0) return { replayed: 0, deviations, deferred: [] };
 
-  deviations.push(...(await nullDanglingSetNullReferences(tx, tableName, table, records)));
+  // A deferred column goes in NULL and is pointed back by
+  // `reattachDeferredReferences` once its target table has replayed.
+  const deferredColumns = DEFERRED_SET_NULL_REFERENCES[tableName] ?? {};
+  const deferred: DeferredReference[] = Object.entries(deferredColumns).flatMap(([column, target]) =>
+    records.flatMap((record) => {
+      const value = record[column];
+      if (value == null) return [];
+      record[column] = null;
+      return [{ tableName, table, column, target, rowId: capturedRowId(record), value }];
+    })
+  );
+  const probed = Object.fromEntries(
+    Object.entries(SET_NULL_REFERENCES[tableName] ?? {}).filter(([column]) => !(column in deferredColumns))
+  );
+  deviations.push(...(await nullDanglingSetNullReferences(tx, tableName, table, records, probed)));
 
   const columnList = sql.join(
     columns.map((column) => sql.identifier(column)),
@@ -6008,7 +6048,36 @@ const replayCapturedRows = async (
   await tx.execute(
     sql`INSERT INTO ${table} (${columnList}) SELECT ${columnList} FROM jsonb_populate_recordset(NULL::${table}, ${JSON.stringify(records)}::jsonb)`
   );
-  return { replayed: records.length, deviations };
+  return { replayed: records.length, deviations, deferred };
+};
+
+type DeferredReference = {
+  tableName: string;
+  table: PgTable;
+  column: string;
+  target: PgColumn;
+  rowId: number | null;
+  value: unknown;
+};
+
+/**
+ * Points each deferred column back at its captured target now that the target
+ * table has replayed, or reports a `nulled` deviation when that row is gone.
+ */
+const reattachDeferredReferences = async (
+  tx: DbTransaction,
+  deferred: readonly DeferredReference[]
+): Promise<RestoreDeviation[]> => {
+  const deviations: RestoreDeviation[] = [];
+  for (const { tableName, table, column, target, rowId, value } of deferred) {
+    const missing = await missingTargetValues(tx, table, [{ [column]: value }], column, target);
+    if (missing.size > 0) {
+      deviations.push({ kind: 'nulled', table: tableName, row_id: rowId, column, captured_value: String(value) });
+    } else {
+      await tx.execute(sql`UPDATE ${table} SET ${sql.identifier(column)} = ${value} WHERE id = ${rowId}`);
+    }
+  }
+  return deviations;
 };
 
 /**
@@ -6236,11 +6305,14 @@ const runRestoreBatchTransaction = async (
 
       const replayed: Record<string, number> = {};
       const deviations = [...parent.deviations];
+      const deferred: DeferredReference[] = [...parent.deferred];
       for (const [name, table] of plan.children) {
         const child = await replayCapturedRows(tx, name, table, children[name] ?? []);
         replayed[name] = child.replayed;
         deviations.push(...child.deviations);
+        deferred.push(...child.deferred);
       }
+      deviations.push(...(await reattachDeferredReferences(tx, deferred)));
 
       // A surviving denylist row would make `jobs/library-etl`'s
       // `reconcileDenylistedInserts` report this restore as a stranded
@@ -7253,6 +7325,9 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         compilation_track_artist.library_id,
         library_urls.library_id,
         reviews.album_id,
+        { column: review_revisions.review_id, via: { column: reviews.album_id, idColumn: reviews.id } },
+        review_prints.album_id,
+        fcc_notes.album_id,
         intake_items.album_id,
         album_critic_reviews.album_id,
         bins.album_id,

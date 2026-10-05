@@ -20,6 +20,7 @@ import { getTableConfig, integer, PgTable, pgTable, serial, text, type AnyPgColu
 import * as schema from '../../../shared/database/src/schema';
 import {
   CASCADE_DROP_REFERENCES,
+  DEFERRED_SET_NULL_REFERENCES,
   dropOrphanedCascadeRows,
   nullDanglingSetNullReferences,
   REFUSE_REFERENCES,
@@ -105,6 +106,29 @@ const declaredSetNullColumns = (setNull: DeclaredReferences = SET_NULL_REFERENCE
     )
   );
 
+/**
+ * SET NULL references whose target the restore replays AFTER the referencing
+ * table, with the reason that is safe. Each is inserted NULL and re-pointed once
+ * its target has replayed (`DEFERRED_SET_NULL_REFERENCES`), so any other
+ * mis-ordered pair still fails the order guard.
+ */
+const ORDER_EXEMPT: Record<string, string> = {
+  'intake_items.accepted_review_id':
+    'reviews.intake_item_id is a CASCADE key into intake_items, so reviews cannot replay first; the pointer is re-attached after reviews',
+};
+
+/** The SET NULL references whose target replays after the referencing table, minus `exempt`. */
+const misorderedSetNullReferences = (
+  guard: GuardSchema = REAL_SCHEMA,
+  exempt: Readonly<Record<string, string>> = ORDER_EXEMPT
+): string[] => {
+  const position = (name: string) => guard.replayed.indexOf(name);
+  return derivedSetNullReferences(guard)
+    .filter(({ table, targetTable }) => position(targetTable) > position(table))
+    .filter(({ table, column }) => !(`${table}.${column}` in exempt))
+    .map(({ table, column, targetTable }) => `${table}.${column} -> ${targetTable}`);
+};
+
 describe('SET_NULL_REFERENCES (catalog restore replay)', () => {
   // Compares the TARGET too, not only the referencing column's name: the
   // target is what the replay probes, so a copy-pasted `library.id` where the
@@ -128,12 +152,32 @@ describe('SET_NULL_REFERENCES (catalog restore replay)', () => {
   // replayed LATER reads as gone and is nulled. Before SET_NULL_REFERENCES
   // that mis-order was a loud 23503; this keeps it from becoming silent.
   it('replays every SET NULL target that the restore also replays at or before its referencing table', () => {
-    const position = (name: string) => RESTORE_PLAN_REPLAYED_TABLE_NAMES.indexOf(name);
-    const misordered = derivedSetNullReferences()
-      .filter(({ table, targetTable }) => position(targetTable) > position(table))
-      .map(({ table, column, targetTable }) => `${table}.${column} -> ${targetTable}`);
+    expect(misorderedSetNullReferences()).toEqual([]);
+  });
 
-    expect(misordered).toEqual([]);
+  it('exempts exactly the columns the replay defers, and no other', () => {
+    const deferred = Object.entries(DEFERRED_SET_NULL_REFERENCES).flatMap(([table, columns]) =>
+      Object.keys(columns).map((column) => `${table}.${column}`)
+    );
+
+    expect(Object.keys(ORDER_EXEMPT).sort()).toEqual(deferred.sort());
+  });
+
+  it('still fails a second mis-ordered pair that is not exempt', () => {
+    const earlier = pgTable('synthetic_earlier', {
+      id: serial('id').primaryKey(),
+      later_id: integer('later_id').references((): AnyPgColumn => later.id, { onDelete: 'set null' }),
+      other_later_id: integer('other_later_id').references((): AnyPgColumn => later.id, { onDelete: 'set null' }),
+    });
+    const later = pgTable('synthetic_later', { id: serial('id').primaryKey() });
+    const guard: GuardSchema = {
+      module: { earlier, later },
+      replayed: ['synthetic_earlier', 'synthetic_later'],
+    };
+
+    expect(misorderedSetNullReferences(guard, { 'synthetic_earlier.later_id': 'exempt' })).toEqual([
+      'synthetic_earlier.other_later_id -> synthetic_later',
+    ]);
   });
 });
 
@@ -278,6 +322,11 @@ describe('every CASCADE or NO ACTION foreign key into a replayed non-root table 
     // re-points `reviews.album_id` and `intake_items.album_id` together.
     // `intake_items` replays before `reviews`, so that is the order that matters.
     'reviews.intake_item_id': "reviews carry their item's filed album_id; intake_items replays first",
+    'review_revisions.review_id': 'captured through reviews.album_id (a depth-2 `via` child)',
+    // Like a review, a print or a note of a filed item carries the release's
+    // album_id (filing stamps them), and `intake_items` replays first.
+    'review_prints.intake_item_id': "prints carry their item's filed album_id; intake_items replays first",
+    'fcc_notes.intake_item_id': "notes carry their item's filed album_id; intake_items replays first",
   };
 
   it('is a capture-through key or on the stated allow-list', () => {
@@ -365,6 +414,17 @@ const probeTx = (live: unknown[]) => {
   };
   return { tx: tx as unknown as Parameters<typeof nullDanglingSetNullReferences>[0], probes };
 };
+
+describe('replay order of the review tables', () => {
+  it('replays reviews, then review_revisions, review_prints and fcc_notes', () => {
+    const order = ['reviews', 'review_revisions', 'review_prints', 'fcc_notes'].map((name) =>
+      RESTORE_PLAN_REPLAYED_TABLE_NAMES.indexOf(name)
+    );
+
+    expect(order.every((position) => position >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+});
 
 describe('nullDanglingSetNullReferences', () => {
   // Real Drizzle columns, not the unit tier's sentinels: the self-reference

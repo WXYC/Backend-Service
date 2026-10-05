@@ -25,6 +25,7 @@ import {
   jsonb,
   bigint,
   char,
+  unique,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
@@ -2947,9 +2948,20 @@ export const intake_items = wxyc_schema.table(
     printed_at: timestamp('printed_at', { withTimezone: true }),
     finalized_by: varchar('finalized_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     finalized_at: timestamp('finalized_at', { withTimezone: true }),
+    // The review a music director accepted. `reviews` and `intake_items` now
+    // reference each other, so TypeScript cannot infer either type without the
+    // `AnyPgColumn` annotation. No CHECK ties `state = 'reviewed'` to a non-null
+    // pointer: SET NULL would turn every delete of an accepted review into a
+    // constraint failure. The services keep the two in step.
+    accepted_review_id: integer('accepted_review_id').references((): AnyPgColumn => reviews.id, {
+      onDelete: 'set null',
+    }),
+    accepted_by: varchar('accepted_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    accepted_at: timestamp('accepted_at', { withTimezone: true }),
   },
   (table) => [
     index('intake_items_state_idx').on(table.state),
+    index('intake_items_accepted_review_id_idx').on(table.accepted_review_id),
     index('intake_items_album_id_idx').on(table.album_id),
     index('intake_items_cited_album_id_idx').on(table.cited_album_id),
     index('intake_items_requested_dj_id_idx').on(table.requested_dj_id),
@@ -2986,6 +2998,91 @@ export const intake_item_passes = wxyc_schema.table(
 
 export type IntakeItemPass = InferSelectModel<typeof intake_item_passes>;
 export type NewIntakeItemPass = InferInsertModel<typeof intake_item_passes>;
+
+/**
+ * Every saved version of a submitted review (slice 9b of
+ * WXYC/Backend-Service#2791). Deleting a review deletes its history. `edited_by`
+ * is a snapshot of `auth_user.name`, cut to 128 code points like
+ * `reviews.author`; `real_name` is never read. Consent fields are not versioned.
+ */
+export const review_revisions = wxyc_schema.table(
+  'review_revisions',
+  {
+    id: serial('id').primaryKey(),
+    review_id: integer('review_id')
+      .references(() => reviews.id, { onDelete: 'cascade' })
+      .notNull(),
+    revision: integer('revision').notNull(),
+    edited_by: varchar('edited_by', { length: 128 }),
+    edited_by_user_id: varchar('edited_by_user_id', { length: 255 }).references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    edited_at: timestamp('edited_at', { withTimezone: true }).defaultNow().notNull(),
+    review: text('review'),
+    artist_blurb: text('artist_blurb'),
+    buzzwords: text('buzzwords'),
+    recommended_tracks: text('recommended_tracks'),
+    fcc: text('fcc'),
+  },
+  (table) => [unique('review_revisions_review_id_revision_unique').on(table.review_id, table.revision)]
+);
+
+/**
+ * The print log: which review, which version, who, when. A slip can be printed
+ * for a library release that has no intake item, so either target may be set
+ * (`review_prints_target_ck`). `review_id` and `revision_id` SET NULL so a
+ * deleted review leaves the fact that a slip was printed.
+ */
+export const review_prints = wxyc_schema.table(
+  'review_prints',
+  {
+    id: serial('id').primaryKey(),
+    intake_item_id: integer('intake_item_id').references(() => intake_items.id, { onDelete: 'cascade' }),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
+    review_id: integer('review_id').references(() => reviews.id, { onDelete: 'set null' }),
+    revision_id: integer('revision_id').references(() => review_revisions.id, { onDelete: 'set null' }),
+    printed_by: varchar('printed_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    printed_at: timestamp('printed_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('review_prints_intake_item_id_idx').on(table.intake_item_id),
+    index('review_prints_album_id_idx').on(table.album_id),
+    index('review_prints_review_id_idx').on(table.review_id),
+    check('review_prints_target_ck', sql`${table.intake_item_id} IS NOT NULL OR ${table.album_id} IS NOT NULL`),
+  ]
+);
+
+export const fccNoteStatusEnum = wxyc_schema.enum('fcc_note_status', ['reported', 'confirmed']);
+
+/**
+ * An FCC note a DJ reports against a release or a pile item, confirmed by a
+ * music director. `reported_by` and `confirmed_by` are display-name snapshots
+ * of `auth_user.name`; `confirmed_by` has no account column because the
+ * contract's `FccNote` carries none.
+ */
+export const fcc_notes = wxyc_schema.table(
+  'fcc_notes',
+  {
+    id: serial('id').primaryKey(),
+    album_id: integer('album_id').references(() => library.id, { onDelete: 'cascade' }),
+    intake_item_id: integer('intake_item_id').references(() => intake_items.id, { onDelete: 'cascade' }),
+    track: text('track').notNull(),
+    note: text('note').notNull(),
+    status: fccNoteStatusEnum('status').notNull().default('reported'),
+    reported_by: varchar('reported_by', { length: 128 }),
+    reported_by_user_id: varchar('reported_by_user_id', { length: 255 }).references(() => user.id, {
+      onDelete: 'set null',
+    }),
+    reported_at: timestamp('reported_at', { withTimezone: true }).defaultNow().notNull(),
+    confirmed_by: varchar('confirmed_by', { length: 128 }),
+    confirmed_at: timestamp('confirmed_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('fcc_notes_album_id_idx').on(table.album_id),
+    index('fcc_notes_intake_item_id_idx').on(table.intake_item_id),
+    check('fcc_notes_target_ck', sql`${table.album_id} IS NOT NULL OR ${table.intake_item_id} IS NOT NULL`),
+  ]
+);
 
 /**
  * External critic-review snippets (ADR 0012) — short attributed excerpts
