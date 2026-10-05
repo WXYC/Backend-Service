@@ -302,6 +302,18 @@ describe('library.service', () => {
       expect(results[0]).toHaveProperty('codeArtistNumber', 3);
     });
 
+    it.each([
+      ['a lettered release', 'b', 'Electronic cd AU 3/2-B'],
+      ['an unlettered release', null, 'Electronic cd AU 3/2'],
+    ])('flows code_volume_letters from the view into callNumber for %s', async (_label, letters, expected) => {
+      mockCatalogTiers(db.execute, { tsvector: [{ ...mockViewRow, code_volume_letters: letters }] });
+
+      const results = await searchLibrary('Autechre');
+
+      expect(results[0]).toHaveProperty('codeVolumeLetters', letters);
+      expect(results[0].callNumber).toBe(expected);
+    });
+
     it('re-hydrates timestamp columns the raw driver returns as text', async () => {
       // The tiers moved from the chained builder to `db.execute`, which returns
       // `client.unsafe(...)` unmapped — so timestamptz columns arrive as

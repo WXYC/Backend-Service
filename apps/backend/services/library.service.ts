@@ -3144,6 +3144,9 @@ const LIBRARY_VIEW_PROJECTION = {
   code_letters: artists.code_letters,
   code_artist_number: genre_artist_crossreference.artist_genre_code,
   code_number: library.code_number,
+  // BS#2827: the release's volume letter, so the request-line call number can
+  // tell the volumes of a multi-volume set apart.
+  code_volume_letters: library.code_volume_letters,
   artist_name: artists.artist_name,
   alphabetical_name: artists.alphabetical_name,
   album_title: library.album_title,
@@ -7700,6 +7703,7 @@ function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
     codeLetters: row.code_letters,
     codeArtistNumber: row.code_artist_number,
     codeNumber: row.code_number,
+    codeVolumeLetters: row.code_volume_letters,
     genre: row.genre_name,
     format: row.format_name,
     onStreaming: row.on_streaming,
