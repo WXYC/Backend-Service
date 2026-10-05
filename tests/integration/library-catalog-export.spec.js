@@ -66,6 +66,7 @@ const CONTRACT_KEYS = [
   'code_artist_number',
   'code_letters',
   'code_number',
+  'code_volume_letters',
   'cross_reference_names',
   'format_name',
   'genre_name',
