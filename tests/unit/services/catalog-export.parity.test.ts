@@ -21,6 +21,19 @@
  *      (e.g. 'N') can't break a strict-enum decoder on device. A bare key-set
  *      check would not catch an enum re-narrowing, so it is pinned explicitly.
  *
+ * # Pending allowlist (`PENDING_SSOT_RELEASE_KEYS`)
+ *
+ * A key can land on wxyc-shared `main`'s contract before any `@wxyc/shared`
+ * release carries it, while Backend (pinned to an older major) must start
+ * emitting it. `PENDING_SSOT_RELEASE_KEYS` names exactly those keys
+ * (`code_volume_letters`: WXYC/wxyc-shared#548, BS#2826). It is ONE-DIRECTIONAL:
+ * it tolerates only the private type having a key the INSTALLED package lacks.
+ * It never tolerates the reverse (an SSOT key missing from Backend), and any
+ * other difference still fails. A self-check fails the suite once an allowlisted
+ * key shows up in the installed SSOT, telling you to delete it from the list.
+ * WXYC/Backend-Service#2884 publishes/bumps the release and removes the
+ * allowlist (and the matching `Omit` on the compile-time assertion below).
+ *
  * # What this does NOT guard
  *
  * Per wxyc-shared#186 G1: this is field add/remove + the one `rotation_bin`
@@ -70,8 +83,12 @@ import type { CatalogExportRow as SharedRow, CatalogCompilationTrackRow as Share
 // Mutual key-set equality: resolves to `true` only when both types declare the
 // exact same key union, `never` otherwise. (optional-vs-required does not change
 // `keyof`, so this tolerates the `?` differences the SSOT carries.)
+//
+// `code_volume_letters` is excluded from the private side while it is pending
+// (see PENDING_SSOT_RELEASE_KEYS below): the installed @wxyc/shared 5.4.0 lacks
+// it. Remove the `Omit` with the allowlist in WXYC/Backend-Service#2884.
 type KeysEqual<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
-const _keysAgree: KeysEqual<PrivateRow, SharedRow> = true;
+const _keysAgree: KeysEqual<Omit<PrivateRow, 'code_volume_letters'>, SharedRow> = true;
 void _keysAgree;
 
 // `rotation_bin` must stay assignable from a raw string on BOTH sides. If
@@ -96,6 +113,30 @@ void _ctaKeysAgree;
 // ---------------------------------------------------------------------------
 // Runtime contract (the assertion that actually fails CI on drift).
 // ---------------------------------------------------------------------------
+
+/**
+ * Keys Backend emits that are already on wxyc-shared `main`'s `CatalogExportRow`
+ * contract but are missing from the INSTALLED `@wxyc/shared`, because no release
+ * carries them yet. One-directional: tolerated only as present-private /
+ * absent-SSOT. Keep it minimal; WXYC/Backend-Service#2884 empties and removes it.
+ * `code_volume_letters`: WXYC/wxyc-shared#548, WXYC/Backend-Service#2826.
+ */
+const PENDING_SSOT_RELEASE_KEYS: readonly string[] = ['code_volume_letters'];
+
+/**
+ * Compare key sets, tolerating only `pending` keys that the private side has and
+ * the SSOT lacks. Returns the unexplained differences plus any `pending` key the
+ * SSOT already carries (stale allowlist entries).
+ */
+function diffKeySets(privateKeys: string[], ssotKeys: string[], pending: readonly string[]) {
+  const stalePending = pending.filter((k) => ssotKeys.includes(k));
+  const tolerated = new Set(pending.filter((k) => privateKeys.includes(k) && !ssotKeys.includes(k)));
+  return {
+    stalePending,
+    privateOnly: privateKeys.filter((k) => !ssotKeys.includes(k) && !tolerated.has(k)),
+    ssotOnly: ssotKeys.filter((k) => !privateKeys.includes(k)),
+  };
+}
 
 /**
  * Field names declared in the private `export type CatalogExportRow = { ... }`
@@ -227,7 +268,36 @@ describe('CatalogExportRow parity: private TS type vs @wxyc/shared SSOT schema (
     // Adding/removing a field on exactly one side fails here. To fix: propagate
     // the field to BOTH the private type and wxyc-shared/api.yaml (then publish
     // a new @wxyc/shared and bump the dependency).
-    expect(privateKeys).toEqual(ssotKeys);
+    // Only PENDING_SSOT_RELEASE_KEYS may be present-private / absent-SSOT.
+    const { privateOnly, ssotOnly } = diffKeySets(privateKeys, ssotKeys, PENDING_SSOT_RELEASE_KEYS);
+    expect({ privateOnly, ssotOnly }).toEqual({ privateOnly: [], ssotOnly: [] });
+  });
+
+  it('PENDING_SSOT_RELEASE_KEYS has no entry the installed @wxyc/shared already carries', () => {
+    // Anti-rot: once a release with the key is installed, the allowlist must go.
+    const { stalePending } = diffKeySets(privateKeys, ssotKeys, PENDING_SSOT_RELEASE_KEYS);
+    if (stalePending.length > 0) {
+      throw new Error(
+        `${stalePending.join(', ')} is now in the installed @wxyc/shared CatalogExportRow: remove it from PENDING_SSOT_RELEASE_KEYS (and the Omit on the KeysEqual assertion), per WXYC/Backend-Service#2884`
+      );
+    }
+  });
+
+  describe('diffKeySets (allowlist semantics)', () => {
+    const pending = ['p'];
+    it('tolerates a pending key present only on the private side', () => {
+      expect(diffKeySets(['a', 'p'], ['a'], pending)).toEqual({ stalePending: [], privateOnly: [], ssotOnly: [] });
+    });
+    it('still reports a non-pending private-only key', () => {
+      expect(diffKeySets(['a', 'p', 'x'], ['a'], pending).privateOnly).toEqual(['x']);
+    });
+    it('never tolerates an SSOT key missing from the private side, even if pending', () => {
+      expect(diffKeySets(['a'], ['a', 'p'], pending)).toMatchObject({ stalePending: ['p'], ssotOnly: ['p'] });
+      expect(diffKeySets(['a'], ['a', 'y'], pending).ssotOnly).toEqual(['y']);
+    });
+    it('flags a pending key the SSOT now carries as stale', () => {
+      expect(diffKeySets(['a', 'p'], ['a', 'p'], pending).stalePending).toEqual(['p']);
+    });
   });
 
   it('pins rotation_bin as a raw nullable string on the SSOT side (not the RotationBin enum)', () => {
