@@ -23,7 +23,17 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
-const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem, managerAccessToken } = require('../utils/intake_seed');
+const {
+  seedAuthUser,
+  removeSeededAuthUsers,
+  seedIntakeItem,
+  seedLibraryRelease,
+  removeSeededLibraryReleases,
+  seedReview,
+  seedFormSubmission,
+  removeSeededFormSubmissions,
+  managerAccessToken,
+} = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE';
@@ -56,9 +66,8 @@ describe('/intake (BS#2796)', () => {
 
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".album_review_submissions WHERE artist_name = $1`, [PREFIX]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE album_title LIKE $1`, [`${PREFIX} %`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1 AND code_letters = 'ZZ'`, [PREFIX]);
+    await removeSeededFormSubmissions();
+    await removeSeededLibraryReleases();
     await sql.unsafe(`DELETE FROM auth_user WHERE id LIKE $1`, [`${USER_PREFIX}%`]);
     await removeSeededAuthUsers();
   };
@@ -133,32 +142,16 @@ describe('/intake (BS#2796)', () => {
       VALUES (${ids.pool}, ${USER_PREFIX + 'passer'})`;
 
     // A filed item needs a library release (CHECK intake_items_filed_requires_album_ck).
-    const [genre] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".genres ORDER BY id LIMIT 1`);
-    const [artist] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters) VALUES ($1, $1, 'ZZ') RETURNING id`,
-      [PREFIX]
-    );
-    const [lib] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
-       VALUES ($1, $2, $3, $4, 9102, $5) RETURNING id`,
-      [artist.id, genre.id, formatId, `${PREFIX} filed`, PREFIX]
-    );
-    libraryId = lib.id;
+    const filed = await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} filed` });
+    libraryId = filed.id;
     // A release with a submitted review, and a form submission: the two things an item can cite.
-    const [cited] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
-       VALUES ($1, $2, $3, $4, 9103, $5) RETURNING id`,
-      [artist.id, genre.id, formatId, `${PREFIX} cited`, PREFIX]
-    );
-    citedAlbumId = cited.id;
-    await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".reviews (album_id, review, author, status) VALUES ($1, $2, $3, 'submitted')`,
-      [citedAlbumId, 'A submitted review', PREFIX]
-    );
-    [{ id: submissionId }] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".album_review_submissions (artist_name, album_title, review) VALUES ($1, $2, $3) RETURNING id`,
-      [PREFIX, 'Submitted album', 'A form review']
-    );
+    citedAlbumId = (
+      await seedLibraryRelease({ artist_id: filed.artist_id, artist_name: PREFIX, album_title: `${PREFIX} cited` })
+    ).id;
+    await seedReview({ album_id: citedAlbumId, review: 'A submitted review' });
+    submissionId = (
+      await seedFormSubmission({ artist_name: PREFIX, album_title: 'Submitted album', review: 'A form review' })
+    ).id;
     await seed('filed', { state: 'filed', album_id: libraryId, filed_at: daysAgo(1) });
     await seed('finalized', {
       state: 'finalized',

@@ -25,6 +25,7 @@ npm run test:integration
 - Tests run sequentially (`--runInBand`) because they share show state, DJ sessions, and flowsheet entries
 - 30-second timeout per test
 - Generates HTML report at `tests/report/report.html`
+- Intake and review specs seed users, intake items, library releases, reviews and form reviews through `tests/utils/intake_seed.js` (`seedAuthUser`, `seedIntakeItem`, `seedLibraryRelease`, `seedReview`, `seedFormSubmission` and their `removeSeeded*` pairs) and do not hand-write those `INSERT`s
 
 ## CI mock
 
