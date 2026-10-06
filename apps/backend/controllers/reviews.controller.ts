@@ -35,8 +35,11 @@ const parseFields = (body: Record<string, unknown>): ReviewFields => {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
 };
 
-const conflict = (res: Parameters<RequestHandler>[1], reason: 'subject_not_held', message: string) =>
-  res.status(409).json({ message, reason });
+const conflict = (
+  res: Parameters<RequestHandler>[1],
+  reason: 'subject_not_held' | 'not_draft' | 'in_use' | 'accepted_review',
+  message: string
+) => res.status(409).json({ message, reason });
 
 export const createReview: RequestHandler = async (req, res) => {
   const body = req.body ?? {};
@@ -69,4 +72,27 @@ export const patchReview: RequestHandler<{ id: string }> = async (req, res) => {
   if (result.outcome === 'text_required')
     throw new WxycError('A submitted typed review must keep its review text', 400);
   res.json(result.review);
+};
+
+export const submitReview: RequestHandler<{ id: string }> = async (req, res) => {
+  const result = await reviewsService.submitReview(parseInt4PathId(req.params.id, 'review'), reviewsActor(req));
+  if (result.outcome === 'not_found') throw new WxycError('Review not found', 404);
+  if (result.outcome === 'not_draft') return void conflict(res, 'not_draft', 'This review is already submitted');
+  if (result.outcome === 'text_required') throw new WxycError('A typed review needs text to be submitted', 400);
+  if (result.outcome !== 'submitted') throw new WxycError('You may not submit this review', 403);
+  // The notice to the music directors (BS#2806) is sent here, after the transaction has committed.
+  res.json(result.review);
+};
+
+export const deleteReview: RequestHandler<{ id: string }> = async (req, res) => {
+  const result = await reviewsService.deleteReview(parseInt4PathId(req.params.id, 'review'), reviewsActor(req));
+  if (result.outcome === 'not_found') throw new WxycError('Review not found', 404);
+  if (result.outcome === 'in_use') {
+    return void conflict(res, 'in_use', 'This review is accepted for an item or is the latest print of a copy');
+  }
+  if (result.outcome === 'accepted_review') {
+    return void conflict(res, 'accepted_review', 'This is the accepted review of a filed item with no citation');
+  }
+  if (result.outcome !== 'deleted') throw new WxycError('You may not delete this review', 403);
+  res.status(204).end();
 };

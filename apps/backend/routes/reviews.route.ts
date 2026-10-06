@@ -11,3 +11,5 @@ export const reviews_route = Router();
 // and cannot see these gates.
 reviews_route.post('/', requirePermissions({ reviews: ['write'] }), reviewsController.createReview);
 reviews_route.patch('/:id', requirePermissions({ reviews: ['write'] }), reviewsController.patchReview);
+reviews_route.post('/:id/submit', requirePermissions({ reviews: ['write'] }), reviewsController.submitReview);
+reviews_route.delete('/:id', requirePermissions({ reviews: ['write'] }), reviewsController.deleteReview);

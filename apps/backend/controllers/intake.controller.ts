@@ -91,11 +91,10 @@ export const patchIntake: RequestHandler<{ id: string }> = async (req, res) => {
 };
 
 export const deleteIntake: RequestHandler<{ id: string }> = async (req, res) => {
-  const { outcome } = await intakeService.deleteIntakeItem(parseId(req.params.id));
-  if (outcome === 'not_found') throw new WxycError('Intake item not found', 404);
-  if (outcome === 'already_filed') return void conflict(res, 'already_filed');
-  // Reviews can't attach to an item until slice 9; slice 10 names their authors here.
-  res.json({ deleted_review_authors: [] });
+  const result = await intakeService.deleteIntakeItem(parseId(req.params.id));
+  if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
+  if (result.outcome === 'already_filed') return void conflict(res, 'already_filed');
+  res.json({ deleted_review_authors: result.authors });
 };
 
 /** `/request`'s `dj_id` must name an account whose membership role can accept, or the request would sit in `requested` with nobody able to answer it. */

@@ -20,18 +20,10 @@
  * when the release or item it names is deleted, a revision with its review, and a print or note with its
  * item or release (all `ON DELETE CASCADE`).
  *
- * `seedReview` writes no revision, so a seeded submitted review has no history. `PATCH /reviews/{id}` writes a
- * `review_revisions` row on every content edit of a submitted review through `writeReviewRevision`
- * (`apps/backend/services/reviews.service.ts`, WXYC/Backend-Service#2859); the first such edit of a review with
- * no history first backfills revision 1 (the pre-edit content, `edited_by` = `reviews.author`, `edited_by_user_id`
- * = `author_user_id`, `edited_at` = `submitted_at`, or `last_modified` when that is NULL), then writes revision 2.
- * The submit route (WXYC/Backend-Service#2854, still open) will write revision 1 at submit time the same way. A
- * test that needs revisions without going through a route seeds them with `seedReviewRevision`. A seeded revision
- * 1 switches that first-edit backfill off (the route backfills only a review whose highest revision is 0), so a
- * test of the backfill must not seed one. A seeded revision carries placeholder `review` text, NULL `edited_by`
- * and `edited_by_user_id`, and `edited_at` = now(); a test whose seeded revision must look like the route's
- * passes the review's five content fields (`review`, `artist_blurb`, `buzzwords`, `recommended_tracks`, `fcc`),
- * `edited_by`, `edited_by_user_id` and `edited_at`.
+ * `seedReview` writes no revision, so a seeded submitted review has no history. Which routes write `review_revisions`
+ * rows, and when, is in `apps/backend/services/reviews.service.ts`. A seeded revision 1 switches the first-edit
+ * backfill off, so a test of that backfill must not seed one; a test that needs revisions without going through a
+ * route seeds them with `seedReviewRevision`, whose JSDoc lists the placeholder defaults.
  *
  * Everything runs on the shared `getTestDb()` pool, which its idle timeout releases after the file's last query (`tests/utils/db.js`); callers need not end it.
  *
@@ -197,13 +189,11 @@ async function seedReview(overrides = {}) {
 /**
  * Insert a `review_revisions` row and return it. `overrides` must set `review_id`. `revision`, when omitted or
  * `null`, defaults to the review's own highest revision plus one (1 for the first); the column is NOT NULL, so
- * `null` cannot mean anything else. `seedReview` writes no revision; `PATCH /reviews/{id}` writes one on every
- * content edit of a submitted review through `writeReviewRevision` (`apps/backend/services/reviews.service.ts`),
- * backfilling revision 1 first when the review has no history, and WXYC/Backend-Service#2854's submit will write
- * revision 1 at submit time. Seed revisions here only when the test does not go through a route, and never in a
- * test of that backfill: a seeded revision 1 switches it off. The defaults are placeholder `review` text, NULL
- * `edited_by` and `edited_by_user_id`, and `edited_at` = now(), not the review's own, so a test that needs the
- * revision to match its review passes the review's five content fields, `edited_by`, `edited_by_user_id` and
+ * `null` cannot mean anything else. `seedReview` writes no revision, and a seeded revision 1 switches the first-edit
+ * backfill off, so never seed one in a test of that backfill (which routes write revisions:
+ * `apps/backend/services/reviews.service.ts`). The defaults are placeholder `review` text, NULL `edited_by` and
+ * `edited_by_user_id`, and `edited_at` = now(), not the review's own, so a test that needs the revision to match its
+ * review passes the review's five content fields, `edited_by`, `edited_by_user_id` and
  * `edited_at` in `overrides`. No remove function: revisions go with their review (`ON DELETE CASCADE`).
  */
 async function seedReviewRevision(overrides = {}) {
