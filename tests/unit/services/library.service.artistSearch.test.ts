@@ -73,7 +73,15 @@ describe('searchArtistsInGenre (BS#2410)', () => {
 
     await searchArtistsInGenre(genreId, 'ju', 10);
 
-    expect(projectionKeys()).toEqual(['artist_name', 'code_letters', 'code_number', 'genre_id', 'genre_name', 'id']);
+    expect(projectionKeys()).toEqual([
+      'artist_name',
+      'code_comp_letter',
+      'code_letters',
+      'code_number',
+      'genre_id',
+      'genre_name',
+      'id',
+    ]);
   });
 
   it.each(MODES)('joins genres for the display name in %s mode', async (_mode, genreId) => {

@@ -1906,6 +1906,7 @@ describe('Library Rotation', () => {
         'alphabetical_name',
         'artist_name',
         'code_artist_number',
+        'code_comp_letter',
         'code_letters',
         'code_number',
         'format_name',
@@ -2273,7 +2274,12 @@ describe('Library Artists', () => {
         expect(second.body).toEqual({
           message: 'Artist code already exists for that genre and code letters.',
           reason: 'artist_code_conflict',
-          artist: { artist_id: first.body.id, artist_name: artistName, code_letters: codeLetters },
+          artist: {
+            artist_id: first.body.id,
+            artist_name: artistName,
+            code_letters: codeLetters,
+            code_comp_letter: null,
+          },
         });
       });
     });

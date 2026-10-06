@@ -26,7 +26,7 @@
  * A key can land on wxyc-shared `main`'s contract before any `@wxyc/shared`
  * release carries it, while Backend (pinned to an older major) must start
  * emitting it. `PENDING_SSOT_RELEASE_KEYS` names exactly those keys
- * (`code_volume_letters`: WXYC/wxyc-shared#548, BS#2826). It is ONE-DIRECTIONAL:
+ * (`code_volume_letters`: WXYC/wxyc-shared#548, BS#2826; `code_comp_letter`: WXYC/wxyc-shared#549, BS#2835). It is ONE-DIRECTIONAL:
  * it tolerates only the private type having a key the INSTALLED package lacks.
  * It never tolerates the reverse (an SSOT key missing from Backend), and any
  * other difference still fails. A self-check fails the suite once an allowlisted
@@ -84,11 +84,12 @@ import type { CatalogExportRow as SharedRow, CatalogCompilationTrackRow as Share
 // exact same key union, `never` otherwise. (optional-vs-required does not change
 // `keyof`, so this tolerates the `?` differences the SSOT carries.)
 //
-// `code_volume_letters` is excluded from the private side while it is pending
-// (see PENDING_SSOT_RELEASE_KEYS below): the installed @wxyc/shared 5.4.0 lacks
-// it. Remove the `Omit` with the allowlist in WXYC/Backend-Service#2884.
+// `code_volume_letters` and `code_comp_letter` are excluded from the private side
+// while they are pending (see PENDING_SSOT_RELEASE_KEYS below): the installed
+// @wxyc/shared 5.4.0 lacks them. Remove the `Omit` with the allowlist in
+// WXYC/Backend-Service#2884.
 type KeysEqual<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
-const _keysAgree: KeysEqual<Omit<PrivateRow, 'code_volume_letters'>, SharedRow> = true;
+const _keysAgree: KeysEqual<Omit<PrivateRow, 'code_volume_letters' | 'code_comp_letter'>, SharedRow> = true;
 void _keysAgree;
 
 // `rotation_bin` must stay assignable from a raw string on BOTH sides. If
@@ -120,8 +121,9 @@ void _ctaKeysAgree;
  * carries them yet. One-directional: tolerated only as present-private /
  * absent-SSOT. Keep it minimal; WXYC/Backend-Service#2884 empties and removes it.
  * `code_volume_letters`: WXYC/wxyc-shared#548, WXYC/Backend-Service#2826.
+ * `code_comp_letter`: WXYC/wxyc-shared#549, WXYC/Backend-Service#2835.
  */
-const PENDING_SSOT_RELEASE_KEYS: readonly string[] = ['code_volume_letters'];
+const PENDING_SSOT_RELEASE_KEYS: readonly string[] = ['code_volume_letters', 'code_comp_letter'];
 
 /**
  * Compare key sets, tolerating only `pending` keys that the private side has and

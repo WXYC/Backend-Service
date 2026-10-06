@@ -58,6 +58,8 @@ export type CatalogExportRow = {
   /** Raw `library.code_volume_letters` (volume of a multi-volume set); unfolded, untrimmed. */
   code_volume_letters: string | null;
   code_artist_number: number;
+  /** `genre_artist_crossreference.code_comp_letter`: the lettered compilation section (BS#2835), NULL for every other slot. */
+  code_comp_letter: string | null;
   label: string | null;
   genre_name: string;
   format_name: string;
@@ -94,6 +96,7 @@ const projectRow = (row: CatalogExportRow): CatalogExportRow => ({
   code_number: row.code_number,
   code_volume_letters: row.code_volume_letters,
   code_artist_number: row.code_artist_number,
+  code_comp_letter: row.code_comp_letter,
   label: row.label,
   genre_name: row.genre_name,
   format_name: row.format_name,
@@ -252,6 +255,7 @@ export const getCatalogExportRows = async (): Promise<CatalogExportRow[]> => {
       ${library.code_number}                   AS code_number,
       ${library.code_volume_letters}           AS code_volume_letters,
       ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
+      ${genre_artist_crossreference.code_comp_letter} AS code_comp_letter,
       ${library.label}                         AS label,
       ${genres.genre_name}                     AS genre_name,
       ${format.format_name}                    AS format_name,

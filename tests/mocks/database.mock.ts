@@ -358,6 +358,7 @@ export const library_artist_view = {
   on_streaming: 'library_artist_view.on_streaming',
   artist_id: 'library_artist_view.artist_id',
   code_volume_letters: 'library_artist_view.code_volume_letters',
+  code_comp_letter: 'library_artist_view.code_comp_letter',
   genre_id: 'library_artist_view.genre_id',
   card_id: 'library_artist_view.card_id',
   card_bin: 'library_artist_view.card_bin',

@@ -625,6 +625,7 @@ async function browseArtistCodeBucket(
       artist_name: member.artist_name,
       code_letters: member.code_letters,
       code_number: member.code_number,
+      code_comp_letter: member.code_comp_letter,
       genre_id: genreId,
     })),
   });
@@ -750,6 +751,7 @@ export const resolveArtistByCode: RequestHandler = async (
       artist_name: owner.artist_name,
       code_letters: owner.code_letters,
       code_number: codeNumber,
+      code_comp_letter: owner.code_comp_letter,
       genre_id: genreId,
     })),
   });

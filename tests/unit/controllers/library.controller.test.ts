@@ -1581,6 +1581,21 @@ describe('library.controller', () => {
       });
     });
 
+    // BS#2835: the controller copies each owner onto the wire field by field, so the lettered section of a
+    // compilation bucket (`V/A`/12/0 holds 27 owners, one per letter) has to be carried by hand.
+    it.each([
+      ['a lettered compilation owner', 'M'],
+      ['a named-artist owner', null],
+    ])('carries code_comp_letter for %s', async (_label, letter) => {
+      mockGetArtistsByCode.mockResolvedValue([{ ...owner(9, 'Soundtracks - M', 'V/A'), code_comp_letter: letter }]);
+
+      const res = mockResponse();
+      await resolveArtistByCode(req({ genre_id: '12', code_letters: 'V/A', code_number: '0' }), res, next);
+
+      const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ artists: Array<Record<string, unknown>> }];
+      expect(payload.artists[0]).toHaveProperty('code_comp_letter', letter);
+    });
+
     // Contested codes are NOT a V/A-only phenomenon: 11 of the 13 collisions in
     // the production clone are ordinary artist codes (`KU`/11/7 has 3 owners).
     // A V/A-gated special case would answer one arbitrary row for those, so the
@@ -1976,6 +1991,21 @@ describe('library.controller', () => {
             { id: 103, artist_name: 'Buzzcocks', code_letters: 'BU', code_number: 31, genre_id: 11 },
           ],
         });
+      });
+
+      it.each([
+        ['a lettered compilation member', 'M'],
+        ['a named-artist member', null],
+      ])('carries code_comp_letter for %s (BS#2835)', async (_label, letter) => {
+        mockBrowseArtistsInCodeBucket.mockResolvedValue([
+          { ...member(9, 'Soundtracks - M', 0, 'V/A'), code_comp_letter: letter },
+        ]);
+
+        const res = mockResponse();
+        await resolveArtistByCode(browseReq({ code_letters: 'V/A' }), res, next);
+
+        const [payload] = (res.json as jest.Mock).mock.calls[0] as [{ artists: Array<Record<string, unknown>> }];
+        expect(payload.artists[0]).toHaveProperty('code_comp_letter', letter);
       });
 
       it('normalizes code_letters before browsing, same as the fully-specified branch', async () => {
@@ -6503,7 +6533,14 @@ describe('library.controller', () => {
       );
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith({
-        artist: { id: 55, artist_name: 'Juana Molina', code_letters: 'MO', code_artist_number: 3, genre_id: 11 },
+        artist: {
+          id: 55,
+          artist_name: 'Juana Molina',
+          code_letters: 'MO',
+          code_artist_number: 3,
+          code_comp_letter: null,
+          genre_id: 11,
+        },
         release: { id: 42, artist_id: 55, album_title: 'DOGA' },
         rotation: { id: 9, album_id: 42, rotation_bin: 'S' },
       });

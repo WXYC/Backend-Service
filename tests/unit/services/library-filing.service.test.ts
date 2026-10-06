@@ -196,6 +196,31 @@ describe('fileLibraryRelease transaction handles', () => {
     expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(expect.anything(), 3, 5, tx);
   });
 
+  it('answers code_comp_letter: null for an artist the create arm just filed (a lettered V/A slot is already a 409)', async () => {
+    mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+      id: 9,
+      artist_name: 'Stereolab',
+      alphabetical_name: 'Stereolab',
+      code_letters: 'ST',
+    });
+
+    const result = await fileLibraryRelease(
+      {
+        filingPlan: {
+          kind: 'create',
+          artist_name: 'Stereolab',
+          alphabetical_name: 'Stereolab',
+          code_letters: 'ST',
+          code_number: 5,
+        },
+        release: input.release,
+      },
+      {} as never
+    );
+
+    expect(result.artist).toHaveProperty('code_comp_letter', null);
+  });
+
   it('files the release under the supplied call number and volume letters, generating a number only when none is supplied', async () => {
     await fileLibraryRelease(
       { ...input, release: { ...input.release, supplied_code_number: 12, code_volume_letters: 'ab' } },
@@ -387,6 +412,56 @@ describe('planLibraryFiling', () => {
         artist: { id: 9, artist_name: 'Jessica Pratt', code_letters: 'JU', code_artist_number: 2, genre_id: 3 },
       },
     });
+  });
+
+  // BS#2835: `kind: 'existing'` and both 409 bodies build the contract's `Artist` through a field-by-field copy, so
+  // the slot's compilation letter has to be carried by hand.
+  it.each([
+    ['a lettered compilation slot', 'M'],
+    ['a named-artist slot', null],
+  ])('carries code_comp_letter on the existing arm for %s', async (_label, letter) => {
+    mockGetArtistCardByIdInGenre.mockResolvedValue({
+      artist_id: 9,
+      artist_name: 'Various Artists',
+      alphabetical_name: 'Various Artists',
+      genre_id: 3,
+      code_letters: 'V/A',
+      code_artist_number: 0,
+      code_comp_letter: letter,
+    });
+
+    const plan = await planLibraryFiling({ artist: { kind: 'existing', artist_id: 9 }, release });
+
+    expect(plan).toMatchObject({
+      kind: 'ok',
+      input: { filingPlan: { kind: 'existing', artist: { id: 9, code_comp_letter: letter } } },
+    });
+  });
+
+  it('carries the holder’s code_comp_letter on both artist_code_conflict and artist_name_conflict bodies', async () => {
+    mockGetArtistByCode.mockResolvedValueOnce({
+      artist_id: 9,
+      artist_name: 'Various Artists',
+      code_letters: 'V/A',
+      code_comp_letter: 'M',
+    });
+    const codeConflict = await planLibraryFiling({ artist: { ...createArtist, code_number: 0 }, release });
+
+    mockGetArtistByCode.mockResolvedValueOnce(undefined);
+    mockArtistIdFromName.mockResolvedValueOnce(9);
+    mockGetArtistCardByIdInGenre.mockResolvedValueOnce({
+      artist_id: 9,
+      artist_name: 'Juana Molina',
+      alphabetical_name: 'Juana Molina',
+      genre_id: 3,
+      code_letters: 'JU',
+      code_artist_number: 2,
+      code_comp_letter: null,
+    });
+    const nameConflict = await planLibraryFiling({ artist: { ...createArtist, code_number: 2 }, release });
+
+    expect(codeConflict).toMatchObject({ kind: 'conflict', body: { artist: { code_comp_letter: 'M' } } });
+    expect(nameConflict).toMatchObject({ kind: 'conflict', body: { artist: { code_comp_letter: null } } });
   });
 
   it('answers an artist_code_conflict with the exhaustion code when no number is assignable', async () => {

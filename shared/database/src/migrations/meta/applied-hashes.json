@@ -181,5 +181,6 @@
   "0182_2858-review-revisions-prints-fcc-notes": "ebf69d84949ec7f17ac74d8239cd349a0d60edbcea39e1d86a69c67a13ded0b4",
   "0183_2833-genre-artist-crossreference-code-comp-letter": "4503ab561b930355213a5a6a87aa5ab460610f34e2c7e9ac78ffa52bc2d4a7bc",
   "0184_2827-code-volume-letters-on-library-artist-view": "b6f00e61956da4e9ba4d7ca9203e6dc900a72786d3279d713a13158ae6c81b0d",
-  "0185_2826-code-volume-letters-in-library-watermark-trigger": "a872fb4fe584dc418f74db1be842a95e05ed3f295abb544c2f76de9b1547f28a"
+  "0185_2826-code-volume-letters-in-library-watermark-trigger": "a872fb4fe584dc418f74db1be842a95e05ed3f295abb544c2f76de9b1547f28a",
+  "0186_2835-code-comp-letter-on-library-artist-view": "46dd21751adb7a97bf93934a5abcf9fe44339f73230980d1725be50d67bec777"
 }

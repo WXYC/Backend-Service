@@ -388,6 +388,7 @@ describe('GET /library/:id/flowsheet-play-counts (BS#2592)', () => {
     'artist_id',
     'artist_name',
     'code_artist_number',
+    'code_comp_letter',
     'code_letters',
     'code_number',
     'code_volume_letters',

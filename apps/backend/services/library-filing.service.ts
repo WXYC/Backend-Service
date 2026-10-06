@@ -242,6 +242,8 @@ export async function fileLibraryRelease(input: ValidatedFilingInput, outerTx?: 
         artist_name: artist.artist_name,
         code_letters: artist.code_letters,
         code_artist_number: filingPlan.code_number,
+        // A new V/A/genre/0 slot is already a 409, so a freshly created artist never holds a letter.
+        code_comp_letter: null,
         genre_id: release_genre_id,
       };
     } else {
@@ -304,6 +306,8 @@ export type FilingArtist = {
   artist_name: string;
   code_letters: string;
   code_artist_number: number;
+  /** The slot's compilation section letter (BS#2835); NULL for every artist but the lettered V/A sections. */
+  code_comp_letter: string | null;
   genre_id: number;
 };
 
@@ -312,6 +316,7 @@ const artistCardToFilingArtist = (row: libraryService.ArtistCardRow): FilingArti
   artist_name: row.artist_name,
   code_letters: row.code_letters,
   code_artist_number: row.code_artist_number,
+  code_comp_letter: row.code_comp_letter,
   genre_id: row.genre_id,
 });
 
@@ -783,6 +788,7 @@ export async function planLibraryFiling(
               artist_name: existing.artist_name,
               code_letters: existing.code_letters,
               code_artist_number: code_number,
+              code_comp_letter: existing.code_comp_letter,
               genre_id: artistBody.genre_id,
             } satisfies FilingArtist,
           },

@@ -84,6 +84,13 @@ function stripSqlComments(sql: string): string {
 }
 
 describe('catalog-export.service SQL invariants (BS#1965)', () => {
+  it('projects code_comp_letter from the same crossreference row as code_artist_number (BS#2835)', () => {
+    const sql = queryBody('getCatalogExportRows');
+
+    expect(sql).toMatch(/\$\{genre_artist_crossreference\.artist_genre_code\}\s+AS code_artist_number/);
+    expect(sql).toMatch(/\$\{genre_artist_crossreference\.code_comp_letter\}\s+AS code_comp_letter/);
+  });
+
   describe('cross_reference_names ordering is collation-pinned', () => {
     const sql = queryBody('getCatalogExportRows');
 

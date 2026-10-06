@@ -375,6 +375,16 @@ describe('library.service / getRotationFromDB', () => {
       // appear in the query.
       expect(stringified).not.toMatch(/-"rotation"\."id"/);
     });
+
+    it('selects the slot compilation letter beside the artist number (BS#2835)', async () => {
+      db.execute.mockResolvedValueOnce([]);
+
+      await getRotationFromDB();
+
+      const stringified = JSON.stringify(db.execute.mock.calls[0][0]);
+      expect(stringified).toContain('genre_artist_crossreference.code_comp_letter');
+      expect(stringified).toContain(' AS code_comp_letter');
+    });
   });
 
   /**

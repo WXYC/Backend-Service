@@ -3490,6 +3490,8 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
         id: library.id,
         code_letters: artists.code_letters,
         code_artist_number: genre_artist_crossreference.artist_genre_code,
+        // BS#2835: the slot's compilation section letter (migration 0186); NULL except on the lettered V/A slots.
+        code_comp_letter: genre_artist_crossreference.code_comp_letter,
         code_number: library.code_number,
         // BS#2827: the release's volume letter (migration 0184).
         code_volume_letters: library.code_volume_letters,
@@ -3580,6 +3582,8 @@ export type LibraryArtistViewEntry = {
   id: number;
   code_letters: string;
   code_artist_number: number;
+  /** BS#2835: nullable -- only the 52 lettered compilation sections carry one. */
+  code_comp_letter: string | null;
   code_number: number;
   /** BS#2827: nullable, unlike `code_number` -- most releases are not a volume of a set. */
   code_volume_letters: string | null;
