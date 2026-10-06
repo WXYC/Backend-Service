@@ -31,7 +31,14 @@
 const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
-const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem } = require('../utils/intake_seed');
+const {
+  seedAuthUser,
+  removeSeededAuthUsers,
+  seedIntakeItem,
+  seedReviewRevision,
+  seedReviewPrint,
+  seedFccNote,
+} = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const ROCK = 11;
@@ -172,15 +179,6 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
   // BS#2858: the accept pointer, revisions, prints and FCC notes ride the same
   // snapshot. `intake_items` replays before `reviews`, so the pointer is
   // re-attached after the reviews are in.
-  const insertRow = async (table, columns) => {
-    const names = Object.keys(columns);
-    const rows = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".${table} (${names.join(', ')})
-       VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`,
-      Object.values(columns)
-    );
-    return rows[0].id;
-  };
   const countWhere = async (table, column, value) =>
     (await sql.unsafe(`SELECT count(*)::int AS n FROM "${SCHEMA}".${table} WHERE ${column} = $1`, [value]))[0].n;
 
@@ -188,15 +186,15 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
     const album = await createAlbum({ album_title: `${marker} Accepted` });
     const itemId = await insertFiledItem(album.id);
     const reviewId = await insertReview({ album_id: album.id, intake_item_id: itemId, review: 'DOGA' });
-    await insertRow('review_revisions', { review_id: reviewId, revision: 1, review: 'first' });
-    const revisionId = await insertRow('review_revisions', { review_id: reviewId, revision: 2, review: 'second' });
-    await insertRow('review_prints', {
+    await seedReviewRevision({ review_id: reviewId, revision: 1, review: 'first' });
+    const { id: revisionId } = await seedReviewRevision({ review_id: reviewId, revision: 2, review: 'second' });
+    await seedReviewPrint({
       album_id: album.id,
       intake_item_id: itemId,
       review_id: reviewId,
       revision_id: revisionId,
     });
-    await insertRow('fcc_notes', { album_id: album.id, intake_item_id: itemId, track: 'la paradoja', note: 'a note' });
+    await seedFccNote({ album_id: album.id, intake_item_id: itemId, track: 'la paradoja', note: 'a note' });
     await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1 WHERE id = $2`, [reviewId, itemId]);
     const batchId = await deleteAlbum(album.id);
     expect(await countWhere('review_revisions', 'review_id', reviewId)).toBe(0);
