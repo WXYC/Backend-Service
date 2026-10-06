@@ -101,7 +101,7 @@ describe('every table the catalog export reads is covered by the library waterma
       const trigger = triggers.get(table);
       if (!trigger) throw new Error(`${table} is read by the export but has no touch_library_watermark* trigger`);
       if (trigger.columns === null) return;
-      const missing = (readSet.get(table) ?? []).filter((c) => !trigger.columns!.includes(c));
+      const missing = (readSet.get(table) ?? []).filter((c) => !trigger.columns.includes(c));
       expect({ table, tag: trigger.tag, missing }).toEqual({ table, tag: trigger.tag, missing: [] });
     }
   );
