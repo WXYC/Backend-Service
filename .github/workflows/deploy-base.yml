@@ -284,10 +284,16 @@ jobs:
                 continue
               fi
               if [ "$RANGE_RESOLVABLE" = true ] && [ -f "jobs/$TARGET/package.json" ] \
-                && [ "$(yq -r '.["job-type"] // "cron"' "jobs/$TARGET/package.json")" = "one-shot" ] \
-                && [ -z "$(git diff --name-only "$BASE" "$HEAD_SHA" -- "jobs/$TARGET/" "Dockerfile.$TARGET")" ]; then
-                SKIPPED_ONE_SHOTS="$SKIPPED_ONE_SHOTS $TARGET"
-                continue
+                && [ "$(yq -r '.["job-type"] // "cron"' "jobs/$TARGET/package.json")" = "one-shot" ]; then
+                # `git diff --quiet` exits 0 for no changes, 1 for changes and
+                # >1 on error. Only a clean 0 skips the job; an error keeps it
+                # (fail toward building, never toward a stale image).
+                OWN_DIFF=0
+                git diff --quiet "$BASE" "$HEAD_SHA" -- "jobs/$TARGET/" "Dockerfile.$TARGET" || OWN_DIFF=$?
+                if [ "$OWN_DIFF" -eq 0 ]; then
+                  SKIPPED_ONE_SHOTS="$SKIPPED_ONE_SHOTS $TARGET"
+                  continue
+                fi
               fi
               BUILDABLE=$(echo "$BUILDABLE" | jq -c --arg t "$TARGET" '. + [$t]')
             done
