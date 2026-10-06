@@ -295,6 +295,15 @@ async function evaluate(sql: Db, options: BackfillOptions, log: (line: string) =
   log(`[comp-letter-backfill] Rock/Soundtracks V/A slots not lettered: ${uncovered.length}`);
   for (const u of uncovered)
     log(`  ${u.genre_name.padEnd(11)}    ${String(u.artist_id).padStart(6)}  ${u.artist_name}`);
+  // BS#2834 (2026-10-06 amendment): dj-site's by-code chooser picks only lettered owners once any owner in the genre is
+  // lettered, so after this write an unlettered slot above drops out of it. Say so, so the librarians know where its
+  // releases went.
+  if (uncovered.length > 0) {
+    log(
+      '  note: once the 52 sections are lettered, these slots no longer appear in the by-code chooser ' +
+        '(Genre + Various Artists + letter); they are reachable only through artist-name search.'
+    );
+  }
 
   let crossCheckResult: CrossCheckResult | null = null;
   if (legacyReleases) {
