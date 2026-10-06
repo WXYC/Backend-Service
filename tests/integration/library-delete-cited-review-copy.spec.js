@@ -252,6 +252,7 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
     const cited = await seedRelease();
     const filedAsCited = await seedItem({ state: 'filed', album_id: cited.id });
     const { review: acceptedByFiledAsCited } = await seedCoverReview(cited.id, 'nc-filed-as-release');
+    const nobodyAccepted = await seedCoverReview(cited.id, 'nc-nobody-accepted');
     await sql`UPDATE ${sql(SCHEMA)}.intake_items SET accepted_review_id = ${acceptedByFiledAsCited.id} WHERE id = ${filedAsCited.id}`;
     const ownReviewer = await seedItem({ cited_album_id: cited.id });
     const own = await seedReview({
@@ -266,13 +267,24 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
       accepted_by: null,
       accepted_at: null,
     });
-    await seedCoverReview(cited.id, 'nc-nobody-accepted');
     const before =
       await sql`SELECT count(*)::int AS n FROM ${sql(SCHEMA)}.reviews WHERE review LIKE ${`${marker} nc-%`}`;
     // The record filed as the release has no review of its own; its accepted review is one of the release's.
     expect(before[0].n).toBe(3);
 
-    await deleteRelease(cited.id);
+    const batchId = await deleteRelease(cited.id);
+
+    // A copy made wrongly for the record filed as the release would carry that record's id and the
+    // release's id, so the cascade removes it with the release and no row check afterwards can see it.
+    // The delete's snapshot is taken after the copy step, so it is where a wrong copy would show: it
+    // holds exactly the release's two original reviews.
+    const [{ captured }] = await sql`
+      SELECT captured->'children'->'reviews' AS captured FROM ${sql(SCHEMA)}.catalog_delete_snapshot
+       WHERE batch_id = ${batchId} AND entity_kind = 'library' AND entity_id = ${cited.id}`;
+    expect(captured.map((row) => row.id).sort((a, b) => a - b)).toEqual(
+      [acceptedByFiledAsCited.id, nobodyAccepted.review.id].sort((a, b) => a - b)
+    );
+    expect(captured.filter((row) => row.intake_item_id === filedAsCited.id)).toEqual([]);
 
     // Only the record's own review is left: the other two went with the release.
     const left = await sql`SELECT id, review FROM ${sql(SCHEMA)}.reviews WHERE review LIKE ${`${marker} nc-%`}`;
