@@ -82,7 +82,7 @@ Row validity: artist + album non-empty (drops the sheet's formula-residue junk r
 - **Never delete.** A row vanishing from the sheet leaves the DB row untouched (org data-safety rule). The job has no delete path at all.
 - **Never overwrite `album_id`.** The link pass is the column's only writer, links only on EXACTLY ONE library match at whichever tier decides it (see [Link pass](#link-pass)), and its UPDATE is guarded `WHERE album_id IS NULL` — manual corrections always win. `album_id` and `add_date` are omitted from the writer's ON CONFLICT set, so a sheet edit can never clobber either.
 - **Honest `last_modified`.** The writer's `setWhere` (IS DISTINCT FROM over every content column) suppresses no-op UPDATEs; an unchanged sheet reports `inserted=0, updated=0` and touches no `last_modified`.
-- **PII stays internal.** `reviewer_raw` and `social_consent_raw` hold names / name-adjacent asides the form promised not to share; no read endpoint emits them.
+- **PII stays internal.** `reviewer_raw` and `social_consent_raw` hold names / name-adjacent asides the form promised not to share. `GET /album-reviews` returns `reviewer_raw` as `reviewer` to signed-in station staff only (ADR 0011's amendment); the public metadata attach never does. `social_consent_raw` is emitted by no read endpoint.
 
 ## Link pass
 

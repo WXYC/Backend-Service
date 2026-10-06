@@ -124,8 +124,9 @@ describe('GET /album-reviews (ADR 0011)', () => {
     libraryId = lib.id;
 
     // Fully populated linked review — the wire-shape row. reviewer_raw and
-    // social_consent_raw are deliberately set: the PII assertions below
-    // prove they never reach the wire.
+    // social_consent_raw are deliberately set: the assertions below prove
+    // reviewer_raw is served as `reviewer` to signed-in staff, and that
+    // neither raw column key nor social_consent_raw ever reaches the wire.
     await seedSubmission('juana-1', {
       album_id: libraryId,
       artist_name: 'Juana Molina',
@@ -275,7 +276,7 @@ describe('GET /album-reviews (ADR 0011)', () => {
       }
     });
 
-    it('serves the full AlbumReview wire shape with no PII and no internal columns', async () => {
+    it('serves the full AlbumReview wire shape: the reviewer name for staff, no raw PII columns, no internal columns', async () => {
       const full = seeded(listing.body).find((r) => r.id === seededIds['juana-1']);
 
       expect(full).toEqual({

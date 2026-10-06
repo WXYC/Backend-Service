@@ -39,13 +39,13 @@ import type { AlbumReview } from '@wxyc/shared/dtos';
 
 /**
  * Wire shape: the generated `AlbumReview` from the cross-repo SSOT
- * (`wxyc-shared/api.yaml`), not a local mirror of it.
+ * (`wxyc-shared/api.yaml`), intersected with a hand-written `reviewer` field.
  *
- * The schema survived wxyc-shared#378 as an orphan when that sweep removed the
- * `GET /album-reviews` PATH, so the type is exportable from the `@wxyc/shared`
- * version already pinned here — no dependency bump is pending, and there is
- * nothing to hand-maintain in the meantime. Re-adding the path to `api.yaml` is
- * a separate wxyc-shared PR and does not change this type.
+ * The generated half is exported from the `@wxyc/shared` version pinned here
+ * and cannot drift. The `reviewer` widening is NOT generated: it is maintained
+ * by hand until the pinned `@wxyc/shared` carries it (see the comment below),
+ * so it must be checked against `api.yaml` on every `@wxyc/shared` bump and
+ * removed once the generated type includes it.
  *
  * Named locally so the rest of this file and its callers read in domain terms;
  * the sibling read over this same table
