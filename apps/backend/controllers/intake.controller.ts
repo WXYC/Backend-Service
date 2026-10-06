@@ -49,8 +49,16 @@ const CONFLICT_MESSAGES = {
 const conflict = (res: Response, reason: keyof typeof CONFLICT_MESSAGES) =>
   res.status(409).json({ message: CONFLICT_MESSAGES[reason], reason });
 
+/** `awaiting_acceptance`: `true`, or `false` (the same as leaving it out); anything else, a repeated key included, is a 400. */
+const parseAwaitingAcceptance = (raw: unknown) => {
+  if (raw === undefined || raw === 'false') return false;
+  if (raw === 'true') return true;
+  throw new WxycError('Invalid Parameter: awaiting_acceptance must be true or false', 400);
+};
+
 export const listIntake: RequestHandler = async (req, res) => {
   const { state } = req.query;
+  const awaitingAcceptance = parseAwaitingAcceptance(req.query.awaiting_acceptance);
   if (state !== undefined && !intakeItemStateEnum.enumValues.includes(state as IntakeItemState)) {
     throw new WxycError(`Invalid Parameter: state must be one of ${intakeItemStateEnum.enumValues.join(', ')}`, 400);
   }
@@ -58,6 +66,7 @@ export const listIntake: RequestHandler = async (req, res) => {
     await intakeService.listIntakeItems({
       state: state as IntakeItemState | undefined,
       includePasses: holdsReviewsManage(req),
+      awaitingAcceptance,
     })
   );
 };
@@ -122,6 +131,20 @@ const transition =
     }
     res.json(result.item);
   };
+
+/** One message for a review that does not exist, a draft and another record's review, so the answer does not reveal whether someone else's draft exists. */
+const ACCEPT_REVIEW_REFUSAL = 'review_id must name a submitted review of this record';
+
+/** `POST /intake/:id/accept-review`: a music director accepts one submitted review of the record (BS#2860). Not `/accept`, which is the requested DJ answering a request. */
+export const acceptReviewIntake: RequestHandler<{ id: string }> = async (req, res) => {
+  const id = parseId(req.params.id);
+  const reviewId = parseInt4BodyId(req.body?.review_id, 'review_id');
+  if (reviewId === undefined) throw new WxycError('review_id is required', 400);
+  const result = await intakeService.acceptReview(id, reviewId, reviewsActor(req));
+  if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
+  if (result.outcome === 'bad_review') throw new WxycError(ACCEPT_REVIEW_REFUSAL, 400);
+  res.json(result.item);
+};
 
 export const checkoutIntake = transition('checkout');
 export const releaseIntake = transition('release');

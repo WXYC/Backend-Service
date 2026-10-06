@@ -4,8 +4,8 @@
  * Effective state is the one definition the list filter, the lanes and (from
  * slice 8) every transition's precondition share, so what these pin is its
  * shape: a stale `requested` row reads as `pool` after 7 days or when the
- * requested DJ's account is gone, and a `checked_out` row is overdue after 14
- * days. The real-Postgres behavior (a stale row listed as `pool` and left
+ * requested DJ's account is gone, and a row whose checkout is more than 14 days
+ * old is overdue, whatever its state. The real-Postgres behavior (a stale row listed as `pool` and left
  * untouched) is pinned by `tests/integration/intake-items.spec.js`.
  *
  * `jest.unit.config.ts` redirects `@wxyc/database` to a stub whose tables are
@@ -40,7 +40,8 @@ import {
   deleteIntakeItem,
   RELEASE_ACCEPTED_REVIEW,
   refusalOutcome,
-  reviewAuthorsOnItem,
+  reviewAuthorsSql,
+  acceptReview,
 } from '../../../apps/backend/services/intake.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -77,16 +78,16 @@ describe('buildIntakeSelect — effective state (BS#2796)', () => {
     expect(text).toContain(`"${SCHEMA}"."intake_items"."requested_at" is null or`);
   });
 
-  it('flags overdue only on checked_out rows older than 14 days, without touching state', () => {
-    expect(text).toContain(`"${SCHEMA}"."intake_items"."state" = 'checked_out'`);
-    expect(text).toContain(`"${SCHEMA}"."intake_items"."checked_out_at" < now() - interval '14 days'`);
+  it('flags overdue on any row whose checkout is older than 14 days, with no state test (decision 39)', () => {
+    const t = `"${SCHEMA}"."intake_items"`;
+    const overdue = text.slice(text.indexOf('coalesce('), text.indexOf('as "overdue"'));
+    expect(overdue).toContain(`${t}."checked_out_at" < now() - interval '14 days'`);
+    expect(overdue).not.toContain('"state"');
   });
 
-  it('makes overdue false, never NULL, for a checked_out row with no checked_out_at', () => {
+  it('makes overdue false, never NULL, for a row with no checked_out_at', () => {
     const t = `"${SCHEMA}"."intake_items"`;
-    expect(text).toContain(
-      `coalesce(${t}."state" = 'checked_out' and ${t}."checked_out_at" < now() - interval '14 days', false) as "overdue"`
-    );
+    expect(text).toContain(`coalesce(${t}."checked_out_at" < now() - interval '14 days', false) as "overdue"`);
   });
 
   it('is a SELECT — reading never writes', () => {
@@ -129,16 +130,72 @@ describe('buildIntakeSelect — passes', () => {
   });
 });
 
-describe('buildIntakeSelect — accepted-review columns (BS#2858)', () => {
-  // BS#2858 lands the columns with no reader; the contract's IntakeItem does not declare them until WXYC/wxyc-shared#571.
-  it('keeps accepted_review_id, accepted_by and accepted_at off the IntakeItem response until BS#2860 exposes them (flip this test there)', () => {
+describe('buildIntakeSelect — accepted-review columns and review fields (BS#2858, BS#2860)', () => {
+  const T = `"${SCHEMA}"`;
+
+  it('exposes accepted_review_id, accepted_by and accepted_at', () => {
     for (const includePasses of [false, true]) {
       const { sql: text } = render({ includePasses });
-      expect(text).toContain(`"${SCHEMA}"."intake_items"."cited_album_id"`);
       for (const column of ['accepted_review_id', 'accepted_by', 'accepted_at']) {
-        expect(text).not.toContain(`"${column}"`);
+        expect(text).toContain(`${T}."intake_items"."${column}"`);
       }
     }
+  });
+
+  it('counts submitted reviews in a correlated subquery of the same statement, for every caller', () => {
+    for (const includePasses of [false, true]) {
+      const text = render({ includePasses }).sql;
+      expect(text).toContain(
+        `(SELECT count(*)::int FROM ${T}."reviews" WHERE ${T}."reviews"."intake_item_id" = ${T}."intake_items"."id" AND ${T}."reviews"."status" = 'submitted') as "submitted_review_count"`
+      );
+    }
+  });
+
+  it('selects draft_authors as a correlated subquery of the same statement for reviews:manage, and never otherwise', () => {
+    const text = render({ includePasses: true }).sql;
+    expect(text).toContain(
+      `${T}."reviews"."intake_item_id" = ${T}."intake_items"."id" AND ${T}."reviews"."status" = 'draft'`
+    );
+    expect(text).toContain('as "draft_authors"');
+    expect(render({ includePasses: false }).sql).not.toContain('draft_authors');
+  });
+
+  it('draft_authors carries names only: no review text, no review id in the output', () => {
+    const text = render({ includePasses: true }).sql;
+    const sub = text.slice(text.indexOf('json_agg(', text.indexOf('as "passes"')), text.indexOf('as "draft_authors"'));
+    expect(sub).not.toMatch(/"review"\b|"artist_blurb"|"buzzwords"/);
+  });
+
+  it('awaiting_acceptance keeps items with a submitted review, no accepted one and no filing, ANDed with state', () => {
+    const { sql: text, params } = render({ includePasses: false, awaitingAcceptance: true, state: 'pool' });
+    expect(text).toContain(`${T}."reviews"."status" = 'submitted') > 0`);
+    expect(text).toContain(`${T}."intake_items"."accepted_review_id" IS NULL`);
+    expect(text).toMatch(/"state" not in \(\$\d+, \$\d+\)/);
+    expect(params).toEqual(expect.arrayContaining(['pool', 'filed', 'finalized']));
+    expect(render({ includePasses: false, awaitingAcceptance: false }).sql).not.toContain(
+      'accepted_review_id" IS NULL'
+    );
+  });
+});
+
+describe('reviewAuthorsSql (BS#2860) — the one list behind draft_authors and deleted_review_authors', () => {
+  const render = (draftsOnly?: boolean) =>
+    new PgDialect().sqlToQuery(sql`SELECT ${reviewAuthorsSql(draftsOnly)} FROM ${intake_items}`).sql;
+  const T = `"${SCHEMA}"`;
+
+  it('names the author of each review on the item, oldest first, leaving out a review with no author text', () => {
+    const text = render();
+    expect(text).toContain(
+      `json_agg(${T}."reviews"."author" ORDER BY ${T}."reviews"."id") FILTER (WHERE ${T}."reviews"."author" IS NOT NULL)`
+    );
+    expect(text).toContain(`coalesce(`);
+    expect(text).toContain(`'[]'::json`);
+    expect(text).toContain(`WHERE ${T}."reviews"."intake_item_id" = ${T}."intake_items"."id")`);
+    expect(text).not.toContain('"status"');
+  });
+
+  it('with draftsOnly restricts the subquery to unsubmitted drafts', () => {
+    expect(render(true)).toContain(`AND ${T}."reviews"."status" = 'draft')`);
   });
 });
 
@@ -152,18 +209,18 @@ describe('buildTransition (BS#2798)', () => {
   };
 
   it.each([
-    ['checkout', 'pool'],
-    ['release', 'checked_out'],
-    ['request', 'pool'],
-    ['cancel_request', 'requested'],
-    ['accept', 'requested'],
-    ['pass', 'requested'],
+    ['checkout', ['pool']],
+    ['release', ['checked_out', 'reviewed']],
+    ['request', ['pool']],
+    ['cancel_request', ['requested']],
+    ['accept', ['requested']],
+    ['pass', ['requested']],
   ] as const)('%s is one UPDATE whose WHERE carries the id and the effective-state precondition %s', (action, from) => {
     const { text, params } = render(action, 7, md, 'dj-2');
     expect(text.trimStart()).toMatch(/^update /);
-    expect(text).toMatch(/where \(.*"id" = \$\d+ and \(case when .* end\) = \$\d+/s);
+    expect(text).toMatch(/where \(.*"id" = \$\d+ and \(case when .* end\) in \(\$\d+(, \$\d+)*\)/s);
     expect(text).toContain('returning');
-    expect(params).toEqual(expect.arrayContaining([7, from]));
+    expect(params).toEqual(expect.arrayContaining([7, ...from]));
   });
 
   it('checkout stamps the holder and clears any stale request fields', () => {
@@ -174,10 +231,22 @@ describe('buildTransition (BS#2798)', () => {
     expect(params).toEqual(expect.arrayContaining(['checked_out', null, 'dj-1']));
   });
 
-  it('release clears the holder fields', () => {
+  it('release clears the holder fields and falls to pool only from checked_out, so a reviewed item stays reviewed', () => {
     const { text, params } = render('release', 7, md);
-    expect(text).toMatch(/set "state" = \$\d+, "checked_out_by" = \$\d+, "checked_out_at" = \$\d+/);
-    expect(params.slice(0, 3)).toEqual(['pool', null, null]);
+    expect(text).toMatch(
+      new RegExp(
+        `set "state" = case when ${t}."state" = 'checked_out' then 'pool' else ${t}."state" end, "checked_out_by" = \\$\\d+, "checked_out_at" = \\$\\d+`
+      )
+    );
+    expect(params.slice(0, 2)).toEqual([null, null]);
+    expect(text).not.toContain('accepted_');
+  });
+
+  it('release from reviewed also requires a checkout: checked_out_at IS NOT NULL on the reviewed arm, for every caller', () => {
+    for (const actor of [dj, md]) {
+      const { text } = render('release', 7, actor);
+      expect(text).toContain(`(${t}."state" <> 'reviewed' or ${t}."checked_out_at" is not null)`);
+    }
   });
 
   it('release by a caller without reviews:manage requires checked_out_by = caller in the WHERE', () => {
@@ -233,25 +302,43 @@ describe('refusalOutcome — 409 state_changed ranks before the identity 403', (
     [
       'an identity-guarded refusal on an item still in the from state',
       { effective_state: 'checked_out' },
-      { from: 'checked_out', identityGuarded: true },
+      { from: ['checked_out'], identityGuarded: true },
       'forbidden',
     ],
     [
       'an identity-guarded transition on an item in another state',
       { effective_state: 'pool' },
-      { from: 'checked_out', identityGuarded: true },
+      { from: ['checked_out'], identityGuarded: true },
       'state_changed',
     ],
     [
       'an identity-guarded transition on a filed item',
       { effective_state: 'filed' },
-      { from: 'requested', identityGuarded: true },
+      { from: ['requested'], identityGuarded: true },
       'state_changed',
     ],
     [
       'an unguarded transition on an item in the from state',
       { effective_state: 'pool' },
-      { from: 'pool', identityGuarded: false },
+      { from: ['pool'], identityGuarded: false },
+      'state_changed',
+    ],
+    [
+      'an identity-guarded refusal on a reviewed item that still has a checkout',
+      { effective_state: 'reviewed', checked_out_at: new Date() },
+      { from: ['checked_out', 'reviewed'], identityGuarded: true },
+      'forbidden',
+    ],
+    [
+      'an identity-guarded release of a reviewed item with no checkout: state_changed, not forbidden',
+      { effective_state: 'reviewed', checked_out_at: null },
+      { from: ['checked_out', 'reviewed'], identityGuarded: true },
+      'state_changed',
+    ],
+    [
+      'an unguarded release of a reviewed item with no checkout',
+      { effective_state: 'reviewed', checked_out_at: null },
+      { from: ['checked_out', 'reviewed'], identityGuarded: false },
       'state_changed',
     ],
   ] as const)('%s', (_name, item, transition, expected) => {
@@ -285,7 +372,7 @@ describe('buildIntakePatch — citations (BS#2797)', () => {
   it('checks a submission against its station date', () => {
     const { sql: text } = render({ cited_submission_id: 12 }, '2027-01-12');
     expect(text).toContain(`(${T}."album_review_submissions"."submitted_at" AT TIME ZONE 'America/New_York')::date`);
-    expect(text).not.toContain('"reviews"');
+    expect(text).not.toContain('"reviews"."status"');
   });
 
   it.each([
@@ -296,10 +383,11 @@ describe('buildIntakePatch — citations (BS#2797)', () => {
     expect(text).toContain(`"${cleared}" = $`);
   });
 
-  it('adds no citation predicate, and clears nothing, for a patch that sets none', () => {
+  it('adds no citation validity predicate, and clears no submission, for a patch that sets none', () => {
     const { sql: text } = render({ album_title: 'DOGA', cited_album_id: null });
-    expect(text).not.toMatch(/exists/i);
-    expect(text).not.toContain('cited_submission_id');
+    expect(text).not.toContain('"library"');
+    expect(text).not.toContain('album_review_submissions');
+    expect(text).not.toContain('"cited_submission_id"');
   });
 
   it.each([
@@ -316,6 +404,54 @@ describe('buildIntakePatch — citations (BS#2797)', () => {
     (reviewGateCutoverDate as jest.Mock).mockClear();
     buildIntakePatch(7, { cited_submission_id: 12 });
     expect(reviewGateCutoverDate).toHaveBeenCalled();
+  });
+});
+
+describe('buildIntakePatch — a citation change takes off a review chosen through it (BS#2860)', () => {
+  const T = `"${SCHEMA}"."intake_items"`;
+  const render = (patch: Parameters<typeof buildIntakePatch>[1]) => {
+    delete process.env.REVIEW_GATE_CUTOVER_DATE;
+    const q = buildIntakePatch(7, patch).toSQL();
+    return { text: q.sql, params: q.params };
+  };
+  const NOT_OWN = `exists (select 1 from "${SCHEMA}"."reviews" where "${SCHEMA}"."reviews"."id" = ${T}."accepted_review_id" and "${SCHEMA}"."reviews"."intake_item_id" is distinct from ${T}."id")`;
+
+  it.each([
+    ['a different release', { cited_album_id: 5 }, `${T}."cited_album_id" is distinct from $`],
+    ['a clear to null', { cited_album_id: null }, `${T}."cited_album_id" is not null and`],
+    [
+      'the submission switch (cited_submission_id clears cited_album_id)',
+      { cited_submission_id: 12 },
+      `${T}."cited_album_id" is not null and`,
+    ],
+  ])(
+    '%s compares the stored cited_album_id with the value the patch leaves, and clears the three accept columns and the state in the same UPDATE',
+    (_name, patch, change) => {
+      const text = render(patch).text.toLowerCase();
+      expect(text).toContain(`${change.replace(' and', '')}`.toLowerCase());
+      expect(text).toContain(NOT_OWN);
+      for (const column of ['accepted_review_id', 'accepted_by', 'accepted_at']) {
+        expect(text).toMatch(new RegExp(`"${column}" = case when .* then null else ${T}\\."${column}" end`, 's'));
+      }
+      expect(text).toMatch(
+        /"state" = case when .* then case when .*'reviewed' and .*"checked_out_at" is not null then 'checked_out'/s
+      );
+    }
+  );
+
+  it.each([
+    ['a title-only patch', { album_title: 'DOGA' }],
+    ['a submission clear that carries no citation', { cited_submission_id: null }],
+  ])('%s leaves the accepted review alone', (_name, patch) => {
+    expect(render(patch).text).not.toContain('accepted_review_id');
+  });
+
+  it('leaves the checkout alone: a removed holder returns to checked_out with checked_out_at unchanged', () => {
+    expect(render({ cited_album_id: null }).text.toLowerCase()).not.toMatch(/"checked_out_(at|by)" = /);
+  });
+
+  it('never reads the review row under a lock: the test is a plain EXISTS', () => {
+    expect(render({ cited_album_id: null }).text.toLowerCase()).not.toContain('for update');
   });
 });
 
@@ -389,10 +525,11 @@ describe('RELEASE_ACCEPTED_REVIEW — the one UPDATE that takes a review off eve
     expect(rendered.params.slice(0, 3)).toEqual([null, null, null]);
   });
 
-  it('sends a reviewed item to its holder when it has one, else to the pool, and keeps every other state', () => {
+  it('sends a reviewed item back to its checkout (checked_out_at set, holder account or not) else to the pool, and keeps every other state', () => {
     expect(text).toMatch(
-      /case when .*"state" = 'reviewed' and .*"checked_out_by" is not null then 'checked_out' when .*"state" = 'reviewed' then 'pool' else .*"state" end/
+      /case when .*"state" = 'reviewed' and .*"checked_out_at" is not null then 'checked_out' when .*"state" = 'reviewed' then 'pool' else .*"state" end/
     );
+    expect(text).not.toContain('"checked_out_by"');
   });
 
   it('reaches every accepting item by the pointer and nothing else', () => {
@@ -421,6 +558,7 @@ describe('deleteIntakeItem (BS#2854)', () => {
     calls.length = 0;
     const tx = {
       select: jest.fn(() => builder('select', selects.shift() ?? [])),
+      execute: jest.fn(() => Promise.resolve([{ authors: selects.shift()?.[0]?.authors }])),
       delete: jest.fn(() => builder('delete', [])),
     };
     jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
@@ -429,13 +567,14 @@ describe('deleteIntakeItem (BS#2854)', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
-  it('locks the item first, reads the authors of every review (drafts included), then deletes, and answers the authors', async () => {
+  it('locks the item first, reads the authors of every review (drafts included) through the shared fragment, then deletes, and answers the authors', async () => {
     const { result, tx } = await run([
       [{ state: 'checked_out' }],
-      [{ author: 'Test Reviewer' }, { author: null }, { author: 'Test Visiting DJ' }],
+      [{ authors: ['Test Reviewer', 'Test Visiting DJ'] }],
     ]);
     expect(result).toEqual({ outcome: 'deleted', authors: ['Test Reviewer', 'Test Visiting DJ'] });
-    expect(calls).toEqual(['select', 'select for update', 'select', 'delete']);
+    expect(calls).toEqual(['select', 'select for update', 'delete']);
+    expect(tx.execute).toHaveBeenCalledTimes(1);
     expect(tx.delete).toHaveBeenCalledTimes(1);
   });
 
@@ -456,48 +595,147 @@ describe('deleteIntakeItem (BS#2854)', () => {
   });
 });
 
-describe('reviewAuthorsOnItem (BS#2854; draft_authors in BS#2860 reuses it)', () => {
-  /** A select stand-in that renders the WHERE and ORDER BY it is given and resolves to `rows`. */
-  const run = async (rows: { author: string | null }[], draftsOnly?: boolean) => {
-    let where = { sql: '', params: [] as unknown[] };
-    let orderBy = '';
-    const dialect = new PgDialect();
+describe('acceptReview (BS#2860)', () => {
+  /** A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows` and logs each `for` and write it sees. */
+  const log: string[] = [];
+  const sets: Record<string, unknown>[] = [];
+  const builder = (label: string, rows: unknown[]): unknown => {
+    const proxy: unknown = new Proxy(() => undefined, {
+      get: (_t, prop: string) => {
+        if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
+        return (...args: unknown[]) => {
+          if (prop === 'for') log.push(`${label} for ${args[0] as string}`);
+          if (prop === 'set') sets.push(args[0] as Record<string, unknown>);
+          return proxy;
+        };
+      },
+    });
+    return proxy;
+  };
+  const dialect = new PgDialect();
+  const MD = { id: 'md-1', manage: true };
+  const own = { status: 'submitted', medium: 'typed', item: 7, album: null };
+  type Row = Record<string, unknown>;
+  /** Selects resolve in call order: the item's citation, the review's album, [the cited library row], the item lock, the review lock. */
+  const run = async (opts: {
+    cited?: number | null;
+    peekAlbum?: number | null;
+    item?: Row;
+    review?: Row | undefined;
+  }) => {
+    log.length = 0;
+    sets.length = 0;
+    const cited = opts.cited ?? null;
+    const item = opts.item ?? { album_id: null, cited };
+    const selects: unknown[][] = [[{ cited }], [{ album: opts.peekAlbum ?? null }]];
+    if (cited !== null && opts.peekAlbum === cited) selects.push([{ id: cited }]);
+    selects.push([item], opts.review === undefined ? [] : [opts.review]);
     const tx = {
-      select: () => ({
-        from: () => ({
-          where: (w: never) => {
-            where = dialect.sqlToQuery(w);
-            return {
-              orderBy: (column: never) => {
-                orderBy = dialect.sqlToQuery(sql`${column}`).sql;
-                return Promise.resolve(rows);
-              },
-            };
-          },
-        }),
-      }),
+      select: jest.fn(() => builder('select', selects.shift() ?? [])),
+      update: jest.fn(() => builder('update', [])),
     };
-    const authors = await reviewAuthorsOnItem(tx as never, 7, draftsOnly);
-    return { authors, where, orderBy };
+    jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
+    jest.spyOn(db, 'select').mockReturnValue(builder('read', [{ id: 7 }]) as never);
+    return { result: await acceptReview(7, 3, MD), tx };
   };
 
-  it('by default names the author of every review on the item, oldest first, and skips a review with no author text', async () => {
-    const { authors, where, orderBy } = await run([
-      { author: 'Test Reviewer' },
-      { author: null },
-      { author: 'Test Visiting DJ' },
-    ]);
-    expect(authors).toEqual(['Test Reviewer', 'Test Visiting DJ']);
-    expect(where.params).toEqual([7]);
-    expect(where.sql).not.toContain('"status"');
-    expect(orderBy).toBe(`"${SCHEMA}"."reviews"."id"`);
+  afterEach(() => jest.restoreAllMocks());
+
+  it('locks the item FOR UPDATE, then the review FOR UPDATE, and writes once', async () => {
+    const { result, tx } = await run({ review: own });
+    expect(result.outcome).toBe('accepted');
+    expect(log).toEqual(['select for update', 'select for update']);
+    expect(tx.update).toHaveBeenCalledTimes(1);
   });
 
-  it('with draftsOnly restricts the read to unsubmitted drafts and still names only authors with text', async () => {
-    const { authors, where } = await run([{ author: 'Test Reviewer' }, { author: null }], true);
-    expect(authors).toEqual(['Test Reviewer']);
-    expect(where.sql).toContain('"intake_item_id" = $1');
-    expect(where.sql).toContain('"status" = $2');
-    expect(where.params).toEqual([7, 'draft']);
+  it('through a citation takes the cited release library row FOR SHARE before the item and the review locks', async () => {
+    const { result } = await run({
+      cited: 9,
+      peekAlbum: 9,
+      review: { status: 'submitted', medium: 'typed', item: null, album: 9 },
+    });
+    expect(result.outcome).toBe('accepted');
+    expect(log).toEqual(['select for share', 'select for update', 'select for update']);
+  });
+
+  it('writes the pointer, the caller and now, withdraws any request, and sets reviewed unless filed or finalized, in one statement', async () => {
+    await run({ review: own });
+    const set = dialect.sqlToQuery(sql`${sets[0].state}`);
+    expect(set.sql).toMatch(/CASE WHEN .*"state" IN \('filed', 'finalized'\) THEN .*"state" ELSE 'reviewed' END/);
+    expect(sets[0]).toMatchObject({
+      accepted_review_id: 3,
+      accepted_by: 'md-1',
+      requested_dj_id: null,
+      requested_at: null,
+    });
+    expect(Object.keys(sets[0])).not.toEqual(expect.arrayContaining(['checked_out_by', 'checked_out_at']));
+  });
+
+  it.each([['the item is missing', { cited: null, item: undefined }, 'not_found']])('%s', async () => {
+    log.length = 0;
+    const tx = { select: jest.fn(() => builder('select', [])), update: jest.fn() };
+    jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
+    expect((await acceptReview(7, 3, MD)).outcome).toBe('not_found');
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a missing review', undefined],
+    ['a draft of this item', { ...own, status: 'draft' }],
+    ['a review of another record', { status: 'submitted', medium: 'typed', item: 8, album: null }],
+    [
+      'a review of another unfiled record when this item is unfiled (both album_ids NULL)',
+      { status: 'submitted', medium: 'handwritten', item: null, album: null },
+    ],
+  ])('%s is bad_review and writes nothing', async (_name, review) => {
+    const { result, tx } = await run({ review });
+    expect(result).toEqual({ outcome: 'bad_review' });
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'a typed review of the release the item was filed as',
+      { album_id: 5, cited: null },
+      { status: 'submitted', medium: 'typed', item: null, album: 5 },
+      true,
+    ],
+    [
+      'a handwritten review of the release the item was filed as',
+      { album_id: 5, cited: null },
+      { status: 'submitted', medium: 'handwritten', item: null, album: 5 },
+      true,
+    ],
+    [
+      'a handwritten review of the cited release',
+      { album_id: null, cited: 9 },
+      { status: 'submitted', medium: 'handwritten', item: null, album: 9 },
+      false,
+    ],
+    [
+      'a draft of the cited release',
+      { album_id: null, cited: 9 },
+      { status: 'draft', medium: 'typed', item: null, album: 9 },
+      false,
+    ],
+    [
+      'a review of a release the item does not cite',
+      { album_id: null, cited: 9 },
+      { status: 'submitted', medium: 'typed', item: null, album: 4 },
+      false,
+    ],
+  ])('%s is %s', async (_name, item, review, accepted) => {
+    const { result } = await run({ cited: item.cited, peekAlbum: review.album, item, review });
+    expect(result.outcome).toBe(accepted ? 'accepted' : 'bad_review');
+  });
+
+  it('honors the citation arm only for the release it holds a lock on: a citation changed after the unlocked read is bad_review', async () => {
+    const { result } = await run({
+      cited: 9,
+      peekAlbum: 9,
+      item: { album_id: null, cited: 4 },
+      review: { status: 'submitted', medium: 'typed', item: null, album: 9 },
+    });
+    expect(result.outcome).toBe('bad_review');
   });
 });

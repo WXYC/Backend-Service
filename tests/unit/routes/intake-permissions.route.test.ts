@@ -150,7 +150,11 @@ describe('/intake — passes visibility', () => {
   ] as const)('list for %s asks for passes: %s', async (role, expected) => {
     mockRole(role);
     await bearer(request(app).get('/intake'));
-    expect(mockListIntakeItems).toHaveBeenCalledWith({ state: undefined, includePasses: expected });
+    expect(mockListIntakeItems).toHaveBeenCalledWith({
+      state: undefined,
+      includePasses: expected,
+      awaitingAcceptance: false,
+    });
   });
 
   test.each([
@@ -187,7 +191,34 @@ describe('GET /intake — ?state=', () => {
   test.each(['pool', 'requested', 'checked_out', 'reviewed', 'filed', 'finalized'])('accepts %s', async (state) => {
     const res = await bearer(request(app).get('/intake').query({ state }));
     expect(res.status).toBe(200);
-    expect(mockListIntakeItems).toHaveBeenCalledWith({ state, includePasses: false });
+    expect(mockListIntakeItems).toHaveBeenCalledWith({ state, includePasses: false, awaitingAcceptance: false });
+  });
+
+  // BS#2860: `false` is the same as leaving it out; anything else, a repeated key included, is a 400.
+  test.each([
+    ['true', true],
+    ['false', false],
+  ])('awaiting_acceptance=%s is passed through as %s, alongside state', async (raw, expected) => {
+    const res = await bearer(request(app).get('/intake').query({ awaiting_acceptance: raw, state: 'pool' }));
+    expect(res.status).toBe(200);
+    expect(mockListIntakeItems).toHaveBeenCalledWith({
+      state: 'pool',
+      includePasses: false,
+      awaitingAcceptance: expected,
+    });
+  });
+
+  test.each(['1', 'yes', 'TRUE', ''])('awaiting_acceptance=%j is a 400 before any query', async (raw) => {
+    const res = await bearer(request(app).get('/intake').query({ awaiting_acceptance: raw }));
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Invalid Parameter: awaiting_acceptance must be true or false');
+    expect(mockListIntakeItems).not.toHaveBeenCalled();
+  });
+
+  test('a repeated awaiting_acceptance is a 400', async () => {
+    expect((await bearer(request(app).get('/intake?awaiting_acceptance=true&awaiting_acceptance=true'))).status).toBe(
+      400
+    );
   });
 });
 
