@@ -705,6 +705,7 @@ const DRAFT = (o: object = {}) => ({
   author: 'Test Reviewer',
   author_user_id: 'dj-1',
   recorded_by_user_id: null,
+  intake_item_id: null,
   submitted_at: null,
   last_modified: new Date('2026-09-30T12:30:00.000Z'),
   ...o,
@@ -715,6 +716,15 @@ describe('submitReview', () => {
   const script = (current: object, ...more: unknown[][]) =>
     mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [DRAFT(current)], ...more);
   const REREAD = DRAFT({ status: 'submitted', note: 'from selectReview' });
+  const NOTICE_ROW = {
+    artist: 'Juana Molina',
+    album: 'DOGA',
+    checked_out_at: new Date('2026-10-01T12:00:00Z'),
+    checked_out_by: 'dj-2',
+    requested_dj_id: null,
+    effective_state: 'checked_out',
+    holder_name: 'Test Holder',
+  };
 
   test('stamps submitted_at, writes revision 1 and answers what selectReview reads after both writes', async () => {
     script({}, [{ id: 3 }], [{ n: 0 }], [REREAD]);
@@ -742,6 +752,32 @@ describe('submitReview', () => {
     expect(mockStatements.at(-2)).toBe('insert review_revisions');
     expect(mockStatements.at(-1)).toMatch(/^select#/);
     expect(mockReads.at(-1)).toMatchObject({ handle: 'tx', table: 'reviews' });
+  });
+
+  test('an item review answers the item as this submit read it, after the locks and the writes', async () => {
+    script({ intake_item_id: 8 }, [{ id: 3 }], [{ n: 0 }], [NOTICE_ROW], [REREAD]);
+    expect(await submitReview(3, DJ)).toEqual({
+      outcome: 'submitted',
+      review: REREAD,
+      notice: {
+        itemId: 8,
+        artist: 'Juana Molina',
+        album: 'DOGA',
+        author: 'Test Reviewer',
+        line: { kind: 'other_dj', holderName: 'Test Holder' },
+      },
+    });
+    expect(mockReads.at(-2)).toMatchObject({ handle: 'tx', table: 'intake_items' });
+  });
+
+  test.each([
+    ['a library-release review', { intake_item_id: null }],
+    ['a review a music director recorded', { intake_item_id: 8, recorded_by_user_id: 'md-1' }],
+  ])('%s carries no notice and reads no item', async (_name, over) => {
+    script(over, [{ id: 3 }], [{ n: 0 }], [REREAD]);
+    const result = await submitReview(3, DJ);
+    expect(result).not.toHaveProperty('notice');
+    expect(mockReads.filter((r) => r.table === 'intake_items' && r.lock === undefined)).toEqual([]);
   });
 
   test('locks only through lockReviewAfterItem (item FOR SHARE, then the review FOR UPDATE) and issues nothing else against intake_items', async () => {

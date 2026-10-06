@@ -42,6 +42,10 @@ const mockRevisions = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 jest.mock('@wxyc/database', () => ({
   reviewCreditEnum: jest.requireActual('../../../shared/database/src/schema').reviewCreditEnum,
 }));
+const mockNotifySubmitted = jestGlobals.fn<(...args: any[]) => Promise<void>>();
+jest.mock('../../../apps/backend/services/review-notices.service', () => ({
+  notifyReviewSubmitted: mockNotifySubmitted,
+}));
 jest.mock('../../../apps/backend/services/reviews.service', () => ({
   createReview: mockCreate,
   updateReview: mockUpdate,
@@ -282,6 +286,25 @@ describe('POST /reviews/:id/submit', () => {
     const res = await submit();
     expect([res.status, res.body]).toEqual([200, REVIEW]);
     expect(mockSubmit).toHaveBeenCalledWith(3, { id: 'caller-id', manage: true });
+  });
+
+  test('sends the notice the service returned, and none when it returned none or the submit was refused', async () => {
+    mockRole('dj');
+    const notice = {
+      itemId: 8,
+      artist: 'Juana Molina',
+      album: 'DOGA',
+      author: 'Test Reviewer',
+      line: { kind: 'pool' },
+    };
+    mockSubmit.mockResolvedValueOnce({ outcome: 'submitted', review: REVIEW, notice });
+    await submit();
+    expect(mockNotifySubmitted).toHaveBeenCalledTimes(1);
+    expect(mockNotifySubmitted).toHaveBeenCalledWith(notice);
+    await submit();
+    mockSubmit.mockResolvedValueOnce({ outcome: 'not_draft' });
+    await submit();
+    expect(mockNotifySubmitted).toHaveBeenCalledTimes(1);
   });
 
   test.each([

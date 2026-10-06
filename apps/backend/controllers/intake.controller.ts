@@ -3,6 +3,7 @@ import { intakeItemStateEnum } from '@wxyc/database';
 import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
 import type { IntakeAction, IntakeCitations, IntakeFields, IntakeItemState } from '../services/intake.service.js';
+import { notifyPass } from '../services/review-notices.service.js';
 import WxycError from '../utils/error.js';
 import { parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
 import { holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
@@ -129,6 +130,8 @@ const transition =
     if (result.outcome === 'already_filed' || result.outcome === 'state_changed') {
       return void conflict(res, 'state_changed');
     }
+    if (action === 'pass' && result.outcome === 'updated')
+      await notifyPass({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);
     res.json(result.item);
   };
 

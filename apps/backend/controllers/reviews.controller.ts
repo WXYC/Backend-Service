@@ -3,6 +3,7 @@ import type { RequestHandler } from 'express';
 import * as reviewsService from '../services/reviews.service.js';
 import type { ReviewFields } from '../services/reviews.service.js';
 import WxycError from '../utils/error.js';
+import { notifyReviewSubmitted } from '../services/review-notices.service.js';
 import { parseInt4BodyId, parseInt4PathId, parseInt4QueryParam } from '../utils/query-params.js';
 import { reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText } from '../utils/text-fields.js';
@@ -80,7 +81,8 @@ export const submitReview: RequestHandler<{ id: string }> = async (req, res) => 
   if (result.outcome === 'not_draft') return void conflict(res, 'not_draft', 'This review is already submitted');
   if (result.outcome === 'text_required') throw new WxycError('A typed review needs text to be submitted', 400);
   if (result.outcome !== 'submitted') throw new WxycError('You may not submit this review', 403);
-  // The notice to the music directors (BS#2806) is sent here, after the transaction has committed.
+  // After the commit; notifyMusicDirectors logs and swallows a failure, so the submit still succeeds.
+  if (result.notice) await notifyReviewSubmitted(result.notice);
   res.json(result.review);
 };
 

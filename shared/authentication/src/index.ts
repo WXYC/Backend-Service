@@ -7,7 +7,8 @@ export * from './device-authorization';
 // The one admin-flag predicate. Exported from the barrel so `apps/auth`'s
 // provision path consumes it instead of restating the role set (BS#2282).
 export { grantsAdminFlag } from './admin-flag-sync';
-export { sendAccountSetupEmail } from './email';
+export { sendAccountSetupEmail, sendNotificationEmail } from './email';
+export type { NotificationEmail } from './email';
 // Station signup (BS#2361) sends this directly rather than going through
 // better-auth's `sendVerificationEmail` endpoint: that endpoint no-ops for an
 // already-`emailVerified` account (see email-verification.mjs's

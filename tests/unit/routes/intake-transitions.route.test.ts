@@ -35,6 +35,8 @@ const mockMemberRoles = jestGlobals.fn<(...args: any[]) => Promise<string[]>>();
 jest.mock('@wxyc/database', () => ({
   intakeItemStateEnum: jest.requireActual('../../../shared/database/src/schema').intakeItemStateEnum,
 }));
+const mockNotifyPass = jestGlobals.fn<(...args: any[]) => Promise<void>>();
+jest.mock('../../../apps/backend/services/review-notices.service', () => ({ notifyPass: mockNotifyPass }));
 jest.mock('../../../apps/backend/services/intake.service', () => ({
   transitionIntakeItem: mockTransition,
   memberRoles: mockMemberRoles,
@@ -71,6 +73,7 @@ beforeEach(() => {
   mockedJwtVerify.mockReset();
   mockTransition.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM });
   mockMemberRoles.mockReset().mockResolvedValue(['dj']);
+  mockNotifyPass.mockReset();
 });
 
 describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
@@ -81,6 +84,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
     const res = await post(path, body);
     expect(res.status).toBe(200);
     expect(res.body).toEqual(ITEM);
+    expect(mockNotifyPass).toHaveBeenCalledTimes(action === 'pass' ? 1 : 0);
     expect(mockTransition).toHaveBeenCalledWith(
       action,
       7,
