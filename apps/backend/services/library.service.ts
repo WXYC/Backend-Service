@@ -7101,7 +7101,8 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * **The snapshot widens that footprint, and the same bound covers it.** The
  * capture takes `FOR SHARE` on every child row it reads (see
  * `captureCatalogDeleteSnapshot`), so the full order is library → rotation →
- * digital_asset → each captured child, in the order the `children` list gives.
+ * digital_asset → the release's intake items → each captured child, in the order
+ * the `children` list gives.
  * That is a real widening — a DJ editing a bin note, or a librarian editing a
  * review, on THIS release now contends with the delete where before it did
  * not — and it is deliberate: without it such an edit commits between the
@@ -7109,17 +7110,19 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * snapshotted, which is the silent loss this whole feature exists to prevent.
  * The rotation and library locks need no order reasoning, for the reason above:
  * nothing there is ordered against, only bounded. The item and review locks DO
- * have an order, because the review writers that take two locks all take the
- * item first and the review second (`lockReviewAfterItem`'s callers, which
- * include `deleteReview`, plus print and accept). So the delete takes its
- * intake items `FOR UPDATE` in one ascending-`id` statement, before
- * `copyCitedCoverReviews` and before the capture's `FOR SHARE` on any review:
- * library, then items, then reviews. A writer that locks a review and then an
- * item would still deadlock, and would lose to the bound below rather than to
- * the deadlock detector.
+ * have an order, because the review writers that take two locks take the item
+ * first and the review second: today `updateReview`, `submitReview` and
+ * `deleteReview` through `lockReviewAfterItem` (`reviews.service.ts`); the print
+ * (BS#2804) and review-accept (BS#2860) writers are planned to follow the same
+ * order. So the delete takes its intake items `FOR UPDATE` in one ascending-`id`
+ * statement, before `copyCitedCoverReviews` and before the capture's `FOR SHARE`
+ * on any review: library, then items, then reviews. A writer that locked a
+ * review and then an item would still deadlock with this delete.
  *
- * So the transaction does not rely on the order at all. It sets
- * `lock_timeout` to {@link DELETE_ALBUM_LOCK_TIMEOUT_MS}, deliberately BELOW
+ * That order is what keeps the delete and the review writers out of a cycle; the
+ * bound is only the backstop for a cycle some other writer could still build.
+ * The transaction sets `lock_timeout` to {@link DELETE_ALBUM_LOCK_TIMEOUT_MS},
+ * deliberately BELOW
  * the default 1 s `deadlock_timeout`, which makes this transaction give up
  * before the deadlock detector even runs — the librarian gets a clean,
  * retryable `lock_unavailable` (503) instead of the DJ getting an aborted
@@ -7325,12 +7328,12 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
 
     // Lock the release's intake items before any review is locked or copied:
     // the items filed as this release and the items whose accepted review is one
-    // of its reviews, in one statement in ascending `id`. Every review writer
-    // locks its item and then its review (`lockReviewAfterItem`, print, accept),
-    // so taking the same order here (library, items, reviews) leaves the
-    // capture's and the copy's later review locks no cycle to join. The review
-    // test is a subquery so one table is in the `FROM` and a plain
-    // `.for('update')` works.
+    // of its reviews, in one statement in ascending `id`. The review writers
+    // lock their item and then their review (`lockReviewAfterItem`; the print
+    // and accept writers, BS#2804 and BS#2860, are planned to), so taking the
+    // same order here (library, items, reviews) leaves the capture's and the
+    // copy's later review locks no cycle to join. The review test is a subquery
+    // so one table is in the `FROM` and a plain `.for('update')` works.
     await tx
       .select({ id: intake_items.id })
       .from(intake_items)
