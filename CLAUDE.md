@@ -239,7 +239,7 @@ See **[`docs/testing.md`](docs/testing.md)** for jest configs, locations, setup 
 
 ## Deployment
 
-Hosted on EC2; CI/CD via GitHub Actions. Push to `main` auto-triggers `deploy-auto.yml`, which delegates to the reusable `deploy-base.yml`. `deploy-manual.yml` (`workflow_dispatch` with `target` + `version`) is the lever for re-deploying a specific tag or rolling back. Docker images built with `node:24-alpine`, stored in ECR.
+Hosted on EC2; CI/CD via GitHub Actions. Push to `main` auto-triggers `deploy-auto.yml`, which delegates to the reusable `deploy-base.yml`. `deploy-manual.yml` (`workflow_dispatch` with `target` + `version`, or `rebuild=true` to build a fresh image from `main`) is the lever for re-deploying a specific tag, rolling back, or rebuilding a target. Docker images built with `node:24-alpine`, stored in ECR.
 
 **Cadence rule**: every merge already triggers an auto-deploy, but when a PR that touches `shared/database/src/migrations/**` merges, verify the auto-deploy succeeded — if it didn't, run Manual Build & Deploy within 24 hours. Migration-chain risk accumulates when deploys fail silently. See [`docs/deploy.md`](docs/deploy.md) for the 2026-05-04 wedge case study and the project-#26 hardening defenses.
 

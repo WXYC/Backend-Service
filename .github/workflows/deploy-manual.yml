@@ -11,6 +11,11 @@ on:
         description: 'The specific version to deploy (e.g., v1.2.3). Defaults to latest if not provided.'
         required: false
         type: string
+      rebuild:
+        description: 'Build a fresh image for the target(s) from main, tagging a new version. Leave version empty.'
+        required: false
+        type: boolean
+        default: false
 
 # Caller permissions must equal or exceed the reusable workflow's
 # declared scope; deploy-base.yml requires contents:write to create
@@ -20,9 +25,31 @@ permissions:
   contents: write
 
 jobs:
+  validate-rebuild:
+    if: inputs.rebuild
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse a rebuild that cannot work
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ -n "$VERSION_INPUT" ]; then
+            echo "Error: rebuild cannot be combined with an explicit version; a pinned version cannot be rebuilt." >&2
+            exit 1
+          fi
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "Error: rebuild checks out, tags and deploys github.sha, so it must run from main (got $REF)." >&2
+            exit 1
+          fi
+
   trigger-build-and-deploy:
+    needs: validate-rebuild
+    # validate-rebuild is skipped on an ordinary dispatch; run anyway, but not after a failure.
+    if: ${{ !cancelled() && !failure() }}
     uses: ./.github/workflows/deploy-base.yml
     with:
       target: ${{ github.event.inputs.target }}
-      version: ${{ github.event.inputs.version || 'latest' }}
+      version: ${{ !inputs.rebuild && (inputs.version || 'latest') || '' }}
     secrets: inherit
