@@ -23,12 +23,17 @@ const {
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
-/** Every source file under `dir`, recursively (not the generated HTML report). */
-function sourceFilesUnder(dir) {
+/**
+ * Every JS, TS, JSON and SQL file under `dir`, recursively (`.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, `.mts`, `.json`,
+ * `.sql`), skipping the directories in `skip`. The caller skips `tests/report/`, the gitignored jest-html-reporters
+ * output: its `result.js` holds the code frames of the last local run's failures, so a literal that once failed
+ * the pin below would otherwise keep failing it after its removal.
+ */
+function sourceFilesUnder(dir, skip = []) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) return sourceFilesUnder(full);
-    return /\.(c?js|ts|json|sql)$/.test(entry.name) ? [full] : [];
+    if (entry.isDirectory()) return skip.includes(full) ? [] : sourceFilesUnder(full, skip);
+    return /\.([cm]?[jt]s|json|sql)$/.test(entry.name) ? [full] : [];
   });
 }
 
@@ -93,29 +98,37 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     expect(draft.submitted_at).toBeNull();
   });
 
-  test("a seeded artist's code_letters is neither 'ZZ' nor 'ZQ', which other specs sweep or bucket on", async () => {
+  test("a seeded artist's code_letters is the exported constant, and neither 'ZZ' nor 'ZQ', which other specs sweep or bucket on", async () => {
     const sql = getTestDb();
     const release = await seedLibraryRelease();
     const [artist] = await sql`SELECT code_letters FROM ${sql(SCHEMA)}.artists WHERE id = ${release.artist_id}`;
+    // The row carries the constant the file walk below guards, so the walk guards what seeded artists get.
+    expect(artist.code_letters).toBe(SEEDED_CODE_LETTERS);
     // 'ZZ' is swept by album-reviews, digital-archive-playback and intake-transitions; 'ZQ' is the BS#2489
     // bucket whose exact membership library.spec.js asserts.
-    expect(['ZZ', 'ZQ']).not.toContain(artist.code_letters);
+    expect(['ZZ', 'ZQ']).not.toContain(SEEDED_CODE_LETTERS);
   });
 
-  test('no other file under tests/ names the seeded code_letters, so no sweep or bucket assertion can meet one', () => {
+  test('no other file under tests/ names the seeded code_letters or imports the constant, so no sweep or bucket assertion can meet one', () => {
     const testsDir = path.resolve(__dirname, '..');
-    const seeder = path.join(testsDir, 'utils', 'intake_seed.js');
-    const needle = `'${SEEDED_CODE_LETTERS}'`;
-    const others = sourceFilesUnder(testsDir).filter(
-      (file) => file !== seeder && fs.readFileSync(file, 'utf8').includes(needle)
+    const owners = [
+      path.join(testsDir, 'utils', 'intake_seed.js'),
+      path.join(testsDir, 'integration', 'intake-seed.spec.js'),
+    ];
+    // The value in either quote style, or the exported name: a sweep that imports `SEEDED_CODE_LETTERS` deletes
+    // exactly what one that writes the literal would.
+    const needle = new RegExp(`SEEDED_CODE_LETTERS|['"]${SEEDED_CODE_LETTERS}['"]`);
+    const others = sourceFilesUnder(testsDir, [path.join(testsDir, 'report')]).filter(
+      (file) => !owners.includes(file) && needle.test(fs.readFileSync(file, 'utf8'))
     );
     expect(others).toEqual([]);
   });
 
   test("a revision's default number is its review's highest plus one, not a count or another review's", async () => {
     const release = await seedLibraryRelease();
+    // Both submitted: the application gives revisions only to submitted reviews, never to a draft.
     const review = await seedReview({ album_id: release.id });
-    const other = await seedReview({ album_id: release.id, status: 'draft' });
+    const other = await seedReview({ album_id: release.id });
     const first = await seedReviewRevision({ review_id: review.id });
     const second = await seedReviewRevision({ review_id: review.id });
     expect([first.revision, second.revision]).toEqual([1, 2]);
@@ -127,6 +140,14 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     // The other review's first default is still 1 where a table-wide MAX + 1 would give 7.
     const otherFirst = await seedReviewRevision({ review_id: other.id });
     expect(otherFirst.revision).toBe(1);
+  });
+
+  test('revision: null takes the default, as an omitted revision does', async () => {
+    const release = await seedLibraryRelease();
+    const review = await seedReview({ album_id: release.id });
+    const first = await seedReviewRevision({ review_id: review.id, revision: null });
+    const second = await seedReviewRevision({ review_id: review.id, revision: null });
+    expect([first.revision, second.revision]).toEqual([1, 2]);
   });
 
   test('the revision, print and note seeders refuse a missing target', async () => {
