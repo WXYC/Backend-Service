@@ -25,6 +25,19 @@ describe('Sentry instrumentation loading', () => {
     expect(pkg.scripts?.start).toMatch(/--import\s+@sentry\/node\/import\s+--import\s+\.\/dist\/instrument\.js/);
   });
 
+  // ESM evaluates every import before the module body, so a `config()` call in
+  // the body runs after the filter's imports have read the environment. The
+  // backend filter pulls in @wxyc/lml-client, whose limiter and timeout
+  // constants are fixed at module load, so .env must load as the first import.
+  it.each([
+    ['backend', '../../../apps/backend/instrument.ts'],
+    ['auth', '../../../apps/auth/instrument.ts'],
+  ])('%s instrument.ts loads .env as its first import', (_app, relPath) => {
+    const source = readFileSync(resolve(__dirname, relPath), 'utf-8');
+    const firstImport = source.match(/^import\s.*$/m)?.[0];
+    expect(firstImport).toBe("import 'dotenv/config';");
+  });
+
   it.each([
     ['backend', '../../../apps/backend/app.ts'],
     ['auth', '../../../apps/auth/app.ts'],

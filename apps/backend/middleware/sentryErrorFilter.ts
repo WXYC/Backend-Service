@@ -4,9 +4,10 @@ import { carriedClientStatus } from './errorHandler.js';
 
 /**
  * Decides whether Sentry's `expressIntegration` (its `shouldHandleError`
- * option, wired in `instrument.ts`) should auto-capture an error that bubbled to express's error pipeline. Returning false skips the
- * capture; the error still propagates to the application's `errorHandler` and
- * the structured response is unaffected.
+ * option, wired in `instrument.ts`) should auto-capture an error that bubbled
+ * to express's error pipeline. Returning false skips the capture; the error
+ * still propagates to the application's `errorHandler` and the structured
+ * response is unaffected.
  *
  * `LmlClientError` is excluded because it is an expected external-dependency
  * signal: the LML client throws it on timeout, non-2xx, or transport failure;
