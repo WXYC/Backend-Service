@@ -4,7 +4,7 @@ import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
 import type { IntakeAction, IntakeCitations, IntakeFields, IntakeItemState } from '../services/intake.service.js';
 import WxycError from '../utils/error.js';
-import { parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
+import { parseBooleanQueryParam, parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
 import { holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
@@ -49,16 +49,9 @@ const CONFLICT_MESSAGES = {
 const conflict = (res: Response, reason: keyof typeof CONFLICT_MESSAGES) =>
   res.status(409).json({ message: CONFLICT_MESSAGES[reason], reason });
 
-/** `awaiting_acceptance`: `true`, or `false` (the same as leaving it out); anything else, a repeated key included, is a 400. */
-const parseAwaitingAcceptance = (raw: unknown) => {
-  if (raw === undefined || raw === 'false') return false;
-  if (raw === 'true') return true;
-  throw new WxycError('Invalid Parameter: awaiting_acceptance must be true or false', 400);
-};
-
 export const listIntake: RequestHandler = async (req, res) => {
   const { state } = req.query;
-  const awaitingAcceptance = parseAwaitingAcceptance(req.query.awaiting_acceptance);
+  const awaitingAcceptance = parseBooleanQueryParam(req.query.awaiting_acceptance, 'awaiting_acceptance');
   if (state !== undefined && !intakeItemStateEnum.enumValues.includes(state as IntakeItemState)) {
     throw new WxycError(`Invalid Parameter: state must be one of ${intakeItemStateEnum.enumValues.join(', ')}`, 400);
   }
