@@ -197,7 +197,9 @@ describe('/reviews submit and delete (BS#2854)', () => {
       async (_name, hasHolder, expected) => {
         const reviewed = await item('reviewed', {
           state: 'reviewed',
+          // A checkout is `checked_out_at` (decision 38), so a held item carries both columns.
           checked_out_by: hasHolder ? global.primary_dj_id : null,
+          checked_out_at: hasHolder ? now() : null,
         });
         const review = await reviewFor({ intake_item_id: reviewed.id });
         await accept(reviewed.id, review);
@@ -244,7 +246,11 @@ describe('/reviews submit and delete (BS#2854)', () => {
     });
 
     test('a review accepted by two items: both unfiled items return to holder or pile; with either filed, the citing one included, nothing is written', async () => {
-      const own = await item('two-own', { state: 'reviewed', checked_out_by: global.primary_dj_id });
+      const own = await item('two-own', {
+        state: 'reviewed',
+        checked_out_by: global.primary_dj_id,
+        checked_out_at: now(),
+      });
       const citing = await item('two-citing', { state: 'reviewed', cited_album_id: libraryId });
       const review = await reviewFor({ intake_item_id: own.id, album_id: libraryId });
       await accept(own.id, review);
