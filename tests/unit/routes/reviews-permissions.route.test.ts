@@ -32,6 +32,7 @@ const mockRole = (role?: string, sub = 'caller-id') =>
   });
 
 const mockCreate = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
+const mockRecord = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockUpdate = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockSubmit = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockDelete = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
@@ -44,6 +45,8 @@ jest.mock('@wxyc/database', () => ({
 }));
 jest.mock('../../../apps/backend/services/reviews.service', () => ({
   createReview: mockCreate,
+  recordReview: mockRecord,
+  AUTHOR_MAX: 128,
   updateReview: mockUpdate,
   submitReview: mockSubmit,
   deleteReview: mockDelete,
@@ -70,6 +73,7 @@ const remove = (id = '3') => request(app).delete(`/reviews/${id}`).set('Authoriz
 beforeEach(() => {
   mockedJwtVerify.mockReset();
   mockCreate.mockReset().mockResolvedValue({ outcome: 'created', review: REVIEW });
+  mockRecord.mockReset().mockResolvedValue({ outcome: 'created', review: REVIEW });
   mockUpdate.mockReset().mockResolvedValue({ outcome: 'updated', review: REVIEW });
   mockSubmit.mockReset().mockResolvedValue({ outcome: 'submitted', review: REVIEW });
   mockDelete.mockReset().mockResolvedValue({ outcome: 'deleted' });
@@ -207,12 +211,104 @@ describe('POST /reviews', () => {
   });
 
   test.each([
-    ['dj', 403],
-    ['musicDirector', 400],
-  ] as const)('%s sending author is a %i (on-behalf is slice 13)', async (role, status) => {
-    mockRole(role);
-    expect((await post({ album_id: 9, author: 'Someone' })).status).toBe(status);
+    { author: 'Someone' },
+    { author_user_id: 'u-1' },
+    { medium: 'handwritten' },
+    { accept: false },
+    { accept: true },
+  ])('a DJ sending %j is a 403 and nothing is created', async (keys) => {
+    expect((await post({ intake_item_id: 4, ...keys })).status).toBe(403);
     expect(mockCreate).not.toHaveBeenCalled();
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /reviews, on behalf (BS#2866)', () => {
+  beforeEach(() => mockRole('musicDirector'));
+  const MANAGER = { id: 'caller-id', manage: true };
+
+  test('a music director sending none of the on-behalf keys is an ordinary create, with the hold rule', async () => {
+    await post({ intake_item_id: 4, review: 'mine' });
+    expect(mockRecord).not.toHaveBeenCalled();
+    expect(mockCreate).toHaveBeenCalledWith({ intake_item_id: 4, album_id: undefined }, { review: 'mine' }, MANAGER);
+  });
+
+  test('an item subject accepts by default, defaults the medium to typed, and trims the author', async () => {
+    const res = await post({ intake_item_id: 4, author: '  Test Reviewer ', review: 'text' });
+    expect([res.status, res.body]).toEqual([200, REVIEW]);
+    expect(mockRecord).toHaveBeenCalledWith(
+      { intake_item_id: 4, album_id: undefined },
+      { review: 'text' },
+      { author: 'Test Reviewer', author_user_id: undefined, medium: 'typed', accept: true },
+      MANAGER
+    );
+  });
+
+  test.each([
+    [{ accept: false }, false],
+    [{ accept: true }, true],
+  ])('an item subject sending %j records accept as %s', async (keys, accept) => {
+    await post({ intake_item_id: 4, author: 'Test Reviewer', medium: 'handwritten', author_user_id: 'u-1', ...keys });
+    expect(mockRecord).toHaveBeenCalledWith(
+      expect.anything(),
+      {},
+      { author: 'Test Reviewer', author_user_id: 'u-1', medium: 'handwritten', accept },
+      MANAGER
+    );
+  });
+
+  test('a release subject is a draft: accept is false when omitted', async () => {
+    await post({ album_id: 9, author: 'Test Reviewer' });
+    expect(mockRecord).toHaveBeenCalledWith(
+      { intake_item_id: undefined, album_id: 9 },
+      {},
+      { author: 'Test Reviewer', author_user_id: undefined, medium: 'typed', accept: false },
+      MANAGER
+    );
+  });
+
+  test.each([{ accept: true }, { accept: false }])('a release subject sending %j is a 400', async (keys) => {
+    expect((await post({ album_id: 9, author: 'Test Reviewer', ...keys })).status).toBe(400);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['no author', { medium: 'handwritten' }],
+    ['a null author', { author: null }],
+    ['a blank author', { author: '   ' }],
+    ['a non-string author', { author: 5 }],
+    ['a 129-code-point author', { author: '😀'.repeat(129) }],
+    ['a printed medium', { author: 'Test Reviewer', medium: 'printed' }],
+    ['a non-boolean accept', { author: 'Test Reviewer', accept: 'yes' }],
+    ['an empty author_user_id', { author: 'Test Reviewer', author_user_id: '' }],
+    ['publish_website ticked', { author: 'Test Reviewer', publish_website: true }],
+    ['publish_apps ticked', { author: 'Test Reviewer', publish_apps: true }],
+    ['publish_instagram ticked', { author: 'Test Reviewer', publish_instagram: true }],
+    ['a credit', { author: 'Test Reviewer', credit: 'dj_name' }],
+  ])('%s is a 400 and nothing is created', async (_, keys) => {
+    expect((await post({ intake_item_id: 4, ...keys })).status).toBe(400);
+    expect(mockRecord).not.toHaveBeenCalled();
+  });
+
+  test('a 128-code-point author is kept whole, and an explicit false surface or null credit is not a tick', async () => {
+    const author = '😀'.repeat(128);
+    const res = await post({ intake_item_id: 4, author, publish_apps: false, credit: null, review: 'x' });
+    expect(res.status).toBe(200);
+    expect(mockRecord.mock.calls[0][2]).toMatchObject({ author });
+  });
+
+  test.each([
+    ['subject_not_held', 409],
+    ['text_required', 400],
+    ['unknown_author', 400],
+  ])('%s is a %i', async (outcome, status) => {
+    mockRecord.mockResolvedValue({ outcome });
+    expect((await post({ intake_item_id: 4, author: 'Test Reviewer' })).status).toBe(status);
+  });
+
+  test('the closed reason of a 409 is subject_not_held', async () => {
+    mockRecord.mockResolvedValue({ outcome: 'subject_not_held' });
+    expect((await post({ intake_item_id: 4, author: 'Test Reviewer' })).body.reason).toBe('subject_not_held');
   });
 });
 
