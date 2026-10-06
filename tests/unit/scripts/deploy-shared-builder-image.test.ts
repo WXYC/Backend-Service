@@ -109,6 +109,9 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
     }
   );
 
+  const COPY_FROM_BUILDER = /^COPY (?:--link )?--from=builder (\S+) (\S+)$/m;
+  const COPY_FROM_BUILDER_G = new RegExp(COPY_FROM_BUILDER.source, 'gm');
+
   describe.each(nodeTargetDockerfiles())('%s', (name) => {
     const text = readDockerfile(name);
 
@@ -120,7 +123,7 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
     });
 
     it('copies dist/** from the builder stage using an absolute path, not the old per-target prefix', () => {
-      const copyLines = [...text.matchAll(/^COPY --from=builder (\S+) (\S+)$/gm)];
+      const copyLines = [...text.matchAll(COPY_FROM_BUILDER_G)];
       expect(copyLines.length).toBeGreaterThan(0);
       for (const [, src, dst] of copyLines) {
         expect(src.startsWith('/')).toBe(true);
@@ -132,6 +135,14 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
         expect(dst.replace(/^\.\//, '')).toBe(src.replace(/^\//, ''));
       }
     });
+  });
+
+  it.each([
+    ['COPY --from=builder /jobs/x/dist ./jobs/x/dist', true],
+    ['COPY --link --from=builder /jobs/x/dist ./jobs/x/dist', true],
+    ['COPY --chown=1:1 --from=builder /jobs/x/dist ./jobs/x/dist', false],
+  ])('COPY-line pattern: %s -> matches=%s', (line, matches) => {
+    expect(COPY_FROM_BUILDER.test(line)).toBe(matches);
   });
 
   describe(SHARED_BUILDER_DOCKERFILE, () => {
