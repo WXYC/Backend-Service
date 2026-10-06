@@ -22,7 +22,12 @@ Sentry.init({
   // path, since better-auth's mount makes /auth/ok's transaction "GET /auth" —
   // and strips Express middleware bookkeeping spans from every surviving
   // transaction (BS#2089).
-  // Error reporting (beforeSend / setupExpressErrorHandler) is untouched —
-  // wxyc-canary depends on /healthcheck errors surfacing there.
+  // Error reporting (beforeSend / the `sentryExpressErrorCapture` middleware)
+  // is untouched — wxyc-canary depends on /healthcheck errors surfacing there.
   beforeSendTransaction: filterSentryTransactionEvent,
+  // Sentry 11's default Express integration captures at the layer that threw,
+  // before app error middleware runs, and ignores our capture predicate. Turn
+  // that capture off so `app.ts`'s terminal `sentryExpressErrorCapture` stays
+  // the only Express capture path (BS#2947). Spans are unaffected.
+  integrations: [Sentry.expressIntegration({ shouldHandleError: false })],
 });
