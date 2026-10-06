@@ -18,6 +18,7 @@ import {
 } from '@wxyc/database';
 import WxycError from '../utils/error.js';
 import { fileLibraryRelease, mapLibraryFilingError, type ValidatedFilingInput } from './library-filing.service.js';
+import { outerRef } from '../utils/sql-fragments.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
 
@@ -46,7 +47,7 @@ const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by'
 export const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
 // coalesce: no CHECK ties checked_out_at to the state, and a NULL stamp must read false, never SQL NULL.
 const overdue = sql<boolean>`coalesce(${intake_items.checked_out_at} < now() - interval '14 days', false)`;
-const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${reviews} WHERE ${reviews.intake_item_id} = ${intake_items.id} AND ${reviews.status} = 'submitted')`;
+const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${reviews} WHERE ${reviews.intake_item_id} = ${outerRef(intake_items.id)} AND ${reviews.status} = 'submitted')`;
 
 /**
  * The `author` of each review on the item, as a JSON array correlated on `intake_items.id`: oldest first by
@@ -57,7 +58,7 @@ const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${reviews} W
 export const reviewAuthorsSql = (draftsOnly = false) =>
   sql<
     string[]
-  >`(SELECT coalesce(json_agg(${reviews.author} ORDER BY ${reviews.id}) FILTER (WHERE ${reviews.author} IS NOT NULL), '[]'::json) FROM ${reviews} WHERE ${reviews.intake_item_id} = ${intake_items.id}${draftsOnly ? sql` AND ${reviews.status} = 'draft'` : sql``})`;
+  >`(SELECT coalesce(json_agg(${reviews.author} ORDER BY ${reviews.id}) FILTER (WHERE ${reviews.author} IS NOT NULL), '[]'::json) FROM ${reviews} WHERE ${reviews.intake_item_id} = ${outerRef(intake_items.id)}${draftsOnly ? sql` AND ${reviews.status} = 'draft'` : sql``})`;
 
 /** Mirror of the contract's `IntakeItem` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x. Timestamps serialize to ISO strings. */
 export type IntakeItemResponse = Omit<
@@ -301,10 +302,10 @@ export const deleteIntakeItem = async (id: number) =>
       .for('update');
     if (!locked) return { outcome: 'not_found' as const };
     if (FILED_STATES.includes(locked.state)) return { outcome: 'already_filed' as const };
-    // `execute`, not `select`: a single-table select renders columns unqualified, which would bind the fragment's `id` to `reviews.id`.
-    const [{ authors }] = await tx.execute<{ authors: string[] }>(
-      sql`SELECT ${reviewAuthorsSql()} AS authors FROM ${intake_items} WHERE ${intake_items.id} = ${id}`
-    );
+    const [{ authors }] = await tx
+      .select({ authors: reviewAuthorsSql() })
+      .from(intake_items)
+      .where(eq(intake_items.id, id));
     await tx.delete(intake_items).where(eq(intake_items.id, id));
     return { outcome: 'deleted' as const, authors };
   });
