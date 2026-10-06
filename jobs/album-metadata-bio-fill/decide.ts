@@ -72,6 +72,9 @@ export const decideBioFill = (
   // alone. Bulk still labels it `match`, or `no_match` when no row came back,
   // so without this it would settle as `no_bio` and the cursor would walk past
   // it. A bio it did carry is still real, so only a non-fill is overridden.
+  // Deliberately wider than the flowsheet re-enrichment jobs, which retry only
+  // `upstream_unavailable`: the bio comes from the enrichment tail, which every
+  // degraded reason sheds, so `deadline_exceeded` and `cache_only` lose it too.
   if (verdict.kind !== 'fill' && verdict.kind !== 'indeterminate' && item?.lookup?.degraded === true) {
     return { kind: 'indeterminate', unexpectedIndex: false };
   }
