@@ -82,7 +82,6 @@ jobs:
             exit 1
           fi
 
-          CHECKED=0
           while IFS= read -r TARGET_INPUT; do
             [ -z "$TARGET_INPUT" ] && continue
             TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
@@ -92,13 +91,7 @@ jobs:
                 exit 1
               fi
             fi
-            CHECKED=$((CHECKED + 1))
           done <<< "$TARGETS"
-          if [ -n "$TARGETS" ] && [ "$CHECKED" -eq 0 ]; then
-            echo "Error: The 'target' input names no target (it is only blank lines)." >&2
-            exit 1
-          fi
-
           echo "Version input '$VERSION_INPUT' is valid."
 
   setup:

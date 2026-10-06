@@ -26,7 +26,8 @@ permissions:
 
 jobs:
   validate-rebuild:
-    if: inputs.rebuild
+    # Always runs (never skipped): a skipped ancestor can make the called workflow's
+    # implicit success() skip its jobs (actions/runner#2205), so it gates on REBUILD itself.
     runs-on: ubuntu-latest
     # Only compares two strings; it needs none of the workflow-level contents:write.
     permissions: {}
@@ -34,9 +35,13 @@ jobs:
     steps:
       - name: Refuse a rebuild that cannot work
         env:
+          REBUILD: ${{ inputs.rebuild }}
           VERSION_INPUT: ${{ inputs.version }}
           REF: ${{ github.ref }}
         run: |
+          if [ "$REBUILD" != true ]; then
+            exit 0
+          fi
           if [ -n "$VERSION_INPUT" ]; then
             echo "Error: rebuild cannot be combined with an explicit version; a pinned version cannot be rebuilt." >&2
             exit 1
@@ -48,8 +53,6 @@ jobs:
 
   trigger-build-and-deploy:
     needs: validate-rebuild
-    # validate-rebuild is skipped on an ordinary dispatch; run anyway, but not after a failure.
-    if: ${{ !cancelled() && !failure() }}
     uses: ./.github/workflows/deploy-base.yml
     with:
       target: ${{ github.event.inputs.target }}
