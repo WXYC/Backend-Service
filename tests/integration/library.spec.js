@@ -580,6 +580,18 @@ describe('Library Rotation', () => {
       });
     });
 
+    test('serves genre_id and code_volume_letters from library, null on an unlinked row (BS#2917)', async () => {
+      const res = await auth.get('/library/rotation').expect(200);
+
+      // Album 7000 is filed in genre 11 with no volume letter.
+      const linked = res.body.find((r) => r.id === 7000 && r.rotation_bin === 'H');
+      expect(linked).toMatchObject({ genre_id: 11, code_volume_letters: null });
+
+      // A NULL-album rotation row has no library row to read either from.
+      const orphan = res.body.find((r) => r.artist_name === 'Shape Fixture Orphan One');
+      expect(orphan).toMatchObject({ id: null, genre_id: null, code_volume_letters: null });
+    });
+
     test('collapses NULL-album rows sharing (artist, album, rotation_bin) to one (#862)', async () => {
       // The shape fixture seeds two NULL-album_id rotation rows (ids
       // 7007 and 7015) with identical artist/album/bin. The pre-#862

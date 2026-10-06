@@ -386,16 +386,34 @@ describe('library.service / getRotationFromDB', () => {
       expect(stringified).toContain(' AS code_comp_letter');
     });
 
-    it('selects library.genre_id and library.code_volume_letters (BS#2917)', async () => {
+    it.each([
+      ['genre_id', 'library.genre_id'],
+      ['code_volume_letters', 'library.code_volume_letters'],
+    ])('projects %s from %s (BS#2917)', async (alias, source) => {
       db.execute.mockResolvedValueOnce([]);
 
       await getRotationFromDB();
 
-      const stringified = JSON.stringify(db.execute.mock.calls[0][0]);
-      expect(stringified).toContain('library.genre_id');
-      expect(stringified).toContain(' AS genre_id');
-      expect(stringified).toContain('library.code_volume_letters');
-      expect(stringified).toContain(' AS code_volume_letters');
+      // The mocked drizzle `sql` serializes as `{ sql: string[], values: unknown[] }`
+      // where `values[i]` sits between `sql[i]` and `sql[i + 1]`. The value
+      // immediately before the ` AS <alias>` fragment is the column projected
+      // under that alias, so this fails if the projection reads another column
+      // (e.g. the crossreference's `genre_id`) even though joins still mention
+      // `library.genre_id`.
+      type Sql = { sql: string[]; values: unknown[] };
+      const sources: unknown[] = [];
+      const visit = (node: unknown): void => {
+        if (!node || typeof node !== 'object') return;
+        const { sql: strings, values } = node as Partial<Sql>;
+        if (!Array.isArray(strings) || !Array.isArray(values)) return;
+        strings.forEach((fragment, i) => {
+          if (i > 0 && fragment.startsWith(` AS ${alias},`)) sources.push(values[i - 1]);
+        });
+        values.forEach(visit);
+      };
+      visit(db.execute.mock.calls[0][0]);
+
+      expect(sources).toEqual([source]);
     });
   });
 
