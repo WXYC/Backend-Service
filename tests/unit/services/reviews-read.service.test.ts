@@ -122,6 +122,16 @@ describe('review reads (BS#2805)', () => {
     );
   });
 
+  test.each([
+    ['getReview', () => getReview(3, ACTOR)],
+    ['the plain list', () => listReviews({}, ACTOR)],
+    ['the album list', () => listReviews({ album_id: 9 }, ACTOR)],
+  ])('%s correlates the latest print through the outer review, never a bare id', async (_n, run) => {
+    await run();
+    // One subquery each for printed_revision_id and printed_at.
+    expect(last().split('lp.review_id = "wxyc_schema"."reviews"."id"').length - 1).toBe(2);
+  });
+
   test('the revision read checks the review visibility rule first and answers undefined when nothing is visible (BS#2861)', async () => {
     expect(await listReviewRevisions(3, ACTOR)).toBeUndefined();
     expect(mockCaptured).toHaveLength(1);
