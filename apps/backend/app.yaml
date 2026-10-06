@@ -566,6 +566,26 @@ components:
         message: { type: string }
         reason: { type: string, enum: [already_filed, invalid_citation, not_reviewed, state_changed] }
 
+    LibraryFilingConflictError:
+      type: object
+      description: >
+        The `POST /library/filings` 409 body, which `POST /intake/{id}/file` answers too when its
+        new-release arm collides (a planned artist conflict or a rotation card/bin mismatch).
+        On the artist-conflict reasons `artist` is the already-catalogued row that collided;
+        absent on `rotation_card_bin_mismatch`. Swagger display only; the SSOT is
+        wxyc-shared/api.yaml.
+      required: [message, reason]
+      properties:
+        message: { type: string }
+        reason:
+          {
+            type: string,
+            enum: [artist_code_conflict, artist_name_conflict, rotation_card_bin_mismatch, review_required],
+          }
+        artist:
+          type: object
+          description: The already-catalogued artist that collided (`artist_code_conflict`, `artist_name_conflict`).
+
     ReviewConflictError:
       type: object
       required: [message, reason]
@@ -5546,7 +5566,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IntakeConflictError'
+                oneOf:
+                  - $ref: '#/components/schemas/IntakeConflictError'
+                  - $ref: '#/components/schemas/LibraryFilingConflictError'
 
   /intake/{id}/pass:
     parameters:

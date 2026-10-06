@@ -108,9 +108,9 @@ describe('fileIntakeItem (BS#2803)', () => {
       requested_dj_id: null,
       requested_at: null,
     });
-    expect(Object.keys(sets.intake_items)).not.toEqual(
-      expect.arrayContaining(['accepted_review_id', 'accepted_by', 'accepted_at'])
-    );
+    expect(sets.intake_items).not.toHaveProperty('accepted_review_id');
+    expect(sets.intake_items).not.toHaveProperty('accepted_by');
+    expect(sets.intake_items).not.toHaveProperty('accepted_at');
     expect(sets.reviews).toEqual({ album_id: 9 });
     expect(sets.review_prints).toEqual({ album_id: 9 });
     expect(tx.delete).toHaveBeenCalledTimes(1);
