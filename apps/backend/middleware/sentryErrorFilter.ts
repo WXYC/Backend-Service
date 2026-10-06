@@ -3,8 +3,9 @@ import WxycError from '../utils/error.js';
 import { carriedClientStatus } from './errorHandler.js';
 
 /**
- * Decides whether `Sentry.setupExpressErrorHandler` should auto-capture an
- * error that bubbled to express's error pipeline. Returning false skips the
+ * Decides whether the `sentryExpressErrorCapture` middleware (`@wxyc/observability`,
+ * mounted in `app.ts`; Sentry 10's `setupExpressErrorHandler` before BS#2947)
+ * should auto-capture an error that bubbled to express's error pipeline. Returning false skips the
  * capture; the error still propagates to the application's `errorHandler` and
  * the structured response is unaffected.
  *
@@ -18,7 +19,7 @@ import { carriedClientStatus } from './errorHandler.js';
  * cascade from the catalog-search 503 incident).
  */
 export function shouldCaptureExpressError(error: Error): boolean {
-  // Sentry passes the RAW pipeline value; errorHandler wraps non-Error
+  // The capture middleware passes the RAW pipeline value; errorHandler wraps non-Error
   // throwables in `new Error(String(err))` — dropping any carried status —
   // so they always render as generic 500s. Normalize identically: a
   // next()'d plain object with a trusted-looking 4xx must still be

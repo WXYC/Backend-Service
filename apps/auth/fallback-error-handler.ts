@@ -12,7 +12,7 @@ import type { Request, Response, NextFunction } from 'express';
 export function fallbackErrorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
   // Deliberately unconditional (BS#1221) — this intentionally overrides
   // `shouldCaptureAuthExpressError` (`./sentry-error-filter.ts`, BS#1387),
-  // which only governs `Sentry.setupExpressErrorHandler`'s own capture.
+  // which only governs the `sentryExpressErrorCapture` middleware's own capture.
   // An error reaching this generic Express fallback is itself unexpected
   // (every status-carrying error path is handled upstream), so it's worth
   // capturing here regardless of what the predicate would have decided.

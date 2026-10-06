@@ -69,7 +69,7 @@ export async function executeSongAsArtist(
     // This catch used to be absent, so a bug here (e.g. a TypeError in the
     // mapping closure the caller wires up around `searchReleasesByArtist`)
     // reached the express error handler and got captured to Sentry there.
-    // Re-run the same classifier (`shouldHandleError` in app.ts) so that
+    // Re-run the same classifier (the capture predicate in app.ts) so that
     // stays true: an expected LML transport failure (`LmlClientError`,
     // including a BS#1748 `LimiterShedError`) is excluded -- it's already
     // quiet by design -- but anything else is still reported instead of

@@ -49,6 +49,7 @@ import { syncAdminRoles } from './sync-admin-roles';
 import { resolveOrganization } from './resolve-organization';
 import { approveSelfSignup, readStationSignupStatus, StationSignupAdminError } from './station-signup-admin';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter';
+import { sentryExpressErrorCapture } from '@wxyc/observability';
 import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
 
 const port = process.env.AUTH_PORT || '8082';
@@ -1346,14 +1347,16 @@ app.get('/healthcheck', async (req, res) => {
   }
 });
 
-// Pass an explicit predicate (BS#1387). Without it, the SDK's default
+// Capture with an explicit predicate (BS#1387). Without it, the SDK's default
 // `shouldHandleError` falls back to a "treat unknown status as 500" rule that
 // captures errors without an explicit status (bare TypeErrors, deserialisation
 // faults) indistinguishably from genuine 5xx faults. The named predicate
 // documents intent. (It deliberately does NOT mirror the backend's
 // `shouldCaptureExpressError`, which suppresses only the trusted 4xx band its
 // errorHandler echoes — see the predicate's JSDoc for the divergence.)
-Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureAuthExpressError });
+// Replaces Sentry 10's `setupExpressErrorHandler`; see
+// `sentryExpressErrorCapture` for why Sentry 11's own API isn't used (BS#2947).
+app.use(sentryExpressErrorCapture(shouldCaptureAuthExpressError));
 
 // Fallback error handler — sanitises response body, forwards full error to
 // Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).
