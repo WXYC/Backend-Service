@@ -1,10 +1,11 @@
 /**
- * Shared seeders for the intake and review integration specs (`tests/integration/intake-*.spec.js`,
- * `reviews*.spec.js` and `library-restore-*.spec.js`, and the slices that follow). `reviews.spec.js` and
+ * Shared seeders for any integration spec that seeds intake or review rows (`tests/integration/intake-*.spec.js`,
+ * `reviews*.spec.js`, `library-restore-*.spec.js` and `library-delete-*.spec.js` among them, and the slices that follow). `reviews.spec.js` and
  * `intake-items.spec.js` take their releases, reviews and form-archive reviews from here, and
  * `intake-seed.spec.js` covers the seeders themselves. A spec that needs a user, an intake item, a
  * library release, a review, a review revision, a print, an FCC note or a form-archive review seeds it
- * here and does not hand-write the INSERT.
+ * here and does not hand-write the INSERT. The accept columns of an intake item are written with `seedAcceptance`, not a hand-written
+ * `UPDATE`.
  *
  * `auth_user` is better-auth's table and lives in the `public` schema, NOT in
  * `${WXYC_SCHEMA_NAME}` like every domain table. It is therefore written
@@ -13,9 +14,9 @@
  * with "relation does not exist"). `intake_items`, `artists`, `library`, `genres`, `reviews`, `review_revisions`,
  * `review_prints`, `fcc_notes` and `album_review_submissions` are domain tables and are schema-qualified.
  *
- * Which seeders have a remover: users (`removeSeededAuthUsers`), releases and their artists
- * (`removeSeededLibraryReleases`) and form-archive reviews (`removeSeededFormSubmissions`). Intake items
- * (`seedIntakeItem`) have none: an item's cleanup is the caller's. Reviews (`seedReview`), revisions
+ * Which seeders have a remover: users (`removeSeededAuthUsers`), intake items (`removeSeededIntakeItems`), releases and
+ * their artists (`removeSeededLibraryReleases`) and form-archive reviews (`removeSeededFormSubmissions`). A spec that
+ * deletes intake items it did not seed through `seedIntakeItem` keeps its own `DELETE`. Reviews (`seedReview`), revisions
  * (`seedReviewRevision`), prints (`seedReviewPrint`) and FCC notes (`seedFccNote`) have none: a review goes
  * when the release or item it names is deleted, a revision with its review, and a print or note with its
  * item or release (all `ON DELETE CASCADE`).
@@ -34,7 +35,7 @@
  *     seedLibraryRelease, removeSeededLibraryReleases,
  *     seedReview, seedReviewRevision, seedReviewPrint, seedFccNote,
  *     seedFormSubmission, removeSeededFormSubmissions,
- *     managerAccessToken,
+ *     managerAccessToken, managerUserId,
  *   } = require('../utils/intake_seed');
  */
 
@@ -55,6 +56,7 @@ const FORMAT_ID = 1; // exists in the integration fixture
 const SEEDED_CODE_LETTERS = 'SEED';
 
 const seededUserIds = [];
+const seededIntakeItemIds = [];
 const seededLibraryIds = [];
 const seededArtistIds = [];
 const seededSubmissionIds = [];
@@ -101,6 +103,38 @@ async function seedIntakeItem(overrides = {}) {
     ...overrides,
   };
   const [item] = await sql`INSERT INTO ${sql(SCHEMA)}.intake_items ${sql(row)} RETURNING *`;
+  seededIntakeItemIds.push(item.id);
+  return item;
+}
+
+/**
+ * Delete every intake item seeded by `seedIntakeItem`, by id (ids already deleted by a test are fine), and clear
+ * the list only after the delete succeeds, so a failed delete can be retried.
+ */
+async function removeSeededIntakeItems() {
+  if (seededIntakeItemIds.length === 0) return;
+  const sql = getTestDb();
+  await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE id = ANY(${seededIntakeItemIds})`;
+  seededIntakeItemIds.length = 0;
+}
+
+/**
+ * Record that an intake item accepted a review: one `UPDATE` setting all three accept columns
+ * (`accepted_review_id`, `accepted_by`, `accepted_at`), which travel together in production. `accepted_by`
+ * defaults to the seeded manager's user id, `accepted_at` to now. It does not change `state`; a test that wants
+ * `reviewed` seeds the item in that state. This is a fixture writer, not the accept route: a test of accept
+ * itself goes through `POST /intake/{id}/accept-review` once WXYC/Backend-Service#2860 lands. Returns the
+ * updated row.
+ */
+async function seedAcceptance({ intake_item_id, review_id, accepted_by, accepted_at }) {
+  const sql = getTestDb();
+  const by = accepted_by === undefined ? await managerUserId() : accepted_by;
+  const at = accepted_at === undefined ? new Date() : accepted_at;
+  const [item] = await sql`
+    UPDATE ${sql(SCHEMA)}.intake_items
+    SET accepted_review_id = ${review_id}, accepted_by = ${by}, accepted_at = ${at}
+    WHERE id = ${intake_item_id} RETURNING *`;
+  if (!item) throw new Error(`seedAcceptance: no intake_items row with id ${intake_item_id}`);
   return item;
 }
 
@@ -273,10 +307,20 @@ function managerAccessToken() {
   return getAccessToken('test_station_manager', 'testpassword123');
 }
 
+/** The `auth_user` id of the seeded `test_station_manager`. */
+async function managerUserId() {
+  const sql = getTestDb();
+  const [row] = await sql`SELECT id FROM auth_user WHERE username = 'test_station_manager'`;
+  if (!row) throw new Error('test_station_manager fixture account is missing');
+  return row.id;
+}
+
 module.exports = {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  removeSeededIntakeItems,
+  seedAcceptance,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -286,5 +330,6 @@ module.exports = {
   seedFormSubmission,
   removeSeededFormSubmissions,
   managerAccessToken,
+  managerUserId,
   SEEDED_CODE_LETTERS,
 };

@@ -18,6 +18,7 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   seedIntakeItem,
+  removeSeededIntakeItems,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   managerAccessToken,
@@ -46,7 +47,7 @@ describe('/intake transitions (BS#2798)', () => {
   const post = (who, id, action, body) => who.post(`/intake/${id}/${action}`).send(body ?? {});
 
   const cleanup = async () => {
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
+    await removeSeededIntakeItems();
     await removeSeededLibraryReleases();
   };
 

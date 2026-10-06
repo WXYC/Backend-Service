@@ -26,6 +26,8 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  removeSeededIntakeItems,
+  seedAcceptance,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -42,7 +44,6 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
   let manager;
   const marker = `BS#2875 ${Date.now()}`;
   const releaseIds = [];
-  const itemIds = [];
 
   const seedRelease = async (overrides = {}) => {
     const release = await seedLibraryRelease(overrides);
@@ -57,7 +58,6 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
       accepted_at: '2025-03-06T01:02:03.456789+00:00',
       ...overrides,
     });
-    itemIds.push(item.id);
     return item;
   };
 
@@ -142,7 +142,7 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
   });
 
   afterAll(async () => {
-    if (itemIds.length > 0) await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE id = ANY(${itemIds})`;
+    await removeSeededIntakeItems();
     await removeSeededLibraryReleases();
     if (releaseIds.length > 0) {
       await sql`DELETE FROM ${sql(SCHEMA)}.catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = ANY(${releaseIds})`;
@@ -253,14 +253,18 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
     const filedAsCited = await seedItem({ state: 'filed', album_id: cited.id });
     const { review: acceptedByFiledAsCited } = await seedCoverReview(cited.id, 'nc-filed-as-release');
     const nobodyAccepted = await seedCoverReview(cited.id, 'nc-nobody-accepted');
-    await sql`UPDATE ${sql(SCHEMA)}.intake_items SET accepted_review_id = ${acceptedByFiledAsCited.id} WHERE id = ${filedAsCited.id}`;
+    await seedAcceptance({
+      intake_item_id: filedAsCited.id,
+      review_id: acceptedByFiledAsCited.id,
+      accepted_by: manager.id,
+    });
     const ownReviewer = await seedItem({ cited_album_id: cited.id });
     const own = await seedReview({
       intake_item_id: ownReviewer.id,
       review: `${marker} nc-own`,
       author: 'Test Reviewer',
     });
-    await sql`UPDATE ${sql(SCHEMA)}.intake_items SET accepted_review_id = ${own.id} WHERE id = ${ownReviewer.id}`;
+    await seedAcceptance({ intake_item_id: ownReviewer.id, review_id: own.id, accepted_by: manager.id });
     const noAccepted = await seedItem({
       state: 'checked_out',
       cited_album_id: cited.id,

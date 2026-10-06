@@ -21,6 +21,7 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  removeSeededIntakeItems,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedFormSubmission,
@@ -49,7 +50,7 @@ describe('intake_items schema (real PG)', () => {
   afterEach(async () => {
     // Items first: `album_id` cascades, but `cited_album_id` and the user
     // columns only null, and a lingering item would hold the parents.
-    await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE artist_name = 'Jessica Pratt'`;
+    await removeSeededIntakeItems();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
     await removeSeededAuthUsers();

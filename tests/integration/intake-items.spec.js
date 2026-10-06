@@ -65,6 +65,7 @@ describe('/intake (BS#2796)', () => {
   };
 
   const cleanup = async () => {
+    // Keeps its prefix sweep: POST /intake creates items the seeder never saw.
     await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();

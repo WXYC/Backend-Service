@@ -10,6 +10,9 @@ const path = require('path');
 const { getTestDb } = require('../utils/db');
 const {
   seedIntakeItem,
+  removeSeededIntakeItems,
+  seedAcceptance,
+  managerUserId,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -38,12 +41,9 @@ function sourceFilesUnder(dir, skip = []) {
 }
 
 describe('intake_seed release, review, revision, print, FCC-note and form-review seeders', () => {
-  // Intake items have no remover; the item cases delete theirs, and this catches one left by a failed case.
-  const itemIds = [];
-
   afterAll(async () => {
     const sql = getTestDb();
-    if (itemIds.length > 0) await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE id = ANY(${itemIds})`;
+    await removeSeededIntakeItems();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
   });
@@ -174,7 +174,6 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
   test('a print seeded with only an intake item as its target inserts, and goes with the item', async () => {
     const sql = getTestDb();
     const item = await seedIntakeItem();
-    itemIds.push(item.id);
     const print = await seedReviewPrint({ intake_item_id: item.id });
     expect(print).toMatchObject({ intake_item_id: item.id, album_id: null });
 
@@ -187,7 +186,6 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
   test('a note seeded with only an intake item as its target inserts, and goes with the item', async () => {
     const sql = getTestDb();
     const item = await seedIntakeItem();
-    itemIds.push(item.id);
     const note = await seedFccNote({ intake_item_id: item.id });
     expect(note).toMatchObject({ intake_item_id: item.id, album_id: null, status: 'reported' });
 
@@ -195,6 +193,52 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
 
     const notes = await sql`SELECT id FROM ${sql(SCHEMA)}.fcc_notes WHERE id = ${note.id}`;
     expect(notes).toHaveLength(0);
+  });
+
+  test('seedAcceptance writes all three accept columns, defaulting to the manager and now, and leaves state alone', async () => {
+    const sql = getTestDb();
+    const item = await seedIntakeItem({ state: 'reviewed' });
+    const review = await seedReview({ intake_item_id: item.id });
+
+    const accepted = await seedAcceptance({ intake_item_id: item.id, review_id: review.id });
+
+    expect(accepted).toMatchObject({
+      state: 'reviewed',
+      accepted_review_id: review.id,
+      accepted_by: await managerUserId(),
+    });
+    expect(accepted.accepted_at).toBeInstanceOf(Date);
+    const [row] =
+      await sql`SELECT state, accepted_review_id, accepted_by FROM ${sql(SCHEMA)}.intake_items WHERE id = ${item.id}`;
+    expect(row).toEqual({ state: 'reviewed', accepted_review_id: review.id, accepted_by: await managerUserId() });
+  });
+
+  test('seedAcceptance honors an explicit accepted_by and accepted_at', async () => {
+    const item = await seedIntakeItem();
+    const review = await seedReview({ intake_item_id: item.id });
+    const at = new Date('2025-03-06T01:02:03.000Z');
+
+    const accepted = await seedAcceptance({
+      intake_item_id: item.id,
+      review_id: review.id,
+      accepted_by: null,
+      accepted_at: at,
+    });
+
+    expect(accepted.accepted_by).toBeNull();
+    expect(accepted.accepted_at).toEqual(at);
+  });
+
+  test('removeSeededIntakeItems deletes every seeded item by id, and a second call is a no-op', async () => {
+    const sql = getTestDb();
+    const first = await seedIntakeItem();
+    const second = await seedIntakeItem();
+
+    await removeSeededIntakeItems();
+    await removeSeededIntakeItems();
+
+    const rows = await sql`SELECT id FROM ${sql(SCHEMA)}.intake_items WHERE id = ANY(${[first.id, second.id]})`;
+    expect(rows).toHaveLength(0);
   });
 
   test('a form submission is removed by id', async () => {

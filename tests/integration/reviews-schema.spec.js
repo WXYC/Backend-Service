@@ -19,6 +19,7 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  removeSeededIntakeItems,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -40,7 +41,7 @@ describe('reviews schema (real PG)', () => {
   });
 
   afterEach(async () => {
-    await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE artist_name = 'Juana Molina'`;
+    await removeSeededIntakeItems();
     await removeSeededLibraryReleases();
     await removeSeededAuthUsers();
   });
