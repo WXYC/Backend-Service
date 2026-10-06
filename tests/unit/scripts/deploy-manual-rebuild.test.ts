@@ -28,7 +28,7 @@ const base = readFileSync(join(workflows, 'deploy-base.yml'), 'utf8');
  * injection), and would also make bash fail here on `${{`.
  */
 type Step = { name?: string; env?: Record<string, string>; run?: string };
-type Job = { if?: unknown; permissions?: unknown; steps: Step[] };
+type Job = { if?: unknown; needs?: unknown; permissions?: unknown; steps: Step[] };
 const runScript = (step: Step & { run: string }, expressions: Record<string, string>, cwd: string) => {
   const values = Object.fromEntries(
     Object.entries(step.env ?? {}).map(([key, expr]) => {
@@ -66,29 +66,36 @@ describe('deploy-manual.yml rebuild switch', () => {
 
   const validateRebuild = manualDoc.jobs['validate-rebuild'];
 
-  it('runs the validation job only for a rebuild, with no token scope', () => {
-    expect(validateRebuild.if).toBe('inputs.rebuild');
+  it('always runs the validation job, with no token scope', () => {
+    expect(validateRebuild.if).toBeUndefined();
     expect(validateRebuild.permissions).toEqual({});
   });
 
-  it.each<[string, string, string, boolean]>([
-    ['no version, from main', '', 'refs/heads/main', true],
-    ['an explicit version', 'v1.2.3', 'refs/heads/main', false],
-    ['a ref other than main', '', 'refs/heads/feature/x', false],
-    ['a tag ref', '', 'refs/tags/backend/v1.2.3', false],
-  ])('validate-rebuild with %s', (_label, version, ref, ok) => {
+  // The job always runs (a skipped ancestor can silently skip the called workflow's
+  // jobs, actions/runner#2205), so the script itself gates on REBUILD.
+  it.each<[string, string, string, string, boolean]>([
+    ['a rebuild with no version, from main', 'true', '', 'refs/heads/main', true],
+    ['a rebuild with an explicit version', 'true', 'v1.2.3', 'refs/heads/main', false],
+    ['a rebuild from a ref other than main', 'true', '', 'refs/heads/feature/x', false],
+    ['a rebuild from a tag ref', 'true', '', 'refs/tags/backend/v1.2.3', false],
+    ['an ordinary dispatch from main', 'false', '', 'refs/heads/main', true],
+    ['a rollback to a version, from a branch', 'false', 'v1.2.3', 'refs/heads/feature/x', true],
+    ['a rollback to a version, from a tag ref', 'false', 'v1.2.3', 'refs/tags/backend/v1.2.3', true],
+  ])('validate-rebuild with %s', (_label, rebuild, version, ref, ok) => {
     const r = runScript(
       findStep(validateRebuild),
-      { '${{ inputs.version }}': version, '${{ github.ref }}': ref },
+      { '${{ inputs.rebuild }}': rebuild, '${{ inputs.version }}': version, '${{ github.ref }}': ref },
       repoRoot
     );
     expect(r.status === 0).toBe(ok);
   });
 
-  it('gates the call job on the validation job without being skipped by it', () => {
+  it('gates the call job on the validation job with no status-function condition', () => {
+    const callJob = manualDoc.jobs['trigger-build-and-deploy'];
+    expect(callJob.needs).toBe('validate-rebuild');
+    expect(callJob.if).toBeUndefined();
     const call = manual.slice(manual.indexOf('trigger-build-and-deploy:'));
-    expect(call).toContain('needs: validate-rebuild');
-    expect(call).toContain('!cancelled() && !failure()');
+    expect(call).not.toMatch(/cancelled\(\)|failure\(\)|success\(\)|always\(\)/);
   });
 });
 
@@ -149,12 +156,11 @@ describe('deploy-base.yml per-target validation', () => {
     expect(runValidate('Validate Build Target', target, version).status === 0).toBe(ok);
   });
 
-  // With version=latest there is no tag to look up, so this step only has the
-  // zero-target guard; directory existence is the step above's job.
+  // With version=latest there is no tag to look up; a blank-only target is already
+  // refused by Validate Build Target earlier in the same job.
   it.each<[string, string, boolean]>([
     ['one target', 'backend', true],
     ['several targets, one per line', 'backend\nauth\n', true],
-    ['only newlines', '\n\n', false],
   ])('Validate Version Input Format (version=latest) with %s', (_label, target, ok) => {
     expect(runValidate('Validate Version Input Format', target, 'latest').status === 0).toBe(ok);
   });
