@@ -7,7 +7,7 @@
  * it takes the postgres.js handle this spec passes it, so no drizzle mock is involved.
  *
  * Isolation: the gate counts EVERY Rock/Soundtracks V/A slot in the schema, so a stray row seeded by another spec
- * would change the count it checks. Each test therefore runs in a throwaway schema whose three tables are
+ * would change the count it checks. Each test therefore runs in a throwaway schema whose four tables are
  * `LIKE ... INCLUDING ALL` copies of the real ones, so the BS#2833 shape CHECK, slot CHECK and per-genre unique index
  * are present as the same backstop they are in production.
  */
@@ -72,7 +72,7 @@ describe('comp-letter backfill (real PG)', () => {
     lines.length = 0;
     await sql`DROP SCHEMA IF EXISTS ${sql(PROBE)} CASCADE`;
     await sql`CREATE SCHEMA ${sql(PROBE)}`;
-    for (const table of ['genres', 'artists', 'genre_artist_crossreference']) {
+    for (const table of ['genres', 'artists', 'genre_artist_crossreference', 'library']) {
       await sql`CREATE TABLE ${sql(PROBE)}.${sql(table)} (LIKE ${sql(SOURCE)}.${sql(table)} INCLUDING ALL)`;
     }
     await sql`INSERT INTO ${sql(PROBE)}.genres (id, genre_name) VALUES (${ROCK}, 'Rock'), (${SOUNDTRACKS}, 'Soundtracks'), (${OTHER_GENRE}, 'Jazz')`;
@@ -175,5 +175,49 @@ describe('comp-letter backfill (real PG)', () => {
     const rerun = await runBackfill(sql, { schema: PROBE, apply: true, log });
 
     expect(rerun.status).toBe('aborted');
+  });
+
+  test('the advisory cross-check sorts every release into one bucket on the real SQL path, and never blocks the write', async () => {
+    await seedShelf();
+    const idOf = async (name, genreId) => {
+      const [row] = await sql`
+        SELECT a.id FROM ${sql(PROBE)}.artists a
+          JOIN ${sql(PROBE)}.genre_artist_crossreference gac ON gac.artist_id = a.id
+         WHERE a.artist_name = ${name} AND gac.genre_id = ${genreId}
+      `;
+      return row.id;
+    };
+    const rockL = await idOf('Various Artists - Rock - L', ROCK);
+    const jazzB = await idOf('Various Artists - Jazz - B', OTHER_GENRE);
+    const file = (artistId, genreId, title, number, legacyId) => sql`
+      INSERT INTO ${sql(PROBE)}.library (artist_id, genre_id, format_id, album_title, code_number, legacy_release_id)
+      VALUES (${artistId}, ${genreId}, 1, ${title}, ${number}, ${legacyId})
+    `;
+    await file(rockL, ROCK, 'Live from the WXDU Lounge', 76, 31001); // agrees
+    await file(rockL, ROCK, 'Refiled since the cutover', 77, 31002); // dump says Rock M
+    await file(rockL, ROCK, 'Moved over from Soundtracks', 78, 31003); // dump says Soundtracks L
+    await file(rockL, ROCK, 'No row in the dump', 79, 31004);
+    await file(rockL, ROCK, 'Filed in dj-site', 80, 1000004); // Backend-minted
+    await file(jazzB, OTHER_GENRE, 'Not a Rock/Soundtracks slot', 5, 31005); // outside the query's scope
+    const legacyReleases = new Map([
+      [31001, { call_letters: 'Z-L', genre_id: ROCK }],
+      [31002, { call_letters: 'Z-M', genre_id: ROCK }],
+      [31003, { call_letters: 'Z-L', genre_id: SOUNDTRACKS }],
+      [31005, { call_letters: 'Z-B', genre_id: OTHER_GENRE }],
+    ]);
+
+    const result = await runBackfill(sql, { schema: PROBE, apply: true, log, legacyReleases });
+
+    expect(result.status).toBe('applied');
+    expect(result.crossCheck).toEqual({
+      agreed: 1,
+      disagreements: [
+        expect.objectContaining({ legacy_release_id: 31002, legacy_call_letters: 'Z-M', legacy_genre_id: ROCK }),
+        expect.objectContaining({ legacy_release_id: 31003, legacy_call_letters: 'Z-L', legacy_genre_id: SOUNDTRACKS }),
+      ],
+      notInDump: 1,
+      backendMinted: 1,
+    });
+    expect(await letters()).toHaveLength(52);
   });
 });

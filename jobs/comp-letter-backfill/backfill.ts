@@ -37,23 +37,70 @@ export interface LetteredSlot {
   code_comp_letter: string;
 }
 
+/** What the frozen tubafrenzy dump says about one legacy release. */
+export interface LegacyRelease {
+  /** Its `LIBRARY_CODE.CALL_LETTERS` (`Z-L` for the Rock L shelf), or null when its code is NULL or missing. */
+  call_letters: string | null;
+  /** Its code's `GENRE_ID`, which uses the same ids as Backend's `genres` (11 Rock, 12 Soundtracks). */
+  genre_id: number | null;
+}
+
+/** A `library` row filed under a Rock/Soundtracks compilation slot, keyed back to tubafrenzy. */
+export interface SlotRelease {
+  artist_id: number;
+  genre_id: number;
+  legacy_release_id: number;
+}
+
+/** A release whose tubafrenzy filing does not match the slot it is under now: another letter, genre, or no code. */
+export interface Disagreement {
+  artist_id: number;
+  genre_name: string;
+  letter: string;
+  legacy_release_id: number;
+  legacy_call_letters: string | null;
+  legacy_genre_id: number | null;
+}
+
+/**
+ * The advisory cross-check's tally over every release under the 52 slots. Each release lands in exactly one bucket:
+ * `agreed` (same letter and genre in the dump), `disagreements`, `notInDump` (a tubafrenzy-era id the dump has no row
+ * for), or `backendMinted` (filed in Backend since the cutover, so there is nothing to compare against).
+ */
+export interface CrossCheckResult {
+  agreed: number;
+  disagreements: Disagreement[];
+  notInDump: number;
+  backendMinted: number;
+}
+
 export type Status = 'dry-run' | 'applied' | 'already-applied' | 'aborted';
 
 export interface BackfillResult {
   status: Status;
   failures: string[];
   candidates: Candidate[];
+  /** Null when no dump was given. */
+  crossCheck: CrossCheckResult | null;
 }
 
 export interface BackfillOptions {
   schema: string;
   apply: boolean;
   log?: (line: string) => void;
+  /** Every `LIBRARY_RELEASE` in the frozen dump, by id (see `legacy.ts`). Omitted: no cross-check. */
+  legacyReleases?: Map<number, LegacyRelease>;
 }
 
 const GENRES = ['Rock', 'Soundtracks'] as const;
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const EXPECTED_TOTAL = GENRES.length * ALPHABET.length;
+
+/**
+ * `legacy_release_id` values at or above this were minted by Backend (`library_legacy_release_id_seq`, BS#1963) and
+ * have no tubafrenzy row to compare against.
+ */
+const BACKEND_MINTED_LEGACY_ID_FLOOR = 1_000_000;
 
 /** Each genre's section name, minus the letter. A candidate's name must be exactly this plus its letter. */
 const NAME_PREFIX: Record<(typeof GENRES)[number], string> = {
@@ -151,6 +198,59 @@ export function checkGate(
 }
 
 /**
+ * Compare each release under a candidate slot with how the frozen tubafrenzy dump filed it. Advisory only: a release
+ * legitimately re-filed to another section after the cutover disagrees with the dump, so disagreements are listed for
+ * a human, never treated as a gate failure.
+ */
+export function crossCheck(
+  candidates: Candidate[],
+  releases: SlotRelease[],
+  legacyReleases: Map<number, LegacyRelease>
+): CrossCheckResult {
+  const slots = new Map(candidates.map((c) => [`${c.artist_id}:${c.genre_id}`, c]));
+  const result: CrossCheckResult = { agreed: 0, disagreements: [], notInDump: 0, backendMinted: 0 };
+  for (const release of releases) {
+    const slot = slots.get(`${release.artist_id}:${release.genre_id}`);
+    if (!slot) continue;
+    if (release.legacy_release_id >= BACKEND_MINTED_LEGACY_ID_FLOOR) {
+      result.backendMinted += 1;
+      continue;
+    }
+    const legacy = legacyReleases.get(release.legacy_release_id);
+    if (legacy === undefined) {
+      result.notInDump += 1;
+      continue;
+    }
+    const legacyLetter = legacy.call_letters === null ? null : /^Z-([A-Z])$/i.exec(legacy.call_letters)?.[1];
+    if (legacyLetter?.toUpperCase() === slot.letter && legacy.genre_id === slot.genre_id) {
+      result.agreed += 1;
+    } else {
+      result.disagreements.push({
+        artist_id: slot.artist_id,
+        genre_name: slot.genre_name,
+        letter: slot.letter,
+        legacy_release_id: release.legacy_release_id,
+        legacy_call_letters: legacy.call_letters,
+        legacy_genre_id: legacy.genre_id,
+      });
+    }
+  }
+  return result;
+}
+
+/** Every release under a Rock/Soundtracks code-0 slot; `crossCheck` keeps the ones under a candidate. */
+const findSlotReleases = (sql: Db, schema: string) => sql<SlotRelease[]>`
+  SELECT l.artist_id, l.genre_id, l.legacy_release_id
+    FROM ${sql(schema)}.library l
+    JOIN ${sql(schema)}.genre_artist_crossreference gac ON gac.artist_id = l.artist_id AND gac.genre_id = l.genre_id
+    JOIN ${sql(schema)}.genres g ON g.id = l.genre_id
+   WHERE gac.artist_genre_code = 0 AND g.genre_name IN ${sql(GENRES)}
+`;
+
+const describeFiling = (callLetters: string | null, genreId: number | null) =>
+  `${callLetters ?? 'no code'} in genre ${genreId ?? '?'}`;
+
+/**
  * Write the 52 letters inside the caller's transaction, one bound UPDATE per slot, each guarded
  * `code_comp_letter IS NULL` and required to touch exactly one row. Before commit, the table must hold exactly 52
  * letters in total, so a run can never leave any other row lettered.
@@ -182,7 +282,7 @@ async function applyLetters(tx: Db, schema: string, candidates: Candidate[]): Pr
  * slip between the gate and the write. A gate failure there writes nothing, and the transaction simply commits empty.
  */
 async function evaluate(sql: Db, options: BackfillOptions, log: (line: string) => void): Promise<BackfillResult> {
-  const { schema, apply } = options;
+  const { schema, apply, legacyReleases } = options;
   const candidates = [...(await findCandidates(sql, schema, apply))];
   log(`[comp-letter-backfill] ${apply ? 'APPLY' : 'DRY RUN'}: ${candidates.length} candidate slots`);
   for (const c of candidates) {
@@ -196,8 +296,25 @@ async function evaluate(sql: Db, options: BackfillOptions, log: (line: string) =
   for (const u of uncovered)
     log(`  ${u.genre_name.padEnd(11)}    ${String(u.artist_id).padStart(6)}  ${u.artist_name}`);
 
+  let crossCheckResult: CrossCheckResult | null = null;
+  if (legacyReleases) {
+    crossCheckResult = crossCheck(candidates, [...(await findSlotReleases(sql, schema))], legacyReleases);
+    const { agreed, disagreements, notInDump, backendMinted } = crossCheckResult;
+    log(
+      `[comp-letter-backfill] advisory cross-check vs frozen tubafrenzy: ${agreed} agree, ${disagreements.length} ` +
+        `disagree, ${notInDump} not in dump, ${backendMinted} filed since the cutover (not checkable)`
+    );
+    for (const d of disagreements) {
+      log(
+        `  ${d.genre_name.padEnd(11)} ${d.letter}  ${String(d.artist_id).padStart(6)}  legacy release ${d.legacy_release_id} was ${describeFiling(d.legacy_call_letters, d.legacy_genre_id)}`
+      );
+    }
+  } else {
+    log('[comp-letter-backfill] advisory cross-check skipped: no --dump given');
+  }
+
   const { failures, alreadyApplied } = checkGate(candidates, [...(await findLettered(sql, schema))]);
-  const result = (status: Status): BackfillResult => ({ status, failures, candidates });
+  const result = (status: Status): BackfillResult => ({ status, failures, candidates, crossCheck: crossCheckResult });
   if (failures.length > 0) {
     log('[comp-letter-backfill] GATE FAILED, nothing written:');
     for (const f of failures) log(`  ✗ ${f}`);
