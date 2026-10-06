@@ -95,7 +95,15 @@ describe('POST /library/filings', () => {
       .expect(200);
 
     expectFields(res.body, 'artist', 'release', 'rotation');
-    expectFields(res.body.artist, 'id', 'artist_name', 'code_letters', 'code_artist_number', 'genre_id');
+    expectFields(
+      res.body.artist,
+      'id',
+      'artist_name',
+      'code_letters',
+      'code_artist_number',
+      'code_comp_letter',
+      'genre_id'
+    );
     expect(res.body.artist.artist_name).toBe(`Filing Artist ${suffix}`);
     expect(res.body.artist.code_artist_number).toBe(1);
     expectFields(res.body.release, 'id', 'artist_id', 'album_title');
@@ -283,6 +291,7 @@ describe('POST /library/filings', () => {
         artist_name: `Filing CodeDup A ${suffix}`,
         code_letters: suffix,
         code_artist_number: 1,
+        code_comp_letter: null,
         genre_id: 11,
       },
     });
@@ -315,6 +324,7 @@ describe('POST /library/filings', () => {
       artist_name: artistName,
       code_letters: codeA,
       code_artist_number: 1,
+      code_comp_letter: null,
       genre_id: 11,
     });
   });

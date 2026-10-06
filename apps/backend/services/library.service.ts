@@ -337,6 +337,7 @@ export interface Rotation {
   id: number | null;
   code_letters: string | null;
   code_artist_number: number | null;
+  code_comp_letter: string | null;
   code_number: number | null;
   artist_name: string | null;
   alphabetical_name: string | null;
@@ -487,6 +488,7 @@ export const getRotationFromDB = async (status: RotationStatus = 'active'): Prom
       ${library.id} AS id,
       ${artists.code_letters} AS code_letters,
       ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
+      ${genre_artist_crossreference.code_comp_letter} AS code_comp_letter,
       ${library.code_number} AS code_number,
       COALESCE(${artists.artist_name}, ${rotation.artist_name}) AS artist_name,
       COALESCE(${artists.alphabetical_name}, ${rotation.artist_name}) AS alphabetical_name,
@@ -3143,6 +3145,7 @@ const LIBRARY_VIEW_PROJECTION = {
   id: library.id,
   code_letters: artists.code_letters,
   code_artist_number: genre_artist_crossreference.artist_genre_code,
+  code_comp_letter: genre_artist_crossreference.code_comp_letter,
   code_number: library.code_number,
   // BS#2827: the release's volume letter, so the request-line call number can
   // tell the volumes of a multi-volume set apart.
@@ -3806,6 +3809,7 @@ export type ArtistInGenreSearchRow = {
   artist_name: string;
   code_letters: string;
   code_number: number;
+  code_comp_letter: string | null;
   genre_id: number;
   genre_name: string;
 };
@@ -3848,6 +3852,7 @@ export const searchArtistsInGenre = async (
         artist_name: artists.artist_name,
         code_letters: artists.code_letters,
         code_number: genre_artist_crossreference.artist_genre_code,
+        code_comp_letter: genre_artist_crossreference.code_comp_letter,
         genre_id: genre_artist_crossreference.genre_id,
         genre_name: genres.genre_name,
       })
@@ -4026,6 +4031,14 @@ export type ArtistCodeOwner = {
 };
 
 /**
+ * `ArtistCodeOwner` plus the compilation letter of the slot it owns (BS#2835): the code triple alone cannot tell
+ * the 27 lettered `V/A`/12/0 sections apart, so the by-code reads carry the section's own letter. NULL for every
+ * artist that is not a lettered compilation section. Not folded into `ArtistCodeOwner`, which `getArtistById`
+ * also answers in with no crossreference row to read it from.
+ */
+export type ArtistSlotOwner = ArtistCodeOwner & { code_comp_letter: string | null };
+
+/**
  * The shared body of the two code-owner lookups. They differ only in the tail
  * (`.limit(1)` for the conflict probe, `.orderBy(...)` for the full list), so
  * the projection and the three-clause join predicate live here — a change to
@@ -4039,6 +4052,7 @@ const artistCodeOwnerQuery = (code_letters: string, genre_id: number, artist_gen
       artist_id: genre_artist_crossreference.artist_id,
       artist_name: artists.artist_name,
       code_letters: artists.code_letters,
+      code_comp_letter: genre_artist_crossreference.code_comp_letter,
     })
     .from(genre_artist_crossreference)
     .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
@@ -4054,7 +4068,7 @@ export const getArtistByCode = async (
   code_letters: string,
   genre_id: number,
   artist_genre_code: number
-): Promise<ArtistCodeOwner | null> => {
+): Promise<ArtistSlotOwner | null> => {
   const response = await artistCodeOwnerQuery(code_letters, genre_id, artist_genre_code).limit(1);
 
   // return null if no artist found
@@ -4094,7 +4108,7 @@ export const getArtistsByCode = async (
   code_letters: string,
   genre_id: number,
   artist_genre_code: number
-): Promise<ArtistCodeOwner[]> => {
+): Promise<ArtistSlotOwner[]> => {
   return artistCodeOwnerQuery(code_letters, genre_id, artist_genre_code).orderBy(
     asc(artists.artist_name),
     asc(artists.id)
@@ -4111,7 +4125,7 @@ export const getArtistsByCode = async (
  * construction; a bucket browse is asked precisely because the numbers differ
  * across the result set.
  */
-export type ArtistCodeBucketMember = ArtistCodeOwner & { code_number: number };
+export type ArtistCodeBucketMember = ArtistSlotOwner & { code_number: number };
 
 /**
  * The shared body of the two reads over a `(code_letters, genre_id)` bucket:
@@ -4131,6 +4145,7 @@ const artistCodeBucketQuery = (code_letters: string, genre_id: number) =>
       artist_name: artists.artist_name,
       code_letters: artists.code_letters,
       code_number: genre_artist_crossreference.artist_genre_code,
+      code_comp_letter: genre_artist_crossreference.code_comp_letter,
     })
     .from(genre_artist_crossreference)
     .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
@@ -4212,6 +4227,7 @@ export type ArtistCardRow = {
   genre_id: number;
   code_letters: string;
   code_artist_number: number;
+  code_comp_letter: string | null;
 };
 
 /**
@@ -4237,6 +4253,7 @@ export const getArtistCardById = async (artist_id: number): Promise<ArtistCardRo
       genre_id: genre_artist_crossreference.genre_id,
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
+      code_comp_letter: genre_artist_crossreference.code_comp_letter,
     })
     .from(artists)
     .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
@@ -4266,6 +4283,7 @@ export const getArtistCardByIdInGenre = async (artist_id: number, genre_id: numb
       genre_id: genre_artist_crossreference.genre_id,
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
+      code_comp_letter: genre_artist_crossreference.code_comp_letter,
     })
     .from(artists)
     .innerJoin(genre_artist_crossreference, eq(genre_artist_crossreference.artist_id, artists.id))
@@ -4618,6 +4636,7 @@ export type ArtistReleaseRow = {
   genre_id: number;
   code_letters: string;
   code_artist_number: number;
+  code_comp_letter: string | null;
   code_number: number;
   code_volume_letters: string | null;
   album_title: string;
@@ -4661,6 +4680,7 @@ const artistReleasesQuery = (artist_id: number, genre_id?: number) =>
       genre_id: library.genre_id,
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
+      code_comp_letter: genre_artist_crossreference.code_comp_letter,
       code_number: library.code_number,
       code_volume_letters: library.code_volume_letters,
       album_title: library.album_title,
@@ -4772,6 +4792,7 @@ export type ArtistCrossReferenceRow = {
   target_code_letters: string;
   target_code_genre_id: number | null;
   target_code_artist_number: number | null;
+  target_code_comp_letter: string | null;
   comment: string | null;
 };
 
@@ -4793,7 +4814,9 @@ export type ArtistCrossReferenceRow = {
  * subqueries read it. Null for an artist with no `genre_artist_crossreference`
  * row at all.
  */
-const targetLowestGenreFiling = (column: 'genre_id' | 'artist_genre_code') => sql<number | null>`(
+const targetLowestGenreFiling = <T extends number | string>(
+  column: 'genre_id' | 'artist_genre_code' | 'code_comp_letter'
+) => sql<T | null>`(
         SELECT gac.${sql.raw(column)}
         FROM ${genre_artist_crossreference} AS gac
         WHERE gac.artist_id = ${targetArtist.id}
@@ -4837,8 +4860,9 @@ const artistCrossReferencesQuery = () =>
       target_artist_id: artist_crossreference.target_artist_id,
       target_artist_name: targetArtist.artist_name,
       target_code_letters: targetArtist.code_letters,
-      target_code_genre_id: targetLowestGenreFiling('genre_id'),
-      target_code_artist_number: targetLowestGenreFiling('artist_genre_code'),
+      target_code_genre_id: targetLowestGenreFiling<number>('genre_id'),
+      target_code_artist_number: targetLowestGenreFiling<number>('artist_genre_code'),
+      target_code_comp_letter: targetLowestGenreFiling<string>('code_comp_letter'),
       comment: artist_crossreference.comment,
     })
     .from(artist_crossreference)
@@ -4905,6 +4929,7 @@ export type ReleaseCrossReferenceRow = {
   genre_id: number;
   code_letters: string;
   code_artist_number: number | null;
+  code_comp_letter: string | null;
   code_number: number;
   code_volume_letters: string | null;
   comment: string | null;
@@ -4949,6 +4974,7 @@ const releaseCrossReferencesQuery = () =>
       genre_id: library.genre_id,
       code_letters: releaseArtist.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
+      code_comp_letter: genre_artist_crossreference.code_comp_letter,
       code_number: library.code_number,
       code_volume_letters: library.code_volume_letters,
       comment: artist_library_crossreference.comment,
@@ -7472,6 +7498,7 @@ export const getAlbumFromDB = async (album_id: number) => {
       format_id: library.format_id,
       code_letters: artists.code_letters,
       code_artist_number: genre_artist_crossreference.artist_genre_code,
+      code_comp_letter: genre_artist_crossreference.code_comp_letter,
       code_number: library.code_number,
       code_volume_letters: library.code_volume_letters,
       artist_name: artists.artist_name,

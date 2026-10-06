@@ -208,6 +208,11 @@ components:
           # Four sibling schemas in this file already say so; only this one said
           # `string`.
           type: integer
+        code_comp_letter:
+          type: string
+          nullable: true
+          description: >-
+            BS#2835. `genre_artist_crossreference.code_comp_letter`: the section letter of a lettered Rock/Soundtracks compilation slot, where `code_artist_number` is 0 for every section. Null for every other slot.
         code_number:
           type: integer
         code_volume_letters:
@@ -315,6 +320,11 @@ components:
           type: string
         code_artist_number:
           type: integer
+        code_comp_letter:
+          type: string
+          nullable: true
+          description: >-
+            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
         code_number:
           type: integer
         artist_name:
@@ -392,6 +402,11 @@ components:
           nullable: true
         code_artist_number:
           type: integer
+        code_comp_letter:
+          type: string
+          nullable: true
+          description: >-
+            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
         label:
           type: string
           nullable: true
@@ -750,6 +765,11 @@ components:
           type: string
         code_artist_number:
           type: integer
+        code_comp_letter:
+          type: string
+          nullable: true
+          description: >-
+            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
         code_number:
           type: integer
         artist_name:
@@ -846,6 +866,11 @@ components:
           type: string
         code_artist_number:
           type: integer
+        code_comp_letter:
+          type: string
+          nullable: true
+          description: >-
+            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
 
     ArtistCardWithDependentCounts:
       description: >-
@@ -1064,6 +1089,11 @@ components:
           type: string
         code_artist_number:
           type: integer
+        code_comp_letter:
+          type: string
+          nullable: true
+          description: >-
+            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
         code_number:
           type: integer
         format_name:
@@ -3197,6 +3227,11 @@ paths:
                             (`genre_artist_crossreference.artist_genre_code`), which is why the
                             genre travels on the row: library-wide, neighbouring rows carry
                             numbers from different shelves.
+                        code_comp_letter:
+                          type: string
+                          nullable: true
+                          description: >-
+                            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
                         genre_id:
                           type: integer
                         genre_name:
@@ -3312,7 +3347,7 @@ paths:
             one field wider, and deliberately not hoisted into a shared schema. That route
             reads `genre_artist_crossreference` joined to `genres`, so every row carries its
             own membership's `code_number`, `genre_id` and `genre_name`. This route is a code
-            lookup: `getArtistsByCode` projects `(artist_id, artist_name, code_letters)` and
+            lookup: `getArtistsByCode` projects `(artist_id, artist_name, code_letters, code_comp_letter)` and
             never joins `genres`, and the handler echoes the already-validated
             `genre_id`/`code_number` back onto each row — they are the request restated,
             identical across the whole list, not per-row facts, and there is no `genre_name`
@@ -3348,6 +3383,11 @@ paths:
                             it is the whole point of the browse, and a response builder that
                             copied the echo would emit one number on every row and still
                             typecheck.
+                        code_comp_letter:
+                          type: string
+                          nullable: true
+                          description: >-
+                            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
                         genre_id:
                           type: integer
                           description: >-
@@ -3745,6 +3785,11 @@ paths:
                           type: string
                         code_artist_number:
                           type: integer
+                        code_comp_letter:
+                          type: string
+                          nullable: true
+                          description: >-
+                            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
                         code_number:
                           type: integer
                         code_volume_letters:
@@ -3973,6 +4018,11 @@ paths:
                         target_code_artist_number:
                           type: integer
                           nullable: true
+                        target_code_comp_letter:
+                          type: string
+                          nullable: true
+                          description: >-
+                            BS#2835. `code_comp_letter` of the same lowest-`genre_id` filing as `target_code_artist_number`. Null for every slot but a lettered compilation section, and null with the number when the target has no crossreference row.
                         comment:
                           type: string
                           nullable: true
@@ -4081,6 +4131,11 @@ paths:
                         code_artist_number:
                           type: integer
                           nullable: true
+                        code_comp_letter:
+                          type: string
+                          nullable: true
+                          description: >-
+                            BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
                         code_number:
                           type: integer
                         code_volume_letters:
