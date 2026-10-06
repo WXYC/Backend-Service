@@ -1,12 +1,12 @@
-import { config } from 'dotenv';
+// First import: ESM evaluates every import before this module's body, so a
+// `config()` call down there would run after the imports below had already
+// read the environment.
+// In production, Docker --env-file sets vars before Node starts, so this is a no-op.
+import 'dotenv/config';
 import * as Sentry from '@sentry/node';
 import { filterSentryTransactionEvent, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
 import { resolveTracesSampleRate } from './sentry-config.js';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter.js';
-
-// Load .env before Sentry.init() so SENTRY_DSN is available.
-// In production, Docker --env-file sets vars before Node starts, so this is a no-op.
-config();
 
 // At boot, not on the first password-reset/OTP send: this container publishes
 // the get-session rate-limit metric from the moment it starts, and the old

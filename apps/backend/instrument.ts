@@ -1,14 +1,14 @@
-import { config } from 'dotenv';
+// First import: ESM evaluates every import before this module's body, so a
+// `config()` call down there would run after the imports below had already
+// read the environment (@wxyc/lml-client fixes its limits at module load).
+// In production, Docker --env-file sets vars before Node starts, so this is a no-op.
+import 'dotenv/config';
 import * as Sentry from '@sentry/node';
 import { filterSentryTransactionEvent, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
 import { resolveTracesSampleRate } from './sentry-config.js';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 
-// Load .env before Sentry.init() so SENTRY_DSN is available.
-// In production, Docker --env-file sets vars before Node starts, so this is a no-op.
-config();
-
-// Immediately after config(), because .env is one of the ways a reserved AWS
+// Immediately after .env loads, because .env is one of the ways a reserved AWS
 // credential name reaches this process. This container holds two of the repo's
 // three CloudWatchClient constructions and sends no email, so it is exactly the
 // process the old per-SES-sender placement could not warn (BS#2532/BS#2518).
