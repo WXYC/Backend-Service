@@ -4960,9 +4960,10 @@ paths:
         GET /proxy/metadata/album, which is anonymous-reachable and applies a
         hard `social_consent = true` filter. Do not conflate the two.
 
-        Reviewer names are never included in responses, on either surface,
-        regardless of the consent answer. This block is Swagger display only;
-        the SSOT is wxyc-shared/api.yaml.
+        This route returns the reviewer's name as typed into the form
+        (`reviewer`), for use inside the station. The public `wxycReviews`
+        attach never carries it, regardless of the consent answer. This block
+        is Swagger display only; the SSOT is wxyc-shared/api.yaml.
       parameters:
         - name: album_id
           in: query
