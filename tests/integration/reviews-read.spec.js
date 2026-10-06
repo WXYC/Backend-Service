@@ -13,6 +13,8 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   seedIntakeItem,
+  removeSeededIntakeItems,
+  seedAcceptance,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -42,7 +44,7 @@ describe('/reviews reads (BS#2805)', () => {
 
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
+    await removeSeededIntakeItems();
     await removeSeededLibraryReleases();
   };
   const ids = async (who, query) => (await who.get('/reviews').query(query)).body.map((r) => r.id);
@@ -92,10 +94,8 @@ describe('/reviews reads (BS#2805)', () => {
       author_user_id: global.secondary_dj_id,
       last_modified: new Date(Date.UTC(2026, 0, 2, 12)).toISOString(),
     });
-    await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1 WHERE id = $2`, [
-      r1.id,
-      filedItem.id,
-    ]);
+    // The reads under test look only at `accepted_review_id`; null `accepted_by` and `accepted_at` keep the row as this spec has always seeded it.
+    await seedAcceptance({ intake_item_id: filedItem.id, review_id: r1.id, accepted_by: null, accepted_at: null });
   });
 
   afterAll(cleanup);
