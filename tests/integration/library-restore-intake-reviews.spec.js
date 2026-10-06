@@ -35,6 +35,7 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  seedReview,
   seedReviewRevision,
   seedReviewPrint,
   seedFccNote,
@@ -104,16 +105,6 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
     return item.id;
   };
 
-  const insertReview = async (columns) => {
-    const names = Object.keys(columns);
-    const rows = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".reviews (${names.join(', ')})
-       VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`,
-      Object.values(columns)
-    );
-    return rows[0].id;
-  };
-
   const readReviews = (albumId) =>
     sql.unsafe(`SELECT * FROM "${SCHEMA}".reviews WHERE album_id = $1 ORDER BY id`, [albumId]);
 
@@ -159,8 +150,8 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
     const album = await createAlbum({ album_title: `${marker} Filed` });
     const itemId = await insertFiledItem(album.id);
     const reviewIds = [
-      await insertReview({ album_id: album.id, intake_item_id: itemId, review: 'la paradoja', author: 'Cat Power' }),
-      await insertReview({ album_id: album.id, intake_item_id: itemId, review: 'Back, Baby', author: 'Stereolab' }),
+      (await seedReview({ album_id: album.id, intake_item_id: itemId, review: 'la paradoja', author: 'Cat Power' })).id,
+      (await seedReview({ album_id: album.id, intake_item_id: itemId, review: 'Back, Baby', author: 'Stereolab' })).id,
     ];
     const batchId = await deleteAlbum(album.id);
     expect(await readReviews(album.id)).toHaveLength(0);
@@ -185,7 +176,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
   test('restores an accepted review with its revisions, a print and an FCC note, the item pointing at the restored review', async () => {
     const album = await createAlbum({ album_title: `${marker} Accepted` });
     const itemId = await insertFiledItem(album.id);
-    const reviewId = await insertReview({ album_id: album.id, intake_item_id: itemId, review: 'DOGA' });
+    const { id: reviewId } = await seedReview({ album_id: album.id, intake_item_id: itemId, review: 'DOGA' });
     await seedReviewRevision({ review_id: reviewId, revision: 1, review: 'first' });
     const { id: revisionId } = await seedReviewRevision({ review_id: reviewId, revision: 2, review: 'second' });
     await seedReviewPrint({
@@ -223,7 +214,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
     const itemId = await insertFiledItem(album.id);
     // Stamped with the item but not the release, so the snapshot (which captures
     // reviews through `album_id`) never holds it.
-    const reviewId = await insertReview({ intake_item_id: itemId, review: 'Back, Baby' });
+    const { id: reviewId } = await seedReview({ intake_item_id: itemId, review: 'Back, Baby' });
     await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1 WHERE id = $2`, [reviewId, itemId]);
     const batchId = await deleteAlbum(album.id);
 
@@ -246,7 +237,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
   test('restores as NULL a review author whose account was removed after the delete, and reports it', async () => {
     const album = await createAlbum({ album_title: `${marker} Author Gone` });
     const authorId = (await seedAuthUser()).id;
-    const reviewId = await insertReview({
+    const { id: reviewId } = await seedReview({
       album_id: album.id,
       review: 'DOGA',
       author: 'Juana Molina',
@@ -290,7 +281,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
 
   test('restores a snapshot whose reviews row has the stub’s old shape, the new columns taking their defaults', async () => {
     const album = await createAlbum({ album_title: `${marker} Stub Shape` });
-    const reviewId = await insertReview({
+    const { id: reviewId } = await seedReview({
       album_id: album.id,
       review: 'On Your Own Love Again',
       author: 'Jessica Pratt',
@@ -340,7 +331,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
 
   test('restores a pre-0180 snapshot that has no intake_items key at all (not an empty one)', async () => {
     const album = await createAlbum({ album_title: `${marker} No Items Key` });
-    const reviewId = await insertReview({
+    const { id: reviewId } = await seedReview({
       album_id: album.id,
       review: 'Call Your Name',
       author: 'Chuquimamani-Condori',

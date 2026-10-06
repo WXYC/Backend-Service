@@ -47,8 +47,9 @@ describe('reviews schema (real PG)', () => {
 
   it('reads back the stub-era defaults on a row that names only the columns the stub had', async () => {
     const album = (await seedLibraryRelease()).id;
-    // Hand-written on purpose: this row must name only the columns the stub had (album_id, review). seedReview also
-    // writes author and submitted_at, which would hide a later NOT NULL or CHECK on a post-stub column.
+    // Hand-written on purpose: this row names only album_id and review, a subset of the stub's columns. seedReview also
+    // writes author and submitted_at, and submitted_at is a post-stub column (migration 0180), so seeding would hide a
+    // later NOT NULL or CHECK on it.
     const [review] = await sql`
       INSERT INTO ${sql(SCHEMA)}.reviews ${sql({ album_id: album, review: 'la paradoja' })} RETURNING *
     `;
