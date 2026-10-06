@@ -2,6 +2,8 @@ import { and, desc, eq, getTableColumns, inArray, or, sql, type AnyColumn, type 
 import { alias } from 'drizzle-orm/pg-core';
 import {
   db,
+  extractConstraintName,
+  extractSqlState,
   intake_items,
   library,
   review_prints,
@@ -253,6 +255,10 @@ const lockSubjectToRecord = async (
   return { intake_item_id: subject.intake_item_id, album_id: release };
 };
 
+/** A foreign-key miss on `reviews.author_user_id` (23503): the linked account no longer exists. Any other 23503 stays a 500. */
+const isUnknownAuthor = (error: unknown) =>
+  extractSqlState(error) === '23503' && extractConstraintName(error)?.includes('author_user_id') === true;
+
 /**
  * `POST /reviews` for a caller with `reviews: manage` who sends the on-behalf keys (slice 13e). Recorded by
  * the caller (`recorded_by_user_id`) for the typed `author`, whom `author_user_id` may link to an account (an
@@ -270,30 +276,36 @@ export const recordReview = async (
 ) => {
   const { accept, author_user_id, ...recorded } = onBehalf;
   if (accept && recorded.medium === 'typed' && fields.review == null) return { outcome: 'text_required' as const };
-  return db.transaction(async (tx) => {
-    const target = await lockSubjectToRecord(tx, subject, accept);
-    if (!target) return { outcome: 'subject_not_held' as const };
-    if (author_user_id !== undefined) {
-      const linked = await tx.select({ id: user.id }).from(user).where(eq(user.id, author_user_id));
-      if (linked.length === 0) return { outcome: 'unknown_author' as const };
-    }
-    const [row] = await tx
-      .insert(reviews)
-      .values({
-        ...fields,
-        ...target,
-        ...recorded,
-        author_user_id: author_user_id ?? null,
-        recorded_by_user_id: actor.id,
-        status: 'draft',
-      })
-      .returning();
-    if (accept && subject.intake_item_id !== undefined) {
-      await writeSubmission(tx, row);
-      await writeAcceptance(tx, subject.intake_item_id, row.id, actor);
-    }
-    return { outcome: 'created' as const, review: (await selectReview(row.id, tx))! };
-  });
+  try {
+    return await db.transaction(async (tx) => {
+      const target = await lockSubjectToRecord(tx, subject, accept);
+      if (!target) return { outcome: 'subject_not_held' as const };
+      if (author_user_id !== undefined) {
+        const linked = await tx.select({ id: user.id }).from(user).where(eq(user.id, author_user_id));
+        if (linked.length === 0) return { outcome: 'unknown_author' as const };
+      }
+      const [row] = await tx
+        .insert(reviews)
+        .values({
+          ...fields,
+          ...target,
+          ...recorded,
+          author_user_id: author_user_id ?? null,
+          recorded_by_user_id: actor.id,
+          status: 'draft',
+        })
+        .returning();
+      if (accept && subject.intake_item_id !== undefined) {
+        await writeSubmission(tx, row);
+        await writeAcceptance(tx, subject.intake_item_id, row.id, actor);
+      }
+      return { outcome: 'created' as const, review: (await selectReview(row.id, tx))! };
+    });
+  } catch (error) {
+    // The account was deleted between the check above and this insert: the same answer as the check gives, not a 500.
+    if (isUnknownAuthor(error)) return { outcome: 'unknown_author' as const };
+    throw error;
+  }
 };
 
 const CONTENT_FIELDS = ['review', 'artist_blurb', 'buzzwords', 'recommended_tracks', 'fcc'] as const;
