@@ -10,7 +10,10 @@
  *   const sql = getTestDb();
  *   const result = await sql`SELECT * FROM users`;
  *
- *   // In afterAll or global teardown:
+ * Nothing has to close the pool: each Jest spec file has its own module registry and so its own pool (a global
+ * teardown can never reach it), and the pool's short `idle_timeout` closes its connections once the file's queries
+ * stop. `closeTestDb()` remains for a spec that wants to close early:
+ *
  *   await closeTestDb();
  */
 
@@ -46,7 +49,9 @@ function getTestDb() {
 
 /**
  * Close the shared test database connection pool.
- * Call this in global teardown or afterAll.
+ * Optional: the pool's `idle_timeout` already releases its connections shortly after the file's last query. Call this
+ * from a spec's own `afterAll` only to close early (a global teardown runs in a different module registry and cannot
+ * reach a spec file's pool).
  */
 async function closeTestDb() {
   if (pool) {

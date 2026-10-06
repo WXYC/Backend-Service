@@ -33,7 +33,7 @@
  * passes the review's five content fields (`review`, `artist_blurb`, `buzzwords`, `recommended_tracks`, `fcc`),
  * `edited_by`, `edited_by_user_id` and `edited_at`.
  *
- * Everything runs on the shared `getTestDb()` pool; callers must not end it.
+ * Everything runs on the shared `getTestDb()` pool, which its idle timeout releases after the file's last query (`tests/utils/db.js`); callers need not end it.
  *
  * Usage:
  *   const {

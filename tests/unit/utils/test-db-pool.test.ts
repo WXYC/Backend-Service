@@ -9,7 +9,10 @@ describe('getTestDb pool options', () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getTestDb } = require('../../utils/db');
     getTestDb();
-    const options = (mockPostgres.mock.calls[0] as unknown[])[0] as { idle_timeout: number };
-    expect(options.idle_timeout).toBeLessThanOrEqual(2);
+    const options = (mockPostgres.mock.calls[0] as unknown[])[0] as { idle_timeout: unknown };
+    // 0 means "never close idle connections" to postgres.js, so it must fail along with null and undefined.
+    expect(typeof options.idle_timeout).toBe('number');
+    expect(options.idle_timeout as number).toBeGreaterThan(0);
+    expect(options.idle_timeout as number).toBeLessThanOrEqual(2);
   });
 });
