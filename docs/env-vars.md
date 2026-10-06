@@ -457,7 +457,7 @@ The `*/30` linkage repair is DB-only and needs no service credentials, but its l
 
 ### One-shot backfill jobs
 
-One-shot backfill jobs under `jobs/*-backfill/` run via `Manual Build & Deploy` with `rebuild=true`, then `docker run`. Multi-target dispatch is CLI-only, because the web form's field is one line: `gh workflow run deploy-manual.yml --ref main -f target="$(printf 'a\nb')" -f rebuild=true`. They share a small set of operator knobs:
+One-shot backfill jobs under `jobs/*-backfill/` run via `Manual Build & Deploy` with `rebuild=true`, then `docker run`. Multi-target dispatch needs the CLI or the REST API, because the web form's field is one line: `gh workflow run deploy-manual.yml --ref main -f target="$(printf 'a\nb')" -f rebuild=true`. They share a small set of operator knobs:
 
 - `BATCH_SIZE` — Rows fetched per SELECT cursor batch (default `500`, capped at `1000` for `library-identity-consumer` to match LML's bulk-resolve cap). Used by `library-identity-consumer`. Other backfills accept the variant `BACKFILL_BATCH_SIZE` (`flowsheet-metadata-backfill`, `flowsheet-dj-name-backfill`); the existing variant is preserved in those jobs for log-tail compatibility.
 - `THROTTLE_MS` — Inter-batch sleep, milliseconds (default `100`). Used by `library-identity-consumer`. The variant `BACKFILL_THROTTLE_MS` is what `flowsheet-metadata-backfill` accepts; same purpose.

@@ -34,16 +34,35 @@ jobs:
       # inside `run:`, which would paste the dispatcher's text into the shell.
       - name: Validate Build Target
         if: inputs.target != ''
+        # An empty version means a rebuild (deploy-manual.yml's rebuild=true):
+        # handle-git-tags tags the target before the build runs, so a target
+        # with no root Dockerfile is refused here rather than left with a tag
+        # no image was built for.
         env:
           TARGETS: ${{ inputs.target }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           CHECKED=0
+          SEEN=" "
           while IFS= read -r TARGET_INPUT; do
             [ -z "$TARGET_INPUT" ] && continue
+            if [[ ! "$TARGET_INPUT" =~ ^[a-z0-9-]+$ ]]; then
+              echo "Error: '$TARGET_INPUT' is not a target name (lowercase letters, digits and hyphens)." >&2
+              exit 1
+            fi
             if [ ! -d "apps/$TARGET_INPUT" ] && [ ! -d "jobs/$TARGET_INPUT" ]; then
               echo "Error: The target directory 'apps/$TARGET_INPUT' or 'jobs/$TARGET_INPUT' does not exist." >&2
               exit 1
             fi
+            if [ -z "$VERSION_INPUT" ] && [ ! -f "Dockerfile.$TARGET_INPUT" ]; then
+              echo "Error: '$TARGET_INPUT' has no root Dockerfile.$TARGET_INPUT, so it cannot be rebuilt." >&2
+              exit 1
+            fi
+            if [[ "$SEEN" == *" $TARGET_INPUT "* ]]; then
+              echo "Error: target '$TARGET_INPUT' is listed more than once." >&2
+              exit 1
+            fi
+            SEEN+="$TARGET_INPUT "
             echo "target input '$TARGET_INPUT' is valid."
             CHECKED=$((CHECKED + 1))
           done <<< "$TARGETS"
