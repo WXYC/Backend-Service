@@ -46,8 +46,11 @@
  * see `ci-node-modules-cache.test.ts`, which depends on the same glob.
  */
 
+import { spawnSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { parse as parseYaml } from 'yaml';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const workflowDir = path.join(repoRoot, '.github/workflows');
@@ -176,16 +179,6 @@ describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () =
       expect(autoArm).toContain('.["job-type"]');
     });
 
-    it('keeps a one-shot whose own directory or Dockerfile changed', () => {
-      expect(autoArm).toMatch(
-        /git diff --name-only "\$BASE" "\$HEAD_SHA" -- "jobs\/\$TARGET\/" "Dockerfile\.\$TARGET"/
-      );
-    });
-
-    it('keeps every one-shot when the range is unresolvable', () => {
-      expect(autoArm).toMatch(/"\$RANGE_RESOLVABLE" = true/);
-    });
-
     it('announces the one-shots it skipped', () => {
       expect(autoArm).toContain('::notice title=Skipping one-shot jobs');
       expect(autoArm).toContain('rebuild=true');
@@ -196,5 +189,125 @@ describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () =
       expect(dispatchArm).not.toContain('one-shot');
       expect(liveStep).not.toContain('one-shot');
     });
+  });
+});
+
+/**
+ * Behavioral tests (BS#2909): run the real filter loop from the `Detect Build
+ * Target` step against a throwaway git repo, so the push range is real. The
+ * loop is sliced out of the parsed step's `run:` script (from `BUILDABLE='[]'`
+ * to the empty-matrix check) and executed with `bash -eo pipefail`, the way
+ * GitHub runs it. `yq` is not installed on dev machines, so a shim backed by
+ * jq (the manifests are JSON, and the expression is valid jq) stands in.
+ */
+describe('one-shot filter behavior', () => {
+  const doc = parseYaml(deployBase) as {
+    jobs: Record<string, { steps: { name?: string; run?: string }[] }>;
+  };
+  const stepRun = doc.jobs.setup.steps.find((s) => s.name === 'Detect Build Target')?.run;
+  if (!stepRun) throw new Error('Detect Build Target step not found');
+  const startIdx = stepRun.indexOf("BUILDABLE='[]'");
+  const endIdx = stepRun.indexOf('if [ "$TARGETS" = "[]" ]');
+  if (startIdx === -1 || endIdx === -1) throw new Error('filter loop markers not found in deploy-base.yml');
+  const filterScript = stepRun.slice(startIdx, endIdx) + '\necho "RESULT=$TARGETS"\n';
+
+  const git = (cwd: string, ...args: string[]) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const write = (root: string, rel: string, content: string) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), content);
+  };
+
+  let root: string;
+  let shimDir: string;
+  let base: string;
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-filter-'));
+    shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yq-shim-'));
+    fs.writeFileSync(path.join(shimDir, 'yq'), '#!/bin/sh\nexec jq "$@"\n', { mode: 0o755 });
+    git(root, 'init', '-q');
+    git(root, 'config', 'user.email', 't@example.com');
+    git(root, 'config', 'user.name', 't');
+    git(root, 'config', 'commit.gpgsign', 'false');
+    const oneShot = JSON.stringify({ 'job-type': 'one-shot' });
+    for (const t of ['oneshot-own', 'oneshot-docker', 'oneshot-dep']) {
+      write(root, `jobs/${t}/package.json`, oneShot);
+      write(root, `jobs/${t}/index.ts`, 'v1');
+      write(root, `Dockerfile.${t}`, 'v1');
+    }
+    write(root, 'jobs/cron-explicit/package.json', JSON.stringify({ 'job-type': 'cron' }));
+    write(root, 'jobs/cron-default/package.json', JSON.stringify({}));
+    for (const t of ['cron-explicit', 'cron-default', 'app-one']) write(root, `Dockerfile.${t}`, 'v1');
+    write(root, 'apps/app-one/index.ts', 'v1');
+    write(root, 'shared/lib.ts', 'v1');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-qm', 'base');
+    base = git(root, 'rev-parse', 'HEAD');
+    write(root, 'jobs/oneshot-own/index.ts', 'v2');
+    write(root, 'Dockerfile.oneshot-docker', 'v2');
+    write(root, 'shared/lib.ts', 'v2');
+    git(root, 'commit', '-qam', 'push');
+  });
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(shimDir, { recursive: true, force: true });
+  });
+
+  const ALL = ['oneshot-own', 'oneshot-docker', 'oneshot-dep', 'cron-explicit', 'cron-default', 'app-one'];
+  const run = (opts: { resolvable?: string; base?: string; targets?: string[] }) => {
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', filterScript], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        PATH: `${shimDir}:${process.env.PATH}`,
+        TARGETS: JSON.stringify(opts.targets ?? ALL),
+        BASE: opts.base ?? base,
+        HEAD_SHA: git(root, 'rev-parse', 'HEAD'),
+        RANGE_RESOLVABLE: opts.resolvable ?? 'true',
+      },
+    });
+    const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT='));
+    return { status: r.status, out: r.stdout + r.stderr, targets: line ? JSON.parse(line.slice(7)) : null };
+  };
+
+  it('skips only the one-shot touched solely through a shared dependency, and says so', () => {
+    const r = run({});
+    expect(r.status).toBe(0);
+    expect(r.targets).toEqual(['oneshot-own', 'oneshot-docker', 'cron-explicit', 'cron-default', 'app-one']);
+    expect(r.out).toContain('::notice title=Skipping one-shot jobs::');
+    expect(r.out).toContain('oneshot-dep');
+  });
+
+  it.each([
+    ['a one-shot whose own files changed', 'oneshot-own'],
+    ['a one-shot whose root Dockerfile changed', 'oneshot-docker'],
+    ['a cron job with an explicit job-type', 'cron-explicit'],
+    ['a cron job with the default job-type', 'cron-default'],
+    ['an app', 'app-one'],
+  ])('keeps %s', (_label, target) => {
+    const r = run({ targets: [target] });
+    expect(r.targets).toEqual([target]);
+    expect(r.out).not.toContain('Skipping one-shot jobs');
+  });
+
+  it('skips a dependency-only one-shot', () => {
+    const r = run({ targets: ['oneshot-dep'] });
+    expect(r.targets).toEqual([]);
+    expect(r.out).toContain('::notice title=Skipping one-shot jobs::');
+  });
+
+  it.each(['false', ''])('keeps every one-shot when RANGE_RESOLVABLE is %j', (resolvable) => {
+    const r = run({ resolvable });
+    expect(r.targets).toEqual(ALL);
+    expect(r.out).not.toContain('Skipping one-shot jobs');
+  });
+
+  it('keeps a one-shot when git diff itself fails (fails toward building)', () => {
+    const r = run({ base: 'deadbeef'.repeat(5), targets: ['oneshot-dep'] });
+    expect(r.status).toBe(0);
+    expect(r.targets).toEqual(['oneshot-dep']);
   });
 });
