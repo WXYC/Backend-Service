@@ -327,6 +327,12 @@ components:
             BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
         code_number:
           type: integer
+        code_volume_letters:
+          type: string
+          nullable: true
+          maxLength: 4
+          description: >-
+            BS#2886. The per-release volume letter, `library.code_volume_letters` (varchar(4)). Volumes of one set share a call number, so this tells them apart. Stored raw: the wire does not trim or case-fold it. Not the compilation-section letter (`code_comp_letter`, a separate field). Null when the release has no volume letters.
         artist_name:
           type: string
         album_title:

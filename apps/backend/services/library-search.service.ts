@@ -73,6 +73,8 @@ export type AlbumSearchResultRow = {
   code_artist_number: number;
   // BS#2835: the slot's compilation section letter; NULL except on the lettered V/A slots.
   code_comp_letter: string | null;
+  // BS#2886: the release's raw volume letter(s), telling apart volumes of a set filed at one slot; NULL when unlettered.
+  code_volume_letters: string | null;
   format_name: string;
   genre_name: string;
   // BS#2639: the shelf, so a result row can link to the card it names rather
@@ -167,6 +169,7 @@ const CATALOG_ROW_PROJECTION_COLUMNS = {
   code_number: library_artist_view.code_number,
   code_artist_number: library_artist_view.code_artist_number,
   code_comp_letter: library_artist_view.code_comp_letter,
+  code_volume_letters: library_artist_view.code_volume_letters,
   format_name: library_artist_view.format_name,
   genre_name: library_artist_view.genre_name,
   genre_id: library_artist_view.genre_id,
@@ -627,6 +630,7 @@ function taggedRowToAlbumSearchResultRow(row: TaggedLibraryViewEntry): AlbumSear
     code_number: row.code_number,
     code_artist_number: row.code_artist_number,
     code_comp_letter: row.code_comp_letter,
+    code_volume_letters: row.code_volume_letters,
     format_name: row.format_name,
     genre_name: row.genre_name,
     genre_id: row.genre_id,
@@ -661,6 +665,7 @@ type RawRow = {
   code_number: number;
   code_artist_number: number;
   code_comp_letter: string | null;
+  code_volume_letters: string | null;
   format_name: string;
   genre_name: string;
   genre_id: number;
@@ -703,6 +708,7 @@ function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
     code_number: row.code_number,
     code_artist_number: row.code_artist_number,
     code_comp_letter: row.code_comp_letter,
+    code_volume_letters: row.code_volume_letters,
     format_name: row.format_name,
     genre_name: row.genre_name,
     genre_id: row.genre_id,
