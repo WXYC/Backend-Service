@@ -17,7 +17,9 @@ const {
   seedReview,
   seedFormSubmission,
   removeSeededFormSubmissions,
+  removeSeededIntakeItems,
   managerAccessToken,
+  managerUserId,
 } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -43,7 +45,7 @@ describe('/intake accept-review (BS#2860)', () => {
   const itemRow = async (id) => (await sql.unsafe(`SELECT * FROM "${SCHEMA}".intake_items WHERE id = $1`, [id]))[0];
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
+    await removeSeededIntakeItems();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
   };
@@ -53,9 +55,7 @@ describe('/intake accept-review (BS#2860)', () => {
     djA = createAuthRequest(request, `Bearer ${global.primary_dj_id}`);
     djB = createAuthRequest(request, global.secondary_access_token);
     sql = getTestDb();
-    const [managerRow] = await sql`SELECT id FROM auth_user WHERE username = 'test_station_manager'`;
-    if (!managerRow) throw new Error('test_station_manager fixture account is missing');
-    managerId = managerRow.id;
+    managerId = await managerUserId();
     await cleanup();
     releaseId = (await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} release` })).id;
   });
