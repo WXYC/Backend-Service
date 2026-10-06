@@ -21,6 +21,10 @@ let pool = null;
 /**
  * Get the shared test database connection pool.
  * Creates the pool on first call, reuses it on subsequent calls.
+ *
+ * Each Jest spec file has its own module registry and so its own pool; nothing ends it when the file finishes, so
+ * a file's connections are released by the 2-second `idle_timeout` (an `afterAll` close in the setup file would run
+ * before a spec's own root-level `afterAll` cleanup, which still queries the pool).
  */
 function getTestDb() {
   if (!pool) {
@@ -33,7 +37,7 @@ function getTestDb() {
       username: process.env.DB_USERNAME,
       password: process.env.DB_PASSWORD,
       max: 5, // Maximum connections in pool
-      idle_timeout: 30, // Close idle connections after 30 seconds
+      idle_timeout: 2, // Close idle connections after 2 seconds
       connect_timeout: 10, // Connection timeout in seconds
     });
   }
