@@ -104,7 +104,7 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     const [artist] = await sql`SELECT code_letters FROM ${sql(SCHEMA)}.artists WHERE id = ${release.artist_id}`;
     // The row carries the constant the file walk below guards, so the walk guards what seeded artists get.
     expect(artist.code_letters).toBe(SEEDED_CODE_LETTERS);
-    // 'ZZ' is swept by album-reviews, digital-archive-playback and intake-transitions; 'ZQ' is the BS#2489
+    // 'ZZ' is swept by album-reviews and digital-archive-playback; 'ZQ' is the BS#2489
     // bucket whose exact membership library.spec.js asserts.
     expect(['ZZ', 'ZQ']).not.toContain(SEEDED_CODE_LETTERS);
   });
