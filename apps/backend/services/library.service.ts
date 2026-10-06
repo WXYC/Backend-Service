@@ -340,11 +340,14 @@ export interface Rotation {
   code_artist_number: number | null;
   code_comp_letter: string | null;
   code_number: number | null;
+  // BS#2917: raw `library.code_volume_letters`; `genre_id` is null with the rest of an unlinked row's library join.
+  code_volume_letters: string | null;
   artist_name: string | null;
   alphabetical_name: string | null;
   album_title: string | null;
   record_label: string | null;
   label_id: number | null;
+  genre_id: number | null;
   genre_name: string | null;
   format_name: string | null;
   rotation_id: number;
@@ -491,11 +494,13 @@ export const getRotationFromDB = async (status: RotationStatus = 'active'): Prom
       ${genre_artist_crossreference.artist_genre_code} AS code_artist_number,
       ${genre_artist_crossreference.code_comp_letter} AS code_comp_letter,
       ${library.code_number} AS code_number,
+      ${library.code_volume_letters} AS code_volume_letters,
       COALESCE(${artists.artist_name}, ${rotation.artist_name}) AS artist_name,
       COALESCE(${artists.alphabetical_name}, ${rotation.artist_name}) AS alphabetical_name,
       COALESCE(${library.album_title}, ${rotation.album_title}) AS album_title,
       COALESCE(${library.label}, ${rotation.record_label}) AS record_label,
       ${library.label_id} AS label_id,
+      ${library.genre_id} AS genre_id,
       ${genres.genre_name} AS genre_name,
       ${format.format_name} AS format_name,
       ${rotation.id} AS rotation_id,
