@@ -20,7 +20,8 @@ const mockReads: {
   lock?: string;
   of?: string;
   where: string;
-  ordered?: boolean;
+  /** The rendered ORDER BY, when the select has one. */
+  orderBy?: string;
 }[] = [];
 /** Every UPDATE and DELETE, in order, with its table, its `SET` (updates) and its rendered WHERE. */
 const mockWritesTo: { verb: 'update' | 'delete'; table: string; set?: Record<string, unknown>; where: string }[] = [];
@@ -47,8 +48,15 @@ jest.mock('@wxyc/database', () => {
         return c;
       },
       leftJoin: () => c,
-      orderBy: () => {
-        read.ordered = true;
+      orderBy: (...columns: any[]) => {
+        const { sql } = jest.requireActual('drizzle-orm');
+        const q = new PgDialect().sqlToQuery(
+          sql.join(
+            columns.map((column) => sql`${column}`),
+            sql`, `
+          )
+        );
+        read.orderBy = q.sql;
         return c;
       },
       where: (w: any) => {
@@ -291,6 +299,9 @@ describe('createReview', () => {
   });
 });
 
+/** The rendered ORDER BY of `intake_items.id` ascending; a `desc(...)` or another column renders differently. */
+const ASCENDING_ID = `"${process.env.WXYC_SCHEMA_NAME || 'wxyc_schema'}"."intake_items"."id"`;
+
 describe('lockReviewAfterItem', () => {
   const lock = (mode: 'share' | 'update', id = 3) =>
     lockReviewAfterItem({ select: jest.requireMock('@wxyc/database').db.select }, id, mode);
@@ -315,14 +326,15 @@ describe('lockReviewAfterItem', () => {
         acceptingItems: true,
       })
     ).toEqual({ itemId: 8 });
-    expect(mockReads.map((r) => [r.table, r.lock, r.ordered])).toEqual([
-      ['reviews', undefined, undefined],
-      ['intake_items', undefined, undefined],
-      ['intake_items', 'update', true],
-      ['reviews', 'update', undefined],
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
+      ['reviews', undefined],
+      ['intake_items', undefined],
+      ['intake_items', 'update'],
+      ['reviews', 'update'],
     ]);
     expect(mockReads[1].where).toContain('[3]');
     expect(mockReads[2].where).toContain('[5,8]');
+    expect(mockReads[2].orderBy).toBe(ASCENDING_ID);
   });
 
   test('with acceptingItems and no item at all, there is nothing to lock but the review', async () => {
@@ -813,7 +825,7 @@ describe('deleteReview', () => {
    */
   const script = (
     review: object,
-    accepting: { id: number; state: string; cited_album_id?: number | null; cited_submission_id?: number | null }[],
+    accepting: { id: number; state: string }[],
     opts: { inUse?: boolean; manage?: boolean } = {}
   ) => {
     const ids = [...new Set([8, ...accepting.map((a) => a.id)])].sort((a, b) => a - b);
@@ -823,34 +835,45 @@ describe('deleteReview', () => {
       ids.map((id) => ({ id })),
       [{ id: 3 }],
       [DRAFT({ status: 'submitted', ...review })],
-      accepting.map((a) => ({ cited_album_id: null, cited_submission_id: null, ...a }))
+      accepting.map((a) => ({ id: a.id, state: a.state }))
     );
     if (!opts.manage && accepting.length === 0) mockQueue.push([{ in_use: opts.inUse ?? false }]);
   };
-  const item = (id: number, state: string, o: object = {}) => ({ id, state, ...o });
+  /** An accepting item. Its citations are not read: the refusal is the same cited or not. */
+  const item = (id: number, state: string) => ({ id, state });
   const writes = () => mockWritesTo.map((w) => `${w.verb} ${w.table}`);
 
   test("locks through lockReviewAfterItem, the review's own item and every accepting item in ascending id order before the review, then reads the accepting items and decides", async () => {
     script({}, [item(8, 'reviewed'), item(5, 'reviewed')], { manage: true });
     await deleteReview(3, MD);
     expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
-    expect(mockReads.map((r) => [r.table, r.lock, r.ordered])).toEqual([
-      ['reviews', undefined, undefined],
-      ['intake_items', undefined, undefined],
-      ['intake_items', 'update', true],
-      ['reviews', 'update', undefined],
-      ['reviews', undefined, undefined],
-      ['intake_items', undefined, undefined],
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
+      ['reviews', undefined],
+      ['intake_items', undefined],
+      ['intake_items', 'update'],
+      ['reviews', 'update'],
+      ['reviews', undefined],
+      ['intake_items', 'update'],
     ]);
     expect(mockReads[2].where).toContain('[5,8]');
+    expect(mockReads[2].orderBy).toBe(ASCENDING_ID);
     expect(mockReads[1].where).toContain('"accepted_review_id"');
     expect(mockReads[5].where).toContain('"accepted_review_id"');
+  });
+
+  test('the read the accepted_review refusal is judged on is FOR UPDATE, by ascending id, with no `of`, so a late accept cannot be changed by a filing before the UPDATE', async () => {
+    script({}, [item(8, 'reviewed'), item(5, 'reviewed')], { manage: true });
+    await deleteReview(3, MD);
+    const judged = mockReads[5];
+    expect([judged.table, judged.lock, judged.of]).toEqual(['intake_items', 'update', undefined]);
+    expect(judged.orderBy).toBe(ASCENDING_ID);
+    expect(judged.where).toContain('"accepted_review_id"');
   });
 
   describe('an author without reviews: manage', () => {
     test.each([
       ['accepted for its own item', [item(8, 'reviewed')]],
-      ['accepted for an item that cites its release', [item(5, 'reviewed', { cited_album_id: 9 })]],
+      ['accepted for an item that cites its release', [item(5, 'reviewed')]],
       ['accepted for a filed item', [item(8, 'filed')]],
     ])('is refused in_use for a review %s, with nothing written', async (_name, accepting) => {
       script({}, accepting);
@@ -901,25 +924,16 @@ describe('deleteReview', () => {
       expect(mockExecuted).toEqual([]);
     });
 
-    test('refuses accepted_review for a filed or finalized item with no citation, writing nothing', async () => {
-      script({}, [item(8, 'filed')], { manage: true });
-      expect(await deleteReview(3, MD)).toEqual({ outcome: 'accepted_review' });
-      expect(mockWritesTo).toEqual([]);
-    });
-
-    test('refuses accepted_review for a finalized item with no citation', async () => {
-      script({}, [item(8, 'finalized')], { manage: true });
-      expect((await deleteReview(3, MD)).outcome).toBe('accepted_review');
-    });
-
-    test.each([
-      ['an album citation', { cited_album_id: 9 }],
-      ['a submission citation', { cited_submission_id: 4 }],
-    ])('deletes the accepted review of a filed item that carries %s, which keeps its state', async (_name, cite) => {
-      script({}, [item(8, 'filed', cite)], { manage: true });
-      expect((await deleteReview(3, MD)).outcome).toBe('deleted');
-      expect(writes()).toEqual(['update intake_items', 'delete reviews']);
-    });
+    // Epic decision 40: a citation (of a release or of a form review) does not exempt a filed record, so the read
+    // selects only `id` and `state`: the refusal is the same for a cited item and an uncited one.
+    test.each(['filed', 'finalized'])(
+      'refuses accepted_review for a %s item, cited or not, writing nothing',
+      async (state) => {
+        script({}, [item(8, state)], { manage: true });
+        expect(await deleteReview(3, MD)).toEqual({ outcome: 'accepted_review' });
+        expect(mockWritesTo).toEqual([]);
+      }
+    );
 
     test('deletes a printed review that is not accepted, with no update', async () => {
       script({}, [], { manage: true });
@@ -929,21 +943,19 @@ describe('deleteReview', () => {
     });
 
     test('a review accepted by two items, its own and one that cites its release: one update for both, then the delete', async () => {
-      script({}, [item(8, 'reviewed'), item(5, 'reviewed', { cited_album_id: 9 })], { manage: true });
+      script({}, [item(8, 'reviewed'), item(5, 'reviewed')], { manage: true });
       expect((await deleteReview(3, MD)).outcome).toBe('deleted');
       expect(writes()).toEqual(['update intake_items', 'delete reviews']);
     });
 
-    test('with one of the two filed and uncited, the delete is refused and neither item is written', async () => {
-      script({}, [item(8, 'reviewed'), item(5, 'filed')], { manage: true });
+    test.each([
+      ['its own', [item(8, 'filed'), item(5, 'reviewed')]],
+      ['the citing one', [item(8, 'reviewed'), item(5, 'filed')]],
+      ['both', [item(8, 'finalized'), item(5, 'filed')]],
+    ])('with %s of the two filed, the delete is refused and neither item is written', async (_name, accepting) => {
+      script({}, accepting, { manage: true });
       expect((await deleteReview(3, MD)).outcome).toBe('accepted_review');
       expect(mockWritesTo).toEqual([]);
-    });
-
-    test('with the citing item filed, the other unfiled, the delete goes ahead', async () => {
-      script({}, [item(8, 'reviewed'), item(5, 'filed', { cited_album_id: 9 })], { manage: true });
-      expect((await deleteReview(3, MD)).outcome).toBe('deleted');
-      expect(writes()).toEqual(['update intake_items', 'delete reviews']);
     });
 
     test("a music director may delete another's submitted review but not another's draft", async () => {

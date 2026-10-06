@@ -91,7 +91,7 @@ export const deleteReview: RequestHandler<{ id: string }> = async (req, res) => 
     return void conflict(res, 'in_use', 'This review is accepted for an item or is the latest print of a copy');
   }
   if (result.outcome === 'accepted_review') {
-    return void conflict(res, 'accepted_review', 'This is the accepted review of a filed item with no citation');
+    return void conflict(res, 'accepted_review', 'This is the accepted review of a filed item');
   }
   if (result.outcome !== 'deleted') throw new WxycError('You may not delete this review', 403);
   res.status(204).end();

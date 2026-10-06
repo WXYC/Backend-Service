@@ -212,18 +212,26 @@ describe('/reviews submit and delete (BS#2854)', () => {
       }
     );
 
-    test('a music director is refused accepted_review for a filed item with no citation, and may delete once it cites a release', async () => {
-      const filed = await item('filed-accepted', { state: 'filed', album_id: libraryId });
-      const review = await reviewFor({ album_id: libraryId });
-      await accept(filed.id, review);
-      const refused = await manager.delete(`/reviews/${review.id}`);
-      expect([refused.status, refused.body.reason]).toEqual([409, 'accepted_review']);
-      expect((await itemRow(filed.id)).accepted_review_id).toBe(review.id);
-      await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET cited_album_id = $1 WHERE id = $2`, [libraryId, filed.id]);
-      expect((await manager.delete(`/reviews/${review.id}`)).status).toBe(204);
-      const after = await itemRow(filed.id);
-      expect([after.state, after.accepted_review_id, after.accepted_by]).toEqual(['filed', null, null]);
-    });
+    test.each([
+      ['no citation', false],
+      ['a citation of a release', true],
+    ])(
+      'a music director is refused accepted_review for a filed item with %s, and nothing is written',
+      async (name, cites) => {
+        const filed = await item(`filed-accepted-${name}`, {
+          state: 'filed',
+          album_id: libraryId,
+          cited_album_id: cites ? libraryId : null,
+        });
+        const review = await reviewFor({ album_id: libraryId });
+        await accept(filed.id, review);
+        const refused = await manager.delete(`/reviews/${review.id}`);
+        expect([refused.status, refused.body.reason]).toEqual([409, 'accepted_review']);
+        const after = await itemRow(filed.id);
+        expect([after.state, after.accepted_review_id]).toEqual(['filed', review.id]);
+        expect(await reviewRow(review.id)).toBeDefined();
+      }
+    );
 
     test('a music director deletes a printed review that is not accepted', async () => {
       const review = await reviewFor({ album_id: libraryId });
@@ -231,7 +239,7 @@ describe('/reviews submit and delete (BS#2854)', () => {
       expect((await manager.delete(`/reviews/${review.id}`)).status).toBe(204);
     });
 
-    test('a review accepted by two items: both unfiled items return to holder or pile; with one filed and uncited nothing is written', async () => {
+    test('a review accepted by two items: both unfiled items return to holder or pile; with either filed, the citing one included, nothing is written', async () => {
       const own = await item('two-own', { state: 'reviewed', checked_out_by: global.primary_dj_id });
       const citing = await item('two-citing', { state: 'reviewed', cited_album_id: libraryId });
       const review = await reviewFor({ intake_item_id: own.id, album_id: libraryId });
@@ -246,15 +254,25 @@ describe('/reviews submit and delete (BS#2854)', () => {
         null,
       ]);
 
-      const own2 = await item('two-own-b', { state: 'reviewed' });
-      const filedUncited = await item('two-filed', { state: 'filed', album_id: libraryId });
-      const review2 = await reviewFor({ intake_item_id: own2.id, album_id: libraryId });
-      await accept(own2.id, review2);
-      await accept(filedUncited.id, review2);
-      expect((await manager.delete(`/reviews/${review2.id}`)).body.reason).toBe('accepted_review');
-      expect((await itemRow(own2.id)).accepted_review_id).toBe(review2.id);
-      expect((await itemRow(own2.id)).state).toBe('reviewed');
-      expect((await itemRow(filedUncited.id)).accepted_review_id).toBe(review2.id);
+      // Either of the two filed, the citing one included, refuses the delete and writes neither item.
+      for (const filedItem of ['own', 'citing']) {
+        const own2 = await item(`two-own-${filedItem}`, { state: filedItem === 'own' ? 'filed' : 'reviewed' });
+        const citing2 = await item(`two-citing-${filedItem}`, {
+          state: filedItem === 'citing' ? 'filed' : 'reviewed',
+          cited_album_id: libraryId,
+        });
+        const review2 = await reviewFor({ intake_item_id: own2.id, album_id: libraryId });
+        await accept(own2.id, review2);
+        await accept(citing2.id, review2);
+        const refused = await manager.delete(`/reviews/${review2.id}`);
+        expect([refused.status, refused.body.reason]).toEqual([409, 'accepted_review']);
+        expect(await reviewRow(review2.id)).toBeDefined();
+        const [own2After, citing2After] = [await itemRow(own2.id), await itemRow(citing2.id)];
+        expect([own2After.accepted_review_id, citing2After.accepted_review_id]).toEqual([review2.id, review2.id]);
+        expect([own2After.state, citing2After.state]).toEqual(
+          filedItem === 'own' ? ['filed', 'reviewed'] : ['reviewed', 'filed']
+        );
+      }
     });
   });
 

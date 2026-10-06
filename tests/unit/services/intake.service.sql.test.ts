@@ -28,7 +28,8 @@ jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
   return { ...actual, reviewGateCutoverDate: jest.fn(actual.reviewGateCutoverDate) };
 });
 
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, intake_items } from '@wxyc/database';
 import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
 import {
@@ -39,6 +40,7 @@ import {
   deleteIntakeItem,
   RELEASE_ACCEPTED_REVIEW,
   refusalOutcome,
+  reviewAuthorsOnItem,
 } from '../../../apps/backend/services/intake.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -451,5 +453,51 @@ describe('deleteIntakeItem (BS#2854)', () => {
     const { result, tx } = await run([[]]);
     expect(result).toEqual({ outcome: 'not_found' });
     expect(tx.delete).not.toHaveBeenCalled();
+  });
+});
+
+describe('reviewAuthorsOnItem (BS#2854; draft_authors in BS#2860 reuses it)', () => {
+  /** A select stand-in that renders the WHERE and ORDER BY it is given and resolves to `rows`. */
+  const run = async (rows: { author: string | null }[], draftsOnly?: boolean) => {
+    let where = { sql: '', params: [] as unknown[] };
+    let orderBy = '';
+    const dialect = new PgDialect();
+    const tx = {
+      select: () => ({
+        from: () => ({
+          where: (w: never) => {
+            where = dialect.sqlToQuery(w);
+            return {
+              orderBy: (column: never) => {
+                orderBy = dialect.sqlToQuery(sql`${column}`).sql;
+                return Promise.resolve(rows);
+              },
+            };
+          },
+        }),
+      }),
+    };
+    const authors = await reviewAuthorsOnItem(tx as never, 7, draftsOnly);
+    return { authors, where, orderBy };
+  };
+
+  it('by default names the author of every review on the item, oldest first, and skips a review with no author text', async () => {
+    const { authors, where, orderBy } = await run([
+      { author: 'Test Reviewer' },
+      { author: null },
+      { author: 'Test Visiting DJ' },
+    ]);
+    expect(authors).toEqual(['Test Reviewer', 'Test Visiting DJ']);
+    expect(where.params).toEqual([7]);
+    expect(where.sql).not.toContain('"status"');
+    expect(orderBy).toBe(`"${SCHEMA}"."reviews"."id"`);
+  });
+
+  it('with draftsOnly restricts the read to unsubmitted drafts and still names only authors with text', async () => {
+    const { authors, where } = await run([{ author: 'Test Reviewer' }, { author: null }], true);
+    expect(authors).toEqual(['Test Reviewer']);
+    expect(where.sql).toContain('"intake_item_id" = $1');
+    expect(where.sql).toContain('"status" = $2');
+    expect(where.params).toEqual([7, 'draft']);
   });
 });
