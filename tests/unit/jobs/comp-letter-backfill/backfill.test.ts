@@ -1,5 +1,6 @@
 /**
- * The pure half of the comp-letter backfill (BS#2834): the gate that decides whether the 52-row write may run.
+ * The pure halves of the comp-letter backfill (BS#2834): the gate that decides whether the 52-row write may run, and
+ * the advisory cross-check against the frozen tubafrenzy dump.
  *
  * The gate is the safety argument for reading a letter out of an artist name at all. A slot renamed since the cutover
  * leaves its genre short a letter (or with a duplicate), and that must abort the run rather than leave one section
@@ -7,7 +8,14 @@
  * a real Postgres in `tests/integration/comp-letter-backfill.spec.js`.
  */
 
-import { checkGate, type Candidate, type LetteredSlot } from '../../../../jobs/comp-letter-backfill/backfill';
+import {
+  checkGate,
+  crossCheck,
+  type Candidate,
+  type LegacyRelease,
+  type LetteredSlot,
+} from '../../../../jobs/comp-letter-backfill/backfill';
+import { legacyReleasesById } from '../../../../jobs/comp-letter-backfill/legacy';
 
 const ROCK = 11;
 const SOUNDTRACKS = 12;
@@ -118,4 +126,102 @@ describe('checkGate', () => {
     const rows = fullShelf().map((row, i) => (i === 0 ? { ...row, artist_name: ' various artists - ROCK - a ' } : row));
     expect(checkGate(rows, [])).toEqual({ failures: [], alreadyApplied: false });
   });
+});
+
+describe('crossCheck', () => {
+  const candidates = [slot('Rock', 'L', 1011), slot('Soundtracks', 'K', 2010)];
+  const filed = (call_letters: string | null, genre_id: number | null): LegacyRelease => ({ call_letters, genre_id });
+  const legacy = new Map<number, LegacyRelease>([
+    [500, filed('Z-L', ROCK)],
+    [501, filed('Z-M', ROCK)], // another Rock section in the dump
+    [502, filed('Z-L', SOUNDTRACKS)], // the right letter but the other genre
+    [503, filed(null, null)], // in the dump, filed under a NULL or missing code
+    [600, filed('Z-K', SOUNDTRACKS)],
+    [601, filed('RO', ROCK)], // filed under a named artist in tubafrenzy
+  ]);
+  const under = (artist_id: number, genre_id: number, legacy_release_id: number) => ({
+    artist_id,
+    genre_id,
+    legacy_release_id,
+  });
+
+  it('puts each release in exactly one bucket, and lists every disagreement without judging it', () => {
+    const releases = [
+      under(1011, ROCK, 500),
+      under(1011, ROCK, 501),
+      under(1011, ROCK, 502),
+      under(1011, ROCK, 503),
+      under(1011, ROCK, 1_000_007), // filed in Backend since the cutover
+      under(2010, SOUNDTRACKS, 600),
+      under(2010, SOUNDTRACKS, 601),
+      under(2010, SOUNDTRACKS, 999), // a tubafrenzy-era id with no row in the dump
+      under(4242, ROCK, 500), // not under a candidate slot: ignored
+    ];
+
+    const disagreement = (
+      artist_id: number,
+      genre_name: string,
+      letter: string,
+      id: number,
+      call: string | null,
+      genre: number | null
+    ) => ({
+      artist_id,
+      genre_name,
+      letter,
+      legacy_release_id: id,
+      legacy_call_letters: call,
+      legacy_genre_id: genre,
+    });
+    expect(crossCheck(candidates, releases, legacy)).toEqual({
+      agreed: 2,
+      disagreements: [
+        disagreement(1011, 'Rock', 'L', 501, 'Z-M', ROCK),
+        disagreement(1011, 'Rock', 'L', 502, 'Z-L', SOUNDTRACKS),
+        disagreement(1011, 'Rock', 'L', 503, null, null),
+        disagreement(2010, 'Soundtracks', 'K', 601, 'RO', ROCK),
+      ],
+      notInDump: 1,
+      backendMinted: 1,
+    });
+  });
+});
+
+describe('legacyReleasesById', () => {
+  // Plain arrays: `for await` accepts a sync iterable, which is all the mapping needs here.
+  const rows = (...items: (string | null)[][]) => items;
+  // LIBRARY_RELEASE: ID at 0, LIBRARY_CODE_ID at 8.
+  const release = (id: string, codeId: string | null) => [id, '1', null, 't', '1', '0', '0', null, codeId];
+
+  it("maps each LIBRARY_RELEASE id to its LIBRARY_CODE's trimmed CALL_LETTERS and GENRE_ID", async () => {
+    // LIBRARY_CODE: ID, GENRE_ID, CALL_LETTERS, ...
+    const codes = rows(['10', '11', 'Z-L', '0'], ['11', '12', 'Z-K ', '0'], ['12', '11', 'RO', '12']);
+    const releases = rows(
+      release('500', '10'),
+      release('600', '11'),
+      release('601', '12'),
+      release('602', null),
+      release('603', '99')
+    );
+
+    expect(await legacyReleasesById(codes, releases)).toEqual(
+      new Map([
+        [500, { call_letters: 'Z-L', genre_id: 11 }],
+        [600, { call_letters: 'Z-K', genre_id: 12 }],
+        [601, { call_letters: 'RO', genre_id: 11 }],
+        [602, { call_letters: null, genre_id: null }], // NULL code: in the dump, code unknown
+        [603, { call_letters: null, genre_id: null }], // dangling code: same
+      ])
+    );
+  });
+
+  it.each([
+    ['LIBRARY_CODE', rows(), rows(release('500', '10'))],
+    ['LIBRARY_RELEASE', rows(['10', '11', 'Z-L']), rows()],
+  ])(
+    'refuses a dump with no %s rows rather than letting every release read as "not in dump"',
+    async (table, codes, releases) => {
+      await expect(legacyReleasesById(codes, releases)).rejects.toThrow(`the dump has no ${table} rows`);
+    }
+  );
 });

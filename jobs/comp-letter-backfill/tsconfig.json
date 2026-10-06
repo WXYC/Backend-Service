@@ -1,7 +1,7 @@
 {
   "extends": ["../../tsconfig.base.json"],
   "references": [{ "path": "../../shared/database" }],
-  "include": ["."],
+  "include": [".", "../library-label-backfill/dump.ts"],
   "compilerOptions": {
     "module": "esnext",
     "moduleResolution": "bundler",
