@@ -2,7 +2,6 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import type { SpanJSON, TransactionEvent } from '@sentry/core';
 import { filterSentryTransactionEvent, isExpressInstrumentationSpan, isLivenessRequestPath } from '@wxyc/observability';
-import { HANDLER, MIDDLEWARE, ROUTER } from '@sentry/conventions/op';
 
 function makeSpan(overrides: Partial<SpanJSON> = {}): SpanJSON {
   return {
@@ -60,11 +59,14 @@ describe('isLivenessRequestPath', () => {
 });
 
 // Sentry 11 (BS#2948) emits Express layer spans with origin
-// `auto.http.express` and the generic `@sentry/conventions` ops. The ops are
-// imported from the SDK's own constants, not restated, so the next rename
-// fails here instead of silently keeping every Express span — which is how the
-// v10 -> v11 rename got past the literal-string version of these tests.
+// `auto.http.express` and the generic `@sentry/conventions` ops below. They
+// are restated rather than imported: the root `@sentry/conventions` is
+// whatever copy something else hoisted (0.16 under Sentry 10, where these
+// constants don't exist), not necessarily the one `@sentry/server-utils` uses.
 const EXPRESS_ORIGIN = 'auto.http.express';
+const MIDDLEWARE = 'middleware';
+const ROUTER = 'router';
+const HANDLER = 'handler';
 const V11_EXPRESS_OPS = [MIDDLEWARE, ROUTER, HANDLER];
 
 describe('isExpressInstrumentationSpan', () => {
