@@ -5,7 +5,8 @@
  *
  * Dry run by default: prints the 52 candidate slots, the Rock/Soundtracks V/A slots left unlettered and the gate
  * verdict, and writes nothing. `--apply` writes only if the gate passes.
- * Exit codes: 0 dry run passed / applied / already applied, 1 gate failed or the run errored.
+ * Exit codes: 0 dry run passed / applied / already applied, 1 gate failed or the run errored. An error logged after
+ * `COMMITTED` (from ANALYZE or teardown) still exits 1, but the letters have landed; see the README.
  *
  * Environment: the standard DB_* variables, plus WXYC_SCHEMA_NAME (default `wxyc_schema`). Production is reached
  * through an SSH tunnel to RDS; see the job's README.
@@ -22,13 +23,15 @@ const main = async () => {
     const result = await runBackfill(sql, { schema, apply });
     if (result.status === 'aborted') process.exitCode = 1;
   } finally {
-    await sql.end();
-    await closeDatabaseConnection();
+    // Close both pools even if one refuses, and log a teardown failure without letting it replace the run's own error.
+    for (const closed of await Promise.allSettled([sql.end(), closeDatabaseConnection()])) {
+      if (closed.status === 'rejected') console.error('[comp-letter-backfill] pool teardown failed:', closed.reason);
+    }
   }
 };
 
 main().catch((err) => {
   console.error('[comp-letter-backfill] Fatal error:', err);
-  // exitCode (not exit) so the finally body runs and the pools close.
+  // exitCode, not process.exit(), so buffered log output is flushed before the process ends.
   process.exitCode = 1;
 });
