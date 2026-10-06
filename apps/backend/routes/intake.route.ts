@@ -25,4 +25,9 @@ intake_route.post(
   intakeController.cancelIntakeRequest
 );
 intake_route.post('/:id/accept', requirePermissions({ reviews: ['write'] }), intakeController.acceptIntake);
+intake_route.post(
+  '/:id/accept-review',
+  requirePermissions({ reviews: ['manage'] }),
+  intakeController.acceptReviewIntake
+);
 intake_route.post('/:id/pass', requirePermissions({ reviews: ['write'] }), intakeController.passIntake);
