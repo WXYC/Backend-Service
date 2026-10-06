@@ -28,6 +28,8 @@ jobs:
   validate-rebuild:
     if: inputs.rebuild
     runs-on: ubuntu-latest
+    # Only compares two strings; it needs none of the workflow-level contents:write.
+    permissions: {}
     timeout-minutes: 5
     steps:
       - name: Refuse a rebuild that cannot work

@@ -30,9 +30,14 @@ jobs:
         with:
           fetch-tags: true
 
+      # Inputs reach these two scripts through `env:`, never as `${{ }}`
+      # inside `run:`, which would paste the dispatcher's text into the shell.
       - name: Validate Build Target
         if: inputs.target != ''
+        env:
+          TARGETS: ${{ inputs.target }}
         run: |
+          CHECKED=0
           while IFS= read -r TARGET_INPUT; do
             [ -z "$TARGET_INPUT" ] && continue
             if [ ! -d "apps/$TARGET_INPUT" ] && [ ! -d "jobs/$TARGET_INPUT" ]; then
@@ -40,18 +45,25 @@ jobs:
               exit 1
             fi
             echo "target input '$TARGET_INPUT' is valid."
-          done <<< "${{ inputs.target }}"
+            CHECKED=$((CHECKED + 1))
+          done <<< "$TARGETS"
+          if [ "$CHECKED" -eq 0 ]; then
+            echo "Error: The 'target' input names no target (it is only blank lines)." >&2
+            exit 1
+          fi
 
       - name: Validate Version Input Format
         if: inputs.version != ''
+        env:
+          TARGETS: ${{ inputs.target }}
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          VERSION_INPUT="${{ inputs.version }}"
-
           if [[ ! "$VERSION_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ && "$VERSION_INPUT" != "latest" ]]; then
             echo "Error: The 'version' input must follow semantic versioning format (e.g., v1.0.0, v1.0.0-beta.1). Received: $VERSION_INPUT" >&2
             exit 1
           fi
 
+          CHECKED=0
           while IFS= read -r TARGET_INPUT; do
             [ -z "$TARGET_INPUT" ] && continue
             TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
@@ -61,7 +73,12 @@ jobs:
                 exit 1
               fi
             fi
-          done <<< "${{ inputs.target }}"
+            CHECKED=$((CHECKED + 1))
+          done <<< "$TARGETS"
+          if [ -n "$TARGETS" ] && [ "$CHECKED" -eq 0 ]; then
+            echo "Error: The 'target' input names no target (it is only blank lines)." >&2
+            exit 1
+          fi
 
           echo "Version input '$VERSION_INPUT' is valid."
 
