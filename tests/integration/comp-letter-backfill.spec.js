@@ -7,7 +7,7 @@
  * it takes the postgres.js handle this spec passes it, so no drizzle mock is involved.
  *
  * Isolation: the gate counts EVERY Rock/Soundtracks V/A slot in the schema, so a stray row seeded by another spec
- * would change the count it checks. Each test therefore runs in a throwaway schema whose four tables are
+ * would change the count it checks. Each test therefore runs in a throwaway schema whose three tables are
  * `LIKE ... INCLUDING ALL` copies of the real ones, so the BS#2833 shape CHECK, slot CHECK and per-genre unique index
  * are present as the same backstop they are in production.
  */
@@ -72,7 +72,7 @@ describe('comp-letter backfill (real PG)', () => {
     lines.length = 0;
     await sql`DROP SCHEMA IF EXISTS ${sql(PROBE)} CASCADE`;
     await sql`CREATE SCHEMA ${sql(PROBE)}`;
-    for (const table of ['genres', 'artists', 'genre_artist_crossreference', 'library']) {
+    for (const table of ['genres', 'artists', 'genre_artist_crossreference']) {
       await sql`CREATE TABLE ${sql(PROBE)}.${sql(table)} (LIKE ${sql(SOURCE)}.${sql(table)} INCLUDING ALL)`;
     }
     await sql`INSERT INTO ${sql(PROBE)}.genres (id, genre_name) VALUES (${ROCK}, 'Rock'), (${SOUNDTRACKS}, 'Soundtracks'), (${OTHER_GENRE}, 'Jazz')`;
@@ -143,5 +143,37 @@ describe('comp-letter backfill (real PG)', () => {
 
     expect(rerun.status).toBe('already-applied');
     expect(await letters()).toEqual(after);
+  });
+
+  test.each([
+    ['a dry run', false],
+    ['--apply', true],
+  ])('a letter on a slot outside the 52 aborts %s, so both modes reach the same verdict', async (_label, apply) => {
+    await seedShelf();
+    await sql`
+      UPDATE ${sql(PROBE)}.genre_artist_crossreference gac SET code_comp_letter = 'V'
+        FROM ${sql(PROBE)}.artists a
+       WHERE a.id = gac.artist_id AND a.artist_name = 'Various Artists' AND gac.genre_id = ${SOUNDTRACKS}
+    `;
+
+    const result = await runBackfill(sql, { schema: PROBE, apply, log });
+
+    expect(result.status).toBe('aborted');
+    expect(result.failures).toEqual([expect.stringMatching(/carries code_comp_letter 'V' but is not a candidate/)]);
+    expect((await letters()).map((r) => r.letter)).toEqual(['V']);
+  });
+
+  test('a re-run is not "already applied" once a slot outside the 52 has been lettered', async () => {
+    await seedShelf();
+    await runBackfill(sql, { schema: PROBE, apply: true, log });
+    await sql`
+      UPDATE ${sql(PROBE)}.genre_artist_crossreference gac SET code_comp_letter = 'B'
+        FROM ${sql(PROBE)}.artists a
+       WHERE a.id = gac.artist_id AND a.artist_name = 'Various Artists - Jazz - B'
+    `;
+
+    const rerun = await runBackfill(sql, { schema: PROBE, apply: true, log });
+
+    expect(rerun.status).toBe('aborted');
   });
 });

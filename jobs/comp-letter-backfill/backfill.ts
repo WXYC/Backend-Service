@@ -5,15 +5,20 @@
  * `Various Artists - Rock - <L>` sections and 26 `Soundtracks - <L>` sections. Until now the letter has existed only
  * as the trailing ` - <L>` of the slot's artist name, so that is where it is read from — once, here, behind a gate.
  *
- * The gate is what makes reading a name safe. Each genre must come out as exactly A-Z with no gaps and no repeats, so
- * a section renamed since the cutover aborts the whole run instead of going quietly unlettered. Nothing is written
- * unless every check passes, and a set value is never overwritten.
+ * The gate is what makes reading a name safe. Each genre must come out as exactly A-Z with no gaps and no repeats, and
+ * each name must be its genre's own form, so a section renamed or refiled since the cutover aborts the whole run
+ * instead of going quietly unlettered. Nothing is written unless every check passes, and a set value is never
+ * overwritten. `--apply` reads, gates and writes inside one transaction holding row locks on the slots and their
+ * artists, so what was checked is what gets written.
  *
  * Takes the postgres.js handle from its caller and imports nothing at runtime, so the integration spec can run this
  * exact module (`dist/backfill.cjs`) against a real Postgres with its own pool.
  */
 
-import type { Sql } from 'postgres';
+import type { Sql, TransactionSql } from 'postgres';
+
+/** A pool or the open transaction `--apply` runs in. */
+type Db = Sql | TransactionSql;
 
 /** One candidate slot, with the letter read from its name and whatever letter it already carries. */
 export interface Candidate {
@@ -23,6 +28,13 @@ export interface Candidate {
   artist_name: string;
   letter: string;
   code_comp_letter: string | null;
+}
+
+/** A `genre_artist_crossreference` row that already carries a letter, candidate or not. */
+export interface LetteredSlot {
+  artist_id: number;
+  genre_id: number;
+  code_comp_letter: string;
 }
 
 export type Status = 'dry-run' | 'applied' | 'already-applied' | 'aborted';
@@ -43,11 +55,17 @@ const GENRES = ['Rock', 'Soundtracks'] as const;
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const EXPECTED_TOTAL = GENRES.length * ALPHABET.length;
 
+/** Each genre's section name, minus the letter. A candidate's name must be exactly this plus its letter. */
+const NAME_PREFIX: Record<(typeof GENRES)[number], string> = {
+  Rock: 'Various Artists - Rock - ',
+  Soundtracks: 'Soundtracks - ',
+};
+
 /**
  * The candidate set exactly as BS#2834 specifies it, plus the slot's current letter. Every condition is structural
  * except the trailing ` - <letter>`, which is the only place the letter exists today.
  */
-export const findCandidates = (sql: Sql, schema: string) => sql<Candidate[]>`
+export const findCandidates = (sql: Db, schema: string, lock = false) => sql<Candidate[]>`
   SELECT gac.artist_id, gac.genre_id, g.genre_name, a.artist_name, gac.code_comp_letter,
          upper(substring(btrim(a.artist_name) from ' - ([A-Za-z])$')) AS letter
     FROM ${sql(schema)}.genre_artist_crossreference gac
@@ -58,10 +76,18 @@ export const findCandidates = (sql: Sql, schema: string) => sql<Candidate[]>`
      AND g.genre_name IN ${sql(GENRES)}
      AND btrim(a.artist_name) ~ ' - [A-Za-z]$'
    ORDER BY g.genre_name, letter, gac.artist_id
+   ${lock ? sql`FOR UPDATE OF gac, a` : sql``}
+`;
+
+/** Every row in the table that already carries a letter. Small: at most 52 once the backfill has run. */
+const findLettered = (sql: Db, schema: string) => sql<LetteredSlot[]>`
+  SELECT artist_id, genre_id, code_comp_letter
+    FROM ${sql(schema)}.genre_artist_crossreference
+   WHERE code_comp_letter IS NOT NULL
 `;
 
 /** Rock/Soundtracks `V/A` slots the candidate predicate leaves out. Expected: the catch-all's Soundtracks filing. */
-const findUncovered = (sql: Sql, schema: string) => sql<
+const findUncovered = (sql: Db, schema: string) => sql<
   { artist_id: number; genre_name: string; artist_name: string }[]
 >`
   SELECT gac.artist_id, g.genre_name, a.artist_name
@@ -75,16 +101,22 @@ const findUncovered = (sql: Sql, schema: string) => sql<
 `;
 
 /**
- * Decide whether the write may run. `alreadyApplied` is a completed earlier run — every slot carries exactly the
- * letter its name gives — which makes a re-run a no-op rather than a failure. Any other set value is a failure.
+ * Decide whether the write may run, from the candidates and every lettered row in the table. `alreadyApplied` is a
+ * completed earlier run — every candidate carries exactly the letter its name gives and nothing else is lettered —
+ * which makes a re-run a no-op rather than a failure. Any other set value is a failure, so a dry run and `--apply` see
+ * the same state and reach the same verdict.
  */
-export function checkGate(candidates: Candidate[]): { failures: string[]; alreadyApplied: boolean } {
+export function checkGate(
+  candidates: Candidate[],
+  lettered: LetteredSlot[]
+): { failures: string[]; alreadyApplied: boolean } {
   const failures: string[] = [];
   if (candidates.length !== EXPECTED_TOTAL) {
     failures.push(`expected ${EXPECTED_TOTAL} candidate slots, found ${candidates.length}`);
   }
   for (const genre of GENRES) {
-    const letters = candidates.filter((c) => c.genre_name === genre).map((c) => c.letter);
+    const inGenre = candidates.filter((c) => c.genre_name === genre);
+    const letters = inGenre.map((c) => c.letter);
     if (letters.length !== ALPHABET.length) {
       failures.push(`${genre}: expected ${ALPHABET.length} slots, found ${letters.length}`);
     }
@@ -92,6 +124,19 @@ export function checkGate(candidates: Candidate[]): { failures: string[]; alread
     const duplicates = [...new Set(letters.filter((l, i) => letters.indexOf(l) !== i))];
     if (missing.length > 0) failures.push(`${genre}: missing ${missing.join(', ')}`);
     if (duplicates.length > 0) failures.push(`${genre}: duplicate ${duplicates.join(', ')}`);
+    for (const c of inGenre) {
+      const expected = `${NAME_PREFIX[genre]}${c.letter}`;
+      if (c.artist_name.trim().toLowerCase() !== expected.toLowerCase()) {
+        failures.push(`${genre} ${c.letter} (artist ${c.artist_id}): name '${c.artist_name}' is not '${expected}'`);
+      }
+    }
+  }
+
+  const candidateKeys = new Set(candidates.map((c) => `${c.artist_id}:${c.genre_id}`));
+  for (const l of lettered.filter((l) => !candidateKeys.has(`${l.artist_id}:${l.genre_id}`))) {
+    failures.push(
+      `artist ${l.artist_id} in genre ${l.genre_id} carries code_comp_letter '${l.code_comp_letter}' but is not a candidate`
+    );
   }
 
   const alreadyApplied = failures.length === 0 && candidates.every((c) => c.code_comp_letter === c.letter);
@@ -106,40 +151,39 @@ export function checkGate(candidates: Candidate[]): { failures: string[]; alread
 }
 
 /**
- * Write the 52 letters in one transaction, one bound UPDATE per slot, each guarded `code_comp_letter IS NULL` and
- * required to touch exactly one row. Before commit, the table must hold exactly 52 letters in total, so a run can
- * never leave any other row lettered.
+ * Write the 52 letters inside the caller's transaction, one bound UPDATE per slot, each guarded
+ * `code_comp_letter IS NULL` and required to touch exactly one row. Before commit, the table must hold exactly 52
+ * letters in total, so a run can never leave any other row lettered.
  */
-async function applyLetters(sql: Sql, schema: string, candidates: Candidate[]): Promise<void> {
-  await sql.begin(async (tx) => {
-    for (const c of candidates) {
-      const updated = await tx`
-        UPDATE ${tx(schema)}.genre_artist_crossreference
-           SET code_comp_letter = ${c.letter}
-         WHERE artist_id = ${c.artist_id} AND genre_id = ${c.genre_id} AND code_comp_letter IS NULL
-      `;
-      if (updated.count !== 1) {
-        throw new Error(
-          `${c.genre_name} ${c.letter} (artist ${c.artist_id}): expected 1 row updated, got ${updated.count}`
-        );
-      }
-    }
-    const [{ lettered }] = await tx<{ lettered: number }[]>`
-      SELECT count(*)::int AS lettered FROM ${tx(schema)}.genre_artist_crossreference WHERE code_comp_letter IS NOT NULL
+async function applyLetters(tx: Db, schema: string, candidates: Candidate[]): Promise<void> {
+  for (const c of candidates) {
+    const updated = await tx`
+      UPDATE ${tx(schema)}.genre_artist_crossreference
+         SET code_comp_letter = ${c.letter}
+       WHERE artist_id = ${c.artist_id} AND genre_id = ${c.genre_id} AND code_comp_letter IS NULL
     `;
-    if (lettered !== EXPECTED_TOTAL) {
-      throw new Error(`expected ${EXPECTED_TOTAL} lettered slots after the write, found ${lettered}; rolled back`);
+    if (updated.count !== 1) {
+      throw new Error(
+        `${c.genre_name} ${c.letter} (artist ${c.artist_id}): expected 1 row updated, got ${updated.count}`
+      );
     }
-  });
-  await sql`ANALYZE ${sql(schema)}.genre_artist_crossreference`;
+  }
+  const [{ lettered }] = await tx<{ lettered: number }[]>`
+    SELECT count(*)::int AS lettered FROM ${tx(schema)}.genre_artist_crossreference WHERE code_comp_letter IS NOT NULL
+  `;
+  if (lettered !== EXPECTED_TOTAL) {
+    throw new Error(`expected ${EXPECTED_TOTAL} lettered slots after the write, found ${lettered}; rolled back`);
+  }
 }
 
-/** Report, gate, and (with `apply`) write. Prints the same report in both modes. */
-export async function runBackfill(sql: Sql, options: BackfillOptions): Promise<BackfillResult> {
+/**
+ * Read, report and gate; with `apply`, also write. Prints the same report in both modes. Under `apply` all of it runs
+ * in one transaction that locks the candidate slots and their artists, so a rename or refile racing the run cannot
+ * slip between the gate and the write. A gate failure there writes nothing, and the transaction simply commits empty.
+ */
+async function evaluate(sql: Db, options: BackfillOptions, log: (line: string) => void): Promise<BackfillResult> {
   const { schema, apply } = options;
-  const log = options.log ?? ((line: string) => console.log(line));
-
-  const candidates = [...(await findCandidates(sql, schema))];
+  const candidates = [...(await findCandidates(sql, schema, apply))];
   log(`[comp-letter-backfill] ${apply ? 'APPLY' : 'DRY RUN'}: ${candidates.length} candidate slots`);
   for (const c of candidates) {
     log(
@@ -152,7 +196,7 @@ export async function runBackfill(sql: Sql, options: BackfillOptions): Promise<B
   for (const u of uncovered)
     log(`  ${u.genre_name.padEnd(11)}    ${String(u.artist_id).padStart(6)}  ${u.artist_name}`);
 
-  const { failures, alreadyApplied } = checkGate(candidates);
+  const { failures, alreadyApplied } = checkGate(candidates, [...(await findLettered(sql, schema))]);
   const result = (status: Status): BackfillResult => ({ status, failures, candidates });
   if (failures.length > 0) {
     log('[comp-letter-backfill] GATE FAILED, nothing written:');
@@ -168,6 +212,19 @@ export async function runBackfill(sql: Sql, options: BackfillOptions): Promise<B
     return result('dry-run');
   }
   await applyLetters(sql, schema, candidates);
-  log(`[comp-letter-backfill] wrote ${EXPECTED_TOTAL} letters and ran ANALYZE`);
   return result('applied');
+}
+
+/** Run the backfill. `ANALYZE` follows the commit, so an error from it comes after the letters have landed. */
+export async function runBackfill(sql: Sql, options: BackfillOptions): Promise<BackfillResult> {
+  const log = options.log ?? ((line: string) => console.log(line));
+  if (!options.apply) return evaluate(sql, options, log);
+
+  const result = await sql.begin((tx) => evaluate(tx, options, log));
+  if (result.status === 'applied') {
+    log(`[comp-letter-backfill] COMMITTED ${EXPECTED_TOTAL} letters; running ANALYZE`);
+    await sql`ANALYZE ${sql(options.schema)}.genre_artist_crossreference`;
+    log('[comp-letter-backfill] ANALYZE done');
+  }
+  return result;
 }
