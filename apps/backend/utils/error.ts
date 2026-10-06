@@ -18,7 +18,26 @@ import type { ApiErrorResponse } from '@wxyc/shared';
  */
 export type WxycErrorOptions = Pick<ApiErrorResponse, 'code' | 'details'>;
 
+/**
+ * Cross-copy identity for `WxycError`. tsup bundles this module into both
+ * `dist/app.js` and `dist/instrument.js` (`splitting: false`), so the Sentry
+ * filter running from the preload holds a different class than the one app code
+ * throws, and `instanceof` is false across them. A `Symbol.for` key is shared
+ * through the global registry, so the brand survives the duplication (BS#2949).
+ */
+const WXYC_ERROR_BRAND = Symbol.for('wxyc.WxycError');
+
+export function isWxycError(error: unknown): error is WxycError {
+  return (error as { [WXYC_ERROR_BRAND]?: true } | null | undefined)?.[WXYC_ERROR_BRAND] === true;
+}
+
 export default class WxycError extends Error {
+  // A prototype getter, not an instance field, so it stays off the error's own
+  // enumerable keys and out of `toEqual` comparisons.
+  get [WXYC_ERROR_BRAND](): true {
+    return true;
+  }
+
   statusCode: number;
   readonly code?: ApiErrorResponse['code'];
   readonly details?: ApiErrorResponse['details'];

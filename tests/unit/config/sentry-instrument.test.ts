@@ -13,6 +13,18 @@ describe('Sentry instrumentation loading', () => {
     }
   );
 
+  // v11 captures Express errors (and consults `shouldHandleError`) through
+  // diagnostics_channel code injected at module load. Without this hook ahead
+  // of instrument.js, Sentry logs "No diagnostics-channel injection detected"
+  // and no Express error is captured at all (BS#2949).
+  it.each([
+    ['backend', '../../../apps/backend'],
+    ['auth', '../../../apps/auth'],
+  ])('%s start script registers the v11 injection hook before instrument.js', (_app, relPath) => {
+    const pkg = JSON.parse(readFileSync(resolve(__dirname, relPath, 'package.json'), 'utf-8'));
+    expect(pkg.scripts?.start).toMatch(/--import\s+@sentry\/node\/import\s+--import\s+\.\/dist\/instrument\.js/);
+  });
+
   it.each([
     ['backend', '../../../apps/backend/app.ts'],
     ['auth', '../../../apps/auth/app.ts'],

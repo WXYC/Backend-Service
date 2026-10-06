@@ -118,3 +118,20 @@ describe('shouldCaptureExpressError', () => {
     expect(shouldCaptureExpressError(undefined as unknown as Error)).toBe(true);
   });
 });
+
+// instrument.ts bundles this filter and `utils/error.ts` into `dist/instrument.js`
+// (tsup `splitting: false`), so the filter holds a different `WxycError` class
+// than app.js's. An `instanceof` check would be false for every error app code
+// throws; the Symbol.for brand must be what identifies it (BS#2949).
+describe('shouldCaptureExpressError across duplicated module copies', () => {
+  it('recognizes a WxycError from a different module copy', () => {
+    let OtherWxycError!: typeof WxycError;
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      OtherWxycError = require('../../../apps/backend/utils/error').default;
+    });
+    expect(OtherWxycError).not.toBe(WxycError);
+    expect(shouldCaptureExpressError(new OtherWxycError('Album not found', 404))).toBe(false);
+    expect(shouldCaptureExpressError(new OtherWxycError('database error', 500))).toBe(true);
+  });
+});
