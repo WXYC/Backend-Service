@@ -639,7 +639,6 @@ components:
             accept:
               {
                 type: boolean,
-                default: true,
                 description: 'On-behalf (`reviews: manage`), `intake_item_id` subjects only (a 400 with `album_id`). True or omitted creates the review already `submitted` (revision 1 written) and accepted for the item in one transaction; a typed review then needs `review` text. False leaves a draft.',
               }
       description: >
