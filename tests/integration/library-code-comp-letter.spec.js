@@ -13,7 +13,7 @@
  */
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
-const { getTestDb } = require('../utils/db');
+const { getTestDb, closeTestDb } = require('../utils/db');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const GENRE = 12; // 'Soundtracks'
@@ -72,6 +72,7 @@ describe('code_comp_letter on slot-serving reads (BS#2835)', () => {
 
   afterAll(async () => {
     await cleanup();
+    await closeTestDb();
   });
 
   test('GET /library/query carries the letter for a lettered slot and null for a named artist', async () => {

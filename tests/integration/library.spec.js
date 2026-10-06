@@ -2143,6 +2143,7 @@ describe('Library Artists', () => {
           artist_name: `BS2475 Assigned ${uniqueSuffix}`,
           code_letters: uniqueSuffix,
           code_number: 42,
+          code_comp_letter: null,
           genre_id: 11,
         },
       ]);
