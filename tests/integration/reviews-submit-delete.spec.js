@@ -12,6 +12,8 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   seedIntakeItem,
+  seedFormSubmission,
+  removeSeededFormSubmissions,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -52,6 +54,7 @@ describe('/reviews submit and delete (BS#2854)', () => {
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author LIKE $1`, [`${PREFIX}%`]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
+    await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
   };
 
@@ -213,15 +216,18 @@ describe('/reviews submit and delete (BS#2854)', () => {
     );
 
     test.each([
-      ['no citation', false],
-      ['a citation of a release', true],
+      ['no citation', false, false],
+      ['a citation of a release', true, false],
+      ['a citation of a form review', false, true],
     ])(
       'a music director is refused accepted_review for a filed item with %s, and nothing is written',
-      async (name, cites) => {
+      async (name, citesRelease, citesForm) => {
+        const submission = citesForm ? await seedFormSubmission({ artist_name: PREFIX }) : null;
         const filed = await item(`filed-accepted-${name}`, {
           state: 'filed',
           album_id: libraryId,
-          cited_album_id: cites ? libraryId : null,
+          cited_album_id: citesRelease ? libraryId : null,
+          cited_submission_id: submission ? submission.id : null,
         });
         const review = await reviewFor({ album_id: libraryId });
         await accept(filed.id, review);
