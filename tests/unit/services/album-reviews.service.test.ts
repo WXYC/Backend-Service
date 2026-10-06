@@ -30,15 +30,17 @@ import {
 /*
  * No compile-time SSOT pin lives here, on purpose.
  *
- * `AlbumReviewDTO` IS the generated `AlbumReview` (the service aliases the
- * `@wxyc/shared/dtos` export rather than mirroring it), so there is no
- * equality left to assert — identity is not drift-prone. The predecessor of
- * this file did assert it, against a hand-transcribed `ApiYamlAlbumReview`
- * literal, and that assertion was doubly inert: a transcription cannot detect
- * drift in the thing it transcribes, AND a type-level assertion in a test file
- * is checked by nothing here — `npm run typecheck` covers `apps/**` and
- * `shared/**` but not `tests/`, and ts-jest is transpile-only. Verified by
- * mutation: breaking the alias left this suite green.
+ * `AlbumReviewDTO` is a hand-written intersection: the generated `AlbumReview`
+ * from `@wxyc/shared/dtos` widened with `{ reviewer: string | null }`, because
+ * the pinned `@wxyc/shared` does not carry `reviewer` yet (WXYC/wxyc-shared#578).
+ * The generated half cannot drift by construction, but the widening is
+ * maintained by hand and must be checked against `api.yaml` (and dropped) when
+ * `@wxyc/shared` is bumped. A type-level assertion here would be checked by
+ * nothing: `npm run typecheck` covers `apps/**` and `shared/**` but not
+ * `tests/`, and ts-jest is transpile-only. The predecessor of this file
+ * asserted equality against a hand-transcribed literal and that assertion was
+ * inert for the same reason. The runtime wire key set is pinned below by
+ * `WIRE_KEYS`.
  *
  * The envelope shape is pinned where it can fail, in
  * `controllers/album-reviews.controller.ts`, by typing the response body as
@@ -176,15 +178,29 @@ describe('getAlbumReviewsPage', () => {
     const result = await getAlbumReviewsPage({}, 50, 0);
 
     expect(result).toEqual([toAlbumReviewDTO(timestampedRow)]);
-    // The mocked table objects map each column to its name, so the
-    // projection's values are column-name strings we can inspect.
+    // The mocked table objects map each column to its table-qualified name
+    // ('album_review_submissions.<col>'), so the projection's values are
+    // qualified strings. Compare like with like: qualify the forbidden names
+    // the same way, or the check can never fail.
     const projection = mockDb._chain.select.mock.calls[0][0] as Record<string, string>;
     const selectedColumns = Object.values(projection);
     for (const internal of INTERNAL_COLUMNS) {
-      expect(selectedColumns).not.toContain(internal);
+      const qualified = album_review_submissions[internal as keyof typeof album_review_submissions];
+      expect(qualified).toEqual(expect.stringContaining(internal));
+      expect(selectedColumns).not.toContain(qualified);
     }
+    // `reviewer` reads reviewer_raw and nothing else.
+    expect(projection.reviewer).toBe(album_review_submissions.reviewer_raw);
     // And it selects exactly the wire fields, keyed by their wire names.
     expect(Object.keys(projection).sort()).toEqual([...WIRE_KEYS].sort());
+  });
+
+  it('returns `reviewer: null` (key present) for a row with no reviewer name', async () => {
+    mockDb._chain.offset.mockReturnValueOnce(Promise.resolve([nulledRow]));
+
+    const [dto] = await getAlbumReviewsPage({}, 50, 0);
+
+    expect(dto).toHaveProperty('reviewer', null);
   });
 
   it('applies the artist filter as norm_artist = normalizeArtistName(param)', async () => {
