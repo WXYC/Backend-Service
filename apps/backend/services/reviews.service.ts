@@ -12,6 +12,7 @@ import {
   type Review,
 } from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
+import { outerRef } from '../utils/sql-fragments.js';
 import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from './intake.service.js';
 
 /**
@@ -57,7 +58,7 @@ export const snapshotAuthor = (name: string | null | undefined) =>
 
 /**
  * SQL for "review `reviewId` is the newest print of a copy": of an intake item, or, with no item, of a library
- * release. `reviewId` must be a nested SQL (`sql`${reviews.id}``), never a bare column, because drizzle renders a
+ * release. `reviewId` must be an `outerRef(...)`, never a bare column, because drizzle renders a
  * bare column unqualified in a single-table select and it would bind to the inner `p`. `scope` narrows which
  * prints count (`on_cover` asks only about the prints of one release's copies). Shared by `in_use` here and by
  * `deleteReview`'s print half, so the two cannot disagree.
@@ -71,7 +72,7 @@ export const latestPrintOfCopy = (
   return sql`EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId}${scope ? sql` AND ${scope(p)}` : sql``} AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id})))`;
 };
 
-const reviewRef = sql`${reviews.id}`;
+const reviewRef = outerRef(reviews.id);
 const acceptedBy = (scope: SQL) =>
   sql`EXISTS (SELECT 1 FROM ${intake_items} AS ai WHERE ai.accepted_review_id = ${reviewRef} AND ${scope})`;
 const inUse = sql<boolean>`(${acceptedBy(sql`true`)} OR ${latestPrintOfCopy(reviewRef)})`;
