@@ -35,6 +35,7 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  seedAcceptance,
   seedReview,
   seedReviewRevision,
   seedReviewPrint,
@@ -186,7 +187,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
       revision_id: revisionId,
     });
     await seedFccNote({ album_id: album.id, intake_item_id: itemId, track: 'la paradoja', note: 'a note' });
-    await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1 WHERE id = $2`, [reviewId, itemId]);
+    await seedAcceptance({ intake_item_id: itemId, review_id: reviewId });
     const batchId = await deleteAlbum(album.id);
     expect(await countWhere('review_revisions', 'review_id', reviewId)).toBe(0);
 
@@ -215,7 +216,7 @@ describe('POST /library/deleted/:batchId/restore with intake items and reviews (
     // Stamped with the item but not the release, so the snapshot (which captures
     // reviews through `album_id`) never holds it.
     const { id: reviewId } = await seedReview({ intake_item_id: itemId, review: 'Back, Baby' });
-    await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1 WHERE id = $2`, [reviewId, itemId]);
+    await seedAcceptance({ intake_item_id: itemId, review_id: reviewId });
     const batchId = await deleteAlbum(album.id);
 
     const res = await auth.post(`/library/deleted/${batchId}/restore`).send({}).expect(200);

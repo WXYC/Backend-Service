@@ -12,6 +12,8 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   seedIntakeItem,
+  removeSeededIntakeItems,
+  seedAcceptance,
   seedFormSubmission,
   removeSeededFormSubmissions,
   seedLibraryRelease,
@@ -19,6 +21,7 @@ const {
   seedReview,
   seedReviewPrint,
   managerAccessToken,
+  managerUserId,
 } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -40,10 +43,7 @@ describe('/reviews submit and delete (BS#2854)', () => {
     seedReview({ ...target, author: `${PREFIX} author`, author_user_id: global.primary_dj_id, ...overrides });
   /** Marks `review` as the one `itemRow` accepts, as accept (BS#2860) will. */
   const accept = (itemRow, review) =>
-    sql.unsafe(
-      `UPDATE "${SCHEMA}".intake_items SET accepted_review_id = $1, accepted_by = $2, accepted_at = now() WHERE id = $3`,
-      [review.id, managerId, itemRow]
-    );
+    seedAcceptance({ intake_item_id: itemRow, review_id: review.id, accepted_by: managerId });
   const itemRow = async (id) => (await sql.unsafe(`SELECT * FROM "${SCHEMA}".intake_items WHERE id = $1`, [id]))[0];
   const reviewRow = async (id) => (await sql.unsafe(`SELECT * FROM "${SCHEMA}".reviews WHERE id = $1`, [id]))[0];
   const revisions = (id) =>
@@ -53,7 +53,7 @@ describe('/reviews submit and delete (BS#2854)', () => {
     );
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
+    await removeSeededIntakeItems();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
   };
@@ -63,9 +63,7 @@ describe('/reviews submit and delete (BS#2854)', () => {
     djA = createAuthRequest(request, `Bearer ${global.primary_dj_id}`);
     djB = createAuthRequest(request, global.secondary_access_token);
     sql = getTestDb();
-    const [managerRow] = await sql`SELECT id FROM auth_user WHERE username = 'test_station_manager'`;
-    if (!managerRow) throw new Error('test_station_manager fixture account is missing');
-    managerId = managerRow.id;
+    managerId = await managerUserId();
     await cleanup();
     libraryId = (await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} release` })).id;
   });

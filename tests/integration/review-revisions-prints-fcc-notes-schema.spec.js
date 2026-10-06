@@ -21,6 +21,8 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  removeSeededIntakeItems,
+  seedAcceptance,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -47,7 +49,7 @@ describe('review_revisions, review_prints, fcc_notes (real PG)', () => {
   afterEach(async () => {
     // Items and library rows cascade to everything below them; the accepted
     // pointer SETs NULL, so deleting items first is safe.
-    await sql`DELETE FROM ${t('intake_items')} WHERE artist_name = ${ITEM_ARTIST}`;
+    await removeSeededIntakeItems();
     await removeSeededLibraryReleases();
     await removeSeededAuthUsers();
   });
@@ -169,7 +171,7 @@ describe('review_revisions, review_prints, fcc_notes (real PG)', () => {
     it('nulls the pointer, keeping the item, when the accepted review is deleted', async () => {
       const item = await seedIntakeItem({ artist_name: ITEM_ARTIST });
       const reviewId = (await seedReview({ intake_item_id: item.id })).id;
-      await sql`UPDATE ${t('intake_items')} SET accepted_review_id = ${reviewId} WHERE id = ${item.id}`;
+      await seedAcceptance({ intake_item_id: item.id, review_id: reviewId });
 
       await sql`DELETE FROM ${t('reviews')} WHERE id = ${reviewId}`;
 
@@ -179,7 +181,7 @@ describe('review_revisions, review_prints, fcc_notes (real PG)', () => {
     it('deletes an item whose accepted review is one of its own, removing both', async () => {
       const item = await seedIntakeItem({ artist_name: ITEM_ARTIST });
       const reviewId = (await seedReview({ intake_item_id: item.id })).id;
-      await sql`UPDATE ${t('intake_items')} SET accepted_review_id = ${reviewId} WHERE id = ${item.id}`;
+      await seedAcceptance({ intake_item_id: item.id, review_id: reviewId });
 
       await sql`DELETE FROM ${t('intake_items')} WHERE id = ${item.id}`;
 
