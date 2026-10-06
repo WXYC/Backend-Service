@@ -376,6 +376,21 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
   });
 
 /**
+ * Submit's two writes, for a caller that already holds the review locked: `status` `submitted`, `submitted_at` and
+ * `last_modified` stamped, and revision 1 written, attributed to the review's own `author` and `author_user_id`.
+ */
+export const writeSubmission = async (
+  tx: Tx & Pick<typeof db, 'update'>,
+  row: RevisionContent & Pick<Review, 'id' | 'author' | 'author_user_id'>
+) => {
+  await tx
+    .update(reviews)
+    .set({ status: 'submitted', submitted_at: sql`now()`, last_modified: sql`now()` })
+    .where(eq(reviews.id, row.id));
+  await writeReviewRevision(tx, row.id, pickContent(row), { name: row.author, userId: row.author_user_id });
+};
+
+/**
  * Submits a draft: `submitted`, `submitted_at` stamped, and revision 1 written in the same transaction (a
  * draft has no history; it starts here), `edited_by` the author's snapshot. It never writes the intake item,
  * in any state, so a review submitted for a filed item is an ordinary submitted review. Whoever may edit the
@@ -391,11 +406,7 @@ export const submitReview = async (id: number, actor: ReviewsActor) =>
     if (decision !== 'allowed') return { outcome: decision };
     if (current.status !== 'draft') return { outcome: 'not_draft' as const };
     if (current.medium === 'typed' && current.review === null) return { outcome: 'text_required' as const };
-    await tx
-      .update(reviews)
-      .set({ status: 'submitted', submitted_at: sql`now()`, last_modified: sql`now()` })
-      .where(eq(reviews.id, id));
-    await writeReviewRevision(tx, id, pickContent(current), { name: current.author, userId: current.author_user_id });
+    await writeSubmission(tx, current);
     return { outcome: 'submitted' as const, review: (await selectReview(id, tx))! };
   });
 
