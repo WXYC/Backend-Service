@@ -1,0 +1,22 @@
+{
+  "name": "@wxyc/comp-letter-backfill",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot backfill (BS#2834): set genre_artist_crossreference.code_comp_letter on the 52 Rock/Soundtracks compilation slots from the trailing letter of the slot's name, behind a self-checking gate. Dry-run by default; --apply to write.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

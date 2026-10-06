@@ -383,6 +383,11 @@ jobs:
       - name: 'Type check: metadata-no-match-digest'
         run: npm run typecheck --workspace=jobs/metadata-no-match-digest
 
+      # BS#2009 gap again: this one-shot writes production catalog data
+      # (BS#2834) and is run by hand with tsx, so nothing else compiles it.
+      - name: 'Type check: comp-letter-backfill'
+        run: npm run typecheck --workspace=jobs/comp-letter-backfill
+
       - name: Lint
         run: npm run lint
 
