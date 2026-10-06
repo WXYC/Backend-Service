@@ -75,3 +75,13 @@ export const parseInt4QueryParam = (raw: unknown, field: string): number | undef
   if (!(id >= 1 && id <= INT4_MAX)) throw new WxycError(`${field} must be an integer from 1 to 2147483647`, 400);
   return id;
 };
+
+/**
+ * Parse a strict boolean query param: absent or `'false'` is false, `'true'` is true, and anything else — `'TRUE'`,
+ * `'1'`, `''`, or a repeated key (which arrives as an array) — is a 400 naming the field.
+ */
+export const parseBooleanQueryParam = (raw: unknown, field: string): boolean => {
+  if (raw === undefined || raw === 'false') return false;
+  if (raw === 'true') return true;
+  throw new WxycError(`${field} must be true or false`, 400);
+};

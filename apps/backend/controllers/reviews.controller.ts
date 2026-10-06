@@ -3,7 +3,12 @@ import type { RequestHandler } from 'express';
 import * as reviewsService from '../services/reviews.service.js';
 import type { ReviewFields } from '../services/reviews.service.js';
 import WxycError from '../utils/error.js';
-import { parseInt4BodyId, parseInt4PathId, parseInt4QueryParam } from '../utils/query-params.js';
+import {
+  parseBooleanQueryParam,
+  parseInt4BodyId,
+  parseInt4PathId,
+  parseInt4QueryParam,
+} from '../utils/query-params.js';
 import { reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText } from '../utils/text-fields.js';
 
@@ -103,18 +108,11 @@ export const getReview: RequestHandler<{ id: string }> = async (req, res) => {
   res.json(review);
 };
 
-/** `mine` is `true` or `false` (absent means `false`); anything else, a repeated key included, is a 400. */
-const parseMine = (raw: unknown) => {
-  if (raw === undefined || raw === 'false') return false;
-  if (raw === 'true') return true;
-  throw new WxycError('mine must be true or false', 400);
-};
-
 export const listReviews: RequestHandler = async (req, res) => {
   const filters = {
     album_id: parseInt4QueryParam(req.query.album_id, 'album_id'),
     intake_item_id: parseInt4QueryParam(req.query.intake_item_id, 'intake_item_id'),
-    mine: parseMine(req.query.mine),
+    mine: parseBooleanQueryParam(req.query.mine, 'mine'),
   };
   res.json(await reviewsService.listReviews(filters, reviewsActor(req)));
 };

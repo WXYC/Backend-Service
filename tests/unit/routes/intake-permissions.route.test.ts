@@ -211,7 +211,7 @@ describe('GET /intake — ?state=', () => {
   test.each(['1', 'yes', 'TRUE', ''])('awaiting_acceptance=%j is a 400 before any query', async (raw) => {
     const res = await bearer(request(app).get('/intake').query({ awaiting_acceptance: raw }));
     expect(res.status).toBe(400);
-    expect(res.body.message).toBe('Invalid Parameter: awaiting_acceptance must be true or false');
+    expect(res.body.message).toBe('awaiting_acceptance must be true or false');
     expect(mockListIntakeItems).not.toHaveBeenCalled();
   });
 
