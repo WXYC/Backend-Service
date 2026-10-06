@@ -88,7 +88,6 @@ describe('advanceStreaks', () => {
 
     expect(step.trip?.error).toBeInstanceOf(ConsecutiveFailedBatchesError);
     expect(step.trip).toMatchObject({ step: 'consecutive_failed_batches', extra: { cause } });
-    expect(step.noBioStreakStart).toBeUndefined();
   });
 
   it('trips the no-bio abort at the limit and says where the streak began', () => {
@@ -96,10 +95,11 @@ describe('advanceStreaks', () => {
 
     expect(step.trip?.error).toBeInstanceOf(ConsecutiveNoBioBatchesError);
     expect(step.trip).toMatchObject({ step: 'consecutive_no_bio_batches', extra: {} });
-    expect(step.noBioStreakStart).toBe(10);
+    // Where the streak began stays in the streaks, for runFill to carry.
+    expect(step.streaks).toMatchObject({ noBio: 10, noBioFrom: 10 });
   });
 
-  it('throws the failed-batch abort when both trip on one batch, and still says where the no-bio streak began', () => {
+  it('throws the failed-batch abort when both trip on one batch, keeping the no-bio streak', () => {
     const step = advanceStreaks(
       { ...NO_STREAKS, lml: 2, noBio: 9, noBioFrom: 10 },
       batch({ indeterminate: 4, no_bio: 1 }),
@@ -108,7 +108,7 @@ describe('advanceStreaks', () => {
     );
 
     expect(step.trip?.error).toBeInstanceOf(ConsecutiveFailedBatchesError);
-    expect(step.noBioStreakStart).toBe(10);
+    expect(step.streaks).toMatchObject({ noBio: 10, noBioFrom: 10 });
   });
 
   it('never trips the no-bio abort when its limit is 0', () => {
@@ -118,6 +118,5 @@ describe('advanceStreaks', () => {
     });
 
     expect(step.trip).toBeUndefined();
-    expect(step.noBioStreakStart).toBeUndefined();
   });
 });

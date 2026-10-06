@@ -5,8 +5,9 @@
  * answers for pins every later run to the same starting point, and each run's
  * window fills up with rows it already settled. The plan instead moves the
  * cursor past everything the run asked and carries the albums it could not
- * settle as the next run's list. `resumeAfterAlbumId` stays the list-free
- * fallback, used when the carried list would outgrow one list.
+ * settle as the next run's list; past 200 it carries the first 200 and stops
+ * the cursor below the rest. `resumeAfterAlbumId` is still reported, a
+ * list-free cursor that never skips but stalls; `nextRun` is what to run.
  *
  * Pure, so every rule is a row here rather than a scripted run.
  *
