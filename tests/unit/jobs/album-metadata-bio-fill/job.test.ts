@@ -17,7 +17,11 @@ jest.mock('@wxyc/lml-client', () => ({
   ...jest.requireActual('@wxyc/lml-client'),
   bulkLookupMetadata: jest.fn(),
 }));
+// The real module's constants, READ_TIMEOUT_DEFAULT among them, with its reads
+// stubbed. A bare factory left the timeout default undefined, so assertions on
+// it compared undefined with undefined.
 jest.mock('../../../../jobs/album-metadata-bio-fill/cohort', () => ({
+  ...jest.requireActual<Record<string, unknown>>('../../../../jobs/album-metadata-bio-fill/cohort'),
   countCohort: jest.fn(),
   countEligible: jest.fn(),
   enumerateCohort: jest.fn(),
@@ -52,6 +56,7 @@ describe('resolveOptions', () => {
       batchSize: 5,
       ratePerMin: 1,
       budgetMs: 25_000,
+      readTimeoutMs: 300_000,
       maxAlbums: 0,
       afterAlbumId: 0,
       maxConsecutiveFailedBatches: 3,
