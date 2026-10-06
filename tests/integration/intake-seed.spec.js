@@ -84,6 +84,11 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     expect(orphan.checked_out_at).not.toBeNull();
   });
 
+  test('the checkout option throws when at is null and a holder is given (decision 38)', async () => {
+    const holder = await seedAuthUser();
+    await expect(seedIntakeItem({ checkout: { by: holder.id, at: null } })).rejects.toThrow(/checkout\.at is null/);
+  });
+
   test('a release given an artist_id reuses that artist', async () => {
     const first = await seedLibraryRelease();
     const second = await seedLibraryRelease({ artist_id: first.artist_id });

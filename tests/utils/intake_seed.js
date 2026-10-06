@@ -96,12 +96,18 @@ async function removeSeededAuthUsers() {
  *
  * `overrides.checkout` is `{ by, at }`: it writes `checked_out_by` and `checked_out_at` together, because a checkout
  * is `checked_out_at` (epic decision 38) and a held item carries both. `at` defaults to the database's `now()`; `by:
- * null` is honored, for a test of a removed holder. `state` defaults to `checked_out` when the caller gives none.
+ * null` is honored, for a test of a removed holder. `at: null` with a holder given throws, because that shape (a
+ * holder and no `checked_out_at`) is not a checkout; a test that wants it passes `checked_out_by` directly. `state` defaults to `checked_out` when the caller gives none.
  * Passing `checked_out_by` or `checked_out_at` directly still works, for a test that needs them apart.
  */
 async function seedIntakeItem(overrides = {}) {
   const sql = getTestDb();
   const { checkout, ...columns } = overrides;
+  if (checkout && checkout.at === null && checkout.by != null) {
+    throw new Error(
+      'seedIntakeItem: checkout.at is null but checkout.by names a holder; a held item without checked_out_at is not a checkout (epic decision 38). Omit `at` for now(), or pass checked_out_by directly for a test that needs the columns apart.'
+    );
+  }
   const row = {
     artist_name: 'Jessica Pratt',
     album_title: 'On Your Own Love Again',

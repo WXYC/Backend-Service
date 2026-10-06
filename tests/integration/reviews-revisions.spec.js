@@ -59,9 +59,7 @@ describe('/reviews revision history (BS#2861)', () => {
   test('submit, an author edit and a music director edit read back as three versions, newest first', async () => {
     const held = await seedIntakeItem({
       artist_name: `${PREFIX} held`,
-      state: 'checked_out',
-      checked_out_by: global.primary_dj_id,
-      checked_out_at: new Date().toISOString(),
+      checkout: { by: global.primary_dj_id },
     });
     const draft = await djA.post('/reviews').send({ intake_item_id: held.id, review: 'First take.' });
     expect([draft.status, draft.body.revision_count]).toEqual([200, 0]);
