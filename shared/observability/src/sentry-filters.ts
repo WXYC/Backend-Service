@@ -85,10 +85,27 @@ export function isLivenessRequestPath(url: string | undefined): boolean {
  * If this is ever revisited, restore `request_handler.express` first;
  * `router.express` is Express choosing which function to call.
  */
-const EXPRESS_INSTRUMENTATION_SPAN_OPS = new Set(['middleware.express', 'router.express', 'request_handler.express']);
+const EXPRESS_INSTRUMENTATION_SPAN_OPS = new Set(['middleware', 'router', 'handler']);
 
-export function isExpressInstrumentationSpan(span: Pick<SpanJSON, 'op'>): boolean {
-  return span.op !== undefined && EXPRESS_INSTRUMENTATION_SPAN_OPS.has(span.op);
+/**
+ * **Keyed on origin as well as op since Sentry 11 (BS#2948).** Sentry 10's
+ * OTel-based Express instrumentation named these ops `middleware.express`,
+ * `router.express` and `request_handler.express`. Sentry 11 replaced it with
+ * `@sentry/server-utils`' diagnostics-channel instrumentation, which stamps
+ * origin `auto.http.express` and the generic `@sentry/conventions` ops
+ * `middleware` / `router` / `handler`. Matching the old strings after the
+ * upgrade kept every Express span with no test failing. The generic ops alone
+ * are not specific enough, because another framework integration could emit
+ * them, so the origin pins the match to Express's own bookkeeping.
+ */
+const EXPRESS_INSTRUMENTATION_ORIGIN = 'auto.http.express';
+
+export function isExpressInstrumentationSpan(span: Pick<SpanJSON, 'op' | 'origin'>): boolean {
+  return (
+    span.origin === EXPRESS_INSTRUMENTATION_ORIGIN &&
+    span.op !== undefined &&
+    EXPRESS_INSTRUMENTATION_SPAN_OPS.has(span.op)
+  );
 }
 
 /**
