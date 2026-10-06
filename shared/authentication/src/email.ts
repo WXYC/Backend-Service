@@ -175,19 +175,23 @@ function getConfigurationSetName(): string | undefined {
 }
 
 /**
- * SES has a 200-message/month quota. `EMAIL_ENABLED` gates the entire send
- * path — a disabled environment needs NO SES configuration at all (no
- * `SES_FROM_EMAIL`, no AWS credentials); the senders no-op before any config
- * validation runs — so test/CI runs (which repeatedly exercise the
- * password-reset / verification / OTP flows) never burn that quota.
- * Defaults to enabled (production behavior) when unset. `scripts/ci-env.sh`
- * does NOT set this var -- test/CI environments set `EMAIL_ENABLED=false`
- * explicitly in these places: `tests/setup/unit.setup.ts` (the jest
- * unit-test-runner process itself); for the separately-spawned auth/
- * backend servers the integration suite talks to over HTTP, on
- * `dev_env/docker-compose.yml`'s `auth` service (CI profile, hardcoded) and
- * `.github/workflows/test.yml`'s Integration-Tests "Start services" step;
- * and dj-site's E2E workflow Backend `.env` (BS#1999).
+ * `EMAIL_ENABLED` gates the entire send path — a disabled environment needs NO
+ * SES configuration at all (no `SES_FROM_EMAIL`, no AWS credentials); the
+ * senders no-op before any config validation runs — so test/CI runs (which
+ * repeatedly exercise the password-reset / verification / OTP flows and the
+ * review notices) never send real mail. The account has production SES
+ * access with a 50,000-message/day quota (measured 2026-10-02; the station
+ * sent 218 messages in the previous 14 days), so volume is not the concern the
+ * old 200-a-month sandbox quota was. Defaults to enabled (production
+ * behavior) when unset. `scripts/ci-env.sh` does NOT set this var --
+ * test/CI environments set `EMAIL_ENABLED=false` explicitly in these places:
+ * `tests/setup/unit.setup.ts` (the jest unit-test-runner process itself); for
+ * the separately-spawned auth/backend servers the integration suite talks to
+ * over HTTP, on `dev_env/docker-compose.yml`'s `auth`, `backend` and
+ * `e2e-backend` services (CI profile, hardcoded) and
+ * `.github/workflows/test.yml`'s Integration-Tests "Start services" step; and
+ * dj-site's E2E workflow Backend `.env` (BS#1999). The backend sends the
+ * music-director review notices (BS#2806) through `sendNotificationEmail`.
  */
 export function isEmailSendingEnabled(): boolean {
   const raw = process.env.EMAIL_ENABLED;
@@ -198,10 +202,10 @@ export function isEmailSendingEnabled(): boolean {
   return normalized !== 'false' && normalized !== '0';
 }
 
-/**
- * Send a transactional email using the unified email system
- */
-export async function sendEmail(email: WXYCEmail): Promise<void> {
+export type NotificationEmail = { to: string[]; subject: string; text: string; html: string };
+
+/** The one place a message reaches SES, so every sender shares the `EMAIL_ENABLED` gate, `SES_FROM_EMAIL` and the configuration set. */
+async function deliver({ to, subject, text, html }: NotificationEmail): Promise<void> {
   // The disable switch must run before any SES config validation: an
   // environment that deliberately disables email (E2E, local dev) sets
   // EMAIL_ENABLED=false without SES vars, and must get a clean no-op rather
@@ -218,27 +222,42 @@ export async function sendEmail(email: WXYCEmail): Promise<void> {
     throw new Error('Missing AWS SES configuration: SES_FROM_EMAIL');
   }
 
-  const orgName = process.env.DEFAULT_ORG_NAME || 'WXYC';
-  const content = getEmailContent(email.type, email.url, orgName);
-
-  const textBody = `${content.intro} ${content.actionUrl}`;
-  const htmlBody = buildEmailHtml(content);
-
   const command = new SendEmailCommand({
     Source: from,
-    Destination: { ToAddresses: [email.to] },
+    Destination: { ToAddresses: to },
     Message: {
-      Subject: { Data: content.subject },
+      Subject: { Data: subject },
       Body: {
-        Text: { Data: textBody },
-        Html: { Data: htmlBody },
+        Text: { Data: text },
+        Html: { Data: html },
       },
     },
     ConfigurationSetName: getConfigurationSetName(),
   });
 
-  const client = getSesClient();
-  await client.send(command);
+  await getSesClient().send(command);
+}
+
+/**
+ * Send a free-form notification (subject, text and HTML bodies) to the given recipients. Callers own the
+ * content; `WXYCEmail` stays the closed set of auth emails. Throws on a send failure, so a caller whose
+ * request must not fail on it wraps the call.
+ */
+export const sendNotificationEmail = (email: NotificationEmail): Promise<void> => deliver(email);
+
+/**
+ * Send a transactional email using the unified email system
+ */
+export async function sendEmail(email: WXYCEmail): Promise<void> {
+  const orgName = process.env.DEFAULT_ORG_NAME || 'WXYC';
+  const content = getEmailContent(email.type, email.url, orgName);
+
+  await deliver({
+    to: [email.to],
+    subject: content.subject,
+    text: `${content.intro} ${content.actionUrl}`,
+    html: buildEmailHtml(content),
+  });
 }
 
 // Backward-compatible wrappers

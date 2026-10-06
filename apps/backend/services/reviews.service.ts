@@ -16,6 +16,7 @@ import {
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { outerRef } from '../utils/sql-fragments.js';
 import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState, writeAcceptance } from './intake.service.js';
+import { readReviewNotice } from './review-notices.service.js';
 
 /**
  * In-app review service behind `/reviews` (BS#2802, slice 10a of BS#2791): a DJ's own
@@ -493,8 +494,8 @@ export const writeSubmission = async (
  * draft has no history; it starts here), `edited_by` the author's snapshot. It never writes the intake item,
  * in any state, so a review submitted for a filed item is an ordinary submitted review. Whoever may edit the
  * review may submit it (`editOutcome`); a typed review needs text. The response is read back through
- * `selectReview` after both writes. The notice to the music directors (slice 14, BS#2806) goes after commit,
- * at the caller of this function.
+ * `selectReview` after both writes. It also returns the item as this submit saw it (`notice`, BS#2806: read after
+ * the locks) for the notice the caller sends after commit; none for a library-release or music-director-recorded review.
  */
 export const submitReview = async (id: number, actor: ReviewsActor) =>
   db.transaction(async (tx) => {
@@ -505,7 +506,12 @@ export const submitReview = async (id: number, actor: ReviewsActor) =>
     if (current.status !== 'draft') return { outcome: 'not_draft' as const };
     if (current.medium === 'typed' && current.review === null) return { outcome: 'text_required' as const };
     await writeSubmission(tx, current);
-    return { outcome: 'submitted' as const, review: (await selectReview(id, tx))! };
+    // A review a music director recorded notifies nobody; a library-release review has no item.
+    const notice =
+      current.intake_item_id !== null && current.recorded_by_user_id === null
+        ? await readReviewNotice(tx, current.intake_item_id, current)
+        : undefined;
+    return { outcome: 'submitted' as const, review: (await selectReview(id, tx))!, ...(notice && { notice }) };
   });
 
 /** The print half of `in_use`, as the same fragment `selectReview` and the lists use. */
