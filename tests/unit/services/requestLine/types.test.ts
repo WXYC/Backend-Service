@@ -17,6 +17,7 @@ function makeResult(overrides: Partial<LibraryResult>): LibraryResult {
     codeArtistNumber: 0,
     codeNumber: 651,
     codeVolumeLetters: null,
+    codeCompLetter: null,
     genre: 'Hiphop',
     format: 'cd',
     ...overrides,
@@ -28,12 +29,27 @@ describe('computeCallNumber', () => {
     ['single-bin genre renders V/A-<ReleaseNum>, no artist number', {}, 'Hiphop cd V/A-651'],
     [
       'Rock with a recoverable bin letter renders V/A <Bin>-<ReleaseNum>',
-      { artist: 'Various Artists - Rock - M', codeNumber: 121, genre: 'Rock' },
+      { artist: 'Various Artists - Rock', codeCompLetter: 'M', codeNumber: 121, genre: 'Rock' },
       'Rock cd V/A M-121',
     ],
     [
       'Soundtracks with a recoverable bin letter renders <Bin>-<ReleaseNum>, no V/A literal',
-      { artist: 'Soundtracks - M', codeNumber: 12, genre: 'Soundtracks' },
+      { artist: 'Soundtracks', codeCompLetter: 'M', codeNumber: 12, genre: 'Soundtracks' },
+      'Soundtracks cd M-12',
+    ],
+    [
+      'a rename that dropped the section suffix still renders the bin from codeCompLetter',
+      { artist: 'Various Artists - Rock', codeCompLetter: 'M', codeNumber: 121, genre: 'Rock' },
+      'Rock cd V/A M-121',
+    ],
+    [
+      'a name suffix with a null codeCompLetter renders no bin: the name is not read',
+      { artist: 'Various Artists - Rock - M', codeCompLetter: null, codeNumber: 121, genre: 'Rock' },
+      'Rock cd V/A-121',
+    ],
+    [
+      'a lowercase codeCompLetter renders upper-cased',
+      { codeCompLetter: 'm', codeNumber: 12, genre: 'Soundtracks' },
       'Soundtracks cd M-12',
     ],
     [
@@ -42,8 +58,7 @@ describe('computeCallNumber', () => {
       'Soundtracks cd V/A-53',
     ],
     [
-      // Deliberately NOT the renamed "Various Artists - Rock - M" form -- this
-      // proves the bin comes from codeLetters, not from the name.
+      // Proves the legacy bin comes from codeLetters, not from the name.
       'legacy Z-M (lettered) spelling recovers its bin from codeLetters[2], not from the name',
       { artist: 'Raw Tubafrenzy Export', codeLetters: 'Z-M', codeNumber: 121, genre: 'Rock' },
       'Rock cd V/A M-121',
@@ -61,12 +76,12 @@ describe('computeCallNumber', () => {
     ],
     [
       'null codeNumber on a Rock compilation with a bin letter renders V/A <Bin>, no trailing hyphen',
-      { artist: 'Various Artists - Rock - M', codeNumber: null, genre: 'Rock' },
+      { artist: 'Various Artists - Rock', codeCompLetter: 'M', codeNumber: null, genre: 'Rock' },
       'Rock cd V/A M',
     ],
     [
       'a trailing " - <letter>" on the name is ignored outside Rock/Soundtracks',
-      { artist: 'Various Artists - M' },
+      { artist: 'Various Artists - M', codeCompLetter: 'M' },
       'Hiphop cd V/A-651',
     ],
     [
@@ -90,23 +105,13 @@ describe('computeCallNumber', () => {
       'Rock cd V/A 1-121',
     ],
     [
-      'a Rock bin heading in the name is ignored under a non-Rock genre',
-      { artist: 'Various Artists - Rock - M', codeNumber: 651, genre: 'Hiphop' },
+      'a comp letter is ignored under a non-Rock/Soundtracks genre',
+      { artist: 'Various Artists - Rock', codeCompLetter: 'M', codeNumber: 651, genre: 'Hiphop' },
       'Hiphop cd V/A-651',
     ],
     [
-      'a multi-letter name suffix is not a bin letter',
-      { artist: 'Various Artists - Rock - Africa', codeNumber: 121, genre: 'Rock' },
-      'Rock cd V/A-121',
-    ],
-    [
-      'the name is trimmed at both ends before the bin suffix is read',
-      { artist: ' - M', codeNumber: 121, genre: 'Rock' },
-      'Rock cd V/A-121',
-    ],
-    [
       'null genre and format are skipped, leaving the bare compilation locator',
-      { artist: 'Various Artists - Rock - M', codeNumber: 121, genre: null, format: null },
+      { artist: 'Various Artists - Rock', codeCompLetter: 'M', codeNumber: 121, genre: null, format: null },
       'V/A-121',
     ],
     [
@@ -131,7 +136,14 @@ describe('computeCallNumber', () => {
     ],
     [
       'volume letter is appended to the release number on a Rock compilation',
-      { artist: 'Various Artists - Rock - A', codeNumber: 12, genre: 'Rock', format: 'cd', codeVolumeLetters: 'B' },
+      {
+        artist: 'Various Artists - Rock',
+        codeCompLetter: 'A',
+        codeNumber: 12,
+        genre: 'Rock',
+        format: 'cd',
+        codeVolumeLetters: 'B',
+      },
       'Rock cd V/A A-12-B',
     ],
     ['volume letter is appended on a single-bin compilation', { codeVolumeLetters: 'C' }, 'Hiphop cd V/A-651-C'],

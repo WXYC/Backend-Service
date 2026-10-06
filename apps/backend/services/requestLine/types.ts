@@ -85,6 +85,8 @@ export interface LibraryResult {
   codeNumber: number | null;
   /** Per-release volume letter of a multi-volume set (e.g., "B"); stored case varies */
   codeVolumeLetters: string | null;
+  /** Compilation section letter of a Rock/Soundtracks V/A slot (`code_comp_letter`); null elsewhere */
+  codeCompLetter: string | null;
   /** Genre name */
   genre: string | null;
   /** Format name (CD, Vinyl, etc.) */
@@ -157,42 +159,33 @@ function isVariousArtists(codeLetters: string): boolean {
 }
 
 /**
- * Recover the Rock/Soundtracks sub-bucket letter from a compilation row that
- * has already passed `isVariousArtists`. Release numbers restart in each of
- * the 26 letter bins, so the letter disambiguates the shelf locator rather
- * than merely decorating it (BS#2822). The caller decides which genres get a
- * bin; this only answers where the letter is.
- *
- * Two naming schemes carry the letter in two different places:
- *
- * - The legacy `Z-<letter>` spelling carries it in `codeLetters` itself, at
- *   index 2 (`Z--` has no letter there -- single-bin genres). Any other
- *   character there is the bin, as tubafrenzy's `substring(2, 3)` takes it.
- * - The modern `V/A` spelling -- what the catalog import collapses every
- *   `Z-<letter>` to -- has already lost the letter from `codeLetters`. It
- *   survives only as a trailing ` - <letter>` on the artist name (`Various
- *   Artists - Rock - M`, `Soundtracks - M`), so that's the narrow exception
- *   where the name is read instead of the structural fields.
+ * Recover the legacy `Z-<letter>` spelling's bin letter from `codeLetters`
+ * itself, at index 2 (`Z--` has no letter there -- single-bin genres). Any
+ * other character there is the bin, as tubafrenzy's `substring(2, 3)` takes
+ * it. Returns undefined for any code that is not `Z-` shaped.
  */
-function recoverCompilationBin(codeLetters: string, artist: string | null): string | null {
+function legacyCompilationBin(codeLetters: string): string | null | undefined {
   const trimmed = codeLetters.trim();
-  if (trimmed.startsWith('Z-')) {
-    const letter = trimmed[2];
-    return letter && letter !== '-' ? letter.toUpperCase() : null;
-  }
-  const match = artist ? / - ([A-Za-z])$/.exec(artist.trim()) : null;
-  return match ? match[1].toUpperCase() : null;
+  if (!trimmed.startsWith('Z-')) return undefined;
+  const letter = trimmed[2];
+  return letter && letter !== '-' ? letter.toUpperCase() : null;
 }
 
 /**
  * The artist half of a compilation's shelf locator (BS#2822): `V/A M` for
  * Rock, the bare `M` for Soundtracks, and `V/A` for every other genre or
- * when no bin letter is recoverable. Only Rock and Soundtracks are split
+ * when the slot has no section letter. Only Rock and Soundtracks are split
  * into letter bins, so only they ever look for one -- the same genre gate
- * tubafrenzy's `ArtistLibraryCode` applies.
+ * tubafrenzy's `ArtistLibraryCode` applies, kept here so the renderer does not
+ * depend on which genres happen to carry a letter. The letter is the
+ * structural `code_comp_letter` (BS#2837); the artist name is never read, so
+ * a librarian rename cannot drop it. A legacy `Z-<letter>` code carries its
+ * own letter and takes precedence.
  */
-function compilationArtistHalf(codeLetters: string, artist: string | null, genre: string | null): string {
-  const bin = genre === 'Rock' || genre === 'Soundtracks' ? recoverCompilationBin(codeLetters, artist) : null;
+function compilationArtistHalf(codeLetters: string, compLetter: string | null, genre: string | null): string {
+  if (genre !== 'Rock' && genre !== 'Soundtracks') return VARIOUS_ARTISTS_CODE_LETTERS;
+  const legacy = legacyCompilationBin(codeLetters);
+  const bin = legacy === undefined ? compLetter?.trim().toUpperCase() : legacy;
   if (!bin) return VARIOUS_ARTISTS_CODE_LETTERS;
   return genre === 'Soundtracks' ? bin : `${VARIOUS_ARTISTS_CODE_LETTERS} ${bin}`;
 }
@@ -232,11 +225,13 @@ export function computeCallNumber(result: LibraryResult): string {
   if (result.format) parts.push(result.format);
   const release = releaseHalf(result);
   if (result.codeLetters && isVariousArtists(result.codeLetters)) {
-    const artistHalf = compilationArtistHalf(result.codeLetters, result.artist, result.genre);
+    const artistHalf = compilationArtistHalf(result.codeLetters, result.codeCompLetter, result.genre);
     parts.push(release !== null ? `${artistHalf}-${release}` : artistHalf);
     return parts.join(' ');
   }
-  const artistHalf = [result.codeLetters, result.codeArtistNumber].filter((p) => p !== null && p !== '').join(' ');
+  const artistHalf = [result.codeLetters?.toUpperCase(), result.codeArtistNumber]
+    .filter((p) => p !== null && p !== '')
+    .join(' ');
   if (release === null) {
     if (artistHalf) parts.push(artistHalf);
   } else {

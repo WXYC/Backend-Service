@@ -7784,6 +7784,7 @@ function viewRowToLibraryResult(row: LibraryArtistViewEntry): LibraryResult {
     codeArtistNumber: row.code_artist_number,
     codeNumber: row.code_number,
     codeVolumeLetters: row.code_volume_letters,
+    codeCompLetter: row.code_comp_letter,
     genre: row.genre_name,
     format: row.format_name,
     onStreaming: row.on_streaming,
