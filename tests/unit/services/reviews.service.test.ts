@@ -825,7 +825,7 @@ describe('deleteReview', () => {
    */
   const script = (
     review: object,
-    accepting: { id: number; state: string }[],
+    accepting: { id: number; state: string; cited_album_id: number | null; cited_submission_id: number | null }[],
     opts: { inUse?: boolean; manage?: boolean } = {}
   ) => {
     const ids = [...new Set([8, ...accepting.map((a) => a.id)])].sort((a, b) => a - b);
@@ -835,12 +835,24 @@ describe('deleteReview', () => {
       ids.map((id) => ({ id })),
       [{ id: 3 }],
       [DRAFT({ status: 'submitted', ...review })],
-      accepting.map((a) => ({ id: a.id, state: a.state }))
+      accepting.map((a) => ({ ...a }))
     );
     if (!opts.manage && accepting.length === 0) mockQueue.push([{ in_use: opts.inUse ?? false }]);
   };
-  /** An accepting item. Its citations are not read: the refusal is the same cited or not. */
-  const item = (id: number, state: string) => ({ id, state });
+  /**
+   * An accepting item with explicit citation columns (uncited by default). The service does not select them, but the
+   * scripted row carries them regardless so a re-added citation exemption would see them.
+   */
+  const item = (
+    id: number,
+    state: string,
+    cited: { cited_album_id?: number | null; cited_submission_id?: number | null } = {}
+  ) => ({
+    id,
+    state,
+    cited_album_id: cited.cited_album_id ?? null,
+    cited_submission_id: cited.cited_submission_id ?? null,
+  });
   const writes = () => mockWritesTo.map((w) => `${w.verb} ${w.table}`);
 
   test("locks through lockReviewAfterItem, the review's own item and every accepting item in ascending id order before the review, then reads the accepting items and decides", async () => {
@@ -924,16 +936,19 @@ describe('deleteReview', () => {
       expect(mockExecuted).toEqual([]);
     });
 
-    // Epic decision 40: a citation (of a release or of a form review) does not exempt a filed record, so the read
-    // selects only `id` and `state`: the refusal is the same for a cited item and an uncited one.
-    test.each(['filed', 'finalized'])(
-      'refuses accepted_review for a %s item, cited or not, writing nothing',
-      async (state) => {
-        script({}, [item(8, state)], { manage: true });
+    // Epic decision 40: a citation (of a release or of a form review) does not exempt a filed record, so the refusal is
+    // the same for a cited item and an uncited one. Each citation shape is a row the scripted read carries.
+    describe.each(['filed', 'finalized'])('the accepted review of a %s item', (state) => {
+      test.each([
+        ['no citation', {}],
+        ['a release citation', { cited_album_id: 9 }],
+        ['a form-review citation', { cited_submission_id: 4 }],
+      ])('with %s is refused accepted_review, writing nothing', async (_name, cited) => {
+        script({}, [item(8, state, cited)], { manage: true });
         expect(await deleteReview(3, MD)).toEqual({ outcome: 'accepted_review' });
         expect(mockWritesTo).toEqual([]);
-      }
-    );
+      });
+    });
 
     test('deletes a printed review that is not accepted, with no update', async () => {
       script({}, [], { manage: true });
