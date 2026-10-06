@@ -162,4 +162,39 @@ describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () =
     expect(dispatchArm).toContain('Using provided target');
     expect(dispatchArm).not.toContain('BUILDABLE');
   });
+
+  describe('one-shot filtering on the automatic path', () => {
+    const autoArm = setup.slice(setup.indexOf('Detecting affected app targets'));
+    const liveStep = withoutComments(deployBase)
+      .split('name: Detect Live Target Repos')[1]
+      .split(/\n\s+- name:/)[0];
+
+    it('reads job-type only behind the package.json existence check', () => {
+      // Apps have no jobs/<t>/package.json, and a bare `yq` on a missing file
+      // fails the step under `bash -e`.
+      expect(autoArm).toMatch(/\[ -f "jobs\/\$TARGET\/package\.json" \]/);
+      expect(autoArm).toContain('.["job-type"]');
+    });
+
+    it('keeps a one-shot whose own directory or Dockerfile changed', () => {
+      expect(autoArm).toMatch(
+        /git diff --name-only "\$BASE" "\$HEAD_SHA" -- "jobs\/\$TARGET\/" "Dockerfile\.\$TARGET"/
+      );
+    });
+
+    it('keeps every one-shot when the range is unresolvable', () => {
+      expect(autoArm).toMatch(/"\$RANGE_RESOLVABLE" = true/);
+    });
+
+    it('announces the one-shots it skipped', () => {
+      expect(autoArm).toContain('::notice title=Skipping one-shot jobs');
+      expect(autoArm).toContain('rebuild=true');
+    });
+
+    it('does not filter the dispatch arm or Detect Live Target Repos', () => {
+      const dispatchArm = setup.slice(0, setup.indexOf('Detecting affected app targets'));
+      expect(dispatchArm).not.toContain('one-shot');
+      expect(liveStep).not.toContain('one-shot');
+    });
+  });
 });
