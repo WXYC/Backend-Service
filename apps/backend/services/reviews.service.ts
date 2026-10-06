@@ -21,14 +21,18 @@ import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from './intake.
 
 /**
  * Mirror of the contract's `Review` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x.
- * The last four keys are computed by `reviewSelection`, never stored.
+ * The last five keys are computed by `reviewSelection`, never stored.
  */
 export type ReviewResponse = Review & {
   in_use: boolean;
   on_cover: boolean;
   printed_revision_id: number | null;
   printed_at: Date | null;
+  revision_count: number;
 };
+
+/** Mirror of the contract's `ReviewRevision`: one saved version of a submitted review's slip content. Consent fields are not versioned. */
+export type ReviewRevisionResponse = typeof review_revisions.$inferSelect;
 
 /** The contract's `ReviewFields`: the slip plus publishing consent. `undefined` means "not supplied". */
 export type ReviewFields = Partial<
@@ -74,13 +78,17 @@ const inUse = sql<boolean>`(${acceptedBy(sql`true`)} OR ${latestPrintOfCopy(revi
 const ownLatestPrint = (column: 'revision_id' | 'printed_at') =>
   sql`(SELECT ${sql.raw(`lp.${column}`)} FROM ${review_prints} AS lp WHERE lp.review_id = ${reviewRef} ORDER BY lp.printed_at DESC, lp.id DESC LIMIT 1)`;
 
-/** A review's columns plus the computed `in_use`, `on_cover` (`onCover`, false unless a release list supplies it), `printed_revision_id`, `printed_at`. */
+// Through `reviewRef`, never a bare `${reviews.id}`: in a single-table select that renders unqualified and would bind to `rr.id`.
+const revisionCount = sql<number>`(SELECT count(*)::int FROM ${review_revisions} AS rr WHERE rr.review_id = ${reviewRef})`;
+
+/** A review's columns plus the computed `in_use`, `on_cover` (`onCover`, false unless a release list supplies it), `printed_revision_id`, `printed_at`, `revision_count`. */
 const reviewSelection = (onCover: SQL<boolean> = sql`false`) => ({
   ...getTableColumns(reviews),
   in_use: inUse,
   on_cover: onCover.as('on_cover'),
   printed_revision_id: ownLatestPrint('revision_id').mapWith(Number),
   printed_at: ownLatestPrint('printed_at').mapWith(review_prints.printed_at),
+  revision_count: revisionCount,
 });
 
 /**
@@ -104,6 +112,24 @@ export const getReview = async (id: number, actor: ReviewsActor) =>
     .from(reviews)
     .where(and(eq(reviews.id, id), reviewVisibleTo(actor)))
     .then((rows) => rows[0] as ReviewResponse | undefined);
+
+/**
+ * `GET /reviews/{id}/revisions` (BS#2861): newest first; `undefined` for a missing review and for a draft the caller
+ * may not see (`reviewVisibleTo`, the rule `getReview` applies). A visible draft has no history: `[]`. Never locks.
+ * `edited_by` is Mixed PII (`docs/pii.md`): returned here only, never logged.
+ */
+export const listReviewRevisions = async (id: number, actor: ReviewsActor) => {
+  const [visible] = await db
+    .select({ id: reviews.id })
+    .from(reviews)
+    .where(and(eq(reviews.id, id), reviewVisibleTo(actor)));
+  if (!visible) return undefined;
+  return (await db
+    .select()
+    .from(review_revisions)
+    .where(eq(review_revisions.review_id, id))
+    .orderBy(desc(review_revisions.revision))) as ReviewRevisionResponse[];
+};
 
 export type ReviewFilters = { album_id?: number; intake_item_id?: number; mine?: boolean };
 

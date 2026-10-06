@@ -639,6 +639,31 @@ components:
                 nullable: true,
                 description: When the review's own latest print was made; null if never printed,
               }
+            revision_count:
+              type: integer
+              description: How many versions are kept. 0 for a draft, 1 once submitted, more after edits; a review submitted before edit history began counts 0 until its first edit, which brings it to 2.
+
+    ReviewRevision:
+      type: object
+      description: One saved version of a submitted review. Consent fields are not versioned.
+      properties:
+        id: { type: integer }
+        review_id: { type: integer }
+        revision: { type: integer, description: '1-based' }
+        edited_by:
+          {
+            type: string,
+            nullable: true,
+            maxLength: 128,
+            description: "On revision 1 the review's `author`; on later revisions a snapshot of the editor's display name",
+          }
+        edited_by_user_id: { type: string, nullable: true }
+        edited_at: { type: string, format: date-time }
+        review: { type: string, nullable: true }
+        artist_blurb: { type: string, nullable: true }
+        buzzwords: { type: string, nullable: true }
+        recommended_tracks: { type: string, nullable: true }
+        fcc: { type: string, nullable: true, description: Station-only, as on `Review` }
 
     DigitalArchivePlaybackManifest:
       type: object
@@ -5644,6 +5669,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReviewConflictError'
+
+  /reviews/{id}/revisions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      summary: Read a review's edit history (BS#2861)
+      description: >-
+        Grant `reviews: read`. A bare array of `ReviewRevision`, newest first (`revision` descending), not paginated. Same visibility as `GET /reviews/{id}`: a draft the caller may not see is a 404; a draft the caller can see has no history, an empty array. `edited_by` can hold a real name (revision 1 is the review's `author`), so it is returned only here. A read: no locks, no writes.
+      responses:
+        '200':
+          description: 'The revisions'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReviewRevision'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: read`'
+        '404':
+          description: 'No such review, or a draft the caller may not see'
 
   /reviews/{id}/submit:
     parameters:
