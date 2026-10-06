@@ -82,8 +82,10 @@ jobs:
             exit 1
           fi
 
+          NAMED=0
           while IFS= read -r TARGET_INPUT; do
             [ -z "$TARGET_INPUT" ] && continue
+            NAMED=$((NAMED + 1))
             TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
             if [ "$VERSION_INPUT" != "latest" ]; then
               if ! git tag -l "$TAG_TO_CHECK" | grep -q "$TAG_TO_CHECK"; then
@@ -92,6 +94,11 @@ jobs:
               fi
             fi
           done <<< "$TARGETS"
+          # An explicit version names a tag per target; with no target there is nothing to deploy.
+          if [ "$NAMED" -eq 0 ]; then
+            echo "Error: The 'version' input needs a 'target'; an empty target cannot be deployed at $VERSION_INPUT." >&2
+            exit 1
+          fi
           echo "Version input '$VERSION_INPUT' is valid."
 
   setup:
