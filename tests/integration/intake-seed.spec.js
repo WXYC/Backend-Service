@@ -251,8 +251,7 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     const rows = await sql`SELECT id FROM ${sql(SCHEMA)}.intake_items WHERE id = ANY(${[first.id, second.id]})`;
     expect(rows).toHaveLength(0);
 
-    // A row the remover was never told about, filed under a deleted seeded id. If the remover kept its id list, this
-    // second call would delete it.
+    // Hand-written because seedIntakeItem would record the id with the remover, and this row must be one the remover was never told about.
     await sql`INSERT INTO ${sql(SCHEMA)}.intake_items ${sql({
       id: first.id,
       artist_name: 'Stereolab',
