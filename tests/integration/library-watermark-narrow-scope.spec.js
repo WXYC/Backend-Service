@@ -138,6 +138,15 @@ describe('library_watermark trigger scope narrowing (BS#2052)', () => {
     expect(await advancedToNow()).toBe(true);
   });
 
+  test('UPDATE of code_volume_letters alone advances the watermark (BS#2826: exported by GET /library/catalog)', async () => {
+    const id = await insertProbeRow('code-volume-letters');
+    await ageWm('1 hour');
+
+    await sql.unsafe(`UPDATE "${SCHEMA}".library SET code_volume_letters = 'B' WHERE id = $1`, [id]);
+
+    expect(await advancedToNow()).toBe(true);
+  });
+
   test('a single UPDATE touching both an exported and a non-exported column still advances the watermark', async () => {
     const id = await insertProbeRow('mixed-columns');
     await ageWm('1 hour');
