@@ -28,13 +28,16 @@ jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
   return { ...actual, reviewGateCutoverDate: jest.fn(actual.reviewGateCutoverDate) };
 });
 
-import { db } from '@wxyc/database';
+import { eq } from 'drizzle-orm';
+import { db, intake_items } from '@wxyc/database';
 import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
 import {
   updateIntakeItem,
   buildIntakePatch,
   buildIntakeSelect,
   buildTransition,
+  deleteIntakeItem,
+  RELEASE_ACCEPTED_REVIEW,
   refusalOutcome,
 } from '../../../apps/backend/services/intake.service';
 
@@ -366,5 +369,87 @@ describe('updateIntakeItem — refusal order end to end (BS#2797)', () => {
     ['a clear on a surviving item is already_filed', { cited_album_id: null }, 'pool', 'already_filed'],
   ])('%s', async (_name, patch, state, expected) => {
     expect(await refuse(patch, state)).toBe(expected);
+  });
+});
+
+describe('RELEASE_ACCEPTED_REVIEW — the one UPDATE that takes a review off every accepting item (BS#2854)', () => {
+  const rendered = db
+    .update(intake_items)
+    .set(RELEASE_ACCEPTED_REVIEW)
+    .where(eq(intake_items.accepted_review_id, 3))
+    .toSQL();
+  const text = rendered.sql.toLowerCase();
+
+  it('clears the three accept columns together and rewrites state in one statement', () => {
+    expect(text).toMatch(
+      /^update "[^"]+"\."intake_items" set "state" = case .* end, "accepted_review_id" = \$1, "accepted_by" = \$2, "accepted_at" = \$3 where /
+    );
+    expect(rendered.params.slice(0, 3)).toEqual([null, null, null]);
+  });
+
+  it('sends a reviewed item to its holder when it has one, else to the pool, and keeps every other state', () => {
+    expect(text).toMatch(
+      /case when .*"state" = 'reviewed' and .*"checked_out_by" is not null then 'checked_out' when .*"state" = 'reviewed' then 'pool' else .*"state" end/
+    );
+  });
+
+  it('reaches every accepting item by the pointer and nothing else', () => {
+    expect(text).toMatch(/where "[^"]+"\."intake_items"\."accepted_review_id" = \$4$/);
+    expect(rendered.params[3]).toBe(3);
+  });
+});
+
+describe('deleteIntakeItem (BS#2854)', () => {
+  /** A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows` and logs each method called on it. */
+  const calls: string[] = [];
+  const builder = (label: string, rows: unknown[]): unknown => {
+    calls.push(label);
+    const proxy: unknown = new Proxy(() => undefined, {
+      get: (_t, prop: string) => {
+        if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
+        return (...args: unknown[]) => {
+          if (prop === 'for') calls.push(`${label} for ${String(args[0])}`);
+          return proxy;
+        };
+      },
+    });
+    return proxy;
+  };
+  const run = async (selects: unknown[][]) => {
+    calls.length = 0;
+    const tx = {
+      select: jest.fn(() => builder('select', selects.shift() ?? [])),
+      delete: jest.fn(() => builder('delete', [])),
+    };
+    jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
+    return { result: await deleteIntakeItem(7), tx };
+  };
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('locks the item first, reads the authors of every review (drafts included), then deletes, and answers the authors', async () => {
+    const { result, tx } = await run([
+      [{ state: 'checked_out' }],
+      [{ author: 'Test Reviewer' }, { author: null }, { author: 'Test Visiting DJ' }],
+    ]);
+    expect(result).toEqual({ outcome: 'deleted', authors: ['Test Reviewer', 'Test Visiting DJ'] });
+    expect(calls).toEqual(['select', 'select for update', 'select', 'delete']);
+    expect(tx.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['filed', 'finalized'])(
+    'a %s item is already_filed, with no read of authors and no delete',
+    async (state) => {
+      const { result, tx } = await run([[{ state }]]);
+      expect(result).toEqual({ outcome: 'already_filed' });
+      expect(tx.select).toHaveBeenCalledTimes(1);
+      expect(tx.delete).not.toHaveBeenCalled();
+    }
+  );
+
+  it('a missing item is not_found', async () => {
+    const { result, tx } = await run([[]]);
+    expect(result).toEqual({ outcome: 'not_found' });
+    expect(tx.delete).not.toHaveBeenCalled();
   });
 });

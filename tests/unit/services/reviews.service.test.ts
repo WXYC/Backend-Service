@@ -14,7 +14,18 @@ const mockInserts: { table: string; values: Record<string, unknown> }[] = [];
 /** Every statement that touched the database, in order: `select <table>` / `update` / `insert <table>`. */
 const mockStatements: string[] = [];
 /** Every select, in order: which handle ran it (`db` outside the transaction, `tx` inside), its table, its lock and its rendered WHERE. */
-const mockReads: { handle: 'db' | 'tx'; table: string; lock?: string; of?: string; where: string }[] = [];
+const mockReads: {
+  handle: 'db' | 'tx';
+  table: string;
+  lock?: string;
+  of?: string;
+  where: string;
+  ordered?: boolean;
+}[] = [];
+/** Every UPDATE and DELETE, in order, with its table, its `SET` (updates) and its rendered WHERE. */
+const mockWritesTo: { verb: 'update' | 'delete'; table: string; set?: Record<string, unknown>; where: string }[] = [];
+/** Every raw statement run through `tx.execute`, rendered. */
+const mockExecuted: string[] = [];
 
 // The default unit stub for the auth package has no `roleGrants`; `holdsReviewsManage` needs the real one.
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
@@ -36,6 +47,10 @@ jest.mock('@wxyc/database', () => {
         return c;
       },
       leftJoin: () => c,
+      orderBy: () => {
+        read.ordered = true;
+        return c;
+      },
       where: (w: any) => {
         const q = new PgDialect().sqlToQuery(w);
         read.where = `${q.sql} ${JSON.stringify(q.params)}`;
@@ -60,24 +75,58 @@ jest.mock('@wxyc/database', () => {
         return { returning: () => Promise.resolve([{ id: 11 }]) };
       },
     }),
-    update: () => ({
+    update: (t: any) => ({
       set: (s: Record<string, unknown>) => {
         mockWrites.updated = s;
         mockStatements.push('update');
-        return { where: () => ({ returning: () => Promise.resolve([mockUpdatedRow]) }) };
+        return {
+          where: (w: any) => {
+            const q = new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(w);
+            mockWritesTo.push({
+              verb: 'update',
+              table: jest.requireActual('drizzle-orm').getTableName(t),
+              set: s,
+              where: `${q.sql} ${JSON.stringify(q.params)}`,
+            });
+            return {
+              returning: () => Promise.resolve([mockUpdatedRow]),
+              then: (resolve: any, reject: any) => Promise.resolve([]).then(resolve, reject),
+            };
+          },
+        };
       },
     }),
+    delete: (t: any) => ({
+      where: (w: any) => {
+        const q = new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(w);
+        mockStatements.push('delete');
+        mockWritesTo.push({
+          verb: 'delete',
+          table: jest.requireActual('drizzle-orm').getTableName(t),
+          where: `${q.sql} ${JSON.stringify(q.params)}`,
+        });
+        return Promise.resolve([]);
+      },
+    }),
+    execute: (q: any) => {
+      mockStatements.push('execute');
+      const rendered = new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(q);
+      mockExecuted.push(`${rendered.sql} ${JSON.stringify(rendered.params)}`);
+      return Promise.resolve(mockQueue.shift());
+    },
   };
   return { ...realSchema, db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) } };
 });
 
-import { FILED_STATES, effectiveState } from '../../../apps/backend/services/intake.service';
+import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from '../../../apps/backend/services/intake.service';
 import {
   AUTHOR_MAX,
   createReview,
+  deleteReview,
   editOutcome,
   lockReviewAfterItem,
   snapshotAuthor,
+  submitReview,
   updateReview,
   writeReviewRevision,
 } from '../../../apps/backend/services/reviews.service';
@@ -91,6 +140,8 @@ beforeEach(() => {
   mockReads.length = 0;
   mockInserts.length = 0;
   mockStatements.length = 0;
+  mockWritesTo.length = 0;
+  mockExecuted.length = 0;
   mockUpdatedRow = {};
   delete mockWrites.inserted;
   delete mockWrites.updated;
@@ -254,6 +305,42 @@ describe('lockReviewAfterItem', () => {
       ['reviews', 'update', undefined],
     ]);
     expect(mockReads[1].where).toContain('[8]');
+  });
+
+  test("with acceptingItems, locks the review's own item and every accepting item in ONE statement, ascending by id, before the review", async () => {
+    // The review's own item is 8; items 5 and 8 accept it. Ascending, deduplicated: 5, 8.
+    mockQueue.push([{ item: 8 }], [{ id: 8 }, { id: 5 }], [{ id: 5 }, { id: 8 }], [{ id: 3 }]);
+    expect(
+      await lockReviewAfterItem({ select: jest.requireMock('@wxyc/database').db.select }, 3, 'update', {
+        acceptingItems: true,
+      })
+    ).toEqual({ itemId: 8 });
+    expect(mockReads.map((r) => [r.table, r.lock, r.ordered])).toEqual([
+      ['reviews', undefined, undefined],
+      ['intake_items', undefined, undefined],
+      ['intake_items', 'update', true],
+      ['reviews', 'update', undefined],
+    ]);
+    expect(mockReads[1].where).toContain('[3]');
+    expect(mockReads[2].where).toContain('[5,8]');
+  });
+
+  test('with acceptingItems and no item at all, there is nothing to lock but the review', async () => {
+    mockQueue.push([{ item: null }], [], [{ id: 3 }]);
+    await lockReviewAfterItem({ select: jest.requireMock('@wxyc/database').db.select }, 3, 'update', {
+      acceptingItems: true,
+    });
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
+      ['reviews', undefined],
+      ['intake_items', undefined],
+      ['reviews', 'update'],
+    ]);
+  });
+
+  test('without acceptingItems, no accepting-items read is made', async () => {
+    mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }]);
+    await lock('share');
+    expect(mockReads).toHaveLength(3);
   });
 
   test('a review on a library release alone has no item to lock', async () => {
@@ -582,5 +669,303 @@ describe('updateReview', () => {
       expect((await updateReview(3, { credit: 'real_name', publish_website: true }, DJ)).outcome).toBe('updated');
       expect(mockWrites.updated).toMatchObject({ credit: 'real_name', publish_website: true });
     });
+  });
+});
+
+const DRAFT = (o: object = {}) => ({
+  id: 3,
+  status: 'draft',
+  medium: 'typed',
+  review: 'Warm and strange.',
+  artist_blurb: 'A blurb.',
+  buzzwords: 'warm',
+  recommended_tracks: 'la paradoja',
+  fcc: null,
+  author: 'Test Reviewer',
+  author_user_id: 'dj-1',
+  recorded_by_user_id: null,
+  submitted_at: null,
+  last_modified: new Date('2026-09-30T12:30:00.000Z'),
+  ...o,
+});
+
+describe('submitReview', () => {
+  /** Scripts a submit: the lock reads (own item 8), the review, the revision's lock and highest number, then the read-back. */
+  const script = (current: object, ...more: unknown[][]) =>
+    mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [DRAFT(current)], ...more);
+  const REREAD = DRAFT({ status: 'submitted', note: 'from selectReview' });
+
+  test('stamps submitted_at, writes revision 1 and answers what selectReview reads after both writes', async () => {
+    script({}, [{ id: 3 }], [{ n: 0 }], [REREAD]);
+    expect(await submitReview(3, DJ)).toEqual({ outcome: 'submitted', review: REREAD });
+    expect(mockWritesTo).toHaveLength(1);
+    expect(mockWritesTo[0]).toMatchObject({ verb: 'update', table: 'reviews' });
+    expect(mockWritesTo[0].set).toMatchObject({ status: 'submitted' });
+    expect(mockWritesTo[0].set).toHaveProperty('submitted_at');
+    expect(mockInserts).toEqual([
+      {
+        table: 'review_revisions',
+        values: {
+          review_id: 3,
+          revision: 1,
+          review: 'Warm and strange.',
+          artist_blurb: 'A blurb.',
+          buzzwords: 'warm',
+          recommended_tracks: 'la paradoja',
+          fcc: null,
+          edited_by: 'Test Reviewer',
+          edited_by_user_id: 'dj-1',
+        },
+      },
+    ]);
+    expect(mockStatements.at(-2)).toBe('insert review_revisions');
+    expect(mockStatements.at(-1)).toMatch(/^select#/);
+    expect(mockReads.at(-1)).toMatchObject({ handle: 'tx', table: 'reviews' });
+  });
+
+  test('locks only through lockReviewAfterItem (item FOR SHARE, then the review FOR UPDATE) and issues nothing else against intake_items', async () => {
+    script({}, [{ id: 3 }], [{ n: 0 }], [REREAD]);
+    await submitReview(3, DJ);
+    expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
+    expect(mockReads.map((r) => [r.table, r.lock])).toEqual([
+      ['reviews', undefined],
+      ['intake_items', 'share'],
+      ['reviews', 'update'],
+      ['reviews', undefined],
+      ['reviews', 'update'],
+      ['review_revisions', undefined],
+      ['reviews', undefined],
+    ]);
+    expect(mockWritesTo.filter((w) => w.table === 'intake_items')).toEqual([]);
+    expect(mockInserts.filter((i) => i.table === 'intake_items')).toEqual([]);
+  });
+
+  test('a review with no item (a library release) locks no item', async () => {
+    mockQueue.push(
+      [{ item: null }],
+      [{ id: 3 }],
+      [DRAFT({ intake_item_id: null, album_id: 9 })],
+      [{ id: 3 }],
+      [{ n: 0 }],
+      [REREAD]
+    );
+    expect((await submitReview(3, DJ)).outcome).toBe('submitted');
+    expect(mockReads.map((r) => r.table)).not.toContain('intake_items');
+  });
+
+  test('a draft for a filed item is submitted like any other: the item is never read, only locked', async () => {
+    script({}, [{ id: 3 }], [{ n: 0 }], [REREAD]);
+    expect((await submitReview(3, DJ)).outcome).toBe('submitted');
+    expect(mockReads.filter((r) => r.table === 'intake_items')).toHaveLength(1);
+  });
+
+  test('a music director who recorded an on-behalf draft submits it; revision 1 names the free-text author and no account', async () => {
+    script(
+      { author_user_id: null, recorded_by_user_id: 'md-1', author: 'Test Visiting DJ' },
+      [{ id: 3 }],
+      [{ n: 0 }],
+      [REREAD]
+    );
+    expect((await submitReview(3, MD)).outcome).toBe('submitted');
+    expect(mockInserts[0].values).toMatchObject({ edited_by: 'Test Visiting DJ', edited_by_user_id: null });
+  });
+
+  test('submitting twice is not_draft and writes nothing', async () => {
+    script({ status: 'submitted' });
+    expect(await submitReview(3, DJ)).toEqual({ outcome: 'not_draft' });
+    expect(mockWritesTo).toEqual([]);
+    expect(mockInserts).toEqual([]);
+  });
+
+  test('a typed review with no text is text_required and writes nothing', async () => {
+    script({ review: null });
+    expect(await submitReview(3, DJ)).toEqual({ outcome: 'text_required' });
+    expect(mockWritesTo).toEqual([]);
+  });
+
+  test('a handwritten review with no text is submitted', async () => {
+    script({ review: null, medium: 'handwritten' }, [{ id: 3 }], [{ n: 0 }], [REREAD]);
+    expect((await submitReview(3, DJ)).outcome).toBe('submitted');
+    expect(mockInserts[0].values).toMatchObject({ review: null });
+  });
+
+  test.each([
+    ["someone else's draft", { author_user_id: 'dj-9' }, DJ, 'not_found'],
+    ["a music director on someone else's draft", { author_user_id: 'dj-9' }, MD, 'not_found'],
+    ["another DJ's submitted review", { author_user_id: 'dj-9', status: 'submitted' }, DJ, 'forbidden'],
+  ])('%s is %s and writes nothing', async (_name, o, actor, expected) => {
+    script(o);
+    expect(await submitReview(3, actor)).toEqual({ outcome: expected });
+    expect(mockWritesTo).toEqual([]);
+  });
+
+  test('a missing review is not_found', async () => {
+    mockQueue.push([]);
+    expect(await submitReview(3, DJ)).toEqual({ outcome: 'not_found' });
+  });
+});
+
+describe('deleteReview', () => {
+  /**
+   * Scripts a delete by `actor`: the lock reads (own item 8; `accepting` are the accepting item rows the second read
+   * returns and the single locking statement locks), the review, the accepting items, and, for a caller without
+   * `reviews: manage` whose review no item accepts, the print-log check.
+   */
+  const script = (
+    review: object,
+    accepting: { id: number; state: string; cited_album_id?: number | null; cited_submission_id?: number | null }[],
+    opts: { inUse?: boolean; manage?: boolean } = {}
+  ) => {
+    const ids = [...new Set([8, ...accepting.map((a) => a.id)])].sort((a, b) => a - b);
+    mockQueue.push(
+      [{ item: 8 }],
+      accepting.map((a) => ({ id: a.id })),
+      ids.map((id) => ({ id })),
+      [{ id: 3 }],
+      [DRAFT({ status: 'submitted', ...review })],
+      accepting.map((a) => ({ cited_album_id: null, cited_submission_id: null, ...a }))
+    );
+    if (!opts.manage && accepting.length === 0) mockQueue.push([{ in_use: opts.inUse ?? false }]);
+  };
+  const item = (id: number, state: string, o: object = {}) => ({ id, state, ...o });
+  const writes = () => mockWritesTo.map((w) => `${w.verb} ${w.table}`);
+
+  test("locks through lockReviewAfterItem, the review's own item and every accepting item in ascending id order before the review, then reads the accepting items and decides", async () => {
+    script({}, [item(8, 'reviewed'), item(5, 'reviewed')], { manage: true });
+    await deleteReview(3, MD);
+    expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
+    expect(mockReads.map((r) => [r.table, r.lock, r.ordered])).toEqual([
+      ['reviews', undefined, undefined],
+      ['intake_items', undefined, undefined],
+      ['intake_items', 'update', true],
+      ['reviews', 'update', undefined],
+      ['reviews', undefined, undefined],
+      ['intake_items', undefined, undefined],
+    ]);
+    expect(mockReads[2].where).toContain('[5,8]');
+    expect(mockReads[1].where).toContain('"accepted_review_id"');
+    expect(mockReads[5].where).toContain('"accepted_review_id"');
+  });
+
+  describe('an author without reviews: manage', () => {
+    test.each([
+      ['accepted for its own item', [item(8, 'reviewed')]],
+      ['accepted for an item that cites its release', [item(5, 'reviewed', { cited_album_id: 9 })]],
+      ['accepted for a filed item', [item(8, 'filed')]],
+    ])('is refused in_use for a review %s, with nothing written', async (_name, accepting) => {
+      script({}, accepting);
+      expect(await deleteReview(3, DJ)).toEqual({ outcome: 'in_use' });
+      expect(mockWritesTo).toEqual([]);
+      expect(mockExecuted).toEqual([]);
+    });
+
+    test('is refused in_use for the latest print of a copy, with nothing written', async () => {
+      script({}, [], { inUse: true });
+      expect(await deleteReview(3, DJ)).toEqual({ outcome: 'in_use' });
+      expect(mockWritesTo).toEqual([]);
+    });
+
+    test('may delete once a newer print of that copy names another review: the print log read says not in use', async () => {
+      script({}, [], { inUse: false });
+      expect(await deleteReview(3, DJ)).toEqual({ outcome: 'deleted' });
+      expect(writes()).toEqual(['delete reviews']);
+      expect(mockWritesTo[0].where).toContain('[3]');
+    });
+
+    test('the print-log read asks for the newest print of an item, and of a release with no item, naming this review', async () => {
+      script({}, [], { inUse: false });
+      await deleteReview(3, DJ);
+      expect(mockExecuted).toHaveLength(1);
+      const q = mockExecuted[0].toLowerCase();
+      expect(q).toContain('review_prints');
+      expect(q).toContain('not exists');
+      expect(q).toMatch(/is not distinct from/);
+      expect(q).toMatch(/\("n"\."printed_at", "n"\."id"\) > \("p"\."printed_at", "p"\."id"\)/);
+      expect(mockExecuted[0]).toContain('[3]');
+    });
+
+    test('may delete an unaccepted, unprinted draft or submitted review', async () => {
+      script({ status: 'draft' }, []);
+      expect((await deleteReview(3, DJ)).outcome).toBe('deleted');
+    });
+  });
+
+  describe('reviews: manage', () => {
+    test('deletes the accepted review of a not-yet-filed item with ONE update that takes it off the item, then the delete', async () => {
+      script({}, [item(8, 'reviewed')], { manage: true });
+      expect(await deleteReview(3, MD)).toEqual({ outcome: 'deleted' });
+      expect(writes()).toEqual(['update intake_items', 'delete reviews']);
+      expect(mockWritesTo[0].set).toBe(RELEASE_ACCEPTED_REVIEW);
+      expect(mockWritesTo[0].where).toContain('[3]');
+      expect(mockWritesTo[0].where).toContain('"accepted_review_id"');
+      expect(mockExecuted).toEqual([]);
+    });
+
+    test('refuses accepted_review for a filed or finalized item with no citation, writing nothing', async () => {
+      script({}, [item(8, 'filed')], { manage: true });
+      expect(await deleteReview(3, MD)).toEqual({ outcome: 'accepted_review' });
+      expect(mockWritesTo).toEqual([]);
+    });
+
+    test('refuses accepted_review for a finalized item with no citation', async () => {
+      script({}, [item(8, 'finalized')], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('accepted_review');
+    });
+
+    test.each([
+      ['an album citation', { cited_album_id: 9 }],
+      ['a submission citation', { cited_submission_id: 4 }],
+    ])('deletes the accepted review of a filed item that carries %s, which keeps its state', async (_name, cite) => {
+      script({}, [item(8, 'filed', cite)], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('deleted');
+      expect(writes()).toEqual(['update intake_items', 'delete reviews']);
+    });
+
+    test('deletes a printed review that is not accepted, with no update', async () => {
+      script({}, [], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('deleted');
+      expect(writes()).toEqual(['delete reviews']);
+      expect(mockExecuted).toEqual([]);
+    });
+
+    test('a review accepted by two items, its own and one that cites its release: one update for both, then the delete', async () => {
+      script({}, [item(8, 'reviewed'), item(5, 'reviewed', { cited_album_id: 9 })], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('deleted');
+      expect(writes()).toEqual(['update intake_items', 'delete reviews']);
+    });
+
+    test('with one of the two filed and uncited, the delete is refused and neither item is written', async () => {
+      script({}, [item(8, 'reviewed'), item(5, 'filed')], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('accepted_review');
+      expect(mockWritesTo).toEqual([]);
+    });
+
+    test('with the citing item filed, the other unfiled, the delete goes ahead', async () => {
+      script({}, [item(8, 'reviewed'), item(5, 'filed', { cited_album_id: 9 })], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('deleted');
+      expect(writes()).toEqual(['update intake_items', 'delete reviews']);
+    });
+
+    test("a music director may delete another's submitted review but not another's draft", async () => {
+      script({ author_user_id: 'dj-9' }, [], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('deleted');
+      mockQueue.length = 0;
+      script({ author_user_id: 'dj-9', status: 'draft' }, [], { manage: true });
+      expect((await deleteReview(3, MD)).outcome).toBe('not_found');
+    });
+  });
+
+  test.each([
+    ["another DJ's submitted review", { author_user_id: 'dj-9' }, 'forbidden'],
+    ["another DJ's draft", { author_user_id: 'dj-9', status: 'draft' }, 'not_found'],
+  ])('%s is %s, with nothing written', async (_name, review, expected) => {
+    script(review, []);
+    expect(await deleteReview(3, DJ)).toEqual({ outcome: expected });
+    expect(mockWritesTo).toEqual([]);
+  });
+
+  test('a missing review is not_found', async () => {
+    mockQueue.push([]);
+    expect(await deleteReview(3, MD)).toEqual({ outcome: 'not_found' });
   });
 });

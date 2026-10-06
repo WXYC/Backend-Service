@@ -90,7 +90,7 @@ describe('/intake — reviews grants (BS#2796)', () => {
     mockGetIntakeItem.mockReset().mockResolvedValue(ITEM);
     mockLogIntakeItem.mockReset().mockResolvedValue({ outcome: 'logged', item: ITEM });
     mockUpdateIntakeItem.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM });
-    mockDeleteIntakeItem.mockReset().mockResolvedValue({ outcome: 'deleted' });
+    mockDeleteIntakeItem.mockReset().mockResolvedValue({ outcome: 'deleted', authors: [] });
   });
 
   const allMocks = () => [
@@ -197,7 +197,7 @@ describe('/intake/:id and bodies', () => {
     mockGetIntakeItem.mockReset().mockResolvedValue(ITEM);
     mockLogIntakeItem.mockReset().mockResolvedValue({ outcome: 'logged', item: ITEM });
     mockUpdateIntakeItem.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM });
-    mockDeleteIntakeItem.mockReset().mockResolvedValue({ outcome: 'deleted' });
+    mockDeleteIntakeItem.mockReset().mockResolvedValue({ outcome: 'deleted', authors: [] });
     mockRole('musicDirector');
   });
 
@@ -330,11 +330,15 @@ describe('/intake/:id and bodies', () => {
     expect(typeof res.body.message).toBe('string');
   });
 
-  test('DELETE answers deleted_review_authors: [] until slice 10 fills it in', async () => {
-    const res = await bearer(request(app).delete('/intake/7'));
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ deleted_review_authors: [] });
-  });
+  test.each([[[]], [['Test Reviewer', 'Test Reviewer', 'Test Visiting DJ']]])(
+    'DELETE answers deleted_review_authors with the authors the service names: %j',
+    async (authors) => {
+      mockDeleteIntakeItem.mockResolvedValueOnce({ outcome: 'deleted', authors });
+      const res = await bearer(request(app).delete('/intake/7'));
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ deleted_review_authors: authors });
+    }
+  );
 
   test('DELETE of a filed item is a 409 already_filed; of a missing one a 404', async () => {
     mockDeleteIntakeItem.mockResolvedValueOnce({ outcome: 'already_filed' });

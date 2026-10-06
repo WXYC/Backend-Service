@@ -137,7 +137,7 @@ export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
 
 /**
  * The zero-row follow-up read, which only chooses the answer and gates nothing.
- * Missing is a 404. For `updateIntakeItem`/`deleteIntakeItem` (the UPDATE's
+ * Missing is a 404. For `updateIntakeItem` (the UPDATE's
  * preconditions are "not filed" and, when a citation is set, "the citation is valid") any surviving item is
  * `already_filed`, except that a PATCH setting a citation (`'citation'`) answers `invalid_citation` for an unfiled one. For a
  * transition, an item still in the right effective state that the identity
@@ -226,14 +226,55 @@ export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> 
   }
 };
 
-/** Passes cascade with the item. Reviews can't attach until slice 9, so none go with it yet. */
-export const deleteIntakeItem = async (id: number) => {
-  const rows = await db
-    .delete(intake_items)
-    .where(and(eq(intake_items.id, id), notInArray(intake_items.state, FILED_STATES)))
-    .returning({ id: intake_items.id });
-  return { outcome: rows.length === 0 ? await refusalFor(id) : ('deleted' as const) };
+/**
+ * The `author` of every review on an intake item, oldest first, or of its drafts alone with `draftsOnly`. One
+ * helper behind both lists a music director sees, `deleted_review_authors` here and `draft_authors` on the item
+ * (BS#2860), so they cannot disagree about which drafts exist. Names only, never content; a review with no
+ * author text names nobody.
+ */
+export const reviewAuthorsOnItem = async (tx: Pick<typeof db, 'select'>, itemId: number, draftsOnly = false) =>
+  (
+    await tx
+      .select({ author: reviews.author })
+      .from(reviews)
+      .where(and(eq(reviews.intake_item_id, itemId), draftsOnly ? eq(reviews.status, 'draft') : undefined))
+      .orderBy(reviews.id)
+  )
+    .map((row) => row.author)
+    .filter((author): author is string => author !== null);
+
+/**
+ * The `SET` that takes an accepted review off an item: the three accept columns cleared together (never left to the
+ * foreign key's `SET NULL`, which would let `accepted_by` and `accepted_at` outlive the pointer), and a `reviewed`
+ * item sent back to its holder (`checked_out`) or the pile (`pool`). Any other state is kept: a filed or finalized
+ * item only loses the pointer. Flat `CASE`, not nested: two bare literals nested resolve to `text`, which cannot
+ * meet the enum column.
+ */
+export const RELEASE_ACCEPTED_REVIEW: PgUpdateSetSource<typeof intake_items> = {
+  accepted_review_id: null,
+  accepted_by: null,
+  accepted_at: null,
+  state: sql`CASE WHEN ${intake_items.state} = 'reviewed' AND ${intake_items.checked_out_by} IS NOT NULL THEN 'checked_out' WHEN ${intake_items.state} = 'reviewed' THEN 'pool' ELSE ${intake_items.state} END`,
 };
+
+/**
+ * Deletes an unfiled item and its reviews and passes (cascade), answering `authors`: the author of every review
+ * the cascade took, drafts included. The item row is locked first, then its authors are read and the item deleted
+ * in the same transaction, so a review created in between is either named or refused its subject.
+ */
+export const deleteIntakeItem = async (id: number) =>
+  db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select({ state: intake_items.state })
+      .from(intake_items)
+      .where(eq(intake_items.id, id))
+      .for('update');
+    if (!locked) return { outcome: 'not_found' as const };
+    if (FILED_STATES.includes(locked.state)) return { outcome: 'already_filed' as const };
+    const authors = await reviewAuthorsOnItem(tx, id);
+    await tx.delete(intake_items).where(eq(intake_items.id, id));
+    return { outcome: 'deleted' as const, authors };
+  });
 
 export type IntakeAction = 'checkout' | 'release' | 'request' | 'cancel_request' | 'accept' | 'pass';
 

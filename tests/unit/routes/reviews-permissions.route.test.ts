@@ -33,6 +33,8 @@ const mockRole = (role?: string, sub = 'caller-id') =>
 
 const mockCreate = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockUpdate = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
+const mockSubmit = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
+const mockDelete = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 
 jest.mock('@wxyc/database', () => ({
   reviewCreditEnum: jest.requireActual('../../../shared/database/src/schema').reviewCreditEnum,
@@ -40,6 +42,8 @@ jest.mock('@wxyc/database', () => ({
 jest.mock('../../../apps/backend/services/reviews.service', () => ({
   createReview: mockCreate,
   updateReview: mockUpdate,
+  submitReview: mockSubmit,
+  deleteReview: mockDelete,
 }));
 
 import { reviews_route } from '../../../apps/backend/routes/reviews.route';
@@ -54,27 +58,32 @@ const REVIEW = { id: 3, status: 'draft' };
 const post = (body: object) => request(app).post('/reviews').set('Authorization', 'Bearer t').send(body);
 const patch = (body: object, id = '3') =>
   request(app).patch(`/reviews/${id}`).set('Authorization', 'Bearer t').send(body);
+const submit = (id = '3') => request(app).post(`/reviews/${id}/submit`).set('Authorization', 'Bearer t');
+const remove = (id = '3') => request(app).delete(`/reviews/${id}`).set('Authorization', 'Bearer t');
 
 beforeEach(() => {
   mockedJwtVerify.mockReset();
   mockCreate.mockReset().mockResolvedValue({ outcome: 'created', review: REVIEW });
   mockUpdate.mockReset().mockResolvedValue({ outcome: 'updated', review: REVIEW });
+  mockSubmit.mockReset().mockResolvedValue({ outcome: 'submitted', review: REVIEW });
+  mockDelete.mockReset().mockResolvedValue({ outcome: 'deleted' });
 });
 
 describe.each([
   ['POST /reviews', (r?: object) => post({ album_id: 9, ...r })],
   ['PATCH /reviews/:id', (r?: object) => patch({ review: 'x', ...r })],
-])('%s grant', (_name, send) => {
+  ['POST /reviews/:id/submit', () => submit()],
+  ['DELETE /reviews/:id', () => remove()],
+])('%s grant', (name, send) => {
   test.each(['dj', 'musicDirector', 'stationManager'])('%s is authorized', async (role) => {
     mockRole(role);
-    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(name.startsWith('DELETE') ? 204 : 200);
   });
 
   test.each(['member', undefined])('%s is refused before any query', async (role) => {
     mockRole(role);
     expect((await send()).status).toBe(403);
-    expect(mockCreate).not.toHaveBeenCalled();
-    expect(mockUpdate).not.toHaveBeenCalled();
+    for (const mock of [mockCreate, mockUpdate, mockSubmit, mockDelete]) expect(mock).not.toHaveBeenCalled();
   });
 });
 
@@ -196,5 +205,72 @@ describe('PATCH /reviews/:id', () => {
   test('an empty patch is a 400', async () => {
     mockRole('dj');
     expect((await patch({})).status).toBe(400);
+  });
+});
+
+describe('POST /reviews/:id/submit', () => {
+  test('passes the id and the caller, with manage from the role, and answers the service review', async () => {
+    mockRole('musicDirector');
+    const res = await submit();
+    expect([res.status, res.body]).toEqual([200, REVIEW]);
+    expect(mockSubmit).toHaveBeenCalledWith(3, { id: 'caller-id', manage: true });
+  });
+
+  test.each([
+    ['not_found', 404],
+    ['forbidden', 403],
+    ['text_required', 400],
+    ['not_draft', 409],
+  ])('%s is a %i', async (outcome, status) => {
+    mockRole('dj');
+    mockSubmit.mockResolvedValue({ outcome });
+    const res = await submit();
+    expect(res.status).toBe(status);
+    if (status === 409) expect(res.body.reason).toBe('not_draft');
+  });
+
+  test.each([['abc'], ['0'], ['2147483648']])('id %s is a 400 naming the review, before any query', async (id) => {
+    mockRole('dj');
+    const res = await submit(id);
+    expect([res.status, res.body.message]).toEqual([400, 'Invalid review id']);
+    expect(mockSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('DELETE /reviews/:id', () => {
+  test('passes the id and the caller, and answers 204 with no body', async () => {
+    mockRole('dj');
+    const res = await remove();
+    expect([res.status, res.text]).toEqual([204, '']);
+    expect(mockDelete).toHaveBeenCalledWith(3, { id: 'caller-id', manage: false });
+  });
+
+  test.each([
+    ['not_found', 404, undefined],
+    ['forbidden', 403, undefined],
+    ['in_use', 409, 'in_use'],
+    ['accepted_review', 409, 'accepted_review'],
+  ])('%s is a %i', async (outcome, status, reason) => {
+    mockRole('dj');
+    mockDelete.mockResolvedValue({ outcome });
+    const res = await remove();
+    expect(res.status).toBe(status);
+    expect(res.body.reason).toBe(reason);
+  });
+
+  test("a DJ cannot delete someone else's review, and a music director can: the service is asked as each", async () => {
+    mockRole('dj');
+    mockDelete.mockResolvedValue({ outcome: 'forbidden' });
+    expect((await remove()).status).toBe(403);
+    mockRole('musicDirector');
+    mockDelete.mockResolvedValue({ outcome: 'deleted' });
+    expect((await remove()).status).toBe(204);
+    expect(mockDelete.mock.calls.map((c) => c[1].manage)).toEqual([false, true]);
+  });
+
+  test.each([['abc'], ['0'], ['2147483648']])('id %s is a 400 before any query', async (id) => {
+    mockRole('dj');
+    expect((await remove(id)).status).toBe(400);
+    expect(mockDelete).not.toHaveBeenCalled();
   });
 });

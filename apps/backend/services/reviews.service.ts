@@ -1,8 +1,10 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import {
   db,
   intake_items,
   library,
+  review_prints,
   review_revisions,
   reviews,
   user,
@@ -10,11 +12,11 @@ import {
   type Review,
 } from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
-import { effectiveState } from './intake.service.js';
+import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from './intake.service.js';
 
 /**
  * In-app review service behind `/reviews` (BS#2802, slice 10a of BS#2791): a DJ's own
- * draft is created and edited here. Submit and delete are BS#2854.
+ * draft is created, edited, submitted and deleted here (submit and delete are BS#2854).
  */
 
 /** Mirror of the contract's `Review` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x. */
@@ -126,17 +128,40 @@ export const editOutcome = (
  * for delete), then the review row with a plain `SELECT id ... FOR UPDATE`. Never drizzle's
  * `.for('update', { of: reviews })`, which renders a schema-qualified `FOR UPDATE OF
  * "wxyc_schema"."reviews"` that Postgres rejects. `intake_item_id` never changes, so reading it
- * unlocked to find the item to lock is safe. `undefined` when the review does not exist.
+ * unlocked to find the item to lock is safe. With `acceptingItems` (delete, which writes every item
+ * that accepts the review) the ids of those items are read unlocked too, and the review's own item
+ * and all of them are locked in one statement, ascending by id, so two deletes cannot take the same
+ * items in opposite orders. An accept that lands after that read is handled by the caller, which
+ * reads the accepting items again once the review is locked. `undefined` when the review does not exist.
  */
 export const lockReviewAfterItem = async (
   tx: Pick<typeof db, 'select'>,
   reviewId: number,
-  itemMode: 'share' | 'update'
+  itemMode: 'share' | 'update',
+  { acceptingItems = false }: { acceptingItems?: boolean } = {}
 ) => {
   const [subject] = await tx.select({ item: reviews.intake_item_id }).from(reviews).where(eq(reviews.id, reviewId));
   if (!subject) return undefined;
-  if (subject.item !== null) {
-    await tx.select({ id: intake_items.id }).from(intake_items).where(eq(intake_items.id, subject.item)).for(itemMode);
+  const itemIds = new Set(subject.item === null ? [] : [subject.item]);
+  if (acceptingItems) {
+    const accepting = await tx
+      .select({ id: intake_items.id })
+      .from(intake_items)
+      .where(eq(intake_items.accepted_review_id, reviewId));
+    accepting.forEach((row) => itemIds.add(row.id));
+  }
+  if (itemIds.size > 0) {
+    await tx
+      .select({ id: intake_items.id })
+      .from(intake_items)
+      .where(
+        inArray(
+          intake_items.id,
+          [...itemIds].sort((a, b) => a - b)
+        )
+      )
+      .orderBy(intake_items.id)
+      .for(itemMode);
   }
   const [mine] = await tx.select({ id: reviews.id }).from(reviews).where(eq(reviews.id, reviewId)).for('update');
   return mine ? { itemId: subject.item } : undefined;
@@ -230,4 +255,78 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
       .returning();
     if (editor) await writeReviewRevision(tx, id, pickContent(row), editor);
     return { outcome: 'updated' as const, review: (await selectReview(id, tx))! };
+  });
+
+/**
+ * Submits a draft: `submitted`, `submitted_at` stamped, and revision 1 written in the same transaction (a
+ * draft has no history; it starts here), `edited_by` the author's snapshot. It never writes the intake item,
+ * in any state, so a review submitted for a filed item is an ordinary submitted review. Whoever may edit the
+ * review may submit it (`editOutcome`); a typed review needs text. The response is read back through
+ * `selectReview` after both writes. The notice to the music directors (slice 14, BS#2806) goes after commit,
+ * at the caller of this function.
+ */
+export const submitReview = async (id: number, actor: ReviewsActor) =>
+  db.transaction(async (tx) => {
+    if (!(await lockReviewAfterItem(tx, id, 'share'))) return { outcome: 'not_found' as const };
+    const current = (await selectReview(id, tx))!;
+    const decision = editOutcome(current, actor);
+    if (decision !== 'allowed') return { outcome: decision };
+    if (current.status !== 'draft') return { outcome: 'not_draft' as const };
+    if (current.medium === 'typed' && current.review === null) return { outcome: 'text_required' as const };
+    await tx
+      .update(reviews)
+      .set({ status: 'submitted', submitted_at: sql`now()`, last_modified: sql`now()` })
+      .where(eq(reviews.id, id));
+    await writeReviewRevision(tx, id, pickContent(current), { name: current.author, userId: current.author_user_id });
+    return { outcome: 'submitted' as const, review: (await selectReview(id, tx))! };
+  });
+
+/** Whether a review is the newest print of a copy: of an intake item, or, with no item, of a library release. */
+const isLatestPrint = async (tx: Pick<typeof db, 'execute'>, reviewId: number) => {
+  const p = alias(review_prints, 'p');
+  const n = alias(review_prints, 'n');
+  const [row] = await tx.execute<{ in_use: boolean }>(
+    sql`SELECT EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId} AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id}))) AS in_use`
+  );
+  return row.in_use;
+};
+
+/**
+ * Deletes a review (its revisions go with it). A review is IN USE when an item accepts it or it is the newest
+ * print of a copy; an author without `reviews: manage` may not delete one (`in_use`). `reviews: manage` may,
+ * except an accepted review of a filed or finalized item that carries no citation (`accepted_review`): a
+ * release must keep an accepted review or a citation. A review can be accepted by several items, so every
+ * accepting item is judged, and when none refuses, one UPDATE (`RELEASE_ACCEPTED_REVIEW`) runs before the
+ * delete and takes it off all of them. Locks: `lockReviewAfterItem` with `acceptingItems`, then the accepting
+ * items are read again under the review's lock, so an accept that committed in between is still judged.
+ */
+export const deleteReview = async (id: number, actor: ReviewsActor) =>
+  db.transaction(async (tx) => {
+    if (!(await lockReviewAfterItem(tx, id, 'update', { acceptingItems: true }))) {
+      return { outcome: 'not_found' as const };
+    }
+    const decision = editOutcome((await selectReview(id, tx))!, actor);
+    if (decision !== 'allowed') return { outcome: decision };
+    const accepting = await tx
+      .select({
+        state: intake_items.state,
+        cited_album_id: intake_items.cited_album_id,
+        cited_submission_id: intake_items.cited_submission_id,
+      })
+      .from(intake_items)
+      .where(eq(intake_items.accepted_review_id, id));
+    if (actor.manage) {
+      const uncited = (item: (typeof accepting)[number]) =>
+        item.cited_album_id === null && item.cited_submission_id === null;
+      if (accepting.some((item) => FILED_STATES.includes(item.state) && uncited(item))) {
+        return { outcome: 'accepted_review' as const };
+      }
+    } else if (accepting.length > 0 || (await isLatestPrint(tx, id))) {
+      return { outcome: 'in_use' as const };
+    }
+    if (accepting.length > 0) {
+      await tx.update(intake_items).set(RELEASE_ACCEPTED_REVIEW).where(eq(intake_items.accepted_review_id, id));
+    }
+    await tx.delete(reviews).where(eq(reviews.id, id));
+    return { outcome: 'deleted' as const };
   });
