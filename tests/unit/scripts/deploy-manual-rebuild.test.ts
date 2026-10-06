@@ -61,7 +61,8 @@ describe('deploy-manual.yml rebuild switch', () => {
 
   it('maps rebuild to an empty version through the typed inputs context', () => {
     expect(manual).toContain("version: ${{ !inputs.rebuild && (inputs.version || 'latest') || '' }}");
-    expect(manual).not.toContain('github.event.inputs.rebuild');
+    expect(manual).toContain('target: ${{ inputs.target }}');
+    expect(manual).not.toContain('github.event.inputs');
   });
 
   const validateRebuild = manualDoc.jobs['validate-rebuild'];
@@ -73,18 +74,26 @@ describe('deploy-manual.yml rebuild switch', () => {
 
   // The job always runs (a skipped ancestor can silently skip the called workflow's
   // jobs, actions/runner#2205), so the script itself gates on REBUILD.
-  it.each<[string, string, string, string, boolean]>([
-    ['a rebuild with no version, from main', 'true', '', 'refs/heads/main', true],
-    ['a rebuild with an explicit version', 'true', 'v1.2.3', 'refs/heads/main', false],
-    ['a rebuild from a ref other than main', 'true', '', 'refs/heads/feature/x', false],
-    ['a rebuild from a tag ref', 'true', '', 'refs/tags/backend/v1.2.3', false],
-    ['an ordinary dispatch from main', 'false', '', 'refs/heads/main', true],
-    ['a rollback to a version, from a branch', 'false', 'v1.2.3', 'refs/heads/feature/x', true],
-    ['a rollback to a version, from a tag ref', 'false', 'v1.2.3', 'refs/tags/backend/v1.2.3', true],
-  ])('validate-rebuild with %s', (_label, rebuild, version, ref, ok) => {
+  it.each<[string, string, string, string, string, boolean]>([
+    ['a rebuild with no version, from main', 'true', 'backend', '', 'refs/heads/main', true],
+    ['a rebuild of several targets', 'true', 'backend\nauth', '', 'refs/heads/main', true],
+    ['a rebuild with an exactly empty target', 'true', '', '', 'refs/heads/main', false],
+    ['a rebuild with a blank-only target', 'true', ' \n\t\n', '', 'refs/heads/main', false],
+    ['a rebuild with an explicit version', 'true', 'backend', 'v1.2.3', 'refs/heads/main', false],
+    ['a rebuild from a ref other than main', 'true', 'backend', '', 'refs/heads/feature/x', false],
+    ['a rebuild from a tag ref', 'true', 'backend', '', 'refs/tags/backend/v1.2.3', false],
+    ['an ordinary dispatch from main', 'false', 'backend', '', 'refs/heads/main', true],
+    ['a rollback to a version, from a branch', 'false', 'backend', 'v1.2.3', 'refs/heads/feature/x', true],
+    ['a rollback to a version, from a tag ref', 'false', 'backend', 'v1.2.3', 'refs/tags/backend/v1.2.3', true],
+  ])('validate-rebuild with %s', (_label, rebuild, target, version, ref, ok) => {
     const r = runScript(
       findStep(validateRebuild),
-      { '${{ inputs.rebuild }}': rebuild, '${{ inputs.version }}': version, '${{ github.ref }}': ref },
+      {
+        '${{ inputs.rebuild }}': rebuild,
+        '${{ inputs.target }}': target,
+        '${{ inputs.version }}': version,
+        '${{ github.ref }}': ref,
+      },
       repoRoot
     );
     expect(r.status === 0).toBe(ok);
@@ -163,6 +172,23 @@ describe('deploy-base.yml per-target validation', () => {
     ['several targets, one per line', 'backend\nauth\n', true],
   ])('Validate Version Input Format (version=latest) with %s', (_label, target, ok) => {
     expect(runValidate('Validate Version Input Format', target, 'latest').status === 0).toBe(ok);
+  });
+
+  // An explicit version names a tag per target, so no target means nothing to check.
+  // The automatic path (deploy-auto.yml) sends an empty target AND an empty version,
+  // which skips this step entirely (`if: inputs.version != ''`).
+  it.each<[string, string, string, boolean]>([
+    ['an empty target and an explicit version', '', 'v1.2.3', false],
+    ['a blank-only target and an explicit version', ' \n\t', 'v1.2.3', false],
+    ['an empty target and version=latest', '', 'latest', false],
+  ])('Validate Version Input Format with %s', (_label, target, version, ok) => {
+    expect(runValidate('Validate Version Input Format', target, version).status === 0).toBe(ok);
+  });
+
+  it('skips Validate Version Input Format and Validate Build Target on the automatic path (empty target, empty version)', () => {
+    const steps = validateInputs.steps as (Step & { if?: string })[];
+    expect(steps.find((s) => s.name === 'Validate Version Input Format')?.if).toBe("inputs.version != ''");
+    expect(steps.find((s) => s.name === 'Validate Build Target')?.if).toBe("inputs.target != ''");
   });
 
   it('Validate Version Input Format does not execute a target as shell', () => {

@@ -36,6 +36,7 @@ jobs:
       - name: Refuse a rebuild that cannot work
         env:
           REBUILD: ${{ inputs.rebuild }}
+          TARGETS: ${{ inputs.target }}
           VERSION_INPUT: ${{ inputs.version }}
           REF: ${{ github.ref }}
         run: |
@@ -43,7 +44,12 @@ jobs:
             exit 0
           fi
           if [ -n "$VERSION_INPUT" ]; then
-            echo "Error: rebuild cannot be combined with an explicit version; a pinned version cannot be rebuilt." >&2
+            echo "Error: rebuild mode always builds a fresh image at the main head, so it takes no version; pass a version without rebuild to redeploy that tag." >&2
+            exit 1
+          fi
+          # An empty target would send deploy-base.yml into auto-detect and rebuild every target.
+          if ! grep -q '[^[:space:]]' <<< "$TARGETS"; then
+            echo "Error: rebuild needs at least one target; an empty target would rebuild every buildable target." >&2
             exit 1
           fi
           if [ "$REF" != "refs/heads/main" ]; then
@@ -55,6 +61,6 @@ jobs:
     needs: validate-rebuild
     uses: ./.github/workflows/deploy-base.yml
     with:
-      target: ${{ github.event.inputs.target }}
+      target: ${{ inputs.target }}
       version: ${{ !inputs.rebuild && (inputs.version || 'latest') || '' }}
     secrets: inherit
