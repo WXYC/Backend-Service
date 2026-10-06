@@ -7,7 +7,8 @@
  * the release carried `flowsheet` plays, along with the three SELECTs that
  * counted them. Nothing here queries `flowsheet` at all any more — the
  * transaction takes exactly three locked SELECTs (library existence,
- * rotation ids, digital_asset rows) regardless of how many plays the release
+ * rotation ids, digital_asset rows), then one more lock on the release's
+ * intake items (BS#2928), regardless of how many plays the release
  * carries, and every path a play can reach a release by is left entirely to
  * the database's own FK actions. Findings pinned here:
  *
@@ -147,6 +148,12 @@ const runDelete = async (
   options: { actor?: Actor; throwOn?: { op: string; error: unknown } } = {}
 ) => {
   const { ops, tx } = makeTx(selectResults, options.throwOn);
+  // The capture is doubled, so it records itself as an op: that is the only way a test can see where it
+  // falls among the transaction's statements (its review `FOR SHARE` locks run inside the real one).
+  (captureCatalogDeleteSnapshot as unknown as jest.Mock<() => Promise<void>>).mockImplementation(() => {
+    ops.push({ op: 'capture', table: undefined, methods: [] });
+    return Promise.resolve();
+  });
   (db as unknown as { transaction: unknown }).transaction = jest
     .fn()
     .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
@@ -248,6 +255,16 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       // No statement before it locks reviews, and the only other intake_items select is the copy's, after it.
       expect(selects.slice(0, itemsIdx).some((o) => o.table === reviews)).toBe(false);
       expect(selects.slice(itemsIdx + 1).filter((o) => o.table === intake_items)).toHaveLength(1);
+      // The capture takes `FOR SHARE` on every review of the release, so the items lock must come first. The
+      // capture is doubled, so it is an op of its own; the two intake_items selects before it are the lock and the
+      // copy's citing-items select. With the lock moved below the capture only the copy's would precede it.
+      const captureOp = ops.findIndex((o) => o.op === 'capture');
+      expect(captureOp).toBeGreaterThan(-1);
+      const itemSelectsBeforeCapture = ops
+        .slice(0, captureOp)
+        .filter((o) => o.op === 'select' && o.table === intake_items);
+      expect(itemSelectsBeforeCapture).toHaveLength(2);
+      expect(itemSelectsBeforeCapture[0].methods).toEqual(['from', 'where', 'orderBy', 'for(update)']);
     });
 
     it('renders the items lock over both the album_id and the accepted-review conditions (BS#2928)', () => {

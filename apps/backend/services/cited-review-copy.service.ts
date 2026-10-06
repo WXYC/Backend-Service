@@ -44,7 +44,7 @@ const copiedColumns = (table: PgTable, omit: string[]) =>
  * onto it. The copy is a row copy, not an edit, so it never goes through `writeReviewRevision`
  * (which would renumber and restamp). Runs inside `deleteAlbumFromDB`'s transaction, after it has
  * locked the release's items (so `selectCitingItems` waits on nothing); items are locked before
- * reviews, the order `lockReviewAfterItem`'s callers (`deleteReview`, print, accept) use, and the originals are held
+ * reviews, the order `lockReviewAfterItem`'s callers (`updateReview`, `submitReview`, `deleteReview`) use, and the originals are held
  * `FOR SHARE` so no `PATCH /reviews/{id}` (which locks its review `FOR UPDATE`) lands between the
  * review's copy and its history's. Names (`reviews.author`, `review_revisions.edited_by`) are
  * copied by the database and never read here.
