@@ -41,6 +41,8 @@ import {
   RELEASE_ACCEPTED_REVIEW,
   refusalOutcome,
   reviewAuthorsSql,
+  submittedReviewCount,
+  passesSql,
   acceptReview,
 } from '../../../apps/backend/services/intake.service';
 
@@ -178,9 +180,14 @@ describe('buildIntakeSelect — accepted-review columns and review fields (BS#28
   });
 });
 
-describe('reviewAuthorsSql in a single-table select', () => {
-  it('correlates on the outer intake item, table-qualified (outerRef)', () => {
-    const { sql: rendered } = db.select({ authors: reviewAuthorsSql() }).from(intake_items).toSQL();
+describe('correlated select fields in a single-table select', () => {
+  // A bare outer column renders unqualified here and would bind to the subquery's own table.
+  it.each([
+    ['reviewAuthorsSql', reviewAuthorsSql()],
+    ['submittedReviewCount', submittedReviewCount],
+    ['passesSql', passesSql],
+  ])('%s correlates on the outer intake item, table-qualified (outerRef)', (_name, field) => {
+    const { sql: rendered } = db.select({ field }).from(intake_items).toSQL();
     expect(rendered).toContain(`= "${SCHEMA}"."intake_items"."id"`);
   });
 });

@@ -47,7 +47,12 @@ const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by'
 export const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
 // coalesce: no CHECK ties checked_out_at to the state, and a NULL stamp must read false, never SQL NULL.
 const overdue = sql<boolean>`coalesce(${intake_items.checked_out_at} < now() - interval '14 days', false)`;
-const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${reviews} WHERE ${reviews.intake_item_id} = ${outerRef(intake_items.id)} AND ${reviews.status} = 'submitted')`;
+export const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${reviews} WHERE ${reviews.intake_item_id} = ${outerRef(intake_items.id)} AND ${reviews.status} = 'submitted')`;
+
+/** The passes on an item as a JSON array, correlated on the outer `intake_items.id` through `outerRef` so it stays correct in a single-table select. */
+export const passesSql = sql<
+  IntakeItemResponse['passes']
+>`(SELECT coalesce(json_agg(json_build_object('dj_name', ${user.name}, 'passed_at', ${intake_item_passes.passed_at}) ORDER BY ${intake_item_passes.passed_at}, ${intake_item_passes.id}), '[]'::json) FROM ${intake_item_passes} JOIN ${user} ON ${user.id} = ${intake_item_passes.dj_id} WHERE ${intake_item_passes.intake_item_id} = ${outerRef(intake_items.id)})`;
 
 /**
  * The `author` of each review on the item, as a JSON array correlated on `intake_items.id`: oldest first by
@@ -98,9 +103,6 @@ export const buildIntakeSelect = (opts: {
   const requester = alias(user, 'requester');
   const holder = alias(user, 'holder');
   const exposed = Object.fromEntries(Object.entries(getTableColumns(intake_items)).filter(([k]) => !UNEXPOSED.has(k)));
-  const passes = sql<
-    IntakeItemResponse['passes']
-  >`(SELECT coalesce(json_agg(json_build_object('dj_name', ${user.name}, 'passed_at', ${intake_item_passes.passed_at}) ORDER BY ${intake_item_passes.passed_at}, ${intake_item_passes.id}), '[]'::json) FROM ${intake_item_passes} JOIN ${user} ON ${user.id} = ${intake_item_passes.dj_id} WHERE ${intake_item_passes.intake_item_id} = ${intake_items.id})`;
   return db
     .select({
       ...exposed,
@@ -110,7 +112,7 @@ export const buildIntakeSelect = (opts: {
       requested_dj_name: requester.name,
       checked_out_by_name: holder.name,
       ...(opts.includePasses && {
-        passes: passes.as('passes'),
+        passes: passesSql.as('passes'),
         draft_authors: reviewAuthorsSql(true).as('draft_authors'),
       }),
     })
