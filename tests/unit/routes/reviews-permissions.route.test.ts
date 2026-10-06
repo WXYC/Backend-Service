@@ -140,13 +140,22 @@ describe('GET /reviews and GET /reviews/:id (BS#2805)', () => {
     '?album_id=1&album_id=2',
     '?intake_item_id=2147483648',
     '?intake_item_id=-1',
-    '?mine=yes',
-    '?mine=true&mine=true',
   ])('%s is a 400 before any query', async (query) => {
     mockRole('dj');
     expect((await get(`/reviews${query}`)).status).toBe(400);
     expect(mockList).not.toHaveBeenCalled();
   });
+
+  test.each(['?mine=yes', '?mine=true&mine=true'])(
+    '%s is a 400 naming the mine field, before any query',
+    async (query) => {
+      mockRole('dj');
+      const res = await get(`/reviews${query}`);
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe('mine must be true or false');
+      expect(mockList).not.toHaveBeenCalled();
+    }
+  );
 
   test.each([['abc'], ['0'], ['2147483648']])('id %s is a 400 before any query', async (id) => {
     mockRole('dj');
