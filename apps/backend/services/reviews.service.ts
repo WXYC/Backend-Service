@@ -294,11 +294,13 @@ const isLatestPrint = async (tx: Pick<typeof db, 'execute'>, reviewId: number) =
 /**
  * Deletes a review (its revisions go with it). A review is IN USE when an item accepts it or it is the newest
  * print of a copy; an author without `reviews: manage` may not delete one (`in_use`). `reviews: manage` may,
- * except an accepted review of a filed or finalized item that carries no citation (`accepted_review`): a
- * release must keep an accepted review or a citation. A review can be accepted by several items, so every
- * accepting item is judged, and when none refuses, one UPDATE (`RELEASE_ACCEPTED_REVIEW`) runs before the
- * delete and takes it off all of them. Locks: `lockReviewAfterItem` with `acceptingItems`, then the accepting
- * items are read again under the review's lock, so an accept that committed in between is still judged.
+ * except the accepted review of a filed or finalized item, whether or not the item carries a citation
+ * (`accepted_review`, epic decision 40): a filed release must keep the review chosen for its cover. A review
+ * can be accepted by several items, so every accepting item is judged, and when none refuses, one UPDATE
+ * (`RELEASE_ACCEPTED_REVIEW`) runs before the delete and takes it off all of them. Locks:
+ * `lockReviewAfterItem` with `acceptingItems`, then the accepting items are read again `FOR UPDATE` in
+ * ascending id order under the review's lock, so the rows the refusal is judged on are locked: an accept that
+ * committed in between is still judged, and a filing cannot change one of them before the UPDATE.
  */
 export const deleteReview = async (id: number, actor: ReviewsActor) =>
   db.transaction(async (tx) => {
@@ -308,19 +310,13 @@ export const deleteReview = async (id: number, actor: ReviewsActor) =>
     const decision = editOutcome((await selectReview(id, tx))!, actor);
     if (decision !== 'allowed') return { outcome: decision };
     const accepting = await tx
-      .select({
-        state: intake_items.state,
-        cited_album_id: intake_items.cited_album_id,
-        cited_submission_id: intake_items.cited_submission_id,
-      })
+      .select({ id: intake_items.id, state: intake_items.state })
       .from(intake_items)
-      .where(eq(intake_items.accepted_review_id, id));
+      .where(eq(intake_items.accepted_review_id, id))
+      .orderBy(intake_items.id)
+      .for('update');
     if (actor.manage) {
-      const uncited = (item: (typeof accepting)[number]) =>
-        item.cited_album_id === null && item.cited_submission_id === null;
-      if (accepting.some((item) => FILED_STATES.includes(item.state) && uncited(item))) {
-        return { outcome: 'accepted_review' as const };
-      }
+      if (accepting.some((item) => FILED_STATES.includes(item.state))) return { outcome: 'accepted_review' as const };
     } else if (accepting.length > 0 || (await isLatestPrint(tx, id))) {
       return { outcome: 'in_use' as const };
     }
