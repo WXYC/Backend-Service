@@ -47,7 +47,11 @@ describe('reviews schema (real PG)', () => {
 
   it('reads back the stub-era defaults on a row that names only the columns the stub had', async () => {
     const album = (await seedLibraryRelease()).id;
-    const review = await seedReview({ album_id: album });
+    // Hand-written on purpose: this row must name only the columns the stub had (album_id, review). seedReview also
+    // writes author and submitted_at, which would hide a later NOT NULL or CHECK on a post-stub column.
+    const [review] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.reviews ${sql({ album_id: album, review: 'la paradoja' })} RETURNING *
+    `;
     expect(review).toMatchObject({
       status: 'submitted',
       medium: 'typed',
