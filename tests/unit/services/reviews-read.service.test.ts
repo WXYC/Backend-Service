@@ -34,7 +34,12 @@ jest.mock('@wxyc/database', () => {
   };
 });
 
-import { getReview, latestPrintOfCopy, listReviews } from '../../../apps/backend/services/reviews.service';
+import {
+  getReview,
+  latestPrintOfCopy,
+  listReviewRevisions,
+  listReviews,
+} from '../../../apps/backend/services/reviews.service';
 import { sql } from 'drizzle-orm';
 import { reviews } from '../../../shared/database/src/schema';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -104,5 +109,23 @@ describe('review reads (BS#2805)', () => {
     const fragment = flat(dialect.sqlToQuery(sql`${latestPrintOfCopy(sql`${reviews.id}`)}`).sql);
     expect(last()).toContain(fragment);
     expect(last()).toContain('ai.accepted_review_id');
+  });
+
+  test.each([
+    ['getReview', () => getReview(3, ACTOR)],
+    ['the plain list', () => listReviews({}, ACTOR)],
+    ['the album list', () => listReviews({ album_id: 9 }, ACTOR)],
+  ])('%s counts review_revisions through the outer review, never a bare id (BS#2861)', async (_n, run) => {
+    await run();
+    expect(last()).toContain(
+      '(SELECT count(*)::int FROM "wxyc_schema"."review_revisions" AS rr WHERE rr.review_id = "wxyc_schema"."reviews"."id")'
+    );
+  });
+
+  test('the revision read checks the review visibility rule first and answers undefined when nothing is visible (BS#2861)', async () => {
+    expect(await listReviewRevisions(3, ACTOR)).toBeUndefined();
+    expect(mockCaptured).toHaveLength(1);
+    expect(last()).toContain('"wxyc_schema"."reviews"."status" <> \'draft\'');
+    expect(last()).toContain('"wxyc_schema"."reviews"."author_user_id" = $');
   });
 });

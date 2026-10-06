@@ -37,6 +37,7 @@ const mockSubmit = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockDelete = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockGet = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockList = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
+const mockRevisions = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 
 jest.mock('@wxyc/database', () => ({
   reviewCreditEnum: jest.requireActual('../../../shared/database/src/schema').reviewCreditEnum,
@@ -48,6 +49,7 @@ jest.mock('../../../apps/backend/services/reviews.service', () => ({
   deleteReview: mockDelete,
   getReview: mockGet,
   listReviews: mockList,
+  listReviewRevisions: mockRevisions,
 }));
 
 import { reviews_route } from '../../../apps/backend/routes/reviews.route';
@@ -73,6 +75,7 @@ beforeEach(() => {
   mockDelete.mockReset().mockResolvedValue({ outcome: 'deleted' });
   mockGet.mockReset().mockResolvedValue(REVIEW);
   mockList.mockReset().mockResolvedValue([REVIEW]);
+  mockRevisions.mockReset().mockResolvedValue([]);
 });
 
 describe.each([
@@ -337,5 +340,29 @@ describe('DELETE /reviews/:id', () => {
     mockRole('dj');
     expect((await remove(id)).status).toBe(400);
     expect(mockDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /reviews/:id/revisions (BS#2861)', () => {
+  const get = (path: string) => request(app).get(path).set('Authorization', 'Bearer t');
+
+  test.each(['dj', 'musicDirector', 'stationManager'])('%s may read', async (role) => {
+    mockRole(role);
+    const res = await get('/reviews/3/revisions');
+    expect([res.status, res.body]).toEqual([200, []]);
+    expect(mockRevisions).toHaveBeenLastCalledWith(3, { id: 'caller-id', manage: role !== 'dj' });
+  });
+
+  test.each(['member', undefined])('%s is refused before any query', async (role) => {
+    mockRole(role);
+    expect((await get('/reviews/3/revisions')).status).toBe(403);
+    expect(mockRevisions).not.toHaveBeenCalled();
+  });
+
+  test('a review the service will not show is a 404, and a malformed id a 400', async () => {
+    mockRole('dj');
+    mockRevisions.mockResolvedValue(undefined);
+    expect((await get('/reviews/3/revisions')).status).toBe(404);
+    expect((await get('/reviews/abc/revisions')).status).toBe(400);
   });
 });

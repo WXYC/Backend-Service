@@ -118,3 +118,12 @@ export const listReviews: RequestHandler = async (req, res) => {
   };
   res.json(await reviewsService.listReviews(filters, reviewsActor(req)));
 };
+
+export const listReviewRevisions: RequestHandler<{ id: string }> = async (req, res) => {
+  const revisions = await reviewsService.listReviewRevisions(
+    parseInt4PathId(req.params.id, 'review'),
+    reviewsActor(req)
+  );
+  if (!revisions) throw new WxycError('Review not found', 404);
+  res.json(revisions);
+};
