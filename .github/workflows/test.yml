@@ -756,10 +756,9 @@ jobs:
           # Must be on the SERVICE env (this step), not the jest runner's: the
           # suite drives a separately spawned backend over HTTP.
           FLOWSHEET_TAKEOVER_ENABLED: 'true'
-          # SES has a 200-message/month quota. The auth service (host process
-          # here) is the only sendEmail/sendOTPEmail caller; keep real sends
-          # off regardless of whether AWS_ACCESS_KEY_ID etc. are ever set on
-          # this job. See shared/authentication/src/email.ts
+          # The auth service and the backend (review notices, BS#2806), both
+          # host processes here, send email; keep real sends off regardless of
+          # whether SES credentials are ever set on this job. See shared/authentication/src/email.ts
           # `isEmailSendingEnabled`.
           EMAIL_ENABLED: 'false'
           # Station signup (BS#2361): same test-coverage-not-rollout rationale

@@ -166,10 +166,9 @@ services:
       - SES_FROM_EMAIL=${SES_FROM_EMAIL}
       - PASSWORD_RESET_REDIRECT_URL=${PASSWORD_RESET_REDIRECT_URL}
       - EMAIL_VERIFICATION_REDIRECT_URL=${EMAIL_VERIFICATION_REDIRECT_URL}
-      # SES has a 200-message/month quota. Hardcoded (not ${}-substituted)
-      # so the CI profile never sends real email regardless of what's in the
-      # developer's .env. See shared/authentication/src/email.ts
-      # `isEmailSendingEnabled`.
+      # Hardcoded (not ${}-substituted) so the CI profile never sends real email
+      # regardless of what's in the developer's .env. See
+      # shared/authentication/src/email.ts `isEmailSendingEnabled`.
       - EMAIL_ENABLED=false
       # Station signup (BS#2361). ON so tests/integration/station-signup.spec.js
       # exercises the routing against real Postgres — a test-coverage decision,
@@ -220,6 +219,11 @@ services:
       # the positive-list AUTH_BYPASS guard engages for the integration suite.
       # Matches the auth service's `NODE_ENV=test` above.
       - NODE_ENV=test
+      # Hardcoded (not ${}-substituted) so this profile never sends real email
+      # regardless of what's in the developer's .env: the backend sends the
+      # music-director review notices (BS#2806). See
+      # shared/authentication/src/email.ts `isEmailSendingEnabled`.
+      - EMAIL_ENABLED=false
       - DB_HOST=ci-db
       # In-container port: hardcoded to match what postgres listens on
       # inside the docker network. Host-side `DB_PORT` (e.g. the dev
@@ -445,6 +449,11 @@ services:
       # fail-loud when FRONTEND_SOURCE is unset) don't fire in tests.
       # Matches the ci-profile backend at line 173.
       - NODE_ENV=test
+      # Hardcoded (not ${}-substituted) so this profile never sends real email
+      # regardless of what's in the developer's .env: the backend sends the
+      # music-director review notices (BS#2806). See
+      # shared/authentication/src/email.ts `isEmailSendingEnabled`.
+      - EMAIL_ENABLED=false
       # `apps/backend/app.ts` imports `requirePermissions` from
       # `@wxyc/authentication`, which evaluates `betterAuth({...})` at module
       # load and calls buildLoginPage(process.env). Without FRONTEND_SOURCE
