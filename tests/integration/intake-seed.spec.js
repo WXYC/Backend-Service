@@ -42,7 +42,6 @@ function sourceFilesUnder(dir, skip = []) {
 
 describe('intake_seed release, review, revision, print, FCC-note and form-review seeders', () => {
   afterAll(async () => {
-    const sql = getTestDb();
     await removeSeededIntakeItems();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
@@ -197,20 +196,33 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
 
   test('seedAcceptance writes all three accept columns, defaulting to the manager and now, and leaves state alone', async () => {
     const sql = getTestDb();
-    const item = await seedIntakeItem({ state: 'reviewed' });
+    // Seeded in 'pool', not 'reviewed': the accept route writes 'reviewed', so an item already there would pass a
+    // seedAcceptance that set it.
+    const item = await seedIntakeItem();
     const review = await seedReview({ intake_item_id: item.id });
+    expect(item.state).toBe('pool');
 
+    const before = Date.now();
     const accepted = await seedAcceptance({ intake_item_id: item.id, review_id: review.id });
+    const after = Date.now();
 
     expect(accepted).toMatchObject({
-      state: 'reviewed',
+      state: 'pool',
       accepted_review_id: review.id,
       accepted_by: await managerUserId(),
     });
     expect(accepted.accepted_at).toBeInstanceOf(Date);
-    const [row] =
-      await sql`SELECT state, accepted_review_id, accepted_by FROM ${sql(SCHEMA)}.intake_items WHERE id = ${item.id}`;
-    expect(row).toEqual({ state: 'reviewed', accepted_review_id: review.id, accepted_by: await managerUserId() });
+    // Now, not a fixed or stale value: the database stamps it, and the Jest process shares its host's clock here.
+    expect(accepted.accepted_at.getTime()).toBeGreaterThanOrEqual(before - 60_000);
+    expect(accepted.accepted_at.getTime()).toBeLessThanOrEqual(after + 60_000);
+    const [row] = await sql`
+      SELECT state, accepted_review_id, accepted_by
+      FROM ${sql(SCHEMA)}.intake_items WHERE id = ${item.id}`;
+    expect(row).toEqual({
+      state: 'pool',
+      accepted_review_id: review.id,
+      accepted_by: await managerUserId(),
+    });
   });
 
   test('seedAcceptance honors an explicit accepted_by and accepted_at', async () => {
@@ -235,10 +247,25 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     const second = await seedIntakeItem();
 
     await removeSeededIntakeItems();
-    await removeSeededIntakeItems();
 
     const rows = await sql`SELECT id FROM ${sql(SCHEMA)}.intake_items WHERE id = ANY(${[first.id, second.id]})`;
     expect(rows).toHaveLength(0);
+
+    // A row the remover was never told about, filed under a deleted seeded id. If the remover kept its id list, this
+    // second call would delete it.
+    await sql`INSERT INTO ${sql(SCHEMA)}.intake_items ${sql({
+      id: first.id,
+      artist_name: 'Stereolab',
+      album_title: 'Aluminum Tunes',
+      format_id: 1,
+    })}`;
+    try {
+      await removeSeededIntakeItems();
+      const survivors = await sql`SELECT id FROM ${sql(SCHEMA)}.intake_items WHERE id = ${first.id}`;
+      expect(survivors).toHaveLength(1);
+    } finally {
+      await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE id = ${first.id}`;
+    }
   });
 
   test('a form submission is removed by id', async () => {

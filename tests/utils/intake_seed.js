@@ -92,7 +92,7 @@ async function removeSeededAuthUsers() {
 /**
  * Insert an `intake_items` row. `overrides` is a column -> value map layered over the NOT NULL
  * defaults (a WXYC-representative artist/album and fixture format). Returns the inserted row.
- * Cleanup is the caller's, since specs scope their rows differently.
+ * The id is recorded for `removeSeededIntakeItems`.
  */
 async function seedIntakeItem(overrides = {}) {
   const sql = getTestDb();
@@ -121,7 +121,7 @@ async function removeSeededIntakeItems() {
 /**
  * Record that an intake item accepted a review: one `UPDATE` setting all three accept columns
  * (`accepted_review_id`, `accepted_by`, `accepted_at`), which travel together in production. `accepted_by`
- * defaults to the seeded manager's user id, `accepted_at` to now. It does not change `state`; a test that wants
+ * defaults to the seeded manager's user id, `accepted_at` to the database's `now()`, as the accept route stamps it. It does not change `state`; a test that wants
  * `reviewed` seeds the item in that state. This is a fixture writer, not the accept route: a test of accept
  * itself goes through `POST /intake/{id}/accept-review` once WXYC/Backend-Service#2860 lands. Returns the
  * updated row.
@@ -129,7 +129,7 @@ async function removeSeededIntakeItems() {
 async function seedAcceptance({ intake_item_id, review_id, accepted_by, accepted_at }) {
   const sql = getTestDb();
   const by = accepted_by === undefined ? await managerUserId() : accepted_by;
-  const at = accepted_at === undefined ? new Date() : accepted_at;
+  const at = accepted_at === undefined ? sql`now()` : accepted_at;
   const [item] = await sql`
     UPDATE ${sql(SCHEMA)}.intake_items
     SET accepted_review_id = ${review_id}, accepted_by = ${by}, accepted_at = ${at}
