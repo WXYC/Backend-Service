@@ -1,6 +1,7 @@
 import { describe, it, expect } from '@jest/globals';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { stripSqlComments } from '../../utils/catalog-export-source';
 
 /**
  * Source-level guards on the two catalog-export queries (BS#1965).
@@ -69,18 +70,6 @@ function queryBody(fnName: string): string {
     throw new Error(`${fnName}'s SQL template literal is not terminated`);
   }
   return stripSqlComments(body.slice(0, end));
-}
-
-/**
- * Drop `--` line comments so these greps assert on the SQL that actually
- * executes, not on prose about it. Without this, the comment explaining why the
- * wire value is NOT `' | '`-joined would itself match a grep for `' | '`.
- */
-function stripSqlComments(sql: string): string {
-  return sql
-    .split('\n')
-    .map((line) => line.replace(/--.*$/, ''))
-    .join('\n');
 }
 
 describe('catalog-export.service SQL invariants (BS#1965)', () => {

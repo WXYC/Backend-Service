@@ -20,86 +20,33 @@
  *
  * The two sets must be EQUAL: a missing column is a stale-cache bug; an extra one is a
  * trigger firing on columns the export never reads (0142 narrowed it deliberately).
+ *
+ * BS#2919 generalizes the obligation to every table the export interpolates a column from (the scrape and
+ * trigger parse live in `tests/utils/catalog-export-source.ts`): the latest `touch_library_watermark*` trigger
+ * on each must be unrestricted, or its `UPDATE OF` list must cover every column the export reads from that
+ * table, or the table must be on the explicit trigger-less allowlist below with a reason.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import { exportedColumnsByTable, latestWatermarkTriggers } from '../../utils/catalog-export-source';
 
-const repoRoot = path.resolve(__dirname, '../../..');
-const migrationsDir = path.join(repoRoot, 'shared/database/src/migrations');
-const exportSource = fs.readFileSync(path.join(repoRoot, 'apps/backend/services/catalog-export.service.ts'), 'utf-8');
-const schemaSource = fs.readFileSync(path.join(repoRoot, 'shared/database/src/schema.ts'), 'utf-8');
-const journal = JSON.parse(fs.readFileSync(path.join(migrationsDir, 'meta/_journal.json'), 'utf-8')) as {
-  entries: { tag: string }[];
+const readSet = exportedColumnsByTable();
+const triggers = latestWatermarkTriggers();
+
+/** Export sources with deliberately no watermark trigger; the reason must say why a stale body is acceptable. */
+const TRIGGERLESS_SOURCES: Record<string, string> = {
+  album_plays: 'materialized view; a view cannot carry a row trigger, and popularity is a slow-moving signal (0142)',
+  album_popularity:
+    'plain table rebuilt by album-popularity-refresh.service.ts, which deliberately does not advance library_watermark (BS#1486 decision 4)',
 };
 
-const stripSqlComments = (sql: string): string =>
-  sql
-    .split('\n')
-    .map((line) => {
-      const i = line.indexOf('--');
-      return i === -1 ? line : line.slice(0, i);
-    })
-    .join('\n');
-
-/** Drizzle property name -> SQL column name for the `library` table (`prop: type('col'`). */
-function libraryColumnNames(): Map<string, string> {
-  const start = schemaSource.indexOf("export const library = wxyc_schema.table(\n  'library',");
-  if (start === -1) throw new Error('Could not find the library table in schema.ts');
-  const end = schemaSource.indexOf('\nexport const ', start + 1);
-  const block = schemaSource.slice(start, end === -1 ? undefined : end);
-  const map = new Map<string, string>();
-  for (const m of block.matchAll(/^ {4}(\w+): \w+\(\s*'(\w+)'/gm)) map.set(m[1], m[2]);
-  return map;
+const libraryTrigger = triggers.get('library');
+if (!libraryTrigger?.columns) {
+  throw new Error('The latest touch_library_watermark trigger on library has no parseable UPDATE OF list');
 }
-
-/** SQL column names of `library` the export queries read (interpolated refs + logicalAlbumKeySql args). */
-function exportedLibraryColumns(): string[] {
-  const props = new Set<string>();
-  for (const m of exportSource.matchAll(/\$\{library\.(\w+)\}/g)) props.add(m[1]);
-  const calls = [...exportSource.matchAll(/logicalAlbumKeySql\(([^)]*)\)/g)];
-  for (const call of calls) for (const m of call[1].matchAll(/\blibrary\.(\w+)/g)) props.add(m[1]);
-  const names = libraryColumnNames();
-  return [...props]
-    .map((prop) => {
-      const col = names.get(prop);
-      if (!col) throw new Error(`library.${prop} is read by the export but is not a column in schema.ts`);
-      return col;
-    })
-    .sort();
-}
-
-const TRIGGER_NAME_RE = /CREATE\s+TRIGGER\s+"?touch_library_watermark"?(?![\w"])/i;
-const ON_LIBRARY_RE = /\sON\s+(?:"?wxyc_schema"?\s*\.\s*)?"?library"?(?![\w"])/i;
-const UPDATE_OF_RE = /\bUPDATE\s+OF\s+([\s\S]*?)\s+OR\s+(?:DELETE|TRUNCATE)\b/i;
-
-/** The `UPDATE OF` list of the latest migration (journal order) that defines the library trigger. */
-function latestLibraryTriggerColumns(): { tag: string; columns: string[] } {
-  // Older definitions (e.g. 0104's unrestricted trigger) need not be parseable; only the latest counts.
-  let latest: { tag: string; stmt: string } | undefined;
-  for (const { tag } of journal.entries) {
-    const sql = stripSqlComments(fs.readFileSync(path.join(migrationsDir, `${tag}.sql`), 'utf-8'));
-    for (const stmt of sql.split(';')) {
-      if (TRIGGER_NAME_RE.test(stmt) && ON_LIBRARY_RE.test(stmt)) latest = { tag, stmt };
-    }
-  }
-  if (!latest) throw new Error('No migration creates the touch_library_watermark trigger on wxyc_schema.library');
-  const list = latest.stmt.match(UPDATE_OF_RE);
-  if (!list) {
-    throw new Error(`${latest.tag} defines touch_library_watermark on library but its UPDATE OF list cannot be parsed`);
-  }
-  const columns = list[1]
-    .split(',')
-    .map((c) => c.trim().replace(/^"|"$/g, ''))
-    .filter(Boolean);
-  if (columns.length === 0) throw new Error(`${latest.tag}: touch_library_watermark has an empty UPDATE OF list`);
-  return { tag: latest.tag, columns };
-}
+const { tag, columns } = { tag: libraryTrigger.tag, columns: libraryTrigger.columns };
+const expected = readSet.get('library') ?? [];
 
 describe('touch_library_watermark UPDATE OF list equals the catalog export read set', () => {
-  const expected = exportedLibraryColumns();
-  const { tag, columns } = latestLibraryTriggerColumns();
-
   it('derives a non-trivial export read set that includes code_volume_letters', () => {
     expect(expected.length).toBeGreaterThanOrEqual(15);
     expect(expected).toContain('code_volume_letters');
@@ -120,4 +67,42 @@ describe('touch_library_watermark UPDATE OF list equals the catalog export read 
   it(`matches exactly (latest definition: ${tag})`, () => {
     expect([...columns].sort()).toEqual(expected);
   });
+});
+
+describe('every table the catalog export reads is covered by the library watermark (BS#2919)', () => {
+  it('derives the eleven export sources', () => {
+    expect([...readSet.keys()].sort()).toEqual(
+      [
+        'album_plays',
+        'album_popularity',
+        'artist_crossreference',
+        'artists',
+        'compilation_track_artist',
+        'digital_asset',
+        'format',
+        'genre_artist_crossreference',
+        'genres',
+        'library',
+        'rotation',
+      ].sort()
+    );
+  });
+
+  it('keeps the trigger-less allowlist honest: no entry has a trigger, none is unread', () => {
+    for (const table of Object.keys(TRIGGERLESS_SOURCES)) {
+      expect(triggers.has(table)).toBe(false);
+      expect(readSet.has(table)).toBe(true);
+    }
+  });
+
+  it.each([...readSet.keys()].filter((t) => !(t in TRIGGERLESS_SOURCES)).map((t) => [t]))(
+    '%s has a trigger that covers every column the export reads',
+    (table) => {
+      const trigger = triggers.get(table);
+      if (!trigger) throw new Error(`${table} is read by the export but has no touch_library_watermark* trigger`);
+      if (trigger.columns === null) return;
+      const missing = (readSet.get(table) ?? []).filter((c) => !trigger.columns!.includes(c));
+      expect({ table, tag: trigger.tag, missing }).toEqual({ table, tag: trigger.tag, missing: [] });
+    }
+  );
 });
