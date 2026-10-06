@@ -178,6 +178,13 @@ describe('buildIntakeSelect — accepted-review columns and review fields (BS#28
   });
 });
 
+describe('reviewAuthorsSql in a single-table select', () => {
+  it('correlates on the outer intake item, table-qualified (outerRef)', () => {
+    const { sql: rendered } = db.select({ authors: reviewAuthorsSql() }).from(intake_items).toSQL();
+    expect(rendered).toContain(`= "${SCHEMA}"."intake_items"."id"`);
+  });
+});
+
 describe('reviewAuthorsSql (BS#2860) — the one list behind draft_authors and deleted_review_authors', () => {
   const render = (draftsOnly?: boolean) =>
     new PgDialect().sqlToQuery(sql`SELECT ${reviewAuthorsSql(draftsOnly)} FROM ${intake_items}`).sql;
@@ -558,7 +565,6 @@ describe('deleteIntakeItem (BS#2854)', () => {
     calls.length = 0;
     const tx = {
       select: jest.fn(() => builder('select', selects.shift() ?? [])),
-      execute: jest.fn(() => Promise.resolve([{ authors: selects.shift()?.[0]?.authors }])),
       delete: jest.fn(() => builder('delete', [])),
     };
     jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
@@ -573,8 +579,8 @@ describe('deleteIntakeItem (BS#2854)', () => {
       [{ authors: ['Test Reviewer', 'Test Visiting DJ'] }],
     ]);
     expect(result).toEqual({ outcome: 'deleted', authors: ['Test Reviewer', 'Test Visiting DJ'] });
-    expect(calls).toEqual(['select', 'select for update', 'delete']);
-    expect(tx.execute).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(['select', 'select for update', 'select', 'delete']);
+    expect(tx.select).toHaveBeenCalledTimes(2);
     expect(tx.delete).toHaveBeenCalledTimes(1);
   });
 

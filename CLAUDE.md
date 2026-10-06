@@ -138,6 +138,8 @@ Express wrapper around better-auth with these plugins: admin, username, anonymou
 
 Drizzle ORM with PostgreSQL (`postgres-js` driver).
 
+**Correlated select fields:** inside a select-field `sql` fragment, reference the outer row's column only through `outerRef(column)` (`apps/backend/utils/sql-fragments.ts`). A bare column in a single-table select renders unqualified and binds to the subquery's own table, silently.
+
 <!-- auth-tables-list:begin -->
 
 **Auth tables** (managed by better-auth): `auth_user`, `auth_session`, `auth_account`, `auth_verification`, `auth_jwks`, `auth_organization`, `auth_member`, `auth_invitation`, `auth_device_code` (ADR 0008 QR sign-in), `auth_oauth_application` / `auth_oauth_access_token` / `auth_oauth_consent` (better-auth `oidcProvider` plugin substrate).
