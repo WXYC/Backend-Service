@@ -52,8 +52,8 @@ const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db) =>
 
 /**
  * Creates the caller's own `typed` draft about one subject. An intake item must be held by the
- * caller (effective state `checked_out`, `checked_out_by` = caller: reviewing needs the physical
- * record), read FOR UPDATE inside the insert's transaction so a release can't land between check
+ * caller (effective state `checked_out` or `reviewed`, `checked_out_by` = caller: reviewing needs the physical
+ * record, and accepting a review leaves the holder on file, so a DJ still holding a reviewed record may write theirs), read FOR UPDATE inside the insert's transaction so a release can't land between check
  * and write; a library release only has to exist. Anything else is `subject_not_held`.
  */
 export const createReview = async (
@@ -70,7 +70,7 @@ export const createReview = async (
             .where(
               and(
                 eq(intake_items.id, subject.intake_item_id),
-                sql`(${effectiveState}) = 'checked_out'`,
+                sql`(${effectiveState}) IN ('checked_out', 'reviewed')`,
                 eq(intake_items.checked_out_by, actor.id)
               )
             )

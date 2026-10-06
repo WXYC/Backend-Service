@@ -481,10 +481,14 @@ components:
         One physical copy logged for a DJ review (BS#2796). `effective_state`
         equals `state` except a `requested` item whose request is more than 7
         days old, or whose `requested_dj_id` is null (the DJ's account was
-        deleted), reads as `pool`; `overdue` is true for a `checked_out` item
-        older than 14 days. A read never changes `state`. DJ names are
-        `auth_user.name`, never a real name. `passes` is present only for
-        callers holding `reviews: manage`. Swagger display only; the SSOT is
+        deleted), reads as `pool`; `overdue` is true for an item whose checkout
+        (`checked_out_at`) is more than 14 days old, `checked_out` or `reviewed`
+        alike (a returned item has no checkout). A read never changes `state`. DJ names are
+        `auth_user.name`, never a real name. `passes` and `draft_authors` (the
+        `author` of each unsubmitted draft, oldest first; names only) are present only for
+        callers holding `reviews: manage`. `submitted_review_count` counts the
+        item's submitted reviews. `accepted_review_id`, `accepted_by` and
+        `accepted_at` name the review a music director accepted. Swagger display only; the SSOT is
         wxyc-shared/api.yaml.
       properties:
         id: { type: integer }
@@ -497,6 +501,10 @@ components:
         state: { $ref: '#/components/schemas/IntakeItemState' }
         effective_state: { $ref: '#/components/schemas/IntakeItemState' }
         overdue: { type: boolean }
+        submitted_review_count: { type: integer }
+        accepted_review_id: { type: integer, nullable: true }
+        accepted_by: { type: string, nullable: true }
+        accepted_at: { type: string, format: date-time, nullable: true }
         logged_at: { type: string, format: date-time }
         requested_dj_id: { type: string, nullable: true }
         requested_dj_name: { type: string, nullable: true }
@@ -518,6 +526,9 @@ components:
             properties:
               dj_name: { type: string }
               passed_at: { type: string, format: date-time }
+        draft_authors:
+          type: array
+          items: { type: string }
 
     IntakeItemState:
       type: string
@@ -5066,13 +5077,22 @@ paths:
         Grant `reviews: read`. Ordered by `logged_at` descending, then `id`
         descending. `state` filters on `effective_state`, so an expired
         `requested` item is returned for `state=pool`. Callers holding
-        `reviews: manage` get `passes` on every item.
+        `reviews: manage` get `passes` and `draft_authors` on every item.
+        `awaiting_acceptance=true` keeps items with a submitted review, no
+        accepted review, and a state that is not `filed` or `finalized`
+        (ANDed with `state`); `false` is the same as leaving it out.
       parameters:
         - name: state
           in: query
           required: false
           schema:
             $ref: '#/components/schemas/IntakeItemState'
+        - name: awaiting_acceptance
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['true', 'false']
       responses:
         '200':
           description: 'The matching items'
@@ -5083,7 +5103,7 @@ paths:
                 items:
                   $ref: '#/components/schemas/IntakeItem'
         '400':
-          description: '`state` is not an intake item state'
+          description: '`state` is not an intake item state, or `awaiting_acceptance` is not `true` or `false`'
         '401':
           description: 'Authentication required'
         '403':
@@ -5252,9 +5272,9 @@ paths:
         schema:
           type: integer
     post:
-      summary: Return a checked-out item to the pool (BS#2798)
+      summary: Return a checked-out or reviewed item (BS#2798, BS#2860)
       description: >-
-        Grant `reviews: write`; a caller without `reviews: manage` must also be the holder. From effective `checked_out` to `pool`, clearing the holder fields. A checkout whose holder account is gone can be released by `reviews: manage`. 403 comes first for the grant, then 409 for the wrong state, then 403 for a non-holder. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+        Grant `reviews: write`; a caller without `reviews: manage` must also be the holder. From effective `checked_out` to `pool`, clearing the holder fields. From `reviewed` the holder fields are cleared and the state stays `reviewed`, with the accepted review untouched; a `reviewed` item with no checkout (`checked_out_at` null) is 409 `state_changed` for every caller. A checkout whose holder account is gone can be released by `reviews: manage`, in either state. 403 comes first for the grant, then 409 for the wrong state, then 403 for a non-holder. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
       responses:
         '200':
           description: 'The updated item'
@@ -5385,6 +5405,42 @@ paths:
               schema:
                 $ref: '#/components/schemas/IntakeConflictError'
 
+  /intake/{id}/accept-review:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: A music director accepts one review of the record (BS#2860)
+      description: >-
+        Grant `reviews: manage`. Not `/intake/{id}/accept`, which is the requested DJ answering a request. The review must be `submitted` and belong to the record: its `intake_item_id` is this item, its `album_id` is the release this item was filed as, or, for an item with a `cited_album_id`, it is a submitted typed review of the cited release (a handwritten review of the cited release is refused). From effective `pool`, `requested` or `checked_out` the item becomes `reviewed`; in `reviewed`, `filed` or `finalized` the pointer swaps and the state stays. The holder stays on file, and a pending request is withdrawn. Accepting the review already accepted answers 200 and re-stamps `accepted_by` and `accepted_at`. Locks: the cited release's `library` row `FOR SHARE` (through a citation only), then the item `FOR UPDATE`, then the review `FOR UPDATE`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [review_id]
+              properties:
+                review_id: { type: integer }
+      responses:
+        '200':
+          description: 'The updated item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id or `review_id`, or a review that does not exist, is a draft, or does not belong to this record (one message for all three)'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+        '404':
+          description: 'No such intake item'
+
   /intake/{id}/pass:
     parameters:
       - name: id
@@ -5422,7 +5478,7 @@ paths:
     post:
       summary: Create a review draft (BS#2802)
       description: >-
-        Grant `reviews: write`. Creates the caller's own `typed` draft about one subject: an intake item the caller currently holds (effective state `checked_out`, `checked_out_by` the caller) or a library release that exists. Answers 200, not 201.
+        Grant `reviews: write`. Creates the caller's own `typed` draft about one subject: an intake item the caller currently holds (effective state `checked_out` or `reviewed`, `checked_out_by` the caller) or a library release that exists. Answers 200, not 201.
       requestBody:
         required: true
         content:

@@ -27,8 +27,8 @@ import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
  * transition's precondition all read this one definition. A `requested` item
  * whose request is more than 7 days old, or whose `requested_dj_id` is NULL
  * because that DJ's account was deleted (or whose `requested_at` is NULL, so
- * there is no age to measure), reads as `pool`. A `checked_out` item
- * past 14 days is `overdue`. Reads never write, and neither does PATCH:
+ * there is no age to measure), reads as `pool`. An item whose checkout
+ * (`checked_out_at`) is past 14 days is `overdue`, `checked_out` or `reviewed` alike. Reads never write, and neither does PATCH:
  * the stale request fields are cleared by the next transition that writes them —
  * checkout, request, cancel-request, accept or pass — never by a GET or an edit.
  */
@@ -38,32 +38,34 @@ export type IntakeItemState = (typeof intakeItemStateEnum.enumValues)[number];
 /** States past which an item is catalogued, so it can no longer be edited or deleted. */
 export const FILED_STATES: IntakeItemState[] = ['filed', 'finalized'];
 
-/**
- * Columns the contract's `IntakeItem` does not carry: the audit columns, and the
- * accepted-review columns, which WXYC/Backend-Service#2860 exposes once
- * WXYC/wxyc-shared#571 declares them.
- */
-const UNEXPOSED = new Set([
-  'logged_by',
-  'filed_by',
-  'printed_by',
-  'finalized_by',
-  'accepted_review_id',
-  'accepted_by',
-  'accepted_at',
-]);
+/** Columns the contract's `IntakeItem` does not carry: the audit columns. */
+const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by']);
 
 export const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
 // coalesce: no CHECK ties checked_out_at to the state, and a NULL stamp must read false, never SQL NULL.
-const overdue = sql<boolean>`coalesce(${intake_items.state} = 'checked_out' AND ${intake_items.checked_out_at} < now() - interval '14 days', false)`;
+const overdue = sql<boolean>`coalesce(${intake_items.checked_out_at} < now() - interval '14 days', false)`;
+const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${reviews} WHERE ${reviews.intake_item_id} = ${intake_items.id} AND ${reviews.status} = 'submitted')`;
+
+/**
+ * The `author` of each review on the item, as a JSON array correlated on `intake_items.id`: oldest first by
+ * `reviews.id`, a review with no author text left out, `[]` when there are none, and only drafts with
+ * `draftsOnly`. The one definition behind both lists a music director sees, `draft_authors` on the item and
+ * `deleted_review_authors` on its delete, so they cannot disagree about which drafts exist. Names only, never content.
+ */
+export const reviewAuthorsSql = (draftsOnly = false) =>
+  sql<
+    string[]
+  >`(SELECT coalesce(json_agg(${reviews.author} ORDER BY ${reviews.id}) FILTER (WHERE ${reviews.author} IS NOT NULL), '[]'::json) FROM ${reviews} WHERE ${reviews.intake_item_id} = ${intake_items.id}${draftsOnly ? sql` AND ${reviews.status} = 'draft'` : sql``})`;
 
 /** Mirror of the contract's `IntakeItem` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x. Timestamps serialize to ISO strings. */
 export type IntakeItemResponse = Omit<
   typeof intake_items.$inferSelect,
-  'logged_by' | 'filed_by' | 'printed_by' | 'finalized_by' | 'accepted_review_id' | 'accepted_by' | 'accepted_at'
+  'logged_by' | 'filed_by' | 'printed_by' | 'finalized_by'
 > & {
   effective_state: IntakeItemState;
   overdue: boolean;
+  submitted_review_count: number;
+  draft_authors?: string[];
   requested_dj_name: string | null;
   checked_out_by_name: string | null;
   passes?: { dj_name: string; passed_at: string }[];
@@ -80,10 +82,16 @@ export type IntakeCitations = Pick<NewIntakeItem, 'cited_album_id' | 'cited_subm
 /**
  * Every item column the contract exposes, plus the DJ display names. Names are
  * `auth_user.name` — the public-safe value — and `real_name` is never selected.
- * `passes` is a correlated aggregate in the same statement (one query for the
- * whole list, not one per item) and is only present when `includePasses`.
+ * `passes` and `draft_authors` are correlated aggregates in the same statement (one query for the
+ * whole list, not one per item) and are only present when `includePasses` (the caller holds `reviews: manage`).
+ * `awaitingAcceptance` keeps items with a submitted review, no accepted one, and no filing.
  */
-export const buildIntakeSelect = (opts: { state?: IntakeItemState; id?: number; includePasses: boolean }) => {
+export const buildIntakeSelect = (opts: {
+  state?: IntakeItemState;
+  id?: number;
+  includePasses: boolean;
+  awaitingAcceptance?: boolean;
+}) => {
   const requester = alias(user, 'requester');
   const holder = alias(user, 'holder');
   const exposed = Object.fromEntries(Object.entries(getTableColumns(intake_items)).filter(([k]) => !UNEXPOSED.has(k)));
@@ -95,9 +103,13 @@ export const buildIntakeSelect = (opts: { state?: IntakeItemState; id?: number; 
       ...exposed,
       effective_state: effectiveState.as('effective_state'),
       overdue: overdue.as('overdue'),
+      submitted_review_count: submittedReviewCount.as('submitted_review_count'),
       requested_dj_name: requester.name,
       checked_out_by_name: holder.name,
-      ...(opts.includePasses && { passes: passes.as('passes') }),
+      ...(opts.includePasses && {
+        passes: passes.as('passes'),
+        draft_authors: reviewAuthorsSql(true).as('draft_authors'),
+      }),
     })
     .from(intake_items)
     .leftJoin(requester, eq(requester.id, intake_items.requested_dj_id))
@@ -105,13 +117,20 @@ export const buildIntakeSelect = (opts: { state?: IntakeItemState; id?: number; 
     .where(
       and(
         opts.state === undefined ? undefined : sql`(${effectiveState}) = ${opts.state}`,
-        opts.id === undefined ? undefined : eq(intake_items.id, opts.id)
+        opts.id === undefined ? undefined : eq(intake_items.id, opts.id),
+        opts.awaitingAcceptance
+          ? and(
+              sql`${submittedReviewCount} > 0`,
+              sql`${intake_items.accepted_review_id} IS NULL`,
+              notInArray(intake_items.state, FILED_STATES)
+            )
+          : undefined
       )
     )
     .orderBy(desc(intake_items.logged_at), desc(intake_items.id));
 };
 
-export const listIntakeItems = (filters: { state?: IntakeItemState; includePasses: boolean }) =>
+export const listIntakeItems = (filters: Parameters<typeof buildIntakeSelect>[0]) =>
   buildIntakeSelect(filters) as unknown as Promise<IntakeItemResponse[]>;
 
 export const getIntakeItem = async (id: number, includePasses: boolean): Promise<IntakeItemResponse | undefined> =>
@@ -147,16 +166,17 @@ export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
 const refusalFor = async (id: number, transition?: IntakeTransitionRefusal | 'citation') =>
   refusalOutcome(await getIntakeItem(id, false), transition);
 
-type IntakeTransitionRefusal = { from: IntakeItemState; identityGuarded: boolean };
+type IntakeTransitionRefusal = { from: IntakeItemState[]; identityGuarded: boolean };
 
 /**
  * The pure decision behind `refusalFor`, split out so its precedence is testable without a database:
  * missing is `not_found`; no transition is `already_filed`; `'citation'` (a PATCH that sets a citation) is `already_filed`
  * for a filed item (it can't be edited at all, so that outranks the citation) and otherwise `invalid_citation`; otherwise an identity-guarded refusal on an item still in
- * the `from` effective state is `forbidden` and anything else is `state_changed`, which therefore outranks the identity 403.
+ * one of the `from` effective states is `forbidden` and anything else is `state_changed`, which therefore outranks the identity 403.
+ * A `reviewed` item with no checkout (`checked_out_at` null) has nothing to return, so it is `state_changed` for every caller.
  */
 export const refusalOutcome = (
-  item: Pick<IntakeItemResponse, 'effective_state'> | undefined,
+  item: Pick<IntakeItemResponse, 'effective_state' | 'checked_out_at'> | undefined,
   transition?: IntakeTransitionRefusal | 'citation'
 ) => {
   if (!item) return 'not_found' as const;
@@ -164,7 +184,8 @@ export const refusalOutcome = (
     return FILED_STATES.includes(item.effective_state) ? ('already_filed' as const) : ('invalid_citation' as const);
   }
   if (!transition) return 'already_filed' as const;
-  return transition.identityGuarded && item.effective_state === transition.from
+  if (item.effective_state === 'reviewed' && item.checked_out_at === null) return 'state_changed' as const;
+  return transition.identityGuarded && transition.from.includes(item.effective_state)
     ? ('forbidden' as const)
     : ('state_changed' as const);
 };
@@ -195,15 +216,37 @@ export const citationValidSql = ({ cited_album_id: album, cited_submission_id: s
 /** Whether the patch sets a citation to a non-null value (a clear, or no citation key, sets none). */
 const setsCitation = (patch: IntakeCitations) => patch.cited_album_id != null || patch.cited_submission_id != null;
 
-/** Throws a 400 `WxycError` when both citations are non-null: the two are mutually exclusive, so the service refuses it as well as the controller. */
+/**
+ * Throws a 400 `WxycError` when both citations are non-null: the two are mutually exclusive, so the service refuses it as well as the controller.
+ * A patch that changes the stored `cited_album_id` (a different release, null, or a submission cited instead) also takes off a review
+ * accepted through that citation (`RELEASE_ACCEPTED_REVIEW`, decision 34): one that is not the item's own, found by reading the review row
+ * unlocked (a review's `intake_item_id` never changes). Decided on the value the patch leaves, not on the key it carries.
+ */
 export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
   if (patch.cited_album_id != null && patch.cited_submission_id != null) {
     throw new WxycError('cited_album_id and cited_submission_id cannot both be set', 400);
   }
+  const leaves = patch.cited_submission_id != null ? null : patch.cited_album_id; // `undefined`: the stored value stays
+  const citationChanged =
+    leaves === undefined
+      ? undefined
+      : leaves === null
+        ? sql`${intake_items.cited_album_id} IS NOT NULL`
+        : sql`${intake_items.cited_album_id} IS DISTINCT FROM ${leaves}`;
+  const takesOffReview = citationChanged
+    ? sql`${citationChanged} AND EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.id} = ${intake_items.accepted_review_id} AND ${reviews.intake_item_id} IS DISTINCT FROM ${intake_items.id})`
+    : undefined;
+  const unlessKept = (column: SQL, cleared: SQL) => sql`CASE WHEN ${takesOffReview} THEN ${cleared} ELSE ${column} END`;
   return db
     .update(intake_items)
     .set({
       ...patch,
+      ...(takesOffReview && {
+        accepted_review_id: unlessKept(sql`${intake_items.accepted_review_id}`, sql`NULL`),
+        accepted_by: unlessKept(sql`${intake_items.accepted_by}`, sql`NULL`),
+        accepted_at: unlessKept(sql`${intake_items.accepted_at}`, sql`NULL`),
+        state: unlessKept(sql`${intake_items.state}`, RELEASED_STATE),
+      }),
       // Setting one citation clears the other, in the same UPDATE.
       ...(patch.cited_album_id != null && { cited_submission_id: null }),
       ...(patch.cited_submission_id != null && { cited_album_id: null }),
@@ -227,34 +270,19 @@ export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> 
 };
 
 /**
- * The `author` of every review on an intake item, oldest first, or of its drafts alone with `draftsOnly`. One
- * helper behind both lists a music director sees, `deleted_review_authors` here and `draft_authors` on the item
- * (BS#2860), so they cannot disagree about which drafts exist. Names only, never content; a review with no
- * author text names nobody.
- */
-export const reviewAuthorsOnItem = async (tx: Pick<typeof db, 'select'>, itemId: number, draftsOnly = false) =>
-  (
-    await tx
-      .select({ author: reviews.author })
-      .from(reviews)
-      .where(and(eq(reviews.intake_item_id, itemId), draftsOnly ? eq(reviews.status, 'draft') : undefined))
-      .orderBy(reviews.id)
-  )
-    .map((row) => row.author)
-    .filter((author): author is string => author !== null);
-
-/**
  * The `SET` that takes an accepted review off an item: the three accept columns cleared together (never left to the
  * foreign key's `SET NULL`, which would let `accepted_by` and `accepted_at` outlive the pointer), and a `reviewed`
- * item sent back to its holder (`checked_out`) or the pile (`pool`). Any other state is kept: a filed or finalized
+ * item sent back to its checkout (`checked_out`, when `checked_out_at` is set, even if the holder's account is gone, which a
+ * music director may still return) or the pile (`pool`). Any other state is kept: a filed or finalized
  * item only loses the pointer. Flat `CASE`, not nested: two bare literals nested resolve to `text`, which cannot
  * meet the enum column.
  */
+const RELEASED_STATE = sql`CASE WHEN ${intake_items.state} = 'reviewed' AND ${intake_items.checked_out_at} IS NOT NULL THEN 'checked_out' WHEN ${intake_items.state} = 'reviewed' THEN 'pool' ELSE ${intake_items.state} END`;
 export const RELEASE_ACCEPTED_REVIEW: PgUpdateSetSource<typeof intake_items> = {
   accepted_review_id: null,
   accepted_by: null,
   accepted_at: null,
-  state: sql`CASE WHEN ${intake_items.state} = 'reviewed' AND ${intake_items.checked_out_by} IS NOT NULL THEN 'checked_out' WHEN ${intake_items.state} = 'reviewed' THEN 'pool' ELSE ${intake_items.state} END`,
+  state: RELEASED_STATE,
 };
 
 /**
@@ -271,7 +299,10 @@ export const deleteIntakeItem = async (id: number) =>
       .for('update');
     if (!locked) return { outcome: 'not_found' as const };
     if (FILED_STATES.includes(locked.state)) return { outcome: 'already_filed' as const };
-    const authors = await reviewAuthorsOnItem(tx, id);
+    // `execute`, not `select`: a single-table select renders columns unqualified, which would bind the fragment's `id` to `reviews.id`.
+    const [{ authors }] = await tx.execute<{ authors: string[] }>(
+      sql`SELECT ${reviewAuthorsSql()} AS authors FROM ${intake_items} WHERE ${intake_items.id} = ${id}`
+    );
     await tx.delete(intake_items).where(eq(intake_items.id, id));
     return { outcome: 'deleted' as const, authors };
   });
@@ -288,31 +319,38 @@ const TAKEN = (actor: ReviewsActor) => ({
 const TO_POOL = { state: 'pool' as const, ...CLEAR_REQUEST };
 
 /**
- * `from` is an EFFECTIVE state. `only` is the identity condition, which goes
+ * `from` lists the EFFECTIVE states the action works from. `only` is the identity condition, which goes
  * in the UPDATE's WHERE: authorizing against a prior read would let A's release
- * match B's checkout taken in between.
+ * match B's checkout taken in between. `release` also returns a `reviewed` item that still has a checkout
+ * (`checked_out_at` set, holder's account or not), leaving it `reviewed`: the state falls to `pool` only from `checked_out`.
  */
 const TRANSITIONS: Record<
   IntakeAction,
   {
-    from: IntakeItemState;
+    from: IntakeItemState[];
     set: (actor: ReviewsActor, djId?: string) => PgUpdateSetSource<typeof intake_items>;
     only?: (actor: ReviewsActor) => SQL | undefined;
+    also?: SQL;
   }
 > = {
-  checkout: { from: 'pool', set: TAKEN },
+  checkout: { from: ['pool'], set: TAKEN },
   release: {
-    from: 'checked_out',
-    set: () => ({ state: 'pool', checked_out_by: null, checked_out_at: null }),
+    from: ['checked_out', 'reviewed'],
+    set: () => ({
+      state: sql`CASE WHEN ${intake_items.state} = 'checked_out' THEN 'pool' ELSE ${intake_items.state} END`,
+      checked_out_by: null,
+      checked_out_at: null,
+    }),
     only: (actor) => (actor.manage ? undefined : eq(intake_items.checked_out_by, actor.id)),
+    also: sql`(${intake_items.state} <> 'reviewed' OR ${intake_items.checked_out_at} IS NOT NULL)`,
   },
   request: {
-    from: 'pool',
+    from: ['pool'],
     set: (_, djId) => ({ state: 'requested', requested_dj_id: djId, requested_at: sql`now()` }),
   },
-  cancel_request: { from: 'requested', set: () => TO_POOL },
-  accept: { from: 'requested', set: TAKEN, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
-  pass: { from: 'requested', set: () => TO_POOL, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
+  cancel_request: { from: ['requested'], set: () => TO_POOL },
+  accept: { from: ['requested'], set: TAKEN, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
+  pass: { from: ['requested'], set: () => TO_POOL, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
 };
 
 export const buildTransition = (
@@ -326,7 +364,17 @@ export const buildTransition = (
   return executor
     .update(intake_items)
     .set(t.set(actor, djId))
-    .where(and(eq(intake_items.id, id), sql`(${effectiveState}) = ${t.from}`, t.only?.(actor)))
+    .where(
+      and(
+        eq(intake_items.id, id),
+        sql`(${effectiveState}) IN (${sql.join(
+          t.from.map((state) => sql`${state}`),
+          sql`, `
+        )})`,
+        t.only?.(actor),
+        t.also
+      )
+    )
     .returning({ id: intake_items.id });
 };
 
@@ -343,6 +391,66 @@ export const transitionIntakeItem = async (action: IntakeAction, id: number, act
   if (rows.length > 0) return { outcome: 'updated' as const, item: (await getIntakeItem(id, actor.manage))! };
   const { from, only } = TRANSITIONS[action];
   return { outcome: await refusalFor(id, { from, identityGuarded: !!only?.(actor) }) };
+};
+
+/**
+ * Accepts one submitted review for an item (BS#2860), in the order every item/review operation uses: the cited
+ * release's `library` row `FOR SHARE` (only for an accept through the citation, so `DELETE /library/{id}`, which holds
+ * that row `FOR UPDATE` and copies the cited cover reviews it finds, either follows this accept and copies its review or
+ * is waited out and then finds the review gone), then the item `FOR UPDATE`, then the review with a plain
+ * `SELECT ... FOR UPDATE` (never `.for('update', { of })`), then the checks, then one write. The review belongs to
+ * the record when it is the item's own, a review of the release the item was filed as, or, for a cited item, a
+ * submitted typed review of the cited release (a handwritten one is on another copy's sleeve). Both release arms compare
+ * on a non-null id: two NULL `album_id`s must never match. A missing review, a draft and another record's review
+ * answer one `bad_review`, so a draft's existence is not revealed. Every effective state has an answer, so there is no
+ * conflict outcome: the item becomes `reviewed` unless filed or finalized, which only swap the pointer; a pending
+ * request is withdrawn; the holder is untouched.
+ */
+export const acceptReview = async (id: number, reviewId: number, actor: ReviewsActor) => {
+  const outcome = await db.transaction(async (tx) => {
+    // The release to lock is read before any lock; the citation arm is only honored for the one locked.
+    const [cites] = await tx
+      .select({ cited: intake_items.cited_album_id })
+      .from(intake_items)
+      .where(eq(intake_items.id, id));
+    if (!cites) return 'not_found' as const;
+    const [peek] = await tx.select({ album: reviews.album_id }).from(reviews).where(eq(reviews.id, reviewId));
+    const citedLocked = cites.cited !== null && peek?.album === cites.cited ? cites.cited : null;
+    if (citedLocked !== null)
+      await tx.select({ id: library.id }).from(library).where(eq(library.id, citedLocked)).for('share');
+    const [item] = await tx
+      .select({ album_id: intake_items.album_id, cited: intake_items.cited_album_id })
+      .from(intake_items)
+      .where(eq(intake_items.id, id))
+      .for('update');
+    if (!item) return 'not_found' as const;
+    const [review] = await tx
+      .select({ status: reviews.status, medium: reviews.medium, item: reviews.intake_item_id, album: reviews.album_id })
+      .from(reviews)
+      .where(eq(reviews.id, reviewId))
+      .for('update');
+    const belongs =
+      review !== undefined &&
+      (review.item === id ||
+        (item.album_id !== null && review.album === item.album_id) ||
+        (citedLocked !== null &&
+          item.cited === citedLocked &&
+          review.album === citedLocked &&
+          review.medium === 'typed'));
+    if (!belongs || review.status !== 'submitted') return 'bad_review' as const;
+    await tx
+      .update(intake_items)
+      .set({
+        accepted_review_id: reviewId,
+        accepted_by: actor.id,
+        accepted_at: sql`now()`,
+        state: sql`CASE WHEN ${intake_items.state} IN ('filed', 'finalized') THEN ${intake_items.state} ELSE 'reviewed' END`,
+        ...CLEAR_REQUEST,
+      })
+      .where(eq(intake_items.id, id));
+    return 'accepted' as const;
+  });
+  return outcome === 'accepted' ? { outcome, item: (await getIntakeItem(id, true))! } : { outcome };
 };
 
 /** The `auth_member` roles of an account — empty when the account is unknown or has no membership. */

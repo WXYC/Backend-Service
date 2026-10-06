@@ -287,6 +287,15 @@ describe('createReview', () => {
     expect(mockReads.every((r) => r.handle === 'tx')).toBe(true);
   });
 
+  // BS#2860: accepting a review leaves the holder on file, so the DJ still holding a reviewed record may start theirs.
+  test('the hold check admits both effective checked_out and reviewed, still only for the holder', async () => {
+    mockQueue.push([{ id: 4 }], [{ name: 'n' }], [created]);
+    await createReview({ intake_item_id: 4 }, {}, DJ);
+    expect(mockReads[0].where).toContain(`) IN ('checked_out', 'reviewed')`);
+    expect(mockReads[0].where).toMatch(/"checked_out_by" = \$\d+/);
+    expect(mockReads[0].where).toContain('[4,"dj-1"]');
+  });
+
   test('a library release that does not exist is subject_not_held', async () => {
     mockQueue.push([]);
     expect(await createReview({ album_id: 9 }, {}, DJ)).toEqual({ outcome: 'subject_not_held' });
