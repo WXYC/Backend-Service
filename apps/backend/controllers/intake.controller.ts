@@ -3,6 +3,11 @@ import { intakeItemStateEnum } from '@wxyc/database';
 import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
 import type { IntakeAction, IntakeCitations, IntakeFields, IntakeItemState } from '../services/intake.service.js';
+import {
+  completeLibraryFiling,
+  planLibraryFiling,
+  type LibraryFilingRequestBody,
+} from '../services/library-filing.service.js';
 import WxycError from '../utils/error.js';
 import { parseBooleanQueryParam, parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
 import { holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
@@ -44,6 +49,7 @@ const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partia
 const CONFLICT_MESSAGES = {
   already_filed: 'Intake item is already filed',
   invalid_citation: 'The cited release or submission is not a valid citation',
+  not_reviewed: 'Intake item has no accepted review',
   state_changed: 'Intake item is no longer in the state this action needs',
 };
 const conflict = (res: Response, reason: keyof typeof CONFLICT_MESSAGES) =>
@@ -136,6 +142,32 @@ export const acceptReviewIntake: RequestHandler<{ id: string }> = async (req, re
   const result = await intakeService.acceptReview(id, reviewId, reviewsActor(req));
   if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
   if (result.outcome === 'bad_review') throw new WxycError(ACCEPT_REVIEW_REFUSAL, 400);
+  res.json(result.item);
+};
+
+/** `POST /intake/:id/file` (BS#2803): `kind` picks the arm; every dangling reference in the body is a 400, the route's 404 is the item. */
+export const fileIntake: RequestHandler<{ id: string }> = async (req, res) => {
+  const id = parseId(req.params.id);
+  const body = req.body ?? {};
+  let arm: intakeService.IntakeFileArm;
+  if (body.kind === 'existing_release') {
+    const albumId = parseInt4BodyId(body.album_id, 'album_id');
+    if (albumId === undefined) throw new WxycError('album_id is required', 400);
+    arm = { kind: 'existing_release', album_id: albumId };
+  } else if (body.kind === 'new_release') {
+    // Planned on the plain pool before any lock; a conflict has written nothing.
+    const plan = await planLibraryFiling(body as LibraryFilingRequestBody);
+    if (plan.kind === 'conflict') return void res.status(409).json(plan.body);
+    arm = { kind: 'new_release', input: plan.input };
+  } else {
+    throw new WxycError("Invalid Parameter: kind must be 'new_release' or 'existing_release'", 400);
+  }
+  const result = await intakeService.fileIntakeItem(id, arm, reviewsActor(req).id);
+  if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
+  if (result.outcome === 'unknown_album') throw new WxycError('album_id does not name a library release', 400);
+  if (result.outcome === 'filing_conflict') return void res.status(409).json(result.body);
+  if (result.outcome !== 'filed') return void conflict(res, result.outcome);
+  if (arm.kind === 'new_release' && result.filed) await completeLibraryFiling(result.filed, arm.input);
   res.json(result.item);
 };
 
