@@ -49,7 +49,7 @@ export function exportedColumnsByTable(): Map<string, string[]> {
   const props = new Map<string, Set<string>>();
   const add = (table: string, prop: string) => {
     if (!props.has(table)) props.set(table, new Set());
-    props.get(table)!.add(prop);
+    props.get(table).add(prop);
   };
   for (const m of exportSource.matchAll(/\$\{(\w+)\.(\w+)\}/g)) add(m[1], m[2]);
   for (const call of exportSource.matchAll(/logicalAlbumKeySql\(([^)]*)\)/g)) {
@@ -81,7 +81,8 @@ export interface WatermarkTrigger {
 }
 
 const CREATE_TRIGGER_RE = /CREATE\s+TRIGGER\s+"?(touch_library_watermark\w*)"?(?![\w"])/i;
-const DROP_TRIGGER_RE = /DROP\s+TRIGGER\s+(?:IF\s+EXISTS\s+)?"?(touch_library_watermark\w*)"?\s+ON\s+(?:"?wxyc_schema"?\s*\.\s*)?"?(\w+)"?/i;
+const DROP_TRIGGER_RE =
+  /DROP\s+TRIGGER\s+(?:IF\s+EXISTS\s+)?"?(touch_library_watermark\w*)"?\s+ON\s+(?:"?wxyc_schema"?\s*\.\s*)?"?(\w+)"?/i;
 const ON_TABLE_RE = /\sON\s+(?:"?wxyc_schema"?\s*\.\s*)?"?(\w+)"?(?![\w"])/i;
 const UPDATE_OF_RE = /\bUPDATE\s+OF\s+([\s\S]*?)\s+OR\s+(?:DELETE|TRUNCATE)\b/i;
 
