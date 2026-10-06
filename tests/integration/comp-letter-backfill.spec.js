@@ -95,6 +95,7 @@ describe('comp-letter backfill (real PG)', () => {
     }
     for (const row of rows) expect(row.artist_name.endsWith(` - ${row.letter}`)).toBe(true);
     expect(lines.join('\n')).toMatch(/not lettered: 1\n\s+Soundtracks\s+\d+\s+Various Artists$/m);
+    expect(lines.join('\n')).toMatch(/reachable only through artist-name search/);
   });
 
   test('a dry run reports the 52 and writes nothing', async () => {
