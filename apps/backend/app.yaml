@@ -1123,7 +1123,6 @@ components:
           type: string
         genre_id:
           type: integer
-          nullable: false
           description: >-
             BS#2917. `library.genre_id`, the id dj-site gates the Rock/Soundtracks section letter on.
         genre_name:
