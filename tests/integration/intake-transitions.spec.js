@@ -16,7 +16,12 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
-const { seedIntakeItem, managerAccessToken } = require('../utils/intake_seed');
+const {
+  seedIntakeItem,
+  seedLibraryRelease,
+  removeSeededLibraryReleases,
+  managerAccessToken,
+} = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE-TX';
@@ -42,8 +47,7 @@ describe('/intake transitions (BS#2798)', () => {
 
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE album_title = $1`, [`${PREFIX} filed`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1 AND code_letters = 'ZZ'`, [PREFIX]);
+    await removeSeededLibraryReleases();
   };
 
   beforeAll(async () => {
@@ -54,17 +58,8 @@ describe('/intake transitions (BS#2798)', () => {
     await cleanup();
     [{ id: formatId }] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format ORDER BY id LIMIT 1`);
 
-    const [genre] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".genres ORDER BY id LIMIT 1`);
-    const [artist] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".artists (artist_name, alphabetical_name, code_letters) VALUES ($1, $1, 'ZZ') RETURNING id`,
-      [PREFIX]
-    );
-    const [lib] = await sql.unsafe(
-      `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
-       VALUES ($1, $2, $3, $4, 9103, $5) RETURNING id`,
-      [artist.id, genre.id, formatId, `${PREFIX} filed`, PREFIX]
-    );
-    libraryId = lib.id;
+    libraryId = (await seedLibraryRelease({ album_title: `${PREFIX} filed`, artist_name: PREFIX, format_id: formatId }))
+      .id;
   });
 
   afterAll(async () => {

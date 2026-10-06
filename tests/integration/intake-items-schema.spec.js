@@ -17,29 +17,21 @@
  */
 
 const { getTestDb } = require('../utils/db');
-const { seedAuthUser, removeSeededAuthUsers, seedIntakeItem } = require('../utils/intake_seed');
+const {
+  seedAuthUser,
+  removeSeededAuthUsers,
+  seedIntakeItem,
+  seedLibraryRelease,
+  removeSeededLibraryReleases,
+} = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-const GENRE_ID = 11; // exists in the integration fixture
-const FORMAT_ID = 1;
 
 describe('intake_items schema (real PG)', () => {
   let sql;
-  let artistId;
-  const libraryIds = [];
   const submissionIds = [];
 
   const seedUser = async () => (await seedAuthUser()).id;
-
-  const seedLibrary = async (title) => {
-    const [row] = await sql`
-      INSERT INTO ${sql(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number)
-      VALUES (${artistId}, ${GENRE_ID}, ${FORMAT_ID}, ${title}, 1)
-      RETURNING id
-    `;
-    libraryIds.push(row.id);
-    return row.id;
-  };
 
   const seedSubmission = async () => {
     const [row] = await sql`
@@ -60,15 +52,6 @@ describe('intake_items schema (real PG)', () => {
     sql = getTestDb();
   });
 
-  beforeEach(async () => {
-    const [a] = await sql`
-      INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
-      VALUES ('Jessica Pratt', 'Pratt, Jessica', 'PR')
-      RETURNING id
-    `;
-    artistId = a.id;
-  });
-
   afterEach(async () => {
     // Items first: `album_id` cascades, but `cited_album_id` and the user
     // columns only null, and a lingering item would hold the parents.
@@ -76,13 +59,9 @@ describe('intake_items schema (real PG)', () => {
     if (submissionIds.length > 0) {
       await sql`DELETE FROM ${sql(SCHEMA)}.album_review_submissions WHERE id = ANY(${submissionIds})`;
     }
-    if (libraryIds.length > 0) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
-    }
+    await removeSeededLibraryReleases();
     await removeSeededAuthUsers();
-    await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
     submissionIds.length = 0;
-    libraryIds.length = 0;
   });
 
   it('defaults a new item to the pool state', async () => {
@@ -93,7 +72,7 @@ describe('intake_items schema (real PG)', () => {
 
   describe('CHECK constraints', () => {
     it('rejects an item citing both a release and a form submission', async () => {
-      const cited = await seedLibrary('cited');
+      const cited = (await seedLibraryRelease({ album_title: 'cited' })).id;
       const submission = await seedSubmission();
       await expect(insertItem({ cited_album_id: cited, cited_submission_id: submission })).rejects.toMatchObject({
         code: '23514',
@@ -102,7 +81,8 @@ describe('intake_items schema (real PG)', () => {
     });
 
     it.each([['cited_album_id'], ['cited_submission_id']])('accepts a citation through %s alone', async (column) => {
-      const target = column === 'cited_album_id' ? await seedLibrary('cited') : await seedSubmission();
+      const target =
+        column === 'cited_album_id' ? (await seedLibraryRelease({ album_title: 'cited' })).id : await seedSubmission();
       const item = await insertItem({ [column]: target });
       expect(item[column]).toBe(target);
     });
@@ -122,7 +102,7 @@ describe('intake_items schema (real PG)', () => {
     });
 
     it.each([['filed'], ['finalized']])('accepts state %s once album_id is set', async (state) => {
-      const albumId = await seedLibrary('filed');
+      const albumId = (await seedLibraryRelease({ album_title: 'filed' })).id;
       const item = await insertItem({ state, album_id: albumId });
       expect(item.state).toBe(state);
     });
@@ -130,7 +110,7 @@ describe('intake_items schema (real PG)', () => {
 
   describe('library foreign keys', () => {
     it('deletes the item with the release it was filed as (album_id CASCADE)', async () => {
-      const albumId = await seedLibrary('filed');
+      const albumId = (await seedLibraryRelease({ album_title: 'filed' })).id;
       const item = await insertItem({ state: 'filed', album_id: albumId });
 
       await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ${albumId}`;
@@ -139,7 +119,7 @@ describe('intake_items schema (real PG)', () => {
     });
 
     it('keeps the item when the release it cited is deleted (cited_album_id SET NULL)', async () => {
-      const cited = await seedLibrary('cited');
+      const cited = (await seedLibraryRelease({ album_title: 'cited' })).id;
       const item = await insertItem({ cited_album_id: cited });
 
       await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ${cited}`;

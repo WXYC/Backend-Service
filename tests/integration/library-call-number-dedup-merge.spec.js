@@ -43,6 +43,7 @@ jest.unmock('drizzle-orm');
 
 const path = require('path');
 const { getTestDb } = require('../utils/db');
+const { seedReview, seedReviewPrint, seedFccNote } = require('../utils/intake_seed');
 
 const merge = require(path.join(__dirname, '..', '..', 'jobs', 'library-call-number-dedup', 'dist', 'merge.cjs'));
 
@@ -56,7 +57,11 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
   let artistId;
   const libraryIds = [];
 
-  /** Seed one library row on a given shelf slot and remember it for cleanup. */
+  /**
+   * Seed one library row on a given shelf slot and remember it for cleanup. Hand-written, not
+   * `seedLibraryRelease`: the slot needs one shared artist, genre and call number across two releases, and the
+   * teardown below deletes `bins` and `library_identity` rows before the release, in the job's own order.
+   */
   const seedAlbum = async ({ title, codeNumber, vol = null, genreId = GENRE_ID }) => {
     const [row] = await sql`
       INSERT INTO ${sql(SCHEMA)}.library
@@ -198,7 +203,7 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       const a = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 12 });
       const b = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 12 });
       for (const id of [a, b]) {
-        await sql`INSERT INTO ${sql(SCHEMA)}.reviews (album_id, review) VALUES (${id}, ${'review of ' + id})`;
+        await seedReview({ album_id: id, review: 'review of ' + id });
       }
 
       const plan = (await merge.planSlots([await slotFor(12)]))[0];
@@ -219,10 +224,8 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       const a = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 13 });
       const b = await seedAlbum({ title: 'Sueño Salvaje', codeNumber: 13 });
       for (const id of [a, b]) {
-        await sql`INSERT INTO ${sql(SCHEMA)}.review_prints (album_id) VALUES (${id})`;
-        await sql`
-          INSERT INTO ${sql(SCHEMA)}.fcc_notes (album_id, track, note) VALUES (${id}, ${'track of ' + id}, 'a note')
-        `;
+        await seedReviewPrint({ album_id: id });
+        await seedFccNote({ album_id: id, track: 'track of ' + id });
       }
 
       const plan = (await merge.planSlots([await slotFor(13)]))[0];
