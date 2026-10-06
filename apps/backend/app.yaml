@@ -5091,8 +5091,7 @@ paths:
           in: query
           required: false
           schema:
-            type: string
-            enum: ['true', 'false']
+            type: boolean
       responses:
         '200':
           description: 'The matching items'
