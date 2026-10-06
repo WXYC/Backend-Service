@@ -394,6 +394,28 @@ export const transitionIntakeItem = async (action: IntakeAction, id: number, act
 };
 
 /**
+ * The accept's one write, for a caller that already holds the item (and the review) locked in the order `acceptReview` uses and has
+ * checked that the review belongs to the record: the review becomes the item's accepted one, an unfiled item becomes `reviewed`
+ * (a filed or finalized one keeps its state), and a pending request is withdrawn. The holder is untouched.
+ */
+export const writeAcceptance = (
+  tx: Pick<typeof db, 'update'>,
+  itemId: number,
+  reviewId: number,
+  actor: Pick<ReviewsActor, 'id'>
+) =>
+  tx
+    .update(intake_items)
+    .set({
+      accepted_review_id: reviewId,
+      accepted_by: actor.id,
+      accepted_at: sql`now()`,
+      state: sql`CASE WHEN ${intake_items.state} IN ('filed', 'finalized') THEN ${intake_items.state} ELSE 'reviewed' END`,
+      ...CLEAR_REQUEST,
+    })
+    .where(eq(intake_items.id, itemId));
+
+/**
  * Accepts one submitted review for an item (BS#2860), in the order every item/review operation uses: the cited
  * release's `library` row `FOR SHARE` (only for an accept through the citation, so `DELETE /library/{id}`, which holds
  * that row `FOR UPDATE` and copies the cited cover reviews it finds, either follows this accept and copies its review or
@@ -438,16 +460,7 @@ export const acceptReview = async (id: number, reviewId: number, actor: ReviewsA
           review.album === citedLocked &&
           review.medium === 'typed'));
     if (!belongs || review.status !== 'submitted') return 'bad_review' as const;
-    await tx
-      .update(intake_items)
-      .set({
-        accepted_review_id: reviewId,
-        accepted_by: actor.id,
-        accepted_at: sql`now()`,
-        state: sql`CASE WHEN ${intake_items.state} IN ('filed', 'finalized') THEN ${intake_items.state} ELSE 'reviewed' END`,
-        ...CLEAR_REQUEST,
-      })
-      .where(eq(intake_items.id, id));
+    await writeAcceptance(tx, id, reviewId, actor);
     return 'accepted' as const;
   });
   return outcome === 'accepted' ? { outcome, item: (await getIntakeItem(id, true))! } : { outcome };
