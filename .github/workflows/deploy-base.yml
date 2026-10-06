@@ -270,15 +270,31 @@ jobs:
             # deliberately NOT filtered: an operator who explicitly dispatches
             # a retired target should get the loud build failure, which is the
             # refusal the retirement was designed around.
+            #
+            # One-shot jobs are never deployed (the deploy step skips them),
+            # so building one only because a dependency changed is pure ECR
+            # egress (BS#2909). Drop a one-shot unless its own directory or
+            # Dockerfile changed in this push; keep them all when the range
+            # is unresolvable, since that path already deploys everything.
             BUILDABLE='[]'
+            SKIPPED_ONE_SHOTS=''
             for TARGET in $(echo "$TARGETS" | jq -r '.[]'); do
-              if [ -f "Dockerfile.$TARGET" ]; then
-                BUILDABLE=$(echo "$BUILDABLE" | jq -c --arg t "$TARGET" '. + [$t]')
-              else
+              if [ ! -f "Dockerfile.$TARGET" ]; then
                 echo "::warning title=Skipping target with no Dockerfile::$TARGET changed but has no root Dockerfile.$TARGET, so it cannot be built; skipping it rather than failing the whole deploy. If this target is meant to deploy, restore its Dockerfile."
+                continue
               fi
+              if [ "$RANGE_RESOLVABLE" = true ] && [ -f "jobs/$TARGET/package.json" ] \
+                && [ "$(yq -r '.["job-type"] // "cron"' "jobs/$TARGET/package.json")" = "one-shot" ] \
+                && [ -z "$(git diff --name-only "$BASE" "$HEAD_SHA" -- "jobs/$TARGET/" "Dockerfile.$TARGET")" ]; then
+                SKIPPED_ONE_SHOTS="$SKIPPED_ONE_SHOTS $TARGET"
+                continue
+              fi
+              BUILDABLE=$(echo "$BUILDABLE" | jq -c --arg t "$TARGET" '. + [$t]')
             done
             TARGETS="$BUILDABLE"
+            if [ -n "$SKIPPED_ONE_SHOTS" ]; then
+              echo "::notice title=Skipping one-shot jobs::Not building one-shots whose own files did not change:$SKIPPED_ONE_SHOTS. Build one with Manual Build & Deploy rebuild=true before running it."
+            fi
 
             if [ "$TARGETS" = "[]" ] || [ -z "$TARGETS" ]; then
               echo "No affected app targets found."
