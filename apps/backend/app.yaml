@@ -609,6 +609,25 @@ components:
             add_date: { type: string, format: date }
             submitted_at: { type: string, format: date-time, nullable: true }
             last_modified: { type: string, format: date-time }
+            in_use:
+              type: boolean
+              description: Accepted for any intake item, or the newest print-log entry for a copy. The rule `DELETE /reviews/{id}` refuses an author on.
+            on_cover:
+              type: boolean
+              description: True only in a `GET /reviews?album_id=` list, for the reviews on the cover of that release (accepted for, or the latest print of, a copy filed as it); false everywhere else.
+            printed_revision_id:
+              {
+                type: integer,
+                nullable: true,
+                description: The `revision_id` of the review's own latest print; null if never printed,
+              }
+            printed_at:
+              {
+                type: string,
+                format: date-time,
+                nullable: true,
+                description: When the review's own latest print was made; null if never printed,
+              }
 
     DigitalArchivePlaybackManifest:
       type: object
@@ -5440,6 +5459,34 @@ paths:
                 $ref: '#/components/schemas/IntakeConflictError'
 
   /reviews:
+    get:
+      summary: List reviews (BS#2805)
+      description: >-
+        Grant `reviews: read`. No filter returns every review the caller may see; filters combine with AND; `mine=false` equals omitting it; unpaginated. A draft is visible only to its author and whoever recorded it (a music director sees no one else's). `album_id`: the release's reviews plus those of the release an item filed or finalized as it cites; the reviews on its cover (`on_cover`) first. Every other list, and that list past its first group, is newest first by `submitted_at` (a visible draft by `last_modified`), ties by `id` descending. `album_id` and `intake_item_id` are 1..2147483647; a malformed value, a repeated key, or `mine` other than `true`/`false` is a 400.
+      parameters:
+        - { name: album_id, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 2147483647 } }
+        - {
+            name: intake_item_id,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 2147483647 },
+          }
+        - { name: mine, in: query, required: false, schema: { type: boolean } }
+      responses:
+        '200':
+          description: 'The reviews'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Review'
+        '400':
+          description: 'A malformed filter'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: read`'
     post:
       summary: Create a review draft (BS#2802)
       description: >-
@@ -5477,6 +5524,25 @@ paths:
         required: true
         schema:
           type: integer
+    get:
+      summary: Read a review (BS#2805)
+      description: >-
+        Grant `reviews: read`. `on_cover` is always false here. A draft the caller may not see is a 404.
+      responses:
+        '200':
+          description: 'The review'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Review'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: read`'
+        '404':
+          description: 'No such review, or a draft the caller may not see'
     patch:
       summary: Edit a review (BS#2802)
       description: >-

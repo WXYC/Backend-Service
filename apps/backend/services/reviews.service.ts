@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, inArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import {
   db,
@@ -19,8 +19,16 @@ import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from './intake.
  * draft is created, edited, submitted and deleted here (submit and delete are BS#2854).
  */
 
-/** Mirror of the contract's `Review` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x. */
-export type ReviewResponse = Review;
+/**
+ * Mirror of the contract's `Review` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x.
+ * The last four keys are computed by `reviewSelection`, never stored.
+ */
+export type ReviewResponse = Review & {
+  in_use: boolean;
+  on_cover: boolean;
+  printed_revision_id: number | null;
+  printed_at: Date | null;
+};
 
 /** The contract's `ReviewFields`: the slip plus publishing consent. `undefined` means "not supplied". */
 export type ReviewFields = Partial<
@@ -43,12 +51,96 @@ export const AUTHOR_MAX = 128;
 export const snapshotAuthor = (name: string | null | undefined) =>
   name == null ? null : [...name].slice(0, AUTHOR_MAX).join('');
 
+/**
+ * SQL for "review `reviewId` is the newest print of a copy": of an intake item, or, with no item, of a library
+ * release. `reviewId` must be a nested SQL (`sql`${reviews.id}``), never a bare column, because drizzle renders a
+ * bare column unqualified in a single-table select and it would bind to the inner `p`. `scope` narrows which
+ * prints count (`on_cover` asks only about the prints of one release's copies). Shared by `in_use` here and by
+ * `deleteReview`'s print half, so the two cannot disagree.
+ */
+export const latestPrintOfCopy = (
+  reviewId: SQL,
+  scope?: (p: { intake_item_id: AnyColumn; album_id: AnyColumn }) => SQL
+) => {
+  const p = alias(review_prints, 'p');
+  const n = alias(review_prints, 'n');
+  return sql`EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId}${scope ? sql` AND ${scope(p)}` : sql``} AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id})))`;
+};
+
+const reviewRef = sql`${reviews.id}`;
+const acceptedBy = (scope: SQL) =>
+  sql`EXISTS (SELECT 1 FROM ${intake_items} AS ai WHERE ai.accepted_review_id = ${reviewRef} AND ${scope})`;
+const inUse = sql<boolean>`(${acceptedBy(sql`true`)} OR ${latestPrintOfCopy(reviewRef)})`;
+const ownLatestPrint = (column: 'revision_id' | 'printed_at') =>
+  sql`(SELECT ${sql.raw(`lp.${column}`)} FROM ${review_prints} AS lp WHERE lp.review_id = ${reviewRef} ORDER BY lp.printed_at DESC, lp.id DESC LIMIT 1)`;
+
+/** A review's columns plus the computed `in_use`, `on_cover` (`onCover`, false unless a release list supplies it), `printed_revision_id`, `printed_at`. */
+const reviewSelection = (onCover: SQL<boolean> = sql`false`) => ({
+  ...getTableColumns(reviews),
+  in_use: inUse,
+  on_cover: onCover.as('on_cover'),
+  printed_revision_id: ownLatestPrint('revision_id').mapWith(Number),
+  printed_at: ownLatestPrint('printed_at').mapWith(review_prints.printed_at),
+});
+
+/**
+ * The read rule: a draft is visible only to its author and whoever recorded it. Everyone else, a music
+ * director included, sees submitted reviews only. Exported for the release print (BS#2865) and the history read (BS#2861).
+ */
+export const reviewVisibleTo = (actor: Pick<ReviewsActor, 'id'>) =>
+  sql`(${reviews.status} <> 'draft' OR ${reviews.author_user_id} = ${actor.id} OR ${reviews.recorded_by_user_id} = ${actor.id})`;
+
 const selectReview = (id: number, executor: Pick<typeof db, 'select'> = db) =>
   executor
-    .select()
+    .select(reviewSelection())
     .from(reviews)
     .where(eq(reviews.id, id))
     .then((rows) => rows[0] as ReviewResponse | undefined);
+
+/** `GET /reviews/{id}`: `undefined` for a missing review and for a draft the caller may not see. Reads never lock. */
+export const getReview = async (id: number, actor: ReviewsActor) =>
+  db
+    .select(reviewSelection())
+    .from(reviews)
+    .where(and(eq(reviews.id, id), reviewVisibleTo(actor)))
+    .then((rows) => rows[0] as ReviewResponse | undefined);
+
+export type ReviewFilters = { album_id?: number; intake_item_id?: number; mine?: boolean };
+
+/**
+ * `GET /reviews`: one statement. Filters combine with AND; the read rule always applies. Newest first
+ * (`submitted_at`, a visible draft by `last_modified`, then `id`). With `album_id` the release's reviews are
+ * `reviews.album_id` = the release plus those of the release an item filed as it cites; the reviews on the
+ * cover of this release (`on_cover`: accepted for, or the latest print of, a copy of it) lead, and the SAME
+ * `on_cover` select alias is the first sort key, so the field and the order cannot disagree.
+ */
+export const listReviews = async (filters: ReviewFilters, actor: ReviewsActor) => {
+  const conditions: SQL[] = [reviewVisibleTo(actor)];
+  if (filters.mine)
+    conditions.push(or(eq(reviews.author_user_id, actor.id), eq(reviews.recorded_by_user_id, actor.id))!);
+  if (filters.intake_item_id !== undefined) conditions.push(eq(reviews.intake_item_id, filters.intake_item_id));
+  const newest = [desc(sql`coalesce(${reviews.submitted_at}, ${reviews.last_modified})`), desc(reviews.id)];
+  if (filters.album_id === undefined) {
+    return (await db
+      .select(reviewSelection())
+      .from(reviews)
+      .where(and(...conditions))
+      .orderBy(...newest)) as ReviewResponse[];
+  }
+  const releaseCopies = sql`(SELECT ci.id FROM ${intake_items} AS ci WHERE ci.album_id = ${filters.album_id} AND ci.state IN ('filed', 'finalized'))`;
+  const cited = sql`(SELECT ci.cited_album_id FROM ${intake_items} AS ci WHERE ci.album_id = ${filters.album_id} AND ci.state IN ('filed', 'finalized') AND ci.cited_album_id IS NOT NULL)`;
+  conditions.push(sql`(${reviews.album_id} = ${filters.album_id} OR ${reviews.album_id} IN ${cited})`);
+  const onCover = sql<boolean>`(${acceptedBy(sql`ai.album_id = ${filters.album_id} AND ai.state IN ('filed', 'finalized')`)} OR ${latestPrintOfCopy(
+    reviewRef,
+    (p) =>
+      sql`(${p.intake_item_id} IN ${releaseCopies} OR (${p.intake_item_id} IS NULL AND ${p.album_id} = ${filters.album_id}))`
+  )})`;
+  return (await db
+    .select(reviewSelection(onCover))
+    .from(reviews)
+    .where(and(...conditions))
+    .orderBy(desc(sql`on_cover`), ...newest)) as ReviewResponse[];
+};
 
 /**
  * Creates the caller's own `typed` draft about one subject. An intake item must be held by the
@@ -281,12 +373,10 @@ export const submitReview = async (id: number, actor: ReviewsActor) =>
     return { outcome: 'submitted' as const, review: (await selectReview(id, tx))! };
   });
 
-/** Whether a review is the newest print of a copy: of an intake item, or, with no item, of a library release. */
+/** The print half of `in_use`, as the same fragment `selectReview` and the lists use. */
 const isLatestPrint = async (tx: Pick<typeof db, 'execute'>, reviewId: number) => {
-  const p = alias(review_prints, 'p');
-  const n = alias(review_prints, 'n');
   const [row] = await tx.execute<{ in_use: boolean }>(
-    sql`SELECT EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId} AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id}))) AS in_use`
+    sql`SELECT ${latestPrintOfCopy(sql`${reviewId}::int`)} AS in_use`
   );
   return row.in_use;
 };
