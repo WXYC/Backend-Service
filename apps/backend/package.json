@@ -19,7 +19,7 @@
     "@aws-sdk/client-cloudwatch": "^3.1146.0",
     "@aws-sdk/client-s3": "^3.1146.0",
     "@aws-sdk/s3-request-presigner": "^3.1146.0",
-    "@sentry/node": "^11.4.0",
+    "@sentry/node": "^10.75.0",
     "@tensorflow/tfjs": "^4.22.0",
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0",
