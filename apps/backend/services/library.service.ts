@@ -7107,15 +7107,16 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * not — and it is deliberate: without it such an edit commits between the
  * capture and the cascade and is destroyed with only its pre-edit version
  * snapshotted, which is the silent loss this whole feature exists to prevent.
- * No new lock-ORDER reasoning is needed, for the same reason the two locks
- * above need none: nothing here is ordered against, only bounded. Every child
- * writer takes exactly one row lock on its own table; the one writer that
- * takes two — `flowsheet`'s INSERT, library then rotation — reaches a captured
- * child only at `rotation`, which this transaction already holds `FOR UPDATE`
- * from before the capture ran, in that same library-then-rotation order, so it
- * introduces no new pair to order. A future writer that locked two captured
- * children in the opposite order would deadlock — and would lose to the bound
- * below rather than to the deadlock detector.
+ * The rotation and library locks need no order reasoning, for the reason above:
+ * nothing there is ordered against, only bounded. The item and review locks DO
+ * have an order, because the review writers that take two locks all take the
+ * item first and the review second (`lockReviewAfterItem`'s callers, which
+ * include `deleteReview`, plus print and accept). So the delete takes its
+ * intake items `FOR UPDATE` in one ascending-`id` statement, before
+ * `copyCitedCoverReviews` and before the capture's `FOR SHARE` on any review:
+ * library, then items, then reviews. A writer that locks a review and then an
+ * item would still deadlock, and would lose to the bound below rather than to
+ * the deadlock detector.
  *
  * So the transaction does not rely on the order at all. It sets
  * `lock_timeout` to {@link DELETE_ALBUM_LOCK_TIMEOUT_MS}, deliberately BELOW
@@ -7170,10 +7171,9 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * would take the review and `ON DELETE SET NULL` would blank the record's
  * `accepted_review_id`. It runs after the `not_found` and `has_digital_assets`
  * returns, so a refused delete copies nothing, and takes its locks inside this
- * transaction under the same `lock_timeout`: the citing items `FOR UPDATE` in
- * ascending `id`, then the reviews to copy `FOR SHARE` in ascending `id`, so
- * item rows are still taken before review rows. Like the capture's locks these
- * are bounded, not ordered against.
+ * transaction under the same `lock_timeout`: the citing items are already held
+ * from the items lock above, then the reviews to copy are taken `FOR SHARE` in
+ * ascending `id`, so item rows are still taken before review rows.
  *
  * Four FKs are resolved explicitly inside the same transaction rather than
  * left to the schema, because each would otherwise fail the DELETE below
@@ -7322,6 +7322,23 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     }
     // Whatever is left is rejected, so the delete proceeds through it.
     const rejectedAssetIds = digitalAssetRows.map((row) => row.id);
+
+    // Lock the release's intake items before any review is locked or copied:
+    // the items filed as this release and the items whose accepted review is one
+    // of its reviews, in one statement in ascending `id`. Every review writer
+    // locks its item and then its review (`lockReviewAfterItem`, print, accept),
+    // so taking the same order here (library, items, reviews) leaves the
+    // capture's and the copy's later review locks no cycle to join. The review
+    // test is a subquery so one table is in the `FROM` and a plain
+    // `.for('update')` works.
+    await tx
+      .select({ id: intake_items.id })
+      .from(intake_items)
+      .where(
+        sql`${intake_items.album_id} = ${album_id} OR ${intake_items.accepted_review_id} IN (SELECT ${reviews.id} FROM ${reviews} WHERE ${reviews.album_id} = ${album_id})`
+      )
+      .orderBy(asc(intake_items.id))
+      .for('update');
 
     // A record that took its cover review from this release keeps a complete
     // copy of it (BS#2875; see the docstring). After the refusals above, so a

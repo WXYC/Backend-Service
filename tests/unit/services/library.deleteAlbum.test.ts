@@ -68,6 +68,7 @@ import {
   captureCatalogDeleteSnapshot,
   db,
   digital_asset,
+  intake_items,
   library,
   reviews,
   rotation,
@@ -237,6 +238,32 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
       expect(assetSelect.methods).toContain('for(update)');
     });
 
+    it('locks the release intake items in one ordered FOR UPDATE statement before any review lock (BS#2928)', async () => {
+      const { ops } = await runDelete(42, CLEAN);
+
+      const selects = ops.filter((o) => o.op === 'select');
+      const itemsIdx = selects.findIndex((o) => o.table === intake_items);
+      expect(itemsIdx).toBe(3);
+      expect(selects[itemsIdx].methods).toEqual(['from', 'where', 'orderBy', 'for(update)']);
+      // No statement before it locks reviews, and the only other intake_items select is the copy's, after it.
+      expect(selects.slice(0, itemsIdx).some((o) => o.table === reviews)).toBe(false);
+      expect(selects.slice(itemsIdx + 1).filter((o) => o.table === intake_items)).toHaveLength(1);
+    });
+
+    it('renders the items lock over both the album_id and the accepted-review conditions (BS#2928)', () => {
+      const body = deleteAlbumBody();
+      const lock = body.slice(
+        body.indexOf('.from(intake_items)'),
+        body.indexOf("for('update')", body.indexOf('.from(intake_items)'))
+      );
+      expect(lock).toContain('${intake_items.album_id} = ${album_id}');
+      expect(lock).toContain('${intake_items.accepted_review_id} IN (SELECT');
+      expect(lock).toContain('orderBy(asc(intake_items.id))');
+      expect(body.indexOf('.from(intake_items)')).toBeLessThan(
+        body.indexOf('await copyCitedCoverReviews(tx, album_id)')
+      );
+    });
+
     it('pins FOR UPDATE rather than FOR NO KEY UPDATE in the source', () => {
       const body = deleteAlbumBody();
       expect(body).toContain("for('update')");
@@ -250,16 +277,16 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
   // cover review from the release), are the whole of it, regardless of whether
   // the release carries plays or how they reach it.
   describe('no flowsheet awareness left (finding 2)', () => {
-    it('issues exactly three locked SELECTs and the cover-review select on a clean release', async () => {
+    it('issues exactly three locked SELECTs, the items lock and the cover-review select on a clean release', async () => {
       const { ops } = await runDelete(42, CLEAN);
 
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(4);
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(5);
     });
 
-    it('issues the same four SELECTs when the release has rotation rows', async () => {
+    it('issues the same five SELECTs when the release has rotation rows', async () => {
       const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], NO_ASSETS]);
 
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(4);
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(5);
     });
 
     it('never references the flowsheet table in the transaction body', () => {
