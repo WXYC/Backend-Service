@@ -29,9 +29,12 @@ import type { AlbumReview } from '@wxyc/shared/dtos';
  *
  * PII rule: `reviewer_raw` holds real names (the form promised "your
  * name will not be shared") and `social_consent_raw` carries
- * name-adjacent asides. Both are stored for internal curation and are
- * NEVER emitted here — see the projection note below. That promise is
- * unconditional: it binds on both surfaces regardless of the consent answer.
+ * name-adjacent asides. The station ruled that the promise covers only
+ * outside the station (epic #2791 decision 14; ADR 0011's amendment), so
+ * `reviewer_raw` IS returned here, as `reviewer`, to the role-gated staff
+ * this route admits — the route gate is what makes that safe. It is never
+ * logged or sent to telemetry. `social_consent_raw` is still NEVER selected.
+ * The public attach above never reads `reviewer_raw`.
  */
 
 /**
@@ -49,7 +52,9 @@ import type { AlbumReview } from '@wxyc/shared/dtos';
  * (`album-metadata-lookup.service.ts`'s `WxycReviewItem`) imports its generated
  * type the same way.
  */
-export type AlbumReviewDTO = AlbumReview;
+// `reviewer` is declared by WXYC/wxyc-shared#578 but not yet in the pinned
+// `@wxyc/shared`; the intersection goes away when this repo's copy carries it.
+export type AlbumReviewDTO = AlbumReview & { reviewer: string | null };
 
 export type AlbumReviewsQueryFilters = {
   /** Exact match on the best-effort library link. */
@@ -65,9 +70,10 @@ export type AlbumReviewsQueryFilters = {
 export type AlbumReviewRow = Omit<AlbumReviewDTO, 'submitted_at'> & { submitted_at: Date | null };
 
 // Explicit select list — THE PROJECTION IS THE PII LEAK BARRIER (the
-// concerts.service precedent): `reviewer_raw` and `social_consent_raw`
-// are never selected, so reviewer identity cannot reach the response no
-// matter what the DTO mapper does. The internal ETL bookkeeping columns
+// concerts.service precedent): `social_consent_raw` is never selected, so
+// it cannot reach the response no matter what the DTO mapper does.
+// `reviewer_raw` is selected deliberately and served as `reviewer` on this
+// role-gated route (decision 14, ADR 0011's amendment). The internal ETL bookkeeping columns
 // (source, source_key, norm_artist, norm_album, add_date, last_modified)
 // are excluded for the same reason. Do NOT replace this with a bare
 // `select()` — a full-row select would silently re-open the leak.
@@ -87,11 +93,12 @@ const albumReviewFields = {
   released_within_six_months: album_review_submissions.released_within_six_months,
   social_consent: album_review_submissions.social_consent,
   submitted_at: album_review_submissions.submitted_at,
+  reviewer: album_review_submissions.reviewer_raw,
   // `satisfies Record<keyof AlbumReviewRow, Column>` is what upgrades the
   // barrier above from a convention to a build error: a column added to
   // `AlbumReviewRow` without an entry here fails to compile, and — the half
   // that matters for PII — an entry here that is not in the row type fails
-  // too, so `reviewer_raw` cannot be added without also widening the type
+  // too, so a new column cannot be selected without also widening the type
   // the wire mapper is written against. The `rawProjection` docblock
   // (`apps/backend/utils/sql-projection.ts`, BS#2231) documents the pattern;
   // `library.service.ts`'s `libraryArtistViewFields` is the in-repo precedent.
@@ -118,6 +125,7 @@ export const toAlbumReviewDTO = (row: AlbumReviewRow): AlbumReviewDTO => ({
   // Drizzle surfaces the `timestamptz` column as `Date`; the SSOT wire
   // type is an ISO-8601 date-time string (see the DTO note above).
   submitted_at: row.submitted_at === null ? null : row.submitted_at.toISOString(),
+  reviewer: row.reviewer,
 });
 
 /**

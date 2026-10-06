@@ -24,9 +24,10 @@
  *     and is pinned separately by wxyc-reviews-metadata.spec.js;
  *   - the `review IS NOT NULL` floor: a bodyless submission is not a review
  *     and never appears, on any filter;
- *   - PII exclusion ON THE WIRE: response objects carry no `reviewer_raw`
- *     or `social_consent_raw` keys (nor any internal ETL column) even
- *     though the seeded rows populate both — the projection barrier;
+ *   - PII posture ON THE WIRE: response objects carry `reviewer` (the stored
+ *     `reviewer_raw`, station staff only) but no `reviewer_raw` or
+ *     `social_consent_raw` keys (nor any internal ETL column) even though the
+ *     seeded rows populate both — the projection barrier;
  *   - ordering by `submitted_at` DESC NULLS LAST (the timestamp-less row
  *     sorts last, not first);
  *   - `album_id` exact filter and `artist` normalized filter
@@ -293,11 +294,13 @@ describe('GET /album-reviews (ADR 0011)', () => {
         released_within_six_months: true,
         social_consent: true,
         submitted_at: OLDEST,
+        reviewer: 'A Real Name, 3/15/21',
       });
 
       // The load-bearing PII assertion: the seeded row HAS reviewer_raw and
-      // social_consent_raw in the DB; the wire object must not carry the
-      // keys at all (absent, not null).
+      // social_consent_raw in the DB; the wire carries the reviewer line as
+      // `reviewer` (station staff only) but neither raw column key at all
+      // (absent, not null).
       for (const row of seeded(listing.body)) {
         for (const internal of [
           'reviewer_raw',

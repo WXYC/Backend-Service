@@ -2326,9 +2326,9 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     `social_consent_raw` — real names collected under a form promise that
  *     "your name will not be shared" — into this permanently-retained,
  *     never-pruned `captured` column. ADR 0011 and that table's docstring
- *     make the enumerated `select({...})` in `lookupWxycReviewsByAlbumId`
- *     the ONLY reader and require any second reader to carry the same
- *     exclusion; this capture would have been that second reader. Do not
+ *     limit readers of `reviewer_raw` to the role-gated `GET /album-reviews`
+ *     and require any other reader to carry the same exclusion; this
+ *     capture would have been one more reader. Do not
  *     "fix" this with a projection — reason (1) means there is nothing to
  *     restore.
  *   - Excluded because the delete REFUSES outright rather than ever reaching
@@ -2813,14 +2813,16 @@ export const reviews = wxyc_schema.table(
  * NULL so a library deletion can't take the submission with it).
  *
  * PII: `reviewer_raw` holds real names and the form promised "your name
- * will not be shared" — stored for internal curation, NEVER emitted by
- * any read surface (the `flowsheet.dj_name` posture). Same for the
- * name-adjacent asides in `social_consent_raw`. The barrier is the
- * enumerated `select({...})` in `lookupWxycReviewsByAlbumId`
- * (`apps/backend/services/album-metadata-lookup.service.ts`), which is
- * the only reader today: because these columns are never fetched, no
- * downstream projection or serializer can surface them by accident. Any
- * second reader must carry the same exclusion — see ADR 0011.
+ * will not be shared" — stored for internal curation. The promise covers
+ * only outside the station (ADR 0011's amendment), so the role-gated
+ * `GET /album-reviews` (`apps/backend/services/album-reviews.service.ts`)
+ * returns it to station staff as `reviewer`. The public attach
+ * (`lookupWxycReviewsByAlbumId` in
+ * `apps/backend/services/album-metadata-lookup.service.ts`) never reads it,
+ * and nothing reads `social_consent_raw` (name-adjacent asides): the
+ * enumerated `select({...})` of each reader is the barrier, so no
+ * downstream projection or serializer can surface a column by accident.
+ * Any other reader must carry the same exclusion — see ADR 0011.
  *
  * `source` is text with a documented vocabulary rather than a pgEnum (the
  * 0109 lesson: enum additions cost a migration each). Values so far:

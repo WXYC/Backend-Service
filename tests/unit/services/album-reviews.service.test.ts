@@ -5,8 +5,9 @@
  * `@wxyc/database` resolves to tests/mocks/database.mock.ts, so these pin
  * the pieces that don't need PostgreSQL:
  *   - `toAlbumReviewDTO` — ISO serialization of `submitted_at`, null
- *     passthrough, and (the PII leak barrier) the exact wire key set: no
- *     `reviewer_raw`, no `social_consent_raw`, no internal ETL columns.
+ *     passthrough, and (the PII leak barrier) the exact wire key set:
+ *     `reviewer` (from `reviewer_raw`) is served, but no `reviewer_raw` key,
+ *     no `social_consent_raw`, no internal ETL columns.
  *   - The select projection never references the PII/internal columns, so
  *     they can't reach the response regardless of the mapper.
  *   - `buildWhere` parity: the page and count queries receive structurally
@@ -47,10 +48,10 @@ import {
 const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
 
 /** Columns that must NEVER appear in the projection or on the wire.
- *  reviewer_raw/social_consent_raw are the PII pair the form's "your name
- *  will not be shared" promise protects; the rest are internal ETL
- *  bookkeeping. */
-const PII_COLUMNS = ['reviewer_raw', 'social_consent_raw'];
+ *  social_consent_raw is the name-adjacent aside that is never served;
+ *  `reviewer_raw` IS selected (served as `reviewer` on this role-gated route,
+ *  ADR 0011's amendment); the rest are internal ETL bookkeeping. */
+const PII_COLUMNS = ['social_consent_raw'];
 const INTERNAL_COLUMNS = [
   ...PII_COLUMNS,
   'source',
@@ -77,6 +78,7 @@ const WIRE_KEYS = [
   'released_within_six_months',
   'social_consent',
   'submitted_at',
+  'reviewer',
 ];
 
 const timestampedRow: AlbumReviewRow = {
@@ -95,6 +97,7 @@ const timestampedRow: AlbumReviewRow = {
   released_within_six_months: true,
   social_consent: true,
   submitted_at: new Date('2026-03-15T17:45:12.000Z'),
+  reviewer: 'Test Reviewer, 3/15/26',
 };
 
 const nulledRow: AlbumReviewRow = {
@@ -113,6 +116,7 @@ const nulledRow: AlbumReviewRow = {
   released_within_six_months: null,
   social_consent: null,
   submitted_at: null,
+  reviewer: null,
 };
 
 describe('toAlbumReviewDTO', () => {
@@ -129,6 +133,11 @@ describe('toAlbumReviewDTO', () => {
     expect(dto.released_within_six_months).toBeNull();
     expect(dto.social_consent).toBeNull();
     expect(dto.submitted_at).toBeNull();
+    expect(dto.reviewer).toBeNull();
+  });
+
+  it('serves the stored reviewer line as `reviewer`', () => {
+    expect(toAlbumReviewDTO(timestampedRow).reviewer).toBe('Test Reviewer, 3/15/26');
   });
 
   it('emits exactly the AlbumReview wire keys — no PII, no internal columns', () => {
@@ -139,13 +148,14 @@ describe('toAlbumReviewDTO', () => {
     }
   });
 
-  it('drops PII even when a wider row leaks extra properties into the mapper', () => {
+  it('drops the raw column names even when a wider row leaks extra properties into the mapper', () => {
     // The projection is the real barrier; this pins the second layer — the
     // mapper is an explicit field list, not a spread, so a row that somehow
-    // carried reviewer_raw still cannot reach the wire.
+    // carried reviewer_raw or social_consent_raw still cannot put those keys
+    // on the wire.
     const leakyRow = {
       ...timestampedRow,
-      reviewer_raw: 'A Real Name, 3/15/26',
+      reviewer_raw: 'Test Reviewer, 3/15/26',
       social_consent_raw: 'Yes, but remove my name',
     } as AlbumReviewRow;
     const dto = toAlbumReviewDTO(leakyRow);

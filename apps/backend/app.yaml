@@ -1298,9 +1298,11 @@ components:
       description: >-
         One archived DJ album review from the WXYC album-review Google Form,
         synced nightly by the album-reviews ETL (ADR 0011). Distinct from
-        the in-app Review model reserved at /reviews (ADR 0006). Reviewer
-        identity (reviewer_raw, social_consent_raw) is never exposed. This
-        block is Swagger display only; the SSOT is wxyc-shared/api.yaml.
+        the in-app Review model reserved at /reviews (ADR 0006). The reviewer's
+        name is returned as `reviewer` to the role-gated staff this endpoint
+        admits (ADR 0011's amendment); social_consent_raw and the ETL
+        bookkeeping columns are never exposed. This block is Swagger display
+        only; the SSOT is wxyc-shared/api.yaml.
       required:
         - id
         - album_id
@@ -1317,6 +1319,7 @@ components:
         - released_within_six_months
         - social_consent
         - submitted_at
+        - reviewer
       properties:
         id:
           type: integer
@@ -1371,6 +1374,13 @@ components:
           type: string
           format: date-time
           nullable: true
+        reviewer:
+          type: string
+          nullable: true
+          description: >-
+            The reviewer line as stored (a name typed into the form, usually
+            with a date); null when the row has none. In-station PII: station
+            staff only, never on a public surface.
 
     AlbumReviewsResponse:
       type: object
