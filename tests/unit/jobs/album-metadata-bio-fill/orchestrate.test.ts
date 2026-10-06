@@ -94,6 +94,8 @@ type Outcomes = Record<number, Outcome | 'throw'>;
 /** The same outcome for each of the given album ids. */
 const outcomesOf = (outcome: Outcome, ...ids: number[]): Outcomes => Object.fromEntries(ids.map((id) => [id, outcome]));
 
+const noBioIds = (...ids: number[]): Outcomes => outcomesOf('no_bio', ...ids);
+
 /** Album ids 1 to n. */
 const idsTo = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
 
@@ -593,6 +595,46 @@ describe('runFill — a shed that leaves other verdicts standing (BS#2789)', () 
 });
 
 describe('runFill — only a fill breaks a no-bio streak (BS#2789)', () => {
+  // A streak below its limit is still a run of albums whose bios may have
+  // been shed. However the run ends, it is carried, not walked past.
+  it.each([
+    ['the failed-batch abort', { maxConsecutiveFailedBatches: 2 }, true],
+    ['a graceful stop', {}, false],
+  ] as const)('carries a no-bio streak still running when %s ends the run', async (_label, options, aborts) => {
+    const outcomes: Outcomes = {
+      1: 'no_bio',
+      2: 'no_match',
+      3: 'no_bio',
+      4: 'no_match',
+      ...outcomesOf('shed', 5, 6, 7, 8),
+    };
+    if (!aborts)
+      waitForQuietPeriod.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    const finished = run(idsTo(10), outcomes, { maxConsecutiveNoBioBatches: 10, ...options });
+    const summary = aborts
+      ? await finished.then(
+          () => undefined,
+          () => loggedSummary()
+        )
+      : await finished;
+
+    expect(summary).toMatchObject({ indeterminate_album_ids: aborts ? [1, 2, 3, 4, 5, 6, 7, 8] : [1, 2, 3, 4] });
+  });
+
+  it('logs the streak in the next_run of the batch that trips the guard, before the closing count', async () => {
+    await expect(run(idsTo(6), noBioIds(1, 2, 3, 4), { maxConsecutiveNoBioBatches: 2 })).rejects.toBeInstanceOf(
+      ConsecutiveNoBioBatchesError
+    );
+
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'batch_done',
+      expect.any(String),
+      expect.objectContaining({ batch: 2, next_run: { BIO_FILL_ALBUM_AFTER_ID: 4, BIO_FILL_ALBUM_IDS: '1,2,3,4' } })
+    );
+  });
+
   // A batch that filled nothing and returned no no_bio says nothing either way:
   // LML answered for none of it, or every answer was no_match and the like.
   // Resetting on it let a breaker shed hide behind an occasional timed-out call.

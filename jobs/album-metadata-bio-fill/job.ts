@@ -489,16 +489,15 @@ export type StreakTrip =
  *   occasional timed-out call.
  *
  * Returns the new streaks and the abort to throw, the failed-batch one first.
- * When the no-bio limit is reached it also returns where that streak began,
- * whichever abort is thrown: every album in it looked settled, so `planResume`
- * has to list them all.
+ * `noBioFrom` in the streaks is where a running no-bio streak began; `runFill`
+ * carries that streak in `next_run` however the run ends.
  */
 export const advanceStreaks = (
   streaks: Streaks,
   result: Pick<BatchResult, 'batchSize' | 'fill' | 'no_bio' | 'indeterminate' | 'write_failed'>,
   batchStart: number,
   limits: Pick<FillOptions, 'maxConsecutiveFailedBatches' | 'maxConsecutiveNoBioBatches'>
-): { streaks: Streaks; noBioStreakStart?: number; trip?: StreakTrip } => {
+): { streaks: Streaks; trip?: StreakTrip } => {
   const lml = 5 * result.indeterminate >= 4 * result.batchSize ? streaks.lml + 1 : 0;
   const database =
     result.fill === 0 ? streaks.database : result.write_failed === result.fill ? streaks.database + 1 : 0;
@@ -507,14 +506,12 @@ export const advanceStreaks = (
   const next = { lml, database, noBio, noBioFrom };
 
   const noBioTripped = limits.maxConsecutiveNoBioBatches > 0 && noBio >= limits.maxConsecutiveNoBioBatches;
-  const noBioStreakStart = noBioTripped ? noBioFrom : undefined;
   const max = limits.maxConsecutiveFailedBatches;
   const failed: { on: FailedBatchStreak; count: number } | undefined =
     lml >= max ? { on: 'lml', count: lml } : database >= max ? { on: 'database', count: database } : undefined;
   if (failed) {
     return {
       streaks: next,
-      noBioStreakStart,
       trip: {
         error: new ConsecutiveFailedBatchesError(failed.count, failed.on),
         step: 'consecutive_failed_batches',
@@ -525,7 +522,6 @@ export const advanceStreaks = (
   if (noBioTripped) {
     return {
       streaks: next,
-      noBioStreakStart,
       trip: { error: new ConsecutiveNoBioBatchesError(noBio), step: 'consecutive_no_bio_batches', extra: {} },
     };
   }
@@ -766,18 +762,19 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   let abort: Error | undefined;
   let streaks = NO_STREAKS;
   // What `planResume` needs: how many candidates were in a batch that came
-  // back, which of those were not settled, and, after a no-bio abort, where
-  // the streak began.
+  // back, and which of those were not settled. A no-bio streak still running
+  // is carried too, whether or not it reached its limit: every album in it
+  // looked settled, and a breaker shed may have hit any of them.
   const candidateIds = candidates.map((c) => c.album_id);
   const unsettledIds: number[] = [];
   let processed = 0;
-  let noBioStreakStart: number | undefined;
   const applyResumePlan = (): void => {
     const plan = planResume({
       candidateIds,
       processed,
       unsettledIds,
-      noBioStreakStart,
+      // With the guard off (0) the operator has judged these bios absent.
+      noBioStreakStart: options.maxConsecutiveNoBioBatches > 0 && streaks.noBio > 0 ? streaks.noBioFrom : undefined,
       afterAlbumId: options.afterAlbumId,
       retryOnly,
     });
@@ -785,7 +782,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     summary.indeterminate_album_ids = plan.pending.slice(0, INDETERMINATE_IDS_REPORT_CAP);
     summary.next_run = plan.nextRun;
   };
-  // Current before the first batch, so a forced exit always has a resume point.
+  // Current before the first batch, so a forced exit from here on, the first
+  // live-DJ pause included, always has a resume point.
   // The batch in flight is safe to abandon: its writes are fill-null, and its
   // albums are above `next_run`'s cursor or in its list.
   applyResumePlan();
@@ -832,6 +830,10 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     }
     unsettledIds.push(...result.indeterminateAlbumIds);
     summary.last_album_id = batch[batch.length - 1].album_id;
+    // The streaks first, so this batch's next_run already carries a no-bio
+    // streak it extended, including the one that trips the guard.
+    const step = advanceStreaks(streaks, result, processed - batch.length, options);
+    streaks = step.streaks;
     applyResumePlan();
     log('info', 'batch_done', `batch ${b + 1}/${batches.length}`, {
       batch: b + 1,
@@ -843,10 +845,7 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
       next_run: summary.next_run,
     });
 
-    const step = advanceStreaks(streaks, result, processed - batch.length, options);
-    streaks = step.streaks;
     if (step.trip) {
-      noBioStreakStart = step.noBioStreakStart;
       abort = step.trip.error;
       captureError(abort, step.trip.step, { batches_done: b + 1, of: batches.length, ...step.trip.extra });
       break;
@@ -854,8 +853,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     if (b < batches.length - 1) await stopAwareSleep(interBatchSleepMs);
   }
 
-  // Once more after the loop, to carry the albums of a no-bio streak that
-  // aborted it. A capped run that used its whole cap may have more above it.
+  // The summary is current after the last batch; this covers a run that never
+  // reached one. A capped run that used its whole cap may have more above it.
   applyResumePlan();
   summary.stopped_early ||= abort !== undefined;
   summary.reached_end =
@@ -903,8 +902,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
  * wait out the batch in flight, which can take the whole bulk timeout: it logs
  * what `runFill` has left for it (the summary as it stands) and exits 1, rather
  * than leave `kill -9` as the way out and lose the summary with it. Before the
- * first batch, or once the run has logged its own outcome, there is no summary
- * to give, and a finished run's exit code stands. A third signal and on find
+ * run has enumerated its albums, or once it has logged its own outcome, there
+ * is no summary to give, and a finished run's exit code stands. A third signal and on find
  * the forced exit already under way.
  */
 export const handleStopSignal = (signal: NodeJS.Signals): void => {
