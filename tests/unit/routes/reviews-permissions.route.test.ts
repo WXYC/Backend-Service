@@ -35,6 +35,8 @@ const mockCreate = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockUpdate = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockSubmit = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockDelete = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
+const mockGet = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
+const mockList = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 
 jest.mock('@wxyc/database', () => ({
   reviewCreditEnum: jest.requireActual('../../../shared/database/src/schema').reviewCreditEnum,
@@ -44,6 +46,8 @@ jest.mock('../../../apps/backend/services/reviews.service', () => ({
   updateReview: mockUpdate,
   submitReview: mockSubmit,
   deleteReview: mockDelete,
+  getReview: mockGet,
+  listReviews: mockList,
 }));
 
 import { reviews_route } from '../../../apps/backend/routes/reviews.route';
@@ -67,6 +71,8 @@ beforeEach(() => {
   mockUpdate.mockReset().mockResolvedValue({ outcome: 'updated', review: REVIEW });
   mockSubmit.mockReset().mockResolvedValue({ outcome: 'submitted', review: REVIEW });
   mockDelete.mockReset().mockResolvedValue({ outcome: 'deleted' });
+  mockGet.mockReset().mockResolvedValue(REVIEW);
+  mockList.mockReset().mockResolvedValue([REVIEW]);
 });
 
 describe.each([
@@ -84,6 +90,65 @@ describe.each([
     mockRole(role);
     expect((await send()).status).toBe(403);
     for (const mock of [mockCreate, mockUpdate, mockSubmit, mockDelete]) expect(mock).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /reviews and GET /reviews/:id (BS#2805)', () => {
+  const get = (path: string) => request(app).get(path).set('Authorization', 'Bearer t');
+
+  test.each(['dj', 'musicDirector', 'stationManager'])('%s may read', async (role) => {
+    mockRole(role);
+    expect((await get('/reviews')).status).toBe(200);
+    expect((await get('/reviews/3')).body).toEqual(REVIEW);
+  });
+
+  test.each(['member', undefined])('%s is refused before any query', async (role) => {
+    mockRole(role);
+    expect((await get('/reviews')).status).toBe(403);
+    expect((await get('/reviews/3')).status).toBe(403);
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockList).not.toHaveBeenCalled();
+  });
+
+  test('a review the service will not show is a 404', async () => {
+    mockRole('dj');
+    mockGet.mockResolvedValue(undefined);
+    expect((await get('/reviews/3')).status).toBe(404);
+  });
+
+  test('the filters reach the service parsed, and mine=false equals no mine', async () => {
+    mockRole('dj');
+    await get('/reviews?album_id=9&intake_item_id=4&mine=true');
+    expect(mockList).toHaveBeenLastCalledWith(
+      { album_id: 9, intake_item_id: 4, mine: true },
+      { id: 'caller-id', manage: false }
+    );
+    await get('/reviews?mine=false');
+    expect(mockList).toHaveBeenLastCalledWith(
+      { album_id: undefined, intake_item_id: undefined, mine: false },
+      expect.anything()
+    );
+  });
+
+  test.each([
+    '?album_id=0',
+    '?album_id=2147483648',
+    '?album_id=abc',
+    '?album_id=1&album_id=2',
+    '?intake_item_id=2147483648',
+    '?intake_item_id=-1',
+    '?mine=yes',
+    '?mine=true&mine=true',
+  ])('%s is a 400 before any query', async (query) => {
+    mockRole('dj');
+    expect((await get(`/reviews${query}`)).status).toBe(400);
+    expect(mockList).not.toHaveBeenCalled();
+  });
+
+  test.each([['abc'], ['0'], ['2147483648']])('id %s is a 400 before any query', async (id) => {
+    mockRole('dj');
+    expect((await get(`/reviews/${id}`)).status).toBe(400);
+    expect(mockGet).not.toHaveBeenCalled();
   });
 });
 
