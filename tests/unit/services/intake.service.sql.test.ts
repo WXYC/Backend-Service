@@ -408,7 +408,7 @@ describe('deleteIntakeItem (BS#2854)', () => {
       get: (_t, prop: string) => {
         if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
         return (...args: unknown[]) => {
-          if (prop === 'for') calls.push(`${label} for ${String(args[0])}`);
+          if (prop === 'for') calls.push(`${label} for ${args[0] as string}`);
           return proxy;
         };
       },
