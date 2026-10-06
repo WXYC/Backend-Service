@@ -31,3 +31,9 @@ intake_route.post(
   intakeController.acceptReviewIntake
 );
 intake_route.post('/:id/pass', requirePermissions({ reviews: ['write'] }), intakeController.passIntake);
+// Filing creates catalog rows, so it takes both grants (BS#2803).
+intake_route.post(
+  '/:id/file',
+  requirePermissions({ reviews: ['manage'], catalog: ['write'] }),
+  intakeController.fileIntake
+);

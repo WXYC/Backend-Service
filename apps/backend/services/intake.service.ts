@@ -11,11 +11,13 @@ import {
   member,
   NY_TIME_ZONE,
   album_review_submissions,
+  review_prints,
   reviews,
   user,
   type NewIntakeItem,
 } from '@wxyc/database';
 import WxycError from '../utils/error.js';
+import { fileLibraryRelease, mapLibraryFilingError, type ValidatedFilingInput } from './library-filing.service.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
 
@@ -451,6 +453,80 @@ export const acceptReview = async (id: number, reviewId: number, actor: ReviewsA
     return 'accepted' as const;
   });
   return outcome === 'accepted' ? { outcome, item: (await getIntakeItem(id, true))! } : { outcome };
+};
+
+/**
+ * Whether an item, read under its row lock, may be filed: a music director has accepted a review for it. A citation
+ * does not stand in for one (decision 37; it only makes the cited release's reviews available to accept), so this
+ * never consults it. Written once, for `POST /intake/{id}/file` and for the review gate's `intake` basis (BS#2807).
+ */
+export const mayFileItem = (item: Pick<typeof intake_items.$inferSelect, 'accepted_review_id'>) =>
+  item.accepted_review_id !== null;
+
+/** Where `POST /intake/{id}/file` files the item: onto a release it creates (planned by `planLibraryFiling`) or one that exists. */
+export type IntakeFileArm =
+  { kind: 'new_release'; input: ValidatedFilingInput } | { kind: 'existing_release'; album_id: number };
+
+/**
+ * Files an item (BS#2803) in one transaction, in the order `DELETE /library/{id}` (BS#2928) takes its locks: an existing
+ * release's `library` row `FOR KEY SHARE` (that locked read is the existence check, so a release deleted in between
+ * is `unknown_album`, never a foreign-key 500), then the item `FOR UPDATE`, then, through the stamping UPDATEs, the
+ * review and print rows. The new-release arm has no row to lock first; `fileLibraryRelease` runs on the same `tx`
+ * after the item lock and the checks. Filing keeps the accept columns, clears the holder and the request, stamps
+ * `album_id` on EVERY review and print of the item (drafts included, the delete snapshot reaches them through it) and
+ * drops the item's passes. `filing_conflict` is `mapLibraryFilingError`'s 409; the caller finishes a new release with
+ * `completeLibraryFiling(filed, input)` after the commit.
+ */
+export const fileIntakeItem = async (id: number, arm: IntakeFileArm, filedBy: string) => {
+  try {
+    const outcome = await db.transaction(async (tx) => {
+      if (arm.kind === 'existing_release') {
+        const [release] = await tx
+          .select({ id: library.id })
+          .from(library)
+          .where(eq(library.id, arm.album_id))
+          .for('key share');
+        if (!release) return { outcome: 'unknown_album' as const };
+      }
+      const [item] = await tx
+        .select({ state: intake_items.state, accepted_review_id: intake_items.accepted_review_id })
+        .from(intake_items)
+        .where(eq(intake_items.id, id))
+        .for('update');
+      if (!item) return { outcome: 'not_found' as const };
+      if (FILED_STATES.includes(item.state)) return { outcome: 'state_changed' as const };
+      if (!mayFileItem(item)) return { outcome: 'not_reviewed' as const };
+      let filed: Awaited<ReturnType<typeof fileLibraryRelease>> | undefined;
+      let albumId: number;
+      if (arm.kind === 'new_release') {
+        filed = await fileLibraryRelease(arm.input, tx);
+        albumId = filed.release.id;
+      } else {
+        albumId = arm.album_id;
+      }
+      await tx
+        .update(intake_items)
+        .set({
+          state: 'filed',
+          album_id: albumId,
+          rotation_id: filed?.rotation?.id ?? null,
+          filed_by: filedBy,
+          filed_at: sql`now()`,
+          checked_out_by: null,
+          checked_out_at: null,
+          ...CLEAR_REQUEST,
+        })
+        .where(eq(intake_items.id, id));
+      await tx.update(reviews).set({ album_id: albumId }).where(eq(reviews.intake_item_id, id));
+      await tx.update(review_prints).set({ album_id: albumId }).where(eq(review_prints.intake_item_id, id));
+      await tx.delete(intake_item_passes).where(eq(intake_item_passes.intake_item_id, id));
+      return { outcome: 'filed' as const, filed };
+    });
+    if (outcome.outcome !== 'filed') return outcome;
+    return { outcome: 'filed' as const, filed: outcome.filed, item: (await getIntakeItem(id, true))! };
+  } catch (error) {
+    return { outcome: 'filing_conflict' as const, body: mapLibraryFilingError(error) };
+  }
 };
 
 /** The `auth_member` roles of an account — empty when the account is unknown or has no membership. */
