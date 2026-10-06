@@ -564,7 +564,7 @@ components:
       required: [message, reason]
       properties:
         message: { type: string }
-        reason: { type: string, enum: [already_filed, invalid_citation, state_changed] }
+        reason: { type: string, enum: [already_filed, invalid_citation, not_reviewed, state_changed] }
 
     ReviewConflictError:
       type: object
@@ -5479,6 +5479,49 @@ paths:
           description: 'Caller lacks `reviews: manage`'
         '404':
           description: 'No such intake item'
+
+  /intake/{id}/file:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: File a reviewed item as a new release or onto an existing one (BS#2803)
+      description: >-
+        Grants `reviews: manage` and `catalog: write`. Body `IntakeFileRequest`, a union on `kind`: `new_release` carries the `POST /library/filings` body (planned by `planLibraryFiling`, filed by `fileLibraryRelease` on this transaction, finished after the commit by `completeLibraryFiling`), `existing_release` carries `{ album_id }` and inserts nothing. One transaction: the item is marked `filed` (`album_id`, `rotation_id`, `filed_by`, `filed_at`), `reviews.album_id` and `review_prints.album_id` are stamped on every row of the item (drafts included), the holder and request fields are cleared, the accept columns are kept, and the item's passes are deleted. Refused with 409 `not_reviewed` unless a music director has accepted a review for the item (a citation does not stand in for one), and 409 `state_changed` when it is already filed. A planned artist conflict or a rotation card/bin mismatch answers the `/library/filings` 409 body. An `album_id` that names no library release, and a dangling `card_id`, are 400. Locks: an existing release's `library` row `FOR KEY SHARE`, then the item `FOR UPDATE`, then the review and print rows through the stamping UPDATEs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [new_release, existing_release] }
+                album_id: { type: integer, description: 'existing_release only' }
+      responses:
+        '200':
+          description: 'The filed item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id, `kind` or body; an `album_id` or `card_id` that does not exist'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage` or `catalog: write`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: 'The item has no accepted review (`not_reviewed`) or is already filed (`state_changed`), or the filing conflicts (`artist_code_conflict`, `artist_name_conflict`, `rotation_card_bin_mismatch`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
 
   /intake/{id}/pass:
     parameters:

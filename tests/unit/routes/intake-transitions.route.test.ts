@@ -40,6 +40,9 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
   memberRoles: mockMemberRoles,
 }));
 
+// The controller imports the filing seam (BS#2803), whose service module reads real schema tables at load.
+jest.mock('../../../apps/backend/services/library-filing.service', () => ({}));
+
 import { intake_route } from '../../../apps/backend/routes/intake.route';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 
