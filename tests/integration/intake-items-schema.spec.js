@@ -23,25 +23,19 @@ const {
   seedIntakeItem,
   seedLibraryRelease,
   removeSeededLibraryReleases,
+  seedFormSubmission,
+  removeSeededFormSubmissions,
 } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
 describe('intake_items schema (real PG)', () => {
   let sql;
-  const submissionIds = [];
 
   const seedUser = async () => (await seedAuthUser()).id;
 
-  const seedSubmission = async () => {
-    const [row] = await sql`
-      INSERT INTO ${sql(SCHEMA)}.album_review_submissions (artist_name, album_title)
-      VALUES ('Juana Molina', 'DOGA')
-      RETURNING id
-    `;
-    submissionIds.push(row.id);
-    return row.id;
-  };
+  const seedSubmission = async () =>
+    (await seedFormSubmission({ artist_name: 'Juana Molina', album_title: 'DOGA' })).id;
 
   /** Insert an item; `extra` is a column → value map layered over the NOT NULLs. */
   const insertItem = (extra = {}) => seedIntakeItem(extra);
@@ -56,12 +50,9 @@ describe('intake_items schema (real PG)', () => {
     // Items first: `album_id` cascades, but `cited_album_id` and the user
     // columns only null, and a lingering item would hold the parents.
     await sql`DELETE FROM ${sql(SCHEMA)}.intake_items WHERE artist_name = 'Jessica Pratt'`;
-    if (submissionIds.length > 0) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.album_review_submissions WHERE id = ANY(${submissionIds})`;
-    }
+    await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
     await removeSeededAuthUsers();
-    submissionIds.length = 0;
   });
 
   it('defaults a new item to the pool state', async () => {
