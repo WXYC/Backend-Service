@@ -256,9 +256,14 @@ describe('/reviews submit and delete (BS#2854)', () => {
 
       // Either of the two filed, the citing one included, refuses the delete and writes neither item.
       for (const filedItem of ['own', 'citing']) {
-        const own2 = await item(`two-own-${filedItem}`, { state: filedItem === 'own' ? 'filed' : 'reviewed' });
+        // A filed item must carry an album_id (intake_items_filed_requires_album_ck).
+        const own2 = await item(`two-own-${filedItem}`, {
+          state: filedItem === 'own' ? 'filed' : 'reviewed',
+          ...(filedItem === 'own' && { album_id: libraryId }),
+        });
         const citing2 = await item(`two-citing-${filedItem}`, {
           state: filedItem === 'citing' ? 'filed' : 'reviewed',
+          ...(filedItem === 'citing' && { album_id: libraryId }),
           cited_album_id: libraryId,
         });
         const review2 = await reviewFor({ intake_item_id: own2.id, album_id: libraryId });
