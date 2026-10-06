@@ -40,6 +40,8 @@ const FIELD_CASES: FieldCase[] = [
   { column: 'discogs_unavailable_note', key: 'discogsUnavailableNote', value: 'Embargoed promo pressing' },
   { column: 'discogs_unavailable_note', key: 'discogsUnavailableNote', value: null },
   { column: 'last_discogs_recheck_at', key: 'lastDiscogsRecheckAt', value: '2026-07-20T04:00:00.000Z' },
+  { column: 'last_discogs_recheck_at', key: 'lastDiscogsRecheckAt', value: null },
+  { column: 'last_discogs_recheck_at', key: 'lastDiscogsRecheckAt', value: new Date('2026-07-20T04:00:00.000Z') },
 ];
 
 const TIERS = [

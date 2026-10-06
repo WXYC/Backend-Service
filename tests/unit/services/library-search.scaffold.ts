@@ -46,7 +46,7 @@ export function libraryRow(overrides: Record<string, unknown> = {}) {
     code_comp_letter: null,
     code_volume_letters: null,
     format_name: 'CD',
-    genre_name: 'Electronic',
+    genre_name: 'Rock',
     genre_id: 11,
     label: 'Warp',
     label_id: 10,

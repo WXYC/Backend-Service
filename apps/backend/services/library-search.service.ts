@@ -709,23 +709,25 @@ type CatalogSearchOmittedViewColumns =
   | 'apple_music_artist_id'
   | 'bandcamp_id';
 
-/** Compile-time guards: a view column that missed `RawRow`, or a `RawRow` key that missed the wire row, is `never`-violating. */
+/** Compile-time guards: a view column that missed `RawRow`, or a `RawRow` key that missed the wire row, is `never`-violating. Type-only, so nothing runs at module load. */
 type RawRowRenames =
-  'card_id' | 'card_bin' | 'card_number' | 'card_name' | `discogs_unavailable${string}` | 'last_discogs_recheck_at';
-const _viewColumnsReachRawRow: Exclude<
-  keyof LibraryArtistViewEntry,
-  keyof RawRow | CatalogSearchOmittedViewColumns
-> extends never
-  ? true
-  : never = true;
-const _rawRowKeysReachWire: Exclude<
-  keyof RawRow,
-  keyof AliasHitFields | keyof AlbumSearchResultRow | RawRowRenames
-> extends never
-  ? true
-  : never = true;
-void _viewColumnsReachRawRow;
-void _rawRowKeysReachWire;
+  | 'card_id'
+  | 'card_bin'
+  | 'card_number'
+  | 'card_name'
+  | 'discogs_unavailable'
+  | 'discogs_unavailable_note'
+  | 'last_discogs_recheck_at';
+type AssertNever<T extends never> = T;
+type _ViewColumnsReachRawRow = AssertNever<
+  Exclude<keyof LibraryArtistViewEntry, keyof RawRow | CatalogSearchOmittedViewColumns>
+>;
+type _RawRowKeysReachWire = AssertNever<
+  Exclude<keyof RawRow, keyof AliasHitFields | keyof AlbumSearchResultRow | RawRowRenames>
+>;
+type _OmittedColumnsAreViewColumns = AssertNever<
+  Exclude<CatalogSearchOmittedViewColumns, keyof LibraryArtistViewEntry>
+>;
 
 function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
   const projected: AlbumSearchResultRow = {
