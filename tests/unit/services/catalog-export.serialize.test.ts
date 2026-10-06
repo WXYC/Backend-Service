@@ -49,7 +49,7 @@ describe('catalog-export.service: serializeCatalogNdjson', () => {
     expect(JSON.parse(lines[1])).toEqual(rows[1]);
   });
 
-  it('emits exactly the 20 contract fields per line and excludes search_doc', () => {
+  it('emits exactly the 21 contract fields per line and excludes search_doc', () => {
     // The field set is the acceptance criterion for #1468 + the four BS#1965
     // library.db-producer fields. A row carrying an extra server-only field (e.g.
     // search_doc) must not leak into the export.
