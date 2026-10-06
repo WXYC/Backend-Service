@@ -28,7 +28,7 @@ jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
   return { ...actual, reviewGateCutoverDate: jest.fn(actual.reviewGateCutoverDate) };
 });
 
-import { eq, sql } from 'drizzle-orm';
+import { eq, getTableName, sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, intake_items } from '@wxyc/database';
 import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
@@ -596,15 +596,20 @@ describe('deleteIntakeItem (BS#2854)', () => {
 });
 
 describe('acceptReview (BS#2860)', () => {
-  /** A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows` and logs each `for` and write it sees. */
+  /**
+   * A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows`, remembers the table of its `from`, and
+   * logs each lock as `<table> for <strength>` (plus ` with options` when `for` got a second argument such as `{ of }`).
+   */
   const log: string[] = [];
   const sets: Record<string, unknown>[] = [];
-  const builder = (label: string, rows: unknown[]): unknown => {
+  const builder = (rows: unknown[]): unknown => {
+    let table = '';
     const proxy: unknown = new Proxy(() => undefined, {
       get: (_t, prop: string) => {
         if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
         return (...args: unknown[]) => {
-          if (prop === 'for') log.push(`${label} for ${args[0] as string}`);
+          if (prop === 'from') table = getTableName(args[0] as Parameters<typeof getTableName>[0]);
+          if (prop === 'for') log.push(`${table} for ${args[0] as string}${args.length > 1 ? ' with options' : ''}`);
           if (prop === 'set') sets.push(args[0] as Record<string, unknown>);
           return proxy;
         };
@@ -631,11 +636,11 @@ describe('acceptReview (BS#2860)', () => {
     if (cited !== null && opts.peekAlbum === cited) selects.push([{ id: cited }]);
     selects.push([item], opts.review === undefined ? [] : [opts.review]);
     const tx = {
-      select: jest.fn(() => builder('select', selects.shift() ?? [])),
-      update: jest.fn(() => builder('update', [])),
+      select: jest.fn(() => builder(selects.shift() ?? [])),
+      update: jest.fn(() => builder([])),
     };
     jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
-    jest.spyOn(db, 'select').mockReturnValue(builder('read', [{ id: 7 }]) as never);
+    jest.spyOn(db, 'select').mockReturnValue(builder([{ id: 7 }]) as never);
     return { result: await acceptReview(7, 3, MD), tx };
   };
 
@@ -644,7 +649,7 @@ describe('acceptReview (BS#2860)', () => {
   it('locks the item FOR UPDATE, then the review FOR UPDATE, and writes once', async () => {
     const { result, tx } = await run({ review: own });
     expect(result.outcome).toBe('accepted');
-    expect(log).toEqual(['select for update', 'select for update']);
+    expect(log).toEqual(['intake_items for update', 'reviews for update']);
     expect(tx.update).toHaveBeenCalledTimes(1);
   });
 
@@ -655,7 +660,7 @@ describe('acceptReview (BS#2860)', () => {
       review: { status: 'submitted', medium: 'typed', item: null, album: 9 },
     });
     expect(result.outcome).toBe('accepted');
-    expect(log).toEqual(['select for share', 'select for update', 'select for update']);
+    expect(log).toEqual(['library for share', 'intake_items for update', 'reviews for update']);
   });
 
   it('writes the pointer, the caller and now, withdraws any request, and sets reviewed unless filed or finalized, in one statement', async () => {
@@ -673,7 +678,7 @@ describe('acceptReview (BS#2860)', () => {
 
   it.each([['the item is missing', { cited: null, item: undefined }, 'not_found']])('%s', async () => {
     log.length = 0;
-    const tx = { select: jest.fn(() => builder('select', [])), update: jest.fn() };
+    const tx = { select: jest.fn(() => builder([])), update: jest.fn() };
     jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
     expect((await acceptReview(7, 3, MD)).outcome).toBe('not_found');
     expect(tx.update).not.toHaveBeenCalled();
@@ -727,6 +732,18 @@ describe('acceptReview (BS#2860)', () => {
   ])('%s is %s', async (_name, item, review, accepted) => {
     const { result } = await run({ cited: item.cited, peekAlbum: review.album, item, review });
     expect(result.outcome).toBe(accepted ? 'accepted' : 'bad_review');
+  });
+
+  it('is one hop: a review the cited release shows only through its own citation is bad_review, takes no library lock and writes nothing', async () => {
+    // The item cites release 9; release 9 itself cites release 4, so 9's list shows a review of 4. The review's album_id (4) is not the item's cited release (9).
+    const { result, tx } = await run({
+      cited: 9,
+      peekAlbum: 4,
+      review: { status: 'submitted', medium: 'typed', item: null, album: 4 },
+    });
+    expect(result).toEqual({ outcome: 'bad_review' });
+    expect(log).toEqual(['intake_items for update', 'reviews for update']);
+    expect(tx.update).not.toHaveBeenCalled();
   });
 
   it('honors the citation arm only for the release it holds a lock on: a citation changed after the unlocked read is bad_review', async () => {
