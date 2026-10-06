@@ -18,7 +18,7 @@ import { carriedClientStatus } from './errorHandler.js';
  * see BACKEND-SERVICE-5 (309 events in 75 minutes during the 2026-04-30
  * cascade from the catalog-search 503 incident).
  */
-export function shouldCaptureExpressError(error: Error): boolean {
+export function shouldCaptureExpressError(error: unknown): boolean {
   // The capture middleware passes the RAW pipeline value; errorHandler wraps non-Error
   // throwables in `new Error(String(err))` — dropping any carried status —
   // so they always render as generic 500s. Normalize identically: a

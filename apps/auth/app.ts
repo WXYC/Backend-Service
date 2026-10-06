@@ -1356,7 +1356,9 @@ app.get('/healthcheck', async (req, res) => {
 // errorHandler echoes — see the predicate's JSDoc for the divergence.)
 // Replaces Sentry 10's `setupExpressErrorHandler`; see
 // `sentryExpressErrorCapture` for why Sentry 11's own API isn't used (BS#2947).
-app.use(sentryExpressErrorCapture(shouldCaptureAuthExpressError));
+app.use(
+  sentryExpressErrorCapture({ shouldCapture: shouldCaptureAuthExpressError, captureException: Sentry.captureException })
+);
 
 // Fallback error handler — sanitises response body, forwards full error to
 // Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).

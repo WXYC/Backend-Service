@@ -196,7 +196,9 @@ app.use('/internal/banned-fingerprints', internalBansRoute);
 // carrying its own key.
 app.use('/internal/slack-ban-moderators', internalSlackModeratorsRoute);
 
-app.use(sentryExpressErrorCapture(shouldCaptureExpressError));
+app.use(
+  sentryExpressErrorCapture({ shouldCapture: shouldCaptureExpressError, captureException: Sentry.captureException })
+);
 app.use(errorHandler);
 
 const server = app.listen(port, () => {

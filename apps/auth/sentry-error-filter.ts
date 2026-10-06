@@ -41,7 +41,9 @@
  * contradictory — this predicate governs only `sentryExpressErrorCapture`'s
  * own capture.
  */
-export function shouldCaptureAuthExpressError(error: Error): boolean {
+export function shouldCaptureAuthExpressError(error: unknown): boolean {
+  // A primitive has no status to resolve, which the policy treats as a 500.
+  if (typeof error !== 'object' || error === null) return true;
   const raw = (error as { statusCode?: number | string }).statusCode ?? (error as { status?: number | string }).status;
   const numeric = typeof raw === 'string' ? parseInt(raw, 10) : raw;
   return numeric === undefined || Number.isNaN(numeric) || numeric >= 500;

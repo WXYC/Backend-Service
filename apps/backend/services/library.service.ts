@@ -2955,7 +2955,7 @@ const ARTWORK_ENRICH_DEADLINE_TRUSTED_IDS_CAP = 20;
  * `searchForAlbum` and the catalog-query warm path) run it detached: neither
  * awaits it, and the HTTP response goes out before this function's first LML
  * round-trip resolves. By then the request's own Express span
- * (`request_handler.express`, what a plain `Sentry.getActiveSpan()` call in
+ * (op `handler` on Sentry 11, `request_handler.express` on Sentry 10 — what a plain `Sentry.getActiveSpan()` call in
  * the detached continuation would return) has already ended and is frozen —
  * `SentrySpan.setAttribute` silently no-ops on a frozen span, and that op is
  * separately stripped from any surviving transaction by

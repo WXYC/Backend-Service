@@ -36,4 +36,14 @@ describe('shouldCaptureAuthExpressError', () => {
     const errWith5xxStatus = Object.assign(new Error('e'), { status: 502 });
     expect(shouldCaptureAuthExpressError(errWith5xxStatus)).toBe(true);
   });
+
+  // BS#2947: the capture middleware hands the raw pipeline value through, so a
+  // primitive must resolve to "no status" (captured) rather than throw.
+  it.each([
+    ['a string', 'boom'],
+    ['null', null],
+    ['undefined', undefined],
+  ])('captures %s', (_label, thrown) => {
+    expect(shouldCaptureAuthExpressError(thrown)).toBe(true);
+  });
 });
