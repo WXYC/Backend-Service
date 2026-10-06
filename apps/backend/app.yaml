@@ -2342,6 +2342,13 @@ paths:
         the original row, and its legacy id, back). A pre-delete read
         that surfaces this to the librarian before the delete is a separate
         endpoint, not this one.
+        A record that took its cover review from this release (an intake item
+        whose `accepted_review_id` names one of the release's reviews, and
+        which was not filed as this release) keeps a complete copy of it: the
+        same text, author, edit history and publishing choices, with the
+        record's accepted review and print log pointed at the copy. No record
+        changes state, and nobody is notified. A review of the release that no
+        record accepted is not copied.
         Dependent rows are resolved in the same transaction as the delete, and
         the release's `legacy_release_id` is recorded in a delete-denylist so
         the library ETL cannot re-import it from tubafrenzy. The denylist row
@@ -4440,7 +4447,10 @@ paths:
         The converse also holds: a reference cleared by the delete itself —
         an intake item's `cited_album_id`, for example — stays NULL after the
         release is restored, because the restore never re-links rows the
-        delete left in place.
+        delete left in place. The copy of a cover review that the delete gave
+        a record stays with that record, and the restored release gets its
+        original review back with its history, so the two are then separate
+        reviews with the same text.
 
 
         The restore does not re-link archived flowsheet plays to the

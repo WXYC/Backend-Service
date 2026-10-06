@@ -93,6 +93,7 @@ import {
 import { lmlLookupCoordinator } from './lml/index.js';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import { checkLibraryArtistNameHealth } from './library-artist-name-assertion.service.js';
+import { copyCitedCoverReviews } from './cited-review-copy.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
@@ -7156,6 +7157,19 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * audit trail is bad; refusing the librarian's delete because the token was
  * thin would be worse.
  *
+ * **Cover-review copy (BS#2875).** A record that took its cover review from this
+ * release (`intake_items.accepted_review_id` names one of the release's reviews,
+ * and the record was not filed as this release) is given its own complete copy
+ * of that review before anything is captured, by `copyCitedCoverReviews`
+ * (`cited-review-copy.service.ts`): without it the cascade on `reviews.album_id`
+ * would take the review and `ON DELETE SET NULL` would blank the record's
+ * `accepted_review_id`. It runs after the `not_found` and `has_digital_assets`
+ * returns, so a refused delete copies nothing, and takes its locks inside this
+ * transaction under the same `lock_timeout`: the citing items `FOR UPDATE` in
+ * ascending `id`, then the reviews to copy `FOR SHARE` in ascending `id`, so
+ * item rows are still taken before review rows. Like the capture's locks these
+ * are bounded, not ordered against.
+ *
  * Four FKs are resolved explicitly inside the same transaction rather than
  * left to the schema, because each would otherwise fail the DELETE below
  * with a raw FK-violation error: `bins.album_id` (NOT NULL, no `onDelete`),
@@ -7178,8 +7192,9 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * nulled explicitly too — it names a library row but carries no FK at all,
  * so nothing would otherwise stop it dangling. Every other dependent
  * (`rotation`, `library_urls`, `album_metadata`, `album_critic_reviews`,
- * `reviews`, `compilation_track_artist`, `uncovered_release_search_markers`:
- * real `onDelete: 'cascade'`; `album_review_submissions`: `onDelete: 'set
+ * `reviews`, `compilation_track_artist`, `uncovered_release_search_markers`,
+ * `intake_items` (`album_id`; its `cited_album_id` is `set null`), `review_prints`,
+ * `fcc_notes`: real `onDelete: 'cascade'`; `album_review_submissions`: `onDelete: 'set
  * null'`, so that row SURVIVES the delete with a NULL link and is
  * deliberately NOT snapshotted — see the capture's own comment for that and
  * for the ADR-0011 PII reason it must stay out) is left to its own FK. `library_watermark` advances via the
@@ -7303,6 +7318,13 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // Whatever is left is rejected, so the delete proceeds through it.
     const rejectedAssetIds = digitalAssetRows.map((row) => row.id);
 
+    // A record that took its cover review from this release keeps a complete
+    // copy of it (BS#2875; see the docstring). After the refusals above, so a
+    // refused delete copies nothing, and before the capture, so the originals
+    // are captured as they stand and the copies, rows of surviving records, are
+    // not.
+    await copyCitedCoverReviews(tx, album_id);
+
     // Capture the release row ITSELF plus its irreplaceable children BEFORE
     // any delete runs, so a failed capture rolls back with the delete instead
     // of leaving the subtree unrecoverable. Each child is just its FK column —
@@ -7322,11 +7344,17 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // which takes the review row `FOR UPDATE` itself before it reads the
     // highest revision, and that lock conflicts with the `FOR SHARE` the
     // `reviews.album_id` entry below takes on this release's reviews before
-    // `review_revisions` is read. The one writer outside the helper is the
+    // `review_revisions` is read. Two writers sit outside the helper. One is the
     // catalog restore, which replays captured `review_revisions` rows
     // directly (`replayCapturedRows`) under its own locks, beneath `reviews`
     // rows it inserts in the same transaction, which no concurrent capture
-    // can see. That writer-side lock is the invariant: a writer holding only
+    // can see. The other is `copyCitedCoverReviews` (above, BS#2875), by design: a row copy keeps the original revision
+    // numbers, editors and `edited_at`, which the helper would renumber and
+    // restamp. It cannot race a capture for the same reason the restore
+    // cannot: it inserts the copied revisions beneath a `reviews` row it
+    // creates in the same transaction, which no concurrent capture can see,
+    // while it holds `FOR SHARE` on the originals, which the helper's `FOR
+    // UPDATE` waits behind. That writer-side lock is the invariant: a writer holding only
     // the FK's `FOR KEY SHARE` on the review could insert a revision between
     // this capture and the cascade, and the revision would be destroyed with
     // nothing in the snapshot. `album_metadata`,
