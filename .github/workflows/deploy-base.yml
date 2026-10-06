@@ -33,32 +33,35 @@ jobs:
       - name: Validate Build Target
         if: inputs.target != ''
         run: |
-          TARGET_INPUT="${{ inputs.target }}"
-
-          if [ ! -d "apps/$TARGET_INPUT" ] && [ ! -d "jobs/$TARGET_INPUT" ]; then
-            echo "Error: The target directory 'apps/$TARGET_INPUT' or 'jobs/$TARGET_INPUT' does not exist." >&2
-            exit 1
-          fi
-          echo "target input '$TARGET_INPUT' is valid."
+          while IFS= read -r TARGET_INPUT; do
+            [ -z "$TARGET_INPUT" ] && continue
+            if [ ! -d "apps/$TARGET_INPUT" ] && [ ! -d "jobs/$TARGET_INPUT" ]; then
+              echo "Error: The target directory 'apps/$TARGET_INPUT' or 'jobs/$TARGET_INPUT' does not exist." >&2
+              exit 1
+            fi
+            echo "target input '$TARGET_INPUT' is valid."
+          done <<< "${{ inputs.target }}"
 
       - name: Validate Version Input Format
         if: inputs.version != ''
         run: |
           VERSION_INPUT="${{ inputs.version }}"
-          TARGET_INPUT="${{ inputs.target }}"
 
           if [[ ! "$VERSION_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ && "$VERSION_INPUT" != "latest" ]]; then
             echo "Error: The 'version' input must follow semantic versioning format (e.g., v1.0.0, v1.0.0-beta.1). Received: $VERSION_INPUT" >&2
             exit 1
           fi
 
-          TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
-          if [ "$VERSION_INPUT" != "latest" ]; then
-            if ! git tag -l "$TAG_TO_CHECK" | grep -q "$TAG_TO_CHECK"; then
-              echo "Error: The corresponding tag for target and version does not exist: $TAG_TO_CHECK"
-              exit 1
+          while IFS= read -r TARGET_INPUT; do
+            [ -z "$TARGET_INPUT" ] && continue
+            TAG_TO_CHECK="$TARGET_INPUT/$VERSION_INPUT"
+            if [ "$VERSION_INPUT" != "latest" ]; then
+              if ! git tag -l "$TAG_TO_CHECK" | grep -q "$TAG_TO_CHECK"; then
+                echo "Error: The corresponding tag for target and version does not exist: $TAG_TO_CHECK"
+                exit 1
+              fi
             fi
-          fi
+          done <<< "${{ inputs.target }}"
 
           echo "Version input '$VERSION_INPUT' is valid."
 

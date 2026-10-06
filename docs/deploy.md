@@ -3,7 +3,10 @@
 ## Where it runs
 
 - Hosted on EC2
-- CI/CD via GitHub Actions: push to `main` auto-triggers `.github/workflows/deploy-auto.yml`, which delegates to the reusable `deploy-base.yml`. `deploy-manual.yml` (Actions tab → Manual Build & Deploy → Run Workflow, with `target` + optional `version` inputs) is for re-deploying a specific tag, deploying a single app target, or rolling back.
+- CI/CD via GitHub Actions: push to `main` auto-triggers `.github/workflows/deploy-auto.yml`, which delegates to the reusable `deploy-base.yml`. `deploy-manual.yml` (Actions tab → Manual Build & Deploy → Run Workflow, with `target` + optional `version` inputs) is for re-deploying a specific tag, deploying a single app target, rolling back, or — with `rebuild=true` — building a fresh image for a target whose image already exists.
+
+  **Rebuild mode.** `rebuild` (boolean, default `false`) passes an empty `version` to `deploy-base.yml`, so `handle-git-tags` bumps the version, tags `github.sha`, misses the image and builds it, exactly as the automatic path does. It is refused, before anything is tagged or built, when combined with an explicit `version` or when dispatched from a ref other than `main`. `target` accepts newline-separated multiple targets, which only the CLI can send (the web form's field is one line): `gh workflow run deploy-manual.yml --ref main -f target="$(printf 'a\nb')" -f rebuild=true`. `deploy-manual.yml` has no concurrency group, so dispatch a rebuild only when no automatic deploy is running. On the dispatch path `live_targets` falls back to `[]`, so `reclaim-disk`'s stopped-container sweep removes a stopped one-shot container more than 7 days old, which an automatic run would keep — save `docker logs` from a finished one-shot before dispatching a rebuild.
+
 - Docker images built with multi-stage Dockerfile (`node:24-alpine`), stored in Amazon ECR
 
 ## CI/CD pipeline detail
