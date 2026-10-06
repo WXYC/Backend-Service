@@ -617,9 +617,36 @@ components:
           properties:
             intake_item_id: { type: integer }
             album_id: { type: integer }
+            author:
+              {
+                type: string,
+                minLength: 1,
+                maxLength: 128,
+                description: 'On-behalf (`reviews: manage`). Free text, required whenever any on-behalf key is sent; kept whole, so one over 128 code points is a 400.',
+              }
+            author_user_id:
+              {
+                type: string,
+                description: "On-behalf (`reviews: manage`). Links the author's account, which then sees, edits and may delete the review and alone sets its publishing choices. An id naming no account is a 400.",
+              }
+            medium:
+              {
+                type: string,
+                enum: [typed, handwritten],
+                default: typed,
+                description: 'On-behalf (`reviews: manage`). A handwritten review needs no text.',
+              }
+            accept:
+              {
+                type: boolean,
+                default: true,
+                description: 'On-behalf (`reviews: manage`), `intake_item_id` subjects only (a 400 with `album_id`). True or omitted creates the review already `submitted` (revision 1 written) and accepted for the item in one transaction; a typed review then needs `review` text. False leaves a draft.',
+              }
       description: >
-        Exactly one of `intake_item_id` and `album_id`. `author`, `author_user_id` and `medium`
-        (the on-behalf shape) are not accepted yet.
+        Exactly one of `intake_item_id` and `album_id`. `author`, `author_user_id`, `medium` and `accept` (the on-behalf
+        shape, BS#2866) need `reviews: manage`; without one of them the create is the caller's own draft. An on-behalf
+        review names its subject in any state (the hold rule does not apply), starts with no publishing surface ticked
+        and `credit` null (sending either is a 400), and one of a `filed` or `finalized` item carries the item's `album_id`.
 
     Review:
       allOf:
@@ -5650,11 +5677,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/Review'
         '400':
-          description: 'Validation failure, including both or neither of `intake_item_id` and `album_id`, and `author`/`author_user_id`/`medium` from a caller with `reviews: manage` (not built yet)'
+          description: 'Validation failure, including both or neither of `intake_item_id` and `album_id`; on-behalf: no or a blank `author`, one over 128 code points, an `author_user_id` naming no account, a typed review with no text and `accept` in force, `accept` with `album_id`, a surface ticked or a `credit` set'
         '401':
           description: 'Authentication required'
         '403':
-          description: 'Caller lacks `reviews: write`, or sent `author`, `author_user_id` or `medium` without `reviews: manage`'
+          description: 'Caller lacks `reviews: write`, or sent `author`, `author_user_id`, `medium` or `accept` without `reviews: manage`'
         '409':
           description: '`subject_not_held`: an intake item the caller does not hold, or a subject that is neither an intake item nor a library release'
           content:
