@@ -69,6 +69,7 @@ const {
 const CURRENT_KEY_HEX = process.env.STATION_PASSCODE_KEY;
 
 const { getTestDb } = require('../utils/db');
+const { closeDatabaseConnection } = require('@wxyc/database');
 
 // `station_passcode` and `station_signup_attempt` are deliberately
 // unprefixed and UNQUALIFIED tables living in `public`, not `wxyc_schema` —
@@ -96,6 +97,8 @@ describe('station-passcode lifecycle (BS#2359, real Postgres)', () => {
   afterAll(async () => {
     await sql`DELETE FROM station_signup_attempt`;
     await sql`DELETE FROM station_passcode`;
+    // Last: the code under test opened its own @wxyc/database client; end it so this file's connections do not outlive it.
+    await closeDatabaseConnection();
   });
 
   async function activeCount() {

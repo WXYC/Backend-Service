@@ -41,7 +41,7 @@ const { getTestDb } = require('../utils/db');
 const distDir = path.join(__dirname, '..', '..', 'jobs', 'station-signup-review', 'dist');
 const { queryPendingSelfSignups } = require(path.join(distDir, 'query.cjs'));
 const { planDowngrades, applyDowngrades } = require(path.join(distDir, 'downgrade.cjs'));
-const { db } = require('@wxyc/database');
+const { db, closeDatabaseConnection } = require('@wxyc/database');
 
 const BASE = '/auth/admin/station-signup';
 
@@ -194,6 +194,8 @@ describe('station-signup manager API (BS#2362, real endpoints, real Postgres)', 
     else process.env.STATION_SIGNUP_DOWNGRADE_ENABLED = previousDowngradeFlag;
     await sql`DELETE FROM station_signup_attempt`;
     await sql`DELETE FROM station_passcode`;
+    // Last: the code under test opened its own @wxyc/database client; end it so this file's connections do not outlive it.
+    await closeDatabaseConnection();
   });
 
   // Both tables are exclusive to the passcode specs in this database, so a

@@ -43,6 +43,7 @@ const {
 } = require('../../shared/authentication/dist/station-passcode.js');
 
 const { getTestDb } = require('../utils/db');
+const { closeDatabaseConnection } = require('@wxyc/database');
 
 function getAuthBaseUrl() {
   if (process.env.BETTER_AUTH_URL) {
@@ -130,6 +131,8 @@ describe('POST /auth/wxyc/station-signup (BS#2361, real Postgres + live auth ser
   afterAll(async () => {
     await sql`DELETE FROM station_signup_attempt`;
     await sql`DELETE FROM station_passcode`;
+    // Last: the code under test opened its own @wxyc/database client; end it so this file's connections do not outlive it.
+    await closeDatabaseConnection();
   });
 
   async function passcodeRow(id) {
