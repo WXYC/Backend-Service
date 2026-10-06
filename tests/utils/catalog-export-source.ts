@@ -2,6 +2,11 @@
  * Source-text helpers shared by the tests that read `catalog-export.service.ts` and the
  * migrations as text (the unit suite cannot execute either against a real database):
  * comment stripping, the interpolated-column scrape, and the latest-trigger parse.
+ *
+ * Known limitations (documented, not modeled): the export scrape reads only `${<table>.<prop>}` interpolations
+ * and `logicalAlbumKeySql(...)` arguments, so a column reached through some other helper call is invisible to
+ * it; and a migration that renames a column or table is not tracked, so a trigger or export column that
+ * survives a rename under its old name is compared by that old name.
  */
 
 import * as fs from 'fs';
@@ -20,13 +25,12 @@ const journal = JSON.parse(fs.readFileSync(path.join(migrationsDir, 'meta/_journ
 };
 
 /**
- * Drop `--` line comments so greps assert on the SQL that actually executes, not on prose about it.
+ * Drop `--` line comments and block comments so greps assert on the SQL that actually executes, not on prose
+ * about it. One left-to-right pass, so a `--` inside a block comment (or a block opener inside a line comment)
+ * cannot desynchronize the two.
  */
 export function stripSqlComments(sql: string): string {
-  return sql
-    .split('\n')
-    .map((line) => line.replace(/--.*$/, ''))
-    .join('\n');
+  return sql.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, (m) => (m.startsWith('/*') ? ' ' : ''));
 }
 
 /** Drizzle property name -> SQL column name for one schema.ts table or materialized view (`prop: type('col'`). */
@@ -95,7 +99,8 @@ const DROP_TRIGGER_RE =
 const ON_TABLE_RE = /\sON\s+(?:"?wxyc_schema"?\s*\.\s*)?"?(\w+)"?(?![\w"])/i;
 const EVENTS_RE = /\b(?:AFTER|BEFORE|INSTEAD\s+OF)\s+([\s\S]*?)\s+ON\s+/i;
 const ALTER_TRIGGER_RE =
-  /ALTER\s+TABLE\s+(?:ONLY\s+)?(?:"?wxyc_schema"?\s*\.\s*)?"?(\w+)"?\s+(DISABLE|ENABLE(?:\s+(?:ALWAYS|REPLICA))?)\s+TRIGGER\s+"?(touch_library_watermark\w*)"?(?![\w"])/i;
+  /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:"?wxyc_schema"?\s*\.\s*)?"?(\w+)"?\s+(DISABLE|ENABLE(?:\s+(?:ALWAYS|REPLICA))?)\s+TRIGGER\s+(?:"?(touch_library_watermark\w*)"?(?![\w"])|(ALL|USER)(?![\w"]))/i;
+const WHEN_RE = /\bWHEN\s*\(/i;
 
 /**
  * Positive parse of a trigger's event clause (`INSERT OR UPDATE OF a, b OR DELETE`): null for an unrestricted
@@ -121,6 +126,33 @@ function parseUpdateColumns(tag: string, name: string, events: string): string[]
 }
 
 /**
+ * Narrow a parsed UPDATE column set by the trigger's `WHEN (...)` clause, failing closed: the trigger then
+ * covers only the columns the condition references through `NEW.<col>` / `OLD.<col>`, intersected with any
+ * `UPDATE OF` list. A condition that cannot be reduced to column references (no references, or a bare `NEW`
+ * / `OLD` row, `NEW.*`) throws rather than being guessed at.
+ */
+function narrowByWhen(tag: string, name: string, stmt: string, columns: string[] | null): string[] | null {
+  const m = WHEN_RE.exec(stmt);
+  if (!m) return columns;
+  let depth = 1;
+  let i = m.index + m[0].length;
+  const start = i;
+  for (; i < stmt.length && depth > 0; i++) {
+    if (stmt[i] === '(') depth++;
+    else if (stmt[i] === ')') depth--;
+  }
+  if (depth !== 0) throw new Error(`${tag}: ${name} has an unbalanced WHEN clause`);
+  const cond = stmt.slice(start, i - 1);
+  const refs = [...cond.matchAll(/\b(?:NEW|OLD)\s*\.\s*"?(\w+)"?/gi)].map((r) => r[1]);
+  if (refs.length === 0 || /\b(?:NEW|OLD)\b(?!\s*\.\s*"?\w)/i.test(cond)) {
+    throw new Error(`${tag}: ${name} has a WHEN clause that cannot be reduced to column references: (${cond.trim()})`);
+  }
+  if (columns !== null && columns.length === 0) return columns;
+  const referenced = [...new Set(refs)];
+  return columns === null ? referenced : columns.filter((c) => referenced.includes(c));
+}
+
+/**
  * The latest (journal order) `touch_library_watermark*` trigger on each table. Older definitions need not be
  * parseable; a later DROP with no re-create, or a later DISABLE TRIGGER with no re-enable, removes the table's entry. A latest
  * definition whose event clause is not positively recognized throws rather than being read as unrestricted.
@@ -140,9 +172,16 @@ export function parseWatermarkTriggers(migrations: { tag: string; sql: string }[
     for (const stmt of sql.split(';')) {
       const alter = ALTER_TRIGGER_RE.exec(stmt);
       if (alter) {
-        const [, table, action, name] = alter;
-        if (/^DISABLE/i.test(action)) disabled.add(`${table}/${name}`);
-        else disabled.delete(`${table}/${name}`);
+        const [, table, action, name, scope] = alter;
+        // ENABLE REPLICA fires only under session_replication_role = replica, i.e. not for normal sessions.
+        const inert = /^DISABLE|REPLICA/i.test(action);
+        // ALL / USER address every trigger on the table, tracked under the `*` wildcard.
+        const key = `${table}/${name ?? '*'}`;
+        if (inert) disabled.add(key);
+        else {
+          disabled.delete(key);
+          if (scope) for (const k of [...disabled]) if (k.startsWith(`${table}/`)) disabled.delete(k);
+        }
         continue;
       }
       const drop = DROP_TRIGGER_RE.exec(stmt);
@@ -158,12 +197,14 @@ export function parseWatermarkTriggers(migrations: { tag: string; sql: string }[
       if (events === undefined) throw new Error(`${tag}: ${create[1]} has no parseable event clause`);
       // CREATE [OR REPLACE] TRIGGER yields a fresh, enabled trigger.
       disabled.delete(`${table}/${create[1]}`);
-      latest.set(table, { tag, name: create[1], columns: parseUpdateColumns(tag, create[1], events) });
+      disabled.delete(`${table}/*`);
+      const columns = narrowByWhen(tag, create[1], stmt, parseUpdateColumns(tag, create[1], events));
+      latest.set(table, { tag, name: create[1], columns });
     }
   }
   for (const key of disabled) {
     const [table, name] = key.split('/');
-    if (latest.get(table)?.name === name) latest.delete(table);
+    if (name === '*' || latest.get(table)?.name === name) latest.delete(table);
   }
   return latest;
 }

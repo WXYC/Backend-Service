@@ -59,8 +59,65 @@ describe('parseWatermarkTriggers', () => {
     expect(latest(create('INSERT'), disable, drop(), create('UPDATE'))?.columns).toBeNull();
   });
 
+  it.each([
+    ['IF EXISTS', `ALTER TABLE IF EXISTS ${T} DISABLE TRIGGER touch_library_watermark_from_gac;`],
+    ['ALL', `ALTER TABLE ${T} DISABLE TRIGGER ALL;`],
+    ['USER', `ALTER TABLE ${T} DISABLE TRIGGER USER;`],
+    [
+      'ENABLE REPLICA',
+      `ALTER TABLE ${T} DISABLE TRIGGER touch_library_watermark_from_gac; ALTER TABLE ${T} ENABLE REPLICA TRIGGER touch_library_watermark_from_gac;`,
+    ],
+    [
+      'ENABLE REPLICA after DISABLE ALL',
+      `ALTER TABLE ${T} DISABLE TRIGGER ALL; ALTER TABLE ${T} ENABLE REPLICA TRIGGER touch_library_watermark_from_gac;`,
+    ],
+  ])('counts %s as disabling', (_label, alter) => {
+    expect(latest(create('INSERT OR UPDATE OR DELETE'), alter)).toBeUndefined();
+  });
+
+  it('ENABLE TRIGGER ALL restores a trigger disabled by DISABLE TRIGGER ALL', () => {
+    const got = latest(
+      create('INSERT OR UPDATE OF a'),
+      `ALTER TABLE ${T} DISABLE TRIGGER ALL; ALTER TABLE ${T} ENABLE TRIGGER ALL;`
+    );
+    expect(got?.columns).toEqual(['a']);
+  });
+
+  it('is not misfiled by a block comment containing ON inside the definition', () => {
+    const sql = `CREATE TRIGGER touch_library_watermark_from_gac /* fires ON wxyc_schema.library */ AFTER UPDATE OF a ON ${T} FOR EACH ROW EXECUTE FUNCTION f();`;
+    expect(latest(sql)?.columns).toEqual(['a']);
+    expect(parse(sql).has('library')).toBe(false);
+  });
+
   it('removes the entry on a later DROP', () => {
     expect(latest(create('UPDATE'), drop())).toBeUndefined();
+  });
+});
+
+describe('parseWatermarkTriggers WHEN clauses', () => {
+  const row = (events: string, when: string) =>
+    `CREATE TRIGGER touch_library_watermark_from_gac AFTER ${events} ON ${T} FOR EACH ROW WHEN (${when}) EXECUTE FUNCTION wxyc_schema.touch_library_watermark();`;
+  it.each([
+    ['plain UPDATE narrowed to the referenced column', row('UPDATE', 'OLD.a IS DISTINCT FROM NEW.a'), ['a']],
+    ['several references, deduplicated', row('UPDATE', 'OLD.a IS DISTINCT FROM NEW.a OR NEW.b > 1'), ['a', 'b']],
+    ['intersected with UPDATE OF', row('UPDATE OF a, b', 'NEW.b IS NOT NULL OR NEW.c IS NOT NULL'), ['b']],
+    [
+      'quoted columns and nested parens',
+      row('UPDATE', '(OLD."a" IS DISTINCT FROM NEW."a") AND lower(NEW.b) = \'x\''),
+      ['a', 'b'],
+    ],
+    ['disjoint from UPDATE OF covers nothing', row('UPDATE OF a', 'NEW.c IS NOT NULL'), []],
+    ['no UPDATE event stays empty', row('INSERT OR DELETE', 'NEW.a IS NOT NULL'), []],
+  ])('%s', (_label, sql, columns) => {
+    expect(latest(sql)?.columns).toEqual(columns);
+  });
+
+  it.each([
+    ['a bare row comparison', 'OLD IS DISTINCT FROM NEW'],
+    ['a row wildcard', 'OLD.* IS DISTINCT FROM NEW.*'],
+    ['a condition with no column references', 'true'],
+  ])('throws on %s', (_label, when) => {
+    expect(() => latest(row('UPDATE', when))).toThrow(/WHEN clause/);
   });
 });
 
