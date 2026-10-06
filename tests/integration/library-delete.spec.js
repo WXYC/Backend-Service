@@ -68,11 +68,13 @@
  *     (which claimed cascade all along).
  *   - 404 on an unknown id.
  *   - BS#2560 (F1): the delete writes a `catalog_delete_snapshot` row in the
- *     same transaction, capturing the eight irreplaceable children
+ *     same transaction, capturing the irreplaceable children
  *     (`compilation_track_artist`, `library_urls`, `reviews`,
  *     `album_critic_reviews`, `bins`, `rotation`,
  *     `rotation_urls` — a depth-2 child of `rotation`, not of `library`
- *     directly — and `artist_library_crossreference`) as JSON, and a
+ *     directly — and `artist_library_crossreference`, plus the review
+ *     tables the census names: `review_revisions`, `review_prints`,
+ *     `fcc_notes` and `intake_items`) as JSON, and a
  *     snapshot write that fails rolls the whole delete back — no listener,
  *     no swallow.
  *   - and that `album_review_submissions` is NOT among them: the row survives
@@ -734,7 +736,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
   });
 
   /**
-   * BS#2560 (F1). Captures the eight irreplaceable children as JSON, keyed by
+   * BS#2560 (F1). Captures the irreplaceable children as JSON, keyed by
    * table name, in the same `catalog_delete_snapshot` row — one row per
    * insert into `bins`/`rotation`/`reviews`/etc, populated for every table
    * this delete can reach. `rotation_urls` is the depth-2 case (finding 1):
@@ -746,7 +748,7 @@ describe('DELETE /library/:id (BS#2112)', () => {
    * data, re-obtained on restore rather than stored forever — see the
    * schema.ts docstring).
    */
-  test('writes a catalog_delete_snapshot row capturing the eight irreplaceable children', async () => {
+  test('writes a catalog_delete_snapshot row capturing the irreplaceable children', async () => {
     const album = await createAlbum(`BS#2560 Snapshot ${uniq}`);
     // Two columns the ETL never refreshes (`LEGACY_SOURCED_LIBRARY_COLUMNS`
     // covers neither), so they are recoverable from the parent capture or

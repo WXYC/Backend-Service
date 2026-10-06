@@ -2293,20 +2293,23 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * UI. For those the documented ETL restore path cannot work, and this is the
  * only record of what the release said.
  *
- * Captures the EIGHT irreplaceable children only — the ones a person typed
+ * Captures the irreplaceable children only — the ones a person typed
  * and nothing recomputes: `compilation_track_artist`, `library_urls`,
- * `reviews`, `album_critic_reviews`, `bins`,
- * `rotation`, `rotation_urls` (a depth-2 child — its own FK points at
- * `rotation.id`, not `library.id`; `captureCatalogDeleteSnapshot`'s `via`
- * shape resolves it as one correlated subquery riding along with the same
- * `rotation` capture), `artist_library_crossreference`.
+ * `reviews`, `review_prints` and `fcc_notes` (both through `album_id`, both
+ * `ON DELETE CASCADE`; filing stamps each with the release, WXYC/Backend-Service#2803
+ * and #2862), `intake_items` (through `album_id`, below), `album_critic_reviews`,
+ * `bins`, `rotation`, `artist_library_crossreference`, and the depth-2
+ * children `rotation_urls` and `review_revisions` (their own FKs point at
+ * `rotation.id` and `reviews.id`, not `library.id`;
+ * `captureCatalogDeleteSnapshot`'s `via` shape resolves each as one
+ * correlated subquery riding along with its parent's capture).
  *
  * This is meant to be the FULL `library.id` dependent list, re-derived from
  * the deployed schema rather than asserted, and it is what a reviewer reads
  * to decide whether some newly-added FK is already accounted for — so a new
  * one belongs in one of the four buckets below even when it needs no new
  * capture. Every dependent resolves to exactly one:
- *   - Captured: the eight above.
+ *   - Captured: the ones above.
  *   - Excluded as DERIVED, re-obtained after a restore rather than stored
  *     forever: `album_metadata` (re-enriched from LML), `library_identity` +
  *     `library_identity_source` (re-resolved), and
@@ -2351,7 +2354,12 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     release it was filed as) and is CAPTURED by the release delete, through
  *     `album_id` (WXYC/Backend-Service#2801). `cited_album_id` is
  *     `onDelete: 'set null'`: the item survives the delete unlinked, and a
- *     restore does not re-link it, so it stays NULL.
+ *     restore does not re-link it, so it stays NULL. A citing item whose
+ *     `accepted_review_id` is one of the release's reviews is given its own
+ *     copy of that review before the delete (`copyCitedCoverReviews`,
+ *     WXYC/Backend-Service#2875), so the delete does not null its
+ *     `accepted_review_id`; the copy is a row of a surviving item, so it is
+ *     not in this snapshot.
  * `library_identity_history`, `album_popularity.representative_library_id` and
  * `flowsheet_linkage_review.candidate_library_ids` are the THREE FK-LESS
  * pointers at `library.id` (a new FK-less pointer is a fifth thing worth
@@ -2399,7 +2407,8 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  * anything, so that account-deletion cascade cannot reach it — a DJ's
  * account can be gone while their handle and bin notes remain readable in a
  * `catalog_delete_snapshot` row forever (no prune job). `reviews.author`
- * behaves the same way. This is deliberately NOT addressed by redacting
+ * behaves the same way, as does `review_revisions.edited_by`: both are Mixed
+ * names (`docs/pii.md`) copied into the permanent snapshot. This is deliberately NOT addressed by redacting
  * `dj_id`/`author` from the capture: doing so would defeat the reason
  * `bins`/`reviews` are captured at all (recoverability), for a PII-in-a-
  * permanent-JSON-column concern that also has no redaction/purge mechanism

@@ -104,7 +104,7 @@ const makeTx = (selectResults: unknown[][], throwOn?: { op: string; error: unkno
     }
 
     const chain: Record<string, unknown> = {};
-    for (const method of ['from', 'where', 'limit', 'values', 'set', 'onConflictDoUpdate']) {
+    for (const method of ['from', 'where', 'limit', 'orderBy', 'values', 'set', 'onConflictDoUpdate']) {
       chain[method] = (arg: unknown) => {
         record.methods.push(method);
         if (method === 'from') record.table = arg;
@@ -245,19 +245,21 @@ describe('deleteAlbumFromDB (BS#2112)', () => {
   });
 
   // BS#2565 (D1). Nothing in the transaction queries `flowsheet` any more —
-  // the three SELECTs above are the whole of it, regardless of whether the
-  // release carries plays or how they reach it.
+  // the three SELECTs above, plus the one indexed select of the cover-review
+  // copy (BS#2875, which returns after that select when no record took its
+  // cover review from the release), are the whole of it, regardless of whether
+  // the release carries plays or how they reach it.
   describe('no flowsheet awareness left (finding 2)', () => {
-    it('issues exactly three locked SELECTs on a clean release', async () => {
+    it('issues exactly three locked SELECTs and the cover-review select on a clean release', async () => {
       const { ops } = await runDelete(42, CLEAN);
 
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(3);
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(4);
     });
 
-    it('issues the same three SELECTs when the release has rotation rows', async () => {
+    it('issues the same four SELECTs when the release has rotation rows', async () => {
       const { ops } = await runDelete(42, [EXISTS, [{ id: 900 }], NO_ASSETS]);
 
-      expect(ops.filter((o) => o.op === 'select')).toHaveLength(3);
+      expect(ops.filter((o) => o.op === 'select')).toHaveLength(4);
     });
 
     it('never references the flowsheet table in the transaction body', () => {
