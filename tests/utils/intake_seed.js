@@ -46,7 +46,7 @@ const FORMAT_ID = 1; // exists in the integration fixture
 // `code_letters` of every artist `seedLibraryRelease` creates. The seeder removes its artists by id, so the value
 // needs no meaning; what it must not do is appear in another spec's cleanup sweep or bucket assertion. 'ZZ' is
 // out: album-reviews deletes artists named Juana Molina, this seeder's default, with `code_letters = 'ZZ'`, and
-// digital-archive-playback and intake-transitions sweep on it under their own names. 'ZQ' is out: it is the
+// digital-archive-playback sweeps on it under its own name. 'ZQ' is out: it is the
 // BS#2489 bucket whose exact membership and order library.spec.js asserts. 'SEED' is four characters, the
 // column's full width, reads as what it is, and no other file under tests/ names it or imports this constant;
 // `intake-seed.spec.js` walks tests/ for either to keep it that way (a sweep on the imported name would delete

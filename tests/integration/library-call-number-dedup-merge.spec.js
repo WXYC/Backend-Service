@@ -59,8 +59,10 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
 
   /**
    * Seed one library row on a given shelf slot and remember it for cleanup. Hand-written, not
-   * `seedLibraryRelease`: the slot needs one shared artist, genre and call number across two releases, and the
-   * teardown below deletes `bins` and `library_identity` rows before the release, in the job's own order.
+   * `seedLibraryRelease` (an `artist_id` override could share one artist): `removeSeededLibraryReleases` has no
+   * `finally` reset, so one failed delete would fail every later test, and the teardown below must delete `bins`
+   * and `library_identity` rows before the release, in the job's own order. The `beforeEach` artist is part of the
+   * same exception, for the same teardown.
    */
   const seedAlbum = async ({ title, codeNumber, vol = null, genreId = GENRE_ID }) => {
     const [row] = await sql`
