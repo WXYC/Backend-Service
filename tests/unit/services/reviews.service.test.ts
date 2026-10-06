@@ -80,7 +80,7 @@ jest.mock('@wxyc/database', () => {
         mockWrites.inserted = v;
         mockInserts.push({ table: jest.requireActual('drizzle-orm').getTableName(t), values: v });
         mockStatements.push(`insert ${mockInserts[mockInserts.length - 1].table}`);
-        return { returning: () => Promise.resolve([{ id: 11 }]) };
+        return { returning: () => Promise.resolve([{ id: 11, ...v }]) };
       },
     }),
     update: (t: any) => ({
@@ -133,6 +133,8 @@ import {
   deleteReview,
   editOutcome,
   lockReviewAfterItem,
+  recordReview,
+  reviewVisibleTo,
   snapshotAuthor,
   submitReview,
   updateReview,
@@ -305,6 +307,220 @@ describe('createReview', () => {
     mockQueue.push([{ id: 9 }], [{ name: 'Jessica Pratt' }], [created]);
     expect((await createReview({ album_id: 9 }, {}, DJ)).outcome).toBe('created');
     expect(mockWrites.inserted).toMatchObject({ album_id: 9, author: 'Jessica Pratt' });
+  });
+});
+
+describe('recordReview (BS#2866: a music director records a review on behalf of an author)', () => {
+  const created = { id: 11 };
+  const ONBEHALF = { author: 'Test Reviewer', medium: 'handwritten' as const, accept: true };
+  const item = (o: object = {}) => [{ album_id: null, state: 'pool', ...o }];
+  /** The scripted reads of an accepted create: the two item reads, then revision 1's review lock and highest revision, then the read-back. */
+  const scriptAccepted = (itemRows = item()) => mockQueue.push(itemRows, itemRows, [{ id: 11 }], [{ n: 0 }], [created]);
+  const itemReads = () => mockReads.filter((r) => r.table === 'intake_items').map((r) => r.lock ?? 'none');
+
+  describe('the accept table', () => {
+    test('an intake item with accept in force: a handwritten review with no text is created submitted, revision 1 is written, and the item is accepted, in one transaction', async () => {
+      scriptAccepted();
+      const result = await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD);
+      expect(result).toEqual({ outcome: 'created', review: created });
+      expect(mockInserts.map((i) => i.table)).toEqual(['reviews', 'review_revisions']);
+      expect(mockInserts[0].values).toMatchObject({
+        intake_item_id: 4,
+        album_id: null,
+        author: 'Test Reviewer',
+        author_user_id: null,
+        recorded_by_user_id: 'md-1',
+        medium: 'handwritten',
+        status: 'draft',
+      });
+      expect(mockInserts[1].values).toMatchObject({
+        review_id: 11,
+        revision: 1,
+        edited_by: 'Test Reviewer',
+        edited_by_user_id: null,
+      });
+      expect(mockWritesTo.map((w) => [w.verb, w.table])).toEqual([
+        ['update', 'reviews'],
+        ['update', 'intake_items'],
+      ]);
+      expect(mockWritesTo[0].set).toMatchObject({ status: 'submitted' });
+      expect(mockWritesTo[1].set).toMatchObject({ accepted_review_id: 11, accepted_by: 'md-1' });
+    });
+
+    test('a typed review with no text and accept in force is refused before anything is read or written', async () => {
+      expect(await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, medium: 'typed' }, MD)).toEqual({
+        outcome: 'text_required',
+      });
+      expect(mockStatements).toEqual([]);
+    });
+
+    test('a typed review with text and accept in force is created submitted and accepted', async () => {
+      scriptAccepted();
+      await recordReview({ intake_item_id: 4 }, { review: 'text' }, { ...ONBEHALF, medium: 'typed' }, MD);
+      expect(mockInserts[1].values).toMatchObject({ review: 'text', revision: 1 });
+      expect(mockWritesTo.map((w) => w.table)).toEqual(['reviews', 'intake_items']);
+    });
+
+    test('accept false leaves a draft: no revision, no write to the item, and the item is only read FOR SHARE', async () => {
+      mockQueue.push(item(), item(), [created]);
+      const result = await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, accept: false }, MD);
+      expect(result.outcome).toBe('created');
+      expect(mockInserts.map((i) => i.table)).toEqual(['reviews']);
+      expect(mockInserts[0].values).toMatchObject({ status: 'draft' });
+      expect(mockWritesTo).toEqual([]);
+      expect(itemReads()).toEqual(['none', 'share']);
+    });
+
+    test('a library release is a draft and is locked FOR KEY SHARE; the item path is not taken', async () => {
+      mockQueue.push([{ id: 9 }], [created]);
+      await recordReview({ album_id: 9 }, {}, { ...ONBEHALF, accept: false }, MD);
+      expect(mockReads[0]).toMatchObject({ table: 'library', lock: 'key share' });
+      expect(mockInserts[0].values).toMatchObject({ album_id: 9, status: 'draft' });
+      expect(mockInserts[0].values).not.toHaveProperty('intake_item_id');
+      expect(mockWritesTo).toEqual([]);
+    });
+
+    test.each([
+      ['a release that does not exist', { album_id: 9 }, [[]]],
+      ['an item that does not exist', { intake_item_id: 4 }, [[]]],
+    ])('%s is subject_not_held and writes nothing', async (_, subject, script) => {
+      mockQueue.push(...script);
+      expect(await recordReview(subject, {}, ONBEHALF, MD)).toEqual({ outcome: 'subject_not_held' });
+      expect(mockInserts).toEqual([]);
+    });
+
+    test.each(['pool', 'requested', 'checked_out', 'reviewed'])(
+      'an item in state %s, held by no one in particular, is accepted all the same',
+      async (state) => {
+        scriptAccepted(item({ state }));
+        expect((await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD)).outcome).toBe('created');
+      }
+    );
+  });
+
+  describe('a review of a filed item carries the release', () => {
+    test.each([
+      ['filed', true],
+      ['filed', false],
+      ['finalized', true],
+      ['finalized', false],
+    ])("a %s item, accept %s: album_id is the item's", async (state, accept) => {
+      const rows = item({ state, album_id: 7 });
+      mockQueue.push(rows, [{ id: 7 }], rows);
+      if (accept) mockQueue.push([{ id: 11 }], [{ n: 0 }]);
+      mockQueue.push([created]);
+      expect((await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, accept }, MD)).outcome).toBe('created');
+      expect(mockInserts[0].values).toMatchObject({ intake_item_id: 4, album_id: 7 });
+    });
+
+    test('an unfiled item stores album_id NULL', async () => {
+      scriptAccepted();
+      await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD);
+      expect(mockInserts[0].values).toMatchObject({ album_id: null });
+    });
+
+    test("an accepted create for a filed item swaps the accepted review and leaves the state to the write's CASE", async () => {
+      const rows = item({ state: 'filed', album_id: 7 });
+      mockQueue.push(rows, [{ id: 7 }], rows, [{ id: 11 }], [{ n: 0 }], [created]);
+      await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD);
+      const write = mockWritesTo.find((w) => w.table === 'intake_items');
+      expect(write?.set).toMatchObject({ accepted_review_id: 11 });
+      expect(write?.where).toContain('[4]');
+    });
+
+    test('an item filed to another release between the two reads is subject_not_held, with nothing written', async () => {
+      mockQueue.push(item({ state: 'filed', album_id: 7 }), [{ id: 7 }], item({ state: 'filed', album_id: 8 }));
+      expect(await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD)).toEqual({ outcome: 'subject_not_held' });
+      expect(mockInserts).toEqual([]);
+    });
+
+    test('an item filed after the unlocked read is subject_not_held: its release was never locked', async () => {
+      mockQueue.push(item(), item({ state: 'filed', album_id: 7 }));
+      expect(await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD)).toEqual({ outcome: 'subject_not_held' });
+      expect(mockInserts).toEqual([]);
+    });
+
+    test('a filed item whose release was deleted is subject_not_held', async () => {
+      mockQueue.push(item({ state: 'filed', album_id: 7 }), []);
+      expect(await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD)).toEqual({ outcome: 'subject_not_held' });
+    });
+  });
+
+  describe('lock order', () => {
+    const order = () => mockReads.map((r) => `${r.table}:${r.lock ?? 'none'}`);
+
+    test('an unfiled item with accept: the item FOR UPDATE, no library lock, then the review for its revision', async () => {
+      scriptAccepted();
+      await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD);
+      expect(order().slice(0, 4)).toEqual([
+        'intake_items:none',
+        'intake_items:update',
+        'reviews:update',
+        'review_revisions:none',
+      ]);
+    });
+
+    test('a filed item with accept: the library row FOR KEY SHARE precedes the item FOR UPDATE', async () => {
+      const rows = item({ state: 'filed', album_id: 7 });
+      mockQueue.push(rows, [{ id: 7 }], rows, [{ id: 11 }], [{ n: 0 }], [created]);
+      await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD);
+      expect(order().slice(0, 3)).toEqual(['intake_items:none', 'library:key share', 'intake_items:update']);
+    });
+
+    test('a filed item without accept: the library row FOR KEY SHARE precedes the item FOR SHARE', async () => {
+      const rows = item({ state: 'finalized', album_id: 7 });
+      mockQueue.push(rows, [{ id: 7 }], rows, [created]);
+      await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, accept: false }, MD);
+      expect(order().slice(0, 3)).toEqual(['intake_items:none', 'library:key share', 'intake_items:share']);
+    });
+  });
+
+  describe('the author', () => {
+    test('a linked account is stored as author_user_id, and revision 1 is attributed to it', async () => {
+      mockQueue.push(item(), item(), [{ id: 'dj-1' }], [{ id: 11 }], [{ n: 0 }], [created]);
+      await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, author_user_id: 'dj-1' }, MD);
+      expect(mockInserts[0].values).toMatchObject({ author_user_id: 'dj-1', recorded_by_user_id: 'md-1' });
+      expect(mockInserts[1].values).toMatchObject({ edited_by: 'Test Reviewer', edited_by_user_id: 'dj-1' });
+    });
+
+    test('an author_user_id that names no account is unknown_author and writes nothing', async () => {
+      mockQueue.push(item(), item(), []);
+      expect(await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, author_user_id: 'nobody' }, MD)).toEqual({
+        outcome: 'unknown_author',
+      });
+      expect(mockInserts).toEqual([]);
+    });
+
+    test('nothing is ticked and credit is not written, so the column defaults leave every surface off and credit null', async () => {
+      scriptAccepted();
+      await recordReview({ intake_item_id: 4 }, {}, ONBEHALF, MD);
+      for (const key of ['publish_website', 'publish_apps', 'publish_instagram', 'credit']) {
+        expect(mockInserts[0].values).not.toHaveProperty(key);
+      }
+    });
+  });
+
+  describe('the linked author of an on-behalf review', () => {
+    const recorded = { status: 'draft' as const, author_user_id: 'dj-1', recorded_by_user_id: 'md-1' };
+
+    test('reads the draft: the read rule names both the linked account and the recorder', () => {
+      const q = new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(reviewVisibleTo(DJ));
+      expect(q.sql).toMatch(/"author_user_id" = \$\d+ OR .*"recorded_by_user_id" = \$\d+/);
+      expect(q.params).toEqual(['dj-1', 'dj-1']);
+    });
+
+    test.each([
+      ['edits it', DJ, false, 'allowed'],
+      ['sets its own consent', DJ, true, 'allowed'],
+      ['the recording music director edits it', MD, false, 'allowed'],
+      ['the recording music director may not set consent on it', MD, true, 'consent_forbidden'],
+    ])('the linked account %s: %s', (_, actor, consent, expected) => {
+      expect(editOutcome(recorded, actor, consent)).toBe(expected);
+    });
+
+    test('an unrelated DJ gets not_found on the draft', () => {
+      expect(editOutcome(recorded, { id: 'dj-2', manage: false })).toBe('not_found');
+    });
   });
 });
 
