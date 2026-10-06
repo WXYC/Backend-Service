@@ -24,7 +24,10 @@
  * BS#2919 generalizes the obligation to every table the export interpolates a column from (the scrape and
  * trigger parse live in `tests/utils/catalog-export-source.ts`): the latest `touch_library_watermark*` trigger
  * on each must be unrestricted, or its `UPDATE OF` list must cover every column the export reads from that
- * table, or the table must be on the explicit trigger-less allowlist below with a reason.
+ * table, or the table must be on the explicit trigger-less allowlist below with a reason. Non-library lists need only
+ * COVER the read set (a superset passes); only `library`'s list is pinned to equality, as 0142 narrowed it. A trigger with
+ * no UPDATE event, or one disabled by a later migration, covers nothing. A view or `pgTable` relation read by the export
+ * throws in the scrape rather than being skipped.
  */
 
 import { exportedColumnsByTable, latestWatermarkTriggers } from '../../utils/catalog-export-source';
