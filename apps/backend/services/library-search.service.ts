@@ -9,6 +9,7 @@ import {
   format as formatTable,
   album_plays,
   ROTATION_BINS,
+  type LibraryArtistViewEntry,
 } from '@wxyc/database';
 import type { TrackMatchHint } from '@wxyc/shared/dtos';
 import {
@@ -696,6 +697,35 @@ type RawRow = {
   // the same ISO shape.
   last_discogs_recheck_at: Date | string | null;
 };
+
+/** `library_artist_view` columns `GET /library/query` deliberately does not carry; any other view column must be in `RawRow`. */
+type CatalogSearchOmittedViewColumns =
+  | 'alphabetical_name' // sort key for the legacy reads; this endpoint sorts on artist_name/album_title/plays/add_date
+  | 'legacy_release_id' // tubafrenzy linkage key, not a catalog-search field
+  | 'discogs_artist_id' // external artist ids belong to the artist card, not a release row
+  | 'musicbrainz_artist_id'
+  | 'wikidata_qid'
+  | 'spotify_artist_id'
+  | 'apple_music_artist_id'
+  | 'bandcamp_id';
+
+/** Compile-time guards: a view column that missed `RawRow`, or a `RawRow` key that missed the wire row, is `never`-violating. */
+type RawRowRenames =
+  'card_id' | 'card_bin' | 'card_number' | 'card_name' | `discogs_unavailable${string}` | 'last_discogs_recheck_at';
+const _viewColumnsReachRawRow: Exclude<
+  keyof LibraryArtistViewEntry,
+  keyof RawRow | CatalogSearchOmittedViewColumns
+> extends never
+  ? true
+  : never = true;
+const _rawRowKeysReachWire: Exclude<
+  keyof RawRow,
+  keyof AliasHitFields | keyof AlbumSearchResultRow | RawRowRenames
+> extends never
+  ? true
+  : never = true;
+void _viewColumnsReachRawRow;
+void _rawRowKeysReachWire;
 
 function toAlbumSearchResultRow(row: RawRow): AlbumSearchResultRow {
   const projected: AlbumSearchResultRow = {
