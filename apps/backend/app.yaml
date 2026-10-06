@@ -778,12 +778,23 @@ components:
             BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
         code_number:
           type: integer
+        code_volume_letters:
+          type: string
+          nullable: true
+          maxLength: 4
+          description: >-
+            BS#2917. The per-release volume letter, `library.code_volume_letters` (varchar(4)). Stored raw, as on `GET /library`. Null when the release has no volume letters or the row is library-unlinked.
         artist_name:
           type: string
         album_title:
           type: string
         record_label:
           type: string
+        genre_id:
+          type: integer
+          nullable: true
+          description: >-
+            BS#2917. `library.genre_id`, the id dj-site gates the Rock/Soundtracks section letter on (null on a library-unlinked rotation row).
         genre_name:
           type: string
         format_name:
@@ -1102,8 +1113,19 @@ components:
             BS#2835. The slot's compilation section letter (`code_comp_letter`); null except on the lettered compilation sections.
         code_number:
           type: integer
+        code_volume_letters:
+          type: string
+          nullable: true
+          maxLength: 4
+          description: >-
+            BS#2917. The per-release volume letter, `library.code_volume_letters` (varchar(4)). Stored raw, as on `GET /library`. Null when the release has no volume letters.
         format_name:
           type: string
+        genre_id:
+          type: integer
+          nullable: false
+          description: >-
+            BS#2917. `library.genre_id`, the id dj-site gates the Rock/Soundtracks section letter on.
         genre_name:
           type: string
 

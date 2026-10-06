@@ -385,6 +385,18 @@ describe('library.service / getRotationFromDB', () => {
       expect(stringified).toContain('genre_artist_crossreference.code_comp_letter');
       expect(stringified).toContain(' AS code_comp_letter');
     });
+
+    it('selects library.genre_id and library.code_volume_letters (BS#2917)', async () => {
+      db.execute.mockResolvedValueOnce([]);
+
+      await getRotationFromDB();
+
+      const stringified = JSON.stringify(db.execute.mock.calls[0][0]);
+      expect(stringified).toContain('library.genre_id');
+      expect(stringified).toContain(' AS genre_id');
+      expect(stringified).toContain('library.code_volume_letters');
+      expect(stringified).toContain(' AS code_volume_letters');
+    });
   });
 
   /**

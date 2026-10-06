@@ -43,7 +43,9 @@ export const getBinFromDB = async (dj_id: string) => {
       code_artist_number: genre_artist_crossreference.artist_genre_code,
       code_comp_letter: genre_artist_crossreference.code_comp_letter,
       code_number: library.code_number,
+      code_volume_letters: library.code_volume_letters,
       format_name: format.format_name,
+      genre_id: library.genre_id,
       genre_name: genres.genre_name,
       // BS#2128: `library` is inner-joined below, so every bin row resolves
       // to a real library row — this is never a synthetic/absent id.

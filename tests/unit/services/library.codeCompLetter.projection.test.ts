@@ -10,7 +10,7 @@
  */
 import { jest } from '@jest/globals';
 
-import { db, genre_artist_crossreference } from '../../mocks/database.mock';
+import { db, genre_artist_crossreference, library } from '../../mocks/database.mock';
 import {
   browseArtistsInCodeBucket,
   getAlbumFromDB,
@@ -60,5 +60,14 @@ describe('code_comp_letter rides beside the slot artist number (BS#2835)', () =>
     const projection = await firstProjection(() => getArtistCrossReferences(0, 10));
 
     expect(projection).toHaveProperty('target_code_comp_letter');
+  });
+});
+
+describe('bin rows carry the genre id that gates the comp letter and the raw volume letter (BS#2917)', () => {
+  it('getBinFromDB selects genre_id and code_volume_letters from library', async () => {
+    const projection = await firstProjection(() => getBinFromDB('dj-1'));
+
+    expect(projection).toHaveProperty('genre_id', library.genre_id);
+    expect(projection).toHaveProperty('code_volume_letters', library.code_volume_letters);
   });
 });
