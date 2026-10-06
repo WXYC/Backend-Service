@@ -14,7 +14,7 @@ jest.unmock('drizzle-orm');
 
 const { randomUUID } = require('crypto');
 const { pruneSignupAttempts } = require('../../shared/authentication/dist/station-passcode.js');
-const { pruneAccountAuditEvents } = require('../../shared/database/dist/index.js');
+const { pruneAccountAuditEvents, closeDatabaseConnection } = require('../../shared/database/dist/index.js');
 const { getTestDb } = require('../utils/db');
 
 describe('pruneSignupAttempts (BS#2363, real Postgres)', () => {
@@ -129,4 +129,10 @@ describe('pruneAccountAuditEvents (BS#2536, real Postgres)', () => {
     expect(deletedCount).toBe(0);
     expect(await remainingIds()).toHaveLength(1);
   });
+});
+
+// Root-level so it runs after both describes' own cleanup.
+afterAll(async () => {
+  // Last: the pruners' @wxyc/database client is module-level; end it so this file's connections do not outlive it.
+  await closeDatabaseConnection();
 });

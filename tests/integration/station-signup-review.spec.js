@@ -41,7 +41,7 @@ const distDir = path.join(__dirname, '..', '..', 'jobs', 'station-signup-review'
 // is the behavior that ships.
 const { queryPendingSelfSignups } = require(path.join(distDir, 'query.cjs'));
 const { planDowngrades, applyDowngrades, isDowngradeEnabled } = require(path.join(distDir, 'downgrade.cjs'));
-const { db } = require('@wxyc/database');
+const { db, closeDatabaseConnection } = require('@wxyc/database');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -139,6 +139,8 @@ describe('station-signup-review downgrade (REAL fns, real PG)', () => {
   afterAll(async () => {
     if (previousFlag === undefined) delete process.env.STATION_SIGNUP_DOWNGRADE_ENABLED;
     else process.env.STATION_SIGNUP_DOWNGRADE_ENABLED = previousFlag;
+    // Last: the code under test opened its own @wxyc/database client; end it so this file's connections do not outlive it.
+    await closeDatabaseConnection();
   });
 
   afterEach(async () => {
