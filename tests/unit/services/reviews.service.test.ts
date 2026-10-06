@@ -8,6 +8,8 @@ jest.unmock('drizzle-orm');
 
 const mockQueue: unknown[][] = [];
 let mockUpdatedRow: Record<string, unknown> = {};
+/** When set, the next insert into `reviews` rejects with it, as Postgres would. */
+let mockInsertError: Error | undefined;
 const mockWrites: { inserted?: Record<string, unknown>; updated?: Record<string, unknown> } = {};
 /** Every insert, in order, with the table it targeted. */
 const mockInserts: { table: string; values: Record<string, unknown> }[] = [];
@@ -80,7 +82,10 @@ jest.mock('@wxyc/database', () => {
         mockWrites.inserted = v;
         mockInserts.push({ table: jest.requireActual('drizzle-orm').getTableName(t), values: v });
         mockStatements.push(`insert ${mockInserts[mockInserts.length - 1].table}`);
-        return { returning: () => Promise.resolve([{ id: 11, ...v }]) };
+        return {
+          returning: () =>
+            mockInsertError !== undefined ? Promise.reject(mockInsertError) : Promise.resolve([{ id: 11, ...v }]),
+        };
       },
     }),
     update: (t: any) => ({
@@ -123,7 +128,8 @@ jest.mock('@wxyc/database', () => {
       return Promise.resolve(mockQueue.shift());
     },
   };
-  return { ...realSchema, db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) } };
+  const sqlstate = jest.requireActual('../../../shared/database/src/sqlstate');
+  return { ...realSchema, ...sqlstate, db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) } };
 });
 
 import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from '../../../apps/backend/services/intake.service';
@@ -153,6 +159,7 @@ beforeEach(() => {
   mockWritesTo.length = 0;
   mockExecuted.length = 0;
   mockUpdatedRow = {};
+  mockInsertError = undefined;
   delete mockWrites.inserted;
   delete mockWrites.updated;
 });
@@ -489,6 +496,43 @@ describe('recordReview (BS#2866: a music director records a review on behalf of 
         outcome: 'unknown_author',
       });
       expect(mockInserts).toEqual([]);
+    });
+
+    test.each([
+      [
+        'a bare driver error',
+        { code: '23503', constraint_name: 'reviews_author_user_id_auth_user_id_fk' },
+        'unknown_author',
+      ],
+      [
+        "drizzle's wrapper",
+        { cause: { code: '23503', constraint_name: 'reviews_author_user_id_auth_user_id_fk' } },
+        'unknown_author',
+      ],
+    ])(
+      'an account deleted between the check and the insert (%s, 23503 on author_user_id) is unknown_author, not a 500',
+      async (_label, error) => {
+        mockQueue.push(item(), item(), [{ id: 'dj-1' }]);
+        mockInsertError = Object.assign(new Error('insert or update violates foreign key constraint'), error);
+        expect(await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, author_user_id: 'dj-1' }, MD)).toEqual({
+          outcome: 'unknown_author',
+        });
+      }
+    );
+
+    test.each([
+      [
+        'a 23503 on another constraint',
+        { code: '23503', constraint_name: 'reviews_recorded_by_user_id_auth_user_id_fk' },
+      ],
+      ['another SQLSTATE', { code: '23505', constraint_name: 'reviews_author_user_id_auth_user_id_fk' }],
+    ])('%s is not mapped: the insert error propagates', async (_label, error) => {
+      mockQueue.push(item(), item(), [{ id: 'dj-1' }]);
+      const thrown = Object.assign(new Error('boom'), error);
+      mockInsertError = thrown;
+      await expect(recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, author_user_id: 'dj-1' }, MD)).rejects.toBe(
+        thrown
+      );
     });
 
     test('nothing is ticked and credit is not written, so the column defaults leave every surface off and credit null', async () => {
