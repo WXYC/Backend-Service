@@ -110,8 +110,7 @@ describe('/intake transitions (BS#2798)', () => {
   });
 
   describe('release', () => {
-    const held = (key) =>
-      seed(key, { state: 'checked_out', checked_out_by: global.primary_dj_id, checked_out_at: daysAgo(20) });
+    const held = (key) => seed(key, { checkout: { by: global.primary_dj_id, at: daysAgo(20) } });
 
     test("a DJ cannot release someone else's checkout (403) and nothing changes", async () => {
       const id = await held('not-yours');
@@ -128,7 +127,7 @@ describe('/intake transitions (BS#2798)', () => {
     });
 
     test('reviews: manage releases anyone, including a checkout whose holder account is gone', async () => {
-      const id = await seed('orphan', { state: 'checked_out', checked_out_by: null, checked_out_at: daysAgo(3) });
+      const id = await seed('orphan', { checkout: { by: null, at: daysAgo(3) } });
       expect((await post(manager, id, 'release')).status).toBe(200);
       const other = await held('manager-releases');
       expect((await post(manager, other, 'release')).status).toBe(200);

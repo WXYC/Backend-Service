@@ -34,9 +34,7 @@ describe('/reviews create and edit (BS#2802)', () => {
     (
       await seedIntakeItem({
         artist_name: `${PREFIX} ${key}`,
-        state: 'checked_out',
-        checked_out_by: by,
-        checked_out_at: new Date().toISOString(),
+        checkout: { by },
       })
     ).id;
   const cleanup = async () => {

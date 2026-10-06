@@ -35,10 +35,8 @@ describe('/reviews submit and delete (BS#2854)', () => {
   let sql;
   let libraryId;
 
-  const now = () => new Date().toISOString();
   const item = async (key, overrides = {}) => seedIntakeItem({ artist_name: `${PREFIX} ${key}`, ...overrides });
-  const held = (key, overrides = {}) =>
-    item(key, { state: 'checked_out', checked_out_by: global.primary_dj_id, checked_out_at: now(), ...overrides });
+  const held = (key, overrides = {}) => item(key, { checkout: { by: global.primary_dj_id }, ...overrides });
   const reviewFor = (target, overrides = {}) =>
     seedReview({ ...target, author: `${PREFIX} author`, author_user_id: global.primary_dj_id, ...overrides });
   /** Marks `review` as the one `itemRow` accepts, as accept (BS#2860) will. */
@@ -198,8 +196,7 @@ describe('/reviews submit and delete (BS#2854)', () => {
         const reviewed = await item('reviewed', {
           state: 'reviewed',
           // A checkout is `checked_out_at` (decision 38), so a held item carries both columns.
-          checked_out_by: hasHolder ? global.primary_dj_id : null,
-          checked_out_at: hasHolder ? now() : null,
+          ...(hasHolder && { checkout: { by: global.primary_dj_id } }),
         });
         const review = await reviewFor({ intake_item_id: reviewed.id });
         await accept(reviewed.id, review);
@@ -248,8 +245,7 @@ describe('/reviews submit and delete (BS#2854)', () => {
     test('a review accepted by two items: both unfiled items return to holder or pile; with either filed, the citing one included, nothing is written', async () => {
       const own = await item('two-own', {
         state: 'reviewed',
-        checked_out_by: global.primary_dj_id,
-        checked_out_at: now(),
+        checkout: { by: global.primary_dj_id },
       });
       const citing = await item('two-citing', { state: 'reviewed', cited_album_id: libraryId });
       const review = await reviewFor({ intake_item_id: own.id, album_id: libraryId });

@@ -93,14 +93,25 @@ async function removeSeededAuthUsers() {
  * Insert an `intake_items` row. `overrides` is a column -> value map layered over the NOT NULL
  * defaults (a WXYC-representative artist/album and fixture format). Returns the inserted row.
  * The id is recorded for `removeSeededIntakeItems`.
+ *
+ * `overrides.checkout` is `{ by, at }`: it writes `checked_out_by` and `checked_out_at` together, because a checkout
+ * is `checked_out_at` (epic decision 38) and a held item carries both. `at` defaults to the database's `now()`; `by:
+ * null` is honored, for a test of a removed holder. `state` defaults to `checked_out` when the caller gives none.
+ * Passing `checked_out_by` or `checked_out_at` directly still works, for a test that needs them apart.
  */
 async function seedIntakeItem(overrides = {}) {
   const sql = getTestDb();
+  const { checkout, ...columns } = overrides;
   const row = {
     artist_name: 'Jessica Pratt',
     album_title: 'On Your Own Love Again',
     format_id: FORMAT_ID,
-    ...overrides,
+    ...(checkout && {
+      state: 'checked_out',
+      checked_out_by: checkout.by,
+      checked_out_at: checkout.at === undefined ? sql`now()` : checkout.at,
+    }),
+    ...columns,
   };
   const [item] = await sql`INSERT INTO ${sql(SCHEMA)}.intake_items ${sql(row)} RETURNING *`;
   seededIntakeItemIds.push(item.id);

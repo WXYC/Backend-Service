@@ -9,6 +9,8 @@ const fs = require('fs');
 const path = require('path');
 const { getTestDb } = require('../utils/db');
 const {
+  seedAuthUser,
+  removeSeededAuthUsers,
   seedIntakeItem,
   removeSeededIntakeItems,
   seedAcceptance,
@@ -43,6 +45,7 @@ function sourceFilesUnder(dir, skip = []) {
 describe('intake_seed release, review, revision, print, FCC-note and form-review seeders', () => {
   afterAll(async () => {
     await removeSeededIntakeItems();
+    await removeSeededAuthUsers();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
   });
@@ -64,6 +67,21 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     expect(await count('library', 'id', [first.id, second.id])).toBe(0);
     expect(await count('artists', 'id', [first.artist_id, second.artist_id])).toBe(0);
     expect(await count('reviews', 'id', [review.id])).toBe(0);
+  });
+
+  test('the checkout option writes both checkout columns, defaults the state, and honors by: null (decision 38)', async () => {
+    const holder = await seedAuthUser();
+    const held = await seedIntakeItem({ checkout: { by: holder.id } });
+    expect([held.state, held.checked_out_by]).toEqual(['checked_out', holder.id]);
+    expect(held.checked_out_at).not.toBeNull();
+
+    const at = new Date('2026-09-01T12:00:00.000Z');
+    const dated = await seedIntakeItem({ checkout: { by: holder.id, at }, state: 'reviewed' });
+    expect([dated.state, dated.checked_out_at]).toEqual(['reviewed', at]);
+
+    const orphan = await seedIntakeItem({ checkout: { by: null } });
+    expect([orphan.state, orphan.checked_out_by]).toEqual(['checked_out', null]);
+    expect(orphan.checked_out_at).not.toBeNull();
   });
 
   test('a release given an artist_id reuses that artist', async () => {
