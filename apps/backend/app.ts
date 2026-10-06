@@ -45,7 +45,6 @@ import { drainInFlightEnrichments } from './services/metadata/enrichment.service
 import { checkDatabase } from './services/health/database-check.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
-import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { responseMetricsMiddleware } from './middleware/responseMetrics.js';
 import { requirePermissions } from '@wxyc/authentication';
@@ -195,7 +194,6 @@ app.use('/internal/banned-fingerprints', internalBansRoute);
 // carrying its own key.
 app.use('/internal/slack-ban-moderators', internalSlackModeratorsRoute);
 
-Sentry.setupExpressErrorHandler(app, { shouldHandleError: shouldCaptureExpressError });
 app.use(errorHandler);
 
 const server = app.listen(port, () => {

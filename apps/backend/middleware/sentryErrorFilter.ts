@@ -1,10 +1,10 @@
 import { LmlClientError } from '@wxyc/lml-client';
-import WxycError from '../utils/error.js';
+import { isWxycError } from '../utils/error.js';
 import { carriedClientStatus } from './errorHandler.js';
 
 /**
- * Decides whether `Sentry.setupExpressErrorHandler` should auto-capture an
- * error that bubbled to express's error pipeline. Returning false skips the
+ * Decides whether Sentry's `expressIntegration` (its `shouldHandleError`
+ * option, wired in `instrument.ts`) should auto-capture an error that bubbled to express's error pipeline. Returning false skips the
  * capture; the error still propagates to the application's `errorHandler` and
  * the structured response is unaffected.
  *
@@ -26,8 +26,9 @@ export function shouldCaptureExpressError(error: Error): boolean {
   if (!(error instanceof Error)) return true;
   if (error instanceof LmlClientError) return false;
   // Application errors keep their own rule: errorHandler echoes a WxycError
-  // at any status, and only the 5xx band is Sentry-worthy.
-  if (error instanceof WxycError) return error.statusCode >= 500;
+  // at any status, and only the 5xx band is Sentry-worthy. Branded, not
+  // `instanceof`: this filter runs from the separately bundled instrument.js.
+  if (isWxycError(error)) return error.statusCode >= 500;
   // Foreign errors: suppress exactly the trusted 4xx band that errorHandler
   // echoes as a client error — via the SAME `carriedClientStatus` helper
   // (integer 4xx + `expose: true` or the router's percent-decode URIError,

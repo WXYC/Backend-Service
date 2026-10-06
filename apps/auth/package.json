@@ -6,7 +6,7 @@
   "type": "module",
   "main": "./dist/app.js",
   "scripts": {
-    "start": "node --import ./dist/instrument.js dist/app.js",
+    "start": "node --import @sentry/node/import --import ./dist/instrument.js dist/app.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_auth_service:ci -f ../../Dockerfile.auth ../../",
@@ -16,7 +16,7 @@
   "author": "Jackson Meade",
   "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
-    "@sentry/node": "^10.75.0",
+    "@sentry/node": "^11.4.0",
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/observability": "^1.0.0",

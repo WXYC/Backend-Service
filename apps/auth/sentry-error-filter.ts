@@ -1,8 +1,9 @@
 /**
- * Decides whether `Sentry.setupExpressErrorHandler` should auto-capture an
- * error that bubbled to the auth service's express error pipeline. Returning
- * false skips the Sentry capture; the error still propagates to
- * `fallbackErrorHandler`, which always emits a sanitised 500 response.
+ * Decides whether Sentry's `expressIntegration` (its `shouldHandleError`
+ * option, wired in `instrument.ts`) should auto-capture an error that bubbled
+ * to the auth service's express error pipeline. Returning false skips the
+ * Sentry capture; the error still propagates to `fallbackErrorHandler`, which
+ * always emits a sanitised 500 response.
  *
  * Why this exists (BS#1387):
  *
@@ -36,7 +37,7 @@
  * NOTE (BS#1221): `./fallback-error-handler.ts` calls `Sentry.captureException`
  * unconditionally, deliberately overriding this predicate for anything that
  * reaches the generic Express fallback chain. The two files are not
- * contradictory — this predicate governs only `setupExpressErrorHandler`'s
+ * contradictory — this predicate governs only `expressIntegration`'s
  * own capture.
  */
 export function shouldCaptureAuthExpressError(error: Error): boolean {

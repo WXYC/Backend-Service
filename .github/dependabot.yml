@@ -65,14 +65,6 @@ updates:
       # say `~1.6.26` instead.
       - dependency-name: 'better-auth'
         update-types: ['version-update:semver-minor', 'version-update:semver-major']
-      # Hold Sentry at v10: v11 made `expressIntegration()` the Express error
-      # capturer and ignores the options passed to the deprecated
-      # `setupExpressErrorHandler(app, { shouldHandleError })`, so both apps'
-      # error filters silently fell back to Sentry's `>= 500` default in prod
-      # (and `tsc` fails with TS2554). Lifting this is part of #2949, which moves
-      # the filters onto `expressIntegration`.
-      - dependency-name: '@sentry/*'
-        update-types: ['version-update:semver-major']
       # The better-auth 1.6.25 hold is gone: 1.6.25 tightened client-plugin
       # option inference so jwtClient() no longer satisfied BetterAuthClientPlugin
       # and `npm run typecheck` failed in shared/authentication/src/auth.client.ts

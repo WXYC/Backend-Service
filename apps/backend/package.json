@@ -6,7 +6,7 @@
   "type": "module",
   "main": "./dist/app.js",
   "scripts": {
-    "start": "node --import ./dist/instrument.js dist/app.js",
+    "start": "node --import @sentry/node/import --import ./dist/instrument.js dist/app.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
@@ -19,7 +19,7 @@
     "@aws-sdk/client-cloudwatch": "^3.1146.0",
     "@aws-sdk/client-s3": "^3.1146.0",
     "@aws-sdk/s3-request-presigner": "^3.1146.0",
-    "@sentry/node": "^10.75.0",
+    "@sentry/node": "^11.4.0",
     "@tensorflow/tfjs": "^4.22.0",
     "@wxyc/authentication": "^1.0.0",
     "@wxyc/database": "^1.0.0",

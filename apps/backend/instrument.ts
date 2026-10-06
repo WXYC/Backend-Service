@@ -2,6 +2,7 @@ import { config } from 'dotenv';
 import * as Sentry from '@sentry/node';
 import { filterSentryTransactionEvent, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
 import { resolveTracesSampleRate } from './sentry-config.js';
+import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 
 // Load .env before Sentry.init() so SENTRY_DSN is available.
 // In production, Docker --env-file sets vars before Node starts, so this is a no-op.
@@ -22,7 +23,12 @@ Sentry.init({
   // path, since better-auth's mount makes /auth/ok's transaction "GET /auth" —
   // and strips Express middleware bookkeeping spans from every surviving
   // transaction (BS#2089).
-  // Error reporting (beforeSend / setupExpressErrorHandler) is untouched —
+  // Error reporting (beforeSend / the Express error filter) is untouched —
   // wxyc-canary depends on /healthcheck errors surfacing there.
   beforeSendTransaction: filterSentryTransactionEvent,
+  // v11's expressIntegration captures Express errors itself, and its
+  // `shouldHandleError` outranks the deprecated `setupExpressErrorHandler`'s
+  // options, so the filter has to be passed here (BS#2949). This is a default
+  // integration; passing it overrides the default instance with ours.
+  integrations: [Sentry.expressIntegration({ shouldHandleError: shouldCaptureExpressError })],
 });
