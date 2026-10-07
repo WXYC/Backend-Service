@@ -9,50 +9,23 @@
  * is the string `'false'`, which is truthy, so `!'false'` would turn every
  * ordinary dispatch (rollbacks included) into a rebuild of main.
  */
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { findStep, runBashScript, stepEnvFrom, type Job, type Step } from '../../utils/workflow-step';
 
 const repoRoot = join(__dirname, '..', '..', '..');
 const workflows = join(repoRoot, '.github', 'workflows');
 const manual = readFileSync(join(workflows, 'deploy-manual.yml'), 'utf8');
 const base = readFileSync(join(workflows, 'deploy-base.yml'), 'utf8');
 
-/**
- * Run a workflow `run:` step the way GitHub does (bash, `-eo pipefail`), with
- * the step's `env:` keys set from the given `${{ ... }}` expressions. The
- * scripts must take dispatch inputs only through `env:`; a `${{ inputs.* }}`
- * left in the script body is pasted into the shell before it runs (script
- * injection), and would also make bash fail here on `${{`.
- */
-type Step = { name?: string; env?: Record<string, string>; run?: string };
-type Job = { if?: unknown; needs?: unknown; permissions?: unknown; steps: Step[] };
 const runScript = (
   step: Step & { run: string },
   expressions: Record<string, string>,
   cwd: string,
   extraEnv: Record<string, string> = {}
-) => {
-  const values = Object.fromEntries(
-    Object.entries(step.env ?? {}).map(([key, expr]) => {
-      const value = Object.entries(expressions).find(([e]) => e === expr)?.[1];
-      if (value === undefined) throw new Error(`unexpected env expression ${key}: ${expr}`);
-      return [key, value];
-    })
-  );
-  return spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
-    cwd,
-    env: { PATH: process.env.PATH, ...values, ...extraEnv },
-    encoding: 'utf8',
-  });
-};
-const findStep = (job: Job, name?: string) => {
-  const found = name ? job.steps.find((s) => s.name === name) : job.steps.find((s) => s.run);
-  if (!found?.run) throw new Error(`step "${name ?? '(first run step)'}" not found`);
-  return found as Step & { run: string };
-};
+) => runBashScript(step.run, { env: { ...stepEnvFrom(step, expressions), ...extraEnv }, cwd });
 
 const manualDoc = parseYaml(manual) as {
   on: { workflow_dispatch: { inputs: Record<string, unknown> } };
