@@ -13,14 +13,14 @@ jest.mock('@wxyc/database', () => {
   return { ...realSchema, ...nyTime, db: drizzle({}) };
 });
 
-import { getTableName } from 'drizzle-orm';
+import { getTableName, type SQL } from 'drizzle-orm';
 import { db } from '@wxyc/database';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { printIntakeItem, printReleaseReview } from '../../../apps/backend/services/review-print.service';
 import { reviewInReleaseList } from '../../../apps/backend/services/reviews.service';
 import { createLockLog } from '../../utils/lock-log-builder';
 
-const { builder, log, sets, setsByTable } = createLockLog();
+const { builder, log, sets, setsByTable, wheres } = createLockLog();
 
 const unfiled = { album_id: null, state: 'reviewed' };
 const filed = { album_id: 9, state: 'filed' };
@@ -237,6 +237,7 @@ describe('printReleaseReview (BS#2865)', () => {
 
   const runRelease = async (selects: unknown[][]) => {
     log.length = 0;
+    wheres.length = 0;
     const inserts: Inserted[] = [];
     const tx = {
       select: jest.fn(() => builder(selects.shift() ?? [])),
@@ -273,6 +274,24 @@ describe('printReleaseReview (BS#2865)', () => {
         revision_id: 55,
       },
     });
+  });
+
+  it('selects the review under the release’s membership rule, binding the review id and the release id', async () => {
+    await runRelease(releasePrint());
+    const dialect = new PgDialect();
+    const [reviewWhere] = wheres.map((w) => dialect.sqlToQuery(w)).filter((q) => q.sql.includes('"reviews"."id"'));
+    expect(reviewWhere.sql).toBe(
+      '("wxyc_schema"."reviews"."id" = $1 and ("wxyc_schema"."reviews"."album_id" = $2 OR "wxyc_schema"."reviews"."album_id" IN (SELECT ci.cited_album_id FROM "wxyc_schema"."intake_items" AS ci WHERE ci.album_id = $3 AND ci.state IN (\'filed\', \'finalized\') AND ci.cited_album_id IS NOT NULL)))'
+    );
+    expect(reviewWhere.params).toEqual([3, 12, 12]);
+  });
+
+  it('names the release’s displayed artist on the slip: its alternate artist name when set, else the artist’s name', async () => {
+    const { tx } = await runRelease(releasePrint());
+    const { artist_name } = tx.select.mock.calls[2][0] as unknown as { artist_name: SQL };
+    expect(new PgDialect().sqlToQuery(artist_name).sql).toBe(
+      'coalesce(nullif("wxyc_schema"."library"."alternate_artist_name", \'\'), "wxyc_schema"."artists"."artist_name")'
+    );
   });
 
   it('answers not_found for an unknown release without reading a review', async () => {
