@@ -114,21 +114,28 @@ export const listReportedFccNotes = (): Promise<FccNoteResponse[]> =>
     .orderBy(...oldestFirst);
 
 /**
- * Confirms a note: one `UPDATE … WHERE id AND status = 'reported'`, stamping the caller's account name (`snapshotAuthor`,
- * as the create does; never `real_name`) and the time. Neither this nor `deleteFccNote` reads an item or a review, so
- * each takes the note's own row lock and nothing else. A note already confirmed matches no row and is answered
- * unchanged, the first confirmer's stamp kept. `no_account` is a caller with no name to snapshot: nothing is written.
+ * Confirms a note: one `UPDATE … WHERE id AND status = 'reported' RETURNING`, stamping the caller's account name
+ * (`snapshotAuthor`, as the create does; never `real_name`) and the time, and answering the row it returned (with the
+ * record's artist and album, read in the same transaction after it). Neither this nor `deleteFccNote` reads an item or
+ * a review, so each takes the note's own row lock and nothing else. A note already confirmed matches no row and is
+ * answered unchanged, the first confirmer's stamp kept. `no_account` is a caller with no name to snapshot: nothing is written.
  */
 export const confirmFccNote = async (id: number, actor: Pick<ReviewsActor, 'id'>) => {
   const [account] = await db.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
   const confirmed_by = snapshotAuthor(account?.name);
   if (confirmed_by === null) return { outcome: 'no_account' as const };
-  await db
-    .update(fcc_notes)
-    .set({ status: 'confirmed', confirmed_by, confirmed_at: sql`now()` })
-    .where(and(eq(fcc_notes.id, id), eq(fcc_notes.status, 'reported')));
-  const [note] = await selectFccNotes(db).where(eq(fcc_notes.id, id));
-  return note ? { outcome: 'confirmed' as const, note } : { outcome: 'not_found' as const };
+  return db.transaction(async (tx) => {
+    const [confirmed] = await tx
+      .update(fcc_notes)
+      .set({ status: 'confirmed', confirmed_by, confirmed_at: sql`now()` })
+      .where(and(eq(fcc_notes.id, id), eq(fcc_notes.status, 'reported')))
+      .returning();
+    // The UPDATE holds the note's row lock until the commit, so a delete cannot land before this read: when the UPDATE
+    // matched, the note it answers is the row it wrote, with the record's artist and album read beside it.
+    const [read] = await selectFccNotes(tx).where(eq(fcc_notes.id, id));
+    if (confirmed && read) return { outcome: 'confirmed' as const, note: { ...read, ...confirmed } };
+    return read ? { outcome: 'confirmed' as const, note: read } : { outcome: 'not_found' as const };
+  });
 };
 
 /**

@@ -69,11 +69,11 @@ describe('a reporter’s delete and a music director’s confirm of one FCC note
   afterAll(cleanup);
 
   test.each([
-    ['the confirm first', 'confirm', 200, 403, 'confirmed'],
-    ['the delete first', 'delete', 404, 204, 'gone'],
+    ['the confirm first', 'confirmed', 'confirm', 200, 403],
+    ['the delete first', 'deleted', 'delete', 404, 204],
   ])(
     'with %s: the note ends %s, and the reporter’s delete never removes a confirmed one',
-    async (_name, first, confirmStatus, deleteStatus, ending) => {
+    async (_name, ending, first, confirmStatus, deleteStatus) => {
       const item = await seedIntakeItem({ artist_name: `${PREFIX} ${first}`, album_title: `${PREFIX} album` });
       const note = await seedFccNote({ intake_item_id: item.id, reported_by_user_id: global.primary_dj_id });
       const confirm = () => manager.post(`/fcc-notes/${note.id}/confirm`).then((res) => res);
@@ -96,7 +96,7 @@ describe('a reporter’s delete and a music director’s confirm of one FCC note
       expect([confirmRes.status, deleteRes.status]).toEqual([confirmStatus, deleteStatus]);
       const rows = await sql.unsafe(`SELECT status, confirmed_by FROM "${SCHEMA}".fcc_notes WHERE id = $1`, [note.id]);
       expect(rows.map((row) => [row.status, typeof row.confirmed_by])).toEqual(
-        ending === 'gone' ? [] : [['confirmed', 'string']]
+        ending === 'deleted' ? [] : [['confirmed', 'string']]
       );
     },
     20000
