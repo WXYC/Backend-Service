@@ -308,11 +308,11 @@ describe('the legacy bases (BS#2810)', () => {
       );
     });
 
-    it('words the lost kill race exactly', async () => {
+    it('words the kill-guard refusal exactly (a lost race, or a source already out of rotation)', async () => {
       seedChain(LEGACY, []);
       await expect(addToRotation(typed, basis)).rejects.toThrow(
         new RotationNotEligibleError(
-          'This rotation entry was taken out of rotation, linked, or moved while the move was saving. Nothing was changed; reload to see where it stands.'
+          'This rotation entry was taken out of rotation, linked, or moved before the move could save. Nothing was changed; reload to see where it stands.'
         )
       );
     });
