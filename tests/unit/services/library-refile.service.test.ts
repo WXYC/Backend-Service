@@ -386,10 +386,19 @@ describe('refileArtistInGenre (BS#2643)', () => {
       expect(outcome).toMatchObject({ outcome: 'slot_taken', occupant: { id: 9, genre_id: 7 } });
     });
 
-    it('letters_shared applies only to a letters change, not to a genre move', async () => {
-      const { outcome } = await run({ selects: [A, [CARD], BUCKET(1), []], probes: [false] }, 4, undefined, 7);
+    it('letters_shared applies only to a letters change: a multi-membership artist with a stray release still moves', async () => {
+      const locked = [
+        { artist_id: 431, genre_id: 2, code_number: 7, code_comp_letter: null },
+        { artist_id: 431, genre_id: 6, code_number: 1, code_comp_letter: null },
+      ];
+      // Probes: the destination probe only (no stray probe runs without a letters change).
+      const { outcome, calls } = await run({ selects: [A, [CARD], locked, []], probes: [false] }, 4, undefined, 7);
 
-      expect(outcome).toMatchObject({ outcome: 'refiled' });
+      expect(outcome).toMatchObject({ outcome: 'refiled', card: { genre_id: 7 } });
+      expect(calls.filter((c) => c.op === 'update').map((c) => c.table)).toEqual([
+        genre_artist_crossreference,
+        library,
+      ]);
     });
 
     it('logs the genre change with the number of releases moved', async () => {

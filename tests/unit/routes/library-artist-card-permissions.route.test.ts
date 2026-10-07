@@ -129,6 +129,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   countReleasesForArtist: mockCountReleasesForArtist,
   deleteArtistFromDB: mockDeleteArtistFromDB,
   refileArtistInGenre: mockRefileArtistInGenre,
+  assertRefileLettersAllowed: () => undefined,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({

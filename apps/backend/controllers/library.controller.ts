@@ -891,9 +891,9 @@ const UPDATABLE_ARTIST_FIELDS = ['alphabetical_name', 'artist_name'] as const;
 
 const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number'] as const;
 
-// Why each field is not writable on THIS ENDPOINT. `genre_id`, `code_letters` and `code_artist_number` are each
-// written by exactly one endpoint, `POST /library/artists/{id}/refile` (BS#2643 for the number, BS#3035 for the
-// letters and the genre), which is why they are
+// Why each field is not writable on THIS ENDPOINT. After creation (`POST /library/artists` writes all three once),
+// `genre_id`, `code_letters` and `code_artist_number` change only through `POST /library/artists/{id}/refile`
+// (BS#2643 for the number, BS#3035 for the letters, BS#3036 for the genre), which is why they are
 // refused HERE: a call-number or call-letters change needs that endpoint's genre scope, destination-shelf lock,
 // occupancy check and bucket lock, not a bare column update. (Batch jobs are a different surface:
 // `jobs/artist-unicode-dedup` rewrites `code_letters`, and `jobs/library-etl` upserts `artist_genre_code`; neither is
@@ -1345,6 +1345,8 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
     codeLetters = validateCanonicalCodeLetters(record.code_letters);
   }
 
+  // Every 400 precedes the 404: the service owns the Various Artists destination guard, so run it first.
+  libraryService.assertRefileLettersAllowed(codeLetters);
   if (toGenreId !== undefined && !(await libraryService.genreExists(toGenreId))) {
     throw new WxycError('Genre not found', 404, { code: 'genre_not_found' });
   }
