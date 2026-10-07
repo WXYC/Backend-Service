@@ -389,6 +389,13 @@ describe('linkRotationToAlbum (BS#2109)', () => {
   const ROTATION_ID = 42;
   const ALBUM_ID = 5;
 
+  /** The read of rows naming this one in `moved_from_rotation_id` (BS#3007); none by default. */
+  const successorRead = (rows: unknown[] = []) => {
+    const chain = createMockQueryChain();
+    chain.limit = jest.fn().mockResolvedValue(rows);
+    return chain;
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -415,7 +422,10 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     const updateChain = createMockQueryChain([updatedRow]);
     const flowsheetUpdateChain = createMockQueryChain([{ id: 11 }, { id: 12 }]);
 
-    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+    db.select
+      .mockReturnValueOnce(albumChain)
+      .mockReturnValueOnce(rotationSelectChain)
+      .mockReturnValueOnce(successorRead());
     db.update.mockReturnValueOnce(updateChain).mockReturnValueOnce(flowsheetUpdateChain);
 
     const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
@@ -472,7 +482,10 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     const updateChain = createMockQueryChain([{ id: ROTATION_ID, album_id: ALBUM_ID }]);
     const flowsheetUpdateChain = createMockQueryChain([{ id: 11 }, { id: 12 }, { id: 13 }]);
 
-    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+    db.select
+      .mockReturnValueOnce(albumChain)
+      .mockReturnValueOnce(rotationSelectChain)
+      .mockReturnValueOnce(successorRead());
     db.update.mockReturnValueOnce(updateChain).mockReturnValueOnce(flowsheetUpdateChain);
 
     const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
@@ -491,7 +504,7 @@ describe('linkRotationToAlbum (BS#2109)', () => {
 
     expect(flowsheetUpdateChain.set).toHaveBeenCalledWith({ album_id: ALBUM_ID });
     expect(flowsheetUpdateChain.where).toHaveBeenCalledWith({
-      and: [{ eq: [flowsheet.rotation_id, ROTATION_ID] }, { isNull: flowsheet.album_id }],
+      and: [{ inArray: [flowsheet.rotation_id, [ROTATION_ID]] }, { isNull: flowsheet.album_id }],
     });
   });
 
@@ -534,27 +547,33 @@ describe('linkRotationToAlbum (BS#2109)', () => {
   });
 
   describe("a moved record's chain is one record (BS#3007)", () => {
-    const seedLink = (existing: Record<string, unknown>, updated: unknown[] = [{ id: ROTATION_ID }]) => {
+    const seedLink = (successors: unknown[] = [], updated: unknown[] = [{ id: ROTATION_ID }]) => {
       const albumChain = createMockQueryChain();
       albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
       const rotationSelectChain = createMockQueryChain();
-      rotationSelectChain.limit = jest.fn().mockResolvedValue([existing]);
-      db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+      rotationSelectChain.limit = jest.fn().mockResolvedValue([{ album_id: null }]);
+      db.select
+        .mockReturnValueOnce(albumChain)
+        .mockReturnValueOnce(rotationSelectChain)
+        .mockReturnValueOnce(successorRead(successors));
       db.update.mockReturnValue(createMockQueryChain(updated));
       return rotationSelectChain;
     };
 
     it('refuses a row that was moved to another bin with the existing conflict, writing nothing', async () => {
-      seedLink({ album_id: null, has_successor: true });
+      const rotationSelectChain = seedLink([{ id: 99 }]);
 
       await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toEqual({ outcome: 'already_linked' });
 
       expect(db.update).not.toHaveBeenCalled();
       expect(db.execute).not.toHaveBeenCalled();
+      // Locked first, so a move that commits while this waits is visible to the successor read that follows.
+      expect(rotationSelectChain.for).toHaveBeenCalledWith('update');
     });
 
     it("links the newest row's unlinked ancestors in the same transaction, behind the same album_id IS NULL guard", async () => {
-      seedLink({ album_id: null, has_successor: false });
+      seedLink();
+      db.execute.mockResolvedValue([]);
 
       await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toMatchObject({ outcome: 'linked' });
 
@@ -569,8 +588,20 @@ describe('linkRotationToAlbum (BS#2109)', () => {
       expect(ancestors.values).toContain(ROTATION_ID);
     });
 
+    it('re-points the plays logged against the ancestors it linked, and only those', async () => {
+      seedLink();
+      db.execute.mockResolvedValue([{ id: 40 }, { id: 41 }]);
+
+      await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);
+
+      const playsUpdate = db.update.mock.results[1].value;
+      expect(playsUpdate.where).toHaveBeenCalledWith({
+        and: [{ inArray: [flowsheet.rotation_id, [ROTATION_ID, 40, 41]] }, { isNull: flowsheet.album_id }],
+      });
+    });
+
     it('does not walk the chain when the guarded UPDATE of the row itself lost a race', async () => {
-      seedLink({ album_id: null, has_successor: false }, []);
+      seedLink([], []);
 
       await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toEqual({ outcome: 'already_linked' });
 
@@ -614,7 +645,10 @@ describe('linkRotationToAlbum (BS#2109)', () => {
 
     const updateChain = createMockQueryChain([]);
 
-    db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+    db.select
+      .mockReturnValueOnce(albumChain)
+      .mockReturnValueOnce(rotationSelectChain)
+      .mockReturnValueOnce(successorRead());
     db.update.mockReturnValue(updateChain);
 
     const result = await linkRotationToAlbum(ROTATION_ID, ALBUM_ID);

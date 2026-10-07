@@ -293,7 +293,8 @@ describe('the legacy bases (BS#2810)', () => {
       select.limit = jest
         .fn()
         .mockResolvedValueOnce([{ id: 5 }])
-        .mockResolvedValueOnce([{ album_id: null }]);
+        .mockResolvedValueOnce([{ album_id: null }])
+        .mockResolvedValueOnce([]);
       db.select.mockReturnValue(select);
       db.update.mockReturnValue(createMockQueryChain([{ id: 1 }]));
       await expect(linkRotationToAlbum(1, 5, db as never)).resolves.toMatchObject({ outcome: 'linked' });

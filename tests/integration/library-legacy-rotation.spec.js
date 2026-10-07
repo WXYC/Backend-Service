@@ -205,10 +205,19 @@ describe('legacy rotation rows: import and move (BS#2810)', () => {
       const chain = await movedChain('chain-import');
       const title = `Imported chain ${runId}`;
 
+      // A play logged while the record sat in the oldest bin.
+      const [play] = await sql`
+        INSERT INTO ${sql(SCHEMA)}.flowsheet (play_order, entry_type, artist_name, album_title, track_title, rotation_id)
+        VALUES (99995, 'track', 'Juana Molina', ${chain[0].album_title}, 'la paradoja', ${chain[0].id})
+        RETURNING id`;
+      createdFlowsheetIds.push(play.id);
+
       const res = await auth.post('/library').send(importBody(title, chain[2].id)).expect(201);
 
       expect(await libraryCount(title)).toBe(1);
       expect(await albumIds(chain)).toEqual([res.body.id, res.body.id, res.body.id]);
+      const [linkedPlay] = await sql`SELECT album_id FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${play.id}`;
+      expect(linkedPlay.album_id).toBe(res.body.id);
     });
 
     test('refuses a moved-away row on import with 409 and writes nothing, not even a label', async () => {
@@ -243,6 +252,22 @@ describe('legacy rotation rows: import and move (BS#2810)', () => {
 
       expect(await albumIds(chain)).toEqual([res.body.id, res.body.id, res.body.id]);
       expect((await rotationRow(earlier.id)).album_id).toBe(earlierRelease.body.id);
+    });
+
+    test('an import and a move of one row at once leave one winner: a release or a successor, never both', async () => {
+      const row = await typedRow('chain-import-vs-move');
+      const title = `Imported against a move ${runId}`;
+
+      const [imported, moved] = await Promise.all([
+        auth.post('/library').send(importBody(title, row.id)),
+        auth.post('/library/rotation').send(moveBody(row, 'M')),
+      ]);
+      if (moved.status === 201) createdRotationIds.push(moved.body.id);
+
+      expect([imported.status, moved.status].sort()).toEqual([201, 409]);
+      const successors = await sql`SELECT id FROM ${sql(SCHEMA)}.rotation WHERE moved_from_rotation_id = ${row.id}`;
+      expect(successors).toHaveLength(moved.status === 201 ? 1 : 0);
+      expect(await libraryCount(title)).toBe(imported.status === 201 ? 1 : 0);
     });
 
     test('PATCH /library/rotation/{id}/link refuses a moved-away row, and the newest row links its ancestors', async () => {
