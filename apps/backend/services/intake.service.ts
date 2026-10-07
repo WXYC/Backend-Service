@@ -483,6 +483,43 @@ export const mayFileItem = (item: Pick<typeof intake_items.$inferSelect, 'accept
 export type IntakeFileArm =
   { kind: 'new_release'; input: ValidatedFilingInput } | { kind: 'existing_release'; album_id: number };
 
+/** The release a filed or finalized item carries; any other item has none to lock or stamp. */
+const filedRelease = (item: { album_id: number | null; state: string }) =>
+  FILED_STATES.some((state) => state === item.state) ? item.album_id : null;
+
+/** Locks a library row `FOR KEY SHARE`, so a concurrent `DELETE /library/{id}` waits; answers whether the row exists. */
+export const lockReleaseRow = async (tx: Pick<typeof db, 'select'>, albumId: number) =>
+  (await tx.select({ id: library.id }).from(library).where(eq(library.id, albumId)).for('key share')).length > 0;
+
+/**
+ * Locks what a write is about and answers the columns that name it, or `undefined` when there is no such
+ * subject (a deleted release, an item filed to another release in between). The lock order is the one
+ * `DELETE /library/{id}` takes (BS#2928): the library row, then the item, then any review. A release subject
+ * locks its library row. An item is held in any state: a FILED one carries its release, whose library row is
+ * locked first from an unlocked read of the item, and the item second (`FOR UPDATE` when `itemMode` is
+ * `'update'`, which the caller writes; `FOR SHARE` otherwise), whose release must be the one already locked.
+ * A caller that gets `undefined` for an item that exists is in the case where filing committed between the read
+ * and the lock, and decides itself whether to retry or refuse.
+ */
+export const lockRecordSubject = async (
+  tx: Pick<typeof db, 'select'>,
+  subject: { intake_item_id?: number; album_id?: number },
+  itemMode: 'share' | 'update'
+) => {
+  if (subject.intake_item_id === undefined) {
+    return (await lockReleaseRow(tx, subject.album_id!)) ? { album_id: subject.album_id! } : undefined;
+  }
+  const columns = { album_id: intake_items.album_id, state: intake_items.state };
+  const where = eq(intake_items.id, subject.intake_item_id);
+  const [peek] = await tx.select(columns).from(intake_items).where(where);
+  if (!peek) return undefined;
+  const release = filedRelease(peek);
+  if (release !== null && !(await lockReleaseRow(tx, release))) return undefined;
+  const [item] = await tx.select(columns).from(intake_items).where(where).for(itemMode);
+  if (!item || filedRelease(item) !== release) return undefined;
+  return { intake_item_id: subject.intake_item_id, album_id: release };
+};
+
 /**
  * Files an item (BS#2803) in one transaction, in the order `DELETE /library/{id}` (BS#2928) takes its locks: an existing
  * release's `library` row `FOR KEY SHARE` (that locked read is the existence check, so a release deleted in between
@@ -497,12 +534,7 @@ export const fileIntakeItem = async (id: number, arm: IntakeFileArm, filedBy: st
   try {
     const outcome = await db.transaction(async (tx) => {
       if (arm.kind === 'existing_release') {
-        const [release] = await tx
-          .select({ id: library.id })
-          .from(library)
-          .where(eq(library.id, arm.album_id))
-          .for('key share');
-        if (!release) return { outcome: 'unknown_album' as const };
+        if (!(await lockReleaseRow(tx, arm.album_id))) return { outcome: 'unknown_album' as const };
       }
       const [item] = await tx
         .select({ state: intake_items.state, accepted_review_id: intake_items.accepted_review_id })

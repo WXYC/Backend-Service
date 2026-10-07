@@ -15,7 +15,13 @@ import {
 } from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { outerRef } from '../utils/sql-fragments.js';
-import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState, writeAcceptance } from './intake.service.js';
+import {
+  FILED_STATES,
+  RELEASE_ACCEPTED_REVIEW,
+  effectiveState,
+  lockRecordSubject,
+  writeAcceptance,
+} from './intake.service.js';
 import { readReviewNotice } from './review-notices.service.js';
 
 /**
@@ -219,44 +225,6 @@ export const createReview = async (
 /** The on-behalf keys of `POST /reviews` (slice 13e): the free-text `author`, an optional linked account, the medium, and whether the review is accepted at once. */
 export type OnBehalf = { author: string; author_user_id?: string; medium: 'typed' | 'handwritten'; accept: boolean };
 
-/** The release a filed or finalized item carries; any other item has none to lock or stamp. */
-const filedRelease = (item: { album_id: number | null; state: string }) =>
-  FILED_STATES.some((state) => state === item.state) ? item.album_id : null;
-
-/**
- * Locks what an on-behalf review is about and answers the columns that name it, or `undefined` when there is
- * no such subject (a deleted release, an item filed to another release in between). A library release is
- * locked `FOR KEY SHARE` so a concurrent `DELETE /library/{id}` is a clean refusal, not a foreign-key 500. An
- * item is held in any state: a FILED one carries its release, whose library row is locked `FOR KEY SHARE`
- * first (the order `DELETE /library/{id}` takes: library row, then items, then reviews) from an unlocked
- * read of the item, and the item (`FOR UPDATE` when the review is accepted, which writes it; `FOR SHARE`
- * otherwise) second, whose release must be the one already locked.
- */
-const lockSubjectToRecord = async (
-  tx: Pick<typeof db, 'select'>,
-  subject: { intake_item_id?: number; album_id?: number },
-  accept: boolean
-) => {
-  const lockRelease = (id: number) =>
-    tx.select({ id: library.id }).from(library).where(eq(library.id, id)).for('key share');
-  if (subject.intake_item_id === undefined) {
-    return (await lockRelease(subject.album_id!)).length > 0 ? { album_id: subject.album_id! } : undefined;
-  }
-  const columns = { album_id: intake_items.album_id, state: intake_items.state };
-  const where = eq(intake_items.id, subject.intake_item_id);
-  const [peek] = await tx.select(columns).from(intake_items).where(where);
-  if (!peek) return undefined;
-  const release = filedRelease(peek);
-  if (release !== null && (await lockRelease(release)).length === 0) return undefined;
-  const [item] = await tx
-    .select(columns)
-    .from(intake_items)
-    .where(where)
-    .for(accept ? 'update' : 'share');
-  if (!item || filedRelease(item) !== release) return undefined;
-  return { intake_item_id: subject.intake_item_id, album_id: release };
-};
-
 /** A foreign-key miss on `reviews.author_user_id` (23503): the linked account no longer exists. Any other 23503 stays a 500. */
 const isUnknownAuthor = (error: unknown) =>
   extractSqlState(error) === '23503' && extractConstraintName(error)?.includes('author_user_id') === true;
@@ -266,7 +234,7 @@ const isUnknownAuthor = (error: unknown) =>
  * the caller (`recorded_by_user_id`) for the typed `author`, whom `author_user_id` may link to an account (an
  * unknown one is `unknown_author`); nothing is ticked for publishing and `credit` stays null, because the author
  * never saw the question (the controller refuses fields that say otherwise). The subject is exempt from the
- * hold rule (`lockSubjectToRecord`). A typed review accepted at once needs text (`text_required`, before any
+ * hold rule (`lockRecordSubject`). A typed review accepted at once needs text (`text_required`, before any
  * lock). With `accept` the draft is submitted and accepted for the item in the same transaction, through the
  * writes `submitReview` and `acceptReview` use. The notice to a linked DJ (BS#2864) goes after commit, at the caller.
  */
@@ -280,7 +248,7 @@ export const recordReview = async (
   if (accept && recorded.medium === 'typed' && fields.review == null) return { outcome: 'text_required' as const };
   try {
     return await db.transaction(async (tx) => {
-      const target = await lockSubjectToRecord(tx, subject, accept);
+      const target = await lockRecordSubject(tx, subject, accept ? 'update' : 'share');
       if (!target) return { outcome: 'subject_not_held' as const };
       if (author_user_id !== undefined) {
         const linked = await tx.select({ id: user.id }).from(user).where(eq(user.id, author_user_id));
