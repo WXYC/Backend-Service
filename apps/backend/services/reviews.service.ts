@@ -198,7 +198,7 @@ export const createReview = async (
               )
             )
             .for('update')
-        : await tx.select({ id: library.id }).from(library).where(eq(library.id, subject.album_id!));
+        : await tx.select({ id: library.id }).from(library).where(eq(library.id, subject.album_id!)).for('key share');
     if (held.length === 0) return { outcome: 'subject_not_held' as const };
     const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
     const [{ id }] = await tx

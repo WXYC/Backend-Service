@@ -310,6 +310,12 @@ describe('createReview', () => {
     expect(await createReview({ album_id: 9 }, {}, DJ)).toEqual({ outcome: 'subject_not_held' });
   });
 
+  test('a release subject reads the library row FOR KEY SHARE inside the transaction, before the insert', async () => {
+    mockQueue.push([{ id: 9 }], [{ name: 'Jessica Pratt' }], [created]);
+    await createReview({ album_id: 9 }, {}, DJ);
+    expect(mockReads[0]).toMatchObject({ handle: 'tx', table: 'library', lock: 'key share' });
+  });
+
   test('any DJ may review a library release', async () => {
     mockQueue.push([{ id: 9 }], [{ name: 'Jessica Pratt' }], [created]);
     expect((await createReview({ album_id: 9 }, {}, DJ)).outcome).toBe('created');
