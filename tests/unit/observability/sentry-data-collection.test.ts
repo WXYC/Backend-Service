@@ -5,11 +5,11 @@
  * IPs, `X-Forwarded-For` / `X-Real-IP` headers, full query strings and
  * incoming request bodies, where 10.75.0 sent none of them. `sendDefaultPii`
  * no longer exists, so `dataCollection` is the only lever, and any field it
- * omits falls back to the permissive default. The behavioral test therefore
- * resolves the constant through the real SDK and compares every field.
+ * omits falls back to the permissive default, so this resolves the constant
+ * through the real SDK and compares every field. That each app preload passes
+ * it is pinned in `tests/unit/config/sentry-express-filter-registration.test.ts`,
+ * against the options `Sentry.init` actually receives.
  */
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
 import * as Sentry from '@sentry/node';
 import { SENTRY_DATA_COLLECTION } from '@wxyc/observability';
 
@@ -39,17 +39,5 @@ describe('SENTRY_DATA_COLLECTION', () => {
   it('resolves, field for field, to the Sentry 10 data-collection posture', () => {
     Sentry.init({ dataCollection: SENTRY_DATA_COLLECTION, defaultIntegrations: false });
     expect(Sentry.getClient()?.getDataCollectionOptions()).toEqual(SENTRY_10_POSTURE);
-  });
-});
-
-describe('app preloads', () => {
-  it.each([
-    ['backend', '../../../apps/backend/instrument.ts'],
-    ['auth', '../../../apps/auth/instrument.ts'],
-    ['enrichment-worker', '../../../apps/enrichment-worker/instrument.ts'],
-  ])('%s passes SENTRY_DATA_COLLECTION to Sentry.init', (_app, relPath) => {
-    // eslint-disable-next-line security/detect-non-literal-fs-filename
-    const source = readFileSync(resolve(__dirname, relPath), 'utf-8');
-    expect(source).toMatch(/Sentry\.init\(\{[\s\S]*\bdataCollection: SENTRY_DATA_COLLECTION,[\s\S]*\}\);/);
   });
 });
