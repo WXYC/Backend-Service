@@ -14,6 +14,8 @@ import {
   fcc_notes,
   review_prints,
   reviews,
+  rotation,
+  rotationActiveSql,
   user,
   type NewIntakeItem,
 } from '@wxyc/database';
@@ -570,6 +572,42 @@ export const fileIntakeItem = async (id: number, arm: IntakeFileArm, filedBy: st
   } catch (error) {
     return { outcome: 'filing_conflict' as const, body: mapLibraryFilingError(error) };
   }
+};
+
+/**
+ * Finalizes a filed item (BS#2804): `filed` to `finalized`, stamping the caller. The item is locked `FOR UPDATE` and its
+ * state read under the lock, so a second finalize is `state_changed`. A release still in rotation is refused as
+ * `in_rotation`, found by the item's `album_id` through `rotationActiveSql()`, the one active predicate every rotation list
+ * uses, never by `intake_items.rotation_id` (`SET NULL` when the call-number dedup deletes a loser's row, and never set by
+ * the `existing_release` arm). The message names the latest kill date, or says none is set. Changes nothing in `library`.
+ */
+export const finalizeIntakeItem = async (id: number, finalizedBy: string) => {
+  const outcome = await db.transaction(async (tx) => {
+    const [item] = await tx
+      .select({ state: intake_items.state, album_id: intake_items.album_id })
+      .from(intake_items)
+      .where(eq(intake_items.id, id))
+      .for('update');
+    if (!item) return { outcome: 'not_found' as const };
+    if (item.state !== 'filed') return { outcome: 'state_changed' as const };
+    const active = await tx
+      .select({ kill_date: rotation.kill_date })
+      .from(rotation)
+      .where(and(eq(rotation.album_id, item.album_id!), rotationActiveSql()));
+    if (active.length > 0) {
+      const dates = active.map((row) => row.kill_date);
+      const latest = dates.includes(null) ? null : dates.sort().at(-1);
+      const until = latest ? `until ${latest}` : 'and no kill date is set';
+      return { outcome: 'in_rotation' as const, message: `The release is still in rotation ${until}` };
+    }
+    await tx
+      .update(intake_items)
+      .set({ state: 'finalized', finalized_by: finalizedBy, finalized_at: sql`now()` })
+      .where(eq(intake_items.id, id));
+    return { outcome: 'finalized' as const };
+  });
+  // Without the manager-only columns: the caller holds `catalog: write`, not necessarily `reviews: manage`.
+  return outcome.outcome === 'finalized' ? { ...outcome, item: (await getIntakeItem(id, false))! } : outcome;
 };
 
 /** The `auth_member` roles of an account — empty when the account is unknown or has no membership. */

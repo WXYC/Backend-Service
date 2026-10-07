@@ -394,6 +394,24 @@ export const writeReviewRevision = async (
 };
 
 /**
+ * Writes revision 1 for a submitted review that has no history, from its locked row: its five content fields as they
+ * are now, attributed to `author` and `author_user_id`, dated `submitted_at`, or `last_modified` when `submitted_at`
+ * is NULL (a row whose `status` came from the column default has none). Answers the number it wrote, or `undefined`
+ * when the review already has history. The one home of that rule, for the first edit (`updateReview`) and the print.
+ */
+export const writeFirstRevisionIfMissing = async (
+  tx: Tx,
+  review: RevisionContent & Pick<Review, 'id' | 'author' | 'author_user_id' | 'submitted_at' | 'last_modified'>
+) =>
+  (await highestRevision(tx, review.id)) === 0
+    ? writeReviewRevision(tx, review.id, pickContent(review), {
+        name: review.author,
+        userId: review.author_user_id,
+        at: review.submitted_at ?? review.last_modified,
+      })
+    : undefined;
+
+/**
  * Edits are decided on rows that cannot change before the write commits: `lockReviewAfterItem`
  * (item `FOR SHARE`, then the review `FOR UPDATE`), then the edit rules and the text rule on the
  * locked row. An edit of a submitted review that changes a content field also appends a
@@ -425,13 +443,7 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
     if (revises) {
       const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
       editor = { name: snapshotAuthor(account?.name), userId: actor.id };
-      if ((await highestRevision(tx, id)) === 0) {
-        await writeReviewRevision(tx, id, pickContent(current), {
-          name: current.author,
-          userId: current.author_user_id,
-          at: current.submitted_at ?? current.last_modified,
-        });
-      }
+      await writeFirstRevisionIfMissing(tx, current);
     }
     const [row] = await tx
       .update(reviews)

@@ -1,0 +1,159 @@
+/**
+ * `POST /intake/{id}/print` and `POST /intake/{id}/finalize` (BS#2804, slice 12 of BS#2791). Real Postgres, seeded
+ * through tests/utils/intake_seed.js. As in intake-accept-review.spec.js the CI containers run AUTH_BYPASS=true, so the
+ * route grants are pinned by tests/unit/routes/intake-print-finalize.route.test.ts and `djA` is a raw user-id Bearer
+ * acting as the review's author. What this tier pins is the print log and the slip against real rows, and the lock that
+ * makes a print and an edit of one review serialize: whichever commits second, the logged revision is one that existed
+ * when the print committed, and the slip's text is that revision's.
+ */
+
+const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
+const { createAuthRequest } = require('../utils/test_helpers');
+const { getTestDb } = require('../utils/db');
+const {
+  seedIntakeItem,
+  removeSeededIntakeItems,
+  seedLibraryRelease,
+  removeSeededLibraryReleases,
+  seedReview,
+  seedAcceptance,
+  managerAccessToken,
+} = require('../utils/intake_seed');
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+const PREFIX = 'ITEST-PRINT';
+
+describe('/intake print and finalize (BS#2804)', () => {
+  let manager;
+  let djA;
+  let sql;
+  let releaseId;
+
+  const reviewedItem = async (key, reviewOverrides = {}) => {
+    const item = await seedIntakeItem({ artist_name: `${PREFIX} ${key}`, state: 'reviewed' });
+    const review = await seedReview({
+      intake_item_id: item.id,
+      author: `${PREFIX} author`,
+      author_user_id: global.primary_dj_id,
+      review: 'First text.',
+      ...reviewOverrides,
+    });
+    await seedAcceptance({ intake_item_id: item.id, review_id: review.id });
+    return { item, review };
+  };
+  const printsOf = (itemId) =>
+    sql.unsafe(`SELECT * FROM "${SCHEMA}".review_prints WHERE intake_item_id = $1 ORDER BY id`, [itemId]);
+  const revisionsOf = (reviewId) =>
+    sql.unsafe(`SELECT * FROM "${SCHEMA}".review_revisions WHERE review_id = $1 ORDER BY revision`, [reviewId]);
+  const itemRow = async (id) => (await sql.unsafe(`SELECT * FROM "${SCHEMA}".intake_items WHERE id = $1`, [id]))[0];
+  const cleanup = async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author LIKE $1`, [`${PREFIX}%`]);
+    await removeSeededIntakeItems();
+    await removeSeededLibraryReleases();
+  };
+
+  beforeAll(async () => {
+    manager = createAuthRequest(request, `Bearer ${await managerAccessToken()}`);
+    djA = createAuthRequest(request, `Bearer ${global.primary_dj_id}`);
+    sql = getTestDb();
+    await cleanup();
+    releaseId = (await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} release` })).id;
+  });
+
+  afterAll(cleanup);
+
+  describe('print', () => {
+    test('an unfiled reviewed item prints: revision 1 is written for the review with no history, logged and on the slip', async () => {
+      const { item, review } = await reviewedItem('first');
+      const res = await manager.post(`/intake/${item.id}/print`);
+      expect(res.status).toBe(200);
+      const [revision] = await revisionsOf(review.id);
+      expect(revision).toMatchObject({ revision: 1, review: 'First text.' });
+      expect(res.body).toMatchObject({
+        artist_name: `${PREFIX} first`,
+        review: 'First text.',
+        author: `${PREFIX} author`,
+        revision_id: revision.id,
+        fcc_notes: [],
+      });
+      const [print] = await printsOf(item.id);
+      expect(print).toMatchObject({ review_id: review.id, revision_id: revision.id, album_id: null });
+      const row = await itemRow(item.id);
+      expect(row.printed_by).not.toBeNull();
+      expect(row.printed_at).not.toBeNull();
+    });
+
+    test('a reprint after an edit appends a second row naming the newer revision, and the slip carries the new text', async () => {
+      const { item, review } = await reviewedItem('reprint');
+      await manager.post(`/intake/${item.id}/print`);
+      expect((await djA.patch(`/reviews/${review.id}`).send({ review: 'Second text.' })).status).toBe(200);
+      const res = await manager.post(`/intake/${item.id}/print`);
+      expect([res.status, res.body.review]).toEqual([200, 'Second text.']);
+      const prints = await printsOf(item.id);
+      const revisions = await revisionsOf(review.id);
+      expect(prints.map((p) => p.revision_id)).toEqual(revisions.map((r) => r.id));
+    });
+
+    test('a filed item prints with the release stamped on the log row', async () => {
+      const { item } = await reviewedItem('filed');
+      await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET state = 'filed', album_id = $1 WHERE id = $2`, [
+        releaseId,
+        item.id,
+      ]);
+      expect((await manager.post(`/intake/${item.id}/print`)).status).toBe(200);
+      expect((await printsOf(item.id))[0].album_id).toBe(releaseId);
+    });
+
+    test('no accepted review, a handwritten one and a missing item are 409, 409 and 404', async () => {
+      const bare = await seedIntakeItem({ artist_name: `${PREFIX} bare`, state: 'reviewed' });
+      const { item: handwritten } = await reviewedItem('handwritten', { medium: 'handwritten', review: null });
+      for (const id of [bare.id, handwritten.id]) {
+        const res = await manager.post(`/intake/${id}/print`);
+        expect([res.status, res.body.reason]).toEqual([409, 'not_reviewed']);
+        expect(await printsOf(id)).toEqual([]);
+      }
+      expect((await manager.post('/intake/2147483647/print')).status).toBe(404);
+    });
+
+    test('a print and a concurrent edit of one review leave a log row naming a revision that existed, with that text on the slip', async () => {
+      for (let round = 0; round < 5; round += 1) {
+        const { item, review } = await reviewedItem(`race ${round}`);
+        const [printed, edited] = await Promise.all([
+          manager.post(`/intake/${item.id}/print`),
+          djA.patch(`/reviews/${review.id}`).send({ review: `Edited text ${round}.` }),
+        ]);
+        expect([printed.status, edited.status]).toEqual([200, 200]);
+        const revisions = await revisionsOf(review.id);
+        const [print] = await printsOf(item.id);
+        const logged = revisions.find((r) => r.id === print.revision_id);
+        expect(logged).toBeDefined();
+        expect(printed.body.revision_id).toBe(logged.id);
+        expect(printed.body.review).toBe(logged.review);
+        expect(['First text.', `Edited text ${round}.`]).toContain(logged.review);
+      }
+    });
+  });
+
+  describe('finalize', () => {
+    const filedItem = (key) => seedIntakeItem({ artist_name: `${PREFIX} ${key}`, state: 'filed', album_id: releaseId });
+
+    test('a filed item with no active rotation row is finalized and stamped', async () => {
+      const item = await filedItem('finalize');
+      const res = await manager.post(`/intake/${item.id}/finalize`);
+      expect([res.status, res.body.state]).toEqual([200, 'finalized']);
+      const row = await itemRow(item.id);
+      expect(row.finalized_by).not.toBeNull();
+      expect(row.finalized_at).not.toBeNull();
+    });
+
+    test('an item that is not filed is 409 state_changed, and a second finalize too', async () => {
+      const reviewed = await seedIntakeItem({ artist_name: `${PREFIX} not filed`, state: 'reviewed' });
+      const res = await manager.post(`/intake/${reviewed.id}/finalize`);
+      expect([res.status, res.body.reason]).toEqual([409, 'state_changed']);
+      const item = await filedItem('twice');
+      await manager.post(`/intake/${item.id}/finalize`);
+      expect((await manager.post(`/intake/${item.id}/finalize`)).body.reason).toBe('state_changed');
+      expect((await manager.post('/intake/2147483647/finalize')).status).toBe(404);
+    });
+  });
+});

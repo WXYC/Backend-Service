@@ -574,7 +574,49 @@ components:
       required: [message, reason]
       properties:
         message: { type: string }
-        reason: { type: string, enum: [already_filed, invalid_citation, not_reviewed, state_changed] }
+        reason: { type: string, enum: [already_filed, in_rotation, invalid_citation, not_reviewed, state_changed] }
+
+    IntakeSlip:
+      type: object
+      description: >-
+        The printable review slip (BS#2804): the item's artist, album and label, and the printed review's text read from
+        the revision that printed. Swagger display only; the SSOT is wxyc-shared/api.yaml.
+      required:
+        [
+          artist_name,
+          album_title,
+          record_label,
+          buzzwords,
+          artist_blurb,
+          review,
+          author,
+          submitted_at,
+          recommended_tracks,
+          fcc,
+          revision_id,
+          fcc_notes,
+        ]
+      properties:
+        artist_name: { type: string }
+        album_title: { type: string }
+        record_label: { type: string, nullable: true }
+        buzzwords: { type: string, nullable: true }
+        artist_blurb: { type: string, nullable: true }
+        review: { type: string, nullable: true }
+        author: { type: string, nullable: true }
+        submitted_at: { type: string, format: date-time, nullable: true }
+        recommended_tracks: { type: string, nullable: true }
+        fcc: { type: string, nullable: true }
+        revision_id: { type: integer, description: 'The review revision this slip printed' }
+        fcc_notes:
+          type: array
+          description: The record's confirmed FCC notes; empty until WXYC/Backend-Service#2863 fills it.
+          items:
+            type: object
+            required: [track, note]
+            properties:
+              track: { type: string }
+              note: { type: string }
 
     LibraryFilingConflictError:
       type: object
@@ -5790,6 +5832,72 @@ paths:
                 oneOf:
                   - $ref: '#/components/schemas/IntakeConflictError'
                   - $ref: '#/components/schemas/LibraryFilingConflictError'
+
+  /intake/{id}/print:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Print an intake item's review slip (BS#2804)
+      description: >-
+        Grant `reviews: manage`. Prints the item's accepted review, which must be typed, in effective `reviewed`, `filed` or `finalized`; filing first is not required. One transaction appends a `review_prints` row (the review, its current revision, the caller, the item's release once filed), stamps the item's `printed_by` and `printed_at` (the latest print), and returns the slip built from that revision. A submitted review with no history first gets revision 1. A cited item prints the cited release's accepted review under its own artist, album and label. Nothing is locked against the author, whose later edit succeeds. Locks: a filed item's `library` row `FOR KEY SHARE`, then the item `FOR UPDATE`, then the review `FOR UPDATE`; an item filed between the first read and the lock is retried once, and a second miss is 404.
+      responses:
+        '200':
+          description: 'The slip'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeSlip'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: 'The item has no accepted review, or its accepted review is handwritten (`not_reviewed`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
+
+  /intake/{id}/finalize:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Mark a filed intake item shelved (BS#2804)
+      description: >-
+        Grant `catalog: write` alone. `filed` to `finalized`, stamping `finalized_by` and `finalized_at`; changes nothing in `library` (call-number edits go through `PATCH /library/{id}` first). Refused with 409 `in_rotation` while a `rotation` row with the item's `album_id` is active by `rotationActiveSql()` (`kill_date` null or after the database's `CURRENT_DATE`), found by release and not by `intake_items.rotation_id`; the message names the latest kill date or says none is set. An item that is not `filed` is 409 `state_changed`.
+      responses:
+        '200':
+          description: 'The finalized item'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeItem'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `catalog: write`'
+        '404':
+          description: 'No such intake item'
+        '409':
+          description: '`state_changed` (not filed) or `in_rotation`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeConflictError'
 
   /intake/{id}/pass:
     parameters:
