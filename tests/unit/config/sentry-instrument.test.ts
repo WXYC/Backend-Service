@@ -20,6 +20,7 @@ describe('Sentry instrumentation loading', () => {
   it.each([
     ['backend', '../../../apps/backend'],
     ['auth', '../../../apps/auth'],
+    ['enrichment-worker', '../../../apps/enrichment-worker'],
   ])('%s start script registers the v11 injection hook before instrument.js', (_app, relPath) => {
     const pkg = JSON.parse(readFileSync(resolve(__dirname, relPath, 'package.json'), 'utf-8'));
     expect(pkg.scripts?.start).toMatch(/--import\s+@sentry\/node\/import\s+--import\s+\.\/dist\/instrument\.js/);
@@ -48,6 +49,18 @@ describe('Sentry instrumentation loading', () => {
       expect(appSource).not.toMatch(/import\s+['"]\.\/instrument(\.js)?['"]/);
     }
   );
+
+  // `splitting: false` gives instrument.js and app.js each their own copy of
+  // every bundled module, so the preload's `instanceof LmlClientError` only
+  // matches errors thrown from app.js while lml-client stays external and both
+  // bundles import the one installed copy.
+  it.each([
+    ['backend', '../../../apps/backend/tsup.config.ts'],
+    ['enrichment-worker', '../../../apps/enrichment-worker/tsup.config.ts'],
+  ])('%s tsup config keeps @wxyc/lml-client external', (_app, relPath) => {
+    const tsupSource = readFileSync(resolve(__dirname, relPath), 'utf-8');
+    expect(tsupSource).toMatch(/external:\s*\[[^\]]*['"]@wxyc\/lml-client['"]/);
+  });
 
   it.each([
     ['backend', '../../../apps/backend/tsup.config.ts'],

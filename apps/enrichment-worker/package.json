@@ -6,7 +6,7 @@
   "main": "./dist/worker.js",
   "publishPort": "8084",
   "scripts": {
-    "start": "node --import ./dist/instrument.js dist/worker.js",
+    "start": "node --import @sentry/node/import --import ./dist/instrument.js dist/worker.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
     "dev": "tsup --watch",

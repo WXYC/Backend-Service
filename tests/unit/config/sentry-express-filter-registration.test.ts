@@ -13,7 +13,8 @@ jest.mock('@sentry/node', () => ({
   init: (...args: unknown[]) => mockInit(...args),
   expressIntegration: (options: unknown) => mockExpressIntegration(options),
 }));
-jest.mock('dotenv', () => ({ config: jest.fn() }));
+// Keeps the developer's local .env out of the test's process.env.
+jest.mock('dotenv/config', () => ({}));
 
 type ShouldHandleError = (error: Error) => boolean;
 

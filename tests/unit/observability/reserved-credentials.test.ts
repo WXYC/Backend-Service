@@ -221,19 +221,21 @@ describe('instrument.ts wiring (BS#2532)', () => {
     ['backend', '../../../apps/backend/instrument.ts'],
     ['auth', '../../../apps/auth/instrument.ts'],
     ['enrichment-worker', '../../../apps/enrichment-worker/instrument.ts'],
-  ])('%s preload calls the detector after config()', (_app, relPath) => {
+  ])('%s preload calls the detector after .env loads', (_app, relPath) => {
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const source = fs.readFileSync(path.resolve(__dirname, relPath), 'utf-8');
 
     expect(source).toMatch(/from ['"]@wxyc\/observability['"]/);
     expect(source).toMatch(/warnIfReservedAwsCredentialsPresent\(\)/);
 
-    // Ordering matters: `config()` is what loads `.env` into `process.env`, so
-    // a detector called before it reads an environment the deploy has not
-    // finished populating and reports a clean host that is not clean.
-    const configAt = source.indexOf('config()');
-    const detectorAt = source.indexOf('warnIfReservedAwsCredentialsPresent()');
-    expect(configAt).toBeGreaterThanOrEqual(0);
-    expect(detectorAt).toBeGreaterThan(configAt);
+    // Ordering matters: loading `.env` (a body-level `config()` call, or an
+    // `import 'dotenv/config'`) is what populates `process.env`, so a detector
+    // called before it reads an environment the deploy has not finished
+    // populating and reports a clean host that is not clean. Both patterns are
+    // anchored to whole lines so a comment that mentions them does not match.
+    const loadAt = source.search(/^(?:config\(\);|import 'dotenv\/config';)$/m);
+    const detectorAt = source.search(/^warnIfReservedAwsCredentialsPresent\(\);$/m);
+    expect(loadAt).toBeGreaterThanOrEqual(0);
+    expect(detectorAt).toBeGreaterThan(loadAt);
   });
 });
