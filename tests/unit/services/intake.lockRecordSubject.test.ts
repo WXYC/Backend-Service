@@ -69,6 +69,7 @@ describe('lockRecordSubject (BS#2968)', () => {
 
 describe('withLockedRecordSubject', () => {
   const { builder } = createLockLog();
+  afterEach(() => jest.restoreAllMocks());
   const unfiled = { album_id: null, state: 'pool' };
   const filed = { album_id: 9, state: 'filed' };
 
@@ -99,18 +100,21 @@ describe('withLockedRecordSubject', () => {
     expect(await withLockedRecordSubject(subject, 'update', body)).toEqual(expected);
     expect(spy).toHaveBeenCalledTimes(transactions);
     expect(body).toHaveBeenCalledTimes(bodies);
-    spy.mockRestore();
   });
 
-  it('does not read a body that returns undefined as a miss', async () => {
-    const spy = jest
-      .spyOn(db, 'transaction')
-      .mockImplementation((run: (tx: unknown) => unknown) =>
-        Promise.resolve(run({ select: jest.fn(() => builder([{ id: 9 }])) }))
-      );
-    expect(await withLockedRecordSubject({ album_id: 9 }, 'share', () => Promise.resolve(undefined))).toEqual({
-      value: undefined,
-    });
-    spy.mockRestore();
-  });
+  it.each([[undefined], [null], [0], [false], ['']])(
+    'does not read a body that returns %p as a miss, so an item is locked once',
+    async (falsy) => {
+      const queue = [[unfiled], [unfiled]];
+      const spy = jest
+        .spyOn(db, 'transaction')
+        .mockImplementation((run: (tx: unknown) => unknown) =>
+          Promise.resolve(run({ select: jest.fn(() => builder(queue.shift() ?? [])) }))
+        );
+      expect(await withLockedRecordSubject({ intake_item_id: 4 }, 'share', () => Promise.resolve(falsy))).toEqual({
+        value: falsy,
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
+  );
 });
