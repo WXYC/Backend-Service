@@ -60,18 +60,20 @@ export function isLivenessRequestPath(url: string | undefined): boolean {
 }
 
 /**
- * Express's auto-instrumentation span ops — framework bookkeeping that records
- * which of Express's own frames ran, not what the request did.
+ * Express's auto-instrumentation spans — framework bookkeeping that records
+ * which of Express's own frames ran, not what the request did. Named below by
+ * their Sentry 11 ops (`middleware` / `router` / `handler`); Sentry 10 called
+ * the same three `middleware.express` / `router.express` /
+ * `request_handler.express`.
  *
- * **`middleware.express`** (`corsMiddleware`, `jsonParser`, route-local
- * handlers) was the original BS#2089 target: each span records only "this
- * middleware ran."
+ * **`middleware`** (`corsMiddleware`, `jsonParser`, route-local handlers) was
+ * the original BS#2089 target: each span records only "this middleware ran."
  *
- * **`router.express` and `request_handler.express` were deliberately EXCLUDED
- * by BS#2089**, on the reasoning that route resolution and the handler frame
- * "carry the information you actually want when tracing a slow request."
- * BS#2406 reversed that. The reversal is recorded here rather than silently
- * applied, because the original call was considered, not an oversight:
+ * **`router` and `handler` were deliberately EXCLUDED by BS#2089**, on the
+ * reasoning that route resolution and the handler frame "carry the information
+ * you actually want when tracing a slow request." BS#2406 reversed that. The
+ * reversal is recorded here rather than silently applied, because the original
+ * call was considered, not an oversight:
  *
  * - Cost: 299,867 spans / 7d measured 2026-09-09 (`router.express` 150,118 +
  *   `request_handler.express` 149,749) — 7.5% of the entire WXYC Sentry org's
@@ -84,13 +86,30 @@ export function isLivenessRequestPath(url: string | undefined): boolean {
  *   inference — transaction duration minus the surviving children. That is a
  *   real degradation, accepted knowingly.
  *
- * If this is ever revisited, restore `request_handler.express` first;
- * `router.express` is Express choosing which function to call.
+ * If this is ever revisited, restore `handler` first; `router` is Express
+ * choosing which function to call.
+ *
+ * **Both SDK generations are matched (BS#2948).** Sentry 11 replaced the
+ * OTel-based Express instrumentation with `@sentry/server-utils`'
+ * diagnostics-channel one, which stamps origin `auto.http.express` and the
+ * generic `@sentry/conventions` ops. Matching only the old strings after the
+ * upgrade would have kept every Express span with no test failing; matching
+ * only the new ones would do the same after a pin back to Sentry 10 (done once
+ * already, 3c3e815e). The Sentry 11 ops are generic enough that another
+ * framework integration could emit them, so they match only alongside
+ * Express's own origin. The Sentry 10 ops are Express-specific on their own.
+ * The filter only runs at all because both preloads pin
+ * `traceLifecycle: 'static'` — Sentry 11's default span streaming never builds
+ * a transaction event.
  */
-const EXPRESS_INSTRUMENTATION_SPAN_OPS = new Set(['middleware.express', 'router.express', 'request_handler.express']);
+const SENTRY_10_EXPRESS_SPAN_OPS = new Set(['middleware.express', 'router.express', 'request_handler.express']);
+const SENTRY_11_EXPRESS_SPAN_OPS = new Set(['middleware', 'router', 'handler']);
+const SENTRY_11_EXPRESS_ORIGIN = 'auto.http.express';
 
-export function isExpressInstrumentationSpan(span: Pick<SpanJSON, 'op'>): boolean {
-  return span.op !== undefined && EXPRESS_INSTRUMENTATION_SPAN_OPS.has(span.op);
+export function isExpressInstrumentationSpan(span: Pick<SpanJSON, 'op' | 'origin'>): boolean {
+  if (span.op === undefined) return false;
+  if (SENTRY_10_EXPRESS_SPAN_OPS.has(span.op)) return true;
+  return span.origin === SENTRY_11_EXPRESS_ORIGIN && SENTRY_11_EXPRESS_SPAN_OPS.has(span.op);
 }
 
 /**
