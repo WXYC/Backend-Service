@@ -177,21 +177,7 @@ describe('FccNote reads (BS#2862)', () => {
   });
 });
 
-/** A stand-in builder that records each chained call's arguments and resolves to `rows`, so a test can render the SQL it was given. */
-const capture = (rows: unknown[] = []) => {
-  const calls: Record<string, unknown[]> = {};
-  const builder: unknown = new Proxy(() => undefined, {
-    get: (_t, prop: string) =>
-      prop === 'then'
-        ? (resolve: (v: unknown) => void) => resolve(rows)
-        : (...args: unknown[]) => {
-            calls[prop] = args;
-            return builder;
-          },
-  });
-  return { builder, calls };
-};
-
+const { builder, callsOf } = createLockLog();
 const dialect = new PgDialect();
 const render = (query: unknown) => {
   const { sql, params } = dialect.sqlToQuery(query as never);
@@ -206,15 +192,16 @@ describe('confirmFccNote (BS#2863)', () => {
 
   /** `returned` is what the UPDATE's RETURNING gives, `notes` what the read after it gives (both inside one transaction). */
   const run = async (account: unknown[], returned: unknown[], notes: unknown[]) => {
-    const account_ = capture(account);
-    const update = capture(returned);
-    const read = capture(notes);
-    const select = jest.spyOn(db, 'select').mockReturnValueOnce(account_.builder as never);
-    const tx = { update: jest.fn(() => update.builder), select: jest.fn(() => read.builder) };
+    const accountQuery = builder(account);
+    const updateQuery = builder(returned);
+    const readQuery = builder(notes);
+    const select = jest.spyOn(db, 'select').mockReturnValueOnce(accountQuery as never);
+    const tx = { update: jest.fn(() => updateQuery), select: jest.fn(() => readQuery) };
     const transaction = jest
       .spyOn(db, 'transaction')
       .mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
-    return { result: await confirmFccNote(5, actor), account: account_, update, read, select, transaction, tx };
+    const update = callsOf(updateQuery);
+    return { result: await confirmFccNote(5, actor), account: callsOf(accountQuery), update, select, transaction, tx };
   };
 
   it('stamps the confirmer by their account name and the time, in one UPDATE that only matches a reported note', async () => {
@@ -222,14 +209,14 @@ describe('confirmFccNote (BS#2863)', () => {
     expect(result).toMatchObject({ outcome: 'confirmed', note });
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(tx.update).toHaveBeenCalledTimes(1);
-    const set = update.calls.set[0] as Record<string, unknown>;
+    const set = update.set[0] as Record<string, unknown>;
     expect(set).toMatchObject({ status: 'confirmed', confirmed_by: 'Test Reviewer' });
     expect(set).toHaveProperty('confirmed_at');
-    expect(render(update.calls.where[0])).toEqual({
+    expect(render(update.where[0])).toEqual({
       sql: `(${T}."id" = $1 and ${T}."status" = $2)`,
       params: [5, 'reported'],
     });
-    expect(update.calls).toHaveProperty('returning');
+    expect(update).toHaveProperty('returning');
   });
 
   it('answers the row its own UPDATE returned, the read after it only adding the record', async () => {
@@ -245,8 +232,8 @@ describe('confirmFccNote (BS#2863)', () => {
     const columns = select.mock.calls[0][0] as Record<string, unknown>;
     expect(Object.keys(columns)).toEqual(['name']);
     expect(columns.name).toBe(user.name);
-    expect(account.calls.from[0]).toBe(user);
-    expect(render(account.calls.where[0])).toEqual({ sql: '"auth_user"."id" = $1', params: ['md-1'] });
+    expect(account.from[0]).toBe(user);
+    expect(render(account.where[0])).toEqual({ sql: '"auth_user"."id" = $1', params: ['md-1'] });
   });
 
   it('confirming a note already confirmed answers the note as it is: the UPDATE matches nothing and the read returns it', async () => {
@@ -264,7 +251,7 @@ describe('confirmFccNote (BS#2863)', () => {
   ])('%s: refused, and nothing is written', async (_name, account) => {
     const update = jest.spyOn(db, 'update');
     const transaction = jest.spyOn(db, 'transaction');
-    jest.spyOn(db, 'select').mockReturnValueOnce(capture(account).builder as never);
+    jest.spyOn(db, 'select').mockReturnValueOnce(builder(account) as never);
     expect(await confirmFccNote(5, actor)).toEqual({ outcome: 'no_account' });
     expect(update).not.toHaveBeenCalled();
     expect(transaction).not.toHaveBeenCalled();
@@ -275,16 +262,16 @@ describe('deleteFccNote (BS#2863)', () => {
   afterEach(() => jest.restoreAllMocks());
 
   const run = async (actor: { id: string; manage: boolean }, deleted: unknown[], existing: unknown[] = []) => {
-    const del = capture(deleted);
-    jest.spyOn(db, 'delete').mockReturnValue(del.builder as never);
-    const select = jest.spyOn(db, 'select').mockReturnValue(capture(existing).builder as never);
-    return { result: await deleteFccNote(5, actor), del, select };
+    const deleteQuery = builder(deleted);
+    jest.spyOn(db, 'delete').mockReturnValue(deleteQuery as never);
+    const select = jest.spyOn(db, 'select').mockReturnValue(builder(existing) as never);
+    return { result: await deleteFccNote(5, actor), del: callsOf(deleteQuery), select };
   };
 
   it('a caller without reviews: manage: the WHERE carries the note, the reporter and the reported status', async () => {
     const { result, del } = await run({ id: 'dj-1', manage: false }, [{ id: 5 }]);
     expect(result).toEqual({ outcome: 'deleted' });
-    expect(render(del.calls.where[0])).toEqual({
+    expect(render(del.where[0])).toEqual({
       sql: `(${T}."id" = $1 and (${T}."reported_by_user_id" = $2 and ${T}."status" = $3))`,
       params: [5, 'dj-1', 'reported'],
     });
@@ -293,7 +280,7 @@ describe('deleteFccNote (BS#2863)', () => {
   it('a music director: the WHERE is the note alone, so a confirmed one goes too', async () => {
     const { result, del } = await run({ id: 'md-1', manage: true }, [{ id: 5 }]);
     expect(result).toEqual({ outcome: 'deleted' });
-    expect(render(del.calls.where[0])).toEqual({ sql: `${T}."id" = $1`, params: [5] });
+    expect(render(del.where[0])).toEqual({ sql: `${T}."id" = $1`, params: [5] });
   });
 
   it('a delete that matches nothing is forbidden when the note exists (another DJ, or the reporter after the confirm) and not_found when it does not', async () => {
@@ -312,8 +299,9 @@ describe('the waiting list and the slip’s notes (BS#2863)', () => {
 
   it('the waiting list is one statement over every reported note, oldest first', async () => {
     const rows = [{ id: 1 }, { id: 2 }];
-    const { builder, calls } = capture(rows);
-    const select = jest.spyOn(db, 'select').mockReturnValue(builder as never);
+    const query = builder(rows);
+    const calls = callsOf(query);
+    const select = jest.spyOn(db, 'select').mockReturnValue(query as never);
     expect(await listReportedFccNotes()).toEqual(rows);
     expect(select).toHaveBeenCalledTimes(1);
     expect(render(calls.where[0])).toEqual({ sql: `${T}."status" = $1`, params: ['reported'] });
@@ -324,10 +312,10 @@ describe('the waiting list and the slip’s notes (BS#2863)', () => {
   });
 
   it('a record list sent with a status keeps only that status', async () => {
-    const { builder, calls } = capture([]);
-    jest.spyOn(db, 'select').mockReturnValue(builder as never);
+    const query = builder([]);
+    jest.spyOn(db, 'select').mockReturnValue(query as never);
     await listFccNotes({ album_id: 9, status: 'confirmed' });
-    expect(render(calls.where[0])).toEqual({
+    expect(render(callsOf(query).where[0])).toEqual({
       sql: `(${T}."album_id" = $1 and ${T}."status" = $2)`,
       params: [9, 'confirmed'],
     });
@@ -356,8 +344,9 @@ describe('the waiting list and the slip’s notes (BS#2863)', () => {
     'the slip’s notes of %s: only confirmed, by the target’s subject, oldest first',
     async (_name, target, sql, params) => {
       const rows = [{ track: 'B2', note: 'a word' }];
-      const { builder, calls } = capture(rows);
-      expect(await confirmedFccNotesOf({ select: () => builder } as never, target)).toEqual(rows);
+      const query = builder(rows);
+      const calls = callsOf(query);
+      expect(await confirmedFccNotesOf({ select: () => query } as never, target)).toEqual(rows);
       expect(render(calls.where[0])).toEqual({ sql, params });
       expect((calls.orderBy as { getSQL(): never }[]).map((o) => render(o.getSQL()).sql)).toEqual([
         `${T}."reported_at" asc`,
