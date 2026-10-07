@@ -37,8 +37,10 @@
  *      registration order directly, per family and per method.
  *   2. Behavioral — a request to the literal `/rotation/:rotation_id/tracks`
  *      path still reaches its own handler rather than being captured by
- *      `/rotation/:id`, and `GET /rotation/uncatalogued` still reaches the
- *      queue handler rather than the new single-row read.
+ *      `/rotation/:id`, `GET /rotation/uncatalogued` still reaches the
+ *      queue handler rather than the new single-row read, and GET and PATCH
+ *      `/rotation/thresholds` each reach the thresholds handlers rather than
+ *      the `/rotation/:id` ones.
  *
  * Mirrors the mock scaffolding of
  * tests/unit/routes/library-discogs-recheck-permissions.route.test.ts —
@@ -198,8 +200,8 @@ type RouteLayer = { route?: { path: string; methods: Record<string, boolean> } }
  * has to know what it would be missing.
  *
  * `/artists/:id` (BS#2156) predates `/rotation/:id` (BS#2410) and carries
- * three literals to the rotation block's two — `/rotation/cards` (BS#2472)
- * joined `/rotation/uncatalogued` as a second shadowable literal, and
+ * three literals, as does the rotation block: `/rotation/cards` (BS#2472) joined
+ * `/rotation/uncatalogued` as a second shadowable literal, and
  * `/rotation/thresholds` is a third that is shadowable by BOTH the GET and the
  * PATCH registration (the first PATCH literal on the block).
  *

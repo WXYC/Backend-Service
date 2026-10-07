@@ -8,7 +8,7 @@ describe('parseRotationThresholdsPatch', () => {
   test.each([
     ['an empty body', {}, {}],
     ['an undefined body', undefined, {}],
-    ['an empty window_days', { window_days: {} }, {}],
+    ['an empty window_days', { window_days: {} }, { window_days: {} }],
     ['one bin', { window_days: { H: 30 } }, { window_days: { H: 30 } }],
     [
       'every bin at the bounds',

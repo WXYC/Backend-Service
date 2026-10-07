@@ -23,11 +23,15 @@ function toWire(row: ThresholdsRow): RotationThresholdsWire {
   };
 }
 
+function requireRow(row: ThresholdsRow | undefined): ThresholdsRow {
+  if (!row) throw new Error('rotation_thresholds row is missing: the migration seed did not run');
+  return row;
+}
+
 /** The station-wide rotation thresholds: one row, seeded by the migration that creates the table. */
 export async function getRotationThresholds(): Promise<RotationThresholdsWire> {
   const [row] = await db.select().from(rotation_thresholds).limit(1);
-  if (!row) throw new Error('rotation_thresholds row is missing: the migration seed did not run');
-  return toWire(row);
+  return toWire(requireRow(row));
 }
 
 /**
@@ -43,5 +47,5 @@ export async function updateRotationThresholds(patch: RotationThresholdsPatch): 
   if (Object.keys(set).length === 0) return getRotationThresholds();
 
   const [row] = await db.update(rotation_thresholds).set(set).returning();
-  return toWire(row);
+  return toWire(requireRow(row));
 }

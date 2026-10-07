@@ -59,7 +59,7 @@ export function parseRotationThresholdsPatch(body: unknown): RotationThresholdsP
     for (const bin of ROTATION_BINS) {
       if (windowDays[bin] !== undefined) days[bin] = requireDays(windowDays[bin], `window_days.${bin}`);
     }
-    if (Object.keys(days).length > 0) patch.window_days = days;
+    patch.window_days = days;
   }
   return patch;
 }
