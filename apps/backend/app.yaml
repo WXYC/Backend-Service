@@ -2832,6 +2832,43 @@ paths:
         '404':
           description: Album not found
 
+  /library/{id}/print:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      summary: Print a typed review of a library release, with no intake item (BS#2865)
+      description: >-
+        Grant `reviews: manage` alone. Body `{ review_id }`. The review must be typed, submitted and in the release's list (`GET /reviews?album_id=`: its own `album_id` is the release, or a filed or finalized copy of the release cites its release). One transaction appends a `review_prints` row (the release, no intake item, the review, its current revision, the caller) and returns the slip, with artist, album and label read from the library row; a submitted review with no history first gets revision 1. Nothing on `intake_items` is read or written. A reprint appends another row; the latest such row puts the review first in `GET /reviews?album_id=` with `on_cover` true and makes it `in_use`. Locks: the release `FOR KEY SHARE`, then the review `FOR UPDATE`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [review_id]
+              properties:
+                review_id:
+                  type: integer
+      responses:
+        '200':
+          description: 'The slip'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntakeSlip'
+        '400':
+          description: "Malformed id, or `review_id` missing, malformed, unknown, a draft, handwritten, or not in the release's list (one message for the well-formed refusals)"
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
+        '404':
+          description: 'No such library release'
+
   /library/{id}/missing:
     patch:
       summary: Mark an album as missing

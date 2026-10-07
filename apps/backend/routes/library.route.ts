@@ -440,6 +440,10 @@ library_route.patch('/:id/missing', requirePermissions({ catalog: ['read'] }), l
 
 library_route.patch('/:id/found', requirePermissions({ catalog: ['read'] }), libraryController.markFound);
 
+// BS#2865: print a typed review of a release, with no intake item. `reviews: ['manage']` alone (nothing in the
+// catalog changes). Two segments with a literal tail: no literal route here shares the shape.
+library_route.post('/:id/print', requirePermissions({ reviews: ['manage'] }), libraryController.printReleaseSlip);
+
 // BS#1283 (epic #1280 sub-issue 3): manual counterpart to the daily
 // library-discogs-unavailable-recheck cron. Gated to catalog:write (same bar
 // as updateAlbum/addAlbum) since it can rewrite rotation.discogs_release_id.
