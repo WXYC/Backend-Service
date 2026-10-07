@@ -5,6 +5,7 @@ import prettierConfig from 'eslint-config-prettier';
 import wxycSourceTaggedConstraint from './eslint-rules/source-tagged-constraint.cjs';
 import wxycNoBareArrayInSqlTemplate from './eslint-rules/no-bare-array-in-sql-template.cjs';
 import wxycRestrictedRealName from './eslint-rules/restricted-real-name.cjs';
+import wxycRestrictedLibraryRotationInsert from './eslint-rules/restricted-library-rotation-insert.cjs';
 
 // All rule modules export `{ rules: { <name>: <rule> } }`; merge them into
 // one `wxyc` plugin object so `files`-scoped blocks below can mix and match
@@ -14,6 +15,7 @@ const wxycLocalRules = {
     ...wxycSourceTaggedConstraint.rules,
     ...wxycNoBareArrayInSqlTemplate.rules,
     ...wxycRestrictedRealName.rules,
+    ...wxycRestrictedLibraryRotationInsert.rules,
   },
 };
 
@@ -137,6 +139,23 @@ export default tseslint.config(
     },
     rules: {
       'wxyc/restricted-real-name': 'error',
+    },
+  },
+
+  // WXYC custom rules — restricted-library-rotation-insert (BS#2808).
+  //
+  // Flags an insert into `library` / `rotation` outside the gated insert
+  // functions (`insertAlbum`, `addToRotation`) and the legacy ETL jobs. The
+  // allow-list names functions, not files, and lives in
+  // eslint-rules/restricted-library-rotation-insert.cjs so RuleTester can
+  // exercise it. Excludes `tests/**/*.ts`, as restricted-real-name does.
+  {
+    files: ['apps/**/*.ts', 'shared/**/*.ts', 'jobs/**/*.ts'],
+    plugins: {
+      wxyc: wxycLocalRules,
+    },
+    rules: {
+      'wxyc/restricted-library-rotation-insert': 'error',
     },
   },
 
