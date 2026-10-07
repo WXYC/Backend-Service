@@ -159,6 +159,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   // create (the review gate, `insertAlbum`'s basis check) rolls back the
   // `labels` row that new label text minted.
   let inserted_album: Album;
+  let flowsheetRowsLinked: number | undefined;
   try {
     inserted_album = await db.transaction(async (tx) => {
       // Resolve label text to label_id via upsert, or label_id to the
@@ -195,6 +196,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       );
       const link = await libraryService.linkRotationToAlbum(fromRotationId, album.id, tx);
       if (link.outcome !== 'linked') throw new RotationNotEligibleError('The rotation row is already linked');
+      flowsheetRowsLinked = link.flowsheetRowsLinked;
       return album;
     });
   } catch (err) {
@@ -203,6 +205,15 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       return;
     }
     throw err;
+  }
+
+  // Same guarded form as `linkRotationToAlbum`: the import is committed, so a telemetry failure must not 500 it.
+  if (flowsheetRowsLinked !== undefined) {
+    try {
+      Sentry.getActiveSpan()?.setAttributes({ 'rotation_link.flowsheet_rows_linked': flowsheetRowsLinked });
+    } catch (e) {
+      console.warn('Failed to project rotation-link telemetry onto span:', (e as Error).message);
+    }
   }
 
   const enriched_album = await enrichNewAlbum(

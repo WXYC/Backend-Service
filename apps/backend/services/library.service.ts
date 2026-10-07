@@ -1815,8 +1815,9 @@ export const getRotationRowFromDB = async (rotationId: number): Promise<Uncatalo
 
 export type LinkRotationOutcome =
   /**
-   * `flowsheetRowsLinked` is how many of the rotation row's plays this link
-   * resolved (BS#2410). It exists for logging, and is deliberately absent from
+   * `flowsheetRowsLinked` is how many plays this link resolved (BS#2410): the
+   * row's own and those of every older row of a moved record's chain it linked
+   * (BS#3007). It exists for logging, and is deliberately absent from
    * every other variant rather than reported as `0` — no other outcome runs
    * the UPDATE, and a `0` there would read as "ran, matched nothing".
    */
