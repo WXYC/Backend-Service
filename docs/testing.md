@@ -99,3 +99,9 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 3. **unit-tests** — Runs the full unit suite (`npm run test:unit:coverage`). Deliberately _not_ Jest's affected-tests mode: selection comes from the module dependency graph, so the ~52 specs that read a source file as text (`fs.readFileSync`) instead of importing it are invisible to a change in the file they guard (BS#2249). The job gates nothing and finishes well inside `lint-and-typecheck`, so the full run is effectively free. `tests/unit/scripts/ci-unit-tests-full-suite.test.ts` pins this.
 4. **integration-tests** — Only if apps/jobs/shared/tests change. Docker images cached by commit SHA in ECR.
 5. **migrate-dryrun** — Only when `db-init` paths change. Restores latest RDS snapshot, runs `dryrun-migrate.mjs`, tears down. Catches data-shape preconditions at PR-review time. Detail in [`deploy.md`](deploy.md).
+
+## Mock drift
+
+Moved verbatim out of `CLAUDE.md`'s Database section.
+
+**Mock drift**: the unit suite resolves `@wxyc/database` to `tests/mocks/database.mock.ts`, a hand-maintained double. A column in `schema.ts` but not in its double reads as `undefined`, and `toHaveBeenCalledWith({ col: undefined })` **matches a call that omitted the key** — so the assertion passes whether or not the code writes it (BS#2409 shipped exactly that). `npm run check:db-mock-sync` (hard-fail in pre-push and CI, BS#2448) is what notices. Its doubles map each column to a **table-qualified** sentinel — `rotation.format_id === 'rotation.format_id'` — so a same-named column on another table is a different value; `tests/utils/db-mock-allowlist.ts` records the pre-existing backlog and is enforced shrink-only.

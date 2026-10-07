@@ -30,3 +30,7 @@ The split matters because these commands act on a project shared by every checko
 Declaring it does not by itself give each worktree its own database; it makes the sharing explicit and stops a stray `down` from being a function of which directory you happened to be standing in. A worktree that genuinely needs an independent stack sets `COMPOSE_PROJECT_NAME` in its own `.env`, plus distinct host ports (`DB_PORT`, `CI_DB_PORT`, `E2E_DB_PORT`, `ETL_PG_PORT`, `ETL_MYSQL_PORT`) — containers are namespaced by project, but the host ports they publish are not, so two stacks on the same ports still collide.
 
 No service pins a `container_name`. Container names are global to the Docker daemon rather than scoped to a Compose project, so a pinned name makes two projects mutually exclusive — the second to start fails with `Conflict. The container name "/..." is already in use`. Address a container through `docker compose <subcommand> <service>`, which resolves it within the project, rather than by a generated name.
+
+## Dev commands (moved from CLAUDE.md)
+
+`npm run dev` rebuilds `@wxyc/database` + `@wxyc/authentication` first via the `predev` lifecycle hook so the backend doesn't serve a stale schema export. Stop the database with `npm run db:stop` (keeps the `pg-data` volume); `npm run db:reset` is the destructive form that drops it, so the next `db:start` is a fresh DB. Both act on the `wxyc-backend` Compose project declared in `dev_env/docker-compose.yml`, which every checkout shares unless the worktree sets `COMPOSE_PROJECT_NAME` and its own host ports.
