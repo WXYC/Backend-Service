@@ -6724,12 +6724,32 @@ describe('library.controller', () => {
         ['a string id', { moved_from_rotation_id: '4' }],
         ['an id past int4', { moved_from_rotation_id: 2147483648 }],
         ['an album_id beside it', { album_id: 5 }],
-        ['an album_id past int4', { moved_from_rotation_id: undefined, album_id: 2147483648 }],
-        ['a card_id past int4', { card_id: 2147483648 }],
       ])('POST /library/rotation rejects %s with a 400', async (_label, extra) => {
         await expect(addRotation(moveReq(extra), mockResponse(), next)).rejects.toMatchObject({ statusCode: 400 });
         expect(mockAddToRotation).not.toHaveBeenCalled();
       });
+
+      it.each([
+        [
+          'album_id',
+          { moved_from_rotation_id: undefined, album_id: 2147483648 },
+          'Invalid Parameter: album_id must be a positive integer, or omitted for an uncatalogued release',
+        ],
+        [
+          'card_id',
+          { card_id: 2147483648 },
+          "Invalid Parameter: card_id must be a positive integer, or omitted to file on the bin's newest card",
+        ],
+      ])(
+        'POST /library/rotation rejects a %s past int4 with its existing 400 message',
+        async (_field, extra, message) => {
+          await expect(addRotation(moveReq(extra), mockResponse(), next)).rejects.toMatchObject({
+            statusCode: 400,
+            message,
+          });
+          expect(mockAddToRotation).not.toHaveBeenCalled();
+        }
+      );
 
       it('POST /library/rotation treats a null moved_from_rotation_id as omitted and accepts INT4_MAX', async () => {
         mockAddToRotation.mockResolvedValue({ id: 20, album_id: null, rotation_bin: 'L' });
