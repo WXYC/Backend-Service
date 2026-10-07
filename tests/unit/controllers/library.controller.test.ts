@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
+import { db } from '@wxyc/database';
 import { ReviewRequiredError, RotationNotEligibleError } from '../../../apps/backend/utils/review-gate-basis';
 
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
@@ -6666,11 +6667,36 @@ describe('library.controller', () => {
         mockSpan.setAttributes.mockImplementationOnce(() => {
           throw new Error('span closed');
         });
+        const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
         const res = mockResponse();
 
         await addAlbum(importReq(12), res, next);
 
         expect(res.status).toHaveBeenCalledWith(201);
+        expect(consoleWarnSpy).toHaveBeenCalledWith(
+          'Failed to project rotation-link telemetry onto span:',
+          'span closed'
+        );
+        consoleWarnSpy.mockRestore();
+      });
+
+      it('POST /library records nothing on the span when the import transaction fails to commit', async () => {
+        (
+          db.transaction as jest.Mock<(fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>>
+        ).mockImplementationOnce(async (fn) => {
+          await fn(db);
+          throw new Error('commit failed');
+        });
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 3 });
+        mockSpan.setAttributes.mockClear();
+
+        const res = mockResponse();
+
+        await expect(addAlbum(importReq(12), res, next)).rejects.toThrow('commit failed');
+
+        expect(res.status).not.toHaveBeenCalledWith(201);
+        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
       });
 
       it('POST /library without it still takes the pre_cutover basis and links nothing', async () => {
