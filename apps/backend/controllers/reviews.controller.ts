@@ -113,8 +113,9 @@ export const submitReview: RequestHandler<{ id: string }> = async (req, res) => 
   if (result.outcome === 'not_draft') return void conflict(res, 'not_draft', 'This review is already submitted');
   if (result.outcome === 'text_required') throw new WxycError('A typed review needs text to be submitted', 400);
   if (result.outcome !== 'submitted') throw new WxycError('You may not submit this review', 403);
-  // After the commit; notifyMusicDirectors logs and swallows a failure, so the submit still succeeds.
-  if (result.notice) await notifyReviewSubmitted(result.notice);
+  // After the commit and not awaited: a slow or hung SES must not hold a committed submit's response, or a client's
+  // retry would meet 409 not_draft. The notice logs and reports its own failures and never rejects.
+  if (result.notice) void notifyReviewSubmitted(result.notice);
   res.json(result.review);
 };
 

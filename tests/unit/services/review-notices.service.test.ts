@@ -27,9 +27,11 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 import { db } from '@wxyc/database';
 import {
   assignedLine,
+  musicDirectorEmails,
   notifyPass,
   notifyReviewSubmitted,
   readReviewNotice,
+  type AssignedLine,
   type NoticeItem,
   type ReviewNotice,
 } from '../../../apps/backend/services/review-notices.service';
@@ -137,28 +139,141 @@ describe('notices', () => {
     line: { kind: 'pool' },
   };
   const DIRECTORS = [
-    { role: 'musicDirector', email: 'md-one@example.org' },
-    { role: 'musicDirector', email: 'md-two@example.org' },
-    { role: 'stationManager', email: 'manager@example.org' },
-    { role: 'dj', email: 'dj@example.org' },
+    { role: 'musicDirector', email: 'md-one@example.org', banned: false, banExpires: null },
+    { role: 'musicDirector', email: 'md-two@example.org', banned: null, banExpires: null },
+    { role: 'stationManager', email: 'manager@example.org', banned: false, banExpires: null },
+    { role: 'dj', email: 'dj@example.org', banned: false, banExpires: null },
   ];
+  const URL = 'https://dj.example.org/dashboard/admin/intake/4';
+  const LINK = `<p><a href="${URL}">Open in the Pile</a></p>`;
+  type Sent = { to: string[]; subject: string; text: string; html: string };
+  const sent = (n = 0) => mockSend.mock.calls.at(n)![0] as Sent;
+  const savedFrontend = process.env.FRONTEND_SOURCE;
   beforeEach(() => {
+    process.env.FRONTEND_SOURCE = 'https://dj.example.org, http://localhost:3000';
+    mockQueue.length = 0;
     mockSend.mockReset();
     mockSend.mockResolvedValue(undefined);
+    mockCapture.mockReset();
+  });
+  afterAll(() => {
+    if (savedFrontend === undefined) delete process.env.FRONTEND_SOURCE;
+    else process.env.FRONTEND_SOURCE = savedFrontend;
   });
 
   test('a submit sends one email per music director and none to a station manager or DJ', async () => {
     mockQueue.push(DIRECTORS);
     await notifyReviewSubmitted(NOTICE);
-    expect(mockSend.mock.calls.map(([e]) => (e as { to: string[] }).to)).toEqual([
-      ['md-one@example.org'],
-      ['md-two@example.org'],
-    ]);
-    const sent = mockSend.mock.calls[0][0] as { subject: string; text: string; html: string };
-    expect(sent.subject).toContain('Juana Molina - DOGA');
-    expect(sent.text).toContain('Test Reviewer');
-    expect(sent.text).toContain('nobody has the record');
-    expect(sent.text).toContain('/dashboard/admin/intake/4');
+    expect(mockSend.mock.calls.map(([e]) => (e as Sent).to)).toEqual([['md-one@example.org'], ['md-two@example.org']]);
+  });
+
+  // The station's copy of 2026-10-06 (BS#2806), pinned whole: subject, plain text (the sentences on separate
+  // lines, then the full URL) and HTML (the same sentences, then the link). `{artist} – {album}` is an en dash.
+  test.each([
+    [
+      'from the holder',
+      NOTICE.author,
+      { kind: 'holder' },
+      'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
+      'This review is from the DJ who has the record.',
+    ],
+    [
+      'from another DJ, while a named DJ has the record',
+      NOTICE.author,
+      { kind: 'other_dj', holderName: 'Test Holder' },
+      'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
+      'This review is from another DJ; the record is with Test Holder.',
+    ],
+    [
+      "from another DJ, while the holder's name is null",
+      NOTICE.author,
+      { kind: 'other_dj', holderName: null },
+      'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
+      'This review is from another DJ; the record is checked out to a different DJ.',
+    ],
+    [
+      'from another DJ, while the holder was removed',
+      NOTICE.author,
+      { kind: 'removed_holder' },
+      'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
+      "This review is from another DJ; the record is checked out and its holder's account was removed.",
+    ],
+    [
+      'from another DJ, while nobody has the record',
+      NOTICE.author,
+      { kind: 'pool' },
+      'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
+      'This review is from another DJ; nobody has the record checked out.',
+    ],
+    [
+      'with a null author snapshot',
+      null,
+      { kind: 'pool' },
+      'A review of Juana Molina – DOGA by a DJ is waiting to be accepted.',
+      'This review is from another DJ; nobody has the record checked out.',
+    ],
+  ] as const)('the submit email, %s, is the decided copy', async (_name, author, line, first, second) => {
+    mockQueue.push(DIRECTORS);
+    await notifyReviewSubmitted({ ...NOTICE, author, line });
+    expect(sent()).toEqual({
+      to: ['md-one@example.org'],
+      subject: 'Review waiting to be accepted: Juana Molina – DOGA',
+      text: `${first}\n${second}\n${URL}`,
+      html: `<p>${first}</p><p>${second.replace("'", '&#39;')}</p>${LINK}`,
+    });
+  });
+
+  test.each([
+    ['the display name', [{ name: 'Test DJ' }], 'Test DJ'],
+    ['"A DJ" when the name is null', [{ name: null }], 'A DJ'],
+    ['"A DJ" when the account has no name to read', [], 'A DJ'],
+  ])('the pass email names the DJ by %s, in the decided copy', async (_name, account, dj) => {
+    mockQueue.push(account, DIRECTORS);
+    await notifyPass({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-1');
+    const body = `${dj} passed on the request for Juana Molina – DOGA. Any DJ can take it now.`;
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(sent(1)).toEqual({
+      to: ['md-two@example.org'],
+      subject: 'Request passed: Juana Molina – DOGA',
+      text: `${body}\n${URL}`,
+      html: `<p>${body}</p>${LINK}`,
+    });
+  });
+
+  test('neither email says "pool", a lower-case "pile" or a hyphen between artist and album', async () => {
+    const lines: AssignedLine[] = [
+      { kind: 'holder' },
+      { kind: 'other_dj', holderName: 'Test Holder' },
+      { kind: 'other_dj', holderName: null },
+      { kind: 'removed_holder' },
+      { kind: 'pool' },
+    ];
+    for (const line of lines) {
+      mockQueue.push(DIRECTORS);
+      await notifyReviewSubmitted({ ...NOTICE, line });
+    }
+    mockQueue.push([{ name: 'Test DJ' }], DIRECTORS);
+    await notifyPass({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-1');
+    for (const [email] of mockSend.mock.calls) {
+      const { subject, text, html } = email as Sent;
+      for (const part of [subject, text, html]) {
+        expect(part).not.toMatch(/pool/i);
+        expect(part).not.toMatch(/\bpile\b/);
+        expect(part).not.toContain('Juana Molina - DOGA');
+      }
+    }
+  });
+
+  test.each([
+    ['a ban with no expiry', { banned: true, banExpires: null }, false],
+    ['a ban that has not expired', { banned: true, banExpires: new Date(Date.now() + 86_400_000) }, false],
+    ['a ban that has expired (lifted)', { banned: true, banExpires: new Date(Date.now() - 86_400_000) }, true],
+    ['no ban', { banned: false, banExpires: null }, true],
+  ])('a music director under %s is sent to: %s', async (_name, ban, expected) => {
+    mockQueue.push([{ role: 'musicDirector', email: 'md-banned@example.org', ...ban }, DIRECTORS[0]]);
+    expect(await musicDirectorEmails()).toEqual(
+      expected ? ['md-banned@example.org', 'md-one@example.org'] : ['md-one@example.org']
+    );
   });
 
   test('each submitted review of the same item sends again', async () => {
@@ -168,24 +283,25 @@ describe('notices', () => {
     expect(mockSend).toHaveBeenCalledTimes(4);
   });
 
-  test('a pass names the DJ by display name and sends one email per music director', async () => {
-    mockQueue.push([{ name: 'Test DJ' }], DIRECTORS);
-    await notifyPass({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-1');
-    expect(mockSend).toHaveBeenCalledTimes(2);
-    expect((mockSend.mock.calls[0][0] as { text: string }).text).toContain('Test DJ passed');
-  });
-
   test('escapes author text in the HTML body', async () => {
     mockQueue.push(DIRECTORS);
     await notifyReviewSubmitted({ ...NOTICE, author: '<b>x</b>' });
-    expect((mockSend.mock.calls[0][0] as { html: string }).html).not.toContain('<b>x</b>');
+    expect(sent().html).not.toContain('<b>x</b>');
   });
 
-  test('a failed send is logged and swallowed, and the other directors are still sent to', async () => {
+  test('a failed send is reported and swallowed, and the other directors are still sent to', async () => {
     mockQueue.push(DIRECTORS);
     mockSend.mockRejectedValueOnce(new Error('ses down'));
     await expect(notifyReviewSubmitted(NOTICE)).resolves.toBeUndefined();
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockCapture).toHaveBeenCalledTimes(1);
+  });
+
+  test('the directors are sent to at once, not one after another', async () => {
+    mockQueue.push(DIRECTORS);
+    mockSend.mockReturnValueOnce(new Promise<void>(() => {}));
+    void notifyReviewSubmitted(NOTICE);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockSend).toHaveBeenCalledTimes(2);
   });
 });

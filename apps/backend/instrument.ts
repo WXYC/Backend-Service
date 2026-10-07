@@ -10,8 +10,11 @@ import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 
 // Immediately after .env loads, because .env is one of the ways a reserved AWS
 // credential name reaches this process. This container holds two of the repo's
-// three CloudWatchClient constructions and sends no email, so it is exactly the
-// process the old per-SES-sender placement could not warn (BS#2532/BS#2518).
+// three CloudWatchClient constructions and sent no email when BS#2532 moved the
+// check here, so it is exactly the process the old per-SES-sender placement
+// could not warn (BS#2532/BS#2518). It now sends the music-director review
+// notices (BS#2806), but only lazily and not at all under EMAIL_ENABLED=false,
+// so the check still belongs at boot.
 warnIfReservedAwsCredentialsPresent();
 
 Sentry.init({

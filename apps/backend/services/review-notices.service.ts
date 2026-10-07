@@ -34,18 +34,24 @@ export const assignedLine = (
 
 const requestedHolder = (item: NoticeItem) => (item.effective_state === 'requested' ? item.requested_dj_id : null);
 
+/** The assigned line's sentence, in the copy the station decided on 2026-10-06 (BS#2806). */
 const lineText = (line: AssignedLine) => {
   switch (line.kind) {
     case 'holder':
       return 'This review is from the DJ who has the record.';
     case 'other_dj':
-      return `This review is from another DJ; the record is with ${line.holderName ?? 'another DJ'}.`;
+      return line.holderName === null
+        ? 'This review is from another DJ; the record is checked out to a different DJ.'
+        : `This review is from another DJ; the record is with ${line.holderName}.`;
     case 'removed_holder':
       return "This review is from another DJ; the record is checked out and its holder's account was removed.";
     case 'pool':
-      return 'This review is from another DJ; nobody has the record (it is in the pool).';
+      return 'This review is from another DJ; nobody has the record checked out.';
   }
 };
+
+/** `{artist} – {album}`, joined by an en dash, never a hyphen. */
+const record = (artist: string, album: string) => `${artist} – ${album}`;
 
 export type ReviewNotice = { itemId: number; artist: string; album: string; author: string | null; line: AssignedLine };
 
@@ -79,13 +85,25 @@ export const readReviewNotice = async (
   return { itemId, artist: row.artist, album: row.album, author: review.author, line };
 };
 
-/** The accounts holding the `musicDirector` role (not `stationManager`), by `normalizeRole` rather than a raw role string. */
+/**
+ * A better-auth ban in force: `banned` set and `banExpires` unset or still ahead. An expired ban counts as lifted, as
+ * `apps/auth/check-request-ban-handler.ts` reads it, since better-auth clears the flag only at the account's next sign-in.
+ */
+const isBanned = (account: { banned: boolean | null; banExpires: Date | null }) =>
+  account.banned === true && (account.banExpires === null || account.banExpires.getTime() > Date.now());
+
+/**
+ * The accounts holding the `musicDirector` role (not `stationManager`), by `normalizeRole` rather than a raw role
+ * string, less any account banned in better-auth (`auth_user.banned`): a banned account is told nothing.
+ */
 export const musicDirectorEmails = async (): Promise<string[]> => {
   const rows = await db
-    .select({ role: member.role, email: user.email })
+    .select({ role: member.role, email: user.email, banned: user.banned, banExpires: user.banExpires })
     .from(member)
     .innerJoin(user, eq(user.id, member.userId));
-  return [...new Set(rows.filter((r) => normalizeRole(r.role) === 'musicDirector').map((r) => r.email))];
+  return [
+    ...new Set(rows.filter((r) => normalizeRole(r.role) === 'musicDirector' && !isBanned(r)).map((r) => r.email)),
+  ];
 };
 
 const escapeHtml = (s: string) =>
@@ -94,24 +112,30 @@ const escapeHtml = (s: string) =>
 const intakeUrl = (itemId: number) =>
   `${(process.env.FRONTEND_SOURCE?.split(',')[0]?.trim() || 'http://localhost:3000').replace(/\/$/, '')}/dashboard/admin/intake/${itemId}`;
 
+const reportFailure = (err: unknown, itemId: number) => {
+  console.error('[review-notices] Failed to notify the music directors:', err);
+  Sentry.captureException(err, { tags: { subsystem: 'review-notices' }, extra: { item_id: itemId } });
+};
+
 /**
- * One email per music director. A failure is logged and swallowed: the intake pile is the source of truth and
- * the request that triggered the notice still succeeds. `sendNotificationEmail` honors `EMAIL_ENABLED`.
+ * One email per music director, sent concurrently. Never rejects: every failure is logged and reported to Sentry
+ * and swallowed, because the intake pile is the source of truth. Callers start a notice after the commit and do
+ * not await it (as `auth.definition.ts` does the password-reset send), so a slow or hung SES never delays or fails
+ * a request that already committed. `sendNotificationEmail` honors `EMAIL_ENABLED`.
  */
 export const notifyMusicDirectors = async (message: { subject: string; lines: string[]; itemId: number }) => {
   try {
     const url = intakeUrl(message.itemId);
     const text = [...message.lines, url].join('\n');
-    const html = `${message.lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('')}<p><a href="${escapeHtml(url)}">Open in the intake pile</a></p>`;
-    for (const email of await musicDirectorEmails()) {
-      try {
-        await sendNotificationEmail({ to: [email], subject: message.subject, text, html });
-      } catch (err) {
-        Sentry.captureException(err, { tags: { subsystem: 'review-notices' }, extra: { item_id: message.itemId } });
-      }
+    const html = `${message.lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('')}<p><a href="${escapeHtml(url)}">Open in the Pile</a></p>`;
+    const sends = (await musicDirectorEmails()).map(async (email) =>
+      sendNotificationEmail({ to: [email], subject: message.subject, text, html })
+    );
+    for (const sent of await Promise.allSettled(sends)) {
+      if (sent.status === 'rejected') reportFailure(sent.reason, message.itemId);
     }
   } catch (err) {
-    Sentry.captureException(err, { tags: { subsystem: 'review-notices' }, extra: { item_id: message.itemId } });
+    reportFailure(err, message.itemId);
   }
 };
 
@@ -119,27 +143,27 @@ export const notifyMusicDirectors = async (message: { subject: string; lines: st
 export const notifyReviewSubmitted = (n: ReviewNotice) =>
   notifyMusicDirectors({
     itemId: n.itemId,
-    subject: `Review waiting to be accepted: ${n.artist} - ${n.album}`,
+    subject: `Review waiting to be accepted: ${record(n.artist, n.album)}`,
     lines: [
-      `A review of ${n.artist} - ${n.album} by ${n.author ?? 'a DJ'} is waiting to be accepted.`,
+      `A review of ${record(n.artist, n.album)} by ${n.author ?? 'a DJ'} is waiting to be accepted.`,
       lineText(n.line),
     ],
   });
 
 /** A DJ passed on a request; named by their account's display name (`auth_user.name`), never the real name. */
 export const notifyPass = async (item: { id: number; artist: string; album: string }, djUserId: string) => {
-  // The request already succeeded; a failed name lookup must not turn it into an error.
-  const dj = await db
-    .select({ name: user.name })
-    .from(user)
-    .where(eq(user.id, djUserId))
+  // The request already succeeded; a failed name lookup sends the notice without the name, never an error.
+  const dj = await Promise.resolve()
+    .then(() => db.select({ name: user.name }).from(user).where(eq(user.id, djUserId)))
     .then(
       (rows) => rows[0],
       () => undefined
     );
   return notifyMusicDirectors({
     itemId: item.id,
-    subject: `Passed: ${item.artist} - ${item.album}`,
-    lines: [`${dj?.name ?? 'A DJ'} passed on the request for ${item.artist} - ${item.album}.`],
+    subject: `Request passed: ${record(item.artist, item.album)}`,
+    lines: [
+      `${dj?.name ?? 'A DJ'} passed on the request for ${record(item.artist, item.album)}. Any DJ can take it now.`,
+    ],
   });
 };

@@ -278,6 +278,73 @@ describe('EMAIL_ENABLED gating', () => {
 });
 
 /**
+ * `sendNotificationEmail` (BS#2806): the free-form sender the music-director review notices use. It shares
+ * `sendEmail`'s SES path, so it must share the `EMAIL_ENABLED` gate too, and hand SES the caller's recipients,
+ * subject and both bodies untouched.
+ */
+describe('sendNotificationEmail', () => {
+  const NOTICE = {
+    to: ['md-one@example.org', 'md-two@example.org'],
+    subject: 'Request passed: Juana Molina – DOGA',
+    text: 'Test DJ passed on the request for Juana Molina – DOGA. Any DJ can take it now.',
+    html: '<p>Test DJ passed on the request for Juana Molina – DOGA. Any DJ can take it now.</p>',
+  };
+
+  beforeEach(() => {
+    process.env.SES_FROM_EMAIL = 'test@wxyc.org';
+    process.env.SES_ACCESS_KEY_ID = 'test';
+    process.env.SES_SECRET_ACCESS_KEY = 'test';
+    process.env.AWS_REGION = 'us-east-1';
+    jest.clearAllMocks();
+    jest.resetModules();
+  });
+
+  afterEach(() => {
+    delete process.env.EMAIL_ENABLED;
+  });
+
+  it('hands SES the recipients, subject and both bodies, from SES_FROM_EMAIL', async () => {
+    process.env.EMAIL_ENABLED = 'true';
+    const emailModule = await import('../../../shared/authentication/src/email');
+    const { SendEmailCommand } = (await import('@aws-sdk/client-ses')) as unknown as { SendEmailCommand: jest.Mock };
+
+    await emailModule.sendNotificationEmail(NOTICE);
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(SendEmailCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        Source: 'test@wxyc.org',
+        Destination: { ToAddresses: ['md-one@example.org', 'md-two@example.org'] },
+        Message: {
+          Subject: { Data: NOTICE.subject },
+          Body: { Text: { Data: NOTICE.text }, Html: { Data: NOTICE.html } },
+        },
+      })
+    );
+  });
+
+  it('sends nothing when EMAIL_ENABLED=false, even with SES entirely unconfigured', async () => {
+    process.env.EMAIL_ENABLED = 'false';
+    delete process.env.SES_FROM_EMAIL;
+    delete process.env.SES_ACCESS_KEY_ID;
+    delete process.env.SES_SECRET_ACCESS_KEY;
+    const emailModule = await import('../../../shared/authentication/src/email');
+
+    await expect(emailModule.sendNotificationEmail(NOTICE)).resolves.toBeUndefined();
+
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it('rejects on a send failure, so a caller whose request must not fail wraps it', async () => {
+    process.env.EMAIL_ENABLED = 'true';
+    mockSend.mockRejectedValueOnce(new Error('ses down') as never);
+    const emailModule = await import('../../../shared/authentication/src/email');
+
+    await expect(emailModule.sendNotificationEmail(NOTICE)).rejects.toThrow('ses down');
+  });
+});
+
+/**
  * Credential resolution for the SES client.
  *
  * These keys are SES-only (IAM user `no-reply-sender`, policy
@@ -410,7 +477,8 @@ describe('SES credential resolution (BS#2518)', () => {
   // variable being SET is the hazard whatever this module reads, and pinning
   // it here implied a sender was the right place to notice — which is exactly
   // the inversion #2532 fixed, since the container the shadowing silences
-  // sends no email at all. What stays here is credential RESOLUTION, which is
+  // sent no email at the time (it sends the review notices since BS#2806, and
+  // still lazily). What stays here is credential RESOLUTION, which is
   // this module's own behaviour.
 });
 

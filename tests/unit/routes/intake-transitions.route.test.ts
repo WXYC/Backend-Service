@@ -111,6 +111,19 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
     expect(res.body.reason).toBe('state_changed');
   });
 
+  if (action === 'pass') {
+    // A hung SES must not hold a pass that already committed.
+    test('a notice that never settles does not hold the response', async () => {
+      mockRole('dj');
+      const item = { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA' };
+      mockTransition.mockResolvedValueOnce({ outcome: 'updated', item });
+      mockNotifyPass.mockReturnValueOnce(new Promise<void>(() => {}));
+      const res = await post(path, body);
+      expect([res.status, res.body]).toEqual([200, item]);
+      expect(mockNotifyPass).toHaveBeenCalledWith({ id: 7, artist: 'Juana Molina', album: 'DOGA' }, 'caller-id');
+    }, 2000);
+  }
+
   test('a missing item is a 404', async () => {
     mockRole('stationManager');
     mockTransition.mockResolvedValue({ outcome: 'not_found' });

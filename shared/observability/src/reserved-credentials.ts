@@ -58,8 +58,9 @@ let warnedReserved = false;
  * NOT from whichever module happens to consume AWS. That placement is the whole
  * point of BS#2532: the detector previously lived in the three SES senders,
  * which inverted its coverage — `apps/backend` holds two of the repo's three
- * `CloudWatchClient` constructions and sends no email, so the container the
- * shadowing actually silences was the one container that never ran the check,
+ * `CloudWatchClient` constructions and then sent no email (it sends the review
+ * notices since BS#2806, but only lazily), so the container the shadowing
+ * actually silences was the one container that never ran the check,
  * while the containers that did ran it lazily on first send and not at all
  * under `EMAIL_ENABLED=false`.
  *
