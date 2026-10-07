@@ -50,6 +50,7 @@ import {
   linkRotationToAlbum,
   UNCATALOGUED_ROTATION_MAX_LIMIT,
 } from '../../../apps/backend/services/library.service';
+import { rotationSuccessorSql } from '../../../apps/backend/utils/sql-fragments';
 import { ROTATION_ROW_SUMMARY_KEYS } from '../../mocks/library-service-rotation.mock';
 
 /**
@@ -88,6 +89,9 @@ test('the shared rotation service double publishes the same column set as the re
   expect([...ROTATION_ROW_SUMMARY_KEYS].sort()).toEqual(PUBLISHED_ROTATION_COLUMNS);
 });
 
+/** The moved-away exclusion, `NOT EXISTS (a row naming this one in moved_from_rotation_id)`, as the drizzle mock renders it. */
+const NOT_MOVED_AWAY = { notExists: rotationSuccessorSql() };
+
 describe('getUncataloguedRotationFromDB (BS#2109)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -113,7 +117,7 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
     expect(selectChain.from).toHaveBeenCalledWith(rotation);
     // Exact-match, so a COALESCE-0 predicate (or any added clause) fails here
     // rather than needing a separate substring assertion against rendered SQL.
-    expect(selectChain.where).toHaveBeenCalledWith({ isNull: rotation.album_id });
+    expect(selectChain.where).toHaveBeenCalledWith({ and: [{ isNull: rotation.album_id }, NOT_MOVED_AWAY] });
     // The query builder never calls selectDistinctOn — no dedup collapse.
     expect(db.selectDistinctOn).not.toHaveBeenCalled();
   });
@@ -190,7 +194,7 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
     await getUncataloguedRotationFromDB();
 
     expect(chain.where).toHaveBeenCalledTimes(1);
-    expect(chain.where).toHaveBeenCalledWith({ isNull: rotation.album_id });
+    expect(chain.where).toHaveBeenCalledWith({ and: [{ isNull: rotation.album_id }, NOT_MOVED_AWAY] });
     expect(chain.orderBy).toHaveBeenCalledWith({ desc: rotation.add_date }, { asc: rotation.id });
   });
 
@@ -230,7 +234,7 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
       await getUncataloguedRotationFromDB({ status: 'killed' });
 
       expect(chain.where).toHaveBeenCalledWith({
-        and: [{ isNull: rotation.album_id }, rotationKilledSql()],
+        and: [{ isNull: rotation.album_id }, NOT_MOVED_AWAY, rotationKilledSql()],
       });
       expect(chain.orderBy).toHaveBeenCalledWith({ desc: rotation.kill_date }, { asc: rotation.id });
     });
@@ -245,9 +249,19 @@ describe('getUncataloguedRotationFromDB (BS#2109)', () => {
       await getUncataloguedRotationFromDB({ status: 'active' });
 
       expect(chain.where).toHaveBeenCalledWith({
-        and: [{ isNull: rotation.album_id }, rotationActiveSql()],
+        and: [{ isNull: rotation.album_id }, NOT_MOVED_AWAY, rotationActiveSql()],
       });
       expect(chain.orderBy).toHaveBeenCalledWith({ desc: rotation.add_date }, { asc: rotation.id });
+    });
+
+    // A moved record's chain is one record (BS#3007): a row some other row's `moved_from_rotation_id` names is not
+    // queued, whatever its status, so the librarian sees the record once, at its newest row.
+    it.each([['all'], ['active'], ['killed']] as const)('leaves out a moved-away row for %s', async (status) => {
+      const chain = mockRead();
+
+      await getUncataloguedRotationFromDB({ status });
+
+      expect(chain.where.mock.calls[0][0].and).toContainEqual(NOT_MOVED_AWAY);
     });
 
     it('still bounds a status-filtered read with the same limit/offset window', async () => {
@@ -517,6 +531,51 @@ describe('linkRotationToAlbum (BS#2109)', () => {
     // Covers BS#2410's flowsheet UPDATE too: neither write runs on a row this
     // request did not link.
     expect(db.update).not.toHaveBeenCalled();
+  });
+
+  describe("a moved record's chain is one record (BS#3007)", () => {
+    const seedLink = (existing: Record<string, unknown>, updated: unknown[] = [{ id: ROTATION_ID }]) => {
+      const albumChain = createMockQueryChain();
+      albumChain.limit = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
+      const rotationSelectChain = createMockQueryChain();
+      rotationSelectChain.limit = jest.fn().mockResolvedValue([existing]);
+      db.select.mockReturnValueOnce(albumChain).mockReturnValueOnce(rotationSelectChain);
+      db.update.mockReturnValue(createMockQueryChain(updated));
+      return rotationSelectChain;
+    };
+
+    it('refuses a row that was moved to another bin with the existing conflict, writing nothing', async () => {
+      seedLink({ album_id: null, has_successor: true });
+
+      await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toEqual({ outcome: 'already_linked' });
+
+      expect(db.update).not.toHaveBeenCalled();
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it("links the newest row's unlinked ancestors in the same transaction, behind the same album_id IS NULL guard", async () => {
+      seedLink({ album_id: null, has_successor: false });
+
+      await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toMatchObject({ outcome: 'linked' });
+
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(db.execute).toHaveBeenCalledTimes(1);
+      const [ancestors] = db.execute.mock.calls[0] as unknown as [{ sql: string[]; values: unknown[] }];
+      const text = ancestors.sql.join('?');
+      expect(text).toContain('WITH RECURSIVE ancestors');
+      expect(text).toMatch(/UNION\s+SELECT/);
+      expect(text).toMatch(/album_id IS NULL/);
+      expect(ancestors.values).toContain(ALBUM_ID);
+      expect(ancestors.values).toContain(ROTATION_ID);
+    });
+
+    it('does not walk the chain when the guarded UPDATE of the row itself lost a race', async () => {
+      seedLink({ album_id: null, has_successor: false }, []);
+
+      await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toEqual({ outcome: 'already_linked' });
+
+      expect(db.execute).not.toHaveBeenCalled();
+    });
   });
 
   it('returns rotation_not_found when the rotation row does not exist', async () => {

@@ -182,7 +182,13 @@ describe('addToRotation', () => {
 
 describe('the legacy bases (BS#2810)', () => {
   const CUTOVER = '2027-01-12';
-  type Chain = { id: number; album_id: number | null; add_date: string; moved_from_rotation_id: number | null };
+  type Chain = {
+    id: number;
+    album_id: number | null;
+    add_date: string;
+    moved_from_rotation_id: number | null;
+    has_successor?: boolean;
+  };
   const row = (id: number, add_date: string, moved_from_rotation_id: number | null = null, album_id = null): Chain => ({
     id,
     album_id,
@@ -223,6 +229,17 @@ describe('the legacy bases (BS#2810)', () => {
       seedChain(chain);
       await expect(insertAlbum(ALBUM, basis)).rejects.toBeInstanceOf(RotationNotEligibleError);
       expect(db.insert).not.toHaveBeenCalled();
+    });
+
+    it('refuses a row that was moved to another bin, whatever its date, and writes nothing', async () => {
+      seedChain([{ ...row(1, '2026-12-01'), has_successor: true }]);
+      await expect(insertAlbum(ALBUM, basis)).rejects.toBeInstanceOf(RotationNotEligibleError);
+      expect(db.insert).not.toHaveBeenCalled();
+    });
+
+    it('imports the newest row of a chain whose ancestor was linked by old data', async () => {
+      seedChain([{ ...row(2, '2027-02-01', 1), has_successor: false }, row(1, '2026-12-01', null, 7)]);
+      await expect(insertAlbum(ALBUM, { kind: 'legacy_import', rotationId: 2 })).resolves.toEqual({ id: 5 });
     });
 
     it('answers the contract 409 body', () => {

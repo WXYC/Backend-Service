@@ -312,7 +312,7 @@ components:
             added on or before the cutover date (or moved from one that was). The release is
             created and the row linked (plays included) in one transaction, accepted on either
             side of the cutover date. A killed row is importable. A row that is linked, not
-            legacy or missing is a 409 `rotation_not_eligible` and nothing is written,
+            legacy, missing or moved to another bin is a 409 `rotation_not_eligible` and nothing is written,
             including a `labels` row. Omit it for an ordinary add.
 
     AlbumView:
@@ -2403,7 +2403,7 @@ paths:
             enters the library only through intake filing. Body `{ message, reason:
             'review_required' }`; nothing is written, including a `labels` row for new
             label text (BS#2807). Also `rotation_not_eligible` when `from_rotation_id` names
-            a row that is linked, not legacy or missing: nothing is written either (BS#2810).
+            a row that is linked, not legacy, missing or moved to another bin: nothing is written either (BS#2810, BS#3007).
           content:
             application/json:
               schema:
@@ -3233,7 +3233,9 @@ paths:
         '404':
           description: Rotation entry not found, or album not found.
         '409':
-          description: Rotation entry is already linked to a library release.
+          description: >-
+            Rotation entry is already linked to a library release, or was moved to another bin
+            (only the newest row of a moved record's chain links, BS#3007).
 
   /library/rotation/{id}:
     get:

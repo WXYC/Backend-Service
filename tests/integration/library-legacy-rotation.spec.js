@@ -186,4 +186,79 @@ describe('legacy rotation rows: import and move (BS#2810)', () => {
       expect(moved).toHaveLength(1);
     });
   });
+  describe("a moved record's chain is one record (BS#3007)", () => {
+    /** Three rows linked by `moved_from_rotation_id`, oldest first; the older two were killed by their moves. */
+    const movedChain = async (suffix) => {
+      const first = await typedRow(suffix, 'L');
+      const second = await auth.post('/library/rotation').send(moveBody(first, 'M')).expect(201);
+      createdRotationIds.push(second.body.id);
+      const third = await auth.post('/library/rotation').send(moveBody(second.body, 'H')).expect(201);
+      createdRotationIds.push(third.body.id);
+      return [first, second.body, third.body];
+    };
+    const albumIds = async (rows) =>
+      (await sql`SELECT album_id FROM ${sql(SCHEMA)}.rotation WHERE id = ANY(${rows.map((r) => r.id)})`).map(
+        (r) => r.album_id
+      );
+
+    test('imports the newest row, and links every row in the chain to the one release', async () => {
+      const chain = await movedChain('chain-import');
+      const title = `Imported chain ${runId}`;
+
+      const res = await auth.post('/library').send(importBody(title, chain[2].id)).expect(201);
+
+      expect(await libraryCount(title)).toBe(1);
+      expect(await albumIds(chain)).toEqual([res.body.id, res.body.id, res.body.id]);
+    });
+
+    test('refuses a moved-away row on import with 409 and writes nothing, not even a label', async () => {
+      const chain = await movedChain('chain-old-import');
+      const label = `Chain Label ${runId}`;
+
+      const res = await auth
+        .post('/library')
+        .send(importBody(`Imported old row ${runId}`, chain[0].id, label))
+        .expect(409);
+
+      expect(res.body.reason).toBe('rotation_not_eligible');
+      expect(await libraryCount(`Imported old row ${runId}`)).toBe(0);
+      expect(await sql`SELECT id FROM ${sql(SCHEMA)}.labels WHERE label_name = ${label}`).toHaveLength(0);
+      expect(await albumIds(chain)).toEqual([null, null, null]);
+    });
+
+    test('imports the newest row after an ancestor was linked, leaving that ancestor alone', async () => {
+      const chain = await movedChain('chain-linked-ancestor');
+      // Old data: a row the chain was moved from, already linked by an import before moves shared a release.
+      const earlier = await typedRow('chain-earlier');
+      const earlierRelease = await auth
+        .post('/library')
+        .send(importBody(`Imported earlier ${runId}`, earlier.id))
+        .expect(201);
+      await sql`UPDATE ${sql(SCHEMA)}.rotation SET moved_from_rotation_id = ${earlier.id} WHERE id = ${chain[0].id}`;
+
+      const res = await auth
+        .post('/library')
+        .send(importBody(`Imported over linked ${runId}`, chain[2].id))
+        .expect(201);
+
+      expect(await albumIds(chain)).toEqual([res.body.id, res.body.id, res.body.id]);
+      expect((await rotationRow(earlier.id)).album_id).toBe(earlierRelease.body.id);
+    });
+
+    test('PATCH /library/rotation/{id}/link refuses a moved-away row, and the newest row links its ancestors', async () => {
+      const chain = await movedChain('chain-link');
+      // A release to link to: the one a plain import of an unrelated row makes.
+      const target = await typedRow('chain-link-target');
+      const made = await auth
+        .post('/library')
+        .send(importBody(`Link target ${runId}`, target.id))
+        .expect(201);
+
+      await auth.patch(`/library/rotation/${chain[0].id}/link`).send({ album_id: made.body.id }).expect(409);
+      expect(await albumIds(chain)).toEqual([null, null, null]);
+
+      await auth.patch(`/library/rotation/${chain[2].id}/link`).send({ album_id: made.body.id }).expect(200);
+      expect(await albumIds(chain)).toEqual([made.body.id, made.body.id, made.body.id]);
+    });
+  });
 });
