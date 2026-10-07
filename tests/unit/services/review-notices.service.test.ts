@@ -309,6 +309,19 @@ describe('notices', () => {
       expect(mockSend).not.toHaveBeenCalled();
     });
 
+    test.each([
+      ['notice 1', notifyReviewEdited],
+      ['notice 2', notifyReviewRecorded],
+    ])('%s to no account is not an error: nothing is reported or logged', async (_n, notify) => {
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
+      mockQueue.push([]);
+      await notify({ ...AUTHOR, name: 'Test MD' });
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(mockCapture).not.toHaveBeenCalled();
+      expect(logged).not.toHaveBeenCalled();
+      logged.mockRestore();
+    });
+
     test('an account is looked up through its station membership, so a former member is told nothing', async () => {
       mockQueue.push(ACCOUNT);
       await notifyReviewEdited({ ...AUTHOR, name: 'Test MD' });
