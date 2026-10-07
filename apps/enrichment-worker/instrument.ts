@@ -32,8 +32,4 @@ Sentry.init({
   release: process.env.SENTRY_RELEASE,
   environment: process.env.NODE_ENV || 'production',
   tracesSampleRate: resolveTracesSampleRate(),
-  // Sentry 11 defaults to span streaming. Pin the transaction lifecycle every
-  // container ran on Sentry 10, matching backend and auth (BS#2948), so CDC
-  // handler transactions still ship as transactions with their LML spans.
-  traceLifecycle: 'static',
 });

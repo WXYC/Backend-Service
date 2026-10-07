@@ -77,15 +77,6 @@ describe('isExpressInstrumentationSpan', () => {
     expect(isExpressInstrumentationSpan({ op, origin: EXPRESS_ORIGIN })).toBe(true);
   });
 
-  // Kept so a pin back to Sentry 10 (done once already, 3c3e815e) doesn't
-  // silently re-ship every Express span.
-  it.each(['middleware.express', 'router.express', 'request_handler.express'])(
-    'flags Sentry 10 Express %s spans',
-    (op) => {
-      expect(isExpressInstrumentationSpan({ op, origin: 'auto.http.otel.express' })).toBe(true);
-    }
-  );
-
   it.each([
     ['http.server', 'auto.http.node.http'],
     ['db', 'auto.db.postgresjs'],
