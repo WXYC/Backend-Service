@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
-import { ReviewRequiredError } from '../../../apps/backend/utils/review-gate-basis';
+import { ReviewRequiredError, RotationNotEligibleError } from '../../../apps/backend/utils/review-gate-basis';
 
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockGetAlbumByLegacyId = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
@@ -70,7 +70,8 @@ type LinkRotationOutcomeMock =
   | { outcome: 'rotation_not_found' }
   | { outcome: 'already_linked' }
   | { outcome: 'album_not_found' };
-const mockLinkRotationToAlbum = jest.fn<(rotationId: number, albumId: number) => Promise<LinkRotationOutcomeMock>>();
+const mockLinkRotationToAlbum =
+  jest.fn<(rotationId: number, albumId: number, tx?: unknown) => Promise<LinkRotationOutcomeMock>>();
 
 // GET/POST/PATCH/DELETE /library/rotation/cards (BS#2472).
 type RotationCardMock = { id: number; bin: string; number: number; name: string | null };
@@ -6612,6 +6613,101 @@ describe('library.controller', () => {
       expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), { kind: 'pre_cutover' }, undefined);
       expect(res.status).toHaveBeenCalledWith(409);
       expect(res.json).toHaveBeenCalledWith(body409);
+    });
+
+    describe('the legacy bases (BS#2810)', () => {
+      const notEligible = new RotationNotEligibleError(
+        'The rotation row is linked, or was not in rotation before the cutover'
+      );
+      const importReq = (from_rotation_id: unknown) =>
+        ({
+          body: { album_title: 'DOGA', artist_id: 42, label: 'Sonamos', genre_id: 11, format_id: 1, from_rotation_id },
+        }) as unknown as Request;
+
+      it('POST /library with from_rotation_id imports on the legacy_import basis and links on the same transaction', async () => {
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 3 });
+        const res = mockResponse();
+
+        await addAlbum(importReq(12), res, next);
+
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.anything(),
+          { kind: 'legacy_import', rotationId: 12 },
+          expect.anything()
+        );
+        expect(mockLinkRotationToAlbum).toHaveBeenCalledWith(12, 8, mockInsertAlbum.mock.calls[0][2]);
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it('POST /library without it still takes the pre_cutover basis and links nothing', async () => {
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+        await addAlbum(importReq(undefined), mockResponse(), next);
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.anything(), { kind: 'pre_cutover' }, expect.anything());
+        expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['an insert refused as not eligible', () => mockInsertAlbum.mockRejectedValue(notEligible)],
+        [
+          'a row linked between the check and the link',
+          () => {
+            mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+            mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'already_linked' });
+          },
+        ],
+      ])('POST /library answers 409 rotation_not_eligible for %s', async (_label, arrange) => {
+        arrange();
+        const res = mockResponse();
+        await addAlbum(importReq(12), res, next);
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith({ message: expect.any(String), reason: 'rotation_not_eligible' });
+      });
+
+      it.each([[0], [-1], [1.5], ['12']])('POST /library rejects from_rotation_id %p with a 400', async (value) => {
+        await expect(addAlbum(importReq(value), mockResponse(), next)).rejects.toMatchObject({ statusCode: 400 });
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      const moveReq = (extra: object = {}) =>
+        ({
+          body: {
+            rotation_bin: 'L',
+            artist_name: 'Jockstrap',
+            album_title: 'I Love You Jennifer B',
+            moved_from_rotation_id: 12,
+            ...extra,
+          },
+        }) as unknown as Request;
+
+      it('POST /library/rotation with moved_from_rotation_id takes the legacy_move basis', async () => {
+        mockAddToRotation.mockResolvedValue({ id: 20, album_id: null, rotation_bin: 'L' });
+        const res = mockResponse();
+        await addRotation(moveReq(), res, next);
+        expect(mockAddToRotation).toHaveBeenCalledWith(
+          expect.anything(),
+          { kind: 'legacy_move', fromRotationId: 12 },
+          undefined
+        );
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
+      it('POST /library/rotation answers 409 rotation_not_eligible when the move is refused', async () => {
+        mockAddToRotation.mockRejectedValue(notEligible);
+        const res = mockResponse();
+        await addRotation(moveReq(), res, next);
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith({ message: notEligible.message, reason: 'rotation_not_eligible' });
+      });
+
+      it.each([
+        ['a non-integer id', { moved_from_rotation_id: 'x' }],
+        ['a non-positive id', { moved_from_rotation_id: 0 }],
+        ['an album_id beside it', { album_id: 5 }],
+      ])('POST /library/rotation rejects %s with a 400', async (_label, extra) => {
+        await expect(addRotation(moveReq(extra), mockResponse(), next)).rejects.toMatchObject({ statusCode: 400 });
+        expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
     });
 
     it('POST /library/filings answers 409 with reason review_required in the body, not just the status', async () => {
