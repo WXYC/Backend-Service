@@ -4,12 +4,8 @@ import * as reviewsService from '../services/reviews.service.js';
 import { AUTHOR_MAX, type OnBehalf, type ReviewFields } from '../services/reviews.service.js';
 import WxycError from '../utils/error.js';
 import { notifyReviewSubmitted } from '../services/review-notices.service.js';
-import {
-  parseBooleanQueryParam,
-  parseInt4BodyId,
-  parseInt4PathId,
-  parseInt4QueryParam,
-} from '../utils/query-params.js';
+import { parseBooleanQueryParam, parseInt4PathId, parseInt4QueryParam } from '../utils/query-params.js';
+import { parseRecordSubject } from '../utils/record-subject.js';
 import { reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
@@ -74,15 +70,15 @@ export const createReview: RequestHandler = async (req, res) => {
   const onBehalf = ON_BEHALF_KEYS.some((key) => key in body);
   if (onBehalf && !actor.manage)
     throw new WxycError('author, author_user_id, medium and accept require reviews: manage', 403);
-  const intake_item_id = parseInt4BodyId(body.intake_item_id, 'intake_item_id');
-  const album_id = parseInt4BodyId(body.album_id, 'album_id');
-  if ((intake_item_id === undefined) === (album_id === undefined)) {
-    throw new WxycError('Send exactly one of intake_item_id and album_id', 400);
-  }
-  const subject = { intake_item_id, album_id };
+  const subject = parseRecordSubject(body);
   const fields = parseFields(body);
   const result = onBehalf
-    ? await reviewsService.recordReview(subject, fields, parseOnBehalf(body, intake_item_id !== undefined), actor)
+    ? await reviewsService.recordReview(
+        subject,
+        fields,
+        parseOnBehalf(body, subject.intake_item_id !== undefined),
+        actor
+      )
     : await reviewsService.createReview(subject, fields, actor);
   if (result.outcome === 'subject_not_held') {
     return void conflict(res, 'subject_not_held', 'You do not hold this intake item, or the subject does not exist');

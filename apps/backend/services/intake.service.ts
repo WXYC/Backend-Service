@@ -23,6 +23,7 @@ import type { ReviewsActor } from '../utils/review-grants.js';
 import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
 import { mayFileItem } from '../utils/intake-filing-rule.js';
 import { lockReleaseRow } from '../utils/release-row-lock.js';
+import type { RecordSubject } from '../utils/record-subject.js';
 
 export { mayFileItem, lockReleaseRow };
 
@@ -495,11 +496,11 @@ const filedRelease = (item: { album_id: number | null; state: string }) =>
  */
 export const lockRecordSubject = async (
   tx: Pick<typeof db, 'select'>,
-  subject: { intake_item_id?: number; album_id?: number },
+  subject: RecordSubject,
   itemMode: 'share' | 'update'
 ) => {
-  if (subject.intake_item_id === undefined) {
-    return (await lockReleaseRow(tx, subject.album_id!)) ? { album_id: subject.album_id! } : undefined;
+  if (!(subject.intake_item_id !== undefined)) {
+    return (await lockReleaseRow(tx, subject.album_id)) ? { album_id: subject.album_id } : undefined;
   }
   const columns = { album_id: intake_items.album_id, state: intake_items.state };
   const where = eq(intake_items.id, subject.intake_item_id);
