@@ -16,10 +16,17 @@
  *      count and commit. On a slow runner that wait can legitimately time out with a 503: the spec logs it and
  *      re-sends the loser once, which must then answer 409 naming the winner. Two 200s, a 500, or a 409 naming the
  *      wrong artist are failures.
- *  (b) The lock does not reach `artists`. S holds a bucket row ABOVE mover X, so the re-file locks X's crossreference
- *      row and blocks on S's. While it is blocked, `SELECT ... FROM artists WHERE id = X FOR KEY SHARE NOWAIT`
- *      succeeds. A joined `.for('update')` would have locked X's `artists` row too and the probe would be refused
- *      with 55P03.
+ *  (b) The bucket lock does not reach OTHER artists' `artists` rows. S holds a bucket row ABOVE mover X, so the re-file
+ *      locks X's crossreference row and blocks on S's. While it is blocked, `SELECT ... FROM artists WHERE id = <other>
+ *      FOR KEY SHARE NOWAIT` succeeds. A joined `.for('update')` would have locked up to 263 `artists` rows and the
+ *      probe would be refused with 55P03. The mover's OWN `artists` row is locked FOR NO KEY UPDATE (first, before the
+ *      card is read, matching `deleteArtistFromDB`'s order), which does not conflict with KEY SHARE: the same probe on
+ *      the mover succeeds too.
+ *  (d) Stale letters. A re-file must lock the artist's `artists` row BEFORE reading `code_letters`, or it checks one
+ *      bucket and writes into another. S has an uncommitted `UPDATE artists SET code_letters = <holder's>` on mover X;
+ *      the re-file races "the response arrives" against "the request is seen waiting on S". Unfixed code answers 200
+ *      first (a duplicate holder once S commits). Fixed code waits on S; S is committed at once and the answer is 409
+ *      naming the holder. A 503 is inconclusive (lock timeout on a slow runner) and is never retried.
  *  (c) A live writer holding a bucket row past the timeout makes the request stand down with 503
  *      `LockUnavailableRefusal`.
  */
@@ -97,6 +104,45 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
     };
   };
 
+  /** Opens a raw transaction holding an uncommitted `UPDATE artists SET code_letters` on `artistId`'s row. */
+  const holdLettersUpdate = async (artistId, letters) => {
+    let release;
+    const released = new Promise((resolve) => {
+      release = resolve;
+    });
+    let resolvePid;
+    const held = new Promise((resolve) => {
+      resolvePid = resolve;
+    });
+    const done = sql.begin(async (tx) => {
+      const [{ pid }] = await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`UPDATE ${sql(SCHEMA)}.artists SET code_letters = ${letters} WHERE id = ${artistId}`;
+      resolvePid(pid);
+      await released;
+    });
+    const pid = await held;
+    return {
+      pid,
+      commit: async () => {
+        release();
+        await done;
+      },
+    };
+  };
+
+  /** Resolves true once a request backend is seen blocked behind `sPid`; false after `ms`, or once `stop.done`. */
+  const seenWaitingOn = async (sPid, stop, ms = BLOCKED_WAIT_MS) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline && !stop.done) {
+      const waiting = await sql`
+        SELECT pid FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND ${sPid}::int = ANY(pg_blocking_pids(pid))`;
+      if (waiting.length > 0) return true;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    return false;
+  };
+
   /** Polls until `count` request backends (not S, not this probe) are waiting on a lock in a crossreference statement. */
   const waitForWaiters = async (sPid, count) => {
     const deadline = Date.now() + BLOCKED_WAIT_MS;
@@ -152,7 +198,7 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
     expect(loser.body.artist).toMatchObject({ id: winnerId, code_artist_number: TARGET });
   }, 30000);
 
-  it('(b) does not lock the artists rows: KEY SHARE on the mover succeeds while the re-file is blocked', async () => {
+  it("(b) locks no other artist's row: KEY SHARE on the mover and on the others succeeds while the re-file is blocked", async () => {
     const [x, above] = await newBucket(2);
     const s = await holdRow(above);
     let released = false;
@@ -163,7 +209,7 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
       await waitForWaiters(s.pid, 1);
       probe = await sql
         .begin(async (tx) => {
-          await tx.unsafe(`SELECT id FROM "${SCHEMA}".artists WHERE id = $1 FOR KEY SHARE NOWAIT`, [x]);
+          await tx.unsafe(`SELECT id FROM "${SCHEMA}".artists WHERE id IN ($1, $2) FOR KEY SHARE NOWAIT`, [x, above]);
           return 'granted';
         })
         .catch((error) => error.code);
@@ -191,5 +237,47 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
 
     expect(res.status).toBe(503);
     expect(res.body.reason).toBe('lock_unavailable');
+  }, 30000);
+
+  it("(d) waits on an uncommitted re-letter of the mover's row instead of checking the stale bucket: 409 naming the holder", async () => {
+    const [holder] = await newBucket(1);
+    const [mover] = await newBucket(1);
+    const [{ code_letters: holderLetters }] =
+      await sql`SELECT code_letters FROM ${sql(SCHEMA)}.artists WHERE id = ${holder}`;
+    await sql`UPDATE ${sql(SCHEMA)}.genre_artist_crossreference SET artist_genre_code = ${TARGET} WHERE artist_id = ${holder}`;
+    const s = await holdLettersUpdate(mover, holderLetters);
+    const stop = { done: false };
+    let committed = false;
+    let first;
+    let response;
+    try {
+      const pending = refile(mover).then((r) => ({ kind: 'response', r }));
+      const waiting = seenWaitingOn(s.pid, stop).then((seen) => ({ kind: seen ? 'waiting' : 'never' }));
+      first = await Promise.race([pending, waiting]);
+      if (first.kind === 'waiting') {
+        await s.commit();
+        committed = true;
+        response = (await pending).r;
+      } else if (first.kind === 'response') {
+        response = first.r;
+      } else {
+        throw new Error('inconclusive: the request neither answered nor waited on S within the budget');
+      }
+    } finally {
+      stop.done = true;
+      if (!committed) await s.commit();
+    }
+
+    if (response.status === 503) {
+      throw new Error('inconclusive: lock timeout on a slow runner (503); not retried');
+    }
+    expect(response.status).toBe(409);
+    expect(response.body.reason).toBe('artist_code_conflict');
+    expect(response.body.artist).toMatchObject({ id: holder, code_artist_number: TARGET });
+    const holders = await sql`
+      SELECT x.artist_id FROM ${sql(SCHEMA)}.genre_artist_crossreference x
+      JOIN ${sql(SCHEMA)}.artists a ON a.id = x.artist_id
+      WHERE a.code_letters = ${holderLetters} AND x.genre_id = ${GENRE} AND x.artist_genre_code = ${TARGET}`;
+    expect(holders.map((h) => h.artist_id)).toEqual([holder]);
   }, 30000);
 });

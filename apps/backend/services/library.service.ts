@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, ne, notExists, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, notExists, or, sql, SQL, type Column } from 'drizzle-orm';
 import { alias, getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -4629,12 +4629,15 @@ export type ArtistRefileOutcome =
  * release re-labels on its own (the physical labels are the librarian's follow-up, reported as `releases_to_relabel`).
  *
  * One transaction, `lock_timeout` bounded (`REFILE_ARTIST_LOCK_TIMEOUT_MS`), so a live writer makes this stand down
- * (`lock_unavailable`) rather than queue. **Lock design:** the whole `(code_letters, genre_id)` bucket is locked in ONE
- * statement over `genre_artist_crossreference` alone, `ORDER BY artist_id`, plain `FOR UPDATE` on `tx`. Alone, so only
- * that table's rows lock (a join would also lock up to 263 `artists` rows and take them in the opposite order from
- * `deleteArtistFromDB`); never `.for('update', { of })` (drizzle schema-qualifies the name and Postgres rejects it); one
- * statement in a fixed order, so two concurrent re-files in a bucket serialize instead of deadlocking on their own rows.
- * Every read here runs on `tx`.
+ * (`lock_unavailable`) rather than queue. **Lock design, in order:** (1) the artist's own `artists` row, `FOR NO KEY
+ * UPDATE`, selected from `artists` alone, BEFORE the card is read -- `code_letters` names the bucket, so a read ahead of
+ * the lock can check a stale bucket while a re-letter commits (and `NO KEY UPDATE` still admits the `KEY SHARE` an FK
+ * insert takes). This is the same artists-row-then-crossreference order as `deleteArtistFromDB`. (2) The whole
+ * `(code_letters, genre_id)` bucket PLUS the artist's own crossreference rows (`artist_id = $a OR inArtistCodeBucket`),
+ * in ONE statement over `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`. Alone,
+ * so only that table's rows lock (a join would also lock up to 263 `artists` rows); never `.for('update', { of })`
+ * (drizzle schema-qualifies the name and Postgres rejects it); one statement in a fixed order, so two concurrent
+ * re-files in a bucket serialize instead of deadlocking on their own rows. Every read here runs on `tx`.
  *
  * **Watermark cost:** a real re-file advances the catalog watermark once (the statement-level trigger from migration
  * 0105), a full catalog re-download for every poller, the cost a rename pays. The trigger fires even for a zero-row
@@ -4655,25 +4658,33 @@ export const refileArtistInGenre = async (
     return await db.transaction(async (tx): Promise<ArtistRefileOutcome> => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${REFILE_ARTIST_LOCK_TIMEOUT_MS}ms'`));
 
-      const missing = async (): Promise<ArtistRefileOutcome> => ({
-        outcome: (await getArtistById(artist_id, tx)) ? 'not_filed' : 'artist_not_found',
-      });
+      // Lock the artist's own row FIRST, before anything reads `code_letters`: the bucket is derived from it, so a card
+      // read ahead of the lock can name a bucket a concurrent commit has already left. `artists` alone, never joined.
+      const [lockedArtist] = await tx
+        .select({ id: artists.id })
+        .from(artists)
+        .where(eq(artists.id, artist_id))
+        .for('no key update');
+      if (!lockedArtist) return { outcome: 'artist_not_found' };
 
       const card = await getArtistCardByIdInGenre(artist_id, genre_id, tx);
-      if (!card) return missing();
+      if (!card) return { outcome: 'not_filed' };
 
       const bucket = await tx
         .select({
           artist_id: genre_artist_crossreference.artist_id,
+          genre_id: genre_artist_crossreference.genre_id,
           code_number: genre_artist_crossreference.artist_genre_code,
           code_comp_letter: genre_artist_crossreference.code_comp_letter,
         })
         .from(genre_artist_crossreference)
-        .where(inArtistCodeBucket(card.code_letters, genre_id))
-        .orderBy(asc(genre_artist_crossreference.artist_id))
+        .where(
+          or(eq(genre_artist_crossreference.artist_id, artist_id), inArtistCodeBucket(card.code_letters, genre_id))
+        )
+        .orderBy(asc(genre_artist_crossreference.genre_id), asc(genre_artist_crossreference.artist_id))
         .for('update');
-      const own = bucket.find((row) => row.artist_id === artist_id);
-      if (!own) return missing();
+      const own = bucket.find((row) => row.artist_id === artist_id && row.genre_id === genre_id);
+      if (!own) return { outcome: 'not_filed' };
       if (own.code_comp_letter !== null) return { outcome: 'lettered_section' };
       // BS#3022: a Various Artists bucket is shared by every compilation in the genre, so re-numbering it moves them
       // all. Decided before the no-op return (resubmitting its own number is a refusal too) and, like it, with no UPDATE.

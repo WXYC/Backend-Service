@@ -23,7 +23,7 @@ const CARD = {
   code_comp_letter: null,
 };
 
-/** Rows for the three `select`s a full run issues, in order: card, bucket lock, owners (a miss issues one more). */
+/** Rows for the four `select`s a full run issues, in order: artists-row lock, card, bucket lock, owners. */
 const makeTx = (opts: { selects: unknown[][]; countRow?: number; throwOnSelect?: number; error?: unknown }) => {
   const calls: Call[] = [];
   let selectIndex = 0;
@@ -79,16 +79,19 @@ const run = async (opts: Parameters<typeof makeTx>[0], target = 31) => {
   return { outcome, calls, dbSelect };
 };
 
+/** The `artists` row the first statement locks. */
+const A = [{ id: 431 }];
+
 const BUCKET = (n: number, comp: string | null = null) => [
-  { artist_id: 100, code_number: 4, code_comp_letter: null },
-  { artist_id: 431, code_number: n, code_comp_letter: comp },
+  { artist_id: 100, genre_id: 6, code_number: 4, code_comp_letter: null },
+  { artist_id: 431, genre_id: 6, code_number: n, code_comp_letter: comp },
 ];
 
 describe('refileArtistInGenre (BS#2643)', () => {
   beforeEach(() => jest.clearAllMocks());
 
   it('refiles: locks the bucket on tx FOR UPDATE ordered, reads owners on tx, updates, counts', async () => {
-    const { outcome, calls, dbSelect } = await run({ selects: [[CARD], BUCKET(1), []] });
+    const { outcome, calls, dbSelect } = await run({ selects: [A, [CARD], BUCKET(1), []] });
 
     expect(outcome).toMatchObject({
       outcome: 'refiled',
@@ -98,20 +101,24 @@ describe('refileArtistInGenre (BS#2643)', () => {
     });
     expect(dbSelect).not.toHaveBeenCalled();
     const selects = calls.filter((c) => c.op === 'select');
-    expect(selects).toHaveLength(3);
-    expect(selects[1].methods).toEqual(['from', 'where', 'orderBy', 'for(update)']);
-    expect(selects[1].methods).not.toContain('innerJoin');
-    expect(selects[2].methods).toContain('innerJoin');
-    expect(selects[2].methods).not.toContain('for(update)');
+    expect(selects).toHaveLength(4);
+    // The artists row is locked first, alone (no join), NO KEY UPDATE, before the card is read.
+    expect(selects[0].methods).toEqual(['from', 'where', 'for(no key update)']);
+    expect(selects[1].methods).toContain('innerJoin');
+    expect(selects[1].methods).not.toContain('for(no key update)');
+    expect(selects[2].methods).toEqual(['from', 'where', 'orderBy', 'for(update)']);
+    expect(selects[2].methods).not.toContain('innerJoin');
+    expect(selects[3].methods).toContain('innerJoin');
+    expect(selects[3].methods).not.toContain('for(update)');
     expect(calls.filter((c) => c.op === 'update')).toHaveLength(1);
   });
 
   it('unchanged: issues no UPDATE and still counts releases', async () => {
-    const { outcome, calls, dbSelect } = await run({ selects: [[CARD], BUCKET(31)], countRow: 3 });
+    const { outcome, calls, dbSelect } = await run({ selects: [A, [CARD], BUCKET(31)], countRow: 3 });
 
     expect(outcome).toMatchObject({ outcome: 'unchanged', previous: 31, releases_to_relabel: 3 });
     expect(calls.some((c) => c.op === 'update')).toBe(false);
-    expect(calls.filter((c) => c.op === 'select')).toHaveLength(2);
+    expect(calls.filter((c) => c.op === 'select')).toHaveLength(3);
     expect(dbSelect).not.toHaveBeenCalled();
   });
 
@@ -120,7 +127,7 @@ describe('refileArtistInGenre (BS#2643)', () => {
       { artist_id: 431, artist_name: 'Isis', code_letters: 'IS', code_comp_letter: null },
       { artist_id: 7, artist_name: 'Isis Two', code_letters: 'IS', code_comp_letter: null },
     ];
-    const { outcome, calls } = await run({ selects: [[CARD], BUCKET(1), owners] });
+    const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(1), owners] });
 
     expect(outcome).toEqual({
       outcome: 'slot_taken',
@@ -137,7 +144,7 @@ describe('refileArtistInGenre (BS#2643)', () => {
   });
 
   it('lettered_section: refuses before the no-op and occupancy checks', async () => {
-    const { outcome, calls } = await run({ selects: [[CARD], BUCKET(0, 'A')] }, 0);
+    const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(0, 'A')] }, 0);
 
     expect(outcome).toEqual({ outcome: 'lettered_section' });
     expect(calls.some((c) => c.op === 'update')).toBe(false);
@@ -151,53 +158,64 @@ describe('refileArtistInGenre (BS#2643)', () => {
   ])(
     'various_artists_section: refuses code_letters %j with target %i before the no-op, issuing no UPDATE',
     async (codeLetters, target) => {
-      const { outcome, calls } = await run({ selects: [[{ ...CARD, code_letters: codeLetters }], BUCKET(4)] }, target);
+      const { outcome, calls } = await run(
+        { selects: [A, [{ ...CARD, code_letters: codeLetters }], BUCKET(4)] },
+        target
+      );
 
       expect(outcome).toEqual({ outcome: 'various_artists_section' });
       expect(calls.some((c) => c.op === 'update')).toBe(false);
-      expect(calls.filter((c) => c.op === 'select')).toHaveLength(2);
+      expect(calls.filter((c) => c.op === 'select')).toHaveLength(3);
     }
   );
 
   it('a lettered V/A section stays lettered_section, not various_artists_section', async () => {
-    const { outcome } = await run({ selects: [[{ ...CARD, code_letters: 'V/A' }], BUCKET(0, 'A')] }, 0);
+    const { outcome } = await run({ selects: [A, [{ ...CARD, code_letters: 'V/A' }], BUCKET(0, 'A')] }, 0);
 
     expect(outcome).toEqual({ outcome: 'lettered_section' });
   });
 
   it('an artist whose name says Various but whose letters are ordinary re-files', async () => {
     const card = { ...CARD, artist_name: 'Various Cruelties', code_letters: 'VA' };
-    const { outcome } = await run({ selects: [[card], BUCKET(1), []] });
+    const { outcome } = await run({ selects: [A, [card], BUCKET(1), []] });
 
     expect(outcome).toMatchObject({ outcome: 'refiled' });
   });
 
   it.each([
-    ['not_filed', [{ artist_id: 431, artist_name: 'Isis', code_letters: 'IS' }]],
-    ['artist_not_found', []],
-  ])('unlocked-read miss separates the 404s on tx (%s)', async (expected, byId) => {
-    const { outcome, dbSelect } = await run({ selects: [[], byId] });
+    ['artist_not_found', [[]], 1],
+    ['not_filed', [A, []], 2],
+  ])('a miss on tx separates the 404s: %s', async (expected, selects, selectCount) => {
+    const { outcome, calls, dbSelect } = await run({ selects });
 
     expect(outcome).toEqual({ outcome: expected });
+    expect(calls.filter((c) => c.op === 'select')).toHaveLength(selectCount);
     expect(dbSelect).not.toHaveBeenCalled();
   });
 
-  it('row gone from the locked set (concurrent delete): answers not_filed via getArtistById on tx', async () => {
-    const { outcome, dbSelect } = await run({
-      selects: [[CARD], [{ artist_id: 100, code_number: 4, code_comp_letter: null }], [{ artist_id: 431 }]],
+  it('row gone from the locked set (concurrent delete): answers not_filed with no further read', async () => {
+    const { outcome, dbSelect, calls } = await run({
+      selects: [A, [CARD], [{ artist_id: 100, genre_id: 6, code_number: 4, code_comp_letter: null }]],
     });
 
     expect(outcome).toEqual({ outcome: 'not_filed' });
+    expect(calls.filter((c) => c.op === 'select')).toHaveLength(3);
     expect(dbSelect).not.toHaveBeenCalled();
   });
 
-  it.each(['55P03', '40P01'])('maps SQLSTATE %s on the lock to lock_unavailable', async (code) => {
-    const { outcome } = await run({ selects: [[CARD]], throwOnSelect: 1, error: pgError(code) });
+  it.each(['55P03', '40P01'])('maps SQLSTATE %s on the bucket lock to lock_unavailable', async (code) => {
+    const { outcome } = await run({ selects: [A, [CARD]], throwOnSelect: 2, error: pgError(code) });
+
+    expect(outcome).toEqual({ outcome: 'lock_unavailable' });
+  });
+
+  it('maps a lock timeout on the artists-row lock itself to lock_unavailable', async () => {
+    const { outcome } = await run({ selects: [A], throwOnSelect: 0, error: pgError('55P03') });
 
     expect(outcome).toEqual({ outcome: 'lock_unavailable' });
   });
 
   it('rethrows an unrelated error', async () => {
-    await expect(run({ selects: [[CARD]], throwOnSelect: 1, error: pgError('23505') })).rejects.toThrow('pg');
+    await expect(run({ selects: [A, [CARD]], throwOnSelect: 2, error: pgError('23505') })).rejects.toThrow('pg');
   });
 });
