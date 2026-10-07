@@ -35,8 +35,10 @@ import {
   parseRotationUrls,
   enrichNewAlbum,
   fireAndForgetCanonicalEntity,
+  validateCanonicalCodeLetters,
 } from '../services/library-filing.service.js';
 import type { LibraryFilingRequestBody, NewArtistRequest } from '../services/library-filing.service.js';
+import { isVariousArtists } from '../services/requestLine/types.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
 import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
@@ -558,49 +560,6 @@ const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): 
 };
 
 /**
- * `artists.code_letters` is a Postgres `varchar(4)` column (`shared/database/
- * src/schema.ts:439`) storing a trimmed, upper-case, ASCII value -- every one
- * of the 24,078 rows in the production clone matches that shape, with `/` the
- * only non-alphanumeric character in use (the `V/A` filing). Neither writer
- * enforces that shape, though: `insertArtistWithGenreCrossreference` (`library.service.ts`) only
- * NFC-normalizes -- no trim, no upper-case -- and the tubafrenzy `library-etl`
- * job writes `codeLetters ?? '??'` verbatim (`jobs/library-etl/job.ts:441`),
- * so a row filed non-canonically can already be sitting in the table.
- *
- * `.trim().toUpperCase()` is not a safe repair for that gap: it is neither
- * length- nor charset-preserving for non-ASCII input
- * (`'ß'.toUpperCase() === 'SS'`, `'ı'.toUpperCase() === 'I'`), so silently
- * folding an out-of-domain value could match a DIFFERENT real artist's shelf
- * code with no precondition that the input was canonical to begin with. (An
- * earlier version of this comment claimed normalizing "can never turn a real
- * hit into a miss" -- true only of the measured production snapshot, not of
- * every possible input, which is exactly the gap this validation closes.)
- *
- * Reject anything outside the column's real domain instead: ASCII letters,
- * digits, or `/`, 1-4 characters. A 5+ character value can never match a row
- * either (BS#2149 review finding 2) -- unvalidated, it used to fall through
- * to the 404 branch, whose own docs called that "safe to create an artist
- * under it," right up until the artist insert's `varchar(4)` column threw
- * SQLSTATE 22001 on the follow-up write and this route's sibling inherited a
- * generic 500 plus a Sentry event. Restricted to this input charset,
- * `.toUpperCase()` is always a deterministic, length- and charset-preserving
- * map (`a`-`z` -> `A`-`Z`; digits and `/` are fixed points), so the fold
- * hazard above cannot occur once this check has passed.
- */
-const CANONICAL_CODE_LETTERS_PATTERN = /^[A-Za-z0-9/]{1,4}$/;
-
-const validateCanonicalCodeLetters = (raw: string): string => {
-  const trimmed = raw.trim();
-  if (!CANONICAL_CODE_LETTERS_PATTERN.test(trimmed)) {
-    throw new WxycError(
-      "Invalid code_letters: must be 1-4 characters from A-Z, 0-9, or '/' (artists.code_letters is varchar(4))",
-      400
-    );
-  }
-  return trimmed.toUpperCase();
-};
-
-/**
  * Upper bound AND default for `?limit=` on the bucket browse — owned by the
  * service, since the cap is a property of the query rather than of this route.
  * Re-exported through the namespace import so the 400 message and the query
@@ -933,37 +892,23 @@ const UPDATABLE_ARTIST_FIELDS = ['alphabetical_name', 'artist_name'] as const;
 
 const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number'] as const;
 
-// Why each field has no write path on THIS ENDPOINT today. `genre_id` and
-// `code_letters` are not writable by any endpoint: `genre_artist_crossreference.genre_id`
-// is only ever `.insert()`ed -- by `POST /library/artists` -- and
-// `artists.code_letters` is likewise set once at create. (Batch jobs are a
-// different surface: `jobs/artist-unicode-dedup` rewrites `code_letters`, and
-// `jobs/library-etl` upserts `artist_genre_code`; neither is an endpoint.)
-// `code_artist_number` (`artist_genre_code`) is writable by exactly one
-// endpoint, `POST /library/artists/{id}/refile` (BS#2643), which is why it is
-// refused HERE: a call-number change needs that endpoint's genre scope,
-// occupancy check and bucket lock, not a bare column update.
+// Why each field is not writable on THIS ENDPOINT. `genre_id` is not writable by any endpoint:
+// `genre_artist_crossreference.genre_id` is only ever `.insert()`ed -- by `POST /library/artists`.
+// `code_letters` and `code_artist_number` are each writable by exactly one endpoint,
+// `POST /library/artists/{id}/refile` (BS#2643 for the number, BS#3035 for the letters), which is why they are
+// refused HERE: a call-number or call-letters change needs that endpoint's genre scope, destination-shelf lock,
+// occupancy check and bucket lock, not a bare column update. (Batch jobs are a different surface:
+// `jobs/artist-unicode-dedup` rewrites `code_letters`, and `jobs/library-etl` upserts `artist_genre_code`; neither is
+// an endpoint.)
 //
-// Re-verified for BS#2563, because `artist_name` becoming writable is exactly
-// the change that could have falsified the `code_letters` reason: it did not.
-// `code_letters` is operator-supplied, not derived from the name
-// (`validateArtistCodeLetters` only NFC-normalizes and length-checks it), so
-// nothing recomputes it on a rename and the write-once claim still holds
-// verbatim. What the rename DOES widen is the gap behind it: a correction
-// that crosses a shelf-letter boundary ('Ziu Ziu' -> 'Xiu Xiu') now succeeds
-// while the accompanying `ZI` -> `XI` edit from the same `/wxycdb` form is
-// still a 400, so the card can disagree with the physical shelf with direct
-// SQL the only remedy. Pre-existing rather than new -- the writable
-// `alphabetical_name` (the field that actually governs shelf ORDER) already
-// reached the same contradiction -- and refiling is a genre-scoped
-// crossreference rewrite plus a call-number reassignment, not a column
-// update, so it has its own endpoint (`POST /library/artists/{id}/refile`,
-// BS#2643) rather than a widened allowlist here.
+// The motivating case for the letters write is the correction that crosses a shelf-letter boundary ('Ziu Ziu' ->
+// 'Xiu Xiu'): the rename succeeds here (BS#2563) while the accompanying `ZI` -> `XI` edit from the same `/wxycdb`
+// form used to be a 400, so the card could disagree with the physical shelf. It is now a re-letter on the refile
+// endpoint, single-genre artists only.
 const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[number], string> = {
   genre_id:
     'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
-  code_letters:
-    'no write path: artists.code_letters is set once by POST /library/artists and is never UPDATEd by any endpoint',
+  code_letters: 'not writable on this endpoint; re-letter with POST /library/artists/{id}/refile (code_letters)',
   code_artist_number: 'not writable on this endpoint; re-file with POST /library/artists/{id}/refile',
 };
 
@@ -973,7 +918,7 @@ const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATAB
  * PATCH /library/artists/:id -- allowlists two of the five `/wxycdb`
  * `modifyArtist` form fields, `alphabetical_name` (BS#2156) and `artist_name`
  * (BS#2563). The other three JSP fields (`genre_id`, `code_letters`,
- * `code_artist_number`; the last is re-filed via `POST /library/artists/:id/refile`, BS#2643) are REJECTED with a 400 naming why
+ * `code_artist_number`; the last two are changed via `POST /library/artists/:id/refile`, BS#2643, BS#3035) are REJECTED with a 400 naming why
  * (`ARTIST_NO_COLUMN_FIELD_OWNERS`), not silently dropped -- unlike the
  * `pickAddRotationFields` / `pickUpdateEntryFields` allowlist convention
  * elsewhere in this repo, which does drop silently. The difference: those
@@ -1061,7 +1006,7 @@ export const updateArtistCard: RequestHandler<{ id: string }, unknown, UpdateArt
   const rejectedFields = ARTIST_NO_COLUMN_FIELDS.filter((field) => field in body);
   if (rejectedFields.length > 0) {
     const detail = rejectedFields.map((field) => `${field} (${ARTIST_NO_COLUMN_FIELD_OWNERS[field]})`).join(', ');
-    throw new WxycError(`Bad Request: no write path exists for ${detail}`, 400);
+    throw new WxycError(`Bad Request: not writable on this endpoint: ${detail}`, 400);
   }
 
   // Request-shape 400s precede the existence 404, matching updateAlbum. The
@@ -1342,24 +1287,29 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
   res.status(204).end();
 };
 
-const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number'] as const;
+const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number', 'code_letters'] as const;
 
 /**
- * POST /library/artists/:id/refile -- BS#2643: re-file the artist's call number (`code_artist_number`) within ONE
- * genre membership (`genre_id`, required: an artist id alone does not identify a membership, BS#2637). Only those two
- * keys are accepted; any other key is a 400 naming it (`code_letters` and a destination genre are "not supported by
- * this endpoint yet"). Gated `catalog: ['write']`.
+ * POST /library/artists/:id/refile -- BS#2643, BS#3035: re-file the artist's call number (`code_artist_number`) within
+ * ONE genre membership (`genre_id`, required: an artist id alone does not identify a membership, BS#2637), and
+ * optionally re-letter it (`code_letters`, single-genre artists only). Only those three keys are accepted; any other
+ * key is a 400 naming it (a destination genre is "not a recognized field" until the genre move ships). `code_letters`
+ * must be a string passing `validateCanonicalCodeLetters` (trim, 1-4 of A-Z, 0-9, `/`; upper-cased, so `ja` files as
+ * `JA`) and must not name a Various Artists bucket (`isVariousArtists`, a 400 before any lock). Sending the stored
+ * letters back, in any case or spacing, is not a change. Gated `catalog: ['write']`.
  *
  * Outcomes: 200 `ArtistRefileResult` (the genre-scoped `ArtistCard` plus `changed`, `previous_code_artist_number`,
- * `releases_to_relabel`) / 404 `Artist not found` (`code: 'artist_not_found'`) or `Artist not filed under genre {n}`
+ * `previous_code_letters`, `previous_genre_id` (always `genre_id` until a genre move exists), `releases_to_relabel`) /
+ * 404 `Artist not found` (`code: 'artist_not_found'`) or `Artist not filed under genre {n}`
  * (`code: 'artist_not_filed_in_genre'`; the message prefix stays stable for clients that fall back to it, BS#3023) /
  * 409 `lettered_compilation_section`, `various_artists_section` (a Various Artists bucket, BS#3022: `V/A` or `Z-` code
- * letters, never the name; refused even for its own number) or `artist_code_conflict` (with the contract `Artist` now
- * holding the slot: the first owner in `getArtistsByCode` order) / 503 `LockUnavailableRefusal` on lock contention.
- * Outside those two sections, a resubmit of the artist's own number is a 200
- * `changed: false` that issues no UPDATE, and is decided before the occupancy check so an artist sharing a contested
- * triple does not collide with its co-owner. See `libraryService.refileArtistInGenre` for the lock design, the catalog
- * watermark cost of a real re-file, and the residual race with `addArtist` (BS#2106).
+ * letters, never the name; refused even for its own number), `letters_shared_across_genres` (a letters change for an
+ * artist with another membership or a release in another genre; carries `memberships`) or `artist_code_conflict`
+ * (with the contract `Artist` now holding the slot: the first owner in `getArtistsByCode` order) / 503
+ * `LockUnavailableRefusal` on lock contention. Outside those sections, a resubmit of the artist's own letters and
+ * number is a 200 `changed: false` that issues no UPDATE, and is decided before the occupancy check so an artist
+ * sharing a contested triple does not collide with its co-owner. See `libraryService.refileArtistInGenre` for the lock
+ * design, the catalog watermark cost of a real re-file, and the residual races.
  */
 export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => {
   const artistId = parseArtistId(req.params.id);
@@ -1371,9 +1321,7 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
   const unknownKey = Object.keys(record).find((key) => !(REFILE_ARTIST_FIELDS as readonly string[]).includes(key));
   if (unknownKey !== undefined) {
     throw new WxycError(
-      unknownKey === 'code_letters'
-        ? 'Bad Request: code_letters is not supported by this endpoint yet'
-        : `Bad Request: ${unknownKey} is not a recognized field (accepted: ${REFILE_ARTIST_FIELDS.join(', ')})`,
+      `Bad Request: ${unknownKey} is not a recognized field (accepted: ${REFILE_ARTIST_FIELDS.join(', ')})`,
       400
     );
   }
@@ -1382,8 +1330,19 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
     throw new WxycError(`Bad Request: genre_id must be an integer between 1 and ${INT4_MAX}`, 400);
   }
   const target = validateArtistCodeNumber(record.code_artist_number, 'code_artist_number');
+  let codeLetters: string | undefined;
+  if (record.code_letters !== undefined) {
+    if (typeof record.code_letters !== 'string') throw new WxycError('Bad Request: code_letters must be a string', 400);
+    codeLetters = validateCanonicalCodeLetters(record.code_letters);
+    if (isVariousArtists(codeLetters)) {
+      throw new WxycError(
+        'Bad Request: code_letters names the Various Artists bucket, which cannot be re-lettered into',
+        400
+      );
+    }
+  }
 
-  const result = await libraryService.refileArtistInGenre(artistId, genreId, target);
+  const result = await libraryService.refileArtistInGenre(artistId, genreId, target, codeLetters);
   switch (result.outcome) {
     case 'artist_not_found':
       throw new WxycError('Artist not found', 404, { code: 'artist_not_found' });
@@ -1407,6 +1366,14 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
         reason: 'various_artists_section',
       });
       return;
+    case 'letters_shared':
+      res.status(409).json({
+        message:
+          'Cannot re-letter: the letters are shared with the other genres this artist is filed in, whose shelves would move too.',
+        reason: 'letters_shared_across_genres',
+        memberships: result.memberships,
+      });
+      return;
     case 'slot_taken':
       res.status(409).json({
         message: 'Artist code already exists for that genre and code letters.',
@@ -1419,6 +1386,8 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
         ...result.card,
         changed: result.outcome === 'refiled',
         previous_code_artist_number: result.previous,
+        previous_code_letters: result.previous_letters,
+        previous_genre_id: genreId,
         releases_to_relabel: result.releases_to_relabel,
       });
   }

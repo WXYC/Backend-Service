@@ -8,7 +8,7 @@
  * membership untouched), an occupied slot with two owners inserted in reverse name order (the 409 names the
  * alphabetically-first one, stably), the no-op (200 `changed: false` and the catalog watermark unmoved, proving no
  * UPDATE was issued), the no-op for an artist sharing a contested triple, the two 404s, a lettered compilation
- * section (409, row unchanged), and the strict body. The `catalog: write` role gate is pinned in
+ * section (409, row unchanged), and the strict body. The re-letter (BS#3035) cases are in the `re-letter` block below. The `catalog: write` role gate is pinned in
  * tests/unit/routes/library-artist-card-permissions.route.test.ts: this tier runs AUTH_BYPASS, which cannot express a
  * role refusal.
  */
@@ -198,9 +198,120 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
   it('rejects a body key the endpoint does not support with 400', async () => {
     const id = await seedArtist('Strict', 'ZR', [[HIPHOP, 80]]);
 
-    const res = await refile(id, { genre_id: HIPHOP, code_artist_number: 81, code_letters: 'ZZ' });
+    const res = await refile(id, { genre_id: HIPHOP, code_artist_number: 81, to_genre_id: ROCK });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toContain('code_letters');
+    expect(res.body.message).toContain('to_genre_id');
+  });
+
+  describe('re-letter (BS#3035)', () => {
+    const lettersOf = async (artistId) => {
+      const [row] = await sql`SELECT code_letters, last_modified FROM ${sql(SCHEMA)}.artists WHERE id = ${artistId}`;
+      return row;
+    };
+
+    it("re-letters Bill's case: ZE 36 -> ZJ 36, previous letters reported, the release reads ZJ 36", async () => {
+      const id = await seedArtist('Jam Money', 'ZE', [[HIPHOP, 36]]);
+      await seedRelease(id, HIPHOP, 'Jam Money Release');
+
+      const res = await refile(id, { genre_id: HIPHOP, code_letters: 'ZJ', code_artist_number: 36 });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        artist_id: id,
+        genre_id: HIPHOP,
+        code_letters: 'ZJ',
+        code_artist_number: 36,
+        changed: true,
+        previous_code_letters: 'ZE',
+        previous_genre_id: HIPHOP,
+        previous_code_artist_number: 36,
+        releases_to_relabel: 1,
+      });
+      const releases = await manager.get(`/library/artists/${id}/releases`).query({ genre_id: HIPHOP });
+      expect(releases.body.releases[0]).toMatchObject({ code_letters: 'ZJ', code_artist_number: 36 });
+    });
+
+    it('re-letters and re-numbers in one request, storing trimmed upper-case letters, and advances last_modified', async () => {
+      const id = await seedArtist('Both', 'ZE', [[HIPHOP, 50]]);
+      const before = await lettersOf(id);
+
+      const res = await refile(id, { genre_id: HIPHOP, code_letters: ' zj ', code_artist_number: 51 });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ code_letters: 'ZJ', code_artist_number: 51, previous_code_artist_number: 50 });
+      const after = await lettersOf(id);
+      expect(after.code_letters).toBe('ZJ');
+      expect(after.last_modified.getTime()).toBeGreaterThan(before.last_modified.getTime());
+    });
+
+    it('409s on an occupied ZJ 60 naming the holder; nothing written, watermark and last_modified unchanged', async () => {
+      const holder = await seedArtist('Holder', 'ZJ', [[HIPHOP, 60]]);
+      const mover = await seedArtist('Mover', 'ZE', [[HIPHOP, 60]]);
+      const before = await lettersOf(mover);
+      const mark = await watermark();
+
+      const res = await refile(mover, { genre_id: HIPHOP, code_letters: ' zj ', code_artist_number: 60 });
+
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe('artist_code_conflict');
+      expect(res.body.artist).toMatchObject({ id: holder, code_letters: 'ZJ', code_artist_number: 60 });
+      expect(await watermark()).toBe(mark);
+      const after = await lettersOf(mover);
+      expect(after.code_letters).toBe('ZE');
+      expect(after.last_modified.getTime()).toBe(before.last_modified.getTime());
+    });
+
+    it('409s letters_shared_across_genres for a multi-genre artist, listing both memberships, writing nothing', async () => {
+      const id = await seedArtist('Two Genres', 'ZE', [
+        [HIPHOP, 70],
+        [ROCK, 71],
+      ]);
+      const mark = await watermark();
+
+      const res = await refile(id, { genre_id: HIPHOP, code_letters: 'ZJ', code_artist_number: 70 });
+
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe('letters_shared_across_genres');
+      expect(res.body.memberships).toEqual([
+        { genre_id: HIPHOP, code_artist_number: 70 },
+        { genre_id: ROCK, code_artist_number: 71 },
+      ]);
+      expect((await lettersOf(id)).code_letters).toBe('ZE');
+      expect(await watermark()).toBe(mark);
+    });
+
+    it('409s letters_shared_across_genres for a single membership with a stray release in another genre', async () => {
+      const id = await seedArtist('Stray', 'ZE', [[HIPHOP, 80]]);
+      await seedRelease(id, ROCK, 'Stray Release');
+      const mark = await watermark();
+
+      const res = await refile(id, { genre_id: HIPHOP, code_letters: 'ZJ', code_artist_number: 80 });
+
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe('letters_shared_across_genres');
+      expect(res.body.memberships).toEqual([{ genre_id: HIPHOP, code_artist_number: 80 }]);
+      expect((await lettersOf(id)).code_letters).toBe('ZE');
+      expect(await watermark()).toBe(mark);
+    });
+
+    it('sending the current letters back is not a change: same number 200 changed:false, new number a plain re-number', async () => {
+      const id = await seedArtist('Same Letters', 'ZE', [
+        [HIPHOP, 90],
+        [ROCK, 91],
+      ]);
+      const mark = await watermark();
+
+      const same = await refile(id, { genre_id: HIPHOP, code_letters: 'ze', code_artist_number: 90 });
+      expect(same.status).toBe(200);
+      expect(same.body).toMatchObject({ changed: false, code_letters: 'ZE', previous_code_letters: 'ZE' });
+      expect(await watermark()).toBe(mark);
+
+      // A multi-genre artist may re-number; the unchanged letters keep it out of the re-letter refusal.
+      const renumbered = await refile(id, { genre_id: HIPHOP, code_letters: 'ze', code_artist_number: 92 });
+      expect(renumbered.status).toBe(200);
+      expect(renumbered.body).toMatchObject({ changed: true, code_letters: 'ZE', code_artist_number: 92 });
+      expect(await codeOf(id, ROCK)).toBe(91);
+    });
   });
 });

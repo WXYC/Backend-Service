@@ -40,12 +40,21 @@ describe('POST /library/artists/:id/refile', () => {
       ['a non-numeric id', { id: 'abc' }, { genre_id: 6, code_artist_number: 31 }, 'Invalid artist ID'],
       ['an array body', { id: '431' }, [], 'body must be a JSON object'],
       ['an unknown key', { id: '431' }, { genre_id: 6, code_artist_number: 31, extra: 1 }, 'extra'],
-      [
-        'code_letters',
+      ...[
+        ['empty', ''],
+        ['whitespace', '   '],
+        ['5 characters', 'ABCDE'],
+        ['a non-ASCII letter', 'Ñ'],
+        ['V/A', 'V/A'],
+        ['v/a with a trailing space', 'v/a '],
+        ['Z-Rock', 'Z-Rock'],
+        ['a non-string', 7],
+      ].map(([name, value]) => [
+        `code_letters: ${name}`,
         { id: '431' },
-        { genre_id: 6, code_artist_number: 31, code_letters: 'XX' },
-        'code_letters is not supported by this endpoint yet',
-      ],
+        { genre_id: 6, code_artist_number: 31, code_letters: value },
+        'code_letters',
+      ]),
       ['a missing genre_id', { id: '431' }, { code_artist_number: 31 }, 'genre_id'],
       ['a string genre_id', { id: '431' }, { genre_id: '6', code_artist_number: 31 }, 'genre_id'],
       ['an over-INT4 genre_id', { id: '431' }, { genre_id: 2147483648, code_artist_number: 31 }, 'genre_id'],
@@ -87,15 +96,50 @@ describe('POST /library/artists/:id/refile', () => {
       ['refiled', true],
       ['unchanged', false],
     ] as const)('answers 200 for %s with changed=%s', async (outcome, changed) => {
-      const { statusMock, jsonMock } = await run({ outcome, card: CARD, previous: 1, releases_to_relabel: 2 });
+      const { statusMock, jsonMock } = await run({
+        outcome,
+        card: CARD,
+        previous: 1,
+        previous_letters: 'IS',
+        releases_to_relabel: 2,
+      });
 
-      expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31);
+      expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, undefined);
       expect(statusMock).toHaveBeenCalledWith(200);
       expect(jsonMock).toHaveBeenCalledWith({
         ...CARD,
         changed,
         previous_code_artist_number: 1,
+        previous_code_letters: 'IS',
+        previous_genre_id: 6,
         releases_to_relabel: 2,
+      });
+    });
+
+    it('passes the canonical (trimmed, upper-cased) code_letters to the service', async () => {
+      mockedService.refileArtistInGenre.mockResolvedValue({ outcome: 'artist_not_found' });
+      const { req, res, next } = mockReqRes(
+        { id: '431' },
+        { genre_id: 6, code_artist_number: 31, code_letters: ' ja ' }
+      );
+
+      await refileArtist(req as never, res, next).catch(() => undefined);
+
+      expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, 'JA');
+    });
+
+    it('answers 409 letters_shared_across_genres with the memberships', async () => {
+      const memberships = [
+        { genre_id: 2, code_artist_number: 7 },
+        { genre_id: 6, code_artist_number: 1 },
+      ];
+      const { statusMock, jsonMock } = await run({ outcome: 'letters_shared', memberships });
+
+      expect(statusMock).toHaveBeenCalledWith(409);
+      expect(jsonMock).toHaveBeenCalledWith({
+        message: expect.any(String),
+        reason: 'letters_shared_across_genres',
+        memberships,
       });
     });
 

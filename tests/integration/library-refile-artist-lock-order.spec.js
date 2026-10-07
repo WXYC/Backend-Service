@@ -3,8 +3,9 @@
  *
  * The re-file locks, on its transaction and in this order: (1) the artist's own `artists` row, `FOR NO KEY UPDATE`,
  * before the card is read; (2) the `(code_letters, genre_id)` bucket plus the artist's own memberships in one statement
- * over `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`. Four properties, each
- * pinned here, in this order: (a), (b), (d), (c).
+ * over `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`. Properties pinned here, in
+ * this order: (a), (b), (d), (e), (f), (c). The destination-shelf advisory lock (BS#3035) is taken between the card read
+ * and the crossreference statement.
  *
  *  (a) Two re-files into one bucket SERIALIZE. A raw session S holds `FOR UPDATE` on the bucket's lowest
  *      `artist_id` row (a third artist below both movers), so both requests queue on that first row before holding
@@ -18,6 +19,8 @@
  *      count and commit. On a slow runner that wait can legitimately time out with a 503: the spec logs it and
  *      re-sends the loser once, which must then answer 409 naming the winner. Two 200s, a 500, or a 409 naming the
  *      wrong artist are failures.
+ *      With the destination-shelf advisory lock (BS#3035) the second request queues on the advisory key, held by the
+ *      first, rather than on the crossreference row, so the waiter filter counts both kinds of wait.
  *  (b) The bucket lock does not reach OTHER artists' `artists` rows. S holds a bucket row ABOVE mover X, so the re-file
  *      locks X's crossreference row and blocks on S's. While it is blocked, `SELECT ... FROM artists WHERE id = <other>
  *      FOR KEY SHARE NOWAIT` succeeds. A joined `.for('update')` would have locked up to 263 `artists` rows and the
@@ -35,6 +38,11 @@
  *      was seen. The spec races "the response arrives" against "the request is seen waiting on S"; the response-first
  *      branch is a safety net that neither version normally takes. A 503 is inconclusive (lock timeout on a slow
  *      runner) and is never retried.
+ *  (e) Two re-letters of different artists into one occupied `(letters, genre, 36)` shelf slot serialize: exactly one
+ *      200, the other a 409 naming the winner.
+ *  (f) Two re-letters into an EMPTY bucket (no rows to lock): a separate session holds the destination shelf's advisory
+ *      key until both requests are seen waiting on it, then releases it. Exactly one 200. Without the advisory lock
+ *      neither request waits and the spec fails with "2 request backend(s) were not seen waiting".
  *  (c) A live writer holding a bucket row past the timeout makes the request stand down with 503
  *      `LockUnavailableRefusal`.
  */
@@ -158,7 +166,7 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
       const waiting = await sql`
         SELECT pid FROM pg_stat_activity
         WHERE wait_event_type = 'Lock' AND pid <> ${sPid}::int AND pid <> pg_backend_pid()
-          AND query ILIKE '%genre_artist_crossreference%'`;
+          AND (query ILIKE '%genre_artist_crossreference%' OR wait_event = 'advisory')`;
       if (waiting.length >= count) return;
       await sleep(POLL_INTERVAL_MS);
     }
@@ -359,5 +367,82 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
       JOIN ${sql(SCHEMA)}.genre_artist_crossreference x ON x.artist_id = a.id AND x.genre_id = ${GENRE}
       WHERE a.id = ${x}`;
     expect(row).toMatchObject({ artist_name: renamed, artist_genre_code: TARGET });
+  }, 30000);
+
+  it('(e) serializes two re-letters of different artists into one occupied slot: exactly one 200, the loser names the winner', async () => {
+    const [holder] = await newBucket(1);
+    const [x] = await newBucket(1);
+    const [y] = await newBucket(1);
+    const [{ code_letters: dest }] = await sql`SELECT code_letters FROM ${sql(SCHEMA)}.artists WHERE id = ${holder}`;
+    const s = await holdRow(holder);
+    const send = (id) =>
+      manager
+        .post(`/library/artists/${id}/refile`)
+        .send({ genre_id: GENRE, code_letters: dest, code_artist_number: 36 });
+    let released = false;
+    let results;
+    try {
+      const pending = [send(x).then((r) => r), send(y).then((r) => r)];
+      await waitForWaiters(s.pid, 2);
+      await s.release();
+      released = true;
+      results = await Promise.all(pending);
+    } finally {
+      if (!released) await s.release();
+    }
+
+    const ids = [x, y];
+    const winnerIndex = results.findIndex((r) => r.status === 200);
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    const loserIndex = 1 - winnerIndex;
+    let loser = results[loserIndex];
+    if (loser.status === 503) {
+      console.warn('refile lock-order (e): loser answered 503 (timing); re-sending once');
+      loser = await send(ids[loserIndex]);
+    }
+    expect(loser.status).toBe(409);
+    expect(loser.body.reason).toBe('artist_code_conflict');
+    expect(loser.body.artist).toMatchObject({ id: ids[winnerIndex], code_letters: dest, code_artist_number: 36 });
+  }, 30000);
+
+  it('(f) serializes two re-letters into an EMPTY bucket on the destination shelf advisory key: exactly one 200', async () => {
+    const EMPTY = 'QX';
+    const [{ n }] = await sql`
+      SELECT count(*)::int AS n FROM ${sql(SCHEMA)}.artists WHERE code_letters = ${EMPTY}`;
+    expect(n).toBe(0);
+    const [x] = await newBucket(1);
+    const [y] = await newBucket(1);
+    const reserved = await sql.reserve();
+    const [{ pid }] = await reserved`SELECT pg_backend_pid() AS pid`;
+    const key = `artist-code-bucket:${GENRE}:${EMPTY}`;
+    await reserved`SELECT pg_advisory_lock(hashtextextended(${key}, 0))`;
+    const send = (id) =>
+      manager
+        .post(`/library/artists/${id}/refile`)
+        .send({ genre_id: GENRE, code_letters: EMPTY, code_artist_number: 36 });
+    let unlocked = false;
+    let results;
+    try {
+      const pending = [send(x).then((r) => r), send(y).then((r) => r)];
+      await waitForWaiters(pid, 2);
+      await reserved`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`;
+      unlocked = true;
+      results = await Promise.all(pending);
+    } finally {
+      if (!unlocked) await reserved`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`;
+      reserved.release();
+    }
+
+    const ids = [x, y];
+    const winnerIndex = results.findIndex((r) => r.status === 200);
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    const loserIndex = 1 - winnerIndex;
+    let loser = results[loserIndex];
+    if (loser.status === 503) {
+      console.warn('refile lock-order (f): loser answered 503 (timing); re-sending once');
+      loser = await send(ids[loserIndex]);
+    }
+    expect(loser.status).toBe(409);
+    expect(loser.body.artist).toMatchObject({ id: ids[winnerIndex], code_letters: EMPTY, code_artist_number: 36 });
   }, 30000);
 });

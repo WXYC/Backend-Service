@@ -5570,7 +5570,7 @@ describe('library.controller', () => {
         } as unknown as Request;
         const res = mockResponse();
 
-        await expect(updateArtistCard(req, res, next)).rejects.toThrow(`no write path exists for ${field}`);
+        await expect(updateArtistCard(req, res, next)).rejects.toThrow(`not writable on this endpoint: ${field}`);
         expect(mockGetArtistCardById).not.toHaveBeenCalled();
         expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
       }
@@ -5599,7 +5599,7 @@ describe('library.controller', () => {
         'genre_id (no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint)'
       );
       expect(message).toContain(
-        'code_letters (no write path: artists.code_letters is set once by POST /library/artists and is never UPDATEd by any endpoint)'
+        'code_letters (not writable on this endpoint; re-letter with POST /library/artists/{id}/refile (code_letters))'
       );
       expect(message).toContain(
         'code_artist_number (not writable on this endpoint; re-file with POST /library/artists/{id}/refile)'
@@ -5611,7 +5611,7 @@ describe('library.controller', () => {
       const req = { params: { id: '42' }, body: { genre_id: 999 } } as unknown as Request;
       const res = mockResponse();
 
-      await expect(updateArtistCard(req, res, next)).rejects.toThrow('no write path exists for genre_id');
+      await expect(updateArtistCard(req, res, next)).rejects.toThrow('not writable on this endpoint: genre_id');
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 

@@ -24,7 +24,13 @@ const CARD = {
 };
 
 /** Rows for the four `select`s a full run issues, in order: artists-row lock, card, bucket lock, owners. */
-const makeTx = (opts: { selects: unknown[][]; countRow?: number; throwOnSelect?: number; error?: unknown }) => {
+const makeTx = (opts: {
+  selects: unknown[][];
+  countRow?: number;
+  strayRelease?: boolean;
+  throwOnSelect?: number;
+  error?: unknown;
+}) => {
   const calls: Call[] = [];
   let selectIndex = 0;
   const chain = (call: Call, result: unknown[], boom?: unknown) => {
@@ -57,15 +63,19 @@ const makeTx = (opts: { selects: unknown[][]; countRow?: number; throwOnSelect?:
       c.where = () => Promise.resolve([]);
       return c;
     },
-    execute: () => {
-      calls.push({ op: 'execute', methods: [] });
+    execute: (query: { sql?: string[] }) => {
+      const text = (query.sql ?? []).join('?');
+      const op = text.includes('pg_advisory_xact_lock') ? 'advisory' : text.includes('<>') ? 'stray' : 'count';
+      calls.push({ op, methods: [] });
+      if (op === 'advisory') return Promise.resolve([]);
+      if (op === 'stray') return Promise.resolve(opts.strayRelease ? [{ '?column?': 1 }] : []);
       return Promise.resolve([{ n: opts.countRow ?? 2 }]);
     },
   };
   return { tx, calls };
 };
 
-const run = async (opts: Parameters<typeof makeTx>[0], target = 31) => {
+const run = async (opts: Parameters<typeof makeTx>[0], target = 31, codeLetters?: string) => {
   const { tx, calls } = makeTx(opts);
   const dbSelect = jest.fn(() => {
     throw new Error('db.select must not be used inside refileArtistInGenre');
@@ -75,7 +85,7 @@ const run = async (opts: Parameters<typeof makeTx>[0], target = 31) => {
     .fn()
     .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
   const { refileArtistInGenre } = await import('../../../apps/backend/services/library.service');
-  const outcome = await refileArtistInGenre(431, 6, target);
+  const outcome = await refileArtistInGenre(431, 6, target, codeLetters);
   return { outcome, calls, dbSelect };
 };
 
@@ -111,6 +121,83 @@ describe('refileArtistInGenre (BS#2643)', () => {
     expect(selects[3].methods).toContain('innerJoin');
     expect(selects[3].methods).not.toContain('for(update)');
     expect(calls.filter((c) => c.op === 'update')).toHaveLength(1);
+    // The advisory lock is taken on tx after the card read and before the bucket lock; no stray-release probe runs
+    // without a letters change.
+    // (index 0 is the SET LOCAL lock_timeout)
+    expect(calls.map((c) => c.op).slice(1, 5)).toEqual(['select', 'select', 'advisory', 'select']);
+    expect(calls.some((c) => c.op === 'stray')).toBe(false);
+  });
+
+  describe('re-lettering', () => {
+    const OWN_JA = [
+      { artist_id: 100, genre_id: 6, code_number: 4, code_comp_letter: null },
+      { artist_id: 431, genre_id: 6, code_number: 1, code_comp_letter: null },
+    ];
+
+    it('writes the normalized letters, then the number; reports the previous letters', async () => {
+      const { outcome, calls, dbSelect } = await run({ selects: [A, [CARD], OWN_JA, []] }, 31, 'JA');
+
+      expect(outcome).toMatchObject({
+        outcome: 'refiled',
+        previous: 1,
+        previous_letters: 'IS',
+        card: { code_letters: 'JA', code_artist_number: 31 },
+      });
+      expect(calls.filter((c) => c.op === 'update')).toHaveLength(2);
+      expect(calls.some((c) => c.op === 'stray')).toBe(true);
+      expect(dbSelect).not.toHaveBeenCalled();
+    });
+
+    it('sending the stored letters back (any case or spacing) is not a letters change', async () => {
+      const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(31)] }, 31, ' is ');
+
+      expect(outcome).toMatchObject({ outcome: 'unchanged', previous_letters: 'IS' });
+      expect(calls.some((c) => c.op === 'update' || c.op === 'stray')).toBe(false);
+    });
+
+    it('a letters-only change issues just the artists UPDATE', async () => {
+      const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(1), []] }, 1, 'JA');
+
+      expect(outcome).toMatchObject({ outcome: 'refiled', card: { code_letters: 'JA' } });
+      expect(calls.filter((c) => c.op === 'update')).toHaveLength(1);
+    });
+
+    it('refuses with the memberships when more than one membership is locked', async () => {
+      const locked = [
+        { artist_id: 431, genre_id: 2, code_number: 7, code_comp_letter: null },
+        { artist_id: 431, genre_id: 6, code_number: 1, code_comp_letter: null },
+      ];
+      const { outcome, calls } = await run({ selects: [A, [CARD], locked] }, 31, 'JA');
+
+      expect(outcome).toEqual({
+        outcome: 'letters_shared',
+        memberships: [
+          { genre_id: 2, code_artist_number: 7 },
+          { genre_id: 6, code_artist_number: 1 },
+        ],
+      });
+      expect(calls.some((c) => c.op === 'update')).toBe(false);
+    });
+
+    it('refuses when the artist has a release in another genre', async () => {
+      const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(1)], strayRelease: true }, 31, 'JA');
+
+      expect(outcome).toEqual({
+        outcome: 'letters_shared',
+        memberships: [{ genre_id: 6, code_artist_number: 1 }],
+      });
+      expect(calls.some((c) => c.op === 'update')).toBe(false);
+    });
+
+    it('a multi-genre artist may still re-number without a letters change', async () => {
+      const locked = [
+        { artist_id: 431, genre_id: 2, code_number: 7, code_comp_letter: null },
+        { artist_id: 431, genre_id: 6, code_number: 1, code_comp_letter: null },
+      ];
+      const { outcome } = await run({ selects: [A, [CARD], locked, []] }, 31);
+
+      expect(outcome).toMatchObject({ outcome: 'refiled' });
+    });
   });
 
   it('unchanged: issues no UPDATE and still counts releases', async () => {
