@@ -1,3 +1,4 @@
+import { rotation } from '@wxyc/database';
 import { sql, type Column, type SQL } from 'drizzle-orm';
 
 /**
@@ -10,3 +11,10 @@ import { sql, type Column, type SQL } from 'drizzle-orm';
  * once keeps it table-qualified. Rule: inside a select-field fragment, reference the outer row only through this.
  */
 export const outerRef = (column: Column): SQL => sql`${column}`;
+
+/**
+ * The subquery of rotation rows that name the outer rotation row in `moved_from_rotation_id` (BS#3007): the row was
+ * moved to another bin, so it is not the newest in its chain. Pass it to `exists` / `notExists`.
+ */
+export const rotationSuccessorSql = (): SQL =>
+  sql`(SELECT 1 FROM ${rotation} AS successor WHERE successor.moved_from_rotation_id = ${outerRef(rotation.id)})`;

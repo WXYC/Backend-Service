@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, ne, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, sql, SQL, type Column } from 'drizzle-orm';
 import { alias, getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -122,6 +122,7 @@ import {
 } from '../utils/review-gate-basis.js';
 import { ROTATION_BIN_DEDUP_ORDINAL } from '../utils/rotation-bin-order.js';
 import { hasAlphanumeric } from '../utils/text-query.js';
+import { rotationSuccessorSql } from '../utils/sql-fragments.js';
 import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
 
@@ -738,7 +739,7 @@ const resolveRotationCardId = async (
  * read `FOR KEY SHARE`: the first lock in `DELETE /library/{id}`'s order (library row, then items, then reviews), so
  * a delete in flight cannot orphan the row this write points at. The two legacy bases (BS#2810) hold for a rotation
  * row `isLegacyRotationRow` accepts; the walk reads the row and its ancestors in one query and the date rule runs in
- * TypeScript, never in SQL. Concurrent claims on one row are settled by the guarded writes that follow
+ * TypeScript, never in SQL; `legacy_import` also refuses a row that was moved away (it has a successor). Concurrent claims on one row are settled by the guarded writes that follow
  * (`linkRotationToAlbum`'s `album_id IS NULL`, the move's kill `WHERE`), which refuse the loser.
  */
 const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
@@ -751,10 +752,16 @@ const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
         SELECT r.id, r.album_id, r.add_date::text, r.moved_from_rotation_id
         FROM ${rotation} r JOIN chain ON r.id = chain.moved_from_rotation_id
       )
-      SELECT id, album_id, add_date, moved_from_rotation_id FROM chain
+      SELECT id, album_id, add_date, moved_from_rotation_id,
+        EXISTS (SELECT 1 FROM ${rotation} s WHERE s.moved_from_rotation_id = chain.id) AS has_successor
+      FROM chain
     `)) as unknown as RotationChainRow[];
     if (!isLegacyRotationRow(chain, rotationId)) {
       throw new RotationNotEligibleError('The rotation row is linked, or was not in rotation before the cutover');
+    }
+    // A moved record's chain is one record (BS#3007): only the newest row imports; `linkRotationToAlbum` links the rest.
+    if (basis.kind === 'legacy_import' && chain.find((row) => row.id === rotationId)?.has_successor) {
+      throw new RotationNotEligibleError('The rotation row was moved to another bin');
     }
     return;
   }
@@ -1741,13 +1748,14 @@ export const getUncataloguedRotationFromDB = async (
 ): Promise<UncataloguedRotationRow[]> => {
   const { limit = UNCATALOGUED_ROTATION_MAX_LIMIT, offset, status = 'all' } = page;
 
-  const unlinked = isNull(rotation.album_id);
+  // A moved record's chain is one record (BS#3007): a row another row names in `moved_from_rotation_id` is not queued.
+  const newestUnlinked = [isNull(rotation.album_id), notExists(rotationSuccessorSql())];
   const where =
     status === 'killed'
-      ? and(unlinked, rotationKilledSql())
+      ? and(...newestUnlinked, rotationKilledSql())
       : status === 'active'
-        ? and(unlinked, rotationActiveSql())
-        : unlinked;
+        ? and(...newestUnlinked, rotationActiveSql())
+        : and(...newestUnlinked);
 
   const windowed = db
     .select(UNCATALOGUED_ROTATION_PROJECTION)
@@ -1904,14 +1912,15 @@ export const linkRotationToAlbum = async (
     }
 
     const [existingRotation] = await tx
-      .select({ album_id: rotation.album_id })
+      .select({ album_id: rotation.album_id, has_successor: sql<boolean>`${exists(rotationSuccessorSql())}` })
       .from(rotation)
       .where(eq(rotation.id, rotationId))
       .limit(1);
     if (!existingRotation) {
       return { outcome: 'rotation_not_found' as const };
     }
-    if (existingRotation.album_id != null) {
+    // A moved-away row is not its chain's newest (BS#3007): refused like a linked one, so the newest row stays linkable.
+    if (existingRotation.album_id != null || existingRotation.has_successor) {
       return { outcome: 'already_linked' as const };
     }
 
@@ -1926,6 +1935,19 @@ export const linkRotationToAlbum = async (
       // this UPDATE's own re-guarded WHERE.
       return { outcome: 'already_linked' as const };
     }
+
+    // A moved record's chain is one record (BS#3007): the ancestors this row was moved from, reached through
+    // `moved_from_rotation_id`, point at the same release. `UNION` ends a loop in the data, and the `album_id IS NULL`
+    // re-guard leaves an ancestor already linked by old data alone.
+    await tx.execute(sql`
+      WITH RECURSIVE ancestors AS (
+        SELECT moved_from_rotation_id AS id FROM ${rotation} WHERE id = ${rotationId}
+        UNION
+        SELECT r.moved_from_rotation_id FROM ${rotation} r JOIN ancestors a ON r.id = a.id
+      )
+      UPDATE ${rotation} SET album_id = ${albumId}
+      WHERE id IN (SELECT id FROM ancestors WHERE id IS NOT NULL) AND album_id IS NULL
+    `);
 
     // BS#2410 / plan D7 — the JSP's third step, which Backend dropped.
     // tubafrenzy's `processImportToLibrary` retroactively pointed the rotation
