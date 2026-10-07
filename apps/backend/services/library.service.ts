@@ -1954,8 +1954,9 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
   return outcome.outcome === 'updated' ? outcome.rotation : undefined;
 };
 
-// `tx` (BS#2474): threaded through by `POST /library/filings` so the insert
-// lands in its caller's own transaction rather than a bare autocommit write —
+// `tx` (BS#2474): threaded through by `POST /library/filings` and `addAlbum`
+// (`POST /library`) so the insert lands in its caller's own transaction —
+// the one that also resolved the label — rather than a bare autocommit write;
 // see `DbTransaction`'s doc comment.
 //
 // `gateBasis` (BS#2807) is the review gate: required, and verified inside the

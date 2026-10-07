@@ -6596,6 +6596,7 @@ describe('library.controller', () => {
       expect(res.json).toHaveBeenCalledWith(body409);
       // One transaction handle for the label upsert and the refused insert: the rollback takes the label back.
       const [, , labelTx] = mockCreateLabel.mock.calls[0] as unknown[];
+      expect(labelTx).toBeDefined();
       expect(mockInsertAlbum.mock.calls[0][2]).toBe(labelTx);
     });
 

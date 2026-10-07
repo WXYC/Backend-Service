@@ -2263,6 +2263,10 @@ paths:
             enters the library only through intake filing. Body `{ message, reason:
             'review_required' }`; nothing is written, including a `labels` row for new
             label text (BS#2807).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LibraryFilingConflictError'
 
   /library/query:
     get:
@@ -2921,12 +2925,18 @@ paths:
             Missing rotation_bin; neither album_id nor a valid artist/title
             pair given; album_id not a positive integer; or a snapshot
             field over 128 characters.
+        '404':
+          description: Release not found (`album_id` names no library release).
         '409':
           description: >-
             A typed-text add (no `album_id`) once the review gate is on: body `{ message,
             reason: 'review_required' }` (BS#2807). An `album_id` add still rotates an
             existing release. Also `rotation_card_bin_mismatch` when the chosen card
             lives in a different bin.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LibraryFilingConflictError'
 
     patch:
       summary: Set rotation removal date
