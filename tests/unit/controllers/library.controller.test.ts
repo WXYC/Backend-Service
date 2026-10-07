@@ -6664,9 +6664,25 @@ describe('library.controller', () => {
         expect(res.json).toHaveBeenCalledWith({ message: expect.any(String), reason: 'rotation_not_eligible' });
       });
 
-      it.each([[0], [-1], [1.5], ['12']])('POST /library rejects from_rotation_id %p with a 400', async (value) => {
-        await expect(addAlbum(importReq(value), mockResponse(), next)).rejects.toMatchObject({ statusCode: 400 });
-        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      it.each([[0], [-1], [1.5], ['4'], [2147483648]])(
+        'POST /library rejects from_rotation_id %p with a 400',
+        async (value) => {
+          await expect(addAlbum(importReq(value), mockResponse(), next)).rejects.toMatchObject({ statusCode: 400 });
+          expect(mockInsertAlbum).not.toHaveBeenCalled();
+        }
+      );
+
+      it('POST /library treats a null from_rotation_id as omitted and accepts INT4_MAX', async () => {
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 0 });
+        await addAlbum(importReq(null), mockResponse(), next);
+        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.anything(), { kind: 'pre_cutover' }, expect.anything());
+        await addAlbum(importReq(2147483647), mockResponse(), next);
+        expect(mockInsertAlbum).toHaveBeenLastCalledWith(
+          expect.anything(),
+          { kind: 'legacy_import', rotationId: 2147483647 },
+          expect.anything()
+        );
       });
 
       const moveReq = (extra: object = {}) =>
@@ -6703,10 +6719,28 @@ describe('library.controller', () => {
       it.each([
         ['a non-integer id', { moved_from_rotation_id: 'x' }],
         ['a non-positive id', { moved_from_rotation_id: 0 }],
+        ['a negative id', { moved_from_rotation_id: -1 }],
+        ['a fractional id', { moved_from_rotation_id: 1.5 }],
+        ['a string id', { moved_from_rotation_id: '4' }],
+        ['an id past int4', { moved_from_rotation_id: 2147483648 }],
         ['an album_id beside it', { album_id: 5 }],
+        ['an album_id past int4', { moved_from_rotation_id: undefined, album_id: 2147483648 }],
+        ['a card_id past int4', { card_id: 2147483648 }],
       ])('POST /library/rotation rejects %s with a 400', async (_label, extra) => {
         await expect(addRotation(moveReq(extra), mockResponse(), next)).rejects.toMatchObject({ statusCode: 400 });
         expect(mockAddToRotation).not.toHaveBeenCalled();
+      });
+
+      it('POST /library/rotation treats a null moved_from_rotation_id as omitted and accepts INT4_MAX', async () => {
+        mockAddToRotation.mockResolvedValue({ id: 20, album_id: null, rotation_bin: 'L' });
+        await addRotation(moveReq({ moved_from_rotation_id: null }), mockResponse(), next);
+        expect(mockAddToRotation).toHaveBeenLastCalledWith(expect.anything(), { kind: 'pre_cutover' }, undefined);
+        await addRotation(moveReq({ moved_from_rotation_id: 2147483647 }), mockResponse(), next);
+        expect(mockAddToRotation).toHaveBeenLastCalledWith(
+          expect.anything(),
+          { kind: 'legacy_move', fromRotationId: 2147483647 },
+          undefined
+        );
       });
     });
 

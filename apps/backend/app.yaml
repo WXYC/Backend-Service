@@ -306,6 +306,7 @@ components:
         from_rotation_id:
           type: integer
           minimum: 1
+          maximum: 2147483647
           description: >-
             BS#2810. The legacy rotation row this release is for: a row with no library link,
             added on or before the cutover date (or moved from one that was). The release is
@@ -1245,6 +1246,7 @@ components:
         moved_from_rotation_id:
           type: integer
           minimum: 1
+          maximum: 2147483647
           description: >-
             BS#2810. The unlinked rotation row this typed-text add replaces in a cross-bin
             move; the source is killed with the database's current date in the same
