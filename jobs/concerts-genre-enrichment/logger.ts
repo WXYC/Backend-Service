@@ -46,6 +46,9 @@ export const initLogger = (config: LoggerConfig): string => {
   baseTags = { repo: config.repo, tool: config.tool, run_id: runId };
 
   Sentry.init({
+    // Sentry 11 turned this on by default, which titles captureMessage events
+    // with a minified function name (BS#3002).
+    attachStacktrace: false,
     dsn: process.env.SENTRY_DSN,
     release: process.env.SENTRY_RELEASE,
     environment: process.env.NODE_ENV || 'production',
