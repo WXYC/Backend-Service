@@ -5,6 +5,7 @@ import * as Sentry from '@sentry/node';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import WxycError from '../utils/error.js';
+import type { FilingArtist } from './library-filing.service.js';
 import {
   db,
   captureCatalogDeleteSnapshot,
@@ -4195,17 +4196,6 @@ export const getArtistsByCode = async (
 export type ArtistCodeBucketMember = ArtistSlotOwner & { code_number: number };
 
 /**
- * The shared body of the two reads over a `(code_letters, genre_id)` bucket:
- * `generateArtistNumber`, which takes the highest number in it and adds one,
- * and `browseArtistsInCodeBucket`, which returns the occupied set.
- *
- * Factored for the same reason as `artistCodeOwnerQuery` above, and with a
- * sharper failure mode: the peek assigns the next shelf code and the browse is
- * how a librarian verifies it, so the two disagreeing about which rows are in
- * the bucket is how a duplicate number gets handed out. The peek reads one
- * column of one row, which is why the wider projection costs it nothing.
- */
-/**
  * The one definition of "a row in the `(code_letters, genre_id)` bucket", as a bare `sql` fragment over
  * `genre_artist_crossreference` (`code_letters` lives on `artists`, one subquery away). A template and not a
  * `db.select` subquery so building it never touches `db`, which keeps `refileArtistInGenre`'s lock statement
@@ -4216,6 +4206,17 @@ export type ArtistCodeBucketMember = ArtistSlotOwner & { code_number: number };
 const inArtistCodeBucket = (code_letters: string, genre_id: number) =>
   sql`${genre_artist_crossreference.genre_id} = ${genre_id} AND ${genre_artist_crossreference.artist_id} IN (SELECT ${artists.id} FROM ${artists} WHERE ${artists.code_letters} = ${code_letters})`;
 
+/**
+ * The shared body of the two reads over a `(code_letters, genre_id)` bucket:
+ * `generateArtistNumber`, which takes the highest number in it and adds one,
+ * and `browseArtistsInCodeBucket`, which returns the occupied set.
+ *
+ * Factored for the same reason as `artistCodeOwnerQuery` above, and with a
+ * sharper failure mode: the peek assigns the next shelf code and the browse is
+ * how a librarian verifies it, so the two disagreeing about which rows are in
+ * the bucket is how a duplicate number gets handed out. The peek reads one
+ * column of one row, which is why the wider projection costs it nothing.
+ */
 const artistCodeBucketQuery = (code_letters: string, genre_id: number) =>
   db
     .select({
@@ -4506,17 +4507,7 @@ export const REFILE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 export type ArtistRefileOutcome =
   | { outcome: 'refiled' | 'unchanged'; card: ArtistCardRow; previous: number; releases_to_relabel: number }
   | { outcome: 'artist_not_found' | 'not_filed' | 'lettered_section' | 'lock_unavailable' }
-  | { outcome: 'slot_taken'; occupant: ArtistRefileOccupant };
-
-/** The contract `Artist` shape of the artist holding a contested slot (same fields as `FilingArtist`), `code_artist_number` being the contested target. */
-export type ArtistRefileOccupant = {
-  id: number;
-  artist_name: string;
-  code_letters: string;
-  code_artist_number: number;
-  code_comp_letter: string | null;
-  genre_id: number;
-};
+  | { outcome: 'slot_taken'; occupant: FilingArtist };
 
 /**
  * BS#2643: re-file an artist's call number within ONE genre membership, `genre_artist_crossreference.artist_genre_code`
@@ -4538,6 +4529,8 @@ export type ArtistRefileOccupant = {
  * **Residual race, accepted:** `addArtist` inserts into a bucket without taking these locks, so a create landing the
  * same triple at the same instant as a re-file is not prevented. That is the check-then-act window BS#2106 records for
  * `addArtist` itself, accepted on the same grounds; the unique constraint stays out of scope (BS#2033, BS#2106).
+ * Also not prevented: a manual run of `jobs/library-etl` upserts `artist_genre_code` from tubafrenzy's frozen value and
+ * so reverts a re-file (WXYC/Backend-Service#2581).
  */
 export const refileArtistInGenre = async (
   artist_id: number,
@@ -4586,6 +4579,8 @@ export const refileArtistInGenre = async (
         };
       }
 
+      // The self-exclusion is defense in depth: a co-owner of this artist's own number is answered by the `unchanged`
+      // return above, so `own` can only appear here if the locked row and the owner read disagree.
       const owners = (await getArtistsByCode(card.code_letters, genre_id, target, tx)).filter(
         (owner) => owner.artist_id !== artist_id
       );

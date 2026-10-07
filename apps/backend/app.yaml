@@ -3670,9 +3670,10 @@ paths:
         are real fields on `/wxycdb`'s artist-card form but have no write path
         on this endpoint — sending one is rejected with a 400 naming why, not
         silently dropped. `code_artist_number` is re-filed with
-        `POST /library/artists/{id}/refile` (BS#2643). A `code_letters` change is therefore still
-        unserviceable, so a rename that crosses a shelf-letter boundary
-        ('Ziu Ziu' → 'Xiu Xiu') leaves the filing code behind.
+        `POST /library/artists/{id}/refile` (BS#2643). A `code_letters` change
+        is therefore still unserviceable, so a rename that crosses a
+        shelf-letter boundary ('Ziu Ziu' → 'Xiu Xiu') leaves the filing code
+        behind.
 
         `artist_name` was excluded from the original BS#2156 ship while
         `jobs/library-etl` was a live 30-minute cron that matched artists by
@@ -4017,7 +4018,7 @@ paths:
         /library/artists` takes no such lock, so a create landing the same
         triple at the same instant is not prevented (BS#2106).
       security:
-        - BearerAuth: ['station-management']
+        - BearerAuth: ['catalog-write']
       parameters:
         - in: path
           name: id

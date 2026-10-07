@@ -115,7 +115,7 @@ describe('refileArtistInGenre (BS#2643)', () => {
     expect(dbSelect).not.toHaveBeenCalled();
   });
 
-  it('slot_taken: names the first other owner as a contract Artist, ignoring self, and writes nothing', async () => {
+  it('slot_taken: names the first other owner as a contract Artist and writes nothing (self in the owner list is filtered as defense in depth; the live guard is the unchanged return)', async () => {
     const owners = [
       { artist_id: 431, artist_name: 'Isis', code_letters: 'IS', code_comp_letter: null },
       { artist_id: 7, artist_name: 'Isis Two', code_letters: 'IS', code_comp_letter: null },
