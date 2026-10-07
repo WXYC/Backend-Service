@@ -1098,6 +1098,14 @@ export async function setLibraryUrls(libraryId: number, urls: string[]) {
   return getAlbumFromDB(libraryId);
 }
 
+/** The four columns of the contract's `RotationCard`; `last_changed_at` rides the list item only. */
+const ROTATION_CARD_WIRE_COLUMNS = {
+  id: rotation_cards.id,
+  bin: rotation_cards.bin,
+  number: rotation_cards.number,
+  name: rotation_cards.name,
+};
+
 /**
  * `GET /library/rotation/cards` (BS#2472): every card across all bins, each
  * with a count of the rotation rows currently active on it — ONE grouped
@@ -1114,6 +1122,7 @@ export const listRotationCardsFromDB = async (): Promise<Array<RotationCard & { 
       bin: rotation_cards.bin,
       number: rotation_cards.number,
       name: rotation_cards.name,
+      last_changed_at: rotation_cards.last_changed_at,
       active_count: sql<number>`count(${rotation.id})::int`,
     })
     .from(rotation_cards)
@@ -1151,7 +1160,7 @@ export const listRotationCardsFromDB = async (): Promise<Array<RotationCard & { 
  * retriable creation contention), so it surfaces in the generic
  * `ApiErrorResponse` shape.
  */
-export const addRotationCard = async (bin: RotationBin, name: string | null | undefined): Promise<RotationCard> => {
+export const addRotationCard = async (bin: RotationBin, name: string | null | undefined): Promise<RotationCardWire> => {
   for (let attempt = 0; ; attempt++) {
     try {
       return await db.transaction(async (tx) => {
@@ -1164,7 +1173,7 @@ export const addRotationCard = async (bin: RotationBin, name: string | null | un
         `)) as unknown as Array<{ number: number }>;
 
         const values: NewRotationCard = { bin, number: (maxRows[0]?.number ?? 0) + 1, name: name ?? null };
-        const [card] = await tx.insert(rotation_cards).values(values).returning();
+        const [card] = await tx.insert(rotation_cards).values(values).returning(ROTATION_CARD_WIRE_COLUMNS);
         return card;
       });
     } catch (err) {
@@ -1179,8 +1188,12 @@ export const addRotationCard = async (bin: RotationBin, name: string | null | un
 };
 
 /** `PATCH /library/rotation/cards/:id` (BS#2472) — rename only; `bin`/`number` are immutable via this endpoint. */
-export const renameRotationCard = async (id: number, name: string | null): Promise<RotationCard | undefined> => {
-  const [card] = await db.update(rotation_cards).set({ name }).where(eq(rotation_cards.id, id)).returning();
+export const renameRotationCard = async (id: number, name: string | null): Promise<RotationCardWire | undefined> => {
+  const [card] = await db
+    .update(rotation_cards)
+    .set({ name })
+    .where(eq(rotation_cards.id, id))
+    .returning(ROTATION_CARD_WIRE_COLUMNS);
   return card;
 };
 

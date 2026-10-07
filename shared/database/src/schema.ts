@@ -1307,6 +1307,11 @@ export const rotation_cards = wxyc_schema.table(
     bin: freqEnum('bin').notNull(),
     number: integer('number').notNull(),
     name: text('name'),
+    // When the card's membership last changed, kept by the triggers on
+    // `rotation` (see the migration that adds them). NULL until something
+    // changes the card: no default and no backfill, since a migration-time
+    // stamp would claim every card changed on deploy day.
+    last_changed_at: timestamp('last_changed_at', { withTimezone: true }),
   },
   (table) => {
     return {
