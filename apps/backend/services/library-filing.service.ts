@@ -15,6 +15,7 @@ import { lmlLookupCoordinator } from './lml/index.js';
 import { filterSpacerGif } from './metadata/metadata.service.js';
 import * as labelsService from './labels.service.js';
 import * as libraryService from './library.service.js';
+import { ReviewRequiredError, type NewReleaseGateBasis } from '../utils/review-gate-basis.js';
 
 /**
  * Validate the create body's `album_title` and `alternate_artist_name` the way
@@ -185,7 +186,7 @@ export type ValidatedFilingInput = {
 /** The 409 body `wxyc-shared`'s `LibraryFilingConflictError` declares. */
 export type LibraryFilingConflictError = {
   message: string;
-  reason: 'artist_code_conflict' | 'artist_name_conflict' | 'rotation_card_bin_mismatch';
+  reason: 'artist_code_conflict' | 'artist_name_conflict' | 'rotation_card_bin_mismatch' | 'review_required';
   artist?: FilingArtist;
   code?: string;
 };
@@ -213,8 +214,17 @@ export type LibraryFilingConflictError = {
  * intake item) can run this same transaction as one step of its own, larger
  * composite — `outerTx`, given, is run against directly instead of opening a
  * nested transaction that wouldn't share the caller's rollback.
+ *
+ * `gateBasis` (BS#2807) is the review gate's basis for the release and its
+ * rotation entry, passed to both `insertAlbum` and `addToRotation`:
+ * `createLibraryFiling` supplies `pre_cutover`, `fileIntakeItem` the `intake`
+ * basis of the item it files. `planLibraryFiling` does not choose it.
  */
-export async function fileLibraryRelease(input: ValidatedFilingInput, outerTx?: libraryService.DbTransaction) {
+export async function fileLibraryRelease(
+  input: ValidatedFilingInput,
+  gateBasis: NewReleaseGateBasis,
+  outerTx?: libraryService.DbTransaction
+) {
   const { filingPlan, release, rotation: rotationBody } = input;
   const { genre_id: release_genre_id, format_id: release_format_id, album_title } = release;
   const { code_volume_letters, supplied_code_number } = release;
@@ -266,6 +276,7 @@ export async function fileLibraryRelease(input: ValidatedFilingInput, outerTx?: 
         alternate_artist_name: release.alternate_artist_name,
         disc_quantity: release.disc_quantity,
       },
+      gateBasis,
       tx
     );
 
@@ -273,6 +284,7 @@ export async function fileLibraryRelease(input: ValidatedFilingInput, outerTx?: 
     if (rotationBody) {
       rotationRow = await libraryService.addToRotation(
         { rotation_bin: rotationBody.rotation_bin, album_id: releaseRow.id, card_id: rotationBody.card_id },
+        gateBasis,
         rotationBody.urls,
         tx
       );
@@ -906,9 +918,11 @@ export async function completeLibraryFiling(
 /**
  * Maps a failure from `fileLibraryRelease` / `completeLibraryFiling` onto the
  * route's declared responses: returns the 409 body for a rotation-card/bin
- * mismatch, throws the 400 for a dangling `card_id`, rethrows anything else.
+ * mismatch, the 409 `review_required` body for a refused gate basis (BS#2807),
+ * throws the 400 for a dangling `card_id`, rethrows anything else.
  */
 export function mapLibraryFilingError(err: unknown): LibraryFilingConflictError {
+  if (err instanceof ReviewRequiredError) return err.toBody();
   if (err instanceof libraryService.RotationCardBinMismatchError) {
     return { message: err.message, reason: 'rotation_card_bin_mismatch' };
   }

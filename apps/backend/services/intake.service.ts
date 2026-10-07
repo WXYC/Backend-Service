@@ -542,7 +542,7 @@ export const fileIntakeItem = async (id: number, arm: IntakeFileArm, filedBy: st
       let filed: Awaited<ReturnType<typeof fileLibraryRelease>> | undefined;
       let albumId: number;
       if (arm.kind === 'new_release') {
-        filed = await fileLibraryRelease(arm.input, tx);
+        filed = await fileLibraryRelease(arm.input, { kind: 'intake', intakeItemId: id }, tx);
         albumId = filed.release.id;
       } else {
         albumId = arm.album_id;

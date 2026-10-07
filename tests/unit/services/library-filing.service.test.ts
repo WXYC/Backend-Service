@@ -19,8 +19,9 @@ const mockInsertArtistWithGenreCrossreference =
     ) => Promise<{ id: number; artist_name: string; alphabetical_name: string; code_letters: string }>
   >();
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number, genreId: number, tx?: unknown) => Promise<number>>();
-const mockInsertAlbum = jest.fn<(album: unknown, tx?: unknown) => Promise<{ id: number }>>();
-const mockAddToRotation = jest.fn<(rotation: unknown, urls?: string[], tx?: unknown) => Promise<unknown>>();
+const mockInsertAlbum = jest.fn<(album: unknown, basis: unknown, tx?: unknown) => Promise<{ id: number }>>();
+const mockAddToRotation =
+  jest.fn<(rotation: unknown, basis: unknown, urls?: string[], tx?: unknown) => Promise<unknown>>();
 const mockGenerateArtistNumber = jest.fn<(letters: string, genreId: number) => Promise<number>>();
 const mockGetArtistByCode = jest.fn<(letters: string, genreId: number, n: number) => Promise<unknown>>();
 const mockArtistIdFromName = jest.fn<(name: string, genreId: number) => Promise<number | null>>();
@@ -56,6 +57,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
 import { db } from '@wxyc/database';
 import * as libraryService from '../../../apps/backend/services/library.service';
 import WxycError from '../../../apps/backend/utils/error';
+import { ReviewRequiredError } from '../../../apps/backend/utils/review-gate-basis';
 import {
   resolveNewAlbumLabel,
   fileLibraryRelease,
@@ -63,6 +65,8 @@ import {
   planLibraryFiling,
   mapLibraryFilingError,
 } from '../../../apps/backend/services/library-filing.service';
+
+const BASIS = { kind: 'pre_cutover' } as const;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -127,7 +131,7 @@ describe('fileLibraryRelease', () => {
     const failure = new Error('insertAlbum exploded');
     mockInsertAlbum.mockRejectedValue(failure);
 
-    await expect(fileLibraryRelease(baseInput, outerTx as never)).rejects.toThrow(failure);
+    await expect(fileLibraryRelease(baseInput, BASIS, outerTx as never)).rejects.toThrow(failure);
 
     // Every write that ran before the failure rode the SAME outer handle —
     // never a second, nested transaction of its own — which is what lets the
@@ -136,7 +140,7 @@ describe('fileLibraryRelease', () => {
     expect(db.transaction).not.toHaveBeenCalled();
     expect(mockCreateLabel).toHaveBeenCalledWith('self-released', undefined, outerTx);
     expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(expect.anything(), 3, 5, outerTx);
-    expect(mockInsertAlbum).toHaveBeenCalledWith(expect.anything(), outerTx);
+    expect(mockInsertAlbum).toHaveBeenCalledWith(expect.anything(), BASIS, outerTx);
     expect(mockAddToRotation).not.toHaveBeenCalled();
   });
 });
@@ -162,13 +166,13 @@ describe('fileLibraryRelease transaction handles', () => {
     const tx = { marker: 'own-tx' };
     (db.transaction as jest.Mock).mockImplementationOnce((cb: unknown) => (cb as (t: unknown) => unknown)(tx));
 
-    await fileLibraryRelease(input);
+    await fileLibraryRelease(input, BASIS);
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(mockCreateLabel).toHaveBeenCalledWith('Sonamos', undefined, tx);
     expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(9, 3, tx);
-    expect(mockInsertAlbum).toHaveBeenCalledWith(expect.anything(), tx);
-    expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), undefined, tx);
+    expect(mockInsertAlbum).toHaveBeenCalledWith(expect.anything(), BASIS, tx);
+    expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), BASIS, undefined, tx);
   });
 
   it('threads the transaction it opens through the create arm artist insert when no outer handle is given', async () => {
@@ -181,16 +185,19 @@ describe('fileLibraryRelease transaction handles', () => {
       code_letters: 'ST',
     });
 
-    await fileLibraryRelease({
-      filingPlan: {
-        kind: 'create',
-        artist_name: 'Stereolab',
-        alphabetical_name: 'Stereolab',
-        code_letters: 'ST',
-        code_number: 5,
+    await fileLibraryRelease(
+      {
+        filingPlan: {
+          kind: 'create',
+          artist_name: 'Stereolab',
+          alphabetical_name: 'Stereolab',
+          code_letters: 'ST',
+          code_number: 5,
+        },
+        release: input.release,
       },
-      release: input.release,
-    });
+      BASIS
+    );
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(expect.anything(), 3, 5, tx);
@@ -215,6 +222,7 @@ describe('fileLibraryRelease transaction handles', () => {
         },
         release: input.release,
       },
+      BASIS,
       {} as never
     );
 
@@ -224,26 +232,41 @@ describe('fileLibraryRelease transaction handles', () => {
   it('files the release under the supplied call number and volume letters, generating a number only when none is supplied', async () => {
     await fileLibraryRelease(
       { ...input, release: { ...input.release, supplied_code_number: 12, code_volume_letters: 'ab' } },
+      BASIS,
       {} as never
     );
     expect(mockInsertAlbum).toHaveBeenCalledWith(
       expect.objectContaining({ code_number: 12, code_volume_letters: 'ab' }),
+      BASIS,
       expect.anything()
     );
     expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
 
-    await fileLibraryRelease(input, {} as never);
-    expect(mockInsertAlbum).toHaveBeenLastCalledWith(expect.objectContaining({ code_number: 4 }), expect.anything());
+    await fileLibraryRelease(input, BASIS, {} as never);
+    expect(mockInsertAlbum).toHaveBeenLastCalledWith(
+      expect.objectContaining({ code_number: 4 }),
+      BASIS,
+      expect.anything()
+    );
+  });
+
+  it('hands the one gate basis to both the release insert and the rotation entry', async () => {
+    const intake = { kind: 'intake', intakeItemId: 12 } as const;
+
+    await fileLibraryRelease(input, intake, {} as never);
+
+    expect(mockInsertAlbum).toHaveBeenCalledWith(expect.anything(), intake, expect.anything());
+    expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), intake, undefined, expect.anything());
   });
 
   it('threads a given outer handle through the code-number generator and the rotation write', async () => {
     const outerTx = { marker: 'outer-tx' };
 
-    await fileLibraryRelease(input, outerTx as never);
+    await fileLibraryRelease(input, BASIS, outerTx as never);
 
     expect(db.transaction).not.toHaveBeenCalled();
     expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(9, 3, outerTx);
-    expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), undefined, outerTx);
+    expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), BASIS, undefined, outerTx);
   });
 });
 
@@ -538,7 +561,7 @@ describe('create text bounds on POST /library/filings', () => {
     });
     const outerTx = { marker: 'tx' };
 
-    const rejection = expect(fileLibraryRelease(filingInput({ label: astral(129) }), outerTx as never)).rejects;
+    const rejection = expect(fileLibraryRelease(filingInput({ label: astral(129) }), BASIS, outerTx as never)).rejects;
     await rejection.toMatchObject({ statusCode: 400 });
     await rejection.toThrow('release.label must be 128 characters or fewer');
 
@@ -556,7 +579,7 @@ describe('create text bounds on POST /library/filings', () => {
     mockInsertAlbum.mockResolvedValue({ id: 1 });
     const outerTx = { marker: 'tx' };
 
-    await fileLibraryRelease(filingInput({ label: `  ${astral(128)}  ` }), outerTx as never);
+    await fileLibraryRelease(filingInput({ label: `  ${astral(128)}  ` }), BASIS, outerTx as never);
 
     expect(mockCreateLabel).toHaveBeenCalledWith(astral(128), undefined, outerTx);
   });
@@ -567,6 +590,12 @@ describe('mapLibraryFilingError', () => {
     const err = new libraryService.RotationCardBinMismatchError(1, 'S', 'A');
 
     expect(mapLibraryFilingError(err)).toEqual({ message: err.message, reason: 'rotation_card_bin_mismatch' });
+  });
+
+  it('maps a refused review gate onto its 409 body, with the reason the bench branches on', () => {
+    const err = new ReviewRequiredError('Every new release needs a review');
+
+    expect(mapLibraryFilingError(err)).toEqual({ message: err.message, reason: 'review_required' });
   });
 
   it('remaps a dangling rotation card onto a 400, code intact', () => {

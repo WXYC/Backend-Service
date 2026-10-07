@@ -108,6 +108,9 @@ import {
   type AliasHitFields,
 } from '../utils/alias-hits.js';
 import { rawProjection } from '../utils/sql-projection.js';
+import { isGateOn } from '../utils/review-gate-cutover.js';
+import { mayFileItem } from '../utils/intake-filing-rule.js';
+import { ReviewRequiredError, type GateBasis, type NewReleaseGateBasis } from '../utils/review-gate-basis.js';
 import { ROTATION_BIN_DEDUP_ORDINAL } from '../utils/rotation-bin-order.js';
 import { hasAlphanumeric } from '../utils/text-query.js';
 import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
@@ -720,6 +723,39 @@ const resolveRotationCardId = async (
 };
 
 /**
+ * Verifies a review-gate basis (BS#2807) on the transaction whose write it licenses. `pre_cutover` holds only while
+ * the gate is off. `intake` holds only for an item with an accepted review (`mayFileItem`), read `FOR UPDATE` so an
+ * unaccept cannot slip in before the insert commits. `existing_release` holds only for a release that is there,
+ * read `FOR KEY SHARE`: the first lock in `DELETE /library/{id}`'s order (library row, then items, then reviews), so
+ * a delete in flight cannot orphan the row this write points at.
+ */
+const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
+  if (basis.kind === 'pre_cutover') {
+    if (isGateOn()) {
+      throw new ReviewRequiredError('Every new release needs a review: file it through the Pile');
+    }
+    return;
+  }
+  if (basis.kind === 'existing_release') {
+    const [release] = await tx
+      .select({ id: library.id })
+      .from(library)
+      .where(eq(library.id, basis.albumId))
+      .for('key share');
+    if (!release) throw new WxycError('Release not found', 404);
+    return;
+  }
+  const [item] = await tx
+    .select({ accepted_review_id: intake_items.accepted_review_id })
+    .from(intake_items)
+    .where(eq(intake_items.id, basis.intakeItemId))
+    .for('update');
+  if (!item || !mayFileItem(item)) {
+    throw new ReviewRequiredError('A music director must accept a review before this record is filed');
+  }
+};
+
+/**
  * Add an album to rotation (dj-site path, `POST /library/rotation`).
  *
  * Synchronously triple-writes `(discogs_release_id, discogs_release_id_source =
@@ -769,8 +805,19 @@ const resolveRotationCardId = async (
  * separate connection rather than as a savepoint of that outer one — see
  * `DbTransaction`'s doc comment. Passed, the insert transaction below is
  * skipped in favor of running directly against the caller's own `tx`.
+ *
+ * `gateBasis` (BS#2807) is the review gate: required, and verified by
+ * `assertGateBasis` first thing inside the insert transaction, after the LML
+ * work above for the same reason the card lock is (no row lock across a
+ * network hop). The bin parse stays this function's first statement, ahead of
+ * the basis check and every read.
  */
-export const addToRotation = async (newRotation: RotationAddRequest, urls?: string[], outerTx?: DbTransaction) => {
+export const addToRotation = async (
+  newRotation: RotationAddRequest,
+  gateBasis: GateBasis,
+  urls?: string[],
+  outerTx?: DbTransaction
+) => {
   const values: RotationAddRequest = { ...newRotation };
 
   // Parse once, before any read: every later step and the INSERT use the
@@ -783,6 +830,9 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
     );
   }
   values.rotation_bin = parsedBin.bin;
+  if (gateBasis.kind === 'existing_release' && gateBasis.albumId !== values.album_id) {
+    throw new Error('addToRotation: the gate basis names a different release than the row it would write');
+  }
 
   // Allowlist guard already runs at the controller layer, but the server-
   // derived fields below must always come from this function, not the
@@ -846,6 +896,7 @@ export const addToRotation = async (newRotation: RotationAddRequest, urls?: stri
   }
 
   const run = async (tx: DbTransaction) => {
+    await assertGateBasis(tx, gateBasis);
     const cardId = await resolveRotationCardId(tx, values.rotation_bin, values.card_id);
     if (cardId !== undefined) values.card_id = cardId;
 
@@ -1906,9 +1957,17 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
 // `tx` (BS#2474): threaded through by `POST /library/filings` so the insert
 // lands in its caller's own transaction rather than a bare autocommit write —
 // see `DbTransaction`'s doc comment.
-export const insertAlbum = async (newAlbum: NewAlbum, tx?: DbTransaction) => {
-  const response = await (tx ?? db).insert(library).values(newAlbum).returning();
-  return response[0];
+//
+// `gateBasis` (BS#2807) is the review gate: required, and verified inside the
+// transaction the insert runs in. Given no `tx`, this opens one, so the check
+// and the insert are always atomic.
+export const insertAlbum = async (newAlbum: NewAlbum, gateBasis: NewReleaseGateBasis, tx?: DbTransaction) => {
+  const run = async (t: DbTransaction) => {
+    await assertGateBasis(t, gateBasis);
+    const response = await t.insert(library).values(newAlbum).returning();
+    return response[0];
+  };
+  return tx ? run(tx) : db.transaction(run);
 };
 
 /**

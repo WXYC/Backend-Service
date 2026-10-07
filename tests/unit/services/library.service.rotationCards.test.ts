@@ -236,7 +236,7 @@ describe('addToRotation card resolution (BS#2472)', () => {
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: 7 }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ rotation_bin: 'M', ...UNCATALOGUED });
+    await addToRotation({ rotation_bin: 'M', ...UNCATALOGUED }, { kind: 'pre_cutover' });
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     const valuesArg = insertChain.values.mock.calls[0][0] as Record<string, unknown>;
@@ -248,7 +248,7 @@ describe('addToRotation card resolution (BS#2472)', () => {
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: null }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ rotation_bin: 'M', ...UNCATALOGUED });
+    await addToRotation({ rotation_bin: 'M', ...UNCATALOGUED }, { kind: 'pre_cutover' });
 
     const valuesArg = insertChain.values.mock.calls[0][0] as Record<string, unknown>;
     expect(valuesArg.card_id).toBeUndefined();
@@ -259,7 +259,7 @@ describe('addToRotation card resolution (BS#2472)', () => {
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: 7 }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ rotation_bin: 'M', card_id: 7, ...UNCATALOGUED });
+    await addToRotation({ rotation_bin: 'M', card_id: 7, ...UNCATALOGUED }, { kind: 'pre_cutover' });
 
     const valuesArg = insertChain.values.mock.calls[0][0] as Record<string, unknown>;
     expect(valuesArg.card_id).toBe(7);
@@ -273,13 +273,15 @@ describe('addToRotation card resolution (BS#2472)', () => {
     const insertChain = createMockQueryChain([{ id: 42, rotation_bin: 'M', card_id: 7 }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ rotation_bin: 'm' as unknown as 'M', card_id: 7, ...UNCATALOGUED });
+    await addToRotation({ rotation_bin: 'm' as unknown as 'M', card_id: 7, ...UNCATALOGUED }, { kind: 'pre_cutover' });
 
     expect(insertChain.values.mock.calls[0][0]).toMatchObject({ rotation_bin: 'M' });
   });
 
   test('rejects a value that is not a bin with a 400 and inserts nothing', async () => {
-    await expect(addToRotation({ rotation_bin: 'X' as unknown as 'M', ...UNCATALOGUED })).rejects.toMatchObject({
+    await expect(
+      addToRotation({ rotation_bin: 'X' as unknown as 'M', ...UNCATALOGUED }, { kind: 'pre_cutover' })
+    ).rejects.toMatchObject({
       statusCode: 400,
       message: expect.stringContaining('Invalid rotation_bin "X"'),
     });
@@ -289,16 +291,18 @@ describe('addToRotation card resolution (BS#2472)', () => {
   test('throws RotationCardBinMismatchError when the card lives in a different bin', async () => {
     db.execute.mockResolvedValueOnce([{ bin: 'S' }]);
 
-    await expect(addToRotation({ rotation_bin: 'M', card_id: 7, ...UNCATALOGUED })).rejects.toThrow(
-      RotationCardBinMismatchError
-    );
+    await expect(
+      addToRotation({ rotation_bin: 'M', card_id: 7, ...UNCATALOGUED }, { kind: 'pre_cutover' })
+    ).rejects.toThrow(RotationCardBinMismatchError);
     expect(db.insert).not.toHaveBeenCalled();
   });
 
   test('404s a card_id that references no card', async () => {
     db.execute.mockResolvedValueOnce([]);
 
-    await expect(addToRotation({ rotation_bin: 'M', card_id: 999, ...UNCATALOGUED })).rejects.toMatchObject({
+    await expect(
+      addToRotation({ rotation_bin: 'M', card_id: 999, ...UNCATALOGUED }, { kind: 'pre_cutover' })
+    ).rejects.toMatchObject({
       statusCode: 404,
     });
     expect(db.insert).not.toHaveBeenCalled();

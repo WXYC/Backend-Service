@@ -144,6 +144,8 @@ describe('addToRotation (BS#1380)', () => {
   const ALBUM_ID = 100;
   const DISCOGS_RELEASE_ID = 12345;
   const LML_IDENTITY_ID = 7700100;
+  // BS#2807: the review gate's basis for re-rotating a release that is already in the library.
+  const EXISTING = { kind: 'existing_release', albumId: ALBUM_ID } as const;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -153,6 +155,7 @@ describe('addToRotation (BS#1380)', () => {
     // Library-identity row supplies a non-NULL discogs_release_id.
     const selectChain = createMockQueryChain([{ discogs_release_id: DISCOGS_RELEASE_ID }]);
     selectChain.limit = jest.fn().mockResolvedValue([{ discogs_release_id: DISCOGS_RELEASE_ID }]);
+    selectChain.for = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
     db.select.mockReturnValue(selectChain);
 
     // LML mints/returns a stable identity_id.
@@ -171,7 +174,7 @@ describe('addToRotation (BS#1380)', () => {
     ]);
     db.insert.mockReturnValue(insertChain);
 
-    const result = await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' });
+    const result = await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, EXISTING);
 
     expect(mockResolveIdentity).toHaveBeenCalledWith({
       kind: 'release',
@@ -194,6 +197,7 @@ describe('addToRotation (BS#1380)', () => {
   test('library_identity hit + LML resolve failure → discogs_release_id + source still land, lml_identity_id = NULL, counter fires', async () => {
     const selectChain = createMockQueryChain([{ discogs_release_id: DISCOGS_RELEASE_ID }]);
     selectChain.limit = jest.fn().mockResolvedValue([{ discogs_release_id: DISCOGS_RELEASE_ID }]);
+    selectChain.for = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
     db.select.mockReturnValue(selectChain);
 
     // Simulate LML timeout — `lmlFetch` raises `LmlClientError(..., 504)`.
@@ -211,7 +215,7 @@ describe('addToRotation (BS#1380)', () => {
     ]);
     db.insert.mockReturnValue(insertChain);
 
-    const result = await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'L' });
+    const result = await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'L' }, EXISTING);
 
     const valuesArg = insertChain.values.mock.calls[0][0] as Record<string, unknown>;
     // The source-of-the-Discogs-id is still library_identity (the issue's
@@ -233,12 +237,13 @@ describe('addToRotation (BS#1380)', () => {
     // The library_identity lookup returns no row.
     const selectChain = createMockQueryChain([]);
     selectChain.limit = jest.fn().mockResolvedValue([]);
+    selectChain.for = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
     db.select.mockReturnValue(selectChain);
 
     const insertChain = createMockQueryChain([{ id: 3, album_id: ALBUM_ID, rotation_bin: 'H' }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'H' });
+    await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'H' }, EXISTING);
 
     expect(mockResolveIdentity).not.toHaveBeenCalled();
 
@@ -261,12 +266,13 @@ describe('addToRotation (BS#1380)', () => {
     // PRIMARY KEY is library_id (schema.ts:1391-1393).
     const selectChain = createMockQueryChain([{ discogs_release_id: null }]);
     selectChain.limit = jest.fn().mockResolvedValue([{ discogs_release_id: null }]);
+    selectChain.for = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
     db.select.mockReturnValue(selectChain);
 
     const insertChain = createMockQueryChain([{ id: 4 }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' });
+    await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, EXISTING);
 
     // The select chain reads from library_identity.
     expect(db.select).toHaveBeenCalled();
@@ -280,12 +286,13 @@ describe('addToRotation (BS#1380)', () => {
     test('a non-empty urls array is inserted into rotation_urls, positioned by array index, inside the same transaction', async () => {
       const selectChain = createMockQueryChain([]);
       selectChain.limit = jest.fn().mockResolvedValue([]);
+      selectChain.for = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
       db.select.mockReturnValue(selectChain);
 
       const insertChain = createMockQueryChain([{ id: 10, album_id: ALBUM_ID, rotation_bin: 'M' }]);
       db.insert.mockReturnValue(insertChain);
 
-      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, [
+      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, EXISTING, [
         'https://example.com/a',
         'https://example.com/b',
       ]);
@@ -304,13 +311,14 @@ describe('addToRotation (BS#1380)', () => {
     test('an empty or absent urls array writes no rotation_urls rows', async () => {
       const selectChain = createMockQueryChain([]);
       selectChain.limit = jest.fn().mockResolvedValue([]);
+      selectChain.for = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
       db.select.mockReturnValue(selectChain);
 
       const insertChain = createMockQueryChain([{ id: 11, album_id: ALBUM_ID, rotation_bin: 'M' }]);
       db.insert.mockReturnValue(insertChain);
 
-      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, []);
-      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' });
+      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, EXISTING, []);
+      await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, EXISTING);
 
       // One rotation INSERT per call, and no second INSERT for either.
       expect(db.insert).toHaveBeenCalledTimes(2);

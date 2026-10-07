@@ -247,6 +247,8 @@ describe('addToRotation writes library_urls for the catalogued arm (BS#2491)', (
   const primeIdentityMiss = () => {
     const selectChain = createMockQueryChain([]);
     selectChain.limit = jest.fn().mockResolvedValue([]);
+    // BS#2807: the `existing_release` gate basis finds the library row.
+    selectChain.for = jest.fn().mockResolvedValue([{ id: ALBUM_ID }]);
     db.select.mockReturnValue(selectChain);
   };
 
@@ -255,7 +257,10 @@ describe('addToRotation writes library_urls for the catalogued arm (BS#2491)', (
     const insertChain = createMockQueryChain([{ id: 77, album_id: ALBUM_ID, rotation_bin: 'M' }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, ['https://a.example', 'https://b.example']);
+    await addToRotation({ album_id: ALBUM_ID, rotation_bin: 'M' }, { kind: 'existing_release', albumId: ALBUM_ID }, [
+      'https://a.example',
+      'https://b.example',
+    ]);
 
     // rotation row, then rotation_urls, then the release-scoped library_urls.
     expect(db.insert.mock.calls.map((c) => c[0])).toEqual([rotation, rotation_urls, library_urls]);
@@ -273,7 +278,11 @@ describe('addToRotation writes library_urls for the catalogued arm (BS#2491)', (
     const insertChain = createMockQueryChain([{ id: 78, rotation_bin: 'M' }]);
     db.insert.mockReturnValue(insertChain);
 
-    await addToRotation({ rotation_bin: 'M', artist_name: 'Juana Molina', album_title: 'DOGA' }, ['https://a.example']);
+    await addToRotation(
+      { rotation_bin: 'M', artist_name: 'Juana Molina', album_title: 'DOGA' },
+      { kind: 'pre_cutover' },
+      ['https://a.example']
+    );
 
     expect(db.insert.mock.calls.map((c) => c[0])).toEqual([rotation, rotation_urls]);
     expect(db.delete).not.toHaveBeenCalledWith(library_urls);
