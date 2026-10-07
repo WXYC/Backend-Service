@@ -85,7 +85,9 @@ export const resolveNewAlbumLabel = async (
   // later-stage rollback would strand the freshly minted `labels` row while
   // everything else vanishes, breaking the endpoint's all-or-nothing
   // contract with exactly the near-duplicate-labels outcome the `label_id`
-  // path above exists to prevent. `addAlbum` keeps calling without one.
+  // path above exists to prevent. Both callers pass one: `POST /library/filings` its composite's
+  // transaction, `addAlbum` the transaction it shares with `insertAlbum`, so a
+  // refused review gate (BS#2807) takes the minted label back too.
   tx?: libraryService.DbTransaction,
   labelField = 'label'
 ): Promise<{ label_id: number | undefined; label: string | undefined }> => {
