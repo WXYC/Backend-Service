@@ -56,3 +56,23 @@ describe('Express error filter registration on expressIntegration', () => {
     expect(source).not.toMatch(/Sentry\.setupExpressErrorHandler\(/);
   });
 });
+
+// v11 defaults to `traceLifecycle: 'stream'`, which silently ignores
+// `beforeSendTransaction` and `ignoreTransactions`. Both preloads pass
+// `filterSentryTransactionEvent` as `beforeSendTransaction` (BS#2089), so they
+// must stay on the static lifecycle or the liveness probes and Express
+// middleware spans that filter drops are sent again.
+describe('transaction filter stays active under Sentry 11', () => {
+  it.each([
+    ['backend', '../../../apps/backend/instrument'],
+    ['auth', '../../../apps/auth/instrument'],
+  ])('%s pins traceLifecycle to static alongside beforeSendTransaction', (_app, relPath) => {
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require(relPath);
+    });
+    const initOptions = mockInit.mock.calls.at(-1)?.[0] as { beforeSendTransaction?: unknown; traceLifecycle?: string };
+    expect(initOptions.beforeSendTransaction).toEqual(expect.any(Function));
+    expect(initOptions.traceLifecycle).toBe('static');
+  });
+});
