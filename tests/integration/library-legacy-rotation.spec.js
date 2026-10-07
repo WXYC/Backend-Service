@@ -186,6 +186,7 @@ describe('legacy rotation rows: import and move (BS#2810)', () => {
       expect(moved).toHaveLength(1);
     });
   });
+
   describe("a moved record's chain is one record (BS#3007)", () => {
     /** Three rows linked by `moved_from_rotation_id`, oldest first; the older two were killed by their moves. */
     const movedChain = async (suffix) => {
@@ -284,6 +285,45 @@ describe('legacy rotation rows: import and move (BS#2810)', () => {
 
       await auth.patch(`/library/rotation/${chain[2].id}/link`).send({ album_id: made.body.id }).expect(200);
       expect(await albumIds(chain)).toEqual([made.body.id, made.body.id, made.body.id]);
+    });
+
+    test('imports a chain whose newest row was killed at the end of its run, and links the whole chain', async () => {
+      const chain = await movedChain('chain-killed-newest');
+      // Killed by its rotation time ending, not by a move: nothing names it in `moved_from_rotation_id`.
+      await auth.patch('/library/rotation').send({ rotation_id: chain[2].id, kill_date: '2020-01-01' }).expect(200);
+      const title = `Imported killed newest ${runId}`;
+
+      const res = await auth.post('/library').send(importBody(title, chain[2].id)).expect(201);
+
+      expect(await libraryCount(title)).toBe(1);
+      expect(await albumIds(chain)).toEqual([res.body.id, res.body.id, res.body.id]);
+    });
+
+    test('GET /library/rotation/uncatalogued lists the newest row of a chain and none of the moved-away rows', async () => {
+      const chain = await movedChain('chain-queue');
+      const queuedIds = async (status) => {
+        const res = await auth.get(`/library/rotation/uncatalogued?status=${status}&limit=500`).expect(200);
+        return res.body.map((row) => row.id);
+      };
+
+      // The older two were killed by their moves, today; the newest is active.
+      for (const status of ['all', 'active']) {
+        const ids = await queuedIds(status);
+        expect(ids).toContain(chain[2].id);
+        expect(ids).not.toContain(chain[0].id);
+        expect(ids).not.toContain(chain[1].id);
+      }
+
+      // Killed at the end of its run (yesterday, so it sorts just behind today's kills in `kill_date DESC` order inside
+      // the 500-row window), the newest row joins the killed queue; the moved-away rows, killed today, stay out of it.
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      await auth.patch('/library/rotation').send({ rotation_id: chain[2].id, kill_date: yesterday }).expect(200);
+      for (const status of ['all', 'killed']) {
+        const ids = await queuedIds(status);
+        expect(ids).toContain(chain[2].id);
+        expect(ids).not.toContain(chain[0].id);
+        expect(ids).not.toContain(chain[1].id);
+      }
     });
   });
 });

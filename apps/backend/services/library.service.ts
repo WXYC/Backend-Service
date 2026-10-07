@@ -1697,7 +1697,13 @@ export type UncataloguedRotationPage = { limit?: number; offset?: number; status
  *     which is why `status` below defaults to `all` where the dropdown's
  *     defaults to `active`. Narrowing is opt-in, never assumed.
  *
- * **`album_id IS NULL` is the whole unlinked predicate.** An earlier draft
+ * **A moved record's chain is one record (BS#3007).** The queue lists a chain's newest row only: a row that another
+ * row names in `moved_from_rotation_id` was moved to another bin, and is left out for every `status` by a
+ * `NOT EXISTS` probe (`rotationSuccessorSql`, indexed by `rotation_moved_from_rotation_id_idx`) beside `album_id IS NULL`.
+ * Importing or linking the newest row links the older ones (`addAlbum`, `linkRotationToAlbum`), so they would
+ * otherwise show here as duplicates of one record.
+ *
+ * **`album_id IS NULL` is the unlinked predicate.** An earlier draft
  * used `COALESCE(album_id, 0) = 0` on the belief that tubafrenzy writes a
  * `0` sentinel here. It does not: `rotation.album_id` carries
  * `rotation_album_id_library_id_fk → library.id`, `library.id` is a `serial`
@@ -1728,16 +1734,16 @@ export type UncataloguedRotationPage = { limit?: number; offset?: number; status
  *
  *   - **The default is `all`, not `active`.** This endpoint shipped
  *     unfiltered; an omitted parameter must return exactly what it returned
- *     before, which is why the unfiltered branch is written out rather than
- *     assembled through `and(..., undefined)`.
+ *     before, which is why every branch is `and(...)` over conditions that are
+ *     always present, never one that may be `undefined`.
  *   - **`active` and `killed` do not partition.** `active` is the canonical
  *     `rotationActiveSql()` (`kill_date IS NULL OR kill_date > CURRENT_DATE`,
  *     the one spelling, BS#2479) while `killed` is "carries a kill_date", so a
  *     future-dated kill matches both — the same non-partition the sibling
  *     documents, reproduced rather than quietly diverged from.
  *
- * **Index note.** The predicate is still `album_id IS NULL` against
- * `album_id_idx`; `kill_date` is unindexed, and so is `add_date`. So `killed`
+ * **Index note.** The unlinked predicate is still `album_id IS NULL` against
+ * `album_id_idx`, with the moved-away probe an index lookup per candidate row; `kill_date` is unindexed, and so is `add_date`. So `killed`
  * sorts the same bounded cohort the existing add-date ordering already sorts,
  * on a different key — it does not widen the scan or introduce a sort the
  * query did not already pay for. (`CURRENT_DATE` is STABLE, not IMMUTABLE, so
@@ -1825,7 +1831,9 @@ export type LinkRotationOutcome =
  * step of the tubafrenzy `/wxycdb` workflow).
  *
  * **Two writes, one transaction (BS#2410 / plan D7).** The rotation row's
- * `album_id`, then the rotation row's own already-logged flowsheet plays. The
+ * `album_id`, then the flowsheet plays logged against it. A moved record's chain is one record (BS#3007): only the
+ * chain's newest row links (a moved-away row answers `already_linked`), and linking it also links the chain's unlinked
+ * older rows, whose plays are re-pointed with the row's own. The
  * second write is the JSP's third step, which Backend had dropped; its
  * predicates, why it is FK-keyed rather than text-matched, and the enrichment
  * carryover it accepts are all documented at the statement itself. The count of

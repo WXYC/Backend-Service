@@ -3108,7 +3108,10 @@ paths:
       description: >-
         BS#2109. Rotation rows with no linked library release (`album_id IS
         NULL`) — the "Import to Library" backlog a librarian works through
-        via `PATCH /library/rotation/{rotation_id}/link`. Deliberately NOT
+        via `PATCH /library/rotation/{rotation_id}/link`. A moved record's
+        rows are one chain (BS#3007): a row that was moved to another bin
+        is left out for every `status`, so a chain is queued once, by its
+        newest row. Deliberately NOT
         deduplicated the way `GET /library/rotation`'s dropdown shape is:
         two physically distinct promos sharing an artist and title are two
         separate rows to catalogue, not one. Unfiltered by default —
@@ -3175,7 +3178,10 @@ paths:
       description: >-
         BS#2109. The "Import to Library" step of the tubafrenzy `/wxycdb`
         workflow: attaches a `library` release to a rotation row that was
-        added without one. Rejects double-linking (409). Deliberately does
+        added without one. Rejects double-linking (409), and a row that was
+        moved to another bin (409; only the newest row of a moved record's
+        chain links, BS#3007). Linking the newest row also links the chain's
+        unlinked older rows to the same release, plays included. Deliberately does
         NOT clear artist_name/album_title/record_label — they're left
         populated so the tracklist picker (`GET
         /library/rotation/{rotation_id}/tracks`) can still resolve a
@@ -3186,7 +3192,8 @@ paths:
 
         **BS#2410: linking also resolves the rotation row's flowsheet
         plays.** In the same transaction, every `flowsheet` row carrying this
-        `rotation_id` with a NULL `album_id` is repointed at the linked
+        `rotation_id` (or the `rotation_id` of an older row of its chain linked
+        by this request) with a NULL `album_id` is repointed at the linked
         release — the third step of tubafrenzy's `processImportToLibrary`,
         which Backend previously dropped. The match is FK-keyed only: a
         free-text play of the same promo carries no `rotation_id` and keeps

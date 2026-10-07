@@ -1825,7 +1825,8 @@ function parseNonNegativeInt(raw: unknown): number | null | undefined {
  * release, deliberately WITHOUT the `DISTINCT ON` collapse `getRotation`
  * uses for its dropdown shape — two physically distinct promos that share
  * an artist and title are two separate rows a librarian has to catalogue,
- * and collapsing them would silently hide one. See
+ * and collapsing them would silently hide one. (A moved record's chain is
+ * one record, BS#3007: only its newest row is queued.) See
  * `getUncataloguedRotationFromDB` for the `album_id IS NULL` predicate this
  * reads through and why the `0` sentinel it once also matched does not
  * exist on this column.
@@ -2427,7 +2428,10 @@ export type LinkRotationRequest = {
  * the raw `.returning()` row (finding 4) — see the same doc.
  *
  * BS#2410 (plan D7) added the JSP's third step to that transaction: the
- * rotation row's own flowsheet plays are repointed at the new release. The
+ * flowsheet plays logged against the row are repointed at the new release.
+ * BS#3007: only the newest row of a moved record's chain links (a moved-away
+ * row is the same 409), and linking it links the chain's unlinked older rows
+ * and their plays too. The
  * response shape is unchanged — the count of resolved plays is observability
  * only, projected onto the active span rather than serialized.
  */
