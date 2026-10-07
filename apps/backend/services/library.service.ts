@@ -4108,8 +4108,8 @@ export type ArtistSlotOwner = ArtistCodeOwner & { code_comp_letter: string | nul
  * miss the other, leaving the 409 pre-check and the lookup disagreeing about
  * who owns a code.
  */
-const artistCodeOwnerQuery = (code_letters: string, genre_id: number, artist_genre_code: number) =>
-  db
+const artistCodeOwnerQuery = (code_letters: string, genre_id: number, artist_genre_code: number, tx?: DbTransaction) =>
+  (tx ?? db)
     .select({
       artist_id: genre_artist_crossreference.artist_id,
       artist_name: artists.artist_name,
@@ -4169,9 +4169,10 @@ export const getArtistByCode = async (
 export const getArtistsByCode = async (
   code_letters: string,
   genre_id: number,
-  artist_genre_code: number
+  artist_genre_code: number,
+  tx?: DbTransaction
 ): Promise<ArtistSlotOwner[]> => {
-  return artistCodeOwnerQuery(code_letters, genre_id, artist_genre_code).orderBy(
+  return artistCodeOwnerQuery(code_letters, genre_id, artist_genre_code, tx).orderBy(
     asc(artists.artist_name),
     asc(artists.id)
   );
@@ -4200,6 +4201,17 @@ export type ArtistCodeBucketMember = ArtistSlotOwner & { code_number: number };
  * the bucket is how a duplicate number gets handed out. The peek reads one
  * column of one row, which is why the wider projection costs it nothing.
  */
+/**
+ * The one definition of "a row in the `(code_letters, genre_id)` bucket", as a bare `sql` fragment over
+ * `genre_artist_crossreference` (`code_letters` lives on `artists`, one subquery away). A template and not a
+ * `db.select` subquery so building it never touches `db`, which keeps `refileArtistInGenre`'s lock statement
+ * on its transaction, and so a statement over the crossreference alone can use it, which is what lets a plain
+ * `FOR UPDATE` lock only that table's rows. `artistCodeBucketQuery` (peek/browse) and the re-file's lock share it,
+ * so the locked set and the set a librarian browses cannot drift apart.
+ */
+const inArtistCodeBucket = (code_letters: string, genre_id: number) =>
+  sql`${genre_artist_crossreference.genre_id} = ${genre_id} AND ${genre_artist_crossreference.artist_id} IN (SELECT ${artists.id} FROM ${artists} WHERE ${artists.code_letters} = ${code_letters})`;
+
 const artistCodeBucketQuery = (code_letters: string, genre_id: number) =>
   db
     .select({
@@ -4211,7 +4223,7 @@ const artistCodeBucketQuery = (code_letters: string, genre_id: number) =>
     })
     .from(genre_artist_crossreference)
     .innerJoin(artists, eq(genre_artist_crossreference.artist_id, artists.id))
-    .where(and(eq(artists.code_letters, code_letters), eq(genre_artist_crossreference.genre_id, genre_id)));
+    .where(inArtistCodeBucket(code_letters, genre_id));
 
 /**
  * Ceiling on `?limit=` for the bucket browse, and the default when the caller
@@ -4268,8 +4280,8 @@ export const browseArtistsInCodeBucket = async (
  * shape `getArtistByCode` returns, so a 409 conflict payload can carry either
  * lookup's result through one consistent wire shape.
  */
-export const getArtistById = async (artist_id: number): Promise<ArtistCodeOwner | null> => {
-  const response = await db
+export const getArtistById = async (artist_id: number, tx?: DbTransaction): Promise<ArtistCodeOwner | null> => {
+  const response = await (tx ?? db)
     .select({
       artist_id: artists.id,
       artist_name: artists.artist_name,
@@ -4336,8 +4348,12 @@ export const getArtistCardById = async (artist_id: number): Promise<ArtistCardRo
  * unknown `artist_id` and for an artist with no crossreference in
  * `genre_id`; the caller distinguishes the two with `getArtistById`.
  */
-export const getArtistCardByIdInGenre = async (artist_id: number, genre_id: number): Promise<ArtistCardRow | null> => {
-  const response = await db
+export const getArtistCardByIdInGenre = async (
+  artist_id: number,
+  genre_id: number,
+  tx?: DbTransaction
+): Promise<ArtistCardRow | null> => {
+  const response = await (tx ?? db)
     .select({
       artist_id: artists.id,
       artist_name: artists.artist_name,
@@ -4480,6 +4496,137 @@ export type DeleteArtistActor = CatalogDeleteActor;
  * stays; only the sentence justifying it needed to name a path that exists.
  */
 export const DELETE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
+
+export const REFILE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
+
+export type ArtistRefileOutcome =
+  | { outcome: 'refiled' | 'unchanged'; card: ArtistCardRow; previous: number; releases_to_relabel: number }
+  | { outcome: 'artist_not_found' | 'not_filed' | 'lettered_section' | 'lock_unavailable' }
+  | { outcome: 'slot_taken'; occupant: ArtistRefileOccupant };
+
+/** The contract `Artist` shape of the artist holding a contested slot (same fields as `FilingArtist`), `code_artist_number` being the contested target. */
+export type ArtistRefileOccupant = {
+  id: number;
+  artist_name: string;
+  code_letters: string;
+  code_artist_number: number;
+  code_comp_letter: string | null;
+  genre_id: number;
+};
+
+/**
+ * BS#2643: re-file an artist's call number within ONE genre membership, `genre_artist_crossreference.artist_genre_code`
+ * only. A one-row UPDATE: `library` stores no artist number and `library_artist_view` composes it at read time, so every
+ * release re-labels on its own (the physical labels are the librarian's follow-up, reported as `releases_to_relabel`).
+ *
+ * One transaction, `lock_timeout` bounded (`REFILE_ARTIST_LOCK_TIMEOUT_MS`), so a live writer makes this stand down
+ * (`lock_unavailable`) rather than queue. **Lock design:** the whole `(code_letters, genre_id)` bucket is locked in ONE
+ * statement over `genre_artist_crossreference` alone, `ORDER BY artist_id`, plain `FOR UPDATE` on `tx`. Alone, so only
+ * that table's rows lock (a join would also lock up to 263 `artists` rows and take them in the opposite order from
+ * `deleteArtistFromDB`); never `.for('update', { of })` (drizzle schema-qualifies the name and Postgres rejects it); one
+ * statement in a fixed order, so two concurrent re-files in a bucket serialize instead of deadlocking on their own rows.
+ * Every read here runs on `tx`.
+ *
+ * **Watermark cost:** a real re-file advances the catalog watermark once (the statement-level trigger from migration
+ * 0105), a full catalog re-download for every poller, the cost a rename pays. The trigger fires even for a zero-row
+ * UPDATE, so the no-op path issues no UPDATE at all.
+ *
+ * **Residual race, accepted:** `addArtist` inserts into a bucket without taking these locks, so a create landing the
+ * same triple at the same instant as a re-file is not prevented. That is the check-then-act window BS#2106 records for
+ * `addArtist` itself, accepted on the same grounds; the unique constraint stays out of scope (BS#2033, BS#2106).
+ */
+export const refileArtistInGenre = async (
+  artist_id: number,
+  genre_id: number,
+  target: number
+): Promise<ArtistRefileOutcome> => {
+  try {
+    return await db.transaction(async (tx): Promise<ArtistRefileOutcome> => {
+      await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${REFILE_ARTIST_LOCK_TIMEOUT_MS}ms'`));
+
+      const missing = async (): Promise<ArtistRefileOutcome> => ({
+        outcome: (await getArtistById(artist_id, tx)) ? 'not_filed' : 'artist_not_found',
+      });
+
+      const card = await getArtistCardByIdInGenre(artist_id, genre_id, tx);
+      if (!card) return missing();
+
+      const bucket = await tx
+        .select({
+          artist_id: genre_artist_crossreference.artist_id,
+          code_number: genre_artist_crossreference.artist_genre_code,
+          code_comp_letter: genre_artist_crossreference.code_comp_letter,
+        })
+        .from(genre_artist_crossreference)
+        .where(inArtistCodeBucket(card.code_letters, genre_id))
+        .orderBy(asc(genre_artist_crossreference.artist_id))
+        .for('update');
+      const own = bucket.find((row) => row.artist_id === artist_id);
+      if (!own) return missing();
+      if (own.code_comp_letter !== null) return { outcome: 'lettered_section' };
+
+      const previous = own.code_number;
+      const countReleases = async (): Promise<number> => {
+        const rows = (await tx.execute(
+          sql`SELECT count(*)::int AS n FROM ${library} WHERE ${library.artist_id} = ${artist_id} AND ${library.genre_id} = ${genre_id}`
+        )) as unknown as { n: number }[];
+        return Number(rows[0]?.n ?? 0);
+      };
+
+      if (previous === target) {
+        return {
+          outcome: 'unchanged',
+          card: { ...card, code_artist_number: previous },
+          previous,
+          releases_to_relabel: await countReleases(),
+        };
+      }
+
+      const owners = (await getArtistsByCode(card.code_letters, genre_id, target, tx)).filter(
+        (owner) => owner.artist_id !== artist_id
+      );
+      if (owners.length > 0) {
+        const first = owners[0];
+        return {
+          outcome: 'slot_taken',
+          occupant: {
+            id: first.artist_id,
+            artist_name: first.artist_name,
+            code_letters: first.code_letters,
+            code_artist_number: target,
+            code_comp_letter: first.code_comp_letter,
+            genre_id,
+          },
+        };
+      }
+
+      await tx
+        .update(genre_artist_crossreference)
+        .set({ artist_genre_code: target })
+        .where(
+          and(eq(genre_artist_crossreference.artist_id, artist_id), eq(genre_artist_crossreference.genre_id, genre_id))
+        );
+
+      return {
+        outcome: 'refiled',
+        card: { ...card, code_artist_number: target },
+        previous,
+        releases_to_relabel: await countReleases(),
+      };
+    });
+  } catch (error) {
+    if (isLockContentionError(error)) {
+      Sentry.addBreadcrumb({
+        category: 'library.refile',
+        level: 'warning',
+        message: 'POST /library/artists/:id/refile stood down on lock contention',
+        data: { artist_id, genre_id, code: extractSqlState(error) },
+      });
+      return { outcome: 'lock_unavailable' };
+    }
+    throw error;
+  }
+};
 
 /**
  * BS#2562: `DELETE /library/artists/:id`. Mirrors `deleteAlbumFromDB`'s

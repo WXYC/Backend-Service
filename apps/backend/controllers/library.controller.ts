@@ -902,11 +902,13 @@ const UPDATABLE_ARTIST_FIELDS = ['alphabetical_name', 'artist_name'] as const;
 const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number'] as const;
 
 // Why each field has no write path on THIS ENDPOINT today -- verified
-// against the full write surface, not asserted. `genre_id`/`code_letters`/
-// `code_artist_number` have no write path anywhere: `genre_artist_crossreference`
-// (the row that carries `genre_id` and `code_artist_number`, i.e.
-// `artist_genre_code`) is only ever `.insert()`ed -- by `POST /library/artists`
-// -- never `.update()`d, and `artists.code_letters` is likewise write-once.
+// against the full write surface, not asserted. `genre_id` and `code_letters`
+// have no write path anywhere: `genre_artist_crossreference.genre_id` is only
+// ever `.insert()`ed -- by `POST /library/artists` -- and `artists.code_letters`
+// is likewise write-once. `code_artist_number` (`artist_genre_code`) is the one
+// exception since BS#2643: `POST /library/artists/{id}/refile` rewrites it,
+// which is why it is refused HERE (a call-number change needs that endpoint's
+// genre scope, occupancy check and bucket lock, not a bare column update).
 //
 // Re-verified for BS#2563, because `artist_name` becoming writable is exactly
 // the change that could have falsified the `code_letters` reason: it did not.
@@ -927,8 +929,7 @@ const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[num
     'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
   code_letters:
     'no write path: artists.code_letters is set once by POST /library/artists and is never UPDATEd by any endpoint',
-  code_artist_number:
-    'no write path: genre_artist_crossreference.artist_genre_code is set once by POST /library/artists and is never UPDATEd by any endpoint',
+  code_artist_number: 'not writable on this endpoint; re-file with POST /library/artists/{id}/refile',
 };
 
 const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATABLE_ARTIST_FIELDS.join(', ')}`;
@@ -937,7 +938,7 @@ const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATAB
  * PATCH /library/artists/:id -- allowlists two of the five `/wxycdb`
  * `modifyArtist` form fields, `alphabetical_name` (BS#2156) and `artist_name`
  * (BS#2563). The other three JSP fields (`genre_id`, `code_letters`,
- * `code_artist_number`) are REJECTED with a 400 naming why
+ * `code_artist_number`; the last is re-filed via `POST /library/artists/:id/refile`, BS#2643) are REJECTED with a 400 naming why
  * (`ARTIST_NO_COLUMN_FIELD_OWNERS`), not silently dropped -- unlike the
  * `pickAddRotationFields` / `pickUpdateEntryFields` allowlist convention
  * elsewhere in this repo, which does drop silently. The difference: those
@@ -1304,6 +1305,79 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
   }
 
   res.status(204).end();
+};
+
+const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number'] as const;
+
+/**
+ * POST /library/artists/:id/refile -- BS#2643: re-file the artist's call number (`code_artist_number`) within ONE
+ * genre membership (`genre_id`, required: an artist id alone does not identify a membership, BS#2637). Only those two
+ * keys are accepted; any other key is a 400 naming it (`code_letters` and a destination genre are "not supported by
+ * this endpoint yet"). Gated `catalog: ['write']`.
+ *
+ * Outcomes: 200 `ArtistRefileResult` (the genre-scoped `ArtistCard` plus `changed`, `previous_code_artist_number`,
+ * `releases_to_relabel`) / 404 `Artist not found` or `Artist not filed under genre {n}` / 409 `lettered_compilation_section`
+ * or `artist_code_conflict` (with the contract `Artist` now holding the slot: the first owner in `getArtistsByCode`
+ * order) / 503 `LockUnavailableRefusal` on lock contention. A resubmit of the artist's own number is a 200
+ * `changed: false` that issues no UPDATE, and is decided before the occupancy check so an artist sharing a contested
+ * triple does not collide with its co-owner. See `libraryService.refileArtistInGenre` for the lock design, the catalog
+ * watermark cost of a real re-file, and the residual race with `addArtist` (BS#2106).
+ */
+export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => {
+  const artistId = parseArtistId(req.params.id);
+  const body: unknown = req.body ?? {};
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    throw new WxycError('Bad Request: body must be a JSON object', 400);
+  }
+  const record = body as Record<string, unknown>;
+  const unknownKey = Object.keys(record).find((key) => !(REFILE_ARTIST_FIELDS as readonly string[]).includes(key));
+  if (unknownKey !== undefined) {
+    throw new WxycError(
+      unknownKey === 'code_letters'
+        ? 'Bad Request: code_letters is not supported by this endpoint yet'
+        : `Bad Request: ${unknownKey} is not a recognized field (accepted: ${REFILE_ARTIST_FIELDS.join(', ')})`,
+      400
+    );
+  }
+  const genreId = record.genre_id;
+  if (typeof genreId !== 'number' || !Number.isInteger(genreId) || genreId < 1 || genreId > INT4_MAX) {
+    throw new WxycError(`genre_id must be an integer between 1 and ${INT4_MAX}`, 400);
+  }
+  const target = validateArtistCodeNumber(record.code_artist_number, 'code_artist_number');
+
+  const result = await libraryService.refileArtistInGenre(artistId, genreId, target);
+  switch (result.outcome) {
+    case 'artist_not_found':
+      throw new WxycError('Artist not found', 404);
+    case 'not_filed':
+      throw new WxycError(`Artist not filed under genre ${genreId}`, 404);
+    case 'lock_unavailable':
+      res.status(503).json({
+        message: 'Could not re-file: the shelf is being written to right now. Try again in a moment.',
+        reason: 'lock_unavailable',
+      });
+      return;
+    case 'lettered_section':
+      res.status(409).json({
+        message: 'Cannot re-file: this membership is a lettered compilation section, whose number is fixed at 0.',
+        reason: 'lettered_compilation_section',
+      });
+      return;
+    case 'slot_taken':
+      res.status(409).json({
+        message: 'Artist code already exists for that genre and code letters.',
+        reason: 'artist_code_conflict',
+        artist: result.occupant,
+      });
+      return;
+    default:
+      res.status(200).json({
+        ...result.card,
+        changed: result.outcome === 'refiled',
+        previous_code_artist_number: result.previous,
+        releases_to_relabel: result.releases_to_relabel,
+      });
+  }
 };
 
 /**

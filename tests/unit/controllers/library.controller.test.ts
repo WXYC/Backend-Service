@@ -5580,7 +5580,7 @@ describe('library.controller', () => {
         'code_letters (no write path: artists.code_letters is set once by POST /library/artists and is never UPDATEd by any endpoint)'
       );
       expect(message).toContain(
-        'code_artist_number (no write path: genre_artist_crossreference.artist_genre_code is set once by POST /library/artists and is never UPDATEd by any endpoint)'
+        'code_artist_number (not writable on this endpoint; re-file with POST /library/artists/{id}/refile)'
       );
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
