@@ -2,7 +2,8 @@
  * `POST /library/{id}/print` (BS#2865, slice 12b of BS#2791). Real Postgres, seeded through tests/utils/intake_seed.js.
  * The CI containers run AUTH_BYPASS=true, so the route grant is pinned by tests/unit/routes/library-print.route.test.ts.
  * This tier pins what real rows add: the print-log row with no intake item, the refusals, the review leading
- * `GET /reviews?album_id=` as `on_cover` and `in_use`, and the print-log row coming back when a deleted release is restored.
+ * `GET /reviews?album_id=` as `on_cover` and `in_use`, a review reached only through a citation, the slip's artist for a
+ * compilation filed under a Various Artists bucket, and the print-log row coming back when a deleted release is restored.
  */
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
@@ -10,6 +11,7 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   removeSeededIntakeItems,
+  seedIntakeItem,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -82,6 +84,47 @@ describe('POST /library/{id}/print (BS#2865)', () => {
     const refused = await djA.delete(`/reviews/${printed.id}`);
     expect(refused.status).toBe(409);
     expect(refused.body.reason).toBe('in_use');
+  });
+
+  test('a review reached only through a citation prints: a filed copy of this release cites the release the review is on', async () => {
+    const albumId = await release('citing');
+    const citedId = await release('cited');
+    await seedIntakeItem({
+      artist_name: `${PREFIX} citing`,
+      album_title: `${PREFIX} citing album`,
+      state: 'filed',
+      album_id: albumId,
+      cited_album_id: citedId,
+    });
+    const review = await typedReview(citedId, { review: 'Cited text.' });
+    const res = await manager.post(`/library/${albumId}/print`).send({ review_id: review.id });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      artist_name: `${PREFIX} citing`,
+      album_title: `${PREFIX} citing album`,
+      review: 'Cited text.',
+      author: `${PREFIX} author`,
+    });
+    const prints = await printsOf(albumId);
+    expect(prints).toHaveLength(1);
+    expect(prints[0]).toMatchObject({ review_id: review.id, revision_id: res.body.revision_id, intake_item_id: null });
+    const list = await manager.get(`/reviews?album_id=${albumId}`).expect(200);
+    expect(list.body[0]).toMatchObject({ id: review.id, on_cover: true });
+  });
+
+  test('a compilation filed under a Various Artists bucket prints its alternate artist name, not the bucket', async () => {
+    const bucket = await seedLibraryRelease({
+      artist_name: `${PREFIX} Various Artists`,
+      album_title: `${PREFIX} compilation`,
+      alternate_artist_name: `${PREFIX} Chuquimamani-Condori`,
+    });
+    const review = await typedReview(bucket.id);
+    const res = await manager.post(`/library/${bucket.id}/print`).send({ review_id: review.id });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      artist_name: `${PREFIX} Chuquimamani-Condori`,
+      album_title: `${PREFIX} compilation`,
+    });
   });
 
   test.each([

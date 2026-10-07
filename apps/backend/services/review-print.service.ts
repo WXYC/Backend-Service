@@ -129,8 +129,9 @@ export const printIntakeItem = async (id: number, actor: Pick<ReviewsActor, 'id'
  * `POST /library/{id}/print` (BS#2865): prints a typed, submitted review in the release's list (`reviewInReleaseList`)
  * for a release that may have no intake item, in one transaction. Locks in `DELETE /library/{id}`'s order: the release
  * `FOR KEY SHARE` (the print row's foreign key would take it anyway, so after the review it would deadlock with a delete),
- * then the review `FOR UPDATE`. The row written has no item, so nothing on `intake_items` is read or written and the log
- * is the only record. `not_found` is a missing release; `bad_review` is every other refusal, one answer for all of them.
+ * then the review `FOR UPDATE`. The row written has no item, so nothing on `intake_items` is written or locked and the log
+ * is the only record; the membership check reads `intake_items` (the citing items of the release), unlocked. The slip's
+ * artist is the release's displayed one (`alternate_artist_name`, else the artist's name). `not_found` is a missing release; `bad_review` is every other refusal, one answer for all of them.
  */
 export const printReleaseReview = async (id: number, reviewId: number, actor: Pick<ReviewsActor, 'id'>) =>
   db.transaction(async (tx) => {
@@ -143,7 +144,13 @@ export const printReleaseReview = async (id: number, reviewId: number, actor: Pi
     if (!review || review.medium !== 'typed' || review.status !== 'submitted')
       return { outcome: 'bad_review' as const };
     const [record] = await tx
-      .select({ artist_name: artists.artist_name, album_title: library.album_title, record_label: library.label })
+      .select({
+        // The release's displayed artist: `alternate_artist_name || artist_name`, as filing hands it to enrichment
+        // (`library-filing.service.ts`, `library.controller.ts`), so a compilation under a V/A bucket names its own artist.
+        artist_name: sql<string>`coalesce(nullif(${library.alternate_artist_name}, ''), ${artists.artist_name})`,
+        album_title: library.album_title,
+        record_label: library.label,
+      })
       .from(library)
       .innerJoin(artists, eq(artists.id, library.artist_id))
       .where(eq(library.id, id));
