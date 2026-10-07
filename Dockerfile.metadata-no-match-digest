@@ -17,8 +17,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/metadata-no-match-digest/dist ./jobs/metadata-no-match-digest/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/metadata-no-match-digest/dist ./jobs/metadata-no-match-digest/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # A single indexed range scan (flowsheet_updated_at_idx) plus one LEFT JOIN
 # against shows by primary key -- the API's tight 5s default statement

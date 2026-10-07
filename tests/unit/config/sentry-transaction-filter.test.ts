@@ -229,7 +229,7 @@ describe('Dockerfile runtime stages ship @wxyc/observability', () => {
   ])('Dockerfile.%s copies the package manifest and the built dist', (_app, relPath) => {
     const source = readFileSync(resolve(__dirname, relPath), 'utf-8');
     expect(source).toContain('COPY ./shared/observability/package* ./shared/observability/');
-    expect(source).toContain('COPY --from=builder /shared/observability/dist ./shared/observability/dist');
+    expect(source).toContain('COPY --link --from=builder /shared/observability/dist ./shared/observability/dist');
   });
 
   it('Dockerfile.deploy-builder builds every shared workspace unconditionally, not by per-target enumeration', () => {

@@ -22,9 +22,9 @@ COPY ./shared/lml-client/package* ./shared/lml-client/
 # pattern in Dockerfile.backend and the BS#1015 lesson.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/library-discogs-unavailable-recheck/dist ./jobs/library-discogs-unavailable-recheck/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /jobs/library-discogs-unavailable-recheck/dist ./jobs/library-discogs-unavailable-recheck/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 
 # Per-statement timeout: the writer does small single-album transactions
 # (a bounded rotation UPDATE plus a single-row library UPDATE); 60 s is more

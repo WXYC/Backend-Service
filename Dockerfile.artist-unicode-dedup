@@ -15,8 +15,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder /jobs/artist-unicode-dedup/dist ./jobs/artist-unicode-dedup/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/artist-unicode-dedup/dist ./jobs/artist-unicode-dedup/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # Bulk repoint workload. Async commit is safe: the job is idempotent (a merged
 # fold-group drops out of the `HAVING count(*) > 1` set) and each group's writes

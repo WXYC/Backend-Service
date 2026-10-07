@@ -32,11 +32,11 @@ COPY ./shared/observability/package* ./shared/observability/
 # pattern in Dockerfile.backend.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /apps/enrichment-worker/dist ./apps/enrichment-worker/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
-COPY --from=builder /shared/observability/dist ./shared/observability/dist
+COPY --link --from=builder /apps/enrichment-worker/dist ./apps/enrichment-worker/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Inherit @wxyc/database's 5s statement timeout default — every query the
 # consumer issues is a single-row PK lookup; anything longer is a stuck

@@ -18,7 +18,7 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder /jobs/concerts-artist-resolver/dist ./jobs/concerts-artist-resolver/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/concerts-artist-resolver/dist ./jobs/concerts-artist-resolver/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/concerts-artist-resolver"]

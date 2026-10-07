@@ -17,8 +17,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/flowsheet-dj-name-scrub/dist ./jobs/flowsheet-dj-name-scrub/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/flowsheet-dj-name-scrub/dist ./jobs/flowsheet-dj-name-scrub/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # All three passes walk `flowsheet` (~2.6M rows) with an id-cursor scan, and
 # the main pass joins `shows` + `auth_user` on the way. The API's tight 5s

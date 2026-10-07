@@ -21,12 +21,12 @@ COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /apps/backend/dist ./apps/backend/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/authentication/dist ./shared/authentication/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
-COPY --from=builder /shared/observability/dist ./shared/observability/dist
+COPY --link --from=builder /apps/backend/dist ./apps/backend/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/authentication/dist ./shared/authentication/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Inherit the @wxyc/database 5s default. Backend HTTP handlers always finish
 # in milliseconds; anything longer than 5s is an orphan from a request that

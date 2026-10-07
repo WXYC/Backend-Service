@@ -22,10 +22,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # .npmrc the prod stage's npm install 401s on @wxyc/shared.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/flowsheet-reenrichment/dist ./jobs/flowsheet-reenrichment/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /jobs/flowsheet-reenrichment/dist ./jobs/flowsheet-reenrichment/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: per-row UPDATEs over a large table
 # can spend tens of seconds on hot batches. The API's tight 5s default is

@@ -15,8 +15,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder /jobs/auth-user-name-backfill/dist ./jobs/auth-user-name-backfill/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/auth-user-name-backfill/dist ./jobs/auth-user-name-backfill/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # Tiny single-table workload (~139 candidate rows) — no bulk-update tuning
 # needed here, unlike the batched flowsheet/shows backfills.

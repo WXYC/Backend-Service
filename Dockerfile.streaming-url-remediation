@@ -21,9 +21,9 @@ COPY ./shared/lml-client/package* ./shared/lml-client/
 # .npmrc the prod stage's npm install 401s on @wxyc/shared.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/streaming-url-remediation/dist ./jobs/streaming-url-remediation/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /jobs/streaming-url-remediation/dist ./jobs/streaming-url-remediation/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 
 # The candidate SELECTs walk `flowsheet` (2.6M rows) with no covering
 # index; the API's tight 5s default statement timeout is too aggressive
