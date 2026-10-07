@@ -12,9 +12,9 @@ jest.mock('@wxyc/database', () => {
   return { ...realSchema, db: drizzle({}) };
 });
 
-import { sql } from 'drizzle-orm';
-import { db, reviews, review_revisions } from '@wxyc/database';
-import { outerRef } from '../../../apps/backend/utils/sql-fragments';
+import { notExists, sql } from 'drizzle-orm';
+import { db, reviews, review_revisions, rotation } from '@wxyc/database';
+import { outerRef, rotationSuccessorSql } from '../../../apps/backend/utils/sql-fragments';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const revisionCount = (outer: unknown) =>
@@ -35,5 +35,21 @@ describe('outerRef', () => {
       .from(reviews)
       .toSQL();
     expect(rendered).toContain('= "id")');
+  });
+});
+
+describe('rotationSuccessorSql (BS#3007)', () => {
+  it('correlates a successor row naming the outer rotation row in moved_from_rotation_id, spelled out literally', () => {
+    const { sql: rendered } = db
+      .select({ id: rotation.id })
+      .from(rotation)
+      .where(notExists(rotationSuccessorSql()))
+      .toSQL();
+    // Direction matters: `successor.moved_from_rotation_id = <outer>.id` means the outer row was moved away. Reversed
+    // (`successor.id = <outer>.moved_from_rotation_id`) it would hide every chain's newest row and queue the rest.
+    expect(rendered).toContain(
+      `not exists (SELECT 1 FROM "${SCHEMA}"."rotation" AS successor ` +
+        `WHERE successor.moved_from_rotation_id = "${SCHEMA}"."rotation"."id")`
+    );
   });
 });
