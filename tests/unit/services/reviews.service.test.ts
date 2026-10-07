@@ -1431,7 +1431,8 @@ describe('review notices decided in the transaction (BS#2864)', () => {
     });
 
     test("sends one for a music director's patch that changes one field and repeats another", async () => {
-      edit({}, 'Test MD', [RECORD]);
+      // The FCC line changes on a printed review, so notice 3's copy read runs first; no copy is on a sleeve here.
+      edit({}, 'Test MD', [], [RECORD]);
       const result = await updateReview(3, { review: 'kept', fcc: 'new line' }, MD);
       expect(result).toMatchObject({ authorNotice: { ...RECORD, reviewId: 3, authorUserId: 'dj-1' } });
     });
