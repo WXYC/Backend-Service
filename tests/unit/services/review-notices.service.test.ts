@@ -5,7 +5,8 @@
  */
 jest.unmock('drizzle-orm');
 
-const mockQueue: unknown[][] = [];
+// An `Error` entry makes that query reject; an array entry resolves to those rows.
+const mockQueue: (unknown[] | Error)[] = [];
 const mockSend = jest.fn<(email: unknown) => Promise<void>>();
 const mockCapture = jest.fn();
 
@@ -17,7 +18,10 @@ jest.mock('@wxyc/authentication', () => ({
 jest.mock('@wxyc/database', () => {
   const chain: any = {};
   for (const m of ['from', 'innerJoin', 'leftJoin', 'where']) chain[m] = () => chain;
-  chain.then = (resolve: (rows: unknown[]) => unknown) => resolve(mockQueue.shift() ?? []);
+  chain.then = (resolve: (rows: unknown[]) => unknown, reject: (err: unknown) => unknown) => {
+    const next = mockQueue.shift() ?? [];
+    return next instanceof Error ? reject(next) : resolve(next);
+  };
   return { ...jest.requireActual('../../../shared/database/src/schema'), db: { select: () => chain } };
 });
 jest.mock('../../../apps/backend/services/intake.service', () => ({
@@ -303,5 +307,73 @@ describe('notices', () => {
     void notifyReviewSubmitted(NOTICE);
     await new Promise((resolve) => setImmediate(resolve));
     expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+
+  // The controllers start a notice with `void` after the commit, so a notifier that rejected would be an unhandled
+  // rejection, which Node turns into a process crash. These pin the two guards that keep that from happening.
+  describe('a failed lookup never rejects out of a fire-and-forget notice', () => {
+    const LOOKUP_FAILURES = [
+      // `afterRead` is how many reads go through first; a rejection is queued, so the caller's push order covers it.
+      ['rejects', (_afterRead: number) => void mockQueue.push(new Error('db down'))],
+      [
+        'throws synchronously',
+        (afterRead: number) => {
+          const real = db.select as (...args: unknown[]) => unknown;
+          const spy = jest.spyOn(db, 'select');
+          for (let i = 0; i < afterRead; i++) spy.mockImplementationOnce(() => real() as never);
+          spy.mockImplementationOnce(() => {
+            throw new Error('db down');
+          });
+        },
+      ],
+    ] as const;
+    let consoleError: jest.SpyInstance;
+    beforeEach(() => {
+      consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    const expectReported = () => {
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(mockCapture).toHaveBeenCalledTimes(1);
+      expect(mockCapture).toHaveBeenCalledWith(expect.objectContaining({ message: 'db down' }), {
+        tags: { subsystem: 'review-notices' },
+        extra: { item_id: 4 },
+      });
+      expect(mockSend).not.toHaveBeenCalled();
+    };
+
+    test.each(LOOKUP_FAILURES)(
+      'the submit notice resolves, reports and sends nothing when the director lookup %s',
+      async (_how, fail) => {
+        fail(0);
+        await expect(notifyReviewSubmitted(NOTICE)).resolves.toBeUndefined();
+        expectReported();
+      }
+    );
+
+    test.each(LOOKUP_FAILURES)(
+      'the pass notice resolves, reports and sends nothing when the director lookup %s',
+      async (_how, fail) => {
+        mockQueue.push([{ name: 'Test DJ' }]);
+        fail(1);
+        await expect(notifyPass({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-1')).resolves.toBeUndefined();
+        expectReported();
+      }
+    );
+
+    test.each(LOOKUP_FAILURES)(
+      'the pass notice resolves and still goes out, naming "A DJ", when the name lookup %s',
+      async (_how, fail) => {
+        fail(0);
+        mockQueue.push(DIRECTORS);
+        await expect(notifyPass({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-1')).resolves.toBeUndefined();
+        expect(mockSend).toHaveBeenCalledTimes(2);
+        expect(sent().text).toContain('A DJ passed on the request for Juana Molina – DOGA.');
+        expect(mockCapture).not.toHaveBeenCalled();
+      }
+    );
   });
 });
