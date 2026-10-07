@@ -495,7 +495,7 @@ const filedRelease = (item: { album_id: number | null; state: string }) =>
  * locked first from an unlocked read of the item, and the item second (`FOR UPDATE` when `itemMode` is
  * `'update'`, which the caller writes; `FOR SHARE` otherwise), whose release must be the one already locked.
  * A caller that gets `undefined` for an item that exists is in the case where filing committed between the read
- * and the lock, and decides itself whether to retry or refuse.
+ * and the lock; `withLockedRecordSubject` is the form that retries it.
  */
 export const lockRecordSubject = async (
   tx: Pick<typeof db, 'select'>,
@@ -514,6 +514,30 @@ export const lockRecordSubject = async (
   const [item] = await tx.select(columns).from(intake_items).where(where).for(itemMode);
   if (!item || filedRelease(item) !== release) return undefined;
   return { intake_item_id: subject.intake_item_id, album_id: release };
+};
+
+/**
+ * Runs `body(tx, target)` in a transaction after `lockRecordSubject`, and answers `{ value }` (what `body` returned,
+ * even `undefined`) or `undefined` when the subject is not there. An item the lock misses may have been filed between
+ * its unlocked read and the lock; that attempt wrote nothing, filing is terminal and the retry locks the release first,
+ * so an item subject runs the transaction once more. A release subject's miss, and a second miss, answer `undefined`.
+ */
+export const withLockedRecordSubject = async <T>(
+  subject: RecordSubject,
+  itemMode: 'share' | 'update',
+  body: (
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    target: NonNullable<Awaited<ReturnType<typeof lockRecordSubject>>>
+  ) => Promise<T>
+) => {
+  for (let attempt = subject.intake_item_id !== undefined ? 2 : 1; attempt > 0; attempt--) {
+    const result = await db.transaction(async (tx) => {
+      const target = await lockRecordSubject(tx, subject, itemMode);
+      return target ? { value: await body(tx, target) } : undefined;
+    });
+    if (result) return result;
+  }
+  return undefined;
 };
 
 /**

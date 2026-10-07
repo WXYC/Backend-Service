@@ -2,7 +2,7 @@ import { and, asc, eq, or, sql, type InferSelectModel } from 'drizzle-orm';
 import { artists, db, fcc_notes, intake_items, library, user } from '@wxyc/database';
 import type { RecordSubject } from '../utils/record-subject.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
-import { lockRecordSubject } from './intake.service.js';
+import { withLockedRecordSubject } from './intake.service.js';
 import { snapshotAuthor } from './reviews.service.js';
 
 /**
@@ -50,10 +50,8 @@ export const selectFccNotes = (handle: Pick<typeof db, 'select'>) =>
 /**
  * Reports a note, in the order `DELETE /library/{id}` (BS#2928) takes its locks: `lockRecordSubject` locks the
  * library row `FOR KEY SHARE` (the existence check for a release) and then the item `FOR SHARE`. There is no hold
- * rule. A note of a filed or finalized item is stamped with the item's release at once. An item the lock does not
- * find may be one that was filed between the unlocked read and the lock, and inserting the note then would leave a
- * filed item's note with no release, so the transaction runs once more: filing is terminal, and the retry locks the
- * release first. A second miss is `unknown_subject`, as is a missing release. `no_account` is a caller with no name
+ * rule. A note of a filed or finalized item is stamped with the item's release at once. `withLockedRecordSubject` retries an
+ * item filed between the unlocked read and the lock; a subject it does not find is `unknown_subject`. `no_account` is a caller with no name
  * to snapshot: nothing is written. `notice` is what BS#2863's email needs, for the caller to send after the commit.
  */
 export const createFccNote = async (
@@ -61,33 +59,29 @@ export const createFccNote = async (
   fields: { track: string; note: string },
   actor: ReviewsActor
 ) => {
-  const attempt = () =>
-    db.transaction(async (tx) => {
-      const locked = await lockRecordSubject(tx, subject, 'share');
-      if (!locked) return { outcome: 'unknown_subject' as const };
-      const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
-      const reported_by = snapshotAuthor(account?.name);
-      if (reported_by === null) return { outcome: 'no_account' as const };
-      const [{ id }] = await tx
-        .insert(fcc_notes)
-        .values({
-          ...fields,
-          album_id: locked.album_id,
-          intake_item_id: subject.intake_item_id,
-          status: 'reported',
-          reported_by,
-          reported_by_user_id: actor.id,
-        })
-        .returning({ id: fcc_notes.id });
-      const [note] = await selectFccNotes(tx).where(eq(fcc_notes.id, id));
-      return {
-        outcome: 'created' as const,
-        note,
-        notice: { note, artist: note.artist_name, album: note.album_title, reporterUserId: actor.id },
-      };
-    });
-  const first = await attempt();
-  return first.outcome === 'unknown_subject' && subject.intake_item_id !== undefined ? attempt() : first;
+  const result = await withLockedRecordSubject(subject, 'share', async (tx, locked) => {
+    const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
+    const reported_by = snapshotAuthor(account?.name);
+    if (reported_by === null) return { outcome: 'no_account' as const };
+    const [{ id }] = await tx
+      .insert(fcc_notes)
+      .values({
+        ...fields,
+        album_id: locked.album_id,
+        intake_item_id: subject.intake_item_id,
+        status: 'reported',
+        reported_by,
+        reported_by_user_id: actor.id,
+      })
+      .returning({ id: fcc_notes.id });
+    const [note] = await selectFccNotes(tx).where(eq(fcc_notes.id, id));
+    return {
+      outcome: 'created' as const,
+      note,
+      notice: { note, artist: note.artist_name, album: note.album_title, reporterUserId: actor.id },
+    };
+  });
+  return result?.value ?? { outcome: 'unknown_subject' as const };
 };
 
 export type FccNoteStatus = (typeof fcc_notes.status.enumValues)[number];

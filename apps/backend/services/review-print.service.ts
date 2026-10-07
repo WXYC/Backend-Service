@@ -2,7 +2,7 @@ import { desc, eq, sql } from 'drizzle-orm';
 import { db, intake_items, review_prints, review_revisions, reviews, type Review } from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { confirmedFccNotesOf } from './fcc-notes.service.js';
-import { lockRecordSubject } from './intake.service.js';
+import { withLockedRecordSubject } from './intake.service.js';
 import { writeFirstRevisionIfMissing } from './reviews.service.js';
 
 /**
@@ -76,41 +76,31 @@ export const printSlip = async (
  * sleeve), in one transaction. Locks in the order `DELETE /library/{id}` takes (BS#2928): through `lockRecordSubject` the
  * item's release `FOR KEY SHARE` when it is filed, then the item `FOR UPDATE`, then the accepted review `FOR UPDATE`, so a
  * print and an edit of one review serialize and the print records the revision current when it commits. Nothing is locked
- * against the author: a later edit succeeds. `lockRecordSubject` answers `undefined` for a missing item and for one filed
- * between its unlocked read and the lock, in which case this attempt wrote nothing and the transaction runs once more; a
- * second `undefined` is `not_found`. The item's `printed_by` and `printed_at` stay the latest print.
+ * against the author: a later edit succeeds. `withLockedRecordSubject` retries an item filed between its unlocked read and
+ * the lock; an item it does not find is `not_found`. The item's `printed_by` and `printed_at` stay the latest print.
  */
 export const printIntakeItem = async (id: number, actor: Pick<ReviewsActor, 'id'>) => {
-  const attempt = () =>
-    db.transaction(async (tx) => {
-      const target = await lockRecordSubject(tx, { intake_item_id: id }, 'update');
-      if (!target) return undefined;
-      const [item] = await tx
-        .select({
-          artist_name: intake_items.artist_name,
-          album_title: intake_items.album_title,
-          record_label: intake_items.record_label,
-          accepted_review_id: intake_items.accepted_review_id,
-        })
-        .from(intake_items)
-        .where(eq(intake_items.id, id));
-      const [review] =
-        item.accepted_review_id === null
-          ? []
-          : await tx.select().from(reviews).where(eq(reviews.id, item.accepted_review_id)).for('update');
-      if (!review || review.medium !== 'typed') return { outcome: 'not_reviewed' as const };
-      const slip = await printSlip(
-        tx,
-        { intake_item_id: id, album_id: target.album_id ?? null },
-        item,
-        review,
-        actor.id
-      );
-      await tx
-        .update(intake_items)
-        .set({ printed_by: actor.id, printed_at: sql`now()` })
-        .where(eq(intake_items.id, id));
-      return { outcome: 'printed' as const, slip };
-    });
-  return (await attempt()) ?? (await attempt()) ?? { outcome: 'not_found' as const };
+  const locked = await withLockedRecordSubject({ intake_item_id: id }, 'update', async (tx, target) => {
+    const [item] = await tx
+      .select({
+        artist_name: intake_items.artist_name,
+        album_title: intake_items.album_title,
+        record_label: intake_items.record_label,
+        accepted_review_id: intake_items.accepted_review_id,
+      })
+      .from(intake_items)
+      .where(eq(intake_items.id, id));
+    const [review] =
+      item.accepted_review_id === null
+        ? []
+        : await tx.select().from(reviews).where(eq(reviews.id, item.accepted_review_id)).for('update');
+    if (!review || review.medium !== 'typed') return { outcome: 'not_reviewed' as const };
+    const slip = await printSlip(tx, { intake_item_id: id, album_id: target.album_id ?? null }, item, review, actor.id);
+    await tx
+      .update(intake_items)
+      .set({ printed_by: actor.id, printed_at: sql`now()` })
+      .where(eq(intake_items.id, id));
+    return { outcome: 'printed' as const, slip };
+  });
+  return locked?.value ?? { outcome: 'not_found' as const };
 };
