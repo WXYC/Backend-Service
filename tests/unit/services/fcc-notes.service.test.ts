@@ -14,7 +14,7 @@ jest.mock('@wxyc/database', () => {
 });
 
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { db } from '@wxyc/database';
+import { db, user } from '@wxyc/database';
 import {
   confirmedFccNotesOf,
   confirmFccNote,
@@ -204,21 +204,24 @@ describe('confirmFccNote (BS#2863)', () => {
   const note = { id: 5, status: 'confirmed', confirmed_by: 'Test Reviewer', artist_name: 'Juana Molina' };
   afterEach(() => jest.restoreAllMocks());
 
-  const run = async (account: unknown[], notes: unknown[]) => {
+  /** `returned` is what the UPDATE's RETURNING gives, `notes` what the read after it gives (both inside one transaction). */
+  const run = async (account: unknown[], returned: unknown[], notes: unknown[]) => {
     const account_ = capture(account);
-    const update = capture();
+    const update = capture(returned);
     const read = capture(notes);
-    jest
-      .spyOn(db, 'select')
-      .mockReturnValueOnce(account_.builder as never)
-      .mockReturnValueOnce(read.builder as never);
-    jest.spyOn(db, 'update').mockReturnValue(update.builder as never);
-    return { result: await confirmFccNote(5, actor), update, read };
+    const select = jest.spyOn(db, 'select').mockReturnValueOnce(account_.builder as never);
+    const tx = { update: jest.fn(() => update.builder), select: jest.fn(() => read.builder) };
+    const transaction = jest
+      .spyOn(db, 'transaction')
+      .mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
+    return { result: await confirmFccNote(5, actor), account: account_, update, read, select, transaction, tx };
   };
 
   it('stamps the confirmer by their account name and the time, in one UPDATE that only matches a reported note', async () => {
-    const { result, update } = await run([{ name: 'Test Reviewer' }], [note]);
-    expect(result).toEqual({ outcome: 'confirmed', note });
+    const { result, update, transaction, tx } = await run([{ name: 'Test Reviewer' }], [{ id: 5 }], [note]);
+    expect(result).toMatchObject({ outcome: 'confirmed', note });
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(tx.update).toHaveBeenCalledTimes(1);
     const set = update.calls.set[0] as Record<string, unknown>;
     expect(set).toMatchObject({ status: 'confirmed', confirmed_by: 'Test Reviewer' });
     expect(set).toHaveProperty('confirmed_at');
@@ -226,15 +229,33 @@ describe('confirmFccNote (BS#2863)', () => {
       sql: `(${T}."id" = $1 and ${T}."status" = $2)`,
       params: [5, 'reported'],
     });
+    expect(update.calls).toHaveProperty('returning');
+  });
+
+  it('answers the row its own UPDATE returned, the read after it only adding the record', async () => {
+    const written = { id: 5, status: 'confirmed', confirmed_by: 'Written By Update', confirmed_at: 'T' };
+    const stale = { ...note, status: 'reported', confirmed_by: null, confirmed_at: null };
+    const { result, tx } = await run([{ name: 'Written By Update' }], [written], [stale]);
+    expect(result).toEqual({ outcome: 'confirmed', note: { ...stale, ...written } });
+    expect(tx.select).toHaveBeenCalledTimes(1);
+  });
+
+  it('the confirmer lookup reads the account name, keyed by the caller', async () => {
+    const { select, account } = await run([{ name: 'Test Reviewer' }], [{ id: 5 }], [note]);
+    const columns = select.mock.calls[0][0] as Record<string, unknown>;
+    expect(Object.keys(columns)).toEqual(['name']);
+    expect(columns.name).toBe(user.name);
+    expect(account.calls.from[0]).toBe(user);
+    expect(render(account.calls.where[0])).toEqual({ sql: '"auth_user"."id" = $1', params: ['md-1'] });
   });
 
   it('confirming a note already confirmed answers the note as it is: the UPDATE matches nothing and the read returns it', async () => {
-    const { result } = await run([{ name: 'Second Confirmer' }], [note]);
+    const { result } = await run([{ name: 'Second Confirmer' }], [], [note]);
     expect(result).toEqual({ outcome: 'confirmed', note });
   });
 
   it('a note that is not there is not_found', async () => {
-    expect((await run([{ name: 'Test Reviewer' }], [])).result).toEqual({ outcome: 'not_found' });
+    expect((await run([{ name: 'Test Reviewer' }], [], [])).result).toEqual({ outcome: 'not_found' });
   });
 
   it.each([
@@ -242,9 +263,11 @@ describe('confirmFccNote (BS#2863)', () => {
     ['an account with no name', [{ name: null }]],
   ])('%s: refused, and nothing is written', async (_name, account) => {
     const update = jest.spyOn(db, 'update');
+    const transaction = jest.spyOn(db, 'transaction');
     jest.spyOn(db, 'select').mockReturnValueOnce(capture(account).builder as never);
     expect(await confirmFccNote(5, actor)).toEqual({ outcome: 'no_account' });
     expect(update).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
   });
 });
 
