@@ -143,6 +143,15 @@ export const listReviewRevisions = async (id: number, actor: ReviewsActor) => {
     .orderBy(desc(review_revisions.revision))) as ReviewRevisionResponse[];
 };
 
+/**
+ * The release-membership rule of `GET /reviews?album_id=`: the review is the release's own (`reviews.album_id`) or
+ * belongs to a release a `filed`/`finalized` item of it cites. `POST /library/{id}/print` (BS#2865) decides by it too.
+ */
+export const reviewInReleaseList = (albumId: number): SQL => {
+  const cited = sql`(SELECT ci.cited_album_id FROM ${intake_items} AS ci WHERE ci.album_id = ${albumId} AND ci.state IN ('filed', 'finalized') AND ci.cited_album_id IS NOT NULL)`;
+  return sql`(${reviews.album_id} = ${albumId} OR ${reviews.album_id} IN ${cited})`;
+};
+
 export type ReviewFilters = { album_id?: number; intake_item_id?: number; mine?: boolean };
 
 /**
@@ -166,8 +175,7 @@ export const listReviews = async (filters: ReviewFilters, actor: ReviewsActor) =
       .orderBy(...newest)) as ReviewResponse[];
   }
   const releaseCopies = sql`(SELECT ci.id FROM ${intake_items} AS ci WHERE ci.album_id = ${filters.album_id} AND ci.state IN ('filed', 'finalized'))`;
-  const cited = sql`(SELECT ci.cited_album_id FROM ${intake_items} AS ci WHERE ci.album_id = ${filters.album_id} AND ci.state IN ('filed', 'finalized') AND ci.cited_album_id IS NOT NULL)`;
-  conditions.push(sql`(${reviews.album_id} = ${filters.album_id} OR ${reviews.album_id} IN ${cited})`);
+  conditions.push(reviewInReleaseList(filters.album_id));
   const onCover = sql<boolean>`(${acceptedBy(sql`ai.album_id = ${filters.album_id} AND ai.state IN ('filed', 'finalized')`)} OR ${latestPrintOfCopy(
     reviewRef,
     (p) =>

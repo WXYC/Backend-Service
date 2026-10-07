@@ -1,9 +1,19 @@
-import { desc, eq, sql } from 'drizzle-orm';
-import { db, intake_items, review_prints, review_revisions, reviews, type Review } from '@wxyc/database';
+import { and, desc, eq, sql } from 'drizzle-orm';
+import {
+  artists,
+  db,
+  intake_items,
+  library,
+  review_prints,
+  review_revisions,
+  reviews,
+  type Review,
+} from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { confirmedFccNotesOf } from './fcc-notes.service.js';
 import { lockRecordSubject } from './intake.service.js';
-import { writeFirstRevisionIfMissing } from './reviews.service.js';
+import { lockReleaseRow } from '../utils/release-row-lock.js';
+import { reviewInReleaseList, writeFirstRevisionIfMissing } from './reviews.service.js';
 
 /**
  * The print log and the slip (BS#2804). Its own module because `reviews.service` imports `intake.service`, and the print
@@ -114,3 +124,31 @@ export const printIntakeItem = async (id: number, actor: Pick<ReviewsActor, 'id'
     });
   return (await attempt()) ?? (await attempt()) ?? { outcome: 'not_found' as const };
 };
+
+/**
+ * `POST /library/{id}/print` (BS#2865): prints a typed, submitted review in the release's list (`reviewInReleaseList`)
+ * for a release that may have no intake item, in one transaction. Locks in `DELETE /library/{id}`'s order: the release
+ * `FOR KEY SHARE` (the print row's foreign key would take it anyway, so after the review it would deadlock with a delete),
+ * then the review `FOR UPDATE`. The row written has no item, so nothing on `intake_items` is read or written and the log
+ * is the only record. `not_found` is a missing release; `bad_review` is every other refusal, one answer for all of them.
+ */
+export const printReleaseReview = async (id: number, reviewId: number, actor: Pick<ReviewsActor, 'id'>) =>
+  db.transaction(async (tx) => {
+    if (!(await lockReleaseRow(tx, id))) return { outcome: 'not_found' as const };
+    const [review] = await tx
+      .select()
+      .from(reviews)
+      .where(and(eq(reviews.id, reviewId), reviewInReleaseList(id)))
+      .for('update');
+    if (!review || review.medium !== 'typed' || review.status !== 'submitted')
+      return { outcome: 'bad_review' as const };
+    const [record] = await tx
+      .select({ artist_name: artists.artist_name, album_title: library.album_title, record_label: library.label })
+      .from(library)
+      .innerJoin(artists, eq(artists.id, library.artist_id))
+      .where(eq(library.id, id));
+    return {
+      outcome: 'printed' as const,
+      slip: await printSlip(tx, { intake_item_id: null, album_id: id }, record, review, actor.id),
+    };
+  });
