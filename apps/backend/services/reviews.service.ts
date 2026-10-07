@@ -177,7 +177,8 @@ export const listReviews = async (filters: ReviewFilters, actor: ReviewsActor) =
  * Creates the caller's own `typed` draft about one subject. An intake item must be held by the
  * caller (effective state `checked_out` or `reviewed`, `checked_out_by` = caller: reviewing needs the physical
  * record, and accepting a review leaves the holder on file, so a DJ still holding a reviewed record may write theirs), read FOR UPDATE inside the insert's transaction so a release can't land between check
- * and write; a library release only has to exist. Anything else is `subject_not_held`.
+ * and write; a library release only has to exist, read FOR KEY SHARE in the same transaction so a concurrent delete
+ * waits or has already removed it. Anything else is `subject_not_held`.
  */
 export const createReview = async (
   subject: { intake_item_id?: number; album_id?: number },
