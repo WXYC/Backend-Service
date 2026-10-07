@@ -124,8 +124,16 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
       expect(text).not.toMatch(/^RUN npm ci\b/m);
     });
 
-    it('never uses the bare COPY --from=builder form, which forces BuildKit to pull the parent layers (BS#2912)', () => {
-      expect(text).not.toMatch(/^COPY --from=builder /m);
+    it('copies from the builder stage only in the exact COPY --link form, since any other copy forces BuildKit to pull the parent layers (BS#2912)', () => {
+      // Every builder copy, however it is spelled (lowercase, extra flags,
+      // flags in another order), must be the one exact form below. Checking
+      // only for the bare `COPY --from=builder ` spelling would let
+      // `COPY --chown=… --from=builder` or `copy --from=builder` through.
+      const builderCopies = text.match(/^\s*copy\s[^\n]*--from=builder\b[^\n]*$/gim) ?? [];
+      expect(builderCopies.length).toBeGreaterThan(0);
+      for (const line of builderCopies) {
+        expect(line).toMatch(COPY_FROM_BUILDER);
+      }
     });
 
     it('copies dist/** from the builder stage using an absolute path, not the old per-target prefix', () => {
