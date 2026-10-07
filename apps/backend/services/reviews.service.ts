@@ -23,12 +23,7 @@ import {
   lockRecordSubject,
   writeAcceptance,
 } from './intake.service.js';
-import {
-  readReviewNotice,
-  type AuthorNotice,
-  type FccChangeNotice,
-  type PrintedCopy,
-} from './review-notices.service.js';
+import { readReviewNotice, type AuthorNotice } from './review-notices.service.js';
 import { lockReleaseRow } from '../utils/release-row-lock.js';
 import type { RecordSubject } from '../utils/record-subject.js';
 
@@ -83,7 +78,7 @@ export const snapshotAuthor = (name: string | null | undefined) =>
  */
 export const latestPrintOfCopy = (
   reviewId: SQL,
-  scope?: (p: { id: AnyColumn; intake_item_id: AnyColumn; album_id: AnyColumn }) => SQL
+  scope?: (p: { intake_item_id: AnyColumn; album_id: AnyColumn }) => SQL
 ) => {
   const p = alias(review_prints, 'p');
   const n = alias(review_prints, 'n');
@@ -256,31 +251,6 @@ const recordNames = async (tx: Pick<typeof db, 'select'>, review: Pick<Review, '
           .innerJoin(artists, eq(artists.id, library.artist_id))
           .where(eq(library.id, review.album_id!));
   return row;
-};
-
-/**
- * The copies whose latest print is `reviewId` (the print half of `in_use`, through `latestPrintOfCopy` itself, one
- * print row at a time), each once: an intake item when the print has one, even when it also carries the filed
- * release's id, else the release.
- */
-const printedCopies = async (tx: Pick<typeof db, 'select'>, reviewId: number) => {
-  const rp = alias(review_prints, 'rp');
-  const rows = await tx
-    .select({ item: rp.intake_item_id, album: rp.album_id })
-    .from(rp)
-    .where(
-      and(
-        eq(rp.review_id, reviewId),
-        latestPrintOfCopy(sql`${reviewId}::int`, (p) => sql`${p.id} = ${rp.id}`)
-      )
-    )
-    .orderBy(rp.printed_at, rp.id);
-  const copies = new Map<string, PrintedCopy>();
-  for (const { item, album } of rows) {
-    if (item !== null) copies.set(`item ${item}`, { intake_item_id: item });
-    else if (album !== null) copies.set(`album ${album}`, { album_id: album });
-  }
-  return [...copies.values()];
 };
 
 /** The on-behalf keys of `POST /reviews` (slice 13e): the free-text `author`, an optional linked account, the medium, and whether the review is accepted at once. */
@@ -510,7 +480,6 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
     const revises =
       current.status === 'submitted' &&
       CONTENT_FIELDS.some((key) => patch[key] !== undefined && patch[key] !== current[key]);
-    const fccChanged = revises && patch.fcc !== undefined && patch.fcc !== current.fcc;
     let editor: { name: string | null; userId: string } | undefined;
     if (revises) {
       const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
@@ -524,20 +493,13 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
       .returning();
     if (editor) await writeReviewRevision(tx, id, pickContent(row), editor);
     const review = (await selectReview(id, tx))!;
-    // Decided here, on the locked review, and sent after commit (BS#2864): notice 1 to a linked author someone
-    // else edited; notice 3 to the music directors when the FCC line changed on a review still on some sleeve.
+    // Decided here, on the locked review, and sent after commit (BS#2864): notice 1 to a linked author someone else edited.
     const toAuthor = revises && current.author_user_id !== null && current.author_user_id !== actor.id;
-    const copies = fccChanged ? await printedCopies(tx, id) : [];
-    const names = toAuthor || copies.length > 0 ? await recordNames(tx, current) : undefined;
-    const authorNotice: AuthorNotice | undefined =
-      names && toAuthor
-        ? { ...names, reviewId: id, authorUserId: current.author_user_id!, name: editor!.name }
-        : undefined;
-    const fccNotice: FccChangeNotice | undefined =
-      names && copies.length > 0
-        ? { ...names, reviewId: id, editor: editor!.name, fcc: patch.fcc ?? null, copies }
-        : undefined;
-    return { outcome: 'updated' as const, review, authorNotice, fccNotice };
+    const names = toAuthor ? await recordNames(tx, current) : undefined;
+    const authorNotice: AuthorNotice | undefined = names
+      ? { ...names, reviewId: id, authorUserId: current.author_user_id!, name: editor!.name }
+      : undefined;
+    return { outcome: 'updated' as const, review, authorNotice };
   });
 
 /**
