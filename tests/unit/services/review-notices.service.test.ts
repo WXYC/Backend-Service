@@ -13,6 +13,7 @@ const mockCapture = jest.fn();
 jest.mock('@sentry/node', () => ({ captureException: (...args: unknown[]) => mockCapture(...args) }));
 jest.mock('@wxyc/authentication', () => ({
   ...jest.requireActual('../../../shared/authentication/src/auth.roles'),
+  ...jest.requireActual('../../../shared/authentication/src/ban-in-force'),
   sendNotificationEmail: (email: unknown) => mockSend(email),
 }));
 jest.mock('@wxyc/database', () => {

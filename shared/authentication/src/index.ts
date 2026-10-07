@@ -7,6 +7,8 @@ export * from './device-authorization';
 // The one admin-flag predicate. Exported from the barrel so `apps/auth`'s
 // provision path consumes it instead of restating the role set (BS#2282).
 export { grantsAdminFlag } from './admin-flag-sync';
+// The one ban-in-force predicate (BS#2993), shared by the request-ban handler and the music-director notices.
+export { isBanInForce } from './ban-in-force';
 export { sendAccountSetupEmail, sendNotificationEmail } from './email';
 export type { NotificationEmail } from './email';
 // Station signup (BS#2361) sends this directly rather than going through

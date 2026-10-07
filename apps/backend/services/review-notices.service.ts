@@ -1,7 +1,7 @@
 import * as Sentry from '@sentry/node';
 import { eq, sql } from 'drizzle-orm';
 import { db, intake_items, member, user } from '@wxyc/database';
-import { normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
+import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
 import { effectiveState, type IntakeItemState } from './intake.service.js';
 
 /** Who has the record a waiting review is about, relative to the review's author (BS#2806). */
@@ -86,13 +86,6 @@ export const readReviewNotice = async (
 };
 
 /**
- * A better-auth ban in force: `banned` set and `banExpires` unset or still ahead. An expired ban counts as lifted, as
- * `apps/auth/check-request-ban-handler.ts` reads it, since better-auth clears the flag only at the account's next sign-in.
- */
-const isBanned = (account: { banned: boolean | null; banExpires: Date | null }) =>
-  account.banned === true && (account.banExpires === null || account.banExpires.getTime() > Date.now());
-
-/**
  * The accounts holding the `musicDirector` role (not `stationManager`), by `normalizeRole` rather than a raw role
  * string, less any account banned in better-auth (`auth_user.banned`): a banned account is told nothing.
  */
@@ -102,7 +95,7 @@ export const musicDirectorEmails = async (): Promise<string[]> => {
     .from(member)
     .innerJoin(user, eq(user.id, member.userId));
   return [
-    ...new Set(rows.filter((r) => normalizeRole(r.role) === 'musicDirector' && !isBanned(r)).map((r) => r.email)),
+    ...new Set(rows.filter((r) => normalizeRole(r.role) === 'musicDirector' && !isBanInForce(r)).map((r) => r.email)),
   ];
 };
 
