@@ -74,6 +74,13 @@ describe('Rotation Cards', () => {
       expect(second.body.name).toBeNull();
     });
 
+    test('responds with exactly { id, bin, number, name } (last_changed_at rides the list only)', async () => {
+      const res = await auth.post('/library/rotation/cards').send({ bin: 'S' }).expect(200);
+      createdCardIds.push(res.body.id);
+
+      expect(Object.keys(res.body).sort()).toEqual(['bin', 'id', 'name', 'number']);
+    });
+
     test('returns 400 for an invalid bin', async () => {
       const res = await auth.post('/library/rotation/cards').send({ bin: 'X' }).expect(400);
       expectErrorContains(res, 'Invalid bin');
@@ -214,6 +221,7 @@ describe('Rotation Cards', () => {
       const renamed = await auth.patch(`/library/rotation/cards/${card.body.id}`).send({ name: 'New' }).expect(200);
 
       expect(renamed.body.name).toBe('New');
+      expect(Object.keys(renamed.body).sort()).toEqual(['bin', 'id', 'name', 'number']);
     });
 
     test('returns 404 for a nonexistent card', async () => {

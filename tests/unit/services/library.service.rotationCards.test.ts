@@ -36,7 +36,37 @@ describe('listRotationCardsFromDB (BS#2472)', () => {
     expect(selectChain.leftJoin.mock.calls[0][0]).toBe(rotation);
     expect(selectChain.groupBy).toHaveBeenCalledWith(rotation_cards.id);
   });
+
+  test('selects last_changed_at alongside the card fields and the active count', async () => {
+    const selectChain = createMockQueryChain();
+    selectChain.orderBy = jest.fn().mockResolvedValue([]);
+    db.select.mockReturnValue(selectChain);
+
+    await listRotationCardsFromDB();
+
+    expect(Object.keys(db.select.mock.calls[0][0] as object).sort()).toEqual([
+      'active_count',
+      'bin',
+      'id',
+      'last_changed_at',
+      'name',
+      'number',
+    ]);
+    expect((db.select.mock.calls[0][0] as Record<string, unknown>).last_changed_at).toBe(
+      rotation_cards.last_changed_at
+    );
+  });
 });
+
+// The card write responses are the contract's `RotationCard` (id, bin,
+// number, name) — `last_changed_at` rides the list item only — so both write
+// paths project exactly those four columns instead of a bare `.returning()`.
+const CARD_WIRE_PROJECTION = {
+  id: rotation_cards.id,
+  bin: rotation_cards.bin,
+  number: rotation_cards.number,
+  name: rotation_cards.name,
+};
 
 describe('addRotationCard (BS#2472)', () => {
   beforeEach(() => {
@@ -57,6 +87,16 @@ describe('addRotationCard (BS#2472)', () => {
     await addRotationCard('M', undefined);
 
     expect(insertChain.values).toHaveBeenCalledWith({ bin: 'M', number: 1, name: null });
+  });
+
+  test('returns exactly the four wire columns, never the full row', async () => {
+    db.execute.mockResolvedValueOnce([]);
+    const insertChain = createMockQueryChain([{ id: 1, bin: 'M', number: 1, name: null }]);
+    db.insert.mockReturnValue(insertChain);
+
+    await addRotationCard('M', undefined);
+
+    expect(insertChain.returning).toHaveBeenCalledWith(CARD_WIRE_PROJECTION);
   });
 
   test('assigns number = max + 1 for a bin with existing cards, locking the top card across the INSERT', async () => {
@@ -133,6 +173,7 @@ describe('renameRotationCard (BS#2472)', () => {
     expect(db.update).toHaveBeenCalledWith(rotation_cards);
     expect(updateChain.set).toHaveBeenCalledWith({ name: 'New name' });
     expect(result).toEqual({ id: 1, bin: 'M', number: 1, name: 'New name' });
+    expect(updateChain.returning).toHaveBeenCalledWith(CARD_WIRE_PROJECTION);
   });
 
   test('returns undefined when no row matched', async () => {

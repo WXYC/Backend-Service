@@ -332,6 +332,7 @@ export const rotation_cards = {
   bin: 'rotation_cards.bin',
   number: 'rotation_cards.number',
   name: 'rotation_cards.name',
+  last_changed_at: 'rotation_cards.last_changed_at',
 };
 export const rotation_urls = {
   id: 'rotation_urls.id',
