@@ -206,7 +206,7 @@ describe('real better-call round-trip (BS#2558 re-serialization claim)', () => {
   // loads. Type-only `import()` references for these paths don't resolve
   // under `tests/tsconfig.json`'s `moduleResolution: "Node"` (it ignores
   // `package.json` "exports" maps entirely — the same documented ts-jest
-  // quirk `shared/observability`'s CLAUDE.md entry names, and the same gap
+  // quirk `shared/observability`'s docs/packages.md section names, and the same gap
   // `tests/mocks/better-auth-api.mock.ts` already tolerates for
   // `better-call/error`). `tests/**/*.ts` has the `no-unsafe-*`/
   // `no-explicit-any` ESLint rules off (`eslint.config.mjs`), so these stay

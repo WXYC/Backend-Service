@@ -122,7 +122,7 @@ The job pauses when a DJ is actively adding tracks. Both phases probe `flowsheet
 **Why a real pause (BS#2009), not deleted plumbing.** The issue that introduced this mechanism (BS#2000 / #2009) considered dropping `checkLive`/`lookbackSeconds`/`pauseMs` entirely on the grounds that this is a manually-invoked one-shot inside an operator-chosen maintenance window, not a cron. Rejected:
 
 - Both sibling one-shot jobs, `jobs/streaming-url-remediation` and `jobs/flowsheet-ghost-row-sweep`, already implement a real cooperative pause (`waitForQuietPeriod` + a fail-open `safeProbe`, the donors this job's implementation is ported from verbatim). Diverging here would be gratuitous inconsistency for no benefit.
-- This README and the `CLAUDE.md` workspace-table row already promised the behavior — the code just didn't implement it (`CheckLiveActivityFn` is a detector, not a sleeper; the two call sites awaited it and discarded the result).
+- This README and the `docs/jobs.md` section already promised the behavior — the code just didn't implement it (`CheckLiveActivityFn` is a detector, not a sleeper; the two call sites awaited it and discarded the result).
 - The job's next production run issues roughly 206 UPDATEs against `album_metadata` during hours when DJs may be live. An operator-chosen window is a courtesy, not a guarantee — the pause is the mechanism that actually protects a DJ's session from write contention if the window assumption is wrong.
 
 ## Environment

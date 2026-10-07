@@ -188,7 +188,7 @@ export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
   // better-auth endpoint. See AdminAction.handWritten's doc comment.
   //
   // M1 (code review PR #2596): this, not create-user above, is the route
-  // dj-site's admin pages actually call to create a DJ (CLAUDE.md). Without
+  // dj-site's admin pages actually call to create a DJ (docs/authentication.md, auth server). Without
   // `subject` this defaulted to `'body-user-id'`, but provisionUser()'s
   // request body carries no `userId` to extract, so every real provisioning
   // wrote a NULL subject. `provision-user.ts:73-81`'s 2xx body

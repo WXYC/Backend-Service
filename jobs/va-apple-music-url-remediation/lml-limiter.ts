@@ -13,7 +13,7 @@
  * — do not read LML's 50/min Discogs ceiling as headroom to raise this to 50.
  *
  * A job-owned limiter deliberately passes neither `breaker` nor `queueWaitMs`,
- * so it keeps the unbounded shape (per CLAUDE.md) and never sheds. That is why
+ * so it keeps the unbounded shape (per docs/packages.md, `@wxyc/lml-client`) and never sheds. That is why
  * `verdict.ts`'s shed arm is a forward-compat pin rather than a live path.
  */
 
