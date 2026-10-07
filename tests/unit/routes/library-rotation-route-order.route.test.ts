@@ -85,6 +85,13 @@ type UpdateRotationOutcome =
 const mockUpdateRotation = jestGlobals.fn<() => Promise<UpdateRotationOutcome>>();
 const mockGetUncataloguedRotationFromDB = jestGlobals.fn<() => Promise<unknown[]>>();
 const mockGetRotationRowFromDB = jestGlobals.fn<() => Promise<unknown>>();
+const mockGetRotationThresholds = jestGlobals.fn<() => Promise<unknown>>();
+const mockUpdateRotationThresholds = jestGlobals.fn<() => Promise<unknown>>();
+
+jest.mock('../../../apps/backend/services/rotation-thresholds.service', () => ({
+  getRotationThresholds: mockGetRotationThresholds,
+  updateRotationThresholds: mockUpdateRotationThresholds,
+}));
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   // Real projection and real field lists, not stubs: the controller routes
@@ -192,7 +199,9 @@ type RouteLayer = { route?: { path: string; methods: Record<string, boolean> } }
  *
  * `/artists/:id` (BS#2156) predates `/rotation/:id` (BS#2410) and carries
  * three literals to the rotation block's two — `/rotation/cards` (BS#2472)
- * joined `/rotation/uncatalogued` as a second shadowable literal.
+ * joined `/rotation/uncatalogued` as a second shadowable literal, and
+ * `/rotation/thresholds` is a third that is shadowable by BOTH the GET and the
+ * PATCH registration (the first PATCH literal on the block).
  *
  * `expectedMethods` is the per-family answer to "which verbs does `param`
  * itself register" (sorted), consumed by the "registers exactly one handler
@@ -202,7 +211,7 @@ type RouteLayer = { route?: { path: string; methods: Record<string, boolean> } }
 const PARAM_FAMILIES = [
   {
     param: '/rotation/:id',
-    literals: ['/rotation/uncatalogued', '/rotation/cards'],
+    literals: ['/rotation/uncatalogued', '/rotation/cards', '/rotation/thresholds'],
     expectedMethods: ['get', 'patch'],
   },
   {
@@ -334,6 +343,17 @@ describe.each(PARAM_FAMILIES)(
   }
 );
 
+// The PATCH arm of the ordering sweep above was vacuous until `PATCH
+// /rotation/thresholds` landed, and would go vacuous again if that route were
+// deleted. Only the rotation family has a PATCH literal.
+test('the PATCH arm is not vacuous: /rotation/thresholds is a shadowable PATCH layer', () => {
+  const shadowable = familyLayers('/rotation/:id')
+    .filter((l) => l.methods.includes('patch') && isShadowableByParam('/rotation/:id', l.path))
+    .map((l) => l.path);
+
+  expect(shadowable).toContain('/rotation/thresholds');
+});
+
 describe('library.route rotation behavior (BS#2113, BS#2410)', () => {
   test('a request to the literal /rotation/:rotation_id/tracks path still reaches its own handler', async () => {
     mockRole('dj');
@@ -358,6 +378,37 @@ describe('library.route rotation behavior (BS#2113, BS#2410)', () => {
     expect(res.status).toBe(200);
     expect(mockGetUncataloguedRotationFromDB).toHaveBeenCalledTimes(1);
     expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
+  });
+});
+
+describe('library.route /rotation/thresholds dispatch', () => {
+  const current = { window_days: { H: 60, M: 60, L: 60, S: 60 }, card_stale_days: 30 };
+
+  test('GET /rotation/thresholds reaches the thresholds handler, not the single-row read', async () => {
+    mockRole('dj');
+    mockGetRotationThresholds.mockReset().mockResolvedValue(current);
+    mockGetRotationRowFromDB.mockReset();
+
+    const res = await request(app).get('/library/rotation/thresholds').set('Authorization', 'Bearer test-token');
+
+    expect(res.status).toBe(200);
+    expect(mockGetRotationThresholds).toHaveBeenCalledTimes(1);
+    expect(mockGetRotationRowFromDB).not.toHaveBeenCalled();
+  });
+
+  test('PATCH /rotation/thresholds reaches the thresholds handler, not the rotation-row edit', async () => {
+    mockRole('musicDirector');
+    mockUpdateRotationThresholds.mockReset().mockResolvedValue(current);
+    mockUpdateRotation.mockReset();
+
+    const res = await request(app)
+      .patch('/library/rotation/thresholds')
+      .set('Authorization', 'Bearer test-token')
+      .send({ card_stale_days: 14 });
+
+    expect(res.status).toBe(200);
+    expect(mockUpdateRotationThresholds).toHaveBeenCalledWith({ card_stale_days: 14 });
+    expect(mockUpdateRotation).not.toHaveBeenCalled();
   });
 });
 

@@ -489,6 +489,14 @@ export const library_watermark = {
   id: 'library_watermark.id',
   last_modified_at: 'library_watermark.last_modified_at',
 };
+export const rotation_thresholds = {
+  id: 'rotation_thresholds.id',
+  window_days_h: 'rotation_thresholds.window_days_h',
+  window_days_m: 'rotation_thresholds.window_days_m',
+  window_days_l: 'rotation_thresholds.window_days_l',
+  window_days_s: 'rotation_thresholds.window_days_s',
+  card_stale_days: 'rotation_thresholds.card_stale_days',
+};
 export const album_metadata = {
   album_id: 'album_metadata.album_id',
   artwork_url: 'album_metadata.artwork_url',

@@ -2119,6 +2119,39 @@ export const library_watermark = wxyc_schema.table(
 );
 
 /**
+ * Station-wide rotation thresholds (one row, set by the music directors): how many days a record may sit in each
+ * rotation bin before it is flagged for replacement, and how many days a rotation card may go unchanged before it is
+ * flagged stale. Same singleton shape as `library_watermark`. The stored values carry no ceiling; the 1..365 bound
+ * is enforced on the request only, so it can be raised without a migration.
+ */
+export const rotation_thresholds = wxyc_schema.table(
+  'rotation_thresholds',
+  {
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    id: boolean('id').primaryKey().notNull().default(true),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    window_days_h: integer('window_days_h').notNull().default(60),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    window_days_m: integer('window_days_m').notNull().default(60),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    window_days_l: integer('window_days_l').notNull().default(60),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    window_days_s: integer('window_days_s').notNull().default(60),
+    // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
+    card_stale_days: integer('card_stale_days').notNull().default(30),
+  },
+  (_table) => [
+    check('rotation_thresholds_singleton', sql.raw(`"id" = true`)),
+    check(
+      'rotation_thresholds_days_positive',
+      sql.raw(
+        `"window_days_h" >= 1 AND "window_days_m" >= 1 AND "window_days_l" >= 1 AND "window_days_s" >= 1 AND "card_stale_days" >= 1`
+      )
+    ),
+  ]
+);
+
+/**
  * Deleted-release denylist (BS#2112). One row per `library.legacy_release_id`
  * hard-deleted through `DELETE /library/:id`, written inside the delete's own
  * transaction.
