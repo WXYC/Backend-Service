@@ -23,6 +23,7 @@ import {
 } from './intake.service.js';
 import { readReviewNotice } from './review-notices.service.js';
 import { lockReleaseRow } from '../utils/release-row-lock.js';
+import type { RecordSubject } from '../utils/record-subject.js';
 
 /**
  * In-app review service behind `/reviews` (BS#2802, slice 10a of BS#2791): a DJ's own
@@ -186,11 +187,7 @@ export const listReviews = async (filters: ReviewFilters, actor: ReviewsActor) =
  * and write; a library release only has to exist, read FOR KEY SHARE in the same transaction so a concurrent delete
  * waits or has already removed it. Anything else is `subject_not_held`.
  */
-export const createReview = async (
-  subject: { intake_item_id?: number; album_id?: number },
-  fields: ReviewFields,
-  actor: ReviewsActor
-) =>
+export const createReview = async (subject: RecordSubject, fields: ReviewFields, actor: ReviewsActor) =>
   db.transaction(async (tx) => {
     const held =
       subject.intake_item_id !== undefined
@@ -207,7 +204,7 @@ export const createReview = async (
               )
               .for('update')
           ).length > 0
-        : await lockReleaseRow(tx, subject.album_id!);
+        : await lockReleaseRow(tx, subject.album_id);
     if (!held) return { outcome: 'subject_not_held' as const };
     const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
     const [{ id }] = await tx
@@ -241,7 +238,7 @@ const isUnknownAuthor = (error: unknown) =>
  * writes `submitReview` and `acceptReview` use. The notice to a linked DJ (BS#2864) goes after commit, at the caller.
  */
 export const recordReview = async (
-  subject: { intake_item_id?: number; album_id?: number },
+  subject: RecordSubject,
   fields: ReviewFields,
   onBehalf: OnBehalf,
   actor: ReviewsActor
