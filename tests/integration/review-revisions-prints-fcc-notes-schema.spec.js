@@ -66,8 +66,16 @@ describe('review_revisions, review_prints, fcc_notes (real PG)', () => {
     it('rejects an FCC note with neither a release nor an item', async () => {
       // Hand-written: seedFccNote refuses a note with no target on purpose, and this test needs the CHECK to fire.
       await expect(
-        sql`INSERT INTO ${t('fcc_notes')} ${sql({ track: 'la paradoja', note: 'a note' })}`
+        sql`INSERT INTO ${t('fcc_notes')} ${sql({ track: 'la paradoja', note: 'a note', reported_by: 'Test Reporter' })}`
       ).rejects.toMatchObject({ code: '23514', constraint_name: 'fcc_notes_target_ck' });
+    });
+
+    it('rejects an FCC note with no reporter name (BS#2862)', async () => {
+      const item = await seedIntakeItem({ artist_name: ITEM_ARTIST });
+      await expect(seedFccNote({ intake_item_id: item.id, reported_by: null })).rejects.toMatchObject({
+        code: '23502',
+        column_name: 'reported_by',
+      });
     });
 
     it('accepts a print for a release with no intake item', async () => {

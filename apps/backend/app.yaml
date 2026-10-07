@@ -741,6 +741,63 @@ components:
         recommended_tracks: { type: string, nullable: true }
         fcc: { type: string, nullable: true, description: Station-only, as on `Review` }
 
+    FccNote:
+      type: object
+      description: An FCC note on a record, separate from any review's own `fcc` field. Station-only, never published. `artist_name` and `album_title` are read at response time, never stored.
+      required:
+        - id
+        - album_id
+        - intake_item_id
+        - track
+        - note
+        - status
+        - reported_by
+        - reported_by_user_id
+        - reported_at
+        - confirmed_by
+        - confirmed_at
+        - artist_name
+        - album_title
+      properties:
+        id: { type: integer }
+        album_id:
+          {
+            type: integer,
+            nullable: true,
+            description: The library release; filing an item stamps its notes with the release it was filed as,
+          }
+        intake_item_id: { type: integer, nullable: true, description: The intake item, kept after filing }
+        track: { type: string }
+        note: { type: string }
+        status: { type: string, enum: [reported, confirmed] }
+        reported_by: { type: string, maxLength: 128, description: "Snapshot of the reporter's `auth_user.name`" }
+        reported_by_user_id: { type: string, nullable: true, description: '`null` once that account is deleted' }
+        reported_at: { type: string, format: date-time }
+        confirmed_by: { type: string, nullable: true, maxLength: 128 }
+        confirmed_at: { type: string, format: date-time, nullable: true }
+        artist_name:
+          {
+            type: string,
+            maxLength: 128,
+            description: "The release's artist when `album_id` is set, else the intake item's",
+          }
+        album_title:
+          {
+            type: string,
+            maxLength: 128,
+            description: "The release's title when `album_id` is set, else the intake item's",
+          }
+
+    NewFccNoteRequest:
+      type: object
+      description: Send exactly one of `album_id` and `intake_item_id`.
+      required: [track, note]
+      properties:
+        album_id: { type: integer, minimum: 1, maximum: 2147483647 }
+        intake_item_id: { type: integer, minimum: 1, maximum: 2147483647 }
+        track: { type: string, description: 'Not blank after trimming' }
+        note: { type: string, description: 'Not blank after trimming' }
+
     DigitalArchivePlaybackManifest:
       type: object
       description: >
@@ -5960,3 +6017,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReviewConflictError'
+
+  /fcc-notes:
+    get:
+      summary: List a record's FCC notes (BS#2862)
+      description: >-
+        Grant `reviews: read`. Exactly one of `album_id` and `intake_item_id` is required (1..2147483647); none, both, a malformed value or a repeated key is a 400. Both statuses, oldest first (`reported_at`, then `id`), a bare array. `album_id` includes the notes reported against an item later filed as that release.
+      parameters:
+        - { name: album_id, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 2147483647 } }
+        - {
+            name: intake_item_id,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 2147483647 },
+          }
+      responses:
+        '200':
+          description: 'The notes of the record'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FccNote'
+        '400':
+          description: 'No filter, both filters, or a malformed value'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: read`'
+    post:
+      summary: Report an FCC note on a record (BS#2862)
+      description: >-
+        Grant `reviews: write`. Any DJ may report against any library release or intake item in any state; no hold is needed. The note starts `reported`, under a snapshot of the caller's account name. A note against a filed or finalized item carries the item's release at once. Answers 200, not 201.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewFccNoteRequest'
+      responses:
+        '200':
+          description: 'The new note'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FccNote'
+        '400':
+          description: 'Both or neither of `intake_item_id` and `album_id`, an id out of bounds, a blank `track` or `note`, or a subject that names no release or item'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: write`, or has no account name to report under'

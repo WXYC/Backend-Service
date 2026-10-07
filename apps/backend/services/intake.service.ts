@@ -11,6 +11,7 @@ import {
   member,
   NY_TIME_ZONE,
   album_review_submissions,
+  fcc_notes,
   review_prints,
   reviews,
   user,
@@ -519,7 +520,7 @@ export const lockRecordSubject = async (
  * is `unknown_album`, never a foreign-key 500), then the item `FOR UPDATE`, then, through the stamping UPDATEs, the
  * review and print rows. The new-release arm has no row to lock first; `fileLibraryRelease` runs on the same `tx`
  * after the item lock and the checks. Filing keeps the accept columns, clears the holder and the request, stamps
- * `album_id` on EVERY review and print of the item (drafts included, the delete snapshot reaches them through it) and
+ * `album_id` on EVERY review, print and FCC note of the item (drafts included, the delete snapshot reaches them through it) and
  * drops the item's passes. `filing_conflict` is `mapLibraryFilingError`'s 409; the caller finishes a new release with
  * `completeLibraryFiling(filed, input)` after the commit.
  */
@@ -560,6 +561,7 @@ export const fileIntakeItem = async (id: number, arm: IntakeFileArm, filedBy: st
         .where(eq(intake_items.id, id));
       await tx.update(reviews).set({ album_id: albumId }).where(eq(reviews.intake_item_id, id));
       await tx.update(review_prints).set({ album_id: albumId }).where(eq(review_prints.intake_item_id, id));
+      await tx.update(fcc_notes).set({ album_id: albumId }).where(eq(fcc_notes.intake_item_id, id));
       await tx.delete(intake_item_passes).where(eq(intake_item_passes.intake_item_id, id));
       return { outcome: 'filed' as const, filed };
     });
