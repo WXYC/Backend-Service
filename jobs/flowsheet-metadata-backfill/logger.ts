@@ -137,6 +137,9 @@ export const initLogger = (config: LoggerConfig): string => {
   // `tracesSampleRate`, so it is the sole sampling authority here (BS#1566).
   const envRate = resolveTracesSampleRate();
   Sentry.init({
+    // Sentry 11 turned this on by default, which titles captureMessage events
+    // with a minified function name (BS#3002).
+    attachStacktrace: false,
     dsn: process.env.SENTRY_DSN,
     release: process.env.SENTRY_RELEASE,
     environment: process.env.NODE_ENV || 'production',
