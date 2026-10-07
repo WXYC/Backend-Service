@@ -45,8 +45,6 @@ describe('POST /library/artists/:id/refile', () => {
         ['whitespace', '   '],
         ['5 characters', 'ABCDE'],
         ['a non-ASCII letter', 'Ñ'],
-        ['V/A', 'V/A'],
-        ['v/a with a trailing space', 'v/a '],
         ['Z-Rock', 'Z-Rock'],
         ['a non-string', 7],
       ].map(([name, value]) => [

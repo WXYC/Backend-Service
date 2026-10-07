@@ -7,9 +7,9 @@
  * `FOR UPDATE` would autocommit and release at once) fails loudly on every branch.
  */
 import { jest } from '@jest/globals';
-import { db } from '@wxyc/database';
+import { artists, db, genre_artist_crossreference } from '@wxyc/database';
 
-type Call = { op: string; methods: string[] };
+type Call = { op: string; methods: string[]; table?: unknown };
 
 const pgError = (code: string): Error => Object.assign(new Error('pg'), { code });
 
@@ -55,8 +55,8 @@ const makeTx = (opts: {
       const i = selectIndex++;
       return chain(call, opts.selects[i] ?? [], opts.throwOnSelect === i ? opts.error : undefined);
     },
-    update: () => {
-      const call: Call = { op: 'update', methods: [] };
+    update: (table: unknown) => {
+      const call: Call = { op: 'update', methods: [], table };
       calls.push(call);
       const c: Record<string, unknown> = {};
       c.set = () => c;
@@ -65,9 +65,17 @@ const makeTx = (opts: {
     },
     execute: (query: { sql?: string[] }) => {
       const text = (query.sql ?? []).join('?');
-      const op = text.includes('pg_advisory_xact_lock') ? 'advisory' : text.includes('<>') ? 'stray' : 'count';
+      // Keyed on distinctive statement tokens, not on any operator: the advisory lock, the release count, the
+      // stray-release probe (the only other `library` read), and the SET LOCAL lock_timeout (neither of those).
+      const op = text.includes('pg_advisory_xact_lock')
+        ? 'advisory'
+        : text.includes('count(*)')
+          ? 'count'
+          : text.includes('LIMIT 1')
+            ? 'stray'
+            : 'other';
       calls.push({ op, methods: [] });
-      if (op === 'advisory') return Promise.resolve([]);
+      if (op === 'advisory' || op === 'other') return Promise.resolve([]);
       if (op === 'stray') return Promise.resolve(opts.strayRelease ? [{ '?column?': 1 }] : []);
       return Promise.resolve([{ n: opts.countRow ?? 2 }]);
     },
@@ -159,7 +167,15 @@ describe('refileArtistInGenre (BS#2643)', () => {
       const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(1), []] }, 1, 'JA');
 
       expect(outcome).toMatchObject({ outcome: 'refiled', card: { code_letters: 'JA' } });
-      expect(calls.filter((c) => c.op === 'update')).toHaveLength(1);
+      const updates = calls.filter((c) => c.op === 'update');
+      expect(updates).toHaveLength(1);
+      expect(updates[0].table).toBe(artists);
+    });
+
+    it('a number-only change updates only the crossreference', async () => {
+      const { calls } = await run({ selects: [A, [CARD], BUCKET(1), []] }, 31);
+
+      expect(calls.filter((c) => c.op === 'update').map((c) => c.table)).toEqual([genre_artist_crossreference]);
     });
 
     it('refuses with the memberships when more than one membership is locked', async () => {
@@ -304,5 +320,63 @@ describe('refileArtistInGenre (BS#2643)', () => {
 
   it('rethrows an unrelated error', async () => {
     await expect(run({ selects: [A, [CARD]], throwOnSelect: 2, error: pgError('23505') })).rejects.toThrow('pg');
+  });
+
+  describe('Various Artists destination', () => {
+    it.each(['V/A', ' v/a ', 'v/a'])(
+      'rejects code_letters %j with a 400 before opening a transaction',
+      async (letters) => {
+        const tx = jest.fn();
+        (db as unknown as { transaction: unknown }).transaction = tx;
+        const { refileArtistInGenre } = await import('../../../apps/backend/services/library.service');
+
+        await expect(refileArtistInGenre(431, 6, 31, letters)).rejects.toMatchObject({ statusCode: 400 });
+        expect(tx).not.toHaveBeenCalled();
+      }
+    );
+  });
+
+  describe('[library.refile] log line', () => {
+    let log: jest.SpiedFunction<typeof console.log>;
+    beforeEach(() => {
+      log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    });
+    afterEach(() => log.mockRestore());
+
+    const lines = () => log.mock.calls.filter(([m]) => String(m).startsWith('[library.refile]'));
+
+    it('logs once, with before/after, on a write', async () => {
+      await run({ selects: [A, [CARD], BUCKET(1), []] }, 31, 'JA');
+
+      expect(lines()).toHaveLength(1);
+      const record = JSON.parse(String(lines()[0][0]).replace('[library.refile] ', ''));
+      expect(record).toEqual({
+        artist_id: 431,
+        before: { code_letters: 'IS', genre_id: 6, code_artist_number: 1 },
+        after: { code_letters: 'JA', genre_id: 6, code_artist_number: 31 },
+        releases_moved: 0,
+      });
+    });
+
+    it('does not log on a no-op', async () => {
+      await run({ selects: [A, [CARD], BUCKET(31)] }, 31, 'is');
+
+      expect(lines()).toHaveLength(0);
+    });
+
+    it('does not log when the transaction fails after the write', async () => {
+      const { tx } = makeTx({ selects: [A, [CARD], BUCKET(1), []] });
+      (tx as { execute: unknown }).execute = jest.fn((q: { sql?: string[] }) => {
+        const text = (q.sql ?? []).join('?');
+        return text.includes('count(*)') ? Promise.reject(new Error('boom')) : Promise.resolve([]);
+      });
+      (db as unknown as { transaction: unknown }).transaction = jest
+        .fn()
+        .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
+      const { refileArtistInGenre } = await import('../../../apps/backend/services/library.service');
+
+      await expect(refileArtistInGenre(431, 6, 31)).rejects.toThrow('boom');
+      expect(lines()).toHaveLength(0);
+    });
   });
 });
