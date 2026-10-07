@@ -9,7 +9,6 @@ const mockService = {
 const mockNotify = {
   notifyReviewEdited: jest.fn<(n: unknown) => Promise<void>>(),
   notifyReviewRecorded: jest.fn<(n: unknown) => Promise<void>>(),
-  notifyFccChanged: jest.fn<(n: unknown) => Promise<void>>(),
 };
 
 jest.mock('../../../apps/backend/services/reviews.service', () => ({ ...mockService, AUTHOR_MAX: 128 }));
@@ -45,17 +44,15 @@ describe('PATCH /reviews/{id}', () => {
     ).then(() => res);
   };
 
-  test('starts notice 1 and notice 3 with the service data, and answers the review', async () => {
-    const res = await patch({ authorNotice: NOTICE, fccNotice: { reviewId: 3, copies: [] } });
+  test('starts notice 1 with the service data, and answers the review', async () => {
+    const res = await patch({ authorNotice: NOTICE });
     expect(mockNotify.notifyReviewEdited).toHaveBeenCalledWith(NOTICE);
-    expect(mockNotify.notifyFccChanged).toHaveBeenCalledWith({ reviewId: 3, copies: [] });
     expect(res.json).toHaveBeenCalledWith(REVIEW);
   });
 
   test('sends nothing when the service decided on no notice', async () => {
     const res = await patch({});
     expect(mockNotify.notifyReviewEdited).not.toHaveBeenCalled();
-    expect(mockNotify.notifyFccChanged).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(REVIEW);
   });
 

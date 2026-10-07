@@ -216,17 +216,6 @@ export type NoticeRecord = { artist: string; album: string };
 /** A review's author is told a music director edited it, or recorded it in their name; `name` is the account name (`auth_user.name`), null when it has none. */
 export type AuthorNotice = NoticeRecord & { reviewId: number; authorUserId: string; name: string | null };
 
-/** A printed copy: an intake item, or a release with no item. */
-export type PrintedCopy = { intake_item_id: number } | { album_id: number };
-
-/** The FCC line of a printed review changed: who edited, the new line, and the copies whose latest print is the review. */
-export type FccChangeNotice = NoticeRecord & {
-  reviewId: number;
-  editor: string | null;
-  fcc: string | null;
-  copies: PrintedCopy[];
-};
-
 const reviewLink = (reviewId: number): NoticeLink => ({
   path: `/dashboard/reviews/${reviewId}`,
   label: 'Open your review',
@@ -252,24 +241,5 @@ export const notifyReviewRecorded = (n: AuthorNotice) =>
       "You can edit it, and it isn't published anywhere until you choose where it can appear and how you're credited.",
     ],
     links: [reviewLink(n.reviewId)],
-    context: { review_id: n.reviewId },
-  });
-
-/** Notice 3: the music directors are told the slips on the covers are out of date. */
-export const notifyFccChanged = (n: FccChangeNotice) =>
-  notifyMusicDirectors({
-    subject: `FCC line changed on a printed review: ${record(n.artist, n.album)}`,
-    lines: [
-      `${n.editor ?? 'Someone'} changed the FCC line on the review of ${record(n.artist, n.album)} after it was printed.`,
-      `New FCC line: ${n.fcc || 'none'}`,
-      n.copies.length === 1
-        ? 'The printed slip is out of date. Reprint it from:'
-        : 'The printed slips are out of date. Reprint them from:',
-    ],
-    links: n.copies.map((c) =>
-      'intake_item_id' in c
-        ? itemLink(c.intake_item_id)
-        : { path: `/dashboard/album/${c.album_id}`, label: 'Open the album page' }
-    ),
     context: { review_id: n.reviewId },
   });
