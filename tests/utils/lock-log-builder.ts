@@ -12,10 +12,11 @@ import { PgDialect } from 'drizzle-orm/pg-core';
  *   to `from()`. A second `for` argument (such as `{ of }`) appends ` with options`. The first parameter the last
  *   `where()` bound appends ` id <param>`, so a test can pin WHICH row was locked.
  * - `sets`: the argument of every `.set()` call, in order. `setsByTable` holds the latest one per table, for a builder
- *   made with a `table` (the table a `tx.update(table)` call got).
+ *   made with `updated` (the name of the table a `tx.update(table)` call got).
  *
  * It needs the real schema (`jest.requireActual` of `schema`), since it reads table names with `getTableName` and
- * renders `where()` with `PgDialect`. Reset between cases with `log.length = 0; sets.length = 0`.
+ * renders `where()` with `PgDialect`. Reset between cases with `log.length = 0; sets.length = 0`, and clear `setsByTable`'s keys if a
+ * case reads it.
  */
 export const createLockLog = () => {
   const log: string[] = [];
