@@ -4324,11 +4324,13 @@ export type ArtistCodeBucketMember = ArtistSlotOwner & { code_number: number };
  * `genre_artist_crossreference` (`code_letters` lives on `artists`, one subquery away). A template and not a
  * `db.select` subquery so building it never touches `db`, which keeps `refileArtistInGenre`'s lock statement
  * on its transaction, and so a statement over the crossreference alone can use it, which is what lets a plain
- * `FOR UPDATE` lock only that table's rows. `artistCodeBucketQuery` (peek/browse) and the re-file's lock share it,
- * so the locked set and the set a librarian browses cannot drift apart.
+ * `FOR UPDATE` lock only that table's rows. `artistCodeBucketQuery` (peek/browse) and the re-file's lock share it
+ * as the bucket arm, so the bucket the lock covers and the bucket a librarian browses cannot drift apart. The lock
+ * also covers the mover's own memberships (`OR artist_id = $a`), which the browse does not. The body is parenthesized
+ * so it stays one operand under `or()`.
  */
 const inArtistCodeBucket = (code_letters: string, genre_id: number) =>
-  sql`${genre_artist_crossreference.genre_id} = ${genre_id} AND ${genre_artist_crossreference.artist_id} IN (SELECT ${artists.id} FROM ${artists} WHERE ${artists.code_letters} = ${code_letters})`;
+  sql`(${genre_artist_crossreference.genre_id} = ${genre_id} AND ${genre_artist_crossreference.artist_id} IN (SELECT ${artists.id} FROM ${artists} WHERE ${artists.code_letters} = ${code_letters}))`;
 
 /**
  * The shared body of the two reads over a `(code_letters, genre_id)` bucket:
@@ -4639,7 +4641,8 @@ export type ArtistRefileOutcome =
  * release re-labels on its own (the physical labels are the librarian's follow-up, reported as `releases_to_relabel`).
  *
  * One transaction, `lock_timeout` bounded (`REFILE_ARTIST_LOCK_TIMEOUT_MS`), so a live writer makes this stand down
- * (`lock_unavailable`) rather than queue. **Lock design, in order:** (1) the artist's own `artists` row, `FOR NO KEY
+ * (`lock_unavailable`) rather than queue indefinitely (the bound restarts on each new wait, so a hand-run job can still be
+ * the side that hits the deadlock detector). **Lock design, in order:** (1) the artist's own `artists` row, `FOR NO KEY
  * UPDATE`, selected from `artists` alone, BEFORE the card is read -- `code_letters` names the bucket, so a read ahead of
  * the lock can check a stale bucket while a re-letter commits (and `NO KEY UPDATE` still admits the `KEY SHARE` an FK
  * insert takes). This is the same artists-row-then-crossreference order as `deleteArtistFromDB`. (2) The whole
@@ -4649,6 +4652,10 @@ export type ArtistRefileOutcome =
  * (drizzle schema-qualifies the name and Postgres rejects it); one statement in a fixed order, so two concurrent
  * re-files in a bucket serialize instead of deadlocking on their own rows. Every read here runs on `tx`.
  *
+ * **Invariant:** the `library_watermark` row (the statement-level trigger's UPDATE target, migrations 0104/0105/0185) is
+ * the LAST lock a writing re-file takes, because every row lock above is taken before the first UPDATE. It is also a
+ * catalog-wide write mutex held until commit, so a writing re-file waits on any open catalog write transaction.
+ *
  * **Watermark cost:** a real re-file advances the catalog watermark once (the statement-level trigger from migration
  * 0105), a full catalog re-download for every poller, the cost a rename pays. The trigger fires even for a zero-row
  * UPDATE, so the no-op path issues no UPDATE at all.
@@ -4656,6 +4663,9 @@ export type ArtistRefileOutcome =
  * **Residual race, accepted:** `addArtist` inserts into a bucket without taking these locks, so a create landing the
  * same triple at the same instant as a re-file is not prevented. That is the check-then-act window BS#2106 records for
  * `addArtist` itself, accepted on the same grounds; the unique constraint stays out of scope (BS#2033, BS#2106).
+ * Also not prevented: a hand-run job (for example `artist-unicode-dedup`) that re-letters ANOTHER artist into this
+ * bucket, uncommitted, is invisible to the occupancy check, and the re-file writes after the job commits. The
+ * destination-shelf advisory key PR 2b adds closes this for the endpoint's own re-letters, not for the jobs.
  * Also not prevented: a manual run of `jobs/library-etl` (needs `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`) upserts `artist_genre_code` from tubafrenzy's frozen value and
  * so reverts a re-file (WXYC/Backend-Service#2581).
  */
