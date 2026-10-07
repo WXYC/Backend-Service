@@ -15,6 +15,8 @@ jest.mock('@sentry/node', () => ({
 }));
 // Keeps the developer's local .env out of the test's process.env.
 jest.mock('dotenv/config', () => ({}));
+// The enrichment worker's preload calls `config()` from `dotenv` directly.
+jest.mock('dotenv', () => ({ config: jest.fn() }));
 
 type ShouldHandleError = (error: Error) => boolean;
 
@@ -54,5 +56,25 @@ describe('Express error filter registration on expressIntegration', () => {
   ])('%s app.ts no longer calls the deprecated setupExpressErrorHandler', (_app, relPath) => {
     const source = readFileSync(resolve(__dirname, relPath), 'utf-8');
     expect(source).not.toMatch(/Sentry\.setupExpressErrorHandler\(/);
+  });
+});
+
+// Sentry 11 defaults `traceLifecycle` to 'stream', under which no transaction
+// event is built and `beforeSendTransaction` never runs — so the BS#2089 /
+// BS#2406 `filterSentryTransactionEvent` would be wired but dead (BS#2948).
+// The worker has no transaction filter but ran on the transaction lifecycle
+// under Sentry 10 like its siblings.
+describe('trace lifecycle', () => {
+  it.each([
+    ['backend', '../../../apps/backend/instrument'],
+    ['auth', '../../../apps/auth/instrument'],
+    ['enrichment-worker', '../../../apps/enrichment-worker/instrument'],
+  ])('%s pins the static trace lifecycle', (_app, relPath) => {
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require(relPath);
+    });
+    const initOptions = mockInit.mock.calls[0][0] as { traceLifecycle?: string };
+    expect(initOptions.traceLifecycle).toBe('static');
   });
 });

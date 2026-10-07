@@ -58,20 +58,47 @@ describe('isLivenessRequestPath', () => {
   });
 });
 
+// Sentry 11 (BS#2948) emits Express layer spans with origin
+// `auto.http.express` and the generic `@sentry/conventions` ops below. They
+// are restated rather than imported: the root `@sentry/conventions` is
+// whatever copy something else hoisted (0.16 under Sentry 10, where these
+// constants don't exist), not necessarily the one `@sentry/server-utils` uses.
+const EXPRESS_ORIGIN = 'auto.http.express';
+const MIDDLEWARE = 'middleware';
+const ROUTER = 'router';
+const HANDLER = 'handler';
+const V11_EXPRESS_OPS = [MIDDLEWARE, ROUTER, HANDLER];
+
 describe('isExpressInstrumentationSpan', () => {
-  // `router.express` and `request_handler.express` were pinned as NOT flagged
-  // until BS#2406. The assertions are inverted rather than deleted so the
-  // reversal of BS#2089's deliberate exclusion is visible in the diff.
-  it.each(['middleware.express', 'router.express', 'request_handler.express'])('flags %s spans', (op) => {
-    expect(isExpressInstrumentationSpan({ op })).toBe(true);
+  // `router` and `handler` (Sentry 10: `router.express`, `request_handler.express`)
+  // were pinned as NOT flagged until BS#2406, reversing BS#2089's deliberate
+  // exclusion.
+  it.each(V11_EXPRESS_OPS)('flags Sentry 11 Express %s spans', (op) => {
+    expect(isExpressInstrumentationSpan({ op, origin: EXPRESS_ORIGIN })).toBe(true);
   });
 
-  it.each(['http.server', 'db', 'http.client', 'lml.lookup', 'BackgroundJob', undefined])(
-    'does not flag %s spans',
+  // Kept so a pin back to Sentry 10 (done once already, 3c3e815e) doesn't
+  // silently re-ship every Express span.
+  it.each(['middleware.express', 'router.express', 'request_handler.express'])(
+    'flags Sentry 10 Express %s spans',
     (op) => {
-      expect(isExpressInstrumentationSpan({ op })).toBe(false);
+      expect(isExpressInstrumentationSpan({ op, origin: 'auto.http.otel.express' })).toBe(true);
     }
   );
+
+  it.each([
+    ['http.server', 'auto.http.node.http'],
+    ['db', 'auto.db.postgresjs'],
+    ['http.client', 'auto.http.node.fetch'],
+    ['lml.lookup', 'manual'],
+    // The generic ops alone are not enough: another framework integration
+    // could emit them, and only Express's own bookkeeping is shed.
+    [HANDLER, 'auto.http.hono'],
+    [MIDDLEWARE, undefined],
+    [undefined, undefined],
+  ])('does not flag op %s with origin %s', (op, origin) => {
+    expect(isExpressInstrumentationSpan({ op, origin })).toBe(false);
+  });
 });
 
 describe('filterSentryTransactionEvent', () => {
@@ -112,10 +139,10 @@ describe('filterSentryTransactionEvent', () => {
     const event = makeTransactionEvent({
       transaction: 'GET /flowsheet',
       spans: [
-        makeSpan({ span_id: 'a', op: 'middleware.express', description: 'corsMiddleware' }),
-        makeSpan({ span_id: 'b', op: 'middleware.express', description: 'jsonParser' }),
-        makeSpan({ span_id: 'c', op: 'router.express', description: 'router - /flowsheet' }),
-        makeSpan({ span_id: 'd', op: 'request_handler.express', description: '/flowsheet' }),
+        makeSpan({ span_id: 'a', op: MIDDLEWARE, origin: EXPRESS_ORIGIN, description: 'corsMiddleware' }),
+        makeSpan({ span_id: 'b', op: MIDDLEWARE, origin: EXPRESS_ORIGIN, description: 'jsonParser' }),
+        makeSpan({ span_id: 'c', op: ROUTER, origin: EXPRESS_ORIGIN, description: '/flowsheet' }),
+        makeSpan({ span_id: 'd', op: HANDLER, origin: EXPRESS_ORIGIN, description: '/flowsheet' }),
         makeSpan({ span_id: 'e', op: 'db', description: 'SELECT 1' }),
         makeSpan({ span_id: 'f', op: 'http.client', description: 'GET lml' }),
       ],
@@ -129,12 +156,12 @@ describe('filterSentryTransactionEvent', () => {
   // untouched, per BS#2089's rationale that they carry the information you
   // want when tracing a slow request. They cost 7.5% of the org's span budget
   // and the surviving db / http.client / custom spans carry the diagnosis.
-  it('strips router.express and request_handler.express spans', () => {
+  it('strips Express router and handler spans', () => {
     const event = makeTransactionEvent({
       transaction: 'GET /library',
       spans: [
-        makeSpan({ span_id: 'a', op: 'router.express' }),
-        makeSpan({ span_id: 'b', op: 'request_handler.express' }),
+        makeSpan({ span_id: 'a', op: ROUTER, origin: EXPRESS_ORIGIN }),
+        makeSpan({ span_id: 'b', op: HANDLER, origin: EXPRESS_ORIGIN }),
       ],
     });
 
@@ -148,7 +175,7 @@ describe('filterSentryTransactionEvent', () => {
     // framework bookkeeping must still report its duration and status.
     const event = makeTransactionEvent({
       transaction: 'GET /library',
-      spans: [makeSpan({ span_id: 'a', op: 'router.express' })],
+      spans: [makeSpan({ span_id: 'a', op: ROUTER, origin: EXPRESS_ORIGIN })],
     });
 
     const result = filterSentryTransactionEvent(event);
@@ -181,6 +208,8 @@ describe('instrument.ts wiring', () => {
     expect(source).toMatch(/from ['"]@wxyc\/observability['"]/);
     expect(source).toMatch(/beforeSendTransaction:\s*filterSentryTransactionEvent/);
   });
+  // The `traceLifecycle: 'static'` pin this filter depends on is asserted on
+  // the real `Sentry.init` options in sentry-express-filter-registration.test.ts.
 });
 
 // The runtime images' prod stages install and copy shared workspaces by

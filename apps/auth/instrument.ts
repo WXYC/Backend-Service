@@ -26,6 +26,11 @@ Sentry.init({
   // Error reporting (beforeSend / the Express error filter) is untouched —
   // wxyc-canary depends on /healthcheck errors surfacing there.
   beforeSendTransaction: filterSentryTransactionEvent,
+  // Sentry 11 defaults to span streaming, which never builds a transaction
+  // event, so `beforeSendTransaction` above would never run (BS#2948). Pin the
+  // transaction lifecycle Sentry 10 used until the filter moves to streaming
+  // (BS#2959).
+  traceLifecycle: 'static',
   // v11's expressIntegration captures Express errors itself, and its
   // `shouldHandleError` outranks the deprecated `setupExpressErrorHandler`'s
   // options, so the filter has to be passed here (BS#2949). This is a default
