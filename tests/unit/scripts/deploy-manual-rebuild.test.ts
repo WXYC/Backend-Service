@@ -29,7 +29,12 @@ const base = readFileSync(join(workflows, 'deploy-base.yml'), 'utf8');
  */
 type Step = { name?: string; env?: Record<string, string>; run?: string };
 type Job = { if?: unknown; needs?: unknown; permissions?: unknown; steps: Step[] };
-const runScript = (step: Step & { run: string }, expressions: Record<string, string>, cwd: string) => {
+const runScript = (
+  step: Step & { run: string },
+  expressions: Record<string, string>,
+  cwd: string,
+  extraEnv: Record<string, string> = {}
+) => {
   const values = Object.fromEntries(
     Object.entries(step.env ?? {}).map(([key, expr]) => {
       const value = Object.entries(expressions).find(([e]) => e === expr)?.[1];
@@ -39,7 +44,7 @@ const runScript = (step: Step & { run: string }, expressions: Record<string, str
   );
   return spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
     cwd,
-    env: { PATH: process.env.PATH, ...values },
+    env: { PATH: process.env.PATH, ...values, ...extraEnv },
     encoding: 'utf8',
   });
 };
@@ -201,5 +206,45 @@ describe('deploy-base.yml per-target validation', () => {
 
   it('Validate Version Input Format still rejects a malformed version', () => {
     expect(runValidate('Validate Version Input Format', 'backend', '1.2').status).not.toBe(0);
+  });
+});
+
+describe('dispatch inputs reach run: scripts only through env:', () => {
+  const stepsOf = (doc: string) =>
+    Object.entries((parseYaml(doc) as { jobs: Record<string, Job> }).jobs).flatMap(([job, { steps = [] }]) =>
+      steps.filter((s) => s.run).map((s) => [`${job} / ${s.name ?? '(unnamed)'}`, s.run] as const)
+    );
+
+  it.each([
+    ...stepsOf(base).map((s) => ['deploy-base.yml', ...s]),
+    ...stepsOf(manual).map((s) => ['deploy-manual.yml', ...s]),
+  ])('%s: %s has no inputs interpolation in its script', (_file, _step, run) => {
+    expect(run).not.toMatch(/\$\{\{\s*(github\.event\.)?inputs\./);
+  });
+
+  // Behaviour pin: 'latest' is an ordinary dispatch, a tag is a pinned dispatch, '' is rebuild/automatic.
+  it.each<[string, string, string]>([
+    ['latest', 'v9.8.7', 'v9.8.7'],
+    ['v1.2.3', 'v9.8.7', 'v1.2.3'],
+    ['', 'v9.8.7', 'v9.8.8'],
+  ])('Determine Deploy Version with version %j yields %s', (version, _latest, expected) => {
+    const job = Object.values((parseYaml(base) as { jobs: Record<string, Job> }).jobs).find((j) =>
+      j.steps?.some((st) => st.name === 'Determine Deploy Version')
+    );
+    if (!job) throw new Error('job with Determine Deploy Version not found');
+    const step = findStep(job, 'Determine Deploy Version');
+    const out = join(fixture, `out-${version || 'empty'}`);
+    const run = step.run
+      .replace(/\$\{\{\s*steps\.latest_tag\.outputs\.latest_tag\s*\}\}/g, 'backend/v9.8.7')
+      .replace(/\$\{\{\s*steps\.latest_tag\.outputs\.is_initial\s*\}\}/g, 'false')
+      .replace(/\$\{\{\s*steps\.bump_version\.outputs\.next_version\s*\}\}/g, '9.8.8');
+    const result = runScript(
+      { ...step, run },
+      { '${{ inputs.target }}': '', '${{ inputs.version }}': version },
+      fixture,
+      { GITHUB_OUTPUT: out }
+    );
+    expect(result.status).toBe(0);
+    expect(readFileSync(out, 'utf8').trim()).toBe(`deploy_version=${expected}`);
   });
 });

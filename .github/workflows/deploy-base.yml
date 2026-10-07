@@ -202,10 +202,12 @@ jobs:
 
       - name: Detect Build Target
         id: detect_targets
+        env:
+          TARGET_INPUT: ${{ inputs.target }}
         run: |
-          if [ -n "${{ inputs.target }}" ]; then
-            echo "Using provided target: ${{ inputs.target }}"
-            TARGETS=$(echo "${{ inputs.target }}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          if [ -n "$TARGET_INPUT" ]; then
+            echo "Using provided target: $TARGET_INPUT"
+            TARGETS=$(echo "$TARGET_INPUT" | jq -R -s -c 'split("\n") | map(select(length > 0))')
             echo "TARGETS=$TARGETS" >> $GITHUB_OUTPUT
             echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
           else
@@ -385,14 +387,16 @@ jobs:
 
       - name: Determine Deploy Version
         id: determine_deploy_version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          if [ "${{ inputs.version }}" == "latest" ]; then
+          if [ "$VERSION_INPUT" == "latest" ]; then
             LATEST_VERSION=$(echo ${{ steps.latest_tag.outputs.latest_tag }} | sed 's/[^0-9.]//g')
             echo "deploy_version=v$LATEST_VERSION"
             echo "deploy_version=v$LATEST_VERSION" >> $GITHUB_OUTPUT
-          elif [ -n "${{ inputs.version }}" ]; then
-            echo "deploy_version=${{ inputs.version }}" 
-            echo "deploy_version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          elif [ -n "$VERSION_INPUT" ]; then
+            echo "deploy_version=$VERSION_INPUT"
+            echo "deploy_version=$VERSION_INPUT" >> $GITHUB_OUTPUT
           elif [ "${{ steps.latest_tag.outputs.is_initial }}" == "true" ]; then
             LATEST_VERSION=$(echo ${{ steps.latest_tag.outputs.latest_tag }} | sed 's/[^0-9.]//g')
             echo "deploy_version=v$LATEST_VERSION"
@@ -577,8 +581,9 @@ jobs:
       # Checkout specific version if provided, otherwise current SHA
       - name: Determine Checkout Ref
         id: determine_checkout_ref
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          INPUT_VERSION="${{ inputs.version }}"
           TARGET_APP="${{ matrix.target }}"
 
           if [ "$INPUT_VERSION" == "latest" ] || [ -z "$INPUT_VERSION" ]; then
@@ -671,6 +676,8 @@ jobs:
       - name: Compute Image Tags
         if: steps.check_image.outputs.image_exists == 'false'
         id: image_tags
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
           TARGET_APP=${{ matrix.target }}
           DEPLOY_TAG=${{ steps.determine_version.outputs.deploy_version }}
@@ -682,7 +689,7 @@ jobs:
           # indentation leaks into a tag. Always include the SHA tag for
           # cache-invalidation detection.
           TAGS="$IMAGE_URI:$DEPLOY_TAG,$IMAGE_URI:$SHA_TAG"
-          if [[ "${{ inputs.version }}" == "latest" || -z "${{ inputs.version }}" ]]; then
+          if [[ "$VERSION_INPUT" == "latest" || -z "$VERSION_INPUT" ]]; then
             TAGS="$TAGS,$IMAGE_URI:latest"
           fi
 
