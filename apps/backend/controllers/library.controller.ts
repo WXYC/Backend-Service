@@ -51,6 +51,7 @@ import {
   MAX_ALBUM_TEXT_LENGTH,
 } from '../utils/text-fields.js';
 import { INT4_MAX } from '../utils/constants.js';
+import { parseInt4BodyId } from '../utils/query-params.js';
 
 // `genres.id` and `genre_artist_crossreference.artist_genre_code` are Postgres
 // int4 columns. A query value outside that range parses fine as a JS integer
@@ -135,10 +136,7 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   const code_volume_letters =
     body.code_volume_letters === undefined ? undefined : validateCodeVolumeLetters(body.code_volume_letters);
   const supplied_code_number = body.code_number === undefined ? undefined : validateCodeNumber(body.code_number);
-  const fromRotationId = body.from_rotation_id ?? undefined;
-  if (fromRotationId !== undefined && !(Number.isInteger(fromRotationId) && fromRotationId > 0)) {
-    throw new WxycError('Invalid Parameter: from_rotation_id must be a positive integer, or omitted', 400);
-  }
+  const fromRotationId = parseInt4BodyId(body.from_rotation_id ?? undefined, 'from_rotation_id');
 
   let artist_id = body.artist_id;
   if (artist_id === undefined && body.artist_name !== undefined) {
@@ -2286,7 +2284,10 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   }
 
   const hasAlbumId = body.album_id != null;
-  if (hasAlbumId && !(Number.isInteger(body.album_id) && (body.album_id as number) > 0)) {
+  if (
+    hasAlbumId &&
+    !(Number.isInteger(body.album_id) && (body.album_id as number) > 0 && (body.album_id as number) <= INT4_MAX)
+  ) {
     throw new WxycError(
       'Invalid Parameter: album_id must be a positive integer, or omitted for an uncatalogued release',
       400
@@ -2298,7 +2299,7 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   // client shape); existence and bin agreement are the service's to assert —
   // 404 for a dangling id, `RotationCardBinMismatchError` (the 409 below)
   // for a card filed in a different bin than `rotation_bin`.
-  if (body.card_id != null && !(Number.isInteger(body.card_id) && body.card_id > 0)) {
+  if (body.card_id != null && !(Number.isInteger(body.card_id) && body.card_id > 0 && body.card_id <= INT4_MAX)) {
     throw new WxycError(
       "Invalid Parameter: card_id must be a positive integer, or omitted to file on the bin's newest card",
       400
@@ -2342,12 +2343,9 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   const urls = body.urls !== undefined ? parseRotationUrls(body.urls) : undefined;
 
   // BS#2810: `moved_from_rotation_id` names the legacy row this typed-text add replaces; the service kills it.
-  const movedFrom = body.moved_from_rotation_id ?? undefined;
-  if (movedFrom !== undefined && (hasAlbumId || !(Number.isInteger(movedFrom) && movedFrom > 0))) {
-    throw new WxycError(
-      'Invalid Parameter: moved_from_rotation_id must be a positive integer, and only on an add without album_id',
-      400
-    );
+  const movedFrom = parseInt4BodyId(body.moved_from_rotation_id ?? undefined, 'moved_from_rotation_id');
+  if (movedFrom !== undefined && hasAlbumId) {
+    throw new WxycError('Invalid Parameter: moved_from_rotation_id is only allowed on an add without album_id', 400);
   }
 
   const picked = pickAddRotationFields(body, parsedRotationBin.bin);
