@@ -6,8 +6,8 @@
  * refused, and a confirm that loses to a delete finds no note.
  *
  * Nothing here races. A raw transaction takes the note's row `FOR UPDATE` and holds it. The two requests are then fired
- * one at a time, in the order under test, and the spec waits by `pg_blocking_pids` until each one's backend is provably
- * queued on that lock before it fires the next, so the order they take the lock in is the order they were fired in.
+ * one at a time, in the order under test, and the spec waits by `pg_blocking_pids` (following the chain, since the second
+ * waiter queues behind the first) until each one's backend is provably queued on that lock before it fires the next, so the order they take the lock in is the order they were fired in.
  * Releasing the raw transaction then lets them run. Every wait is bounded.
  *
  * Rows come from `tests/utils/intake_seed.js`. `djA` is a raw user-id Bearer (the reporter, holding no
@@ -36,17 +36,27 @@ describe('a reporter’s delete and a music director’s confirm of one FCC note
     await removeSeededIntakeItems();
   };
 
-  /** Polls until at least `count` backends are waiting on a lock that `pid` holds; throws when they do not show up in time. */
-  const waitUntilBlockedBy = async (pid, count) => {
+  /**
+   * Polls until at least `count` backends are queued behind the lock `pid` holds; throws when they do not show up in
+   * time. The first waiter's `pg_blocking_pids` is the holder, but the second waits on the first (it queues behind
+   * the first waiter's tuple lock), so the count follows the chain of blockers rather than looking at the holder alone.
+   */
+  const waitUntilQueuedBehind = async (pid, count) => {
     const deadline = Date.now() + BLOCKED_WAIT_MS;
     while (Date.now() < deadline) {
-      const waiting = await sql`
-        SELECT pid FROM pg_stat_activity
-        WHERE wait_event_type = 'Lock' AND ${pid}::int = ANY(pg_blocking_pids(pid))`;
-      if (waiting.length >= count) return;
+      const [{ queued }] = await sql`
+        WITH RECURSIVE queue AS (
+          SELECT pid FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND ${pid}::int = ANY(pg_blocking_pids(pid))
+          UNION
+          SELECT a.pid FROM pg_stat_activity a JOIN queue ON queue.pid = ANY(pg_blocking_pids(a.pid))
+          WHERE a.wait_event_type = 'Lock'
+        )
+        SELECT count(*)::int AS queued FROM queue`;
+      if (queued >= count) return;
       await sleep(POLL_INTERVAL_MS);
     }
-    throw new Error(`fewer than ${count} backends were blocked on the note's row lock within ${BLOCKED_WAIT_MS} ms`);
+    throw new Error(`fewer than ${count} backends were queued on the note's row lock within ${BLOCKED_WAIT_MS} ms`);
   };
 
   beforeAll(async () => {
@@ -75,9 +85,9 @@ describe('a reporter’s delete and a music director’s confirm of one FCC note
         await tx.unsafe(`SELECT id FROM "${SCHEMA}".fcc_notes WHERE id = $1 FOR UPDATE`, [note.id]);
         const [start, second] = first === 'confirm' ? [confirm, remove] : [remove, confirm];
         const firstRequest = start();
-        await waitUntilBlockedBy(pid, 1);
+        await waitUntilQueuedBehind(pid, 1);
         const secondRequest = second();
-        await waitUntilBlockedBy(pid, 2);
+        await waitUntilQueuedBehind(pid, 2);
         responses = [firstRequest, secondRequest];
       });
 
