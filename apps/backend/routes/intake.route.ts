@@ -37,3 +37,6 @@ intake_route.post(
   requirePermissions({ reviews: ['manage'], catalog: ['write'] }),
   intakeController.fileIntake
 );
+// Print appends to the print log; finalize is the librarian's step, so it takes `catalog: write` alone (BS#2804).
+intake_route.post('/:id/print', requirePermissions({ reviews: ['manage'] }), intakeController.printIntake);
+intake_route.post('/:id/finalize', requirePermissions({ catalog: ['write'] }), intakeController.finalizeIntake);

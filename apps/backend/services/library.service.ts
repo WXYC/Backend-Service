@@ -7374,7 +7374,7 @@ export const DELETE_ALBUM_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
  * have an order, because the review writers that take two locks take the item
  * first and the review second: today `updateReview`, `submitReview` and
  * `deleteReview` through `lockReviewAfterItem` (`reviews.service.ts`); the print
- * (BS#2804) and review-accept (BS#2860) writers are planned to follow the same
+ * (`printIntakeItem`, BS#2804) and review-accept (`acceptReview`, BS#2860) writers follow the same
  * order. So the delete takes its intake items `FOR UPDATE` in one ascending-`id`
  * statement, before `copyCitedCoverReviews` and before the capture's `FOR SHARE`
  * on any review: library, then items, then reviews. A writer that locked a
@@ -7591,7 +7591,7 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     // the items filed as this release and the items whose accepted review is one
     // of its reviews, in one statement in ascending `id`. The review writers
     // lock their item and then their review (`lockReviewAfterItem`; the print
-    // and accept writers, BS#2804 and BS#2860, are planned to), so taking the
+    // and accept writers, BS#2804 and BS#2860, do the same), so taking the
     // same order here (library, items, reviews) leaves the capture's and the
     // copy's later review locks no cycle to join. The review test is a subquery
     // so one table is in the `FROM` and a plain `.for('update')` works.

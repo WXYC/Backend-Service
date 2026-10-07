@@ -63,6 +63,8 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 
 // The controller imports the filing seam (BS#2803), whose service module reads real schema tables at load.
 jest.mock('../../../apps/backend/services/library-filing.service', () => ({}));
+// The controller imports the print seam (BS#2804), whose service module reads real schema tables at load.
+jest.mock('../../../apps/backend/services/review-print.service', () => ({}));
 
 import { intake_route } from '../../../apps/backend/routes/intake.route';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';

@@ -9,6 +9,7 @@ import {
   type LibraryFilingRequestBody,
 } from '../services/library-filing.service.js';
 import { notifyPass } from '../services/review-notices.service.js';
+import { printIntakeItem } from '../services/review-print.service.js';
 import WxycError from '../utils/error.js';
 import { parseBooleanQueryParam, parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
 import { holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
@@ -172,6 +173,24 @@ export const fileIntake: RequestHandler<{ id: string }> = async (req, res) => {
   if (result.outcome === 'filing_conflict') return void res.status(409).json(result.body);
   if (result.outcome !== 'filed') return void conflict(res, result.outcome);
   if (arm.kind === 'new_release' && result.filed) await completeLibraryFiling(result.filed, arm.input);
+  res.json(result.item);
+};
+
+/** `POST /intake/:id/print` (BS#2804): the accepted review's slip, appended to the print log; the only refusal is `not_reviewed`. */
+export const printIntake: RequestHandler<{ id: string }> = async (req, res) => {
+  const result = await printIntakeItem(parseId(req.params.id), reviewsActor(req));
+  if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
+  if (result.outcome === 'not_reviewed') return void conflict(res, 'not_reviewed');
+  res.json(result.slip);
+};
+
+/** `POST /intake/:id/finalize` (BS#2804): `filed` to `finalized`; a release still in rotation is 409 `in_rotation`, naming its kill date. */
+export const finalizeIntake: RequestHandler<{ id: string }> = async (req, res) => {
+  const result = await intakeService.finalizeIntakeItem(parseId(req.params.id), reviewsActor(req).id);
+  if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
+  if (result.outcome === 'state_changed') return void conflict(res, 'state_changed');
+  if (result.outcome === 'in_rotation')
+    return void res.status(409).json({ message: result.message, reason: 'in_rotation' });
   res.json(result.item);
 };
 
