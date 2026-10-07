@@ -14,7 +14,8 @@ jest.mock('@wxyc/database', () => {
   return { ...realSchema, ...nyTime, rotationActiveSql: mockRotationActiveSql, db: drizzle({}) };
 });
 
-import { getTableName } from 'drizzle-orm';
+import { getTableName, type SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { db } from '@wxyc/database';
 import { finalizeIntakeItem } from '../../../apps/backend/services/intake.service';
 import { createLockLog } from '../../utils/lock-log-builder';
@@ -24,11 +25,28 @@ describe('finalizeIntakeItem (BS#2804)', () => {
   const filed = { state: 'filed', album_id: 9 };
   const ITEM = { id: 7, state: 'finalized' };
 
+  // The `where()` argument of every select, in order, so a test can render the rotation lookup's predicate.
+  const wheres: SQL[] = [];
+
   const run = async (selects: unknown[][]) => {
     log.length = 0;
+    wheres.length = 0;
     for (const key of Object.keys(sets)) delete sets[key];
     const tx = {
-      select: jest.fn(() => builder(selects.shift() ?? [])),
+      select: jest.fn(() => {
+        const query = builder(selects.shift() ?? []) as { from: (table: never) => { where: (w: SQL) => unknown } };
+        return {
+          from: (table: never) => {
+            const from = query.from(table);
+            return {
+              where: (w: SQL) => {
+                wheres.push(w);
+                return from.where(w);
+              },
+            };
+          },
+        };
+      }),
       update: jest.fn((table: never) => builder([], undefined, getTableName(table))),
     };
     jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
@@ -51,6 +69,11 @@ describe('finalizeIntakeItem (BS#2804)', () => {
   it('asks the one active-rotation predicate, by the release rather than the item’s rotation_id', async () => {
     await run([[filed], []]);
     expect(mockRotationActiveSql).toHaveBeenCalledTimes(1);
+    // The second select is the rotation lookup. Render its WHERE: the release column, bound to the item's album id.
+    const { sql: text, params } = new PgDialect().sqlToQuery(wheres[1]);
+    expect(text).toContain('"rotation"."album_id" = $1');
+    expect(text).not.toContain('"rotation"."id"');
+    expect(params).toEqual([filed.album_id]);
   });
 
   it.each([

@@ -2,9 +2,11 @@
  * `POST /intake/{id}/print` and `POST /intake/{id}/finalize` (BS#2804, slice 12 of BS#2791). Real Postgres, seeded
  * through tests/utils/intake_seed.js. As in intake-accept-review.spec.js the CI containers run AUTH_BYPASS=true, so the
  * route grants are pinned by tests/unit/routes/intake-print-finalize.route.test.ts and `djA` is a raw user-id Bearer
- * acting as the review's author. What this tier pins is the print log and the slip against real rows, and the lock that
- * makes a print and an edit of one review serialize: whichever commits second, the logged revision is one that existed
- * when the print committed, and the slip's text is that revision's.
+ * acting as the review's author. What this tier pins is the print log and the slip against real rows, the serialization of
+ * a print and an edit of one review (for an item's own review it is the intake item lock, print FOR UPDATE and PATCH
+ * FOR SHARE, that orders them; the review lock matters only for a cited item, which is pinned in the unit lock log):
+ * whichever commits second, the logged revision is one that existed when the print committed, and the slip's text is
+ * that revision's. And finalize's refusal while the release is in rotation, against real `rotation` rows.
  */
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
@@ -115,6 +117,8 @@ describe('/intake print and finalize (BS#2804)', () => {
       expect((await manager.post('/intake/2147483647/print')).status).toBe(404);
     });
 
+    // The item lock serializes these two requests: print takes the intake item FOR UPDATE and PATCH takes it FOR SHARE.
+    // (The review's own FOR UPDATE is not what orders them here.)
     test('a print and a concurrent edit of one review leave a log row naming a revision that existed, with that text on the slip', async () => {
       for (let round = 0; round < 5; round += 1) {
         const { item, review } = await reviewedItem(`race ${round}`);
@@ -144,6 +148,45 @@ describe('/intake print and finalize (BS#2804)', () => {
       const row = await itemRow(item.id);
       expect(row.finalized_by).not.toBeNull();
       expect(row.finalized_at).not.toBeNull();
+    });
+
+    // The finalize guard looks the release up by `rotation.album_id`, not by the item's `rotation_id`, which stays null.
+    const rotatedItem = async (key) => {
+      const release = await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} ${key}` });
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".rotation (album_id, rotation_bin, add_date) VALUES ($1, 'H', CURRENT_DATE)`,
+        [release.id]
+      );
+      const item = await seedIntakeItem({ artist_name: `${PREFIX} ${key}`, state: 'filed', album_id: release.id });
+      expect(item.rotation_id).toBeNull();
+      return { item, release };
+    };
+    const setKillDate = (albumId, offset) =>
+      sql.unsafe(`UPDATE "${SCHEMA}".rotation SET kill_date = CURRENT_DATE + $1::int WHERE album_id = $2`, [
+        offset,
+        albumId,
+      ]);
+    const dateText = async (offset) => (await sql.unsafe(`SELECT (CURRENT_DATE + $1::int)::text AS d`, [offset]))[0].d;
+
+    test('a filed item with a null rotation_id is 409 in_rotation while its release has an active rotation row, naming the kill date', async () => {
+      const { item, release } = await rotatedItem('in rotation');
+      let res = await manager.post(`/intake/${item.id}/finalize`);
+      expect([res.status, res.body.reason]).toEqual([409, 'in_rotation']);
+      expect(res.body.message).toContain('no kill date is set');
+      await setKillDate(release.id, 30);
+      res = await manager.post(`/intake/${item.id}/finalize`);
+      expect([res.status, res.body.reason]).toEqual([409, 'in_rotation']);
+      expect(res.body.message).toContain(`until ${await dateText(30)}`);
+      expect((await itemRow(item.id)).state).toBe('filed');
+    });
+
+    test('the same item is finalized once its rotation row’s kill date has passed', async () => {
+      const { item, release } = await rotatedItem('killed');
+      expect((await manager.post(`/intake/${item.id}/finalize`)).status).toBe(409);
+      await setKillDate(release.id, -1);
+      const res = await manager.post(`/intake/${item.id}/finalize`);
+      expect([res.status, res.body.state]).toEqual([200, 'finalized']);
+      expect((await itemRow(item.id)).finalized_at).not.toBeNull();
     });
 
     test('an item that is not filed is 409 state_changed, and a second finalize too', async () => {
