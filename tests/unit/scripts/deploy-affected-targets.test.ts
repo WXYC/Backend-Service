@@ -50,7 +50,7 @@ import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parse as parseYaml } from 'yaml';
+import { findStep, loadWorkflow, makeYqShim, runBashScript, sliceScript } from '../../utils/workflow-step';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const workflowDir = path.join(repoRoot, '.github/workflows');
@@ -201,15 +201,10 @@ describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () =
  * jq (the manifests are JSON, and the expression is valid jq) stands in.
  */
 describe('one-shot filter behavior', () => {
-  const doc = parseYaml(deployBase) as {
-    jobs: Record<string, { steps: { name?: string; run?: string }[] }>;
-  };
-  const stepRun = doc.jobs.setup.steps.find((s) => s.name === 'Detect Build Target')?.run;
-  if (!stepRun) throw new Error('Detect Build Target step not found');
-  const startIdx = stepRun.indexOf("BUILDABLE='[]'");
-  const endIdx = stepRun.indexOf('if [ "$TARGETS" = "[]" ]');
-  if (startIdx === -1 || endIdx === -1) throw new Error('filter loop markers not found in deploy-base.yml');
-  const filterScript = stepRun.slice(startIdx, endIdx) + '\necho "RESULT=$TARGETS"\n';
+  const stepRun = findStep(loadWorkflow('deploy-base.yml').jobs.setup, 'Detect Build Target').run;
+  const filterScript =
+    sliceScript(stepRun, "BUILDABLE='[]'", 'if [ "$TARGETS" = "[]" ]') + '\necho "RESULT=$TARGETS"\n';
+  const shimDir = makeYqShim();
 
   const git = (cwd: string, ...args: string[]) => {
     const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -222,12 +217,9 @@ describe('one-shot filter behavior', () => {
   };
 
   let root: string;
-  let shimDir: string;
   let base: string;
   beforeAll(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-filter-'));
-    shimDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yq-shim-'));
-    fs.writeFileSync(path.join(shimDir, 'yq'), '#!/bin/sh\nexec jq "$@"\n', { mode: 0o755 });
     git(root, 'init', '-q');
     git(root, 'config', 'user.email', 't@example.com');
     git(root, 'config', 'user.name', 't');
@@ -253,16 +245,14 @@ describe('one-shot filter behavior', () => {
   });
   afterAll(() => {
     fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(shimDir, { recursive: true, force: true });
   });
 
   const ALL = ['oneshot-own', 'oneshot-docker', 'oneshot-dep', 'cron-explicit', 'cron-default', 'app-one'];
   const run = (opts: { resolvable?: string; base?: string; targets?: string[] }) => {
-    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', filterScript], {
+    const r = runBashScript(filterScript, {
       cwd: root,
-      encoding: 'utf8',
+      pathPrepend: shimDir,
       env: {
-        PATH: `${shimDir}:${process.env.PATH}`,
         TARGETS: JSON.stringify(opts.targets ?? ALL),
         BASE: opts.base ?? base,
         HEAD_SHA: git(root, 'rev-parse', 'HEAD'),
