@@ -15,7 +15,7 @@ import {
   ROTATION_BINS,
 } from '@wxyc/database';
 import { gunzipSync } from 'node:zlib';
-import { ReviewRequiredError } from '../utils/review-gate-basis.js';
+import { ReviewRequiredError, RotationNotEligibleError, type GateBasis } from '../utils/review-gate-basis.js';
 import * as libraryService from '../services/library.service.js';
 import * as catalogExportService from '../services/catalog-export.service.js';
 import * as bmiPerformanceService from '../services/bmi-performance.service.js';
@@ -95,6 +95,9 @@ type NewAlbumRequest = {
   // BS#2587 — NULL volume letters).
   code_number?: number;
   code_volume_letters?: string;
+  // BS#2810: import the legacy rotation row this release is for — the release is created and the row linked in one
+  // transaction, and the gate accepts it on either side of the cutover date.
+  from_rotation_id?: number;
 };
 
 //Check if artist exists.
@@ -132,6 +135,10 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   const code_volume_letters =
     body.code_volume_letters === undefined ? undefined : validateCodeVolumeLetters(body.code_volume_letters);
   const supplied_code_number = body.code_number === undefined ? undefined : validateCodeNumber(body.code_number);
+  const fromRotationId = body.from_rotation_id ?? undefined;
+  if (fromRotationId !== undefined && !(Number.isInteger(fromRotationId) && fromRotationId > 0)) {
+    throw new WxycError('Invalid Parameter: from_rotation_id must be a positive integer, or omitted', 400);
+  }
 
   let artist_id = body.artist_id;
   if (artist_id === undefined && body.artist_name !== undefined) {
@@ -179,10 +186,21 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
         disc_quantity: body.disc_quantity,
       };
 
-      return libraryService.insertAlbum(new_album, { kind: 'pre_cutover' }, tx);
+      if (fromRotationId === undefined) return libraryService.insertAlbum(new_album, { kind: 'pre_cutover' }, tx);
+
+      // BS#2810: the insert and the link share this transaction, so a row that is no longer linkable rolls back the
+      // release (and any `labels` row) rather than leaving a library row behind.
+      const album = await libraryService.insertAlbum(
+        new_album,
+        { kind: 'legacy_import', rotationId: fromRotationId },
+        tx
+      );
+      const link = await libraryService.linkRotationToAlbum(fromRotationId, album.id, tx);
+      if (link.outcome !== 'linked') throw new RotationNotEligibleError('The rotation row is already linked');
+      return album;
     });
   } catch (err) {
-    if (err instanceof ReviewRequiredError) {
+    if (err instanceof ReviewRequiredError || err instanceof RotationNotEligibleError) {
       res.status(409).json(err.toBody());
       return;
     }
@@ -2323,19 +2341,29 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   // a bad entry never reaches the insert transaction.
   const urls = body.urls !== undefined ? parseRotationUrls(body.urls) : undefined;
 
+  // BS#2810: `moved_from_rotation_id` names the legacy row this typed-text add replaces; the service kills it.
+  const movedFrom = body.moved_from_rotation_id ?? undefined;
+  if (movedFrom !== undefined && (hasAlbumId || !(Number.isInteger(movedFrom) && movedFrom > 0))) {
+    throw new WxycError(
+      'Invalid Parameter: moved_from_rotation_id must be a positive integer, and only on an add without album_id',
+      400
+    );
+  }
+
   const picked = pickAddRotationFields(body, parsedRotationBin.bin);
   let rotationRelease: RotationRelease;
   try {
     // BS#2807: a catalogued add rotates a release that is already there; a
     // typed-text add makes a row with no release behind it, so it needs the
-    // gate to be off.
-    rotationRelease = await libraryService.addToRotation(
-      picked,
-      hasAlbumId ? { kind: 'existing_release', albumId: body.album_id as number } : { kind: 'pre_cutover' },
-      urls
-    );
+    // gate to be off, unless it moves a legacy row (BS#2810).
+    const basis: GateBasis = hasAlbumId
+      ? { kind: 'existing_release', albumId: body.album_id as number }
+      : movedFrom !== undefined
+        ? { kind: 'legacy_move', fromRotationId: movedFrom }
+        : { kind: 'pre_cutover' };
+    rotationRelease = await libraryService.addToRotation(picked, basis, urls);
   } catch (err) {
-    if (err instanceof ReviewRequiredError) {
+    if (err instanceof ReviewRequiredError || err instanceof RotationNotEligibleError) {
       res.status(409).json(err.toBody());
       return;
     }

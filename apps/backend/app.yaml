@@ -303,6 +303,16 @@ components:
             `library.code_volume_letters`, varchar(4)). Omitted → NULL.
         disc_quantity:
           type: integer
+        from_rotation_id:
+          type: integer
+          minimum: 1
+          description: >-
+            BS#2810. The legacy rotation row this release is for: a row with no library link,
+            added on or before the cutover date (or moved from one that was). The release is
+            created and the row linked (plays included) in one transaction, accepted on either
+            side of the cutover date. A killed row is importable. A row that is linked, not
+            legacy or missing is a 409 `rotation_not_eligible` and nothing is written,
+            including a `labels` row. Omit it for an ordinary add.
 
     AlbumView:
       type: object
@@ -585,6 +595,26 @@ components:
         artist:
           type: object
           description: The already-catalogued artist that collided (`artist_code_conflict`, `artist_name_conflict`).
+
+    LibraryAddConflictError:
+      type: object
+      description: >-
+        The `POST /library` 409 body (BS#2810). Swagger display only; the SSOT is
+        wxyc-shared/api.yaml.
+      required: [message, reason]
+      properties:
+        message: { type: string }
+        reason: { type: string, enum: [review_required, rotation_not_eligible] }
+
+    RotationConflictError:
+      type: object
+      description: >-
+        The `POST /library/rotation` 409 body (BS#2810). Swagger display only; the SSOT is
+        wxyc-shared/api.yaml.
+      required: [message, reason]
+      properties:
+        message: { type: string }
+        reason: { type: string, enum: [rotation_card_bin_mismatch, review_required, rotation_not_eligible] }
 
     ReviewConflictError:
       type: object
@@ -1113,6 +1143,15 @@ components:
             dangling-id 400 ("label_id does not reference an existing label")
             as `format_id`. `record_label` stays the free-text display
             snapshot and the two are independent.
+        moved_from_rotation_id:
+          type: integer
+          minimum: 1
+          description: >-
+            BS#2810. The unlinked rotation row this typed-text add replaces in a cross-bin
+            move; the source is killed with the database's current date in the same
+            transaction. The source must be active (`kill_date` null or in the future) and
+            legacy: added on or before the cutover date, or moved from a row that was. Accepted
+            on either side of the cutover date. Sent with `album_id` it is a 400.
 
     UncataloguedRotationRow:
       type: object
@@ -2262,11 +2301,12 @@ paths:
             The review gate is on (`REVIEW_GATE_CUTOVER_DATE` has arrived): a new release
             enters the library only through intake filing. Body `{ message, reason:
             'review_required' }`; nothing is written, including a `labels` row for new
-            label text (BS#2807).
+            label text (BS#2807). Also `rotation_not_eligible` when `from_rotation_id` names
+            a row that is linked, not legacy or missing: nothing is written either (BS#2810).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LibraryFilingConflictError'
+                $ref: '#/components/schemas/LibraryAddConflictError'
 
   /library/query:
     get:
@@ -2930,13 +2970,16 @@ paths:
         '409':
           description: >-
             A typed-text add (no `album_id`) once the review gate is on: body `{ message,
-            reason: 'review_required' }` (BS#2807). An `album_id` add still rotates an
-            existing release. Also `rotation_card_bin_mismatch` when the chosen card
-            lives in a different bin.
+            reason: 'review_required' }` (BS#2807), unless it carries
+            `moved_from_rotation_id`. An `album_id` add still rotates an existing
+            release. Also `rotation_card_bin_mismatch` when the chosen card lives in a
+            different bin, and `rotation_not_eligible` when `moved_from_rotation_id`
+            names a row that is linked, already killed, not legacy or missing: nothing
+            is written and the source stays as it was (BS#2810).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LibraryFilingConflictError'
+                $ref: '#/components/schemas/RotationConflictError'
 
     patch:
       summary: Set rotation removal date

@@ -5,7 +5,7 @@
  */
 
 import { jest } from '@jest/globals';
-import { db, createMockQueryChain, library, intake_items, rotation } from '../../mocks/database.mock';
+import { db, createMockQueryChain, library, intake_items, rotation, flowsheet } from '../../mocks/database.mock';
 
 const mockResolveIdentity = jest.fn<() => Promise<unknown>>();
 jest.mock('@wxyc/lml-client', () => ({
@@ -26,10 +26,17 @@ jest.mock('@sentry/node', () => ({
   metrics: { count: jest.fn() },
 }));
 const mockIsGateOn = jest.fn<() => boolean>();
-jest.mock('../../../apps/backend/utils/review-gate-cutover', () => ({ isGateOn: mockIsGateOn }));
+jest.mock('../../../apps/backend/utils/review-gate-cutover', () => ({
+  ...jest.requireActual<object>('../../../apps/backend/utils/review-gate-cutover'),
+  isGateOn: mockIsGateOn,
+}));
 
-import { addToRotation, insertAlbum } from '../../../apps/backend/services/library.service';
-import { ReviewRequiredError, type GateBasis } from '../../../apps/backend/utils/review-gate-basis';
+import { addToRotation, insertAlbum, linkRotationToAlbum } from '../../../apps/backend/services/library.service';
+import {
+  ReviewRequiredError,
+  RotationNotEligibleError,
+  type RotationInsertGateBasis,
+} from '../../../apps/backend/utils/review-gate-basis';
 import WxycError from '../../../apps/backend/utils/error';
 
 const ALBUM = { artist_id: 1, genre_id: 1, format_id: 1, album_title: 'DOGA', code_number: 1 };
@@ -113,7 +120,7 @@ describe('addToRotation', () => {
   });
 
   describe('existing_release basis', () => {
-    const basis: GateBasis = { kind: 'existing_release', albumId: 100 };
+    const basis: RotationInsertGateBasis = { kind: 'existing_release', albumId: 100 };
 
     it.each(GATE_STATES)('re-rotates an existing release, gate %s', async (_label, on) => {
       mockIsGateOn.mockReturnValue(on);
@@ -157,7 +164,7 @@ describe('addToRotation', () => {
     });
   });
 
-  it.each<GateBasis>([
+  it.each<RotationInsertGateBasis>([
     { kind: 'pre_cutover' },
     { kind: 'existing_release', albumId: 100 },
     { kind: 'intake', intakeItemId: 3 },
@@ -170,5 +177,111 @@ describe('addToRotation', () => {
     expect(mockResolveIdentity).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
     expect(mockIsGateOn).not.toHaveBeenCalled();
+  });
+});
+
+describe('the legacy bases (BS#2810)', () => {
+  const CUTOVER = '2027-01-12';
+  type Chain = { id: number; album_id: number | null; add_date: string; moved_from_rotation_id: number | null };
+  const row = (id: number, add_date: string, moved_from_rotation_id: number | null = null, album_id = null): Chain => ({
+    id,
+    album_id,
+    add_date,
+    moved_from_rotation_id,
+  });
+  const LEGACY = [row(1, '2026-12-01')];
+  const POST_CUTOVER = [row(1, '2027-01-13')];
+  const LINKED = [row(1, '2026-12-01', null, 7)];
+  /** The chain read the legacy check makes, and the kill's UPDATE ... RETURNING. */
+  const seedChain = (chain: Chain[], killed: unknown[] = [{ id: 1 }]) => {
+    db.execute.mockResolvedValue(chain);
+    db.update.mockReturnValue(createMockQueryChain(killed));
+  };
+
+  beforeEach(() => {
+    process.env.REVIEW_GATE_CUTOVER_DATE = CUTOVER;
+    mockIsGateOn.mockReturnValue(true);
+  });
+  afterEach(() => {
+    delete process.env.REVIEW_GATE_CUTOVER_DATE;
+  });
+
+  describe('legacy_import, gate on', () => {
+    const basis = { kind: 'legacy_import', rotationId: 1 } as const;
+
+    it('inserts the release for an unlinked row added on or before the cutover', async () => {
+      seedChain(LEGACY);
+      await expect(insertAlbum(ALBUM, basis)).resolves.toEqual({ id: 5 });
+      expect(db.insert).toHaveBeenCalledWith(library);
+    });
+
+    it.each([
+      ['a post-cutover row', POST_CUTOVER],
+      ['a linked row', LINKED],
+      ['a row that does not exist', []],
+    ])('refuses %s and writes nothing', async (_label, chain) => {
+      seedChain(chain);
+      await expect(insertAlbum(ALBUM, basis)).rejects.toBeInstanceOf(RotationNotEligibleError);
+      expect(db.insert).not.toHaveBeenCalled();
+    });
+
+    it('answers the contract 409 body', () => {
+      expect(new RotationNotEligibleError('no').toBody()).toEqual({ message: 'no', reason: 'rotation_not_eligible' });
+    });
+  });
+
+  describe('legacy_move, gate on', () => {
+    const typed = { rotation_bin: 'M', artist_name: 'Juana Molina', album_title: 'DOGA' } as never;
+    const basis = { kind: 'legacy_move', fromRotationId: 1 } as const;
+
+    it('kills the source and adds the new row, stamped with where it came from', async () => {
+      seedChain(LEGACY);
+      await expect(addToRotation(typed, basis)).resolves.toEqual({ id: 5 });
+      expect(db.update).toHaveBeenCalledWith(rotation);
+      const insert = db.insert.mock.results[0].value;
+      expect(insert.values).toHaveBeenCalledWith(expect.objectContaining({ moved_from_rotation_id: 1 }));
+    });
+
+    it('moves a post-cutover row that was itself moved from a legacy row', async () => {
+      seedChain([row(2, '2027-02-01', 1), row(1, '2026-12-01')]);
+      await expect(addToRotation(typed, { kind: 'legacy_move', fromRotationId: 2 })).resolves.toEqual({ id: 5 });
+    });
+
+    it.each([
+      ['a post-cutover typed-text row', POST_CUTOVER],
+      ['a linked row', LINKED],
+    ])('refuses %s before touching the source', async (_label, chain) => {
+      seedChain(chain);
+      await expect(addToRotation(typed, basis)).rejects.toBeInstanceOf(RotationNotEligibleError);
+      expect(db.update).not.toHaveBeenCalled();
+      expect(db.insert).not.toHaveBeenCalled();
+    });
+
+    it('refuses a second move of the same source: the guarded kill matches nothing, so no row is added', async () => {
+      seedChain(LEGACY, []);
+      await expect(addToRotation(typed, basis)).rejects.toBeInstanceOf(RotationNotEligibleError);
+      expect(db.insert).not.toHaveBeenCalled();
+    });
+
+    it('is accepted with the gate off too', async () => {
+      mockIsGateOn.mockReturnValue(false);
+      seedChain(LEGACY);
+      await expect(addToRotation(typed, basis)).resolves.toEqual({ id: 5 });
+    });
+  });
+
+  describe("linkRotationToAlbum on the caller's transaction", () => {
+    it('joins it, and re-points the plays logged against the row', async () => {
+      const select = createMockQueryChain();
+      select.limit = jest
+        .fn()
+        .mockResolvedValueOnce([{ id: 5 }])
+        .mockResolvedValueOnce([{ album_id: null }]);
+      db.select.mockReturnValue(select);
+      db.update.mockReturnValue(createMockQueryChain([{ id: 1 }]));
+      await expect(linkRotationToAlbum(1, 5, db as never)).resolves.toMatchObject({ outcome: 'linked' });
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(db.update).toHaveBeenCalledWith(flowsheet);
+    });
   });
 });

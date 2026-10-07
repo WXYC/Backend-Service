@@ -112,7 +112,14 @@ import { rawProjection } from '../utils/sql-projection.js';
 import { isGateOn } from '../utils/review-gate-cutover.js';
 import { mayFileItem } from '../utils/intake-filing-rule.js';
 import { lockReleaseRow } from '../utils/release-row-lock.js';
-import { ReviewRequiredError, type GateBasis, type NewReleaseGateBasis } from '../utils/review-gate-basis.js';
+import { isLegacyRotationRow, type RotationChainRow } from '../utils/review-gate-legacy.js';
+import {
+  ReviewRequiredError,
+  RotationNotEligibleError,
+  type AlbumInsertGateBasis,
+  type GateBasis,
+  type RotationInsertGateBasis,
+} from '../utils/review-gate-basis.js';
 import { ROTATION_BIN_DEDUP_ORDINAL } from '../utils/rotation-bin-order.js';
 import { hasAlphanumeric } from '../utils/text-query.js';
 import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
@@ -729,9 +736,28 @@ const resolveRotationCardId = async (
  * the gate is off. `intake` holds only for an item with an accepted review (`mayFileItem`), read `FOR UPDATE` so an
  * unaccept cannot slip in before the insert commits. `existing_release` holds only for a release that is there,
  * read `FOR KEY SHARE`: the first lock in `DELETE /library/{id}`'s order (library row, then items, then reviews), so
- * a delete in flight cannot orphan the row this write points at.
+ * a delete in flight cannot orphan the row this write points at. The two legacy bases (BS#2810) hold for a rotation
+ * row `isLegacyRotationRow` accepts; the walk reads the row and its ancestors in one query and the date rule runs in
+ * TypeScript, never in SQL. Concurrent claims on one row are settled by the guarded writes that follow
+ * (`linkRotationToAlbum`'s `album_id IS NULL`, the move's kill `WHERE`), which refuse the loser.
  */
 const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
+  if (basis.kind === 'legacy_import' || basis.kind === 'legacy_move') {
+    const rotationId = basis.kind === 'legacy_import' ? basis.rotationId : basis.fromRotationId;
+    const chain = (await tx.execute(sql`
+      WITH RECURSIVE chain AS (
+        SELECT id, album_id, add_date::text AS add_date, moved_from_rotation_id FROM ${rotation} WHERE id = ${rotationId}
+        UNION
+        SELECT r.id, r.album_id, r.add_date::text, r.moved_from_rotation_id
+        FROM ${rotation} r JOIN chain ON r.id = chain.moved_from_rotation_id
+      )
+      SELECT id, album_id, add_date, moved_from_rotation_id FROM chain
+    `)) as unknown as RotationChainRow[];
+    if (!isLegacyRotationRow(chain, rotationId)) {
+      throw new RotationNotEligibleError('The rotation row is linked, or was not in rotation before the cutover');
+    }
+    return;
+  }
   if (basis.kind === 'pre_cutover') {
     if (isGateOn()) {
       throw new ReviewRequiredError('Every new release needs a review: file it through the Pile');
@@ -811,7 +837,7 @@ const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
  */
 export const addToRotation = async (
   newRotation: RotationAddRequest,
-  gateBasis: GateBasis,
+  gateBasis: RotationInsertGateBasis,
   urls?: string[],
   outerTx?: DbTransaction
 ) => {
@@ -894,6 +920,18 @@ export const addToRotation = async (
 
   const run = async (tx: DbTransaction) => {
     await assertGateBasis(tx, gateBasis);
+    if (gateBasis.kind === 'legacy_move') {
+      // Kill first: the guarded UPDATE takes the source row's lock, so a second move of it waits here and is refused
+      // before it writes a row. The new row's `moved_from_rotation_id` keeps the source's standing past its new `add_date`.
+      const killed = await killRotationInDB(
+        gateBasis.fromRotationId,
+        undefined,
+        tx,
+        and(isNull(rotation.album_id), rotationActiveSql())
+      );
+      if (!killed) throw new RotationNotEligibleError('The rotation row was already killed or linked');
+      values.moved_from_rotation_id = gateBasis.fromRotationId;
+    }
     const cardId = await resolveRotationCardId(tx, values.rotation_bin, values.card_id);
     if (cardId !== undefined) values.card_id = cardId;
 
@@ -1342,7 +1380,9 @@ export type UpdateRotationOutcome =
  */
 export const updateRotation = async (
   rotation_id: number,
-  updates: UpdateRotationRow
+  updates: UpdateRotationRow,
+  outerTx?: DbTransaction,
+  precondition?: SQL
 ): Promise<UpdateRotationOutcome> => {
   const set: Record<string, unknown> = {};
   for (const key of [
@@ -1392,7 +1432,11 @@ export const updateRotation = async (
   // on a box that also serves the live flowsheet. That endpoint issued one
   // bare UPDATE before BS#2113; keep it that way.
   if (!touchesPrecatalog && !touchesCardId && !touchesUrls) {
-    const [updated] = await db.update(rotation).set(set).where(eq(rotation.id, rotation_id)).returning();
+    const [updated] = await (outerTx ?? db)
+      .update(rotation)
+      .set(set)
+      .where(and(eq(rotation.id, rotation_id), precondition))
+      .returning();
     // No guard beyond `id` in the WHERE — zero rows really does mean "no such
     // row", exactly as before this function returned a bare row.
     return updated ? { outcome: 'updated' as const, rotation: updated } : { outcome: 'not_found' as const };
@@ -1405,6 +1449,10 @@ export const updateRotation = async (
   // LML for.
   if (touchesSnapshot) {
     set.tracklist_lookup_attempted_at = null;
+  }
+
+  if (outerTx || precondition) {
+    throw new Error('updateRotation: outerTx and precondition are for the single-statement kill path only');
   }
 
   const outcome = await db.transaction(async (tx): Promise<UpdateRotationOutcome> => {
@@ -1844,8 +1892,12 @@ export type LinkRotationOutcome =
  * and out of scope here — it publishes onto a freshly-inserted row this
  * client just supplied every field of, not a read of someone else's data.
  */
-export const linkRotationToAlbum = async (rotationId: number, albumId: number): Promise<LinkRotationOutcome> => {
-  return db.transaction(async (tx) => {
+export const linkRotationToAlbum = async (
+  rotationId: number,
+  albumId: number,
+  outerTx?: DbTransaction
+): Promise<LinkRotationOutcome> => {
+  const run = async (tx: DbTransaction): Promise<LinkRotationOutcome> => {
     const [albumRow] = await tx.select({ id: library.id }).from(library).where(eq(library.id, albumId)).limit(1);
     if (!albumRow) {
       return { outcome: 'album_not_found' as const };
@@ -1943,11 +1995,22 @@ export const linkRotationToAlbum = async (rotationId: number, albumId: number): 
       .returning({ id: flowsheet.id });
 
     return { outcome: 'linked' as const, rotation: updated, flowsheetRowsLinked: linkedPlays.length };
-  });
+  };
+  return outerTx ? run(outerTx) : db.transaction(run);
 };
 
-export const killRotationInDB = async (rotationId: number, updatedKillDate?: string) => {
-  const outcome = await updateRotation(rotationId, { kill_date: updatedKillDate || sql`CURRENT_DATE` });
+export const killRotationInDB = async (
+  rotationId: number,
+  updatedKillDate?: string,
+  outerTx?: DbTransaction,
+  precondition?: SQL
+) => {
+  const outcome = await updateRotation(
+    rotationId,
+    { kill_date: updatedKillDate || sql`CURRENT_DATE` },
+    outerTx,
+    precondition
+  );
   return outcome.outcome === 'updated' ? outcome.rotation : undefined;
 };
 
@@ -1959,7 +2022,7 @@ export const killRotationInDB = async (rotationId: number, updatedKillDate?: str
 // `gateBasis` (BS#2807) is the review gate: required, and verified inside the
 // transaction the insert runs in. Given no `tx`, this opens one, so the check
 // and the insert are always atomic.
-export const insertAlbum = async (newAlbum: NewAlbum, gateBasis: NewReleaseGateBasis, tx?: DbTransaction) => {
+export const insertAlbum = async (newAlbum: NewAlbum, gateBasis: AlbumInsertGateBasis, tx?: DbTransaction) => {
   const run = async (t: DbTransaction) => {
     await assertGateBasis(t, gateBasis);
     const response = await t.insert(library).values(newAlbum).returning();
