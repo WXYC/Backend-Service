@@ -295,17 +295,37 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
       expect(await watermark()).toBe(mark);
     });
 
+    it.each([
+      ['a lettered compilation section', 'V/A', SOUNDTRACKS, 0, 'W', 'lettered_compilation_section'],
+      ['a Various Artists source bucket', 'Z-R', HIPHOP, 5, null, 'various_artists_section'],
+    ])(
+      'refuses a re-letter of %s with the source-section 409, writing nothing',
+      async (_n, letters, genre, number, letter, reason) => {
+        const id = await seedArtist(`Source ${reason}`, letters, [[genre, number, letter]]);
+        const mark = await watermark();
+
+        const res = await refile(id, { genre_id: genre, code_letters: 'ZJ', code_artist_number: number });
+
+        expect(res.status).toBe(409);
+        expect(res.body.reason).toBe(reason);
+        expect((await lettersOf(id)).code_letters).toBe(letters);
+        expect(await watermark()).toBe(mark);
+      }
+    );
+
     it('sending the current letters back is not a change: same number 200 changed:false, new number a plain re-number', async () => {
       const id = await seedArtist('Same Letters', 'ZE', [
         [HIPHOP, 90],
         [ROCK, 91],
       ]);
       const mark = await watermark();
+      const stamped = await lettersOf(id);
 
       const same = await refile(id, { genre_id: HIPHOP, code_letters: 'ze', code_artist_number: 90 });
       expect(same.status).toBe(200);
       expect(same.body).toMatchObject({ changed: false, code_letters: 'ZE', previous_code_letters: 'ZE' });
       expect(await watermark()).toBe(mark);
+      expect((await lettersOf(id)).last_modified.getTime()).toBe(stamped.last_modified.getTime());
 
       // A multi-genre artist may re-number; the unchanged letters keep it out of the re-letter refusal.
       const renumbered = await refile(id, { genre_id: HIPHOP, code_letters: 'ze', code_artist_number: 92 });

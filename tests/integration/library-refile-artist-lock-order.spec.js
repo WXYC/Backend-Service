@@ -1,26 +1,27 @@
 /**
  * `POST /library/artists/:id/refile` bucket lock (BS#2643), with the interleavings forced rather than raced.
  *
- * The re-file locks, on its transaction and in this order: (1) the artist's own `artists` row, `FOR NO KEY UPDATE`,
- * before the card is read; (2) the `(code_letters, genre_id)` bucket plus the artist's own memberships in one statement
- * over `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`. Properties pinned here, in
- * this order: (a), (b), (d), (e), (f), (c). The destination-shelf advisory lock (BS#3035) is taken between the card read
- * and the crossreference statement.
+ * The re-file takes these locks, on its transaction and in this order: (1) the artist's own `artists` row, `FOR NO KEY
+ * UPDATE`, before the card is read; (2) the DESTINATION shelf's advisory key (BS#3035,
+ * `pg_advisory_xact_lock(hashtextextended('artist-code-bucket:<genre>:<letters>', 0))`), on every path; (3) the
+ * destination `(code_letters, genre_id)` bucket plus the artist's own memberships in one statement over
+ * `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`; (4) last, at its first
+ * UPDATE, the `library_watermark` row (the statement-level trigger's target, a catalog-wide write mutex). Properties
+ * pinned here, in this order: (a), (b), (d), (e), (f), (c).
  *
  *  (a) Two re-files into one bucket SERIALIZE. A raw session S holds `FOR UPDATE` on the bucket's lowest
- *      `artist_id` row (a third artist below both movers), so both requests queue on that first row before holding
- *      anything else. Both are fired, the spec waits until two request backends are provably waiting, then releases S.
- *      Exactly one answers 200; the loser re-reads the occupied slot and answers 409 naming the winner. If the bucket
- *      lock ran on the pool instead of the transaction, both blocked statements would complete on S's commit and
- *      release at once, and both requests would pass the occupancy check against a still-free 31: two 200s.
+ *      `artist_id` row (a third artist below both movers). The first request takes the advisory key and then queues on
+ *      S's row; the second queues on the ADVISORY KEY behind the first, so the waiter filter counts both kinds of wait
+ *      (a crossreference statement, and `wait_event = 'advisory'`). The spec waits until two request backends are
+ *      provably waiting, then releases S. Exactly one answers 200; the loser re-reads the occupied slot and answers
+ *      409 naming the winner. The advisory key serializes same-bucket re-files on its own; that every statement runs
+ *      on the transaction rather than the pool is pinned by the unit test's `db.select` assertion, not here.
  *      TIME BUDGET: both requests must be seen waiting, and S released, inside the 750 ms `lock_timeout`, measured
- *      from when the first starts waiting. After the release the winner takes the first row and locks the rest; the
- *      loser starts a NEW lock wait on that row behind the winner, with its own 750 ms covering the winner's UPDATE,
- *      count and commit. On a slow runner that wait can legitimately time out with a 503: the spec logs it and
- *      re-sends the loser once, which must then answer 409 naming the winner. Two 200s, a 500, or a 409 naming the
- *      wrong artist are failures.
- *      With the destination-shelf advisory lock (BS#3035) the second request queues on the advisory key, held by the
- *      first, rather than on the crossreference row, so the waiter filter counts both kinds of wait.
+ *      from when the first starts waiting. After the release the winner proceeds; the loser's advisory wait then ends
+ *      and it starts a NEW wait on the crossreference rows behind the winner's UPDATE, count and commit, with its own
+ *      750 ms. On a slow runner that wait can legitimately time out with a 503: the spec logs it and re-sends the
+ *      loser once, which must then answer 409 naming the winner. Two 200s, a 500, or a 409 naming the wrong artist
+ *      are failures.
  *  (b) The bucket lock does not reach OTHER artists' `artists` rows. S holds a bucket row ABOVE mover X, so the re-file
  *      locks X's crossreference row and blocks on S's. While it is blocked, `SELECT ... FROM artists WHERE id = <other>
  *      FOR KEY SHARE NOWAIT` succeeds. A joined `.for('update')` would have locked up to 263 `artists` rows and the
@@ -369,7 +370,7 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
     expect(row).toMatchObject({ artist_name: renamed, artist_genre_code: TARGET });
   }, 30000);
 
-  it('(e) serializes two re-letters of different artists into one occupied slot: exactly one 200, the loser names the winner', async () => {
+  it("(e) serializes two re-letters into an occupied bucket's free slot: exactly one 200, the loser names the winner", async () => {
     const [holder] = await newBucket(1);
     const [x] = await newBucket(1);
     const [y] = await newBucket(1);
@@ -443,6 +444,7 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
       loser = await send(ids[loserIndex]);
     }
     expect(loser.status).toBe(409);
+    expect(loser.body.reason).toBe('artist_code_conflict');
     expect(loser.body.artist).toMatchObject({ id: ids[winnerIndex], code_letters: EMPTY, code_artist_number: 36 });
   }, 30000);
 });

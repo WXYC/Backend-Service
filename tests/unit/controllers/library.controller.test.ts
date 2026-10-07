@@ -5598,12 +5598,8 @@ describe('library.controller', () => {
       expect(message).toContain(
         'genre_id (no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint)'
       );
-      expect(message).toContain(
-        'code_letters (not writable on this endpoint; re-letter with POST /library/artists/{id}/refile (code_letters))'
-      );
-      expect(message).toContain(
-        'code_artist_number (not writable on this endpoint; re-file with POST /library/artists/{id}/refile)'
-      );
+      expect(message).toContain('code_letters (re-letter with POST /library/artists/{id}/refile (code_letters))');
+      expect(message).toContain('code_artist_number (re-file with POST /library/artists/{id}/refile)');
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
     });
 

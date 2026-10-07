@@ -38,7 +38,6 @@ import {
   validateCanonicalCodeLetters,
 } from '../services/library-filing.service.js';
 import type { LibraryFilingRequestBody, NewArtistRequest } from '../services/library-filing.service.js';
-import { isVariousArtists } from '../services/requestLine/types.js';
 import * as librarySearchService from '../services/library-search.service.js';
 import type { CatalogSort, CatalogOrder } from '../services/library-search.service.js';
 import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
@@ -710,7 +709,7 @@ export const resolveArtistByCode: RequestHandler = async (
   const genreId = parseCodeQueryInt(query.genre_id, 'genre_id', 1);
 
   // Validate against the column's real domain, then trim + upper-case -- see
-  // `validateCanonicalCodeLetters` above for why a bare `.trim().toUpperCase()`
+  // `validateCanonicalCodeLetters` in `library-filing.service.ts` for why a bare `.trim().toUpperCase()`
   // is not a safe normalization on its own. (The sibling write path,
   // `addArtist`, only NFC-normalizes -- no trim, no upper-case; widening its
   // pre-check to this fold is a separate change, deliberately not made here
@@ -908,8 +907,8 @@ const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number
 const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[number], string> = {
   genre_id:
     'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
-  code_letters: 'not writable on this endpoint; re-letter with POST /library/artists/{id}/refile (code_letters)',
-  code_artist_number: 'not writable on this endpoint; re-file with POST /library/artists/{id}/refile',
+  code_letters: 're-letter with POST /library/artists/{id}/refile (code_letters)',
+  code_artist_number: 're-file with POST /library/artists/{id}/refile',
 };
 
 const NO_ARTIST_FIELDS_MESSAGE = `Bad Request: provide at least one of ${UPDATABLE_ARTIST_FIELDS.join(', ')}`;
@@ -1295,7 +1294,7 @@ const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number', 'code_letters'] 
  * optionally re-letter it (`code_letters`, single-genre artists only). Only those three keys are accepted; any other
  * key is a 400 naming it (a destination genre is "not a recognized field" until the genre move ships). `code_letters`
  * must be a string passing `validateCanonicalCodeLetters` (trim, 1-4 of A-Z, 0-9, `/`; upper-cased, so `ja` files as
- * `JA`) and must not name a Various Artists bucket (`isVariousArtists`, a 400 before any lock). Sending the stored
+ * `JA`) and must not name a Various Artists bucket (a 400 from the service before any lock). Sending the stored
  * letters back, in any case or spacing, is not a change. Gated `catalog: ['write']`.
  *
  * Outcomes: 200 `ArtistRefileResult` (the genre-scoped `ArtistCard` plus `changed`, `previous_code_artist_number`,
@@ -1333,13 +1332,8 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
   let codeLetters: string | undefined;
   if (record.code_letters !== undefined) {
     if (typeof record.code_letters !== 'string') throw new WxycError('Bad Request: code_letters must be a string', 400);
+    // A Various Artists destination is refused (400) by `refileArtistInGenre` itself, before any lock.
     codeLetters = validateCanonicalCodeLetters(record.code_letters);
-    if (isVariousArtists(codeLetters)) {
-      throw new WxycError(
-        'Bad Request: code_letters names the Various Artists bucket, which cannot be re-lettered into',
-        400
-      );
-    }
   }
 
   const result = await libraryService.refileArtistInGenre(artistId, genreId, target, codeLetters);
@@ -1369,7 +1363,7 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
     case 'letters_shared':
       res.status(409).json({
         message:
-          'Cannot re-letter: the letters are shared with the other genres this artist is filed in, whose shelves would move too.',
+          "Cannot re-letter: this artist's letters are used in more than one genre (another membership, or a release filed in another genre), and the other shelves would move too.",
         reason: 'letters_shared_across_genres',
         memberships: result.memberships,
       });

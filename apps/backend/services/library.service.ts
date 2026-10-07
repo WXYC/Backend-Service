@@ -4683,8 +4683,15 @@ export type ArtistRefileOutcome =
  * destination-shelf advisory key closes this for the endpoint's own re-letters, not for the jobs. The four hand-run
  * jobs (`library-etl`, `artist-unicode-dedup`, `artist-conflation-split`, `library-call-number-dedup`) take no advisory
  * key and some take the reverse lock order, so only `lock_timeout` protects against them. A manual run of
- * `jobs/library-etl` (needs `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`) upserts `artist_genre_code` from tubafrenzy's frozen
- * value and so reverts a re-file (WXYC/Backend-Service#2581), and likewise the letters.
+ * `jobs/library-etl` (needs `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`) does not revert letters or numbers in place: its
+ * `ensureArtist` (`jobs/library-etl/job.ts`) matches on lower(code_letters) + genre + number, so after a re-letter or
+ * re-number it misses, INSERTs a duplicate artist at the old code, and the conflict-update repoints the release's
+ * `library.artist_id` to it (WXYC/Backend-Service#2581).
+ *
+ * **Residual race, accepted:** the stray-release probe behind `letters_shared` is a plain read, and `POST /library`
+ * accepts any `genre_id` for an `artist_id` with no membership check, so a release insert into another genre that is in
+ * flight during a re-letter is not seen, and the new release then reads the new letters. The window is small and prod
+ * holds no such releases; the real fix is release writers refusing a genre the artist is not filed in (BS#3038).
  */
 export const refileArtistInGenre = async (
   artist_id: number,
@@ -4692,6 +4699,13 @@ export const refileArtistInGenre = async (
   target: number,
   code_letters?: string
 ): Promise<ArtistRefileOutcome> => {
+  // Nothing can be re-lettered into the shared Various Artists bucket; decided before any lock.
+  if (code_letters !== undefined && isVariousArtists(code_letters.trim().toUpperCase())) {
+    throw new WxycError(
+      'Bad Request: code_letters names the Various Artists bucket, which cannot be re-lettered into',
+      400
+    );
+  }
   let written: Record<string, unknown> | undefined;
   try {
     const outcome = await db.transaction(async (tx): Promise<ArtistRefileOutcome> => {
