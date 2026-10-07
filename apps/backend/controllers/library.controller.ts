@@ -2455,7 +2455,7 @@ export type LinkRotationRequest = {
  * BS#2410 (plan D7) added the JSP's third step to that transaction: the
  * flowsheet plays logged against the row are repointed at the new release.
  * BS#3007: only the newest row of a moved record's chain links (a moved-away
- * row is the same 409), and linking it links the chain's unlinked older rows
+ * row is a 409 with its own message, BS#3033), and linking it links the chain's unlinked older rows
  * and their plays too. The
  * response shape is unchanged — the count of resolved plays is observability
  * only, projected onto the active span rather than serialized.
