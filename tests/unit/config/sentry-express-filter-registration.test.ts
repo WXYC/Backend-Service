@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import { SENTRY_DATA_COLLECTION } from '@wxyc/observability';
 
 // v11's `expressIntegration` is the Express error capturer, and its
 // `shouldHandleError` wins over the deprecated `setupExpressErrorHandler`'s
@@ -15,6 +16,8 @@ jest.mock('@sentry/node', () => ({
 }));
 // Keeps the developer's local .env out of the test's process.env.
 jest.mock('dotenv/config', () => ({}));
+// The enrichment worker still loads .env through a body-level `config()`.
+jest.mock('dotenv', () => ({ config: jest.fn() }));
 
 type ShouldHandleError = (error: Error) => boolean;
 
@@ -73,5 +76,22 @@ describe('trace lifecycle', () => {
     });
     const initOptions = mockInit.mock.calls[0][0] as { traceLifecycle?: string };
     expect(initOptions.traceLifecycle).toBe('static');
+  });
+});
+
+// What each preload hands `Sentry.init`, not what its source text says: a
+// commented-out or overridden `dataCollection` must fail here (BS#3004).
+describe('data collection', () => {
+  it.each([
+    ['backend', '../../../apps/backend/instrument'],
+    ['auth', '../../../apps/auth/instrument'],
+    ['enrichment-worker', '../../../apps/enrichment-worker/instrument'],
+  ])('%s passes SENTRY_DATA_COLLECTION to Sentry.init', (_app, relPath) => {
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require(relPath);
+    });
+    const initOptions = mockInit.mock.calls[0][0] as { dataCollection?: unknown };
+    expect(initOptions.dataCollection).toEqual(SENTRY_DATA_COLLECTION);
   });
 });
