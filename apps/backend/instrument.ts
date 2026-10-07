@@ -4,7 +4,11 @@
 // In production, Docker --env-file sets vars before Node starts, so this is a no-op.
 import 'dotenv/config';
 import * as Sentry from '@sentry/node';
-import { filterSentryTransactionEvent, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
+import {
+  SENTRY_DATA_COLLECTION,
+  filterSentryTransactionEvent,
+  warnIfReservedAwsCredentialsPresent,
+} from '@wxyc/observability';
 import { resolveTracesSampleRate } from './sentry-config.js';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 
@@ -39,4 +43,7 @@ Sentry.init({
   // options, so the filter has to be passed here (BS#2949). This is a default
   // integration; passing it overrides the default instance with ours.
   integrations: [Sentry.expressIntegration({ shouldHandleError: shouldCaptureExpressError })],
+  // Sentry 10's data-collection posture: no end-user IPs, IP-bearing headers
+  // or request bodies (BS#3004).
+  dataCollection: SENTRY_DATA_COLLECTION,
 });
