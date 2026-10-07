@@ -151,6 +151,9 @@ const VARIOUS_ARTISTS_CODE_LETTERS = 'V/A';
  *   kept so a row that predates or bypasses the import's rewrite still reads
  *   as a compilation.
  *
+ * It also guards a write: `refileArtistInGenre` refuses to re-file a bucket this matches (BS#3022), so a change made
+ * for rendering would change which re-files are refused. The `Z-` arm is case-sensitive, as in the contract.
+ *
  * Matches dj-site's `isVariousArtists` (`lib/features/catalog/libraryCode.ts`).
  */
 export function isVariousArtists(codeLetters: string): boolean {
