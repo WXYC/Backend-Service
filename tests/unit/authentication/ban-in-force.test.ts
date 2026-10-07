@@ -13,6 +13,7 @@ describe('isBanInForce', () => {
     ['banned, expiring in the future', { banned: true, banExpires: future }, true],
     ['banned, already expired', { banned: true, banExpires: past }, false],
     ['banned, expiring exactly now', { banned: true, banExpires: new Date(NOW) }, false],
+    ['banned, expiry not a valid date (fails closed)', { banned: true, banExpires: new Date('infinity') }, true],
     ['banned is null', { banned: null, banExpires: null }, false],
     ['banned is null with a future expiry', { banned: null, banExpires: future }, false],
   ])('%s', (_label, account, expected) => {
