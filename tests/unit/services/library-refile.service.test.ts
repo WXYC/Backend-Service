@@ -144,6 +144,35 @@ describe('refileArtistInGenre (BS#2643)', () => {
   });
 
   it.each([
+    ['V/A', 5],
+    ['  v/a ', 5],
+    ['Z-R', 5],
+    ['V/A', 4],
+  ])(
+    'various_artists_section: refuses code_letters %j with target %i before the no-op, issuing no UPDATE',
+    async (codeLetters, target) => {
+      const { outcome, calls } = await run({ selects: [[{ ...CARD, code_letters: codeLetters }], BUCKET(4)] }, target);
+
+      expect(outcome).toEqual({ outcome: 'various_artists_section' });
+      expect(calls.some((c) => c.op === 'update')).toBe(false);
+      expect(calls.filter((c) => c.op === 'select')).toHaveLength(2);
+    }
+  );
+
+  it('a lettered V/A section stays lettered_section, not various_artists_section', async () => {
+    const { outcome } = await run({ selects: [[{ ...CARD, code_letters: 'V/A' }], BUCKET(0, 'A')] }, 0);
+
+    expect(outcome).toEqual({ outcome: 'lettered_section' });
+  });
+
+  it('an artist whose name says Various but whose letters are ordinary re-files', async () => {
+    const card = { ...CARD, artist_name: 'Various Cruelties', code_letters: 'VA' };
+    const { outcome } = await run({ selects: [[card], BUCKET(1), []] });
+
+    expect(outcome).toMatchObject({ outcome: 'refiled' });
+  });
+
+  it.each([
     ['not_filed', [{ artist_id: 431, artist_name: 'Isis', code_letters: 'IS' }]],
     ['artist_not_found', []],
   ])('unlocked-read miss separates the 404s on tx (%s)', async (expected, byId) => {

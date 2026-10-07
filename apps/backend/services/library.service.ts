@@ -75,6 +75,7 @@ import {
   enrichLibraryResult,
   ArtistMatchHint,
   ArtistSearchAliasSource,
+  isVariousArtists,
 } from './requestLine/types.js';
 import {
   getRelease,
@@ -4616,7 +4617,7 @@ export const REFILE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 
 export type ArtistRefileOutcome =
   | { outcome: 'refiled' | 'unchanged'; card: ArtistCardRow; previous: number; releases_to_relabel: number }
-  | { outcome: 'artist_not_found' | 'not_filed' | 'lettered_section' | 'lock_unavailable' }
+  | { outcome: 'artist_not_found' | 'not_filed' | 'lettered_section' | 'various_artists_section' | 'lock_unavailable' }
   | { outcome: 'slot_taken'; occupant: FilingArtist };
 
 /**
@@ -4671,6 +4672,9 @@ export const refileArtistInGenre = async (
       const own = bucket.find((row) => row.artist_id === artist_id);
       if (!own) return missing();
       if (own.code_comp_letter !== null) return { outcome: 'lettered_section' };
+      // BS#3022: a Various Artists bucket is shared by every compilation in the genre, so re-numbering it moves them
+      // all. Decided before the no-op return (resubmitting its own number is a refusal too) and, like it, with no UPDATE.
+      if (isVariousArtists(card.code_letters)) return { outcome: 'various_artists_section' };
 
       const previous = own.code_number;
       const countReleases = async (): Promise<number> => {

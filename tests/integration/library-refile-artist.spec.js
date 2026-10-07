@@ -174,6 +174,24 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
     expect(await codeOf(id, SOUNDTRACKS)).toBe(0);
   });
 
+  it.each(['V/A', 'Z-R'])(
+    'refuses a Various Artists bucket (%s) with 409, even for its own number, writing nothing',
+    async (letters) => {
+      const id = await seedArtist('Bucket', letters, [[HIPHOP, 5]]);
+      const before = await watermark();
+
+      for (const number of [5, 9]) {
+        const res = await refile(id, { genre_id: HIPHOP, code_artist_number: number });
+
+        expect(res.status).toBe(409);
+        expect(res.body.reason).toBe('various_artists_section');
+        expect(res.body).not.toHaveProperty('artist');
+      }
+      expect(await codeOf(id, HIPHOP)).toBe(5);
+      expect(await watermark()).toBe(before);
+    }
+  );
+
   it('rejects a body key the endpoint does not support with 400', async () => {
     const id = await seedArtist('Strict', 'ZR', [[HIPHOP, 80]]);
 

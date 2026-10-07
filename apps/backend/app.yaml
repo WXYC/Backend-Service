@@ -4198,7 +4198,10 @@ paths:
 
 
         409 bodies: `reason: 'lettered_compilation_section'` (the membership is
-        a lettered compilation section, whose number is fixed at 0) or
+        a lettered compilation section, whose number is fixed at 0),
+        `reason: 'various_artists_section'` (a Various Artists bucket, BS#3022:
+        `code_letters` `V/A` or `Z-`-prefixed, never the artist's name; refused
+        even when resubmitting its own number, and nothing is written) or
         `reason: 'artist_code_conflict'` with `artist`, the first other owner of
         the target slot in `artist_name`, `id` order (shape of the contract
         `Artist`; `code_artist_number` is the contested target). 503
@@ -4242,7 +4245,7 @@ paths:
         '404':
           description: Artist not found, or not filed under `genre_id`
         '409':
-          description: A lettered compilation section, or the target slot is held by another artist
+          description: A lettered compilation section, a Various Artists bucket, or the target slot is held by another artist
         '503':
           description: A live writer holds the shelf; retry in a moment
 
