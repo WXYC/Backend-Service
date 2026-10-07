@@ -217,3 +217,9 @@ Each rule above is preceded by a `<!-- @rule -->` marker. Fields:
 Run on demand: `npm run check:doc-rules`. Also runs in `.husky/pre-push` (warn-only — never blocks).
 
 The intent is a forcing function for the question this codebase keeps re-asking: when is an incident-anchored rule ready to compress? Once enforcement exists in a script or CI check, the prose stops being load-bearing and becomes commentary — the script tells you when the moment has arrived.
+
+## CLAUDE.md scope list
+
+Moved verbatim out of `CLAUDE.md`'s Database section.
+
+**Read [`docs/migrations.md`](docs/migrations.md) before authoring any migration.** It covers the journal `when`-bumping recipe, the parallel-PR collision case, the `IF NOT EXISTS` index pattern, the DDL-only rule, the constraint-precondition-guard pattern, and the cross-cache-identity gate. Also documents the attempt-at markers, including `flowsheet.legacy_link_attempted_at`, `flowsheet.metadata_attempt_at`, `rotation.discogs_release_id_resolve_attempted_at`, and `rotation.tracklist_lookup_attempted_at`, plus the jobs that stamp them.
