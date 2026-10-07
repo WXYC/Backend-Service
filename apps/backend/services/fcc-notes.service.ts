@@ -1,9 +1,9 @@
 import { and, asc, eq, or, sql, type InferSelectModel } from 'drizzle-orm';
-import { artists, db, fcc_notes, intake_items, library, user } from '@wxyc/database';
+import { artists, db, fcc_notes, intake_items, library } from '@wxyc/database';
 import type { RecordSubject } from '../utils/record-subject.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { withLockedRecordSubject } from './intake.service.js';
-import { snapshotAuthor } from './reviews.service.js';
+import { readAccountName } from './reviews.service.js';
 
 /**
  * FCC notes on the record (BS#2862, slice 13c of BS#2791): any DJ reports a note against a library release or an
@@ -60,8 +60,7 @@ export const createFccNote = async (
   actor: ReviewsActor
 ) => {
   const result = await withLockedRecordSubject(subject, 'share', async (tx, locked) => {
-    const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
-    const reported_by = snapshotAuthor(account?.name);
+    const reported_by = await readAccountName(tx, actor.id);
     if (reported_by === null) return { outcome: 'no_account' as const };
     const [{ id }] = await tx
       .insert(fcc_notes)
@@ -115,8 +114,7 @@ export const listReportedFccNotes = (): Promise<FccNoteResponse[]> =>
  * answered unchanged, the first confirmer's stamp kept. `no_account` is a caller with no name to snapshot: nothing is written.
  */
 export const confirmFccNote = async (id: number, actor: Pick<ReviewsActor, 'id'>) => {
-  const [account] = await db.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
-  const confirmed_by = snapshotAuthor(account?.name);
+  const confirmed_by = await readAccountName(db, actor.id);
   if (confirmed_by === null) return { outcome: 'no_account' as const };
   return db.transaction(async (tx) => {
     const [confirmed] = await tx
