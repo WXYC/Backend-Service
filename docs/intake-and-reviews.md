@@ -15,7 +15,7 @@ Route and rule reference for `/intake` and `/reviews`, moved out of `CLAUDE.md`'
 
 ## `/reviews`
 
-- In-app DJ reviews (BS#2802, slice 10a of BS#2791): `POST /reviews` creates the caller's own `typed` draft about one subject — an intake item they hold (effective state `checked_out` or `reviewed`, `checked_out_by` = caller, read `FOR UPDATE` inside the insert's transaction; else 409 `subject_not_held`) or an existing library release — and answers 200.
+- In-app DJ reviews (BS#2802, slice 10a of BS#2791): `POST /reviews` creates the caller's own `typed` draft about one subject — an intake item they hold (effective state `checked_out` or `reviewed`, `checked_out_by` = caller, read `FOR UPDATE` inside the insert's transaction; else 409 `subject_not_held`) or an existing library release (read `FOR KEY SHARE` inside the same transaction, so a concurrent `DELETE /library/{id}` either waits and sees the review or has already removed the row, which is 409 `subject_not_held`, never a foreign-key 500; BS#2969) — and answers 200.
 - `author` is a snapshot of `auth_user.name` cut to its first 128 code points; `real_name` is never read.
 - `PATCH /reviews/{id}` enforces the editing rules in `services/reviews.service.ts` `editOutcome` (the author at any time, with no print lock; `reviews:manage` always; `publish_*` and `credit` only by the author account, else 403 even for a music director; 400 when a patch would null a submitted `typed` review's text).
 - Every edit of a submitted review that changes one of the five content fields appends a `review_revisions` row through the exported `writeReviewRevision` (which takes the review `FOR UPDATE` itself; a submitted review with no history first gets revision 1); a draft or consent-only edit writes none.
