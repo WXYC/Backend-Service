@@ -88,15 +88,20 @@ export const readReviewNotice = async (
 
 /**
  * The accounts holding the `musicDirector` role (not `stationManager`), by `normalizeRole` rather than a raw role
- * string, less any account banned in better-auth (`auth_user.banned`): a banned account is told nothing.
+ * string, less any account banned in better-auth (`auth_user.banned`): a banned account is told nothing. Accounts
+ * named in `excludeUserIds` (`auth_user.id`, never an address) are left out too.
  */
-export const musicDirectorEmails = async (): Promise<string[]> => {
+export const musicDirectorEmails = async (excludeUserIds: readonly string[] = []): Promise<string[]> => {
   const rows = await db
-    .select({ role: member.role, email: user.email, banned: user.banned, banExpires: user.banExpires })
+    .select({ id: user.id, role: member.role, email: user.email, banned: user.banned, banExpires: user.banExpires })
     .from(member)
     .innerJoin(user, eq(user.id, member.userId));
   return [
-    ...new Set(rows.filter((r) => normalizeRole(r.role) === 'musicDirector' && !isBanInForce(r)).map((r) => r.email)),
+    ...new Set(
+      rows
+        .filter((r) => normalizeRole(r.role) === 'musicDirector' && !isBanInForce(r) && !excludeUserIds.includes(r.id))
+        .map((r) => r.email)
+    ),
   ];
 };
 
@@ -152,12 +157,13 @@ const render = ({ lines, links }: Pick<Notice, 'lines' | 'links'>) => ({
  * (`context` is its `extra`) and swallowed, because the intake Pile is the source of truth. Callers start a notice after the commit and do
  * not await it (as `auth.definition.ts` does the password-reset send), so a slow or hung SES never delays or fails
  * a request that already committed. Each link's `path` is joined to the frontend's base URL in `render`, which stays private.
- * `sendNotificationEmail` honors `EMAIL_ENABLED`.
+ * `sendNotificationEmail` honors `EMAIL_ENABLED`. `excludeUserIds` names accounts that are not sent to even though
+ * they are music directors (see `musicDirectorEmails`); when it leaves nobody, nothing is sent.
  */
-export const notifyMusicDirectors = async (message: Notice) => {
+export const notifyMusicDirectors = async (message: Notice, { excludeUserIds }: { excludeUserIds?: string[] } = {}) => {
   try {
     const { text, html } = render(message);
-    const sends = (await musicDirectorEmails()).map(async (email) =>
+    const sends = (await musicDirectorEmails(excludeUserIds)).map(async (email) =>
       sendNotificationEmail({ to: [email], subject: message.subject, text, html })
     );
     for (const sent of await Promise.allSettled(sends)) {
@@ -240,10 +246,14 @@ export type AuthorNotice = NoticeRecord & { reviewId: number; authorUserId: stri
 /** A printed copy: an intake item, or a release with no item. */
 export type PrintedCopy = { intake_item_id: number } | { album_id: number };
 
-/** The FCC line of a printed review changed: who edited, the new line, and the copies whose sleeve slip is now out of date. */
+/**
+ * The FCC line of a printed review changed: who edited (`editor`, the account name; `editorUserId`, the account, who is
+ * not emailed), the new line, and the copies whose sleeve slip is now out of date.
+ */
 export type FccChangeNotice = NoticeRecord & {
   reviewId: number;
   editor: string | null;
+  editorUserId: string;
   fcc: string | null;
   copies: PrintedCopy[];
 };
@@ -276,21 +286,24 @@ export const notifyReviewRecorded = (n: AuthorNotice) =>
     context: { review_id: n.reviewId },
   });
 
-/** Notice 3: the music directors are told the slips on the covers are out of date. */
+/** Notice 3: the music directors, except the one who made the edit, are told the slips on the covers are out of date. */
 export const notifyFccChanged = (n: FccChangeNotice) =>
-  notifyMusicDirectors({
-    subject: `FCC line changed on a printed review: ${record(n.artist, n.album)}`,
-    lines: [
-      `${n.editor ?? 'Someone'} changed the FCC line on the review of ${record(n.artist, n.album)} after it was printed.`,
-      `New FCC line: ${n.fcc || 'none'}`,
-      n.copies.length === 1
-        ? 'The printed slip is out of date. Reprint it from:'
-        : 'The printed slips are out of date. Reprint them from:',
-    ],
-    links: n.copies.map((c) =>
-      'intake_item_id' in c
-        ? itemLink(c.intake_item_id)
-        : { path: `/dashboard/album/${c.album_id}`, label: 'Open the album page' }
-    ),
-    context: { review_id: n.reviewId },
-  });
+  notifyMusicDirectors(
+    {
+      subject: `FCC line changed on a printed review: ${record(n.artist, n.album)}`,
+      lines: [
+        `${n.editor ?? 'Someone'} changed the FCC line on the review of ${record(n.artist, n.album)} after it was printed.`,
+        `New FCC line: ${n.fcc || 'none'}`,
+        n.copies.length === 1
+          ? 'The printed slip is out of date. Reprint it from:'
+          : 'The printed slips are out of date. Reprint them from:',
+      ],
+      links: n.copies.map((c) =>
+        'intake_item_id' in c
+          ? itemLink(c.intake_item_id)
+          : { path: `/dashboard/album/${c.album_id}`, label: 'Open the album page' }
+      ),
+      context: { review_id: n.reviewId },
+    },
+    { excludeUserIds: [n.editorUserId] }
+  );
