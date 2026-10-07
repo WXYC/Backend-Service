@@ -456,9 +456,9 @@ export type NewArtistRequest = {
  * demonstrably holds and the read path resolves; the contract's floor is the
  * side that needs amending.
  */
-export const validateArtistCodeNumber = (code_number: unknown): number => {
+export const validateArtistCodeNumber = (code_number: unknown, field = 'code_number'): number => {
   if (typeof code_number !== 'number' || !Number.isInteger(code_number) || code_number < 0 || code_number > INT4_MAX) {
-    throw new WxycError(`code_number must be an integer between 0 and ${INT4_MAX}`, 400);
+    throw new WxycError(`${field} must be an integer between 0 and ${INT4_MAX}`, 400);
   }
   return code_number;
 };

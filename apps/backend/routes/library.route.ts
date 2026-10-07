@@ -282,6 +282,10 @@ library_route.patch('/rotation/:id', requirePermissions({ catalog: ['write'] }),
 
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);
 
+// BS#2643: re-file an artist's call number within one genre. Three path segments, so it shares method and segment
+// count with no `/artists/:id` route and needs no ordering care (same argument as `/artists/:id/next-release-number`).
+library_route.post('/artists/:id/refile', requirePermissions({ catalog: ['write'] }), libraryController.refileArtist);
+
 library_route.get(
   '/artists/search',
   requirePermissions({ catalog: ['write'] }),

@@ -3669,7 +3669,8 @@ paths:
         non-empty string. `genre_id`, `code_letters`, and `code_artist_number`
         are real fields on `/wxycdb`'s artist-card form but have no write path
         on this endpoint — sending one is rejected with a 400 naming why, not
-        silently dropped. A `code_letters` change is therefore still
+        silently dropped. `code_artist_number` is re-filed with
+        `POST /library/artists/{id}/refile` (BS#2643). A `code_letters` change is therefore still
         unserviceable, so a rename that crosses a shelf-letter boundary
         ('Ziu Ziu' → 'Xiu Xiu') leaves the filing code behind.
 
@@ -3982,6 +3983,77 @@ paths:
             has no membership in answers the distinct `Artist not filed under
             genre {genre_id}` rather than an empty page, which would be
             indistinguishable from a membership holding no releases.
+
+  /library/artists/{id}/refile:
+    post:
+      summary: Re-file an artist's call number within one genre (BS#2643)
+      description: >-
+        Changes `genre_artist_crossreference.artist_genre_code` for ONE
+        `(artist, genre)` membership — Bill's case, the Hiphop Isis `IS 1` to
+        `IS 31`. `library` stores no artist number and `library_artist_view`
+        composes it at read time, so every release re-labels at once with no
+        release edit; `releases_to_relabel` counts the physical labels the
+        librarian must reprint. Call letters and genre cannot change here: any
+        body key other than `genre_id` and `code_artist_number` is a 400
+        (`code_letters` is "not supported by this endpoint yet").
+
+
+        Gated at `requirePermissions({ catalog: ['write'] })`. Resubmitting the
+        artist's current number answers 200 `changed: false` without issuing an
+        UPDATE (a real re-file advances the catalog watermark once, a full
+        catalog re-download for every poller, the cost a rename pays), and is
+        decided before the occupancy check so an artist sharing a contested
+        triple does not collide with its co-owner.
+
+
+        409 bodies: `reason: 'lettered_compilation_section'` (the membership is
+        a lettered compilation section, whose number is fixed at 0) or
+        `reason: 'artist_code_conflict'` with `artist`, the first other owner of
+        the target slot in `artist_name`, `id` order (shape of the contract
+        `Artist`; `code_artist_number` is the contested target). 503
+        `lock_unavailable` when a live writer holds the shelf: the whole
+        `(code_letters, genre_id)` bucket is locked in one statement ordered by
+        `artist_id`, so two re-files into one bucket serialize. `POST
+        /library/artists` takes no such lock, so a create landing the same
+        triple at the same instant is not prevented (BS#2106).
+      security:
+        - BearerAuth: ['station-management']
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [genre_id, code_artist_number]
+              additionalProperties: false
+              properties:
+                genre_id:
+                  type: integer
+                  minimum: 1
+                  maximum: 2147483647
+                code_artist_number:
+                  type: integer
+                  minimum: 0
+                  maximum: 2147483647
+      responses:
+        '200':
+          description: >-
+            The genre-scoped artist card plus `changed`,
+            `previous_code_artist_number` and `releases_to_relabel`
+        '400':
+          description: Malformed id or body, an unsupported key, or an invalid `genre_id` / `code_artist_number`
+        '404':
+          description: Artist not found, or not filed under `genre_id`
+        '409':
+          description: A lettered compilation section, or the target slot is held by another artist
+        '503':
+          description: A live writer holds the shelf; retry in a moment
 
   /library/artists/{id}/next-release-number:
     get:

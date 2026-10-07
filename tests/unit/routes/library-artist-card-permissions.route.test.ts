@@ -75,6 +75,7 @@ const mockPeekArtistShelf =
   jestGlobals.fn<() => Promise<{ next_code_number: number; slots_in_use: Record<string, string[]> }>>();
 // DELETE /library/artists/:id (BS#2562).
 const mockDeleteArtistFromDB = jestGlobals.fn<() => Promise<{ outcome: string }>>();
+const mockRefileArtistInGenre = jestGlobals.fn<() => Promise<{ outcome: string }>>();
 
 // Collaborator mocks below mirror the discogs-recheck route-permission test —
 // only enough is stubbed here to let library.route's import chain resolve
@@ -127,6 +128,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   getReleasesForArtist: mockGetReleasesForArtist,
   countReleasesForArtist: mockCountReleasesForArtist,
   deleteArtistFromDB: mockDeleteArtistFromDB,
+  refileArtistInGenre: mockRefileArtistInGenre,
 }));
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
@@ -195,6 +197,7 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
     mockGenerateAlbumCodeNumber.mockReset().mockResolvedValue(1);
     mockPeekArtistShelf.mockReset().mockResolvedValue({ next_code_number: 1, slots_in_use: {} });
     mockDeleteArtistFromDB.mockReset().mockResolvedValue({ outcome: 'deleted' });
+    mockRefileArtistInGenre.mockReset().mockResolvedValue({ outcome: 'lock_unavailable' });
   });
 
   describe('GET /library/artists/:id (catalog:read)', () => {
@@ -287,6 +290,39 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
       const res = await request(app).delete('/library/artists/1');
       expect(res.status).toBe(401);
       expect(mockDeleteArtistFromDB).not.toHaveBeenCalled();
+    });
+  });
+
+  // BS#2643: re-filing rewrites a shelf call number, so it sits at the same `catalog:['write']` bar as the other
+  // artist writes. (The integration tier runs AUTH_BYPASS, which cannot express a role refusal; this is where the
+  // tier is pinned.)
+  describe('POST /library/artists/:id/refile (catalog:write)', () => {
+    const body = { genre_id: 6, code_artist_number: 31 };
+
+    test.each(['stationManager', 'musicDirector'])('a %s-role token is authorized', async (role) => {
+      mockRole(role);
+      const res = await request(app)
+        .post('/library/artists/1/refile')
+        .set('Authorization', 'Bearer test-token')
+        .send(body);
+      expect(res.status).toBe(503);
+      expect(mockRefileArtistInGenre).toHaveBeenCalledWith(1, 6, 31);
+    });
+
+    test.each(['dj', 'member'])('a %s-role token (catalog:read only) is rejected', async (role) => {
+      mockRole(role);
+      const res = await request(app)
+        .post('/library/artists/1/refile')
+        .set('Authorization', 'Bearer test-token')
+        .send(body);
+      expect(res.status).toBe(403);
+      expect(mockRefileArtistInGenre).not.toHaveBeenCalled();
+    });
+
+    test('a request with no Authorization header is rejected', async () => {
+      const res = await request(app).post('/library/artists/1/refile').send(body);
+      expect(res.status).toBe(401);
+      expect(mockRefileArtistInGenre).not.toHaveBeenCalled();
     });
   });
 
