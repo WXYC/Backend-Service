@@ -4246,8 +4246,9 @@ paths:
         '404':
           description: >-
             Artist not found (`code: artist_not_found`), or not filed under
-            `genre_id` (`code: artist_not_filed_in_genre`); the messages are
-            unchanged (BS#3023)
+            `genre_id` (`code: artist_not_filed_in_genre`). The `Artist not filed
+            under genre` message prefix stays stable until every client keys on
+            `code`.
         '409':
           description: A lettered compilation section, a Various Artists bucket, or the target slot is held by another artist
         '503':
