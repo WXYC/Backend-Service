@@ -4,6 +4,8 @@ Incremental synchronization of the music library from the legacy tubafrenzy MySQ
 
 **Do not run it after `REVIEW_GATE_CUTOVER_DATE`** (BS#2807, `docs/env-vars.md`). It writes `library` rows straight to the table, not through `insertAlbum`, so it sits outside the review gate, and a run after the date would catalogue releases that no review stands behind. It has been unscheduled since 2026-09-17; this is the reason not to re-arm it.
 
+**Refuses to run unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set** (WXYC/Backend-Service#2581), the same guard `jobs/flowsheet-etl` and `jobs/rotation-etl` carry. tubafrenzy's catalog has been frozen since `/wxycdb` went dark on 2026-09-16 and dj-site now edits the catalog, so every run is a backwards write: the conflict update reverts dj-site edits to the `LEGACY_SOURCED_LIBRARY_COLUMNS` and an artist's re-filed call number (`genre_artist_crossreference.artist_genre_code`, `POST /library/artists/{id}/refile`), and since relabelling is physical, a revert leaves discs mislabelled the other way. The guard is checked before any database or MySQL connection opens; with the variable set, behavior (including inserting new releases) is unchanged. The rationale is in `backwards-write-guard.ts`.
+
 ## How It Works
 
 The run has **two phases**, in two separate transactions. Every legacy MySQL read happens with no Postgres transaction open.
@@ -135,13 +137,13 @@ Then, in principle, **one** of:
   DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%';
   ```
 
-  Whether this alone re-imports anything is not something this job verifies: `package.json` now declares `job-type: one-shot` (`cd8f058e`), so a fresh deploy no longer registers a crontab entry for this job (see [Delete denylist](#delete-denylist) above) — but that commit only ever installs crontab lines, it never removes one already installed on a host, so whether a previously-installed half-hourly line is still firing there is a separate, unverified fact. If one is, this `DELETE` alone is enough to start the re-sync: the next scheduled tick finds no watermark and fires the full-catalog re-import unattended, within thirty minutes. If none is, the job has to be invoked by hand instead. Do not assume the quiet case — check the host's crontab, or invoke the job explicitly, rather than waiting to see which one happens.
+  Whether this alone re-imports anything is not something this job verifies: `package.json` now declares `job-type: one-shot` (`cd8f058e`), so a fresh deploy no longer registers a crontab entry for this job (see [Delete denylist](#delete-denylist) above) — but that commit only ever installs crontab lines, it never removes one already installed on a host, so whether a previously-installed half-hourly line is still firing there is a separate, unverified fact. (Such a line now exits 1 at once unless the host's environment sets `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`.) If one is and the variable is set, this `DELETE` alone is enough to start the re-sync: the next scheduled tick finds no watermark and fires the full-catalog re-import unattended, within thirty minutes. If none is, the job has to be invoked by hand instead. Do not assume the quiet case — check the host's crontab, or invoke the job explicitly with `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`, rather than waiting to see which one happens.
 
   The next run has no watermark, so `buildReleaseQuery` emits no `TIME_LAST_MODIFIED` predicate and re-selects the entire upstream catalog in one pass. Every other release re-upserts idempotently (the `setWhere` guard means unchanged rows are not touched), so it is slow rather than dangerous for unchanged rows — but it is **not** the harmless operation the older wording implied:
 
   > **⚠️ A full re-sync REVERTS every dj-site catalog edit made since the Phase 3.5 freeze.** The upsert's `ON CONFLICT (legacy_release_id) DO UPDATE` sets each of `LEGACY_SOURCED_LIBRARY_COLUMNS` from `excluded.*` — `artist_id`, `artist_name`, `genre_id`, `format_id`, `alternate_artist_name`, `album_artist`, `album_title`, `code_number`, `code_volume_letters`, `disc_quantity`, `add_date`, `last_modified`, `date_lost`, `date_found`, `on_streaming` — wherever the Backend value differs from tubafrenzy's. That treated tubafrenzy as authoritative for those columns, which was true while `/wxycdb` was the only editor. It is no longer: dj-site's classic catalog interface now owns them, and the MySQL copy has been frozen since `cd8f058e` (2026-09-16), so for every release a librarian has retitled, re-filed or re-coded through dj-site since that date, "re-select the entire upstream catalog" means "overwrite the correction with the stale pre-freeze value". The `setWhere` guard does not help here — a changed row is exactly what it lets through. The blast radius is every edited release in the catalog, not just the one being restored, and the revert is silent.
   >
-  > So this recipe is safe only when no dj-site catalog edits have happened since the freeze, or when you have accepted losing them. To restore ONE release without that blast radius, put its row back from the snapshot's `captured -> 'entity'` instead (see below) rather than forcing a catalog-wide pass. The column-provenance fix — teaching the upsert which columns dj-site now owns — is tracked as WXYC/Backend-Service#2581.
+  > So this recipe is safe only when no dj-site catalog edits have happened since the freeze, or when you have accepted losing them. To restore ONE release without that blast radius, put its row back from the snapshot's `captured -> 'entity'` instead (see below) rather than forcing a catalog-wide pass. Rather than teach the upsert which columns dj-site owns (nearly all of them), WXYC/Backend-Service#2581 gates the whole job behind `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`, so this recipe now needs that variable set as an explicit acknowledgement of the loss.
 
   **Both clauses, not just the `=`.** The secondary imports carry their own `library-etl:*` watermark rows ([Delta bounds and watermarks](#delta-bounds-and-watermarks)). Deleting only the exact `library-etl` row leaves those in place, so the cross-reference and compilation-track imports stay bounded and the operator gets a release-only pass while believing they forced a full one. The predicate is written `= 'library-etl' OR LIKE 'library-etl:%'` rather than the looser `LIKE 'library-etl%'` so that a future job named `library-etl-something` is not swept up by an operator running this recipe — `:` is the namespace separator, and no job name elsewhere in `jobs/` contains one.
 
@@ -278,13 +280,13 @@ docker run --env-file .env wxyc_library_etl:ci
 
 ### Scheduled Execution
 
-The job is designed to run every 30 minutes (see `cron-schedule` in `package.json`). In production, an external scheduler (e.g., Kubernetes CronJob, AWS ECS Scheduled Task, or cron) should invoke:
+The job is **not scheduled**: `package.json` declares `job-type: one-shot` and has no `cron-schedule`, and it refuses to run without `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` (see the top of this file). It was originally designed to run every 30 minutes. To invoke it deliberately:
 
 ```
-npm start --workspace=@wxyc/library-etl
+LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1 npm start --workspace=@wxyc/library-etl
 ```
 
-The job is safe to run on a schedule because it is incremental (only processes releases modified since the last run) and idempotent (duplicate albums are detected and skipped).
+The job was safe to run on a schedule while tubafrenzy was the catalog's source of truth, because it is incremental (only processes releases modified since the last run) and idempotent (duplicate albums are detected and skipped).
 
 ## Testing
 

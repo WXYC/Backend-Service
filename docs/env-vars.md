@@ -388,7 +388,7 @@ Why 0.4: pg_trgm's 0.30 is far too permissive for short variants. The misprint `
 
 ## ETL Jobs
 
-The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. The rotation ETL (`jobs/rotation-etl/`) syncs rotation releases from tubafrenzy. All three require the standard database variables above plus these for SSH tunneling to the legacy server:
+The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. The rotation ETL (`jobs/rotation-etl/`) syncs rotation releases from tubafrenzy. All three require the standard database variables above plus these for SSH tunneling to the legacy server, and all three refuse to run unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set (each reverts Backend-side edits to tubafrenzy-sourced rows; library-etl: BS#2581):
 
 - `SSH_HOST` — Hostname of the legacy server
 - `SSH_USERNAME` — SSH login username

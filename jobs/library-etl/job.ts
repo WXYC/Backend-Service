@@ -16,6 +16,7 @@ import {
   compilation_track_artist,
   closeDatabaseConnection,
 } from '@wxyc/database';
+import { backwardsWriteRefusalMessage, isBackwardsWriteAllowed } from './backwards-write-guard.js';
 
 const legacyDB = MirrorSQL.instance();
 const JOB_NAME = 'library-etl';
@@ -1221,9 +1222,13 @@ const findExistingRelease = async (
 };
 
 /**
- * Columns the library-etl is the source of truth for — i.e. the columns it
- * writes during INSERT and refreshes from `excluded.*` on a legacy_release_id
- * conflict. Pinned by a unit test so PG-only / LML-resolved columns (`id`,
+ * Columns the library-etl writes during INSERT and refreshes from `excluded.*`
+ * on a legacy_release_id conflict. Upstream (tubafrenzy) is NO LONGER the
+ * source of truth for them: its catalog is frozen and dj-site edits these
+ * columns now, so a conflict-update reverts those edits. That is survivable
+ * only because the whole job refuses to run without
+ * `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` (`./backwards-write-guard.ts`,
+ * WXYC/Backend-Service#2581). Pinned by a unit test so PG-only / LML-resolved columns (`id`,
  * `plays`, `label`, `label_id`, `artwork_url`, `canonical_entity_*`,
  * `search_doc`) can't drift into the SET list and clobber human-curated or
  * downstream-resolved fields. `legacy_release_id` is the conflict key itself
@@ -1534,6 +1539,16 @@ const runSecondaryImports = async (runStartedAt: Date) => {
 };
 
 const run = async () => {
+  // Retained-code guard (WXYC/Backend-Service#2581). tubafrenzy's catalog is
+  // frozen and dj-site owns catalog edits, so every run reverts them. Refuse
+  // unless the operator opted in explicitly. Checked before the try so no DB
+  // or tubafrenzy connection is opened; see ./backwards-write-guard.ts.
+  if (!isBackwardsWriteAllowed()) {
+    console.error(backwardsWriteRefusalMessage(JOB_NAME));
+    process.exitCode = 1;
+    return;
+  }
+
   try {
     const runStartedAt = new Date();
     const lastRunMs = await getLastRunTimestamp(JOB_NAME);
