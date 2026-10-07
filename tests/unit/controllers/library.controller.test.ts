@@ -70,6 +70,7 @@ type LinkRotationOutcomeMock =
   | { outcome: 'linked'; rotation: Record<string, unknown>; flowsheetRowsLinked: number }
   | { outcome: 'rotation_not_found' }
   | { outcome: 'already_linked' }
+  | { outcome: 'moved' }
   | { outcome: 'album_not_found' };
 const mockLinkRotationToAlbum =
   jest.fn<(rotationId: number, albumId: number, tx?: unknown) => Promise<LinkRotationOutcomeMock>>();
@@ -3484,7 +3485,26 @@ describe('library.controller', () => {
       const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
       const res = mockResponse();
 
-      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('already linked');
+      await expect(linkRotationToAlbum(req, res, next)).rejects.toMatchObject({
+        message: 'Rotation entry is already linked to a library release',
+        statusCode: 409,
+        code: undefined,
+      });
+    });
+
+    it('returns 409 with its own message, and no reason code, for a moved-away row', async () => {
+      mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'moved' });
+      const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
+      const res = mockResponse();
+
+      const err = await linkRotationToAlbum(req, res, next).catch((e) => e);
+
+      expect(err.message).toBe(
+        'This rotation entry was moved to another bin. Link the entry in its current bin instead.'
+      );
+      expect(err.statusCode).toBe(409);
+      expect(err.code).toBeUndefined();
+      expect(mockSpan.setAttributes).not.toHaveBeenCalled();
     });
   });
 
@@ -6618,7 +6638,7 @@ describe('library.controller', () => {
 
     describe('the legacy bases (BS#2810)', () => {
       const notEligible = new RotationNotEligibleError(
-        'The rotation row is linked, or was not in rotation before the cutover'
+        'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.'
       );
       const importReq = (from_rotation_id: unknown) =>
         ({
@@ -6707,20 +6727,33 @@ describe('library.controller', () => {
       });
 
       it.each([
-        ['an insert refused as not eligible', () => mockInsertAlbum.mockRejectedValue(notEligible)],
+        [
+          'an insert refused as not eligible',
+          () => mockInsertAlbum.mockRejectedValue(notEligible),
+          'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.',
+        ],
         [
           'a row linked between the check and the link',
           () => {
             mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
             mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'already_linked' });
           },
+          'This rotation entry was linked or moved to another bin while the import was saving. Nothing was created; reload to see where it stands.',
         ],
-      ])('POST /library answers 409 rotation_not_eligible for %s', async (_label, arrange) => {
+        [
+          'a row moved between the check and the link',
+          () => {
+            mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+            mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'moved' });
+          },
+          'This rotation entry was linked or moved to another bin while the import was saving. Nothing was created; reload to see where it stands.',
+        ],
+      ])('POST /library answers 409 rotation_not_eligible for %s', async (_label, arrange, message) => {
         arrange();
         const res = mockResponse();
         await addAlbum(importReq(12), res, next);
         expect(res.status).toHaveBeenCalledWith(409);
-        expect(res.json).toHaveBeenCalledWith({ message: expect.any(String), reason: 'rotation_not_eligible' });
+        expect(res.json).toHaveBeenCalledWith({ message, reason: 'rotation_not_eligible' });
       });
 
       it.each([[0], [-1], [1.5], ['4'], [2147483648]])(

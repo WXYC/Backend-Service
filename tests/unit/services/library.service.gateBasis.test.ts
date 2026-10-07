@@ -231,9 +231,24 @@ describe('the legacy bases (BS#2810)', () => {
       expect(db.insert).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['a post-cutover row', POST_CUTOVER],
+      ['a linked row', LINKED],
+      ['a row that does not exist', []],
+    ])('words the refusal of %s exactly', async (_label, chain) => {
+      seedChain(chain);
+      await expect(insertAlbum(ALBUM, basis)).rejects.toThrow(
+        new RotationNotEligibleError(
+          'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.'
+        )
+      );
+    });
+
     it('refuses a row that was moved to another bin, whatever its date, and writes nothing', async () => {
       seedChain([{ ...row(1, '2026-12-01'), has_successor: true }]);
-      await expect(insertAlbum(ALBUM, basis)).rejects.toBeInstanceOf(RotationNotEligibleError);
+      await expect(insertAlbum(ALBUM, basis)).rejects.toThrow(
+        new RotationNotEligibleError('The rotation row was moved to another bin')
+      );
       expect(db.insert).not.toHaveBeenCalled();
     });
 

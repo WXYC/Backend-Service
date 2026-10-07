@@ -280,7 +280,13 @@ describe('legacy rotation rows: import and move (BS#2810)', () => {
         .send(importBody(`Link target ${runId}`, target.id))
         .expect(201);
 
-      await auth.patch(`/library/rotation/${chain[0].id}/link`).send({ album_id: made.body.id }).expect(409);
+      const movedAway = await auth
+        .patch(`/library/rotation/${chain[0].id}/link`)
+        .send({ album_id: made.body.id })
+        .expect(409);
+      expect(movedAway.body.message).toBe(
+        'This rotation entry was moved to another bin. Link the entry in its current bin instead.'
+      );
       expect(await albumIds(chain)).toEqual([null, null, null]);
 
       await auth.patch(`/library/rotation/${chain[2].id}/link`).send({ album_id: made.body.id }).expect(200);

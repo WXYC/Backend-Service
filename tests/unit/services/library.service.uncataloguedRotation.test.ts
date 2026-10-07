@@ -560,10 +560,10 @@ describe('linkRotationToAlbum (BS#2109)', () => {
       return rotationSelectChain;
     };
 
-    it('refuses a row that was moved to another bin with the existing conflict, writing nothing', async () => {
+    it('answers moved, not already_linked, for a row that was moved to another bin, writing nothing', async () => {
       const rotationSelectChain = seedLink([{ id: 99 }]);
 
-      await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toEqual({ outcome: 'already_linked' });
+      await expect(linkRotationToAlbum(ROTATION_ID, ALBUM_ID)).resolves.toEqual({ outcome: 'moved' });
 
       expect(db.update).not.toHaveBeenCalled();
       expect(db.execute).not.toHaveBeenCalled();

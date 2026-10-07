@@ -3278,8 +3278,10 @@ paths:
           description: Rotation entry not found, or album not found.
         '409':
           description: >-
-            Rotation entry is already linked to a library release, or was moved to another bin
-            (only the newest row of a moved record's chain links, BS#3007).
+            `Rotation entry is already linked to a library release`, or, for a row that was moved
+            to another bin (only the newest row of a moved record's chain links, BS#3007),
+            `This rotation entry was moved to another bin. Link the entry in its current bin instead.`
+            Neither carries a reason code.
 
   /library/rotation/{id}:
     get:

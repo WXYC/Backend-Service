@@ -759,7 +759,9 @@ const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
       FROM chain
     `)) as unknown as RotationChainRow[];
     if (!isLegacyRotationRow(chain, rotationId)) {
-      throw new RotationNotEligibleError('The rotation row is linked, or was not in rotation before the cutover');
+      throw new RotationNotEligibleError(
+        'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.'
+      );
     }
     // A moved record's chain is one record (BS#3007): only the newest row imports; `linkRotationToAlbum` links the rest.
     if (basis.kind === 'legacy_import' && chain.find((row) => row.id === rotationId)?.has_successor) {
@@ -1825,6 +1827,7 @@ export type LinkRotationOutcome =
   | { outcome: 'linked'; rotation: UncataloguedRotationRow; flowsheetRowsLinked: number }
   | { outcome: 'rotation_not_found' }
   | { outcome: 'already_linked' }
+  | { outcome: 'moved' }
   | { outcome: 'album_not_found' };
 
 /**
@@ -1834,7 +1837,7 @@ export type LinkRotationOutcome =
  *
  * **Two writes, one transaction (BS#2410 / plan D7).** The rotation row's
  * `album_id`, then the flowsheet plays logged against it. A moved record's chain is one record (BS#3007): only the
- * chain's newest row links (a moved-away row answers `already_linked`), and linking it also links the chain's unlinked
+ * chain's newest row links (a moved-away row answers `moved`), and linking it also links the chain's unlinked
  * older rows, whose plays are re-pointed with the row's own. The
  * second write is the JSP's third step, which Backend had dropped; its
  * predicates, why it is FK-keyed rather than text-matched, and the enrichment
@@ -1936,14 +1939,14 @@ export const linkRotationToAlbum = async (
     if (existingRotation.album_id != null) {
       return { outcome: 'already_linked' as const };
     }
-    // A moved-away row is not its chain's newest (BS#3007): refused like a linked one, so the newest row stays linkable.
+    // A moved-away row is not its chain's newest (BS#3007): refused, so the newest row stays linkable.
     const [successor] = await tx
       .select({ id: rotation.id })
       .from(rotation)
       .where(eq(rotation.moved_from_rotation_id, rotationId))
       .limit(1);
     if (successor) {
-      return { outcome: 'already_linked' as const };
+      return { outcome: 'moved' as const };
     }
 
     const [updated] = await tx
