@@ -22,8 +22,9 @@ import { outerRef } from '../utils/sql-fragments.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
 import { mayFileItem } from '../utils/intake-filing-rule.js';
+import { lockReleaseRow } from '../utils/release-row-lock.js';
 
-export { mayFileItem };
+export { mayFileItem, lockReleaseRow };
 
 /**
  * Intake-item service behind `/intake` (BS#2796, slice 7 of BS#2791).
@@ -481,10 +482,6 @@ export type IntakeFileArm =
 /** The release a filed or finalized item carries; any other item has none to lock or stamp. */
 const filedRelease = (item: { album_id: number | null; state: string }) =>
   FILED_STATES.some((state) => state === item.state) ? item.album_id : null;
-
-/** Locks a library row `FOR KEY SHARE`, so a concurrent `DELETE /library/{id}` waits; answers whether the row exists. */
-export const lockReleaseRow = async (tx: Pick<typeof db, 'select'>, albumId: number) =>
-  (await tx.select({ id: library.id }).from(library).where(eq(library.id, albumId)).for('key share')).length > 0;
 
 /**
  * Locks what a write is about and answers the columns that name it, or `undefined` when there is no such

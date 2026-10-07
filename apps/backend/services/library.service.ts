@@ -110,6 +110,7 @@ import {
 import { rawProjection } from '../utils/sql-projection.js';
 import { isGateOn } from '../utils/review-gate-cutover.js';
 import { mayFileItem } from '../utils/intake-filing-rule.js';
+import { lockReleaseRow } from '../utils/release-row-lock.js';
 import { ReviewRequiredError, type GateBasis, type NewReleaseGateBasis } from '../utils/review-gate-basis.js';
 import { ROTATION_BIN_DEDUP_ORDINAL } from '../utils/rotation-bin-order.js';
 import { hasAlphanumeric } from '../utils/text-query.js';
@@ -737,12 +738,7 @@ const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
     return;
   }
   if (basis.kind === 'existing_release') {
-    const [release] = await tx
-      .select({ id: library.id })
-      .from(library)
-      .where(eq(library.id, basis.albumId))
-      .for('key share');
-    if (!release) throw new WxycError('Release not found', 404);
+    if (!(await lockReleaseRow(tx, basis.albumId))) throw new WxycError('Release not found', 404);
     return;
   }
   const [item] = await tx
