@@ -13,7 +13,7 @@ import type { ReviewsActor } from '../utils/review-grants.js';
 import { confirmedFccNotesOf } from './fcc-notes.service.js';
 import { withLockedRecordSubject } from './intake.service.js';
 import { lockReleaseRow } from '../utils/release-row-lock.js';
-import { reviewInReleaseList, writeFirstRevisionIfMissing } from './reviews.service.js';
+import { reviewInReleaseList, selectReleaseRecord, writeFirstRevisionIfMissing } from './reviews.service.js';
 
 /**
  * The print log and the slip (BS#2804). Its own module because `reviews.service` imports `intake.service`, and the print
@@ -133,17 +133,8 @@ export const printReleaseReview = async (id: number, reviewId: number, actor: Pi
       .for('update');
     if (!review || review.medium !== 'typed' || review.status !== 'submitted')
       return { outcome: 'bad_review' as const };
-    const [record] = await tx
-      .select({
-        // The release's displayed artist: `alternate_artist_name || artist_name`, as filing hands it to enrichment
-        // (`library-filing.service.ts`, `library.controller.ts`), so a compilation under a V/A bucket names its own artist.
-        artist_name: sql<string>`coalesce(nullif(${library.alternate_artist_name}, ''), ${artists.artist_name})`,
-        album_title: library.album_title,
-        record_label: library.label,
-      })
-      .from(library)
-      .innerJoin(artists, eq(artists.id, library.artist_id))
-      .where(eq(library.id, id));
+    // The release's displayed artist, by the one rule `selectReleaseRecord` holds.
+    const [record] = await selectReleaseRecord(tx, id);
     return {
       outcome: 'printed' as const,
       slip: await printSlip(tx, { intake_item_id: null, album_id: id }, record, review, actor.id),

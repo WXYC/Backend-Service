@@ -72,21 +72,22 @@ export const createReview: RequestHandler = async (req, res) => {
     throw new WxycError('author, author_user_id, medium and accept require reviews: manage', 403);
   const subject = parseRecordSubject(body);
   const fields = parseFields(body);
-  const result = onBehalf
+  const recorded = onBehalf
     ? await reviewsService.recordReview(
         subject,
         fields,
         parseOnBehalf(body, subject.intake_item_id !== undefined),
         actor
       )
-    : await reviewsService.createReview(subject, fields, actor);
+    : undefined;
+  const result = recorded ?? (await reviewsService.createReview(subject, fields, actor));
   if (result.outcome === 'subject_not_held') {
     return void conflict(res, 'subject_not_held', 'You do not hold this intake item, or the subject does not exist');
   }
   if (result.outcome === 'text_required') throw new WxycError('A typed review needs text to be accepted', 400);
   if (result.outcome === 'unknown_author') throw new WxycError('author_user_id names no account', 400);
   // After the commit and not awaited, like the submit notice: a failed send never fails the request.
-  if (result.notice) void notifyReviewRecorded(result.notice);
+  if (recorded?.outcome === 'created' && recorded.notice) void notifyReviewRecorded(recorded.notice);
   res.json(result.review);
 };
 

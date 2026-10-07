@@ -228,29 +228,39 @@ export const createReview = async (subject: RecordSubject, fields: ReviewFields,
         status: 'draft',
       })
       .returning({ id: reviews.id });
-    return { outcome: 'created' as const, review: (await selectReview(id, tx))!, notice: undefined };
+    return { outcome: 'created' as const, review: (await selectReview(id, tx))! };
   });
 
 /**
+ * A release's own record: the one home of the displayed-artist rule. The artist is `alternate_artist_name`, else the
+ * artist's name, as filing hands it to enrichment (`library-filing.service.ts`, `library.controller.ts`), so a
+ * compilation under a V/A bucket names its own artist. Used by the release print's slip and by the review notices.
+ */
+export const selectReleaseRecord = (tx: Pick<typeof db, 'select'>, albumId: number) =>
+  tx
+    .select({
+      artist_name: sql<string>`coalesce(nullif(${library.alternate_artist_name}, ''), ${artists.artist_name})`,
+      album_title: library.album_title,
+      record_label: library.label,
+    })
+    .from(library)
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .where(eq(library.id, albumId));
+
+/**
  * The record a review is about, as the notices name it: the item's artist and album, else the release's displayed
- * artist (`alternate_artist_name`, else the artist's name) and title. `undefined` when it is gone.
+ * artist and title (`selectReleaseRecord`). `undefined` when it is gone.
  */
 const recordNames = async (tx: Pick<typeof db, 'select'>, review: Pick<Review, 'intake_item_id' | 'album_id'>) => {
-  const [row] =
-    review.intake_item_id !== null
-      ? await tx
-          .select({ artist: intake_items.artist_name, album: intake_items.album_title })
-          .from(intake_items)
-          .where(eq(intake_items.id, review.intake_item_id))
-      : await tx
-          .select({
-            artist: sql<string>`coalesce(nullif(${library.alternate_artist_name}, ''), ${artists.artist_name})`,
-            album: library.album_title,
-          })
-          .from(library)
-          .innerJoin(artists, eq(artists.id, library.artist_id))
-          .where(eq(library.id, review.album_id!));
-  return row;
+  if (review.intake_item_id !== null) {
+    const [item] = await tx
+      .select({ artist: intake_items.artist_name, album: intake_items.album_title })
+      .from(intake_items)
+      .where(eq(intake_items.id, review.intake_item_id));
+    return item;
+  }
+  const [release] = await selectReleaseRecord(tx, review.album_id!);
+  return release && { artist: release.artist_name, album: release.album_title };
 };
 
 /** The on-behalf keys of `POST /reviews` (slice 13e): the free-text `author`, an optional linked account, the medium, and whether the review is accepted at once. */
@@ -302,13 +312,14 @@ export const recordReview = async (
       }
       const review = (await selectReview(row.id, tx))!;
       // Notice 2 (BS#2864): the linked account, unless it is the recorder's own.
-      const names =
-        author_user_id !== undefined && author_user_id !== actor.id ? await recordNames(tx, row) : undefined;
-      const [recorder] = names ? await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id)) : [];
-      const notice: AuthorNotice | undefined =
-        names && author_user_id !== undefined
-          ? { ...names, reviewId: row.id, authorUserId: author_user_id, name: snapshotAuthor(recorder?.name) }
-          : undefined;
+      let notice: AuthorNotice | undefined;
+      if (author_user_id !== undefined && author_user_id !== actor.id) {
+        const names = await recordNames(tx, row);
+        if (names) {
+          const [recorder] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
+          notice = { ...names, reviewId: row.id, authorUserId: author_user_id, name: snapshotAuthor(recorder?.name) };
+        }
+      }
       return { outcome: 'created' as const, review, notice };
     });
   } catch (error) {
