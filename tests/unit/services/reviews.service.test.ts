@@ -24,6 +24,8 @@ const mockReads: {
   where: string;
   /** The rendered ORDER BY, when the select has one. */
   orderBy?: string;
+  /** Every join, in order: its kind and its rendered ON clause. */
+  joins?: { kind: 'left' | 'inner'; on: string }[];
 }[] = [];
 /** Every UPDATE and DELETE, in order, with its table, its `SET` (updates) and its rendered WHERE. */
 const mockWritesTo: { verb: 'update' | 'delete'; table: string; set?: Record<string, unknown>; where: string }[] = [];
@@ -44,13 +46,17 @@ jest.mock('@wxyc/database', () => {
     const read: (typeof mockReads)[number] = { handle, table: '', where: '' };
     mockReads.push(read);
     mockStatements.push(`select#${mockReads.length - 1}`);
+    const recordJoin = (kind: 'left' | 'inner', on: any) => {
+      (read.joins ??= []).push({ kind, on: new PgDialect().sqlToQuery(on).sql });
+      return c;
+    };
     const c: any = {
       from: (t: any) => {
         read.table = getTableName(t);
         return c;
       },
-      leftJoin: () => c,
-      innerJoin: () => c,
+      leftJoin: (_t: any, on: any) => recordJoin('left', on),
+      innerJoin: (_t: any, on: any) => recordJoin('inner', on),
       orderBy: (...columns: any[]) => {
         const { sql } = jest.requireActual('drizzle-orm');
         const q = new PgDialect().sqlToQuery(
@@ -1564,6 +1570,13 @@ describe('review notices decided in the transaction (BS#2864)', () => {
       expect(read.where).toContain('("n"."printed_at", "n"."id") > ("p"."printed_at", "p"."id")');
       expect(read.where).toContain('[3,3]');
       expect(read.orderBy).toBe('"rp"."printed_at", "rp"."id"');
+    });
+
+    // Pins "a print whose revision row is gone is listed": an inner join, or a join on the review's id, would drop that print.
+    test("the copies read LEFT JOINs the printed revision on the print's revision_id", async () => {
+      await fccNotice([print(8, null)]);
+      const [read] = printedReads();
+      expect(read.joins).toEqual([{ kind: 'left', on: '"printed"."id" = "rp"."revision_id"' }]);
     });
   });
 
