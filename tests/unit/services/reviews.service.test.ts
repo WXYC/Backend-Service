@@ -1414,6 +1414,25 @@ describe('review notices decided in the transaction (BS#2864)', () => {
       expect(names?.where).toContain('[9]');
     });
 
+    // The content-change rule (`revises`) for an editor who is not the author. The own-edit exclusion silences the
+    // author's own PATCHes whatever `revises` says, so only a music director's edit pins it. A music director's
+    // consent-only patch never gets this far: it is refused below (`consent_forbidden`). A record is queued so a
+    // notice that wrongly fires has names to carry.
+    test.each([
+      ['a patch that sends the stored values', { review: 'kept', fcc: 'old line' }],
+      ['an empty patch', {}],
+    ])("sends none for a music director's %s on a submitted, linked review", async (_n, patch) => {
+      mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored()], [stored()], [RECORD]);
+      const result = await updateReview(3, patch, MD);
+      expect(result).toMatchObject({ outcome: 'updated', authorNotice: undefined });
+    });
+
+    test("sends one for a music director's patch that changes one field and repeats another", async () => {
+      edit({}, 'Test MD', [RECORD]);
+      const result = await updateReview(3, { review: 'kept', fcc: 'new line' }, MD);
+      expect(result).toMatchObject({ authorNotice: { ...RECORD, reviewId: 3, authorUserId: 'dj-1' } });
+    });
+
     test("a music director's consent-only patch is refused before any notice", async () => {
       mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored()]);
       expect(await updateReview(3, { publish_apps: true }, MD)).toEqual({ outcome: 'consent_forbidden' });

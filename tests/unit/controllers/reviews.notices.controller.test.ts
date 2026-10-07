@@ -85,4 +85,10 @@ describe('POST /reviews', () => {
     await create({ notice: undefined });
     expect(mockNotify.notifyReviewRecorded).not.toHaveBeenCalled();
   });
+
+  test('a send that never settles does not hold the response', async () => {
+    mockNotify.notifyReviewRecorded.mockReturnValue(new Promise<void>(() => {}));
+    const res = await create({ notice: NOTICE });
+    expect(res.json).toHaveBeenCalledWith(REVIEW);
+  });
 });
