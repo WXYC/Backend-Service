@@ -29,7 +29,7 @@ import * as Sentry from '@sentry/node';
 import type { Request, Response } from 'express';
 import { eq, sql } from 'drizzle-orm';
 import { db, banned_fingerprints, user } from '@wxyc/database';
-import { auth } from '@wxyc/authentication';
+import { auth, isBanInForce } from '@wxyc/authentication';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -76,12 +76,6 @@ async function lookupFingerprint(fingerprint: string): Promise<FingerprintBanRow
     )
     .limit(1);
   return rows[0] ?? null;
-}
-
-function isUserCurrentlyBanned(row: UserBanRow): boolean {
-  if (!row.banned) return false;
-  if (row.banExpires && row.banExpires.getTime() <= Date.now()) return false;
-  return true;
 }
 
 export async function checkRequestBanHandler(req: Request, res: Response): Promise<Response> {
@@ -152,7 +146,7 @@ export async function checkRequestBanHandler(req: Request, res: Response): Promi
       return res.status(404).json({ error: 'user_not_found' });
     }
 
-    if (isUserCurrentlyBanned(userRow)) {
+    if (isBanInForce(userRow)) {
       return res.status(200).json({
         userId,
         fingerprint,

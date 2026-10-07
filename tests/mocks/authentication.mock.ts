@@ -43,3 +43,6 @@ export type { CorsModeRequest, ResolvedCorsOrigin } from '../../shared/authentic
 // middleware's fail-closed-to-NULL behavior on a missing/invalid key is
 // production behavior the unit suite must exercise, not a stub's guess at it.
 export { deriveStationSignupIpHash } from '../../shared/authentication/src/signup-ip-hash';
+
+// Real implementation, same convention: `isBanInForce` is a pure predicate with no auth/database dependency.
+export { isBanInForce } from '../../shared/authentication/src/ban-in-force';

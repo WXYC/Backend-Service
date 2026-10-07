@@ -21,6 +21,8 @@ jest.mock('@wxyc/authentication', () => ({
       verifyJWT: mockVerifyJWT,
     },
   },
+  // The real predicate, from its leaf module: the handler's expiry behavior is under test here.
+  isBanInForce: jest.requireActual('../../../shared/authentication/src/ban-in-force').isBanInForce,
 }));
 
 import { db } from '@wxyc/database';
