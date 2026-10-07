@@ -7,7 +7,7 @@
  * destination `(code_letters, genre_id)` bucket plus the artist's own memberships in one statement over
  * `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`; (4) last, at its first
  * UPDATE, the `library_watermark` row (the statement-level trigger's target, a catalog-wide write mutex). Properties
- * pinned here, in this order: (a), (b), (d), (e), (f), (c).
+ * pinned here, in this order: (a), (b), (d), (e), (f), (g), (h), (i), (c).
  *
  *  (a) Two re-files into one bucket SERIALIZE. A raw session S holds `FOR UPDATE` on the bucket's lowest
  *      `artist_id` row (a third artist below both movers). The first request takes the advisory key and then queues on
@@ -44,6 +44,14 @@
  *  (f) Two re-letters into an EMPTY bucket (no rows to lock): a separate session holds the destination shelf's advisory
  *      key until both requests are seen waiting on it, then releases it. Exactly one 200. Without the advisory lock
  *      neither request waits and the spec fails with "2 request backend(s) were not seen waiting".
+ *  (g) Genre move vs a release edit. The moving `library` rows are locked FOR NO KEY UPDATE before the first UPDATE
+ *      (BS#3036). Without that, the move takes `library_watermark` at its crossreference UPDATE and then waits on a
+ *      release row that a concurrent `PATCH /library/:id` holds while ITS statement trigger waits on the watermark: a
+ *      deadlock that the move's 750 ms `lock_timeout` turns into a 503. A raw session W holds the watermark; the move
+ *      queues on it; the PATCH arrives; W releases. Fixed code: the move already holds the release row, the PATCH waits
+ *      on it, and both succeed. Unfixed code: the move answers 503.
+ *  (h) Two genre moves into one empty destination shelf serialize on the destination advisory key: exactly one 200.
+ *  (i) A session holding a moving release row past the timeout makes the move answer 503 with nothing written.
  *  (c) A live writer holding a bucket row past the timeout makes the request stand down with 503
  *      `LockUnavailableRefusal`.
  */
@@ -83,6 +91,7 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
   };
 
   const cleanup = async () => {
+    await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE album_title LIKE ${`${PREFIX}%`}`;
     const ids = (await sql`SELECT id FROM ${sql(SCHEMA)}.artists WHERE artist_name LIKE ${`${PREFIX}%`}`).map(
       (a) => a.id
     );
@@ -172,6 +181,32 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
       await sleep(POLL_INTERVAL_MS);
     }
     throw new Error(`${count} request backend(s) were not seen waiting within ${BLOCKED_WAIT_MS} ms`);
+  };
+
+  /** Polls until a request backend running a `query` matching `fragment` is blocked behind `blockerPid`. */
+  const waitForBlockedBy = async (blockerPid, fragment) => {
+    const deadline = Date.now() + BLOCKED_WAIT_MS;
+    while (Date.now() < deadline) {
+      const waiting = await sql`
+        SELECT pid FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND ${blockerPid}::int = ANY(pg_blocking_pids(pid)) AND query ILIKE ${`%${fragment}%`}`;
+      if (waiting.length > 0) return;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    throw new Error(`no backend running a ${fragment} statement was seen blocked behind ${blockerPid}`);
+  };
+
+  /** Polls until the release edit's UPDATE is blocked on a lock (on the watermark, or on the move's row lock). */
+  const waitForBlockedPatch = async (excludePid) => {
+    const deadline = Date.now() + BLOCKED_WAIT_MS;
+    while (Date.now() < deadline) {
+      const waiting = await sql`
+        SELECT pid FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND pid <> ${excludePid}::int AND query ILIKE '%update%library%album_title%'`;
+      if (waiting.length > 0) return;
+      await sleep(POLL_INTERVAL_MS);
+    }
+    throw new Error('the release edit was not seen waiting');
   };
 
   const refile = (artistId) =>
@@ -447,4 +482,146 @@ describe('POST /library/artists/:id/refile bucket lock (BS#2643)', () => {
     expect(loser.body.reason).toBe('artist_code_conflict');
     expect(loser.body.artist).toMatchObject({ id: ids[winnerIndex], code_letters: EMPTY, code_artist_number: 36 });
   }, 30000);
+
+  describe('genre move (BS#3036)', () => {
+    const JAZZ = 7;
+    const ELECTRONIC = 15;
+
+    const seedMover = async (name, letters, number, releaseTitle) => {
+      const [artist] = await sql`
+        INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
+        VALUES (${`${PREFIX} ${name}`}, ${`${PREFIX} ${name}`}, ${letters}) RETURNING id`;
+      await sql`
+        INSERT INTO ${sql(SCHEMA)}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+        VALUES (${artist.id}, ${JAZZ}, ${number})`;
+      let releaseId;
+      if (releaseTitle) {
+        [{ id: releaseId }] = await sql`
+          INSERT INTO ${sql(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number)
+          VALUES (${artist.id}, ${JAZZ}, 1, ${`${PREFIX} ${releaseTitle}`}, 1) RETURNING id`;
+      }
+      return { id: artist.id, releaseId };
+    };
+
+    const move = (id, number = 4) =>
+      manager
+        .post(`/library/artists/${id}/refile`)
+        .send({ genre_id: JAZZ, to_genre_id: ELECTRONIC, code_artist_number: number });
+
+    const genreOf = async (id) => {
+      const [row] = await sql`
+        SELECT genre_id FROM ${sql(SCHEMA)}.genre_artist_crossreference WHERE artist_id = ${id}`;
+      return row.genre_id;
+    };
+
+    it('(g) a release edit racing the move does not deadlock: both succeed', async () => {
+      const { id, releaseId } = await seedMover('Edit Race', 'ZM', 36, 'Edit Race Release');
+      let releaseW;
+      let resolveWPid;
+      const wPid = new Promise((resolve) => {
+        resolveWPid = resolve;
+      });
+      const wDone = sql.begin(async (tx) => {
+        const [{ pid }] = await tx`SELECT pg_backend_pid() AS pid`;
+        await tx`UPDATE ${sql(SCHEMA)}.library_watermark SET last_modified_at = now()`;
+        resolveWPid(pid);
+        await new Promise((resolve) => {
+          releaseW = resolve;
+        });
+      });
+      const pidW = await wPid;
+      let released = false;
+      let moved;
+      let edited;
+      try {
+        const moving = move(id).then((r) => r);
+        await waitForBlockedBy(pidW, 'genre_artist_crossreference');
+        const editing = manager
+          .patch(`/library/${releaseId}`)
+          .send({ album_title: `${PREFIX} edited` })
+          .then((r) => r);
+        await waitForBlockedPatch(pidW);
+        releaseW();
+        released = true;
+        await wDone;
+        [moved, edited] = await Promise.all([moving, editing]);
+      } finally {
+        if (!released) {
+          releaseW();
+          await wDone;
+        }
+      }
+
+      if (edited.status >= 500) throw new Error(`the release edit failed: ${edited.status}`);
+      expect(moved.status).toBe(200);
+      expect(edited.status).toBe(200);
+      expect(await genreOf(id)).toBe(ELECTRONIC);
+    }, 30000);
+
+    it('(h) two moves into one empty destination shelf serialize on the advisory key: exactly one 200', async () => {
+      const LETTERS = 'QY';
+      const [{ n }] = await sql`
+        SELECT count(*)::int AS n FROM ${sql(SCHEMA)}.genre_artist_crossreference x
+        JOIN ${sql(SCHEMA)}.artists a ON a.id = x.artist_id WHERE a.code_letters = ${LETTERS} AND x.genre_id = ${ELECTRONIC}`;
+      expect(n).toBe(0);
+      const x = (await seedMover('Shelf X', LETTERS, 10)).id;
+      const y = (await seedMover('Shelf Y', LETTERS, 11)).id;
+      const reserved = await sql.reserve();
+      const [{ pid }] = await reserved`SELECT pg_backend_pid() AS pid`;
+      const key = `artist-code-bucket:${ELECTRONIC}:${LETTERS}`;
+      await reserved`SELECT pg_advisory_lock(hashtextextended(${key}, 0))`;
+      let unlocked = false;
+      let results;
+      try {
+        const pending = [move(x, 4).then((r) => r), move(y, 4).then((r) => r)];
+        await waitForWaiters(pid, 2);
+        await reserved`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`;
+        unlocked = true;
+        results = await Promise.all(pending);
+      } finally {
+        if (!unlocked) await reserved`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`;
+        reserved.release();
+      }
+
+      const ids = [x, y];
+      const winnerIndex = results.findIndex((r) => r.status === 200);
+      expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+      let loser = results[1 - winnerIndex];
+      if (loser.status === 503) loser = await move(ids[1 - winnerIndex], 4);
+      expect(loser.status).toBe(409);
+      expect(loser.body.reason).toBe('artist_code_conflict');
+      expect(loser.body.artist).toMatchObject({ id: ids[winnerIndex], genre_id: ELECTRONIC, code_artist_number: 4 });
+    }, 30000);
+
+    it('(i) a moving release row held past the timeout makes the move answer 503 with nothing written', async () => {
+      const { id, releaseId } = await seedMover('Held Release', 'ZM', 37, 'Held Release Row');
+      let release;
+      const released = new Promise((resolve) => {
+        release = resolve;
+      });
+      let resolveHeld;
+      const held = new Promise((resolve) => {
+        resolveHeld = resolve;
+      });
+      const done = sql.begin(async (tx) => {
+        await tx.unsafe(`SELECT 1 FROM "${SCHEMA}".library WHERE id = $1 FOR UPDATE`, [releaseId]);
+        resolveHeld();
+        await released;
+      });
+      await held;
+      let res;
+      try {
+        res = await move(id, 5);
+      } finally {
+        release();
+        await done;
+      }
+
+      expect(res.status).toBe(503);
+      expect(res.body.reason).toBe('lock_unavailable');
+      expect(await genreOf(id)).toBe(JAZZ);
+      const [row] = await sql`SELECT genre_id FROM ${sql(SCHEMA)}.library WHERE id = ${releaseId}`;
+      expect(row.genre_id).toBe(JAZZ);
+    }, 30000);
+  });
 });

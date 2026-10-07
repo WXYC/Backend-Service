@@ -53,6 +53,14 @@ describe('POST /library/artists/:id/refile', () => {
         { genre_id: 6, code_artist_number: 31, code_letters: value },
         'code_letters',
       ]),
+      ['a string to_genre_id', { id: '431' }, { genre_id: 6, code_artist_number: 31, to_genre_id: '7' }, 'to_genre_id'],
+      ['a zero to_genre_id', { id: '431' }, { genre_id: 6, code_artist_number: 31, to_genre_id: 0 }, 'to_genre_id'],
+      [
+        'an over-INT4 to_genre_id',
+        { id: '431' },
+        { genre_id: 6, code_artist_number: 31, to_genre_id: 2147483648 },
+        'to_genre_id',
+      ],
       ['a missing genre_id', { id: '431' }, { code_artist_number: 31 }, 'genre_id'],
       ['a string genre_id', { id: '431' }, { genre_id: '6', code_artist_number: 31 }, 'genre_id'],
       ['an over-INT4 genre_id', { id: '431' }, { genre_id: 2147483648, code_artist_number: 31 }, 'genre_id'],
@@ -99,10 +107,11 @@ describe('POST /library/artists/:id/refile', () => {
         card: CARD,
         previous: 1,
         previous_letters: 'IS',
+        previous_genre_id: 6,
         releases_to_relabel: 2,
       });
 
-      expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, undefined);
+      expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, undefined, undefined);
       expect(statusMock).toHaveBeenCalledWith(200);
       expect(jsonMock).toHaveBeenCalledWith({
         ...CARD,
@@ -123,7 +132,7 @@ describe('POST /library/artists/:id/refile', () => {
 
       await refileArtist(req as never, res, next).catch(() => undefined);
 
-      expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, 'JA');
+      expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, 'JA', undefined);
     });
 
     it('answers 409 letters_shared_across_genres with the memberships', async () => {
@@ -187,6 +196,64 @@ describe('POST /library/artists/:id/refile', () => {
       expect(jsonMock).toHaveBeenCalledWith(
         expect.objectContaining({ reason: 'artist_code_conflict', artist: occupant })
       );
+    });
+
+    describe('genre move', () => {
+      const body = { genre_id: 6, code_artist_number: 31, to_genre_id: 7 };
+
+      it('answers 404 genre_not_found for an unknown to_genre_id, before the service', async () => {
+        mockedService.genreExists.mockResolvedValue(false);
+        const { req, res, next } = mockReqRes({ id: '431' }, body);
+
+        const error = await refileArtist(req as never, res, next).catch((e: unknown) => e);
+
+        expect(error).toMatchObject({ statusCode: 404 });
+        expect((error as { toApiErrorResponse(): unknown }).toApiErrorResponse()).toEqual({
+          message: 'Genre not found',
+          code: 'genre_not_found',
+        });
+        expect(mockedService.refileArtistInGenre).not.toHaveBeenCalled();
+      });
+
+      it('passes a known to_genre_id through', async () => {
+        mockedService.genreExists.mockResolvedValue(true);
+        mockedService.refileArtistInGenre.mockResolvedValue({ outcome: 'artist_not_found' });
+        const { req, res, next } = mockReqRes({ id: '431' }, body);
+
+        await refileArtist(req as never, res, next).catch(() => undefined);
+
+        expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, undefined, 7);
+      });
+
+      it('treats to_genre_id equal to genre_id as absent, without a genre lookup', async () => {
+        mockedService.refileArtistInGenre.mockResolvedValue({ outcome: 'artist_not_found' });
+        const { req, res, next } = mockReqRes({ id: '431' }, { ...body, to_genre_id: 6 });
+
+        await refileArtist(req as never, res, next).catch(() => undefined);
+
+        expect(mockedService.genreExists).not.toHaveBeenCalled();
+        expect(mockedService.refileArtistInGenre).toHaveBeenCalledWith(431, 6, 31, undefined, undefined);
+      });
+
+      it('answers 409 already_filed_in_genre', async () => {
+        const { statusMock, jsonMock } = await run({ outcome: 'already_filed' });
+
+        expect(statusMock).toHaveBeenCalledWith(409);
+        expect(jsonMock).toHaveBeenCalledWith({ message: expect.any(String), reason: 'already_filed_in_genre' });
+      });
+
+      it('reports previous_genre_id from the service result', async () => {
+        const { jsonMock } = await run({
+          outcome: 'refiled',
+          card: { ...CARD, genre_id: 7 },
+          previous: 1,
+          previous_letters: 'IS',
+          previous_genre_id: 6,
+          releases_to_relabel: 2,
+        });
+
+        expect(jsonMock).toHaveBeenCalledWith(expect.objectContaining({ genre_id: 7, previous_genre_id: 6 }));
+      });
     });
 
     it('answers 503 lock_unavailable', async () => {
