@@ -1348,8 +1348,9 @@ const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number'] as const;
  * this endpoint yet"). Gated `catalog: ['write']`.
  *
  * Outcomes: 200 `ArtistRefileResult` (the genre-scoped `ArtistCard` plus `changed`, `previous_code_artist_number`,
- * `releases_to_relabel`) / 404 `Artist not found` or `Artist not filed under genre {n}` / 409 `lettered_compilation_section`
- * or `artist_code_conflict` (with the contract `Artist` now holding the slot: the first owner in `getArtistsByCode`
+ * `releases_to_relabel`) / 404 `Artist not found` or `Artist not filed under genre {n}` / 409 `lettered_compilation_section`,
+ * `various_artists_section` (a Various Artists bucket, BS#3022: `V/A` or `Z-` code letters, never the name; refused even for
+ * its own number) or `artist_code_conflict` (with the contract `Artist` now holding the slot: the first owner in `getArtistsByCode`
  * order) / 503 `LockUnavailableRefusal` on lock contention. A resubmit of the artist's own number is a 200
  * `changed: false` that issues no UPDATE, and is decided before the occupancy check so an artist sharing a contested
  * triple does not collide with its co-owner. See `libraryService.refileArtistInGenre` for the lock design, the catalog
@@ -1393,6 +1394,12 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
       res.status(409).json({
         message: 'Cannot re-file: this membership is a lettered compilation section, whose number is fixed at 0.',
         reason: 'lettered_compilation_section',
+      });
+      return;
+    case 'various_artists_section':
+      res.status(409).json({
+        message: 'Cannot re-file: this membership is a Various Artists bucket shared by every compilation filed in it.',
+        reason: 'various_artists_section',
       });
       return;
     case 'slot_taken':

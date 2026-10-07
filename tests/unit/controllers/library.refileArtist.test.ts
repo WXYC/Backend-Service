@@ -117,6 +117,16 @@ describe('POST /library/artists/:id/refile', () => {
       expect(jsonMock.mock.calls[0][0]).not.toHaveProperty('artist');
     });
 
+    it('answers 409 various_artists_section with exactly message and reason', async () => {
+      const { statusMock, jsonMock } = await run({ outcome: 'various_artists_section' });
+
+      expect(statusMock).toHaveBeenCalledWith(409);
+      expect(jsonMock).toHaveBeenCalledWith({
+        message: 'Cannot re-file: this membership is a Various Artists bucket shared by every compilation filed in it.',
+        reason: 'various_artists_section',
+      });
+    });
+
     it('answers 409 artist_code_conflict naming the occupant', async () => {
       const occupant = {
         id: 7,

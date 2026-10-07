@@ -153,7 +153,7 @@ const VARIOUS_ARTISTS_CODE_LETTERS = 'V/A';
  *
  * Matches dj-site's `isVariousArtists` (`lib/features/catalog/libraryCode.ts`).
  */
-function isVariousArtists(codeLetters: string): boolean {
+export function isVariousArtists(codeLetters: string): boolean {
   const trimmed = codeLetters.trim();
   return trimmed.toUpperCase() === VARIOUS_ARTISTS_CODE_LETTERS || trimmed.startsWith('Z-');
 }
