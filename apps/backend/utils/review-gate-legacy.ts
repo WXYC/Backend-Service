@@ -6,7 +6,7 @@ export type RotationChainRow = {
   album_id: number | null;
   add_date: string;
   moved_from_rotation_id: number | null;
-  /** Another row names this one in `moved_from_rotation_id`; only the row the walk starts from carries it. */
+  /** Another row names this one in `moved_from_rotation_id`; the walk's caller reads it on the row it starts from. */
   has_successor?: boolean;
 };
 

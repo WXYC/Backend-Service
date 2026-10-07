@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, sql, SQL, type Column } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, ne, notExists, sql, SQL, type Column } from 'drizzle-orm';
 import { alias, getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
@@ -739,8 +739,9 @@ const resolveRotationCardId = async (
  * read `FOR KEY SHARE`: the first lock in `DELETE /library/{id}`'s order (library row, then items, then reviews), so
  * a delete in flight cannot orphan the row this write points at. The two legacy bases (BS#2810) hold for a rotation
  * row `isLegacyRotationRow` accepts; the walk reads the row and its ancestors in one query and the date rule runs in
- * TypeScript, never in SQL; `legacy_import` also refuses a row that was moved away (it has a successor). Concurrent claims on one row are settled by the guarded writes that follow
- * (`linkRotationToAlbum`'s `album_id IS NULL`, the move's kill `WHERE`), which refuse the loser.
+ * TypeScript, never in SQL; `legacy_import` also refuses a row that was moved away (it has a successor). Concurrent claims
+ * on one row are settled by the writes that follow, which refuse the loser: `linkRotationToAlbum` locks the row, then
+ * re-reads its successors and its `album_id IS NULL`, and the move's kill `WHERE` re-checks `album_id IS NULL`.
  */
 const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
   if (basis.kind === 'legacy_import' || basis.kind === 'legacy_move') {
@@ -1911,16 +1912,27 @@ export const linkRotationToAlbum = async (
       return { outcome: 'album_not_found' as const };
     }
 
+    // Locked first, and the successor read below is its own statement: under READ COMMITTED a move that commits while
+    // this waits is invisible to a subquery in this statement's snapshot, but not to the next statement's.
     const [existingRotation] = await tx
-      .select({ album_id: rotation.album_id, has_successor: sql<boolean>`${exists(rotationSuccessorSql())}` })
+      .select({ album_id: rotation.album_id })
       .from(rotation)
       .where(eq(rotation.id, rotationId))
+      .for('update')
       .limit(1);
     if (!existingRotation) {
       return { outcome: 'rotation_not_found' as const };
     }
+    if (existingRotation.album_id != null) {
+      return { outcome: 'already_linked' as const };
+    }
     // A moved-away row is not its chain's newest (BS#3007): refused like a linked one, so the newest row stays linkable.
-    if (existingRotation.album_id != null || existingRotation.has_successor) {
+    const [successor] = await tx
+      .select({ id: rotation.id })
+      .from(rotation)
+      .where(eq(rotation.moved_from_rotation_id, rotationId))
+      .limit(1);
+    if (successor) {
       return { outcome: 'already_linked' as const };
     }
 
@@ -1939,7 +1951,7 @@ export const linkRotationToAlbum = async (
     // A moved record's chain is one record (BS#3007): the ancestors this row was moved from, reached through
     // `moved_from_rotation_id`, point at the same release. `UNION` ends a loop in the data, and the `album_id IS NULL`
     // re-guard leaves an ancestor already linked by old data alone.
-    await tx.execute(sql`
+    const linkedAncestors = (await tx.execute(sql`
       WITH RECURSIVE ancestors AS (
         SELECT moved_from_rotation_id AS id FROM ${rotation} WHERE id = ${rotationId}
         UNION
@@ -1947,7 +1959,8 @@ export const linkRotationToAlbum = async (
       )
       UPDATE ${rotation} SET album_id = ${albumId}
       WHERE id IN (SELECT id FROM ancestors WHERE id IS NOT NULL) AND album_id IS NULL
-    `);
+      RETURNING id
+    `)) as unknown as Array<{ id: number }>;
 
     // BS#2410 / plan D7 — the JSP's third step, which Backend dropped.
     // tubafrenzy's `processImportToLibrary` retroactively pointed the rotation
@@ -2013,7 +2026,14 @@ export const linkRotationToAlbum = async (
     const linkedPlays = await tx
       .update(flowsheet)
       .set({ album_id: albumId })
-      .where(and(eq(flowsheet.rotation_id, rotationId), isNull(flowsheet.album_id)))
+      .where(
+        and(
+          // The plays logged while the record sat in an older bin follow the rows this transaction linked, so an
+          // ancestor already linked to another release (by old data) keeps its plays.
+          inArray(flowsheet.rotation_id, [rotationId, ...linkedAncestors.map((ancestor) => ancestor.id)]),
+          isNull(flowsheet.album_id)
+        )
+      )
       .returning({ id: flowsheet.id });
 
     return { outcome: 'linked' as const, rotation: updated, flowsheetRowsLinked: linkedPlays.length };
