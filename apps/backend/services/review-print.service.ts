@@ -1,6 +1,7 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import { db, intake_items, review_prints, review_revisions, reviews, type Review } from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
+import { confirmedFccNotesOf } from './fcc-notes.service.js';
 import { lockRecordSubject } from './intake.service.js';
 import { writeFirstRevisionIfMissing } from './reviews.service.js';
 
@@ -22,7 +23,7 @@ export type IntakeSlip = {
   recommended_tracks: string | null;
   fcc: string | null;
   revision_id: number;
-  /** The record's confirmed FCC notes; WXYC/Backend-Service#2863 fills it. */
+  /** The record's confirmed FCC notes (its item's and its release's), oldest first; reported ones never print. */
   fcc_notes: { track: string; note: string }[];
 };
 
@@ -32,7 +33,8 @@ export type SlipRecord = Pick<IntakeSlip, 'artist_name' | 'album_title' | 'recor
 /**
  * Appends one `review_prints` row and builds the slip, for a caller that holds the review locked (after the item, after
  * the library row of a filed one, as `printIntakeItem` does). The review's current revision is the one printed; a
- * submitted review with no history first gets revision 1 through `writeFirstRevisionIfMissing`. `target` is the row's
+ * submitted review with no history first gets revision 1 through `writeFirstRevisionIfMissing`; the confirmed FCC notes of
+ * `target` are read last, inside the caller's transaction after its locks. `target` is the row's
  * `intake_item_id` and `album_id`, either of which may be null. The release print (BS#2865) writes the same log through it.
  */
 export const printSlip = async (
@@ -65,7 +67,7 @@ export const printSlip = async (
     recommended_tracks: revision!.recommended_tracks,
     fcc: revision!.fcc,
     revision_id: revision!.id,
-    fcc_notes: [],
+    fcc_notes: await confirmedFccNotesOf(tx, target),
   };
 };
 

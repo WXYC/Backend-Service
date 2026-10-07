@@ -33,6 +33,7 @@ import { db } from '@wxyc/database';
 import {
   assignedLine,
   musicDirectorEmails,
+  notifyFccNoteReported,
   notifyPass,
   notifyReviewSubmitted,
   readReviewNotice,
@@ -242,6 +243,68 @@ describe('notices', () => {
       subject: 'Request passed: Juana Molina – DOGA',
       text: `${body}\n${URL}`,
       html: `<p>${body}</p>${LINK}`,
+    });
+  });
+
+  // The FCC-note email's copy, decided by the station on 2026-10-06 (BS#2863), pinned byte for byte: the subject, both
+  // lines (`{artist} – {album}` joined by an en dash), and the link's path and text.
+  describe('the FCC-note notice', () => {
+    const FCC: Parameters<typeof notifyFccNoteReported>[0] = {
+      note: {
+        id: 5,
+        track: 'la paradoja',
+        note: 'A placeholder note.',
+        reported_by: 'Test Reporter',
+      } as Parameters<typeof notifyFccNoteReported>[0]['note'],
+      artist: 'Juana Molina',
+      album: 'DOGA',
+      reporterUserId: 'dj-1',
+    };
+    const FCC_URL = 'https://dj.example.org/dashboard/admin/intake';
+
+    test('is the decided copy', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccNoteReported(FCC);
+      const first = 'Test Reporter reported an FCC note on Juana Molina – DOGA.';
+      const second = 'la paradoja: A placeholder note.';
+      expect(sent()).toEqual({
+        to: ['md-one@example.org'],
+        subject: 'FCC note to confirm: Juana Molina – DOGA',
+        text: `${first}\n${second}\n${FCC_URL}`,
+        html: `<p>${first}</p><p>${second}</p><p><a href="${FCC_URL}">Open FCC notes to confirm</a></p>`,
+      });
+    });
+
+    test('goes to every music director and to no one else', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccNoteReported(FCC);
+      expect(mockSend.mock.calls.map(([e]) => (e as Sent).to)).toEqual([
+        ['md-one@example.org'],
+        ['md-two@example.org'],
+      ]);
+    });
+
+    test('says neither "pool" nor "pile" and joins artist and album by an en dash', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccNoteReported(FCC);
+      const { subject, text, html } = sent();
+      for (const part of [subject, text, html]) {
+        expect(part).not.toMatch(/pool|pile/i);
+        expect(part).not.toContain('Juana Molina - DOGA');
+      }
+    });
+
+    test('a failed send is reported under the note’s id and swallowed, and the other director is still sent to', async () => {
+      mockQueue.push(DIRECTORS);
+      mockSend.mockRejectedValueOnce(new Error('ses down'));
+      jest.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(notifyFccNoteReported(FCC)).resolves.toBeUndefined();
+      expect(mockSend).toHaveBeenCalledTimes(2);
+      expect(mockCapture).toHaveBeenCalledWith(expect.objectContaining({ message: 'ses down' }), {
+        tags: { subsystem: 'review-notices' },
+        extra: { fcc_note_id: 5 },
+      });
+      jest.restoreAllMocks();
     });
   });
 

@@ -1,4 +1,4 @@
-import { asc, eq, sql, type InferSelectModel } from 'drizzle-orm';
+import { and, asc, eq, or, sql, type InferSelectModel } from 'drizzle-orm';
 import { artists, db, fcc_notes, intake_items, library, user } from '@wxyc/database';
 import type { RecordSubject } from '../utils/record-subject.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
@@ -7,7 +7,8 @@ import { snapshotAuthor } from './reviews.service.js';
 
 /**
  * FCC notes on the record (BS#2862, slice 13c of BS#2791): any DJ reports a note against a library release or an
- * intake item, and every DJ sees it at once. Confirming and deleting are BS#2863.
+ * intake item, and every DJ sees it at once. A music director confirms or removes it (BS#2863), and only a confirmed
+ * note prints on the slip.
  */
 
 /**
@@ -89,12 +90,84 @@ export const createFccNote = async (
   return first.outcome === 'unknown_subject' && subject.intake_item_id !== undefined ? attempt() : first;
 };
 
-/** The notes of one release (including those stamped at filing) or one item, both statuses, oldest first. */
-export const listFccNotes = (filter: RecordSubject): Promise<FccNoteResponse[]> =>
+export type FccNoteStatus = (typeof fcc_notes.status.enumValues)[number];
+
+const oldestFirst = [asc(fcc_notes.reported_at), asc(fcc_notes.id)];
+
+/** The notes of one release (including those stamped at filing) or one item, oldest first; both statuses unless `status` is sent. */
+export const listFccNotes = (filter: RecordSubject & { status?: FccNoteStatus }): Promise<FccNoteResponse[]> =>
   selectFccNotes(db)
     .where(
-      filter.intake_item_id !== undefined
-        ? eq(fcc_notes.intake_item_id, filter.intake_item_id)
-        : eq(fcc_notes.album_id, filter.album_id)
+      and(
+        filter.intake_item_id !== undefined
+          ? eq(fcc_notes.intake_item_id, filter.intake_item_id)
+          : eq(fcc_notes.album_id, filter.album_id),
+        filter.status && eq(fcc_notes.status, filter.status)
+      )
     )
-    .orderBy(asc(fcc_notes.reported_at), asc(fcc_notes.id));
+    .orderBy(...oldestFirst);
+
+/** The music directors' waiting list: every unconfirmed note at the station, oldest first, in one statement. */
+export const listReportedFccNotes = (): Promise<FccNoteResponse[]> =>
+  selectFccNotes(db)
+    .where(eq(fcc_notes.status, 'reported'))
+    .orderBy(...oldestFirst);
+
+/**
+ * Confirms a note: one `UPDATE … WHERE id AND status = 'reported'`, stamping the caller's account name (`snapshotAuthor`,
+ * as the create does; never `real_name`) and the time. Neither this nor `deleteFccNote` reads an item or a review, so
+ * each takes the note's own row lock and nothing else. A note already confirmed matches no row and is answered
+ * unchanged, the first confirmer's stamp kept. `no_account` is a caller with no name to snapshot: nothing is written.
+ */
+export const confirmFccNote = async (id: number, actor: Pick<ReviewsActor, 'id'>) => {
+  const [account] = await db.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
+  const confirmed_by = snapshotAuthor(account?.name);
+  if (confirmed_by === null) return { outcome: 'no_account' as const };
+  await db
+    .update(fcc_notes)
+    .set({ status: 'confirmed', confirmed_by, confirmed_at: sql`now()` })
+    .where(and(eq(fcc_notes.id, id), eq(fcc_notes.status, 'reported')));
+  const [note] = await selectFccNotes(db).where(eq(fcc_notes.id, id));
+  return note ? { outcome: 'confirmed' as const, note } : { outcome: 'not_found' as const };
+};
+
+/**
+ * Deletes a note. A caller with `reviews: manage` may delete any; anyone else only their own note while it is still
+ * `reported`, a condition in the `DELETE`'s `WHERE` and not a prior read, so a reporter's delete racing a confirm either
+ * removes a reported note or matches nothing, and never removes a confirmed one. Zero rows is then read once to tell a
+ * note that is not there (`not_found`) from one the caller may not delete (`forbidden`).
+ */
+export const deleteFccNote = async (id: number, actor: ReviewsActor) => {
+  const deleted = await db
+    .delete(fcc_notes)
+    .where(
+      and(
+        eq(fcc_notes.id, id),
+        actor.manage ? undefined : and(eq(fcc_notes.reported_by_user_id, actor.id), eq(fcc_notes.status, 'reported'))
+      )
+    )
+    .returning({ id: fcc_notes.id });
+  if (deleted.length > 0) return { outcome: 'deleted' as const };
+  const [exists] = await db.select({ id: fcc_notes.id }).from(fcc_notes).where(eq(fcc_notes.id, id));
+  return { outcome: exists ? ('forbidden' as const) : ('not_found' as const) };
+};
+
+/**
+ * The confirmed notes of a record, for its slip: those of the item (`intake_item_id`) or of its release (`album_id`),
+ * whichever the target carries, oldest first as the lists are. Reported notes never print.
+ */
+export const confirmedFccNotesOf = async (
+  tx: Pick<typeof db, 'select'>,
+  target: { intake_item_id: number | null; album_id: number | null }
+): Promise<{ track: string; note: string }[]> => {
+  const subjects = [
+    target.intake_item_id === null ? undefined : eq(fcc_notes.intake_item_id, target.intake_item_id),
+    target.album_id === null ? undefined : eq(fcc_notes.album_id, target.album_id),
+  ].filter((subject) => subject !== undefined);
+  if (subjects.length === 0) return [];
+  return tx
+    .select({ track: fcc_notes.track, note: fcc_notes.note })
+    .from(fcc_notes)
+    .where(and(eq(fcc_notes.status, 'confirmed'), or(...subjects)))
+    .orderBy(...oldestFirst);
+};

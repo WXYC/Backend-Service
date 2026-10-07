@@ -1,6 +1,6 @@
 /**
- * `/fcc-notes` create and list (BS#2862): the lock order, the retry, what is written and the one-statement list, against a
- * stand-in transaction. Real schema, as in `intake.file.service.test.ts`; the SQL against real rows is
+ * `/fcc-notes` create and list (BS#2862) and confirm, delete, the waiting list and the slip's notes (BS#2863): the lock
+ * order, the retry, what is written and the one-statement list, against a stand-in transaction. Real schema, as in `intake.file.service.test.ts`; the SQL against real rows is
  * `tests/integration/fcc-notes.spec.js`.
  */
 
@@ -16,9 +16,13 @@ jest.mock('@wxyc/database', () => {
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db } from '@wxyc/database';
 import {
+  confirmedFccNotesOf,
+  confirmFccNote,
   createFccNote,
+  deleteFccNote,
   fccNoteSelection,
   listFccNotes,
+  listReportedFccNotes,
   selectFccNotes,
 } from '../../../apps/backend/services/fcc-notes.service';
 import { createLockLog } from '../../utils/lock-log-builder';
@@ -170,5 +174,178 @@ describe('FccNote reads (BS#2862)', () => {
     for (const name of ['from', 'leftJoin']) chain[name] = record(name);
     selectFccNotes({ select: () => chain } as never);
     expect(calls).toEqual(['from', 'leftJoin', 'leftJoin', 'leftJoin']);
+  });
+});
+
+/** A stand-in builder that records each chained call's arguments and resolves to `rows`, so a test can render the SQL it was given. */
+const capture = (rows: unknown[] = []) => {
+  const calls: Record<string, unknown[]> = {};
+  const builder: unknown = new Proxy(() => undefined, {
+    get: (_t, prop: string) =>
+      prop === 'then'
+        ? (resolve: (v: unknown) => void) => resolve(rows)
+        : (...args: unknown[]) => {
+            calls[prop] = args;
+            return builder;
+          },
+  });
+  return { builder, calls };
+};
+
+const dialect = new PgDialect();
+const render = (query: unknown) => {
+  const { sql, params } = dialect.sqlToQuery(query as never);
+  return { sql, params };
+};
+const T = '"wxyc_schema"."fcc_notes"';
+
+describe('confirmFccNote (BS#2863)', () => {
+  const actor = { id: 'md-1' };
+  const note = { id: 5, status: 'confirmed', confirmed_by: 'Test Reviewer', artist_name: 'Juana Molina' };
+  afterEach(() => jest.restoreAllMocks());
+
+  const run = async (account: unknown[], notes: unknown[]) => {
+    const account_ = capture(account);
+    const update = capture();
+    const read = capture(notes);
+    jest
+      .spyOn(db, 'select')
+      .mockReturnValueOnce(account_.builder as never)
+      .mockReturnValueOnce(read.builder as never);
+    jest.spyOn(db, 'update').mockReturnValue(update.builder as never);
+    return { result: await confirmFccNote(5, actor), update, read };
+  };
+
+  it('stamps the confirmer by their account name and the time, in one UPDATE that only matches a reported note', async () => {
+    const { result, update } = await run([{ name: 'Test Reviewer' }], [note]);
+    expect(result).toEqual({ outcome: 'confirmed', note });
+    const set = update.calls.set[0] as Record<string, unknown>;
+    expect(set).toMatchObject({ status: 'confirmed', confirmed_by: 'Test Reviewer' });
+    expect(set).toHaveProperty('confirmed_at');
+    expect(render(update.calls.where[0])).toEqual({
+      sql: `(${T}."id" = $1 and ${T}."status" = $2)`,
+      params: [5, 'reported'],
+    });
+  });
+
+  it('confirming a note already confirmed answers the note as it is: the UPDATE matches nothing and the read returns it', async () => {
+    const { result } = await run([{ name: 'Second Confirmer' }], [note]);
+    expect(result).toEqual({ outcome: 'confirmed', note });
+  });
+
+  it('a note that is not there is not_found', async () => {
+    expect((await run([{ name: 'Test Reviewer' }], [])).result).toEqual({ outcome: 'not_found' });
+  });
+
+  it.each([
+    ['no account row', []],
+    ['an account with no name', [{ name: null }]],
+  ])('%s: refused, and nothing is written', async (_name, account) => {
+    const update = jest.spyOn(db, 'update');
+    jest.spyOn(db, 'select').mockReturnValueOnce(capture(account).builder as never);
+    expect(await confirmFccNote(5, actor)).toEqual({ outcome: 'no_account' });
+    expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteFccNote (BS#2863)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  const run = async (actor: { id: string; manage: boolean }, deleted: unknown[], existing: unknown[] = []) => {
+    const del = capture(deleted);
+    jest.spyOn(db, 'delete').mockReturnValue(del.builder as never);
+    const select = jest.spyOn(db, 'select').mockReturnValue(capture(existing).builder as never);
+    return { result: await deleteFccNote(5, actor), del, select };
+  };
+
+  it('a caller without reviews: manage: the WHERE carries the note, the reporter and the reported status', async () => {
+    const { result, del } = await run({ id: 'dj-1', manage: false }, [{ id: 5 }]);
+    expect(result).toEqual({ outcome: 'deleted' });
+    expect(render(del.calls.where[0])).toEqual({
+      sql: `(${T}."id" = $1 and (${T}."reported_by_user_id" = $2 and ${T}."status" = $3))`,
+      params: [5, 'dj-1', 'reported'],
+    });
+  });
+
+  it('a music director: the WHERE is the note alone, so a confirmed one goes too', async () => {
+    const { result, del } = await run({ id: 'md-1', manage: true }, [{ id: 5 }]);
+    expect(result).toEqual({ outcome: 'deleted' });
+    expect(render(del.calls.where[0])).toEqual({ sql: `${T}."id" = $1`, params: [5] });
+  });
+
+  it('a delete that matches nothing is forbidden when the note exists (another DJ, or the reporter after the confirm) and not_found when it does not', async () => {
+    expect((await run({ id: 'dj-2', manage: false }, [], [{ id: 5 }])).result).toEqual({ outcome: 'forbidden' });
+    expect((await run({ id: 'dj-2', manage: false }, [], [])).result).toEqual({ outcome: 'not_found' });
+  });
+
+  it('a delete that matches a row never reads again', async () => {
+    const { select } = await run({ id: 'dj-1', manage: false }, [{ id: 5 }]);
+    expect(select).not.toHaveBeenCalled();
+  });
+});
+
+describe('the waiting list and the slip’s notes (BS#2863)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('the waiting list is one statement over every reported note, oldest first', async () => {
+    const rows = [{ id: 1 }, { id: 2 }];
+    const { builder, calls } = capture(rows);
+    const select = jest.spyOn(db, 'select').mockReturnValue(builder as never);
+    expect(await listReportedFccNotes()).toEqual(rows);
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(render(calls.where[0])).toEqual({ sql: `${T}."status" = $1`, params: ['reported'] });
+    expect((calls.orderBy as { getSQL(): never }[]).map((o) => render(o.getSQL()).sql)).toEqual([
+      `${T}."reported_at" asc`,
+      `${T}."id" asc`,
+    ]);
+  });
+
+  it('a record list sent with a status keeps only that status', async () => {
+    const { builder, calls } = capture([]);
+    jest.spyOn(db, 'select').mockReturnValue(builder as never);
+    await listFccNotes({ album_id: 9, status: 'confirmed' });
+    expect(render(calls.where[0])).toEqual({
+      sql: `(${T}."album_id" = $1 and ${T}."status" = $2)`,
+      params: [9, 'confirmed'],
+    });
+  });
+
+  it.each([
+    [
+      'an item',
+      { intake_item_id: 4, album_id: null },
+      `(${T}."status" = $1 and ${T}."intake_item_id" = $2)`,
+      ['confirmed', 4],
+    ],
+    [
+      'a release',
+      { intake_item_id: null, album_id: 9 },
+      `(${T}."status" = $1 and ${T}."album_id" = $2)`,
+      ['confirmed', 9],
+    ],
+    [
+      'a filed item, by its item or its release',
+      { intake_item_id: 4, album_id: 9 },
+      `(${T}."status" = $1 and (${T}."intake_item_id" = $2 or ${T}."album_id" = $3))`,
+      ['confirmed', 4, 9],
+    ],
+  ])(
+    'the slip’s notes of %s: only confirmed, by the target’s subject, oldest first',
+    async (_name, target, sql, params) => {
+      const rows = [{ track: 'B2', note: 'a word' }];
+      const { builder, calls } = capture(rows);
+      expect(await confirmedFccNotesOf({ select: () => builder } as never, target)).toEqual(rows);
+      expect(render(calls.where[0])).toEqual({ sql, params });
+      expect((calls.orderBy as { getSQL(): never }[]).map((o) => render(o.getSQL()).sql)).toEqual([
+        `${T}."reported_at" asc`,
+        `${T}."id" asc`,
+      ]);
+    }
+  );
+
+  it('a target with neither subject reads nothing, never every confirmed note', async () => {
+    const select = jest.fn();
+    expect(await confirmedFccNotesOf({ select } as never, { intake_item_id: null, album_id: null })).toEqual([]);
+    expect(select).not.toHaveBeenCalled();
   });
 });

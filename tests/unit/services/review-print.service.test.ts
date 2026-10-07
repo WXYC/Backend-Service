@@ -173,6 +173,15 @@ describe('printIntakeItem writes (BS#2804)', () => {
     });
   });
 
+  it('fills fcc_notes from the confirmed notes read after the print-log row, in the order read', async () => {
+    const notes = [
+      { track: 'la paradoja', note: 'A placeholder note.' },
+      { track: 'B2', note: 'Another placeholder note.' },
+    ];
+    const { result } = await run([...filedPrint(), notes]);
+    expect(result).toMatchObject({ outcome: 'printed', slip: { fcc_notes: notes } });
+  });
+
   it('writes revision 1 first for a submitted review with no history, at submitted_at and attributed to its author', async () => {
     const { inserts } = await run([
       [unfiled],

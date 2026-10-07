@@ -2,6 +2,7 @@ import * as Sentry from '@sentry/node';
 import { eq, sql } from 'drizzle-orm';
 import { db, intake_items, member, user } from '@wxyc/database';
 import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
+import type { FccNoteResponse } from './fcc-notes.service.js';
 import { effectiveState, type IntakeItemState } from './intake.service.js';
 
 /** Who has the record a waiting review is about, relative to the review's author (BS#2806). */
@@ -102,40 +103,50 @@ export const musicDirectorEmails = async (): Promise<string[]> => {
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-const intakeUrl = (itemId: number) =>
-  `${(process.env.FRONTEND_SOURCE?.split(',')[0]?.trim() || 'http://localhost:3000').replace(/\/$/, '')}/dashboard/admin/intake/${itemId}`;
+const absoluteUrl = (path: string) =>
+  `${(process.env.FRONTEND_SOURCE?.split(',')[0]?.trim() || 'http://localhost:3000').replace(/\/$/, '')}${path}`;
 
-const reportFailure = (err: unknown, itemId: number) => {
+const reportFailure = (err: unknown, context: Record<string, unknown>) => {
   console.error('[review-notices] Failed to notify the music directors:', err);
-  Sentry.captureException(err, { tags: { subsystem: 'review-notices' }, extra: { item_id: itemId } });
+  Sentry.captureException(err, { tags: { subsystem: 'review-notices' }, extra: context });
 };
+
+/** The link to an intake item in the Pile, for the two notices about one. */
+const itemLink = (itemId: number) => ({ path: `/dashboard/admin/intake/${itemId}`, label: 'Open in the Pile' });
 
 /**
  * One email per music director, sent concurrently. Never rejects: every failure is logged and reported to Sentry
- * and swallowed, because the intake pile is the source of truth. Callers start a notice after the commit and do
+ * (`context` is its `extra`) and swallowed, because the intake Pile is the source of truth. Callers start a notice after the commit and do
  * not await it (as `auth.definition.ts` does the password-reset send), so a slow or hung SES never delays or fails
- * a request that already committed. `sendNotificationEmail` honors `EMAIL_ENABLED`.
+ * a request that already committed. `link.path` is joined to the frontend's base URL here, which stays private.
+ * `sendNotificationEmail` honors `EMAIL_ENABLED`.
  */
-export const notifyMusicDirectors = async (message: { subject: string; lines: string[]; itemId: number }) => {
+export const notifyMusicDirectors = async (message: {
+  subject: string;
+  lines: string[];
+  link: { path: string; label: string };
+  context: Record<string, unknown>;
+}) => {
   try {
-    const url = intakeUrl(message.itemId);
+    const url = absoluteUrl(message.link.path);
     const text = [...message.lines, url].join('\n');
-    const html = `${message.lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('')}<p><a href="${escapeHtml(url)}">Open in the Pile</a></p>`;
+    const html = `${message.lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('')}<p><a href="${escapeHtml(url)}">${escapeHtml(message.link.label)}</a></p>`;
     const sends = (await musicDirectorEmails()).map(async (email) =>
       sendNotificationEmail({ to: [email], subject: message.subject, text, html })
     );
     for (const sent of await Promise.allSettled(sends)) {
-      if (sent.status === 'rejected') reportFailure(sent.reason, message.itemId);
+      if (sent.status === 'rejected') reportFailure(sent.reason, message.context);
     }
   } catch (err) {
-    reportFailure(err, message.itemId);
+    reportFailure(err, message.context);
   }
 };
 
 /** A review of an intake item is waiting to be accepted (the item did not move). */
 export const notifyReviewSubmitted = (n: ReviewNotice) =>
   notifyMusicDirectors({
-    itemId: n.itemId,
+    link: itemLink(n.itemId),
+    context: { item_id: n.itemId },
     subject: `Review waiting to be accepted: ${record(n.artist, n.album)}`,
     lines: [
       `A review of ${record(n.artist, n.album)} by ${n.author ?? 'a DJ'} is waiting to be accepted.`,
@@ -153,10 +164,23 @@ export const notifyPass = async (item: { id: number; artist: string; album: stri
       () => undefined
     );
   return notifyMusicDirectors({
-    itemId: item.id,
+    link: itemLink(item.id),
+    context: { item_id: item.id },
     subject: `Request passed: ${record(item.artist, item.album)}`,
     lines: [
       `${dj?.name ?? 'A DJ'} passed on the request for ${record(item.artist, item.album)}. Any DJ can take it now.`,
     ],
   });
 };
+
+/** What the create hands back for the FCC-note notice: the note, the record it is on, and the reporter's user id. */
+export type FccNoteNotice = { note: FccNoteResponse; artist: string; album: string; reporterUserId: string };
+
+/** A DJ reported an FCC note; the music directors confirm it on their intake page. The reporter is `note.reported_by`, the account-name snapshot. */
+export const notifyFccNoteReported = ({ note, artist, album }: FccNoteNotice) =>
+  notifyMusicDirectors({
+    subject: `FCC note to confirm: ${record(artist, album)}`,
+    lines: [`${note.reported_by} reported an FCC note on ${record(artist, album)}.`, `${note.track}: ${note.note}`],
+    link: { path: '/dashboard/admin/intake', label: 'Open FCC notes to confirm' },
+    context: { fcc_note_id: note.id },
+  });

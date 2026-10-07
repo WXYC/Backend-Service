@@ -1,6 +1,7 @@
 /**
- * `POST /fcc-notes` and `GET /fcc-notes` (BS#2862, slice 13c of BS#2791), and the stamp `POST /intake/{id}/file`
- * gives a note. Real Postgres, seeded through tests/utils/intake_seed.js. The CI containers run AUTH_BYPASS=true, so
+ * `POST /fcc-notes` and `GET /fcc-notes` (BS#2862, slice 13c of BS#2791), the stamp `POST /intake/{id}/file`
+ * gives a note, and confirm, delete and the music directors' waiting list (BS#2863; the delete-against-confirm overlap
+ * is tests/integration/fcc-notes-delete-confirm-race.spec.js). Real Postgres, seeded through tests/utils/intake_seed.js. The CI containers run AUTH_BYPASS=true, so
  * the route grants are pinned by tests/unit/routes/fcc-notes-permissions.route.test.ts and the lock order and retry
  * by tests/unit/services/fcc-notes.service.test.ts; this tier pins the SQL against real rows: the record's name read
  * through the joins, the order of a list, the stamp at filing (both arms), the race with a filing, the cascade and
@@ -215,6 +216,122 @@ describe('/fcc-notes (BS#2862)', () => {
         expect((await djA.get(`/fcc-notes${query}`)).status).toBe(400);
       }
     );
+  });
+
+  describe('confirm, delete and the waiting list (BS#2863)', () => {
+    const reportedBy = (id, extra) => seedFccNote({ reported_by_user_id: id, ...extra });
+
+    test('a music director confirms a reported note, stamped with their account name and the time; a second confirm changes nothing', async () => {
+      const item = await pooledItem('confirm');
+      const reported = await reportedBy(global.primary_dj_id, { intake_item_id: item.id });
+      const [{ name }] = await sql.unsafe(`SELECT name FROM auth_user WHERE username = 'test_station_manager'`);
+
+      const first = await manager.post(`/fcc-notes/${reported.id}/confirm`);
+
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({
+        id: reported.id,
+        status: 'confirmed',
+        confirmed_by: name,
+        artist_name: `${PREFIX} confirm`,
+        album_title: `${PREFIX} confirm album`,
+      });
+      expect(first.body.confirmed_at).not.toBeNull();
+      const second = await manager.post(`/fcc-notes/${reported.id}/confirm`);
+      expect(second.status).toBe(200);
+      expect(second.body).toEqual(first.body);
+    });
+
+    test.each([
+      ['an unknown note', '2147483647', 404],
+      ['a malformed id', 'abc', 400],
+      ['an id past int4', '2147483648', 400],
+    ])('confirming %s is a %i', async (_name, id, status) => {
+      expect((await manager.post(`/fcc-notes/${id}/confirm`)).status).toBe(status);
+    });
+
+    test('the reporter deletes their own reported note; the row is gone', async () => {
+      const item = await pooledItem('own');
+      const reported = await reportedBy(global.primary_dj_id, { intake_item_id: item.id });
+
+      const res = await djA.delete(`/fcc-notes/${reported.id}`);
+
+      expect(res.status).toBe(204);
+      expect(res.text).toBe('');
+      expect(await noteRows('id', reported.id)).toHaveLength(0);
+    });
+
+    test('the reporter of a confirmed note, and a DJ who did not report it, are refused and the note stays', async () => {
+      const item = await pooledItem('refused');
+      const confirmed = await reportedBy(global.primary_dj_id, {
+        intake_item_id: item.id,
+        status: 'confirmed',
+        confirmed_by: 'Test Reviewer',
+        confirmed_at: '2026-10-03T12:00:00Z',
+      });
+      const someoneElses = await reportedBy(null, { intake_item_id: item.id });
+
+      expect((await djA.delete(`/fcc-notes/${confirmed.id}`)).status).toBe(403);
+      expect((await djA.delete(`/fcc-notes/${someoneElses.id}`)).status).toBe(403);
+
+      expect(await noteRows('intake_item_id', item.id)).toHaveLength(2);
+    });
+
+    test('a music director deletes a confirmed note, and an unknown note is 404', async () => {
+      const item = await pooledItem('md-delete');
+      const confirmed = await reportedBy(null, {
+        intake_item_id: item.id,
+        status: 'confirmed',
+        confirmed_by: 'Test Reviewer',
+        confirmed_at: '2026-10-03T12:00:00Z',
+      });
+
+      expect((await manager.delete(`/fcc-notes/${confirmed.id}`)).status).toBe(204);
+      expect(await noteRows('id', confirmed.id)).toHaveLength(0);
+      expect((await manager.delete('/fcc-notes/2147483647')).status).toBe(404);
+      expect((await manager.delete('/fcc-notes/abc')).status).toBe(400);
+    });
+
+    test('the waiting list holds every reported note and no confirmed one, oldest first, for a music director only', async () => {
+      const item = await pooledItem('waiting');
+      const release = await seedLibraryRelease({ artist_name: `${PREFIX} Artist`, album_title: `${PREFIX} waiting` });
+      const newer = await seedFccNote({ album_id: release.id, reported_at: '2026-10-02T12:00:00Z' });
+      const older = await seedFccNote({ intake_item_id: item.id, reported_at: '2026-10-01T12:00:00Z' });
+      const done = await seedFccNote({
+        intake_item_id: item.id,
+        reported_at: '2026-10-01T06:00:00Z',
+        status: 'confirmed',
+        confirmed_by: 'Test Reviewer',
+        confirmed_at: '2026-10-03T12:00:00Z',
+      });
+
+      const res = await manager.get('/fcc-notes?status=reported');
+
+      expect(res.status).toBe(200);
+      const mine = res.body.filter((n) => [newer.id, older.id, done.id].includes(n.id));
+      expect(mine.map((n) => n.id)).toEqual([older.id, newer.id]);
+      expect(res.body.every((n) => n.status === 'reported')).toBe(true);
+      expect(mine[0]).toMatchObject({ artist_name: `${PREFIX} waiting`, intake_item_id: item.id });
+      expect(mine[1]).toMatchObject({ artist_name: `${PREFIX} Artist`, album_id: release.id });
+      expect((await djA.get('/fcc-notes?status=reported')).status).toBe(403);
+      expect((await manager.get('/fcc-notes?status=confirmed')).status).toBe(400);
+    });
+
+    test('a record’s list sent with a status keeps only that status, for any DJ', async () => {
+      const item = await pooledItem('status');
+      await seedFccNote({ intake_item_id: item.id, reported_at: '2026-10-01T12:00:00Z' });
+      const done = await seedFccNote({
+        intake_item_id: item.id,
+        reported_at: '2026-10-02T12:00:00Z',
+        status: 'confirmed',
+        confirmed_by: 'Test Reviewer',
+        confirmed_at: '2026-10-03T12:00:00Z',
+      });
+
+      const res = await djA.get(`/fcc-notes?intake_item_id=${item.id}&status=confirmed`);
+
+      expect(res.body.map((n) => n.id)).toEqual([done.id]);
+    });
   });
 
   describe('filing an item stamps its notes with the release', () => {

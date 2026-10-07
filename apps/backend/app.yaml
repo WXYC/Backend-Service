@@ -6141,7 +6141,7 @@ paths:
     get:
       summary: List a record's FCC notes (BS#2862)
       description: >-
-        Grant `reviews: read`. Exactly one of `album_id` and `intake_item_id` is required (1..2147483647); none, both, a malformed value or a repeated key is a 400. Both statuses, oldest first (`reported_at`, then `id`), a bare array. `album_id` includes the notes reported against an item later filed as that release.
+        A list is one of two shapes, both a bare array oldest first (`reported_at`, then `id`). A record's list (grant `reviews: read`) sends exactly one of `album_id` and `intake_item_id` (1..2147483647) and returns both statuses, or only one when `status` is also sent; `album_id` includes the notes reported against an item later filed as that release. The music directors' waiting list (BS#2863) sends `status=reported` and neither subject, needs `reviews: manage` (a caller with only `reviews: read` is a 403) and returns every unconfirmed note on every record, unpaginated. Anything else is a 400: both subjects, no subject without `status=reported`, `status=confirmed` with no subject, a `status` that is not `reported` or `confirmed`, a malformed value or a repeated key.
       parameters:
         - { name: album_id, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 2147483647 } }
         - {
@@ -6150,9 +6150,10 @@ paths:
             required: false,
             schema: { type: integer, minimum: 1, maximum: 2147483647 },
           }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [reported, confirmed] } }
       responses:
         '200':
-          description: 'The notes of the record'
+          description: 'The notes of the record, or every unconfirmed note for the waiting list'
           content:
             application/json:
               schema:
@@ -6160,11 +6161,11 @@ paths:
                 items:
                   $ref: '#/components/schemas/FccNote'
         '400':
-          description: 'No filter, both filters, or a malformed value'
+          description: 'Both subjects, no subject without `status=reported`, `status=confirmed` with no subject, a `status` that is not `reported` or `confirmed`, or a malformed value'
         '401':
           description: 'Authentication required'
         '403':
-          description: 'Caller lacks `reviews: read`'
+          description: 'Caller lacks `reviews: read`, or asked for the waiting list (`status=reported` and no subject) and lacks `reviews: manage`'
     post:
       summary: Report an FCC note on a record (BS#2862)
       description: >-
@@ -6188,3 +6189,57 @@ paths:
           description: 'Authentication required'
         '403':
           description: 'Caller lacks `reviews: write`, or has no account name to report under'
+
+  /fcc-notes/{id}/confirm:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+    post:
+      summary: Confirm an FCC note (BS#2863)
+      description: >-
+        Grant `reviews: manage`. Sets `status` to `confirmed` and stamps `confirmed_by` (a snapshot of the caller's account name, never the real name) and `confirmed_at`, in one `UPDATE … WHERE status = 'reported'`. Confirming a note that is already confirmed answers 200 and changes nothing: the first confirmer's stamp stays. A caller with no account name to snapshot is a 403 and nothing is written. Only confirmed notes print on the slip.
+      responses:
+        '200':
+          description: 'The note, confirmed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FccNote'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`, or has no account name to confirm under'
+        '404':
+          description: 'No such note'
+
+  /fcc-notes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+    delete:
+      summary: Remove an FCC note (BS#2863)
+      description: >-
+        Grant `reviews: manage` for any note, reported or confirmed; `reviews: write` for the reporter, and only while the note is still `reported`. The reporter and status conditions are in the `DELETE`'s own `WHERE`, so a reporter's delete racing a confirm either removes a reported note or is refused, never removes a confirmed one. A removed note is deleted, not kept under a third status.
+      responses:
+        '204':
+          description: 'Deleted; no body'
+        '400':
+          description: 'Malformed id'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks the grant, is not the reporter, or is the reporter of a note already confirmed'
+        '404':
+          description: 'No such note'
