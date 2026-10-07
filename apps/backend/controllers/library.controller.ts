@@ -51,7 +51,9 @@ import {
   MAX_ALBUM_TEXT_LENGTH,
 } from '../utils/text-fields.js';
 import { INT4_MAX } from '../utils/constants.js';
-import { parseInt4BodyId } from '../utils/query-params.js';
+import { parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
+import { reviewsActor } from '../utils/review-grants.js';
+import { printReleaseReview } from '../services/review-print.service.js';
 
 // `genres.id` and `genre_artist_crossreference.artist_genre_code` are Postgres
 // int4 columns. A query value outside that range parses fine as a JS integer
@@ -4271,4 +4273,18 @@ export const exportBmiPerformanceList: RequestHandler = async (req, res) => {
   const range = bmiPerformanceService.parseBmiDateRange(req.query.from, req.query.to);
   const payload = await bmiPerformanceService.getBmiPerformanceList(range);
   res.status(200).json(payload);
+};
+
+/** One message for a review that does not exist, a draft, a handwritten review and another release's review. */
+const PRINT_REVIEW_REFUSAL = 'review_id must name a typed, submitted review of this release';
+
+/** `POST /library/:id/print` (BS#2865): a typed review of the release, printed with no intake item; 404 is the release. */
+export const printReleaseSlip: RequestHandler<{ id: string }> = async (req, res) => {
+  const id = parseInt4PathId(req.params.id, 'album');
+  const reviewId = parseInt4BodyId(req.body?.review_id, 'review_id');
+  if (reviewId === undefined) throw new WxycError('review_id is required', 400);
+  const result = await printReleaseReview(id, reviewId, reviewsActor(req));
+  if (result.outcome === 'not_found') throw new WxycError('Album not found', 404);
+  if (result.outcome === 'bad_review') throw new WxycError(PRINT_REVIEW_REFUSAL, 400);
+  res.json(result.slip);
 };

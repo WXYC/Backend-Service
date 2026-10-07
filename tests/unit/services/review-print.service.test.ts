@@ -15,7 +15,9 @@ jest.mock('@wxyc/database', () => {
 
 import { getTableName } from 'drizzle-orm';
 import { db } from '@wxyc/database';
-import { printIntakeItem } from '../../../apps/backend/services/review-print.service';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { printIntakeItem, printReleaseReview } from '../../../apps/backend/services/review-print.service';
+import { reviewInReleaseList } from '../../../apps/backend/services/reviews.service';
 import { createLockLog } from '../../utils/lock-log-builder';
 
 const { builder, log, sets, setsByTable } = createLockLog();
@@ -217,5 +219,86 @@ describe('printIntakeItem writes (BS#2804)', () => {
       [revision],
     ]);
     expect(inserts[0][1]).toMatchObject({ edited_at: review.last_modified });
+  });
+});
+
+describe('printReleaseReview (BS#2865)', () => {
+  const record = { artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again', record_label: 'Drag City' };
+  const typed = { ...review, status: 'submitted' };
+
+  /** The selects of one print: the release lock, the review, the record, then printSlip's own reads. */
+  const releasePrint = (overrides: { release?: unknown[]; review?: unknown[] } = {}) => [
+    overrides.release ?? [{ id: 12 }],
+    overrides.review ?? [typed],
+    [record],
+    [{ n: 2 }],
+    [revision],
+  ];
+
+  const runRelease = async (selects: unknown[][]) => {
+    log.length = 0;
+    const inserts: Inserted[] = [];
+    const tx = {
+      select: jest.fn(() => builder(selects.shift() ?? [])),
+      insert: jest.fn((table: never) => ({
+        values: jest.fn((values: Record<string, unknown>) => {
+          inserts.push([getTableName(table), values]);
+          return Promise.resolve();
+        }),
+      })),
+      update: jest.fn(),
+    };
+    jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
+    const result = await printReleaseReview(12, 3, { id: 'md-1' });
+    return { result, inserts, tx };
+  };
+
+  it('locks the release for key share, then the review for update, and never an intake item', async () => {
+    await runRelease(releasePrint());
+    expect(log).toEqual(['library for key share id 12', 'reviews for update id 3']);
+  });
+
+  it('appends one print-log row with no intake item and builds the slip from the library row', async () => {
+    const { result, inserts, tx } = await runRelease(releasePrint());
+    expect(inserts).toEqual([
+      ['review_prints', { intake_item_id: null, album_id: 12, review_id: 3, revision_id: 55, printed_by: 'md-1' }],
+    ]);
+    expect(tx.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      outcome: 'printed',
+      slip: {
+        artist_name: 'Jessica Pratt',
+        album_title: 'On Your Own Love Again',
+        record_label: 'Drag City',
+        revision_id: 55,
+      },
+    });
+  });
+
+  it('answers not_found for an unknown release without reading a review', async () => {
+    const { result, inserts, tx } = await runRelease(releasePrint({ release: [] }));
+    expect(result).toEqual({ outcome: 'not_found' });
+    expect(tx.select).toHaveBeenCalledTimes(1);
+    expect(inserts).toEqual([]);
+  });
+
+  it.each([
+    ['an unknown review, or one outside the release’s list', []],
+    ['a draft', [{ ...typed, status: 'draft' }]],
+    ['a handwritten review', [{ ...typed, medium: 'handwritten' }]],
+  ])('%s is bad_review and writes nothing', async (_name, found) => {
+    const { result, inserts } = await runRelease(releasePrint({ review: found }));
+    expect(result).toEqual({ outcome: 'bad_review' });
+    expect(inserts).toEqual([]);
+  });
+});
+
+describe('reviewInReleaseList (BS#2865)', () => {
+  it('matches the release’s own reviews and those of a release a filed or finalized copy cites', () => {
+    const { sql: text, params } = new PgDialect().sqlToQuery(reviewInReleaseList(12));
+    expect(text).toBe(
+      '("wxyc_schema"."reviews"."album_id" = $1 OR "wxyc_schema"."reviews"."album_id" IN (SELECT ci.cited_album_id FROM "wxyc_schema"."intake_items" AS ci WHERE ci.album_id = $2 AND ci.state IN (\'filed\', \'finalized\') AND ci.cited_album_id IS NOT NULL))'
+    );
+    expect(params).toEqual([12, 12]);
   });
 });
