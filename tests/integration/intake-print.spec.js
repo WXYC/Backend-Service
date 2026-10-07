@@ -6,7 +6,7 @@
  * a print and an edit of one review (for an item's own review it is the intake item lock, print FOR UPDATE and PATCH
  * FOR SHARE, that orders them; the review lock matters only for a cited item, which is pinned in the unit lock log):
  * whichever commits second, the logged revision is one that existed when the print committed, and the slip's text is
- * that revision's. And finalize's refusal while the release is in rotation, against real `rotation` rows.
+ * that revision's, the confirmed FCC notes on the slip (BS#2863). And finalize's refusal while the release is in rotation, against real `rotation` rows.
  */
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
@@ -19,6 +19,7 @@ const {
   removeSeededLibraryReleases,
   seedReview,
   seedAcceptance,
+  seedFccNote,
   managerAccessToken,
 } = require('../utils/intake_seed');
 
@@ -104,6 +105,51 @@ describe('/intake print and finalize (BS#2804)', () => {
       ]);
       expect((await manager.post(`/intake/${item.id}/print`)).status).toBe(200);
       expect((await printsOf(item.id))[0].album_id).toBe(releaseId);
+    });
+
+    test('the slip carries the confirmed FCC notes of the item and of its release, oldest first, and no reported note', async () => {
+      const { item } = await reviewedItem('notes');
+      const other = await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} other release` });
+      await sql.unsafe(`UPDATE "${SCHEMA}".intake_items SET state = 'filed', album_id = $1 WHERE id = $2`, [
+        releaseId,
+        item.id,
+      ]);
+      const confirmed = { status: 'confirmed', confirmed_by: 'Test Confirmer', confirmed_at: '2026-10-04T12:00:00Z' };
+      await seedFccNote({
+        album_id: releaseId,
+        track: 'B2',
+        note: 'On the release.',
+        reported_at: '2026-10-02T12:00:00Z',
+        ...confirmed,
+      });
+      await seedFccNote({
+        intake_item_id: item.id,
+        track: 'A1',
+        note: 'On the item.',
+        reported_at: '2026-10-01T12:00:00Z',
+        ...confirmed,
+      });
+      await seedFccNote({
+        intake_item_id: item.id,
+        track: 'C3',
+        note: 'Still reported.',
+        reported_at: '2026-10-03T12:00:00Z',
+      });
+      await seedFccNote({
+        album_id: other.id,
+        track: 'D4',
+        note: 'On another release.',
+        reported_at: '2026-10-01T12:00:00Z',
+        ...confirmed,
+      });
+
+      const res = await manager.post(`/intake/${item.id}/print`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.fcc_notes).toEqual([
+        { track: 'A1', note: 'On the item.' },
+        { track: 'B2', note: 'On the release.' },
+      ]);
     });
 
     test('no accepted review, a handwritten one and a missing item are 409, 409 and 404', async () => {
