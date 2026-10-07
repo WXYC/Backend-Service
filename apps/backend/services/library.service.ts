@@ -11,6 +11,7 @@ import {
   captureCatalogDeleteSnapshot,
   type CatalogDeleteActor,
   type CatalogDeleteSnapshot,
+  extractConstraintName,
   extractSqlState,
   intArrayLiteral,
   isLockContentionError,
@@ -4636,9 +4637,11 @@ export type ArtistRefileOutcome =
       card: ArtistCardRow;
       previous: number;
       previous_letters: string;
+      previous_genre_id: number;
       releases_to_relabel: number;
     }
   | { outcome: 'artist_not_found' | 'not_filed' | 'lettered_section' | 'various_artists_section' | 'lock_unavailable' }
+  | { outcome: 'already_filed' }
   | { outcome: 'letters_shared'; memberships: { genre_id: number; code_artist_number: number }[] }
   | { outcome: 'slot_taken'; occupant: FilingArtist };
 
@@ -4647,7 +4650,10 @@ export type ArtistRefileOutcome =
  * (`genre_artist_crossreference.artist_genre_code`) and, when `code_letters` differs from the stored letters under
  * `trim().toUpperCase()`, re-letter the artist (`artists.code_letters`). Letters are artist-level, not per-membership,
  * so a letters change is refused (`letters_shared`) when the artist has another membership or any `library` row in
- * another genre. `library` stores neither value and `library_artist_view` composes them at read time, so every release
+ * another genre. `to_genre_id` (a genre move, BS#3036) moves the membership and every `library` row filed in it to the
+ * destination genre, refused (`already_filed`) when the artist already has a membership or a release at `(artist, to)`;
+ * release `code_number`s are untouched, and `releases_to_relabel` is counted in the destination genre. A destination
+ * equal to the source is no move. `library` stores neither value and `library_artist_view` composes them at read time, so every release
  * re-labels on its own (the physical labels are the librarian's follow-up, reported as `releases_to_relabel`). Each
  * write is only issued when its column changes, and a real write logs one `[library.refile]` JSON line after commit.
  *
@@ -4660,11 +4666,16 @@ export type ArtistRefileOutcome =
  * shelf's advisory key, `pg_advisory_xact_lock(hashtextextended('artist-code-bucket:' || genre || ':' || letters, 0))`,
  * on every path: the row locks below only fence a bucket that already has rows, so without it two artists re-lettered
  * into the same slot of an EMPTY bucket would both pass the occupancy check and both write. (3) The whole destination
- * `(code_letters, genre_id)` bucket PLUS the artist's own crossreference rows (`artist_id = $a OR inArtistCodeBucket`),
+ * `(code_letters, destination genre)` bucket PLUS the artist's own crossreference rows (`artist_id = $a OR inArtistCodeBucket`),
  * in ONE statement over `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`. Alone,
  * so only that table's rows lock (a join would also lock up to 263 `artists` rows); never `.for('update', { of })`
  * (drizzle schema-qualifies the name and Postgres rejects it); one statement in a fixed order, so two concurrent
  * re-files in a bucket serialize instead of deadlocking on their own rows. Every read here runs on `tx`.
+ *
+ * For a genre move the moving `library` rows are then locked explicitly (`FOR NO KEY UPDATE`, ordered by id) before
+ * any UPDATE. Without that, the `library` UPDATE would wait on a row a concurrent `PATCH /library/:id` holds while this
+ * transaction already holds `library_watermark`, and that editor (waiting on the watermark in its statement trigger)
+ * closes a deadlock cycle.
  *
  * **Invariant:** the `library_watermark` row (the statement-level trigger's UPDATE target, migrations 0104/0105/0185) is
  * the LAST lock a writing re-file takes, because every row lock above is taken before the first UPDATE. It is also a
@@ -4686,7 +4697,14 @@ export type ArtistRefileOutcome =
  * `jobs/library-etl` (needs `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`) does not revert letters or numbers in place: its
  * `ensureArtist` (`jobs/library-etl/job.ts`) matches on lower(code_letters) + genre + number, so after a re-letter or
  * re-number it misses, INSERTs a duplicate artist at the old code, and the conflict-update repoints the release's
- * `library.artist_id` to it (WXYC/Backend-Service#2581).
+ * `library.artist_id` to it (WXYC/Backend-Service#2581); a genre move is subject to the same hazard.
+ *
+ * **Residual race, accepted:** a release write racing a genre move. `PATCH /library/:id` checks membership with the
+ * unlocked `artistExistsInGenre`; if that passes for `(artist, from)` just before the move commits, the release lands
+ * in `(artist, from)` afterwards with no membership row, and `library_artist_view` stops showing it. Locking the artists
+ * row `FOR UPDATE` would only delay the orphan; closing it means the release writers lock the membership row, a change
+ * to another endpoint. A 23505 on `artist_genre_key` (a concurrent membership insert at `(artist, to)`) maps to
+ * `already_filed`.
  *
  * **Residual race, accepted:** the stray-release probe behind `letters_shared` is a plain read, and `POST /library`
  * accepts any `genre_id` for an `artist_id` with no membership check, so a release insert into another genre that is in
@@ -4697,8 +4715,12 @@ export const refileArtistInGenre = async (
   artist_id: number,
   genre_id: number,
   target: number,
-  code_letters?: string
+  code_letters?: string,
+  to_genre_id?: number
 ): Promise<ArtistRefileOutcome> => {
+  // A destination equal to the source is no move at all.
+  const moveTo = to_genre_id !== undefined && to_genre_id !== genre_id ? to_genre_id : undefined;
+  const destGenre = moveTo ?? genre_id;
   // Nothing can be re-lettered into the shared Various Artists bucket; decided before any lock.
   if (code_letters !== undefined && isVariousArtists(code_letters.trim().toUpperCase())) {
     throw new WxycError(
@@ -4734,7 +4756,7 @@ export const refileArtistInGenre = async (
       // Destination-shelf advisory lock, on every path: the row locks below only fence a bucket that already has rows,
       // so two artists moving into the same slot of an EMPTY bucket would both pass the occupancy check.
       await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(hashtextextended('artist-code-bucket:' || ${genre_id}::text || ':' || ${destLetters}::text, 0))`
+        sql`SELECT pg_advisory_xact_lock(hashtextextended('artist-code-bucket:' || ${destGenre}::text || ':' || ${destLetters}::text, 0))`
       );
 
       const bucket = await tx
@@ -4745,7 +4767,7 @@ export const refileArtistInGenre = async (
           code_comp_letter: genre_artist_crossreference.code_comp_letter,
         })
         .from(genre_artist_crossreference)
-        .where(or(eq(genre_artist_crossreference.artist_id, artist_id), inArtistCodeBucket(destLetters, genre_id)))
+        .where(or(eq(genre_artist_crossreference.artist_id, artist_id), inArtistCodeBucket(destLetters, destGenre)))
         .orderBy(asc(genre_artist_crossreference.genre_id), asc(genre_artist_crossreference.artist_id))
         .for('update');
       const own = bucket.find((row) => row.artist_id === artist_id && row.genre_id === genre_id);
@@ -4768,28 +4790,43 @@ export const refileArtistInGenre = async (
         }
       }
 
+      if (moveTo !== undefined) {
+        // D3: a membership OR a release already at (artist, to). The release probe covers releases left without a
+        // membership row, whose call numbers would collide with the ones moved in.
+        const releaseAtDestination = (await tx.execute(
+          sql`SELECT 1 FROM ${library} WHERE ${library.artist_id} = ${artist_id} AND ${library.genre_id} = ${moveTo} LIMIT 1`
+        )) as unknown as unknown[];
+        if (
+          bucket.some((row) => row.artist_id === artist_id && row.genre_id === moveTo) ||
+          releaseAtDestination.length > 0
+        ) {
+          return { outcome: 'already_filed' };
+        }
+      }
+
       const previous = own.code_number;
       const previous_letters = card.code_letters;
       const countReleases = async (): Promise<number> => {
         const rows = (await tx.execute(
-          sql`SELECT count(*)::int AS n FROM ${library} WHERE ${library.artist_id} = ${artist_id} AND ${library.genre_id} = ${genre_id}`
+          sql`SELECT count(*)::int AS n FROM ${library} WHERE ${library.artist_id} = ${artist_id} AND ${library.genre_id} = ${destGenre}`
         )) as unknown as { n: number }[];
         return Number(rows[0]?.n ?? 0);
       };
 
-      if (!lettersChange && previous === target) {
+      if (!lettersChange && moveTo === undefined && previous === target) {
         return {
           outcome: 'unchanged',
           card: { ...card, code_artist_number: previous },
           previous,
           previous_letters,
+          previous_genre_id: genre_id,
           releases_to_relabel: await countReleases(),
         };
       }
 
       // The self-exclusion is defense in depth: a co-owner of this artist's own number is answered by the `unchanged`
       // return above, so `own` can only appear here if the locked row and the owner read disagree.
-      const owners = (await getArtistsByCode(destLetters, genre_id, target, tx)).filter(
+      const owners = (await getArtistsByCode(destLetters, destGenre, target, tx)).filter(
         (owner) => owner.artist_id !== artist_id
       );
       if (owners.length > 0) {
@@ -4802,9 +4839,18 @@ export const refileArtistInGenre = async (
             code_letters: first.code_letters,
             code_artist_number: target,
             code_comp_letter: first.code_comp_letter,
-            genre_id,
+            genre_id: destGenre,
           },
         };
+      }
+
+      // D4 step 7: lock the moving release rows BEFORE the first UPDATE. Otherwise the `library` UPDATE would wait on a
+      // row a concurrent `PATCH /library/:id` holds while this transaction already holds `library_watermark`, and that
+      // editor (holding the row, waiting on the watermark in its statement trigger) closes a deadlock cycle.
+      if (moveTo !== undefined) {
+        await tx.execute(
+          sql`SELECT ${library.id} FROM ${library} WHERE ${library.artist_id} = ${artist_id} AND ${library.genre_id} = ${genre_id} ORDER BY ${library.id} FOR NO KEY UPDATE`
+        );
       }
 
       if (lettersChange) {
@@ -4813,10 +4859,10 @@ export const refileArtistInGenre = async (
           .set({ code_letters: destLetters, last_modified: sql`NOW()` })
           .where(eq(artists.id, artist_id));
       }
-      if (previous !== target) {
+      if (moveTo !== undefined || previous !== target) {
         await tx
           .update(genre_artist_crossreference)
-          .set({ artist_genre_code: target })
+          .set({ genre_id: destGenre, artist_genre_code: target })
           .where(
             and(
               eq(genre_artist_crossreference.artist_id, artist_id),
@@ -4824,18 +4870,27 @@ export const refileArtistInGenre = async (
             )
           );
       }
+      const moved =
+        moveTo === undefined
+          ? []
+          : await tx
+              .update(library)
+              .set({ genre_id: destGenre, last_modified: sql`NOW()` })
+              .where(and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id)))
+              .returning({ id: library.id });
       written = {
         artist_id,
         before: { code_letters: previous_letters, genre_id, code_artist_number: previous },
-        after: { code_letters: destLetters, genre_id, code_artist_number: target },
-        releases_moved: 0,
+        after: { code_letters: destLetters, genre_id: destGenre, code_artist_number: target },
+        releases_moved: moved.length,
       };
 
       return {
         outcome: 'refiled',
-        card: { ...card, code_letters: destLetters, code_artist_number: target },
+        card: { ...card, code_letters: destLetters, genre_id: destGenre, code_artist_number: target },
         previous,
         previous_letters,
+        previous_genre_id: genre_id,
         releases_to_relabel: await countReleases(),
       };
     });
@@ -4843,6 +4898,11 @@ export const refileArtistInGenre = async (
     if (written) console.log(`[library.refile] ${JSON.stringify(written)}`);
     return outcome;
   } catch (error) {
+    // A concurrent writer inserting the (artist, to) membership after the unlocked-row check: a row that does not exist
+    // yet cannot be locked, so the unique index is the backstop.
+    if (extractSqlState(error) === '23505' && extractConstraintName(error) === 'artist_genre_key') {
+      return { outcome: 'already_filed' };
+    }
     if (isLockContentionError(error)) {
       Sentry.addBreadcrumb({
         category: 'library.refile',

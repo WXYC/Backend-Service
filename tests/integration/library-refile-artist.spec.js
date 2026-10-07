@@ -23,6 +23,8 @@ const HIPHOP = 6;
 const ROCK = 11;
 const SOUNDTRACKS = 12;
 const LETTER = 'V';
+const JAZZ = 7;
+const ELECTRONIC = 15;
 
 describe('POST /library/artists/:id/refile (BS#2643)', () => {
   let manager;
@@ -40,10 +42,10 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
     return artist.id;
   };
 
-  const seedRelease = async (artistId, genreId, title) => {
+  const seedRelease = async (artistId, genreId, title, codeNumber = 1) => {
     const [row] = await sql`
       INSERT INTO ${sql(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number)
-      VALUES (${artistId}, ${genreId}, 1, ${`${PREFIX} ${title}`}, 1) RETURNING id`;
+      VALUES (${artistId}, ${genreId}, 1, ${`${PREFIX} ${title}`}, ${codeNumber}) RETURNING id`;
     return row.id;
   };
 
@@ -198,10 +200,10 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
   it('rejects a body key the endpoint does not support with 400', async () => {
     const id = await seedArtist('Strict', 'ZR', [[HIPHOP, 80]]);
 
-    const res = await refile(id, { genre_id: HIPHOP, code_artist_number: 81, to_genre_id: ROCK });
+    const res = await refile(id, { genre_id: HIPHOP, code_artist_number: 81, bogus_key: ROCK });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toContain('to_genre_id');
+    expect(res.body.message).toContain('bogus_key');
   });
 
   describe('re-letter (BS#3035)', () => {
@@ -332,6 +334,155 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
       expect(renumbered.status).toBe(200);
       expect(renumbered.body).toMatchObject({ changed: true, code_letters: 'ZE', code_artist_number: 92 });
       expect(await codeOf(id, ROCK)).toBe(91);
+    });
+  });
+
+  describe('genre move (BS#3036)', () => {
+    const releaseRows = async (artistId) =>
+      sql`SELECT id, genre_id, code_number, last_modified FROM ${sql(SCHEMA)}.library WHERE artist_id = ${artistId} ORDER BY id`;
+    const body = (extra) => ({ genre_id: JAZZ, to_genre_id: ELECTRONIC, code_artist_number: 4, ...extra });
+
+    it('moves the membership and both releases: Jazz ZG 36 to Electronic ZG 4, code numbers kept, last_modified bumped', async () => {
+      const id = await seedArtist('Mover', 'ZG', [[JAZZ, 36]]);
+      await seedRelease(id, JAZZ, 'First', 1);
+      await seedRelease(id, JAZZ, 'Second', 2);
+      const before = await releaseRows(id);
+
+      const res = await refile(id, body());
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        artist_id: id,
+        genre_id: ELECTRONIC,
+        code_letters: 'ZG',
+        code_artist_number: 4,
+        changed: true,
+        previous_genre_id: JAZZ,
+        previous_code_artist_number: 36,
+        previous_code_letters: 'ZG',
+        releases_to_relabel: 2,
+      });
+      const after = await releaseRows(id);
+      expect(after.map((r) => [r.genre_id, r.code_number])).toEqual([
+        [ELECTRONIC, 1],
+        [ELECTRONIC, 2],
+      ]);
+      after.forEach((r, i) => expect(r.last_modified.getTime()).toBeGreaterThan(before[i].last_modified.getTime()));
+      expect(await codeOf(id, ELECTRONIC)).toBe(4);
+      expect(await codeOf(id, JAZZ)).toBeUndefined();
+      const old = await manager.get(`/library/artists/${id}`).query({ genre_id: JAZZ });
+      expect(old.status).toBe(404);
+      expect(old.body.message).toContain(`not filed under genre ${JAZZ}`);
+    });
+
+    it('moves with the same number (genre only) and with letters, number and genre in one request', async () => {
+      const a = await seedArtist('Genre Only', 'ZG', [[JAZZ, 45]]);
+      const only = await refile(a, body({ code_artist_number: 45 }));
+      expect(only.status).toBe(200);
+      expect(only.body).toMatchObject({ changed: true, genre_id: ELECTRONIC, code_artist_number: 45 });
+
+      const b = await seedArtist('Everything', 'ZG', [[JAZZ, 46]]);
+      await seedRelease(b, JAZZ, 'Everything Release');
+      const all = await refile(b, body({ code_letters: 'zh', code_artist_number: 47 }));
+      expect(all.status).toBe(200);
+      expect(all.body).toMatchObject({
+        genre_id: ELECTRONIC,
+        code_letters: 'ZH',
+        code_artist_number: 47,
+        previous_code_letters: 'ZG',
+        previous_genre_id: JAZZ,
+        releases_to_relabel: 1,
+      });
+    });
+
+    it("leaves the artist's other membership and its releases untouched", async () => {
+      const id = await seedArtist('Two Homes', 'ZG', [
+        [JAZZ, 50],
+        [ROCK, 51],
+      ]);
+      await seedRelease(id, JAZZ, 'Jazz Release');
+      const rockRelease = await seedRelease(id, ROCK, 'Rock Release');
+      const [rockBefore] =
+        await sql`SELECT genre_id, last_modified FROM ${sql(SCHEMA)}.library WHERE id = ${rockRelease}`;
+
+      const res = await refile(id, body({ code_artist_number: 5 }));
+
+      expect(res.status).toBe(200);
+      expect(await codeOf(id, ROCK)).toBe(51);
+      const [rockAfter] =
+        await sql`SELECT genre_id, last_modified FROM ${sql(SCHEMA)}.library WHERE id = ${rockRelease}`;
+      expect(rockAfter.genre_id).toBe(ROCK);
+      expect(rockAfter.last_modified.getTime()).toBe(rockBefore.last_modified.getTime());
+    });
+
+    it('refuses already_filed_in_genre for a membership at the destination, writing nothing', async () => {
+      const id = await seedArtist('Both Genres', 'ZG', [
+        [JAZZ, 60],
+        [ELECTRONIC, 61],
+      ]);
+      const release = await seedRelease(id, JAZZ, 'Jazz Release');
+      const mark = await watermark();
+
+      const res = await refile(id, body());
+
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe('already_filed_in_genre');
+      expect(await codeOf(id, JAZZ)).toBe(60);
+      const [row] = await sql`SELECT genre_id FROM ${sql(SCHEMA)}.library WHERE id = ${release}`;
+      expect(row.genre_id).toBe(JAZZ);
+      expect(await watermark()).toBe(mark);
+    });
+
+    it('refuses already_filed_in_genre for a release at the destination with no membership row', async () => {
+      const id = await seedArtist('Stray Dest', 'ZG', [[JAZZ, 70]]);
+      await seedRelease(id, ELECTRONIC, 'Stray Release');
+      const mark = await watermark();
+
+      const res = await refile(id, body());
+
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe('already_filed_in_genre');
+      expect(await codeOf(id, JAZZ)).toBe(70);
+      expect(await watermark()).toBe(mark);
+    });
+
+    it('refuses an occupied destination slot naming the holder, and an unknown genre with 404 genre_not_found', async () => {
+      const holder = await seedArtist('Holder', 'ZG', [[ELECTRONIC, 4]]);
+      const id = await seedArtist('Blocked', 'ZG', [[JAZZ, 80]]);
+
+      const taken = await refile(id, body());
+      expect(taken.status).toBe(409);
+      expect(taken.body.reason).toBe('artist_code_conflict');
+      expect(taken.body.artist).toMatchObject({ id: holder, genre_id: ELECTRONIC, code_artist_number: 4 });
+      expect(await codeOf(id, JAZZ)).toBe(80);
+
+      const unknown = await refile(id, body({ to_genre_id: 9999 }));
+      expect(unknown.status).toBe(404);
+      expect(unknown.body.code).toBe('genre_not_found');
+    });
+
+    it('treats to_genre_id equal to genre_id as a number-only re-file', async () => {
+      const id = await seedArtist('Same Genre', 'ZG', [[JAZZ, 90]]);
+
+      const res = await refile(id, body({ to_genre_id: JAZZ, code_artist_number: 91 }));
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ genre_id: JAZZ, code_artist_number: 91, previous_genre_id: JAZZ });
+    });
+
+    it.each([
+      ['a lettered compilation section', 'V/A', SOUNDTRACKS, 0, 'X', 'lettered_compilation_section'],
+      ['a Various Artists bucket', 'V/A', HIPHOP, 5, null, 'various_artists_section'],
+    ])('refuses moving out of %s, writing nothing', async (_n, letters, genre, number, letter, reason) => {
+      const id = await seedArtist(`Move ${reason}`, letters, [[genre, number, letter]]);
+      const mark = await watermark();
+
+      const res = await refile(id, { genre_id: genre, to_genre_id: ELECTRONIC, code_artist_number: number });
+
+      expect(res.status).toBe(409);
+      expect(res.body.reason).toBe(reason);
+      expect(await codeOf(id, genre)).toBe(number);
+      expect(await watermark()).toBe(mark);
     });
   });
 });

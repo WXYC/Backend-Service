@@ -7,7 +7,7 @@
  * `FOR UPDATE` would autocommit and release at once) fails loudly on every branch.
  */
 import { jest } from '@jest/globals';
-import { artists, db, genre_artist_crossreference } from '@wxyc/database';
+import { artists, db, genre_artist_crossreference, library } from '@wxyc/database';
 
 type Call = { op: string; methods: string[]; table?: unknown };
 
@@ -27,12 +27,15 @@ const CARD = {
 const makeTx = (opts: {
   selects: unknown[][];
   countRow?: number;
-  strayRelease?: boolean;
+  /** Results of the `LIMIT 1` probes in the order they run: stray-release (letters change), then destination (move). */
+  probes?: boolean[];
+  updateRows?: unknown[];
   throwOnSelect?: number;
   error?: unknown;
 }) => {
   const calls: Call[] = [];
   let selectIndex = 0;
+  const probes = [...(opts.probes ?? [])];
   const chain = (call: Call, result: unknown[], boom?: unknown) => {
     const c: Record<string, unknown> = {};
     for (const m of ['from', 'innerJoin', 'where', 'orderBy', 'limit']) {
@@ -60,7 +63,10 @@ const makeTx = (opts: {
       calls.push(call);
       const c: Record<string, unknown> = {};
       c.set = () => c;
-      c.where = () => Promise.resolve([]);
+      c.where = () =>
+        Object.assign(Promise.resolve([]), {
+          returning: () => Promise.resolve(opts.updateRows ?? [{ id: 1 }, { id: 2 }]),
+        });
       return c;
     },
     execute: (query: { sql?: string[] }) => {
@@ -73,17 +79,20 @@ const makeTx = (opts: {
           ? 'count'
           : text.includes('LIMIT 1')
             ? 'stray'
-            : 'other';
+            : text.includes('FOR NO KEY UPDATE')
+              ? 'lockLibrary'
+              : 'other';
       calls.push({ op, methods: [] });
       if (op === 'advisory' || op === 'other') return Promise.resolve([]);
-      if (op === 'stray') return Promise.resolve(opts.strayRelease ? [{ '?column?': 1 }] : []);
+      if (op === 'stray') return Promise.resolve(probes.shift() ? [{ '?column?': 1 }] : []);
+      if (op === 'lockLibrary') return Promise.resolve([]);
       return Promise.resolve([{ n: opts.countRow ?? 2 }]);
     },
   };
   return { tx, calls };
 };
 
-const run = async (opts: Parameters<typeof makeTx>[0], target = 31, codeLetters?: string) => {
+const run = async (opts: Parameters<typeof makeTx>[0], target = 31, codeLetters?: string, toGenre?: number) => {
   const { tx, calls } = makeTx(opts);
   const dbSelect = jest.fn(() => {
     throw new Error('db.select must not be used inside refileArtistInGenre');
@@ -93,7 +102,7 @@ const run = async (opts: Parameters<typeof makeTx>[0], target = 31, codeLetters?
     .fn()
     .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
   const { refileArtistInGenre } = await import('../../../apps/backend/services/library.service');
-  const outcome = await refileArtistInGenre(431, 6, target, codeLetters);
+  const outcome = await refileArtistInGenre(431, 6, target, codeLetters, toGenre);
   return { outcome, calls, dbSelect };
 };
 
@@ -196,7 +205,7 @@ describe('refileArtistInGenre (BS#2643)', () => {
     });
 
     it('refuses when the artist has a release in another genre', async () => {
-      const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(1)], strayRelease: true }, 31, 'JA');
+      const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(1)], probes: [true] }, 31, 'JA');
 
       expect(outcome).toEqual({
         outcome: 'letters_shared',
@@ -320,6 +329,106 @@ describe('refileArtistInGenre (BS#2643)', () => {
 
   it('rethrows an unrelated error', async () => {
     await expect(run({ selects: [A, [CARD]], throwOnSelect: 2, error: pgError('23505') })).rejects.toThrow('pg');
+  });
+
+  describe('genre move', () => {
+    it('moves: locks the releases, then UPDATEs crossreference and library; counts in the destination genre', async () => {
+      const { outcome, calls, dbSelect } = await run(
+        { selects: [A, [CARD], BUCKET(1), []], probes: [false] },
+        4,
+        undefined,
+        7
+      );
+
+      expect(outcome).toMatchObject({
+        outcome: 'refiled',
+        previous: 1,
+        previous_genre_id: 6,
+        card: { genre_id: 7, code_artist_number: 4 },
+      });
+      const ops = calls.map((c) => c.op);
+      // Release rows are locked before the first UPDATE (the watermark stays the last lock taken).
+      expect(ops.indexOf('lockLibrary')).toBeGreaterThan(-1);
+      expect(ops.indexOf('lockLibrary')).toBeLessThan(ops.indexOf('update'));
+      expect(calls.filter((c) => c.op === 'update').map((c) => c.table)).toEqual([
+        genre_artist_crossreference,
+        library,
+      ]);
+      expect(dbSelect).not.toHaveBeenCalled();
+    });
+
+    it('a destination equal to the source is no move', async () => {
+      const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(31)] }, 31, undefined, 6);
+
+      expect(outcome).toMatchObject({ outcome: 'unchanged' });
+      expect(calls.some((c) => c.op === 'lockLibrary' || c.op === 'update')).toBe(false);
+    });
+
+    it('refuses already_filed when a membership exists at the destination, writing nothing', async () => {
+      const locked = [...BUCKET(1), { artist_id: 431, genre_id: 7, code_number: 2, code_comp_letter: null }];
+      const { outcome, calls } = await run({ selects: [A, [CARD], locked], probes: [false] }, 4, undefined, 7);
+
+      expect(outcome).toEqual({ outcome: 'already_filed' });
+      expect(calls.some((c) => c.op === 'update' || c.op === 'lockLibrary')).toBe(false);
+    });
+
+    it('refuses already_filed when a release sits at the destination without a membership', async () => {
+      const { outcome, calls } = await run({ selects: [A, [CARD], BUCKET(1)], probes: [true] }, 4, undefined, 7);
+
+      expect(outcome).toEqual({ outcome: 'already_filed' });
+      expect(calls.some((c) => c.op === 'update')).toBe(false);
+    });
+
+    it('a move onto an occupied destination slot is slot_taken in the destination genre', async () => {
+      const owners = [{ artist_id: 9, artist_name: 'Other', code_letters: 'IS', code_comp_letter: null }];
+      const { outcome } = await run({ selects: [A, [CARD], BUCKET(1), owners], probes: [false] }, 4, undefined, 7);
+
+      expect(outcome).toMatchObject({ outcome: 'slot_taken', occupant: { id: 9, genre_id: 7 } });
+    });
+
+    it('letters_shared applies only to a letters change, not to a genre move', async () => {
+      const { outcome } = await run({ selects: [A, [CARD], BUCKET(1), []], probes: [false] }, 4, undefined, 7);
+
+      expect(outcome).toMatchObject({ outcome: 'refiled' });
+    });
+
+    it('logs the genre change with the number of releases moved', async () => {
+      const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+      await run(
+        { selects: [A, [CARD], BUCKET(1), []], probes: [false], updateRows: [{ id: 1 }, { id: 2 }, { id: 3 }] },
+        4,
+        undefined,
+        7
+      );
+
+      const line = log.mock.calls.map(([m]) => String(m)).find((m) => m.startsWith('[library.refile]'));
+      log.mockRestore();
+      expect(JSON.parse(String(line).replace('[library.refile] ', ''))).toMatchObject({
+        before: { genre_id: 6 },
+        after: { genre_id: 7, code_artist_number: 4 },
+        releases_moved: 3,
+      });
+    });
+
+    it.each([
+      ['artist_genre_key', 'already_filed'],
+      ['some_other_unique', undefined],
+    ])('maps a 23505 on %s', async (constraint, expected) => {
+      const err = Object.assign(new Error('Failed query'), { cause: { code: '23505', constraint_name: constraint } });
+      const { tx } = makeTx({ selects: [A, [CARD], BUCKET(1), []], probes: [false] });
+      (tx as { update: unknown }).update = () => {
+        throw err;
+      };
+      (db as unknown as { transaction: unknown }).transaction = jest
+        .fn()
+        .mockImplementation(async (cb: (t: unknown) => Promise<unknown>) => cb(tx));
+      const { refileArtistInGenre } = await import('../../../apps/backend/services/library.service');
+
+      const result = refileArtistInGenre(431, 6, 4, undefined, 7);
+
+      if (expected) await expect(result).resolves.toEqual({ outcome: expected });
+      else await expect(result).rejects.toBe(err);
+    });
   });
 
   describe('Various Artists destination', () => {

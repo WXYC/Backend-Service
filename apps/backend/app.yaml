@@ -3494,6 +3494,11 @@ paths:
               properties:
                 artist_name:
                   type: string
+                to_genre_id:
+                  type: integer
+                  minimum: 1
+                  maximum: 2147483647
+                  description: Destination genre; moves the membership and every release filed in it
                 code_letters:
                   type: string
                 genre_id:
@@ -4178,7 +4183,7 @@ paths:
 
   /library/artists/{id}/refile:
     post:
-      summary: Re-file an artist's call number, and optionally its call letters, within one genre (BS#2643, BS#3035)
+      summary: Re-file an artist (call number, call letters, or genre) (BS#2643, BS#3035, BS#3036)
       description: >-
         Changes `genre_artist_crossreference.artist_genre_code` for ONE
         `(artist, genre)` membership — Bill's case, the Hiphop Isis `IS 1` to
@@ -4191,8 +4196,13 @@ paths:
         bucket is a 400); sending the stored letters back is not a change. A
         letters change is refused with 409 `letters_shared_across_genres` for
         an artist with another membership or a release in another genre. The
-        genre cannot change here: any body key other than `genre_id`,
-        `code_artist_number` and `code_letters` is a 400.
+        genre moves with `to_genre_id`: the membership and every release filed in it
+        move together (release call numbers are untouched), an unknown genre is
+        a 404 `genre_not_found`, and a destination equal to `genre_id` is no
+        move. Refused with 409 `already_filed_in_genre` when the artist already
+        has a membership or a release in the destination genre. Any body key
+        other than `genre_id`, `code_artist_number`, `code_letters` and
+        `to_genre_id` is a 400.
 
 
         Gated at `requirePermissions({ catalog: ['write'] })`. Outside a lettered
@@ -4206,6 +4216,8 @@ paths:
 
         409 bodies: `reason: 'lettered_compilation_section'` (the membership is
         a lettered compilation section, whose number is fixed at 0),
+        `reason: 'already_filed_in_genre'` (a genre move onto a genre the
+        artist already holds, or has a release in),
         `reason: 'letters_shared_across_genres'` with `memberships`, every
         `{genre_id, code_artist_number}` the artist holds,
         `reason: 'various_artists_section'` (a Various Artists bucket, BS#3022:
@@ -4259,12 +4271,12 @@ paths:
           description: Malformed id or body, an unsupported key, or an invalid `genre_id` / `code_artist_number` / `code_letters`
         '404':
           description: >-
-            Artist not found (`code: artist_not_found`), or not filed under
+            Unknown `to_genre_id` (`code: genre_not_found`), artist not found (`code: artist_not_found`), or not filed under
             `genre_id` (`code: artist_not_filed_in_genre`). The `Artist not filed
             under genre` message prefix stays stable until every client keys on
             `code`.
         '409':
-          description: A lettered compilation section, a Various Artists bucket, letters shared across genres, or the target slot is held by another artist
+          description: A lettered compilation section, a Various Artists bucket, letters shared across genres, an already-filed destination genre, or the target slot is held by another artist
         '503':
           description: A live writer holds the shelf; retry in a moment
 

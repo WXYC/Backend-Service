@@ -891,10 +891,9 @@ const UPDATABLE_ARTIST_FIELDS = ['alphabetical_name', 'artist_name'] as const;
 
 const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number'] as const;
 
-// Why each field is not writable on THIS ENDPOINT. `genre_id` is not writable by any endpoint:
-// `genre_artist_crossreference.genre_id` is only ever `.insert()`ed -- by `POST /library/artists`.
-// `code_letters` and `code_artist_number` are each writable by exactly one endpoint,
-// `POST /library/artists/{id}/refile` (BS#2643 for the number, BS#3035 for the letters), which is why they are
+// Why each field is not writable on THIS ENDPOINT. `genre_id`, `code_letters` and `code_artist_number` are each
+// written by exactly one endpoint, `POST /library/artists/{id}/refile` (BS#2643 for the number, BS#3035 for the
+// letters and the genre), which is why they are
 // refused HERE: a call-number or call-letters change needs that endpoint's genre scope, destination-shelf lock,
 // occupancy check and bucket lock, not a bare column update. (Batch jobs are a different surface:
 // `jobs/artist-unicode-dedup` rewrites `code_letters`, and `jobs/library-etl` upserts `artist_genre_code`; neither is
@@ -905,8 +904,7 @@ const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number
 // form used to be a 400, so the card could disagree with the physical shelf. It is now a re-letter on the refile
 // endpoint, single-genre artists only.
 const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[number], string> = {
-  genre_id:
-    'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
+  genre_id: 'move genres with POST /library/artists/{id}/refile (to_genre_id)',
   code_letters: 're-letter with POST /library/artists/{id}/refile (code_letters)',
   code_artist_number: 're-file with POST /library/artists/{id}/refile',
 };
@@ -1286,24 +1284,26 @@ export const deleteArtist: RequestHandler<{ id: string }> = async (req, res) => 
   res.status(204).end();
 };
 
-const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number', 'code_letters'] as const;
+const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number', 'code_letters', 'to_genre_id'] as const;
 
 /**
  * POST /library/artists/:id/refile -- BS#2643, BS#3035: re-file the artist's call number (`code_artist_number`) within
  * ONE genre membership (`genre_id`, required: an artist id alone does not identify a membership, BS#2637), and
- * optionally re-letter it (`code_letters`, single-genre artists only). Only those three keys are accepted; any other
- * key is a 400 naming it (a destination genre is "not a recognized field" until the genre move ships). `code_letters`
+ * optionally re-letter it (`code_letters`, single-genre artists only). Only those four keys are accepted; any other
+ * key is a 400 naming it. `to_genre_id` moves the membership (and every release filed in it) to another genre: an
+ * unknown genre is a 404 `genre_not_found` before any lock, and a value equal to `genre_id` is no move. `code_letters`
  * must be a string passing `validateCanonicalCodeLetters` (trim, 1-4 of A-Z, 0-9, `/`; upper-cased, so `ja` files as
  * `JA`) and must not name a Various Artists bucket (a 400 from the service before any lock). Sending the stored
  * letters back, in any case or spacing, is not a change. Gated `catalog: ['write']`.
  *
  * Outcomes: 200 `ArtistRefileResult` (the genre-scoped `ArtistCard` plus `changed`, `previous_code_artist_number`,
- * `previous_code_letters`, `previous_genre_id` (always `genre_id` until a genre move exists), `releases_to_relabel`) /
+ * `previous_code_letters`, `previous_genre_id`, `releases_to_relabel`, counted in the destination genre) /
  * 404 `Artist not found` (`code: 'artist_not_found'`) or `Artist not filed under genre {n}`
  * (`code: 'artist_not_filed_in_genre'`; the message prefix stays stable for clients that fall back to it, BS#3023) /
  * 409 `lettered_compilation_section`, `various_artists_section` (a Various Artists bucket, BS#3022: `V/A` or `Z-` code
  * letters, never the name; refused even for its own number), `letters_shared_across_genres` (a letters change for an
- * artist with another membership or a release in another genre; carries `memberships`) or `artist_code_conflict`
+ * artist with another membership or a release in another genre; carries `memberships`), `already_filed_in_genre` (a
+ * move to a genre where the artist already has a membership or a release) or `artist_code_conflict`
  * (with the contract `Artist` now holding the slot: the first owner in `getArtistsByCode` order) / 503
  * `LockUnavailableRefusal` on lock contention. Outside those sections, a resubmit of the artist's own letters and
  * number is a 200 `changed: false` that issues no UPDATE, and is decided before the occupancy check so an artist
@@ -1329,6 +1329,15 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
     throw new WxycError(`Bad Request: genre_id must be an integer between 1 and ${INT4_MAX}`, 400);
   }
   const target = validateArtistCodeNumber(record.code_artist_number, 'code_artist_number');
+  let toGenreId: number | undefined;
+  if (record.to_genre_id !== undefined) {
+    const raw = record.to_genre_id;
+    if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > INT4_MAX) {
+      throw new WxycError(`Bad Request: to_genre_id must be an integer between 1 and ${INT4_MAX}`, 400);
+    }
+    // A destination equal to the source is no move: handled as a number-only (or re-letter) request.
+    toGenreId = raw === genreId ? undefined : raw;
+  }
   let codeLetters: string | undefined;
   if (record.code_letters !== undefined) {
     if (typeof record.code_letters !== 'string') throw new WxycError('Bad Request: code_letters must be a string', 400);
@@ -1336,7 +1345,11 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
     codeLetters = validateCanonicalCodeLetters(record.code_letters);
   }
 
-  const result = await libraryService.refileArtistInGenre(artistId, genreId, target, codeLetters);
+  if (toGenreId !== undefined && !(await libraryService.genreExists(toGenreId))) {
+    throw new WxycError('Genre not found', 404, { code: 'genre_not_found' });
+  }
+
+  const result = await libraryService.refileArtistInGenre(artistId, genreId, target, codeLetters, toGenreId);
   switch (result.outcome) {
     case 'artist_not_found':
       throw new WxycError('Artist not found', 404, { code: 'artist_not_found' });
@@ -1360,6 +1373,12 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
         reason: 'various_artists_section',
       });
       return;
+    case 'already_filed':
+      res.status(409).json({
+        message: 'Cannot move: this artist already has a membership or a release in the destination genre.',
+        reason: 'already_filed_in_genre',
+      });
+      return;
     case 'letters_shared':
       res.status(409).json({
         message:
@@ -1381,7 +1400,7 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
         changed: result.outcome === 'refiled',
         previous_code_artist_number: result.previous,
         previous_code_letters: result.previous_letters,
-        previous_genre_id: genreId,
+        previous_genre_id: result.previous_genre_id,
         releases_to_relabel: result.releases_to_relabel,
       });
   }

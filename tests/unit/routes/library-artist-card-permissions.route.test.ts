@@ -306,7 +306,7 @@ describe('BS#2156 artist-card routes — permission tiers', () => {
         .set('Authorization', 'Bearer test-token')
         .send(body);
       expect(res.status).toBe(503);
-      expect(mockRefileArtistInGenre).toHaveBeenCalledWith(1, 6, 31, undefined);
+      expect(mockRefileArtistInGenre).toHaveBeenCalledWith(1, 6, 31, undefined, undefined);
     });
 
     test.each(['dj', 'member'])('a %s-role token (catalog:read only) is rejected', async (role) => {

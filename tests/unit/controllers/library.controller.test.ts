@@ -5595,9 +5595,7 @@ describe('library.controller', () => {
         caught = err;
       }
       const message = (caught as Error).message;
-      expect(message).toContain(
-        'genre_id (no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint)'
-      );
+      expect(message).toContain('genre_id (move genres with POST /library/artists/{id}/refile (to_genre_id))');
       expect(message).toContain('code_letters (re-letter with POST /library/artists/{id}/refile (code_letters))');
       expect(message).toContain('code_artist_number (re-file with POST /library/artists/{id}/refile)');
       expect(mockUpdateArtistInDB).not.toHaveBeenCalled();
