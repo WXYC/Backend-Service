@@ -146,6 +146,7 @@ import {
   deleteReview,
   editOutcome,
   lockReviewAfterItem,
+  readAccountName,
   recordReview,
   reviewVisibleTo,
   snapshotAuthor,
@@ -200,6 +201,18 @@ describe('snapshotAuthor', () => {
 
   test('has no name to snapshot for a missing account', () => {
     expect(snapshotAuthor(undefined)).toBeNull();
+  });
+});
+
+describe('readAccountName', () => {
+  test.each([
+    ['a name', [{ name: 'Test Reviewer' }], 'Test Reviewer'],
+    ['a name over 128 code points', [{ name: '😀'.repeat(200) }], '😀'.repeat(128)],
+    ['a null name', [{ name: null }], null],
+    ['no row', [], null],
+  ])('reads %s from the handle it is given', async (_label, rows, expected) => {
+    const handle = { select: () => ({ from: () => ({ where: () => Promise.resolve(rows) }) }) };
+    expect(await readAccountName(handle as any, 'user-1')).toBe(expected);
   });
 });
 
