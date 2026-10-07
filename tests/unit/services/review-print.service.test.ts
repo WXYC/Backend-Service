@@ -128,11 +128,11 @@ describe('printIntakeItem locks (BS#2804)', () => {
 
 describe('printIntakeItem refusals (BS#2804)', () => {
   it.each([
-    ['an item with no accepted review', filedPrint({ item: { accepted_review_id: null } }).slice(0, 4)],
-    ['a handwritten accepted review', filedPrint({ review: { medium: 'handwritten' } })],
-  ])('%s is not_reviewed and writes nothing', async (_name, selects) => {
+    ['an item with no accepted review', filedPrint({ item: { accepted_review_id: null } }).slice(0, 4), 'not_reviewed'],
+    ['a handwritten accepted review', filedPrint({ review: { medium: 'handwritten' } }), 'handwritten'],
+  ])('%s is %s and writes nothing', async (_name, selects, outcome) => {
     const { result, inserts, tx } = await run(selects);
-    expect(result).toEqual({ outcome: 'not_reviewed' });
+    expect(result).toEqual({ outcome });
     expect(inserts).toEqual([]);
     expect(tx.update).not.toHaveBeenCalled();
   });

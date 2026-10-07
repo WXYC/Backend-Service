@@ -104,12 +104,18 @@ describe('POST /intake/:id/print (BS#2804)', () => {
   });
 
   test.each([
-    [{ outcome: 'not_found' }, 404, undefined],
-    [{ outcome: 'not_reviewed' }, 409, 'not_reviewed'],
-  ])('%j answers %i', async (result, status, reason) => {
+    [{ outcome: 'not_found' }, 404, undefined, 'Intake item not found'],
+    [{ outcome: 'not_reviewed' }, 409, 'not_reviewed', 'This item has no accepted review to print.'],
+    [
+      { outcome: 'handwritten' },
+      409,
+      'not_reviewed',
+      "This item's accepted review is handwritten, so its slip is already on the sleeve.",
+    ],
+  ])('%j answers %i', async (result, status, reason, message) => {
     mockPrintIntakeItem.mockResolvedValue(result);
     const res = await call('print');
-    expect([res.status, res.body.reason]).toEqual([status, reason]);
+    expect([res.status, res.body.reason, res.body.message]).toEqual([status, reason, message]);
   });
 
   test('a malformed id is a 400 before any query', async () => {

@@ -155,9 +155,13 @@ describe('/intake print and finalize (BS#2804)', () => {
     test('no accepted review, a handwritten one and a missing item are 409, 409 and 404', async () => {
       const bare = await seedIntakeItem({ artist_name: `${PREFIX} bare`, state: 'reviewed' });
       const { item: handwritten } = await reviewedItem('handwritten', { medium: 'handwritten', review: null });
-      for (const id of [bare.id, handwritten.id]) {
+      const messages = [
+        [bare.id, 'This item has no accepted review to print.'],
+        [handwritten.id, "This item's accepted review is handwritten, so its slip is already on the sleeve."],
+      ];
+      for (const [id, message] of messages) {
         const res = await manager.post(`/intake/${id}/print`);
-        expect([res.status, res.body.reason]).toEqual([409, 'not_reviewed']);
+        expect([res.status, res.body.reason, res.body.message]).toEqual([409, 'not_reviewed', message]);
         expect(await printsOf(id)).toEqual([]);
       }
       expect((await manager.post('/intake/2147483647/print')).status).toBe(404);
