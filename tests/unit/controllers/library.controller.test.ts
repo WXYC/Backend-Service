@@ -6640,6 +6640,39 @@ describe('library.controller', () => {
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
+      it('POST /library records rotation_link.flowsheet_rows_linked on the span after the import commits', async () => {
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 3 });
+        mockSpan.setAttributes.mockClear();
+
+        await addAlbum(importReq(12), mockResponse(), next);
+
+        expect(mockSpan.setAttributes).toHaveBeenCalledWith({ 'rotation_link.flowsheet_rows_linked': 3 });
+      });
+
+      it('POST /library records nothing on the span for a refused import', async () => {
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'already_linked' });
+        mockSpan.setAttributes.mockClear();
+
+        await addAlbum(importReq(12), mockResponse(), next);
+
+        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
+      });
+
+      it('POST /library still answers 201 when setting the span attribute throws', async () => {
+        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
+        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 3 });
+        mockSpan.setAttributes.mockImplementationOnce(() => {
+          throw new Error('span closed');
+        });
+        const res = mockResponse();
+
+        await addAlbum(importReq(12), res, next);
+
+        expect(res.status).toHaveBeenCalledWith(201);
+      });
+
       it('POST /library without it still takes the pre_cutover basis and links nothing', async () => {
         mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
         await addAlbum(importReq(undefined), mockResponse(), next);
