@@ -6638,7 +6638,7 @@ describe('library.controller', () => {
 
     describe('the legacy bases (BS#2810)', () => {
       const notEligible = new RotationNotEligibleError(
-        'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.'
+        'This rotation entry is already linked to a release, or was added after reviews moved into the DJ site, so it needs a review before it can be catalogued.'
       );
       const importReq = (from_rotation_id: unknown) =>
         ({
@@ -6730,7 +6730,7 @@ describe('library.controller', () => {
         [
           'an insert refused as not eligible',
           () => mockInsertAlbum.mockRejectedValue(notEligible),
-          'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.',
+          'This rotation entry is already linked to a release, or was added after reviews moved into the DJ site, so it needs a review before it can be catalogued.',
         ],
         [
           'a row linked between the check and the link',
@@ -6801,11 +6801,13 @@ describe('library.controller', () => {
       });
 
       it('POST /library/rotation answers 409 rotation_not_eligible when the move is refused', async () => {
-        mockAddToRotation.mockRejectedValue(notEligible);
+        const moveSentence =
+          "This rotation entry can't be moved to another bin this way. It is already linked to a release, or it was added after reviews moved into the DJ site.";
+        mockAddToRotation.mockRejectedValue(new RotationNotEligibleError(moveSentence));
         const res = mockResponse();
         await addRotation(moveReq(), res, next);
         expect(res.status).toHaveBeenCalledWith(409);
-        expect(res.json).toHaveBeenCalledWith({ message: notEligible.message, reason: 'rotation_not_eligible' });
+        expect(res.json).toHaveBeenCalledWith({ message: moveSentence, reason: 'rotation_not_eligible' });
       });
 
       it.each([
