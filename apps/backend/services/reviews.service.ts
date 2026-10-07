@@ -5,7 +5,6 @@ import {
   extractConstraintName,
   extractSqlState,
   intake_items,
-  library,
   review_prints,
   review_revisions,
   reviews,
@@ -195,21 +194,21 @@ export const createReview = async (
   db.transaction(async (tx) => {
     const held =
       subject.intake_item_id !== undefined
-        ? await tx
-            .select({ id: intake_items.id })
-            .from(intake_items)
-            .where(
-              and(
-                eq(intake_items.id, subject.intake_item_id),
-                sql`(${effectiveState}) IN ('checked_out', 'reviewed')`,
-                eq(intake_items.checked_out_by, actor.id)
+        ? (
+            await tx
+              .select({ id: intake_items.id })
+              .from(intake_items)
+              .where(
+                and(
+                  eq(intake_items.id, subject.intake_item_id),
+                  sql`(${effectiveState}) IN ('checked_out', 'reviewed')`,
+                  eq(intake_items.checked_out_by, actor.id)
+                )
               )
-            )
-            .for('update')
-        : (await lockReleaseRow(tx, subject.album_id!))
-          ? [{ id: subject.album_id! }]
-          : [];
-    if (held.length === 0) return { outcome: 'subject_not_held' as const };
+              .for('update')
+          ).length > 0
+        : await lockReleaseRow(tx, subject.album_id!);
+    if (!held) return { outcome: 'subject_not_held' as const };
     const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
     const [{ id }] = await tx
       .insert(reviews)
