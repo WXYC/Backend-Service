@@ -169,7 +169,7 @@ describe('/fcc-notes (BS#2862)', () => {
         .expect(200);
       expect(await noteRows('intake_item_id', item.id)).toHaveLength(1);
 
-      await manager.delete(`/intake/${item.id}`).expect(204);
+      await manager.delete(`/intake/${item.id}`).expect(200);
 
       expect(await noteRows('intake_item_id', item.id)).toHaveLength(0);
     });
