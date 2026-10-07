@@ -20,11 +20,11 @@ import type { SpanJSON, TransactionEvent } from '@sentry/core';
  *     plugin-hook bookkeeping. This is the volume this filter exists to shed.
  *   - `/healthcheck` — the app-level liveness route in both
  *     `apps/backend/app.ts` and `apps/auth/app.ts` (`apps/auth`'s proxies to
- *     `/auth/ok`; `apps/backend`'s runs a DB probe). It currently produces no
- *     transaction at all — hence the zero above — so listing it sheds nothing
- *     today. It is kept so the probe stays shed if that ever changes; a path
- *     in a Set costs nothing, and re-deriving this the next time span volume
- *     spikes does.
+ *     `/auth/ok`; `apps/backend`'s runs a DB probe). It produced no
+ *     transaction at all under Sentry 10 — hence the zero above. Under Sentry
+ *     11 (`traceLifecycle: 'static'`) it does produce a `GET /healthcheck`
+ *     transaction, and this entry is what drops it (verified 2026-10-06 against
+ *     11.4.0, BS#2948). Do not remove it as dead weight.
  *
  * Dropping these transactions has no effect on error reporting: `wxyc-canary`
  * alerts on `/healthcheck` failures via `beforeSend` and the Express error
@@ -89,36 +89,41 @@ export function isLivenessRequestPath(url: string | undefined): boolean {
  * If this is ever revisited, restore `handler` first; `router` is Express
  * choosing which function to call.
  *
- * **Both SDK generations are matched (BS#2948).** Sentry 11 replaced the
- * OTel-based Express instrumentation with `@sentry/server-utils`'
+ * **Matched by origin and op since Sentry 11 (BS#2948).** Sentry 11 replaced
+ * the OTel-based Express instrumentation with `@sentry/server-utils`'
  * diagnostics-channel one, which stamps origin `auto.http.express` and the
- * generic `@sentry/conventions` ops. Matching only the old strings after the
- * upgrade would have kept every Express span with no test failing; matching
- * only the new ones would do the same after a pin back to Sentry 10 (done once
- * already, 3c3e815e). The Sentry 11 ops are generic enough that another
- * framework integration could emit them, so they match only alongside
- * Express's own origin. The Sentry 10 ops are Express-specific on their own.
- * The filter only runs at all because both preloads pin
- * `traceLifecycle: 'static'` — Sentry 11's default span streaming never builds
- * a transaction event.
+ * generic `@sentry/conventions` ops. The old `*.express` match kept every
+ * Express span after the upgrade with no test failing. The new ops are generic
+ * enough that another framework integration could emit them, so they match
+ * only alongside Express's own origin. The filter only runs at all because
+ * both preloads pin `traceLifecycle: 'static'` — Sentry 11's default span
+ * streaming never builds a transaction event.
  */
-const SENTRY_10_EXPRESS_SPAN_OPS = new Set(['middleware.express', 'router.express', 'request_handler.express']);
-const SENTRY_11_EXPRESS_SPAN_OPS = new Set(['middleware', 'router', 'handler']);
-const SENTRY_11_EXPRESS_ORIGIN = 'auto.http.express';
+const EXPRESS_INSTRUMENTATION_SPAN_OPS = new Set(['middleware', 'router', 'handler']);
+const EXPRESS_INSTRUMENTATION_ORIGIN = 'auto.http.express';
 
 export function isExpressInstrumentationSpan(span: Pick<SpanJSON, 'op' | 'origin'>): boolean {
-  if (span.op === undefined) return false;
-  if (SENTRY_10_EXPRESS_SPAN_OPS.has(span.op)) return true;
-  return span.origin === SENTRY_11_EXPRESS_ORIGIN && SENTRY_11_EXPRESS_SPAN_OPS.has(span.op);
+  return (
+    span.origin === EXPRESS_INSTRUMENTATION_ORIGIN &&
+    span.op !== undefined &&
+    EXPRESS_INSTRUMENTATION_SPAN_OPS.has(span.op)
+  );
 }
 
 /**
  * `beforeSendTransaction` for both `apps/backend/instrument.ts` and
  * `apps/auth/instrument.ts` (BS#2089, widened by BS#2406). Returning `null`
- * drops the whole transaction event, so liveness probes are filtered here
- * rather than via `beforeSendSpan` — the SDK's `beforeSendSpan` type can only
- * modify a span, not drop it. Express instrumentation spans are stripped from
- * `event.spans` on every surviving transaction.
+ * drops the whole transaction event. Express instrumentation spans are
+ * stripped from `event.spans` on every surviving transaction.
+ *
+ * **Only runs under `traceLifecycle: 'static'`.** In Sentry 11.4.0,
+ * `beforeSendTransaction` is `@deprecated`: span streaming (the default) ignores
+ * it, and it "will be removed in v12". The SDK's replacement for dropping spans
+ * under either lifecycle is `ignoreSpans` (the old reason for filtering here —
+ * that `beforeSendSpan` can modify but not drop a span — predates it). Moving
+ * this filter there, or not creating Express spans at all via
+ * `expressIntegration({ ignoreLayersType })`, is BS#2959, and is required
+ * before the v12 upgrade.
  *
  * **`null` is reserved for liveness paths.** A transaction whose spans are
  * *entirely* filtered still ships, as a transaction with an empty span list —
