@@ -100,9 +100,9 @@ describe('POST /library/artists/:id/refile', () => {
     });
 
     it.each([
-      ['artist_not_found', 'Artist not found', 'artist_not_found'],
-      ['not_filed', 'Artist not filed under genre 6', 'artist_not_filed_in_genre'],
-    ] as const)('throws a 404 for %s carrying code %s', async (outcome, message, code) => {
+      ['artist_not_found', 'artist_not_found', 'Artist not found'],
+      ['not_filed', 'artist_not_filed_in_genre', 'Artist not filed under genre 6'],
+    ] as const)('throws a 404 for %s carrying code %s', async (outcome, code, message) => {
       mockedService.refileArtistInGenre.mockResolvedValue({ outcome });
       const { req, res, next } = mockReqRes({ id: '431' }, { genre_id: 6, code_artist_number: 31 });
 

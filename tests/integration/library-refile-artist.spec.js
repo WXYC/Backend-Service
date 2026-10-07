@@ -159,9 +159,12 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
     const unknown = await refile(2147483000, { genre_id: HIPHOP, code_artist_number: 1 });
 
     expect(wrongGenre.status).toBe(404);
-    expect(wrongGenre.body.message).toContain(`Artist not filed under genre ${SOUNDTRACKS}`);
+    expect(wrongGenre.body).toEqual({
+      message: `Artist not filed under genre ${SOUNDTRACKS}`,
+      code: 'artist_not_filed_in_genre',
+    });
     expect(unknown.status).toBe(404);
-    expect(unknown.body.message).toContain('Artist not found');
+    expect(unknown.body).toEqual({ message: 'Artist not found', code: 'artist_not_found' });
   });
 
   it('refuses a lettered compilation section with 409, leaving the row unchanged', async () => {
