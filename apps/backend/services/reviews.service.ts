@@ -23,6 +23,7 @@ import {
   writeAcceptance,
 } from './intake.service.js';
 import { readReviewNotice } from './review-notices.service.js';
+import { lockReleaseRow } from '../utils/release-row-lock.js';
 
 /**
  * In-app review service behind `/reviews` (BS#2802, slice 10a of BS#2791): a DJ's own
@@ -205,7 +206,9 @@ export const createReview = async (
               )
             )
             .for('update')
-        : await tx.select({ id: library.id }).from(library).where(eq(library.id, subject.album_id!)).for('key share');
+        : (await lockReleaseRow(tx, subject.album_id!))
+          ? [{ id: subject.album_id! }]
+          : [];
     if (held.length === 0) return { outcome: 'subject_not_held' as const };
     const [account] = await tx.select({ name: user.name }).from(user).where(eq(user.id, actor.id));
     const [{ id }] = await tx
