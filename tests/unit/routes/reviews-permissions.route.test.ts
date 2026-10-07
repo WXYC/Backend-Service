@@ -412,6 +412,16 @@ describe('POST /reviews/:id/submit', () => {
     expect(mockNotifySubmitted).toHaveBeenCalledTimes(1);
   });
 
+  // A hung SES must not hold a submit that already committed: the client would time out, retry and meet 409.
+  test('a notice that never settles does not hold the response', async () => {
+    mockRole('dj');
+    mockNotifySubmitted.mockReturnValueOnce(new Promise<void>(() => {}));
+    mockSubmit.mockResolvedValueOnce({ outcome: 'submitted', review: REVIEW, notice: { itemId: 8 } });
+    const res = await submit();
+    expect([res.status, res.body]).toEqual([200, REVIEW]);
+    expect(mockNotifySubmitted).toHaveBeenCalledTimes(1);
+  }, 2000);
+
   test.each([
     ['not_found', 404],
     ['forbidden', 403],

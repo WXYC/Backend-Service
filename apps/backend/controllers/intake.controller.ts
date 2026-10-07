@@ -129,8 +129,9 @@ const transition =
     if (result.outcome === 'already_filed' || result.outcome === 'state_changed') {
       return void conflict(res, 'state_changed');
     }
+    // After the commit and not awaited, so SES never holds the response; the notice never rejects.
     if (action === 'pass' && result.outcome === 'updated')
-      await notifyPass({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);
+      void notifyPass({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);
     res.json(result.item);
   };
 

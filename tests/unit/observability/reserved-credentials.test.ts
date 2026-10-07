@@ -3,9 +3,9 @@
  *
  * The detector this file covers used to live in the three SES senders, where
  * it could not fire in the process it protects: `apps/backend` holds two of
- * the repo's three `CloudWatchClient` constructions and sends no email at all,
- * so the container whose metrics the shadowing actually kills never ran the
- * check. It now lives in `@wxyc/observability` and is called from each app's
+ * the repo's three `CloudWatchClient` constructions and then sent no email at
+ * all (it sends the review notices since BS#2806, but only lazily), so the
+ * container whose metrics the shadowing actually kills never ran the check. It now lives in `@wxyc/observability` and is called from each app's
  * Sentry preload (`instrument.ts`, `node --import`), which is the only place
  * that runs in every container regardless of what the container goes on to do.
  *

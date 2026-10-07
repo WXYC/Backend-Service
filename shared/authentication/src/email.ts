@@ -29,9 +29,9 @@ let sesClient: SESClient | null = null;
  * Detecting a re-armed reserved name is deliberately NOT this resolver's job.
  * A copy of that check used to live here and was byte-identical in the two
  * digest crons, which inverted its coverage: `apps/backend` holds two of the
- * repo's three `CloudWatchClient` constructions and sends no email, so the one
- * container the shadowing actually silences was the one that never ran the
- * check, while the senders that did ran it lazily on first send and not at all
+ * repo's three `CloudWatchClient` constructions and then sent no email (it sends
+ * the review notices since BS#2806, lazily), so the one container the shadowing
+ * actually silences was the one that never ran the check, while the senders that did ran it lazily on first send and not at all
  * under `EMAIL_ENABLED=false`. It is now `warnIfReservedAwsCredentialsPresent`
  * in `@wxyc/observability`, called from every container's Sentry preload
  * (BS#2532).
