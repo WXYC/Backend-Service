@@ -488,13 +488,8 @@ describe('the service refuses both citations non-null (BS#2797)', () => {
 });
 
 describe('updateIntakeItem — refusal order end to end (BS#2797)', () => {
-  /** A chainable, awaitable stand-in for a drizzle builder that resolves to `rows`. */
-  const builder = (rows: unknown[]): unknown => {
-    const proxy: unknown = new Proxy(() => undefined, {
-      get: (_t, prop) => (prop === 'then' ? (resolve: (v: unknown) => void) => resolve(rows) : () => proxy),
-    });
-    return proxy;
-  };
+  /** A chainable, awaitable stand-in for a drizzle builder that resolves to `rows` (the shared lock-log builder; no lock is asserted here). */
+  const { builder } = createLockLog();
 
   const refuse = async (patch: Parameters<typeof updateIntakeItem>[1], effective_state: string) => {
     jest.spyOn(db, 'update').mockReturnValue(builder([]) as never); // the guarded UPDATE touched no row
@@ -554,7 +549,7 @@ describe('RELEASE_ACCEPTED_REVIEW — the one UPDATE that takes a review off eve
 });
 
 describe('deleteIntakeItem (BS#2854)', () => {
-  /** A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows` and logs each method called on it. */
+  /** The shared lock-log builder: each statement's label, then each lock as `<table> for <strength> id <param>`, in call order. */
   const { builder: lockBuilder, log: calls } = createLockLog();
   const builder = (label: string, rows: unknown[]) => lockBuilder(rows, label);
   const run = async (selects: unknown[][]) => {
@@ -599,8 +594,8 @@ describe('deleteIntakeItem (BS#2854)', () => {
 
 describe('acceptReview (BS#2860)', () => {
   /**
-   * A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows`, remembers the table of its `from`, and
-   * logs each lock as `<table> for <strength>` (plus ` with options` when `for` got a second argument such as `{ of }`).
+   * The shared lock-log builder: it resolves to `rows` and logs each lock as `<table> for <strength>`, plus ` with options`
+   * when `for` got a second argument such as `{ of }`, then ` id <param>` for the row the `where` bound.
    */
   const { builder, log, sets } = createLockLog();
   const dialect = new PgDialect();
