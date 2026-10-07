@@ -3494,11 +3494,6 @@ paths:
               properties:
                 artist_name:
                   type: string
-                to_genre_id:
-                  type: integer
-                  minimum: 1
-                  maximum: 2147483647
-                  description: Destination genre; moves the membership and every release filed in it
                 code_letters:
                   type: string
                 genre_id:
@@ -4228,9 +4223,11 @@ paths:
         `Artist`; `code_artist_number` is the contested target). 503
         `lock_unavailable` when a live writer holds the shelf: the artist's row,
         then the destination shelf's advisory key, then the destination
-        `(code_letters, genre_id)` bucket plus the artist's own memberships in
-        one statement ordered by `(genre_id, artist_id)`, so two re-files into
-        one shelf serialize. `POST
+        `(to_genre_id or genre_id, destination letters)` bucket plus the
+        artist's own memberships in one statement ordered by
+        `(genre_id, artist_id)`, so two re-files into one shelf serialize. A
+        genre move also locks the moving `library` rows before its first
+        write, so a concurrent release edit waits rather than deadlocking. `POST
         /library/artists` takes no such lock, so a create landing the same
         triple at the same instant is not prevented (BS#2106).
       security:
@@ -4261,6 +4258,11 @@ paths:
                 code_letters:
                   type: string
                   description: Destination call letters; trimmed and upper-cased, 1-4 of A-Z, 0-9, `/`; not a Various Artists bucket
+                to_genre_id:
+                  type: integer
+                  minimum: 1
+                  maximum: 2147483647
+                  description: Destination genre; moves the membership and every release filed in it. Equal to `genre_id` is no move.
       responses:
         '200':
           description: >-
@@ -4268,7 +4270,7 @@ paths:
             `previous_code_artist_number`, `previous_code_letters`,
             `previous_genre_id` and `releases_to_relabel`
         '400':
-          description: Malformed id or body, an unsupported key, or an invalid `genre_id` / `code_artist_number` / `code_letters`
+          description: Malformed id or body, an unsupported key, or an invalid `genre_id` / `code_artist_number` / `code_letters` / `to_genre_id`
         '404':
           description: >-
             Unknown `to_genre_id` (`code: genre_not_found`), artist not found (`code: artist_not_found`), or not filed under

@@ -215,6 +215,17 @@ describe('POST /library/artists/:id/refile', () => {
         expect(mockedService.refileArtistInGenre).not.toHaveBeenCalled();
       });
 
+      it('answers 400 (not 404) for a Various Artists destination even when to_genre_id is unknown', async () => {
+        const actual = jest.requireActual<typeof libraryService>('../../../apps/backend/services/library.service');
+        mockedService.assertRefileLettersAllowed.mockImplementation(actual.assertRefileLettersAllowed);
+        mockedService.genreExists.mockResolvedValue(false);
+        const { req, res, next } = mockReqRes({ id: '431' }, { ...body, to_genre_id: 9999, code_letters: 'V/A' });
+
+        await expect(refileArtist(req as never, res, next)).rejects.toMatchObject({ statusCode: 400 });
+        expect(mockedService.genreExists).not.toHaveBeenCalled();
+        expect(mockedService.refileArtistInGenre).not.toHaveBeenCalled();
+      });
+
       it('passes a known to_genre_id through', async () => {
         mockedService.genreExists.mockResolvedValue(true);
         mockedService.refileArtistInGenre.mockResolvedValue({ outcome: 'artist_not_found' });

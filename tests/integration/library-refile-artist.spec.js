@@ -373,6 +373,21 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
       const old = await manager.get(`/library/artists/${id}`).query({ genre_id: JAZZ });
       expect(old.status).toBe(404);
       expect(old.body.message).toContain(`not filed under genre ${JAZZ}`);
+
+      // The composed view (library_artist_view) reads the destination genre and call number for each release, and the
+      // source shelf no longer lists the artist while the destination shelf does.
+      const releases = await manager.get(`/library/artists/${id}/releases`).query({ genre_id: ELECTRONIC });
+      expect(releases.status).toBe(200);
+      expect(releases.body.releases.map((r) => [r.genre_id, r.code_letters, r.code_artist_number])).toEqual([
+        [ELECTRONIC, 'ZG', 4],
+        [ELECTRONIC, 'ZG', 4],
+      ]);
+      const source = await manager.get('/library/artists/by-code').query({ genre_id: JAZZ, code_letters: 'ZG' });
+      expect(source.body.artists.map((a) => a.id)).not.toContain(id);
+      const destination = await manager
+        .get('/library/artists/by-code')
+        .query({ genre_id: ELECTRONIC, code_letters: 'ZG' });
+      expect(destination.body.artists.map((a) => a.id)).toContain(id);
     });
 
     it('moves with the same number (genre only) and with letters, number and genre in one request', async () => {
@@ -449,12 +464,17 @@ describe('POST /library/artists/:id/refile (BS#2643)', () => {
     it('refuses an occupied destination slot naming the holder, and an unknown genre with 404 genre_not_found', async () => {
       const holder = await seedArtist('Holder', 'ZG', [[ELECTRONIC, 4]]);
       const id = await seedArtist('Blocked', 'ZG', [[JAZZ, 80]]);
+      const release = await seedRelease(id, JAZZ, 'Blocked Release');
+      const [stamped] = await sql`SELECT last_modified FROM ${sql(SCHEMA)}.library WHERE id = ${release}`;
 
       const taken = await refile(id, body());
       expect(taken.status).toBe(409);
       expect(taken.body.reason).toBe('artist_code_conflict');
       expect(taken.body.artist).toMatchObject({ id: holder, genre_id: ELECTRONIC, code_artist_number: 4 });
       expect(await codeOf(id, JAZZ)).toBe(80);
+      const [row] = await sql`SELECT genre_id, last_modified FROM ${sql(SCHEMA)}.library WHERE id = ${release}`;
+      expect(row.genre_id).toBe(JAZZ);
+      expect(row.last_modified.getTime()).toBe(stamped.last_modified.getTime());
 
       const unknown = await refile(id, body({ to_genre_id: 9999 }));
       expect(unknown.status).toBe(404);

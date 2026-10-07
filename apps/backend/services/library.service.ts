@@ -4646,6 +4646,20 @@ export type ArtistRefileOutcome =
   | { outcome: 'slot_taken'; occupant: FilingArtist };
 
 /**
+ * The request-shape 400 the service owns: nothing can be re-lettered into the shared Various Artists bucket. Called by
+ * `refileArtistInGenre` before any lock, and by the controller ahead of its `genreExists` check so every 400 precedes
+ * the 404.
+ */
+export const assertRefileLettersAllowed = (code_letters?: string): void => {
+  if (code_letters !== undefined && isVariousArtists(code_letters.trim().toUpperCase())) {
+    throw new WxycError(
+      'Bad Request: code_letters names the Various Artists bucket, which cannot be re-lettered into',
+      400
+    );
+  }
+};
+
+/**
  * BS#2643, BS#3035: re-file an artist's call number within ONE genre membership
  * (`genre_artist_crossreference.artist_genre_code`) and, when `code_letters` differs from the stored letters under
  * `trim().toUpperCase()`, re-letter the artist (`artists.code_letters`). Letters are artist-level, not per-membership,
@@ -4721,13 +4735,7 @@ export const refileArtistInGenre = async (
   // A destination equal to the source is no move at all.
   const moveTo = to_genre_id !== undefined && to_genre_id !== genre_id ? to_genre_id : undefined;
   const destGenre = moveTo ?? genre_id;
-  // Nothing can be re-lettered into the shared Various Artists bucket; decided before any lock.
-  if (code_letters !== undefined && isVariousArtists(code_letters.trim().toUpperCase())) {
-    throw new WxycError(
-      'Bad Request: code_letters names the Various Artists bucket, which cannot be re-lettered into',
-      400
-    );
-  }
+  assertRefileLettersAllowed(code_letters);
   let written: Record<string, unknown> | undefined;
   try {
     const outcome = await db.transaction(async (tx): Promise<ArtistRefileOutcome> => {
@@ -4878,6 +4886,8 @@ export const refileArtistInGenre = async (
               .set({ genre_id: destGenre, last_modified: sql`NOW()` })
               .where(and(eq(library.artist_id, artist_id), eq(library.genre_id, genre_id)))
               .returning({ id: library.id });
+      // On a move the destination was empty (the already-filed probe), so the moved rows ARE the releases to relabel.
+      const releasesToRelabel = moveTo === undefined ? await countReleases() : moved.length;
       written = {
         artist_id,
         before: { code_letters: previous_letters, genre_id, code_artist_number: previous },
@@ -4891,7 +4901,7 @@ export const refileArtistInGenre = async (
         previous,
         previous_letters,
         previous_genre_id: genre_id,
-        releases_to_relabel: await countReleases(),
+        releases_to_relabel: releasesToRelabel,
       };
     });
     // Logged after commit so a rolled-back write leaves no record; the reverse re-file is the undo this line enables.
@@ -4908,7 +4918,7 @@ export const refileArtistInGenre = async (
         category: 'library.refile',
         level: 'warning',
         message: 'POST /library/artists/:id/refile stood down on lock contention',
-        data: { artist_id, genre_id, code: extractSqlState(error) },
+        data: { artist_id, genre_id, to_genre_id: moveTo, code_letters, code: extractSqlState(error) },
       });
       return { outcome: 'lock_unavailable' };
     }
