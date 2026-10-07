@@ -2,6 +2,8 @@
 
 Incremental synchronization of the music library from the legacy tubafrenzy MySQL database to PostgreSQL. The job connects to the remote MySQL server over SSH, fetches releases modified since the last run, normalizes the data, and inserts new artists and albums into the PostgreSQL database via Drizzle ORM.
 
+**Do not run it after `REVIEW_GATE_CUTOVER_DATE`** (BS#2807, `docs/env-vars.md`). It writes `library` rows straight to the table, not through `insertAlbum`, so it sits outside the review gate, and a run after the date would catalogue releases that no review stands behind. It has been unscheduled since 2026-09-17; this is the reason not to re-arm it.
+
 ## How It Works
 
 The run has **two phases**, in two separate transactions. Every legacy MySQL read happens with no Postgres transaction open.

@@ -1,5 +1,6 @@
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
+import { ReviewRequiredError } from '../../../apps/backend/utils/review-gate-basis';
 
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockGetAlbumByLegacyId = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
@@ -30,7 +31,8 @@ const mockGenreExists = jest.fn<(genreId: number) => Promise<boolean>>();
 const mockGenerateArtistNumber = jest.fn<(codeLetters: string, genreId: number) => Promise<number>>();
 const mockInsertArtistWithGenreCrossreference =
   jest.fn<(artist: Record<string, unknown>, genreId: number, codeNumber: number) => Promise<Record<string, unknown>>>();
-const mockInsertAlbum = jest.fn<(album: Record<string, unknown>) => Promise<Record<string, unknown>>>();
+const mockInsertAlbum =
+  jest.fn<(album: Record<string, unknown>, basis: unknown, tx?: unknown) => Promise<Record<string, unknown>>>();
 const mockGenerateAlbumCodeNumber = jest.fn<(artistId: number, genreId: number) => Promise<number>>();
 const mockPeekArtistShelf =
   jest.fn<
@@ -50,7 +52,8 @@ const mockGetRotationTracksFromRelease = jest.fn<(releaseId: number) => Promise<
 // GET /library/rotation, POST /library/rotation, PATCH /library/rotation,
 // GET /library/rotation/uncatalogued, PATCH /library/rotation/:id/link (BS#2109).
 const mockGetRotationFromDB = jest.fn<() => Promise<unknown[]>>();
-const mockAddToRotation = jest.fn<(fields: Record<string, unknown>) => Promise<Record<string, unknown>>>();
+const mockAddToRotation =
+  jest.fn<(fields: Record<string, unknown>, basis: unknown, urls?: string[]) => Promise<Record<string, unknown>>>();
 // BS#2491 release-scoped definitive links.
 const mockReconcileLibraryUrlsToLml = jest.fn<(urls: string[]) => Promise<void>>();
 const mockSetLibraryUrls = jest.fn<(id: number, urls: string[]) => Promise<Record<string, unknown> | undefined>>();
@@ -638,7 +641,11 @@ describe('library.controller', () => {
 
         await addAlbum(bodyWith(album_artist), res, next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ album_artist: expected }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ album_artist: expected }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
@@ -687,7 +694,11 @@ describe('library.controller', () => {
 
         await addAlbum(req({ [field]: astral(128) }), res, next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ [field]: astral(128) }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ [field]: astral(128) }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
@@ -707,13 +718,21 @@ describe('library.controller', () => {
       it.each(['album_title', 'label'])('%s: trims a value padded past 128 that fits once trimmed', async (field) => {
         await addAlbum(req({ [field]: `  ${astral(128)}  ` }), mockResponse(), next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ [field]: astral(128) }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ [field]: astral(128) }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it('stores a blank alternate_artist_name as null', async () => {
         await addAlbum(req({ alternate_artist_name: '   ' }), mockResponse(), next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ alternate_artist_name: null }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ alternate_artist_name: null }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
     });
 
@@ -735,7 +754,9 @@ describe('library.controller', () => {
 
       expect(mockGetArtistNameById).toHaveBeenCalledWith(42);
       expect(mockInsertAlbum).toHaveBeenCalledWith(
-        expect.objectContaining({ artist_id: 42, artist_name: 'Juana Molina' })
+        expect.objectContaining({ artist_id: 42, artist_name: 'Juana Molina' }),
+        { kind: 'pre_cutover' },
+        expect.anything()
       );
       expect(res.status).toHaveBeenCalledWith(201);
     });
@@ -759,7 +780,9 @@ describe('library.controller', () => {
 
       expect(mockGetArtistNameById).toHaveBeenCalledWith(7);
       expect(mockInsertAlbum).toHaveBeenCalledWith(
-        expect.objectContaining({ artist_id: 7, artist_name: 'Jessica Pratt' })
+        expect.objectContaining({ artist_id: 7, artist_name: 'Jessica Pratt' }),
+        { kind: 'pre_cutover' },
+        expect.anything()
       );
     });
 
@@ -798,7 +821,11 @@ describe('library.controller', () => {
       it('persists a client-supplied code_number instead of generating one', async () => {
         await addAlbum(req({ code_number: 12345 }), mockResponse(), next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_number: 12345 }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ code_number: 12345 }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
         expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
       });
 
@@ -813,8 +840,12 @@ describe('library.controller', () => {
 
         await addAlbum(req({}), mockResponse(), next);
 
-        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 11);
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_number: 7 }));
+        expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(42, 11, expect.anything());
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ code_number: 7 }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it.each([[0], [-1], [32768], [40000], [1.5]])('rejects code_number %p before the insert', async (code_number) => {
@@ -830,13 +861,21 @@ describe('library.controller', () => {
       it.each([[1], [32767]])('accepts the boundary code_number %p', async (code_number) => {
         await addAlbum(req({ code_number }), mockResponse(), next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_number }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ code_number }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it('passes code_volume_letters through to the insert', async () => {
         await addAlbum(req({ code_volume_letters: 'B' }), mockResponse(), next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_volume_letters: 'B' }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ code_volume_letters: 'B' }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it('leaves code_volume_letters unset when omitted', async () => {
@@ -861,7 +900,11 @@ describe('library.controller', () => {
       it('measures code_volume_letters in code points, not UTF-16 units', async () => {
         await addAlbum(req({ code_volume_letters: '𝐀𝐁𝐂𝐃' }), mockResponse(), next);
 
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ code_volume_letters: '𝐀𝐁𝐂𝐃' }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ code_volume_letters: '𝐀𝐁𝐂𝐃' }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it('rejects a non-string code_volume_letters', async () => {
@@ -900,11 +943,15 @@ describe('library.controller', () => {
 
         await addAlbum(req({ label_id: 55 }), mockResponse(), next);
 
-        // Trailing undefined: `resolveNewAlbumLabel` threads no transaction
-        // on the standalone add path (only `POST /library/filings` passes one).
-        expect(mockGetLabelById).toHaveBeenCalledWith(55, undefined);
+        // Trailing transaction (BS#2807): the standalone add resolves the label
+        // and inserts the release in one, as `POST /library/filings` does.
+        expect(mockGetLabelById).toHaveBeenCalledWith(55, expect.anything());
         expect(mockCreateLabel).not.toHaveBeenCalled();
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 55, label: 'Sonamos' }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ label_id: 55, label: 'Sonamos' }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it('rejects a dangling label_id with the wording updateAlbum already uses', async () => {
@@ -929,17 +976,25 @@ describe('library.controller', () => {
         await addAlbum(req({ label_id: 55, label: 'Sonamos US' }), mockResponse(), next);
 
         expect(mockCreateLabel).not.toHaveBeenCalled();
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 55, label: 'Sonamos US' }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ label_id: 55, label: 'Sonamos US' }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it('still creates or reuses the labels row when only label text is sent', async () => {
         await addAlbum(req({ label: 'Drag City' }), mockResponse(), next);
 
-        // Trailing undefineds: no parent label, and no transaction on the
-        // standalone add path (only `POST /library/filings` passes one).
-        expect(mockCreateLabel).toHaveBeenCalledWith('Drag City', undefined, undefined);
+        // Trailing undefined: no parent label; then the add's transaction
+        // (BS#2807), shared with the insert so a refused create strands no label.
+        expect(mockCreateLabel).toHaveBeenCalledWith('Drag City', undefined, expect.anything());
         expect(mockGetLabelById).not.toHaveBeenCalled();
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 99, label: 'Drag City' }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ label_id: 99, label: 'Drag City' }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
 
       it('rejects a body carrying neither label nor label_id', async () => {
@@ -968,9 +1023,13 @@ describe('library.controller', () => {
 
           await addAlbum(req({ label: 'Drag City', ...labelIdField }), res, next);
 
-          expect(mockCreateLabel).toHaveBeenCalledWith('Drag City', undefined, undefined);
+          expect(mockCreateLabel).toHaveBeenCalledWith('Drag City', undefined, expect.anything());
           expect(mockGetLabelById).not.toHaveBeenCalled();
-          expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label_id: 99, label: 'Drag City' }));
+          expect(mockInsertAlbum).toHaveBeenCalledWith(
+            expect.objectContaining({ label_id: 99, label: 'Drag City' }),
+            { kind: 'pre_cutover' },
+            expect.anything()
+          );
           expect(res.status).toHaveBeenCalledWith(201);
         }
       );
@@ -1008,7 +1067,11 @@ describe('library.controller', () => {
         await addAlbum(req({ label: '' }), mockResponse(), next);
 
         expect(mockCreateLabel).not.toHaveBeenCalled();
-        expect(mockInsertAlbum).toHaveBeenCalledWith(expect.objectContaining({ label: '', label_id: undefined }));
+        expect(mockInsertAlbum).toHaveBeenCalledWith(
+          expect.objectContaining({ label: '', label_id: undefined }),
+          { kind: 'pre_cutover' },
+          expect.anything()
+        );
       });
     });
 
@@ -2495,7 +2558,11 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, undefined);
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        { album_id: 5, rotation_bin: 'M' },
+        { kind: 'existing_release', albumId: 5 },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2511,7 +2578,11 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'H' }, undefined);
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        { album_id: 5, rotation_bin: 'H' },
+        { kind: 'existing_release', albumId: 5 },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2536,6 +2607,7 @@ describe('library.controller', () => {
           artist_name: 'Jockstrap',
           album_title: 'I Love You Jennifer B',
         },
+        { kind: 'pre_cutover' },
         undefined
       );
       expect(res.status).toHaveBeenCalledWith(201);
@@ -2560,6 +2632,7 @@ describe('library.controller', () => {
           artist_name: 'Jockstrap',
           album_title: 'I Love You Jennifer B',
         },
+        { kind: 'pre_cutover' },
         undefined
       );
       expect(res.status).toHaveBeenCalledWith(201);
@@ -2641,7 +2714,11 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M', card_id: 7 }, undefined);
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        { album_id: 5, rotation_bin: 'M', card_id: 7 },
+        { kind: 'existing_release', albumId: 5 },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2652,7 +2729,11 @@ describe('library.controller', () => {
 
       await addRotation(req, res, next);
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, undefined);
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        { album_id: 5, rotation_bin: 'M' },
+        { kind: 'existing_release', albumId: 5 },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2685,10 +2766,11 @@ describe('library.controller', () => {
 
         await addRotation(req, res, next);
 
-        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, [
-          'https://example.com/a',
-          'https://example.com/b',
-        ]);
+        expect(mockAddToRotation).toHaveBeenCalledWith(
+          { album_id: 5, rotation_bin: 'M' },
+          { kind: 'existing_release', albumId: 5 },
+          ['https://example.com/a', 'https://example.com/b']
+        );
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
@@ -2703,10 +2785,11 @@ describe('library.controller', () => {
 
         // Stored trimmed and otherwise as-is: no scheme is bound on, no
         // parse is attempted.
-        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 5, rotation_bin: 'M' }, [
-          'bandcamp.com/album/x',
-          'www.dragcity.com',
-        ]);
+        expect(mockAddToRotation).toHaveBeenCalledWith(
+          { album_id: 5, rotation_bin: 'M' },
+          { kind: 'existing_release', albumId: 5 },
+          ['bandcamp.com/album/x', 'www.dragcity.com']
+        );
         expect(res.status).toHaveBeenCalledWith(201);
       });
 
@@ -2806,6 +2889,7 @@ describe('library.controller', () => {
           artist_name: 'Jockstrap',
           album_title: title,
         },
+        { kind: 'pre_cutover' },
         undefined
       );
       expect(res.status).toHaveBeenCalledWith(201);
@@ -2841,6 +2925,7 @@ describe('library.controller', () => {
           artist_name: astralName,
           album_title: 'I Love You Jennifer B',
         },
+        { kind: 'pre_cutover' },
         undefined
       );
       expect(res.status).toHaveBeenCalledWith(201);
@@ -2872,7 +2957,11 @@ describe('library.controller', () => {
         next
       );
 
-      expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' }, undefined);
+      expect(mockAddToRotation).toHaveBeenCalledWith(
+        { album_id: 7, rotation_bin: 'M' },
+        { kind: 'existing_release', albumId: 7 },
+        undefined
+      );
       expect(res.status).toHaveBeenCalledWith(201);
     });
 
@@ -2900,6 +2989,7 @@ describe('library.controller', () => {
 
         expect(mockAddToRotation).toHaveBeenCalledWith(
           expect.objectContaining({ format_id: 3, label_id: 91 }),
+          { kind: 'pre_cutover' },
           undefined
         );
         expect(res.status).toHaveBeenCalledWith(201);
@@ -2954,7 +3044,11 @@ describe('library.controller', () => {
           next
         );
 
-        expect(mockAddToRotation).toHaveBeenCalledWith({ album_id: 7, rotation_bin: 'M' }, undefined);
+        expect(mockAddToRotation).toHaveBeenCalledWith(
+          { album_id: 7, rotation_bin: 'M' },
+          { kind: 'existing_release', albumId: 7 },
+          undefined
+        );
         expect(mockGetFormatById).not.toHaveBeenCalled();
         expect(mockGetLabelById).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(201);
@@ -6476,6 +6570,74 @@ describe('library.controller', () => {
     });
   });
 
+  // BS#2807: after the cutover date a refused basis is the contract's 409 `review_required`.
+  describe('the review gate (BS#2807)', () => {
+    const refusal = new ReviewRequiredError('Every new release needs a review: file it through the Pile');
+    const body409 = { message: refusal.message, reason: 'review_required' };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockIsLmlConfigured.mockReturnValue(false);
+      mockGetArtistNameById.mockResolvedValue('Juana Molina');
+      mockGenerateAlbumCodeNumber.mockResolvedValue(1);
+      mockCreateLabel.mockResolvedValue({ id: 99 });
+    });
+
+    it('POST /library answers 409 review_required, and the new label text was minted in the insert transaction', async () => {
+      mockInsertAlbum.mockRejectedValue(refusal);
+      const req = {
+        body: { album_title: 'DOGA', artist_id: 42, label: 'Sonamos', genre_id: 11, format_id: 1 },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await addAlbum(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(body409);
+      // One transaction handle for the label upsert and the refused insert: the rollback takes the label back.
+      const [, , labelTx] = mockCreateLabel.mock.calls[0] as unknown[];
+      expect(mockInsertAlbum.mock.calls[0][2]).toBe(labelTx);
+    });
+
+    it('POST /library/rotation answers 409 review_required for a typed-text add', async () => {
+      mockAddToRotation.mockRejectedValue(refusal);
+      const req = {
+        body: { rotation_bin: 'L', artist_name: 'Jockstrap', album_title: 'I Love You Jennifer B' },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await addRotation(req, res, next);
+
+      expect(mockAddToRotation).toHaveBeenCalledWith(expect.anything(), { kind: 'pre_cutover' }, undefined);
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(body409);
+    });
+
+    it('POST /library/filings answers 409 with reason review_required in the body, not just the status', async () => {
+      mockGetArtistByCode.mockResolvedValue(null);
+      mockArtistIdFromName.mockResolvedValue(0);
+      mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+        id: 55,
+        artist_name: 'Juana Molina',
+        alphabetical_name: 'Juana Molina',
+        code_letters: 'MO',
+      });
+      mockInsertAlbum.mockRejectedValue(refusal);
+      const req = {
+        body: {
+          artist: { kind: 'create', artist_name: 'Juana Molina', code_letters: 'MO', genre_id: 11, code_number: 3 },
+          release: { album_title: 'DOGA', label: 'Sonamos', genre_id: 11, format_id: 1 },
+        },
+      } as unknown as Request;
+      const res = mockResponse();
+
+      await createLibraryFiling(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(body409);
+    });
+  });
+
   describe('createLibraryFiling (POST /library/filings, BS#2474)', () => {
     const filingArtist = {
       kind: 'create',
@@ -6523,11 +6685,13 @@ describe('library.controller', () => {
       expect(mockCreateLabel).toHaveBeenCalledWith('Sonamos', undefined, expect.anything());
       expect(mockInsertAlbum).toHaveBeenCalledWith(
         expect.objectContaining({ artist_id: 55, album_title: 'DOGA', label: 'Sonamos', label_id: 77 }),
+        { kind: 'pre_cutover' },
         expect.anything()
       );
       expect(mockGenerateAlbumCodeNumber).toHaveBeenCalledWith(55, 11, expect.anything());
       expect(mockAddToRotation).toHaveBeenCalledWith(
         { rotation_bin: 'S', album_id: 42, card_id: undefined },
+        { kind: 'pre_cutover' },
         undefined,
         expect.anything()
       );
@@ -6559,6 +6723,7 @@ describe('library.controller', () => {
 
       expect(mockAddToRotation).toHaveBeenCalledWith(
         { rotation_bin: 'H', album_id: 42, card_id: undefined },
+        { kind: 'pre_cutover' },
         undefined,
         expect.anything()
       );

@@ -10,10 +10,12 @@ import {
   NewRotationRelease,
   RotationBin,
   RotationRelease,
+  db,
   parseRotationBin,
   ROTATION_BINS,
 } from '@wxyc/database';
 import { gunzipSync } from 'node:zlib';
+import { ReviewRequiredError } from '../utils/review-gate-basis.js';
 import * as libraryService from '../services/library.service.js';
 import * as catalogExportService from '../services/catalog-export.service.js';
 import * as bmiPerformanceService from '../services/bmi-performance.service.js';
@@ -148,29 +150,44 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   // sent a casing variant. Renames cascade via the trigger added in 0060.
   const canonical_artist_name = await libraryService.getArtistNameById(artist_id);
 
-  // Resolve label text to label_id via upsert, or label_id to the
-  // denormalized name (BS#2410 / plan D5).
-  const { label_id, label } = await resolveNewAlbumLabel(body);
+  // BS#2807: the label upsert and the insert share one transaction, so a refused
+  // create (the review gate, `insertAlbum`'s basis check) rolls back the
+  // `labels` row that new label text minted.
+  let inserted_album: Album;
+  try {
+    inserted_album = await db.transaction(async (tx) => {
+      // Resolve label text to label_id via upsert, or label_id to the
+      // denormalized name (BS#2410 / plan D5).
+      const { label_id, label } = await resolveNewAlbumLabel(body, tx);
 
-  const new_album: NewAlbum = {
-    artist_id: artist_id,
-    artist_name: canonical_artist_name,
-    genre_id: body.genre_id,
-    format_id: body.format_id,
-    album_title,
-    label: label,
-    label_id: label_id,
-    // BS#2410: an omitted code_number still takes MAX+1 for the artist, which
-    // is byte-for-byte the pre-2410 behavior (now scoped to the release's own
-    // genre -- BS#2587).
-    code_number: supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id, body.genre_id)),
-    code_volume_letters: code_volume_letters,
-    alternate_artist_name,
-    album_artist: normalizeOptionalText(body.album_artist, 'album_artist', MAX_ALBUM_TEXT_LENGTH),
-    disc_quantity: body.disc_quantity,
-  };
+      const new_album: NewAlbum = {
+        artist_id: artist_id,
+        artist_name: canonical_artist_name,
+        genre_id: body.genre_id,
+        format_id: body.format_id,
+        album_title,
+        label: label,
+        label_id: label_id,
+        // BS#2410: an omitted code_number still takes MAX+1 for the artist, which
+        // is byte-for-byte the pre-2410 behavior (now scoped to the release's own
+        // genre -- BS#2587).
+        code_number:
+          supplied_code_number ?? (await libraryService.generateAlbumCodeNumber(artist_id, body.genre_id, tx)),
+        code_volume_letters: code_volume_letters,
+        alternate_artist_name,
+        album_artist: normalizeOptionalText(body.album_artist, 'album_artist', MAX_ALBUM_TEXT_LENGTH),
+        disc_quantity: body.disc_quantity,
+      };
 
-  const inserted_album: Album = await libraryService.insertAlbum(new_album);
+      return libraryService.insertAlbum(new_album, { kind: 'pre_cutover' }, tx);
+    });
+  } catch (err) {
+    if (err instanceof ReviewRequiredError) {
+      res.status(409).json(err.toBody());
+      return;
+    }
+    throw err;
+  }
 
   const enriched_album = await enrichNewAlbum(
     inserted_album,
@@ -2232,8 +2249,19 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
   const picked = pickAddRotationFields(body, parsedRotationBin.bin);
   let rotationRelease: RotationRelease;
   try {
-    rotationRelease = await libraryService.addToRotation(picked, urls);
+    // BS#2807: a catalogued add rotates a release that is already there; a
+    // typed-text add makes a row with no release behind it, so it needs the
+    // gate to be off.
+    rotationRelease = await libraryService.addToRotation(
+      picked,
+      hasAlbumId ? { kind: 'existing_release', albumId: body.album_id as number } : { kind: 'pre_cutover' },
+      urls
+    );
   } catch (err) {
+    if (err instanceof ReviewRequiredError) {
+      res.status(409).json(err.toBody());
+      return;
+    }
     if (err instanceof libraryService.RotationCardBinMismatchError) {
       // The named-reason 409 convention (`addArtist`, `deleteRotationCard`);
       // `rotation_card_bin_mismatch` is the exact `LibraryFilingConflictReason`
@@ -2271,7 +2299,7 @@ export const createLibraryFiling: RequestHandler<object, unknown, LibraryFilingR
   }
 
   try {
-    const result = await fileLibraryRelease(plan.input);
+    const result = await fileLibraryRelease(plan.input, { kind: 'pre_cutover' });
     const filed = await completeLibraryFiling(result, plan.input);
     res.status(200).json(filed);
   } catch (err) {

@@ -96,7 +96,11 @@ describe('fileIntakeItem (BS#2803)', () => {
     const { result, tx } = await run(newRelease, [[reviewed]]);
     expect(result.outcome).toBe('filed');
     expect(log).toEqual(['intake_items for update']);
-    expect(mockFileLibraryRelease).toHaveBeenCalledWith((newRelease as { input: unknown }).input, tx);
+    expect(mockFileLibraryRelease).toHaveBeenCalledWith(
+      (newRelease as { input: unknown }).input,
+      { kind: 'intake', intakeItemId: 7 },
+      tx
+    );
     expect(sets.intake_items).toMatchObject({ state: 'filed', album_id: 42, rotation_id: 5, filed_by: 'md-1' });
   });
 

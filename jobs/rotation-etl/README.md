@@ -8,6 +8,8 @@ Phase 3 of the tubafrenzy decommission ([WXYC/wiki#88](https://github.com/WXYC/w
 
 It **refuses to run** unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set. Read the rest of this file before setting it.
 
+**Do not run it after `REVIEW_GATE_CUTOVER_DATE`** (BS#2807, `docs/env-vars.md`). It upserts `rotation` rows straight into the table, not through `addToRotation`, so it sits outside the review gate, and a run after the date would put releases into rotation that no review stands behind.
+
 > **Removing the `job-type` line re-arms a live half-hourly cron against tubafrenzy.** There is no other signal. The `cron-schedule` key was deleted for the same reason.
 
 ## Why running it is a backwards write — and how it differs from the flowsheet sibling
