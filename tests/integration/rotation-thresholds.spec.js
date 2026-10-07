@@ -13,7 +13,7 @@ const MIGRATION_PATH = path.join(
   'database',
   'src',
   'migrations',
-  '0188_rotation-thresholds.sql'
+  '0190_rotation-thresholds.sql'
 );
 const DEFAULTS = { window_days: { H: 60, M: 60, L: 60, S: 60 }, card_stale_days: 30 };
 
@@ -72,12 +72,6 @@ describe('Rotation thresholds', () => {
 
     const reread = await auth.get('/library/rotation/thresholds').expect(200);
     expect(reread.body).toEqual(DEFAULTS);
-  });
-
-  test('the literal path is not captured by the :id handlers', async () => {
-    // `:id` would answer 400 (non-numeric id) or 404; the thresholds handler answers the record.
-    const res = await auth.get('/library/rotation/thresholds').expect(200);
-    expect(res.body.card_stale_days).toBe(30);
   });
 
   test('re-running the migration seed leaves an edited row alone', async () => {

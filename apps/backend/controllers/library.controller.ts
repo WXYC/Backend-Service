@@ -1921,9 +1921,7 @@ export const getRotationThresholds: RequestHandler = async (_req, res) => {
 
 /**
  * `PATCH /library/rotation/thresholds`: partial update of the station-wide thresholds. Gated `catalog: ['write']`.
- * Partial at both levels, so `{}` and `{"window_days": {}}` are 200 no-ops. A day count must be an integer in 1..365;
- * an explicit `null` or an unknown key at either level is a 400 naming it (unlike `PATCH /rotation/:id`, which drops
- * unknown keys). The response is always the whole record after the write. Validation: `parseRotationThresholdsPatch`.
+ * Validation rules: `parseRotationThresholdsPatch`.
  */
 export const updateRotationThresholds: RequestHandler = async (req, res) => {
   const patch = parseRotationThresholdsPatch(req.body);

@@ -38,6 +38,12 @@ describe('rotation thresholds service', () => {
     await expect(getRotationThresholds()).rejects.toThrow(/row is missing/);
   });
 
+  test('updateRotationThresholds throws the same descriptive error when the seeded row is missing', async () => {
+    db.update.mockReturnValue(createMockQueryChain([]));
+
+    await expect(updateRotationThresholds({ card_stale_days: 14 })).rejects.toThrow(/row is missing/);
+  });
+
   test('updateRotationThresholds sets only the supplied columns and returns the whole record', async () => {
     const updateChain = createMockQueryChain([{ ...row, window_days_h: 30, card_stale_days: 14 }]);
     db.update.mockReturnValue(updateChain);
