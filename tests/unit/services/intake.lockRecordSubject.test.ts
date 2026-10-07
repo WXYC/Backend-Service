@@ -13,7 +13,8 @@ jest.mock('@wxyc/database', () => {
   return { ...realSchema, ...nyTime, db: drizzle({}) };
 });
 
-import { lockRecordSubject } from '../../../apps/backend/services/intake.service';
+import { db } from '@wxyc/database';
+import { lockRecordSubject, withLockedRecordSubject } from '../../../apps/backend/services/intake.service';
 import { createLockLog } from '../../utils/lock-log-builder';
 
 describe('lockRecordSubject (BS#2968)', () => {
@@ -63,5 +64,53 @@ describe('lockRecordSubject (BS#2968)', () => {
     const tx = { select: jest.fn(() => builder(queue.shift() ?? [])) };
     expect(await lockRecordSubject(tx as never, subject, mode)).toEqual(expected);
     expect(log).toEqual(locks);
+  });
+});
+
+describe('withLockedRecordSubject', () => {
+  const { builder } = createLockLog();
+  const unfiled = { album_id: null, state: 'pool' };
+  const filed = { album_id: 9, state: 'filed' };
+
+  // Each transaction is handed the next scripted select results; `transactions` counts how many were opened.
+  it.each([
+    ['item hit', { intake_item_id: 4 }, [[[unfiled], [unfiled]]], 1, 1, { value: 'done' }],
+    [
+      'item misses once, then locks',
+      { intake_item_id: 4 },
+      [
+        [[unfiled], [filed]],
+        [[filed], [{ id: 9 }], [filed]],
+      ],
+      2,
+      1,
+      { value: 'done' },
+    ],
+    ['item misses twice', { intake_item_id: 4 }, [[[]], [[]]], 2, 0, undefined],
+    ['release hit', { album_id: 9 }, [[[{ id: 9 }]]], 1, 1, { value: 'done' }],
+    ['release miss is not retried', { album_id: 9 }, [[[]], [[{ id: 9 }]]], 1, 0, undefined],
+  ] as const)('%s', async (_name, subject, scripts, transactions, bodies, expected) => {
+    const queues = scripts.map((script) => script.map((rows) => [...rows]));
+    const spy = jest.spyOn(db, 'transaction').mockImplementation((run: (tx: unknown) => unknown) => {
+      const queue = queues.shift() ?? [];
+      return Promise.resolve(run({ select: jest.fn(() => builder(queue.shift() ?? [])) }));
+    });
+    const body = jest.fn(() => Promise.resolve('done'));
+    expect(await withLockedRecordSubject(subject, 'update', body)).toEqual(expected);
+    expect(spy).toHaveBeenCalledTimes(transactions);
+    expect(body).toHaveBeenCalledTimes(bodies);
+    spy.mockRestore();
+  });
+
+  it('does not read a body that returns undefined as a miss', async () => {
+    const spy = jest
+      .spyOn(db, 'transaction')
+      .mockImplementation((run: (tx: unknown) => unknown) =>
+        Promise.resolve(run({ select: jest.fn(() => builder([{ id: 9 }])) }))
+      );
+    expect(await withLockedRecordSubject({ album_id: 9 }, 'share', () => Promise.resolve(undefined))).toEqual({
+      value: undefined,
+    });
+    spy.mockRestore();
   });
 });
