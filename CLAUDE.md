@@ -12,13 +12,13 @@ CLAUDE.md is a router for the always-loaded reference card. Topic depth lives in
 - **[`docs/replication.md`](docs/replication.md)** — Local PostgreSQL logical-replication setup and operation
 - **[`docs/cdc.md`](docs/cdc.md)** — CDC pipeline: triggers, per-process LISTEN, in-process consumers, fallback channels
 - **[`docs/deploy.md`](docs/deploy.md)** — Deploy cadence, migration-chain risk, deploy-wedge anatomy, buildx registry layer caching (ECR manifest requirement, lifecycle policy) plus the shared builder image that replaced 56 per-target `npm ci` builds (`Dockerfile.deploy-builder`, BS#2718), CI workflow pin maintenance (permissions, gha/v1 pins, caller-callee permissions trap from #857), edge gzip (allowlist, the SSE guard, `/auth` opt-out)
-- **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha
+- **[`docs/authentication.md`](docs/authentication.md)** — Roles, permissions matrix, JWT payload, `requirePermissions` middleware flow, `AUTH_BYPASS`, better-auth role-mismatch gotcha, auth server endpoints and bootstrap, role grant data and mock sync
 - **[`docs/pii.md`](docs/pii.md)** — PII field registry: `real_name`/`email` vs `dj_name`/`name` classification, allowed read sites, the `wxyc/restricted-real-name` ESLint rule, DJ-name/real-name conflation history
-- **[`docs/testing.md`](docs/testing.md)** — Unit + integration + CI-mock test setup, jest configs, CI workflow job list
+- **[`docs/testing.md`](docs/testing.md)** — Unit + integration + CI-mock test setup, jest configs, CI workflow job list, mock drift
 - **[`docs/dev-db-fixture.md`](docs/dev-db-fixture.md)** — Dev DB seed pipeline (`seed_db.sql` + `seed-clone.sql`), `LOAD_CLONE_FIXTURE` gate, `predev` rebuild hook, Compose project naming, `db:stop` vs `db:reset`
 - **[`docs/ops-cron-scheduling.md`](docs/ops-cron-scheduling.md)** — LML-heavy cron spacing policy; heavy-drain vs light-touch vs hourly-safety-net; slot table; cron-liveness recipe (BS#2064 — Sentry cron monitor + `cronjob_runs` heartbeat + outcome check, with the per-monitor cost)
-- **[`docs/jobs.md`](docs/jobs.md)** — Full per-job reference for every `@wxyc/*` job in `jobs/` (the Monorepo Layout table keeps one line each)
-- **[`docs/packages.md`](docs/packages.md)** — Full reference for the long package rows (`enrichment-worker`, `database`, `lml-client`, `observability`)
+- **[`docs/jobs.md`](docs/jobs.md)** — Full per-job reference for every job in the Monorepo Layout table. Some `jobs/` directories have no entry yet; they are named in that file.
+- **[`docs/packages.md`](docs/packages.md)** — Full reference for the long package rows
 - **[`docs/api-routes.md`](docs/api-routes.md)** — Detailed route notes (`/album-reviews`, `/digital-archive`, ...), the no-`/v2/flowsheet` explanation, legacy mirror middleware history
 - **[`docs/intake-and-reviews.md`](docs/intake-and-reviews.md)** — `/intake` and `/reviews` route rules, one bullet per rule (moved out of the route table; add new rules there)
 
@@ -36,11 +36,11 @@ npm workspaces:
 | --- | --- | --- |
 | `@wxyc/backend` | `apps/backend/` | Express API server (port 8080) |
 | `@wxyc/auth-service` | `apps/auth/` | better-auth server (port 8082) |
-| `@wxyc/enrichment-worker` | `apps/enrichment-worker/` | Long-running CDC consumer: enriches new flowsheet track rows via LML (idempotent claim, trust-gated). |
-| `@wxyc/database` | `shared/database/` | Drizzle schema, client, migrations, ETL utilities; subpath export `./streaming-merge-sql`. |
+| `@wxyc/enrichment-worker` | `apps/enrichment-worker/` | CDC consumer: enriches new flowsheet track rows via LML (trust-gated). |
+| `@wxyc/database` | `shared/database/` | Drizzle schema, client, migrations, ETL utilities. |
 | `@wxyc/authentication` | `shared/authentication/` | Auth middleware, roles, JWT verification |
-| `@wxyc/lml-client` | `shared/lml-client/` | HTTP client for LML: single chokepoint with limiter, caller-keyed traffic classes, per-instance breaker. |
-| `@wxyc/observability` | `shared/observability/` | Shared Sentry filters/config, AWS-credential warning; `./metrics` CloudWatch emitter (never re-export from the barrel). |
+| `@wxyc/lml-client` | `shared/lml-client/` | HTTP client for LML: single chokepoint with limiter and breaker. |
+| `@wxyc/observability` | Sentry filters/config (every `SENTRY_DATA_COLLECTION` field must stay spelled out; Sentry 11 defaults are PII-on); `./metrics` emitter never re-exported from the barrel. |
 
 Jobs under `jobs/<name>/` (full text per job in [`docs/jobs.md`](docs/jobs.md)):
 
@@ -81,12 +81,12 @@ Jobs under `jobs/<name>/` (full text per job in [`docs/jobs.md`](docs/jobs.md)):
 | `@wxyc/album-reviews-etl` | Nightly cron `50 4 * * *`: mirror the Album Review Responses sheet into `album_review_submissions`. |
 | `@wxyc/album-critic-reviews-etl` | Weekly cron `10 7 * * 0`: ingest research-data critic reviews into `album_critic_reviews`. |
 | `@wxyc/uncovered-release-list` | Weekly cron `40 7 * * 0`: publish releases lacking critic reviews to research-data. |
-| `@wxyc/flowsheet-ghost-row-sweep` | One-shot, dry-run default: delete flowsheet/rotation rows absent from the tubafrenzy keyspace. |
-| `@wxyc/flowsheet-april-gap-import` | One-shot, dry-run default: insert-only import of 403 dropped April 2026 flowsheet rows. |
-| `@wxyc/va-apple-music-url-remediation` | One-shot, dry-run default: re-verify or invalidate V/A-blind Apple URLs (BS#2000). |
+| `@wxyc/flowsheet-ghost-row-sweep` | One-shot, dry-run default: delete flowsheet/rotation rows absent from the tubafrenzy keyspace; do not run against prod until BS#1083. |
+| `@wxyc/flowsheet-april-gap-import` | One-shot, dry-run default: insert-only import of 399 dropped rows (Apr 16–20, 2026). |
+| `@wxyc/va-apple-music-url-remediation` | One-shot, dry-run default: re-verify or invalidate V/A-blind Apple URLs (BS#2000); gated on LML#1139 + cache purge deployed. |
 | `@wxyc/metadata-no-match-digest` | Daily cron `07 15 * * *`: email digest of new `enriched_no_match` rows. |
 | `@wxyc/auth-user-name-backfill` | One-shot, dry-run default: rewrite `auth_user.name`; **never `--execute` before plan step 2a**. |
-| `@wxyc/flowsheet-show-split` | One-shot repair: split a multi-DJ show per DJ; requires `--show-id`; not re-runnable. |
+| `@wxyc/flowsheet-show-split` | One-shot repair, **writes by default (`--dry-run` to preview)**; requires `--show-id`; also stamps tubafrenzy `SIGNOFF_TIME`; not re-runnable. |
 | `@wxyc/station-signup-review` | Daily cron: pending-signup digest plus the only automatic downgrade (`STATION_SIGNUP_DOWNGRADE_ENABLED`, default OFF). |
 | `@wxyc/auth-log-prune` | Daily cron `27 15 * * *`: prune signup-attempt and account-audit tables. |
 | `@wxyc/comp-letter-backfill` | One-shot, dry-run default (`--apply`): set `code_comp_letter` on 52 compilation slots. |
@@ -112,8 +112,6 @@ Express 5 application with these route groups:
 | `/events` | SSE for real-time updates |
 | `/healthcheck` | Health check |
 | `/internal` | Internal endpoints (ETL notifications, tubafrenzy flowsheet webhook) |
-
-
 
 Code is organized as controllers (HTTP handling) → services (business logic) → database (Drizzle queries).
 
@@ -168,12 +166,11 @@ npm run drizzle:migrate    # Apply migrations to database
 npm run drizzle:drop       # Delete a migration file
 ```
 
-**Read [`docs/migrations.md`](docs/migrations.md) before authoring any migration.** It covers the journal `when` recipe, collisions, DDL-only and precondition-guard rules, and the attempt-at markers; the full scope list is at the top of [`docs/migrations.md`](docs/migrations.md#claudemd-scope-list).
+**Read [`docs/migrations.md`](docs/migrations.md) before authoring any migration.** It covers the journal `when` recipe, collisions, DDL-only and precondition-guard rules, and the attempt-at markers; the full scope list is in [`docs/migrations.md`](docs/migrations.md#claudemd-scope-list).
 
 ### Authentication (`shared/authentication`)
 
 better-auth wrapper providing JWT verification + role-based access control; roles form a chain (member < dj < musicDirector < stationManager) that is a CI-enforced invariant on the grant data, not a runtime fallback. `auth.roles.ts` owns the only grant matrix; `npm run check:better-auth-mock-sync` is hard-fail in pre-push and CI. Detail: [`docs/authentication.md`](docs/authentication.md#role-grant-data-and-mock-sync).
-
 
 See **[`docs/authentication.md`](docs/authentication.md)** for the permissions matrix, JWT payload shape, `requirePermissions` middleware flow, `AUTH_BYPASS` test hook, and the better-auth role-mismatch gotcha.
 

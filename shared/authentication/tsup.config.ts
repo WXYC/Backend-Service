@@ -3,7 +3,7 @@ import { defineConfig } from 'tsup';
 export default defineConfig({
   // `src/station-passcode.ts` is a second entry, not just a barrel
   // re-export — mirrors `@wxyc/observability`'s `./metrics` subpath
-  // (see that package's CLAUDE.md entry): the barrel (`src/index.ts`) also
+  // (see docs/packages.md, `@wxyc/observability`): the barrel (`src/index.ts`) also
   // pulls in `auth.definition.ts`, which imports the pure-ESM `better-auth`
   // package, so any plain-CJS consumer of the barrel (e.g. a `require()`
   // from this repo's Jest integration tier, which cannot load a pure-ESM

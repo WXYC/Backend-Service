@@ -1,4 +1,4 @@
-# Job and package reference
+# Job reference
 
 Per-job detail moved verbatim out of `CLAUDE.md`'s Monorepo Layout table. `CLAUDE.md` keeps a one-line summary per job; this file holds the full text. See also [`packages.md`](packages.md) for the long package rows.
 

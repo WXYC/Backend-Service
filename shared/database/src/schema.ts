@@ -534,7 +534,7 @@ export const artists = wxyc_schema.table(
      *
      * Constraints added to these six columns must accept the full LML
      * shape. See WXYC/Backend-Service#702 + the artist-identity-etl
-     * docs in CLAUDE.md.
+     * docs in docs/jobs.md.
      */
     discogs_artist_id: integer('discogs_artist_id'),
     musicbrainz_artist_id: varchar('musicbrainz_artist_id', { length: 64 }),
@@ -1064,7 +1064,7 @@ export const discogsReleaseIdSourceEnum = wxyc_schema.enum('discogs_release_id_s
  * will block a Backend-canonical write or the retained
  * one-shot ETL — which is still meant to run in the Phase 6a maintenance
  * window, so its shape tolerance is not yet dead weight. See
- * WXYC/Backend-Service#702 + CLAUDE.md (`@wxyc/rotation-etl`).
+ * WXYC/Backend-Service#702 + docs/jobs.md (`@wxyc/rotation-etl`).
  */
 export const rotation = wxyc_schema.table(
   'rotation',

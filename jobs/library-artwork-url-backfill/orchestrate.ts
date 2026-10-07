@@ -239,7 +239,7 @@ export const processRow = async (
  * `CREATE INDEX CONCURRENTLY library_artwork_pending_idx ON
  * wxyc_schema.library (id) WHERE artwork_url IS NULL` (paired with the
  * artists join, per the deploy runbook for index-with-IF-NOT-EXISTS in
- * CLAUDE.md).
+ * docs/migrations.md).
  */
 const loadBatch = async (afterId: number, batchSize: number, partitionFilter: SQL | null): Promise<EnrichRow[]> => {
   const partitionClause = partitionFilter ?? sql``;
