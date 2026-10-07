@@ -1310,6 +1310,13 @@
       "when": 1791408621228,
       "tag": "0189_rotation-cards-last-changed-at-trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 190,
+      "version": "7",
+      "when": 1791417325214,
+      "tag": "0190_rotation-thresholds",
+      "breakpoints": true
     }
   ]
 }
