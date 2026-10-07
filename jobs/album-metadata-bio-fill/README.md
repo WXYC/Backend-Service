@@ -45,7 +45,7 @@ Each album gets exactly one verdict (`decide.ts`), and only `fill` writes.
 
 A `fill` then ends one of three ways, each with its own counter: `filled`, `skipped_raced` (the row had a bio by write time), or `write_failed` (the UPDATE threw). A failed write does not stop the run. The row is logged and carried into the next run exactly as an unanswered row is.
 
-**A degraded lookup is asked again.** LML treats every bulk item as low priority, and when it sheds a lookup's Discogs work it still answers: the library rows alone, flagged `degraded` with a `degraded_reason` of `cache_only` (its admission shed), `deadline_exceeded` (the per-item budget) or `upstream_unavailable` (a saturated Discogs). Bulk labels that item `match`, or `no_match` when no row came back. Short of a fill it is `indeterminate`, so it is carried into the next run and asked again; the `lml_indeterminate` log line names the reason. A degraded lookup that does carry a bio for the row's card still fills.
+**A degraded lookup is asked again.** LML treats every bulk item as low priority, and when it sheds a lookup's Discogs work it still answers: the library rows alone, flagged `degraded` with a `degraded_reason` of `cache_only` (its admission shed), `deadline_exceeded` (a per-item time limit ran out) or `upstream_unavailable` (a saturated Discogs). Bulk labels that item `match`, or `no_match` when no row came back. Short of a fill it is `indeterminate`, so it is carried into the next run and asked again; the `lml_indeterminate` log line names the reason. A degraded lookup that does carry a bio for the row's card still fills.
 
 `no_bio` is not a stable verdict. When the circuit breaker on LML's artist-details step is open, LML still returns the match, with a null bio and without the `degraded` flag, and that is identical on the wire to an artist with no Discogs profile. For one album the job cannot tell the two apart. For a streak it can: `BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES` (default 10; `0` disables) aborts the run once that many batches in a row filled nothing and came back with at least one `no_bio`. A shed blanks the bio and nothing else, so a shed batch still holds its `no_match`, `untrusted` and `card_mismatch` albums; what it cannot hold is a fill. So only a fill resets the count, and a batch with neither a fill nor a `no_bio` (LML answered for none of it, or only with other verdicts) leaves it as it is. A no-bio streak still running when the run ends is carried in `next_run` whatever ends it: this guard, the failed-batch guard, the pause ceiling or a stop. So a run that stops for another reason in the middle of a shed does not walk past the albums it hit. With the guard set to `0` a streak is not carried, since the operator has judged those bios absent.
 
@@ -82,7 +82,7 @@ Start every run with the previous run's `next_run`. Nothing is skipped: everythi
 - **A list with no cursor is a retry of just those albums**, under the cohort predicate and the eligibility conditions. An id that got a bio in the meantime, or is not eligible, is not asked: it is named on a `listed_ids_not_in_cohort` line. A retry's `next_run` is the next retry, or `null` when it left nothing.
 
 ```sh
-docker run --rm --stop-timeout 60 --env-file ~/.env \
+docker run --rm --stop-timeout 90 --env-file ~/.env \
   -e BIO_FILL_ALBUM_IDS=53812,53977,54020 \
   <image> --execute
 ```
@@ -95,7 +95,7 @@ A list holds at most 200 ids. Carried into a cursor run, every listed id must be
 | ------------------------------------------------------ | ------- | -------------------------------------------------------------------------------------------------------------- |
 | `BIO_FILL_BULK_BATCH_SIZE`                             | 5       | albums per LML bulk request                                                                                    |
 | `BIO_FILL_BULK_RATE_PER_MIN`                           | 1       | batches per minute                                                                                             |
-| `BIO_FILL_BULK_BUDGET_MS`                              | 25000   | per-item budget forwarded to LML                                                                               |
+| `BIO_FILL_BULK_BUDGET_MS`                              | 0       | per-item budget sent to LML as `X-Caller-Budget-Ms`; 0 sends no header (see below)                             |
 | `BIO_FILL_READ_TIMEOUT_MS`                             | 300000  | statement timeout for the counts and the enumeration                                                           |
 | `BIO_FILL_MAX_ALBUMS`                                  | 0       | stop after this many albums; 0 is no cap                                                                       |
 | `BIO_FILL_ALBUM_AFTER_ID`                              | 0       | cursor: every album above this id, plus any listed at or below it                                              |
@@ -119,7 +119,7 @@ Precondition: `LML_ARTIST_IDENTITY_SPLIT_GATE` is not set false on the LML servi
 4. **The full cohort**, as a chain of bounded runs. At the defaults the cohort is about 2,600 batches at one a minute, which is more than 43 hours and not a window. Instead, start each run with the previous run's `next_run` (the first run sets neither):
 
    ```sh
-   docker run --rm --stop-timeout 60 --env-file ~/.env \
+   docker run --rm --stop-timeout 90 --env-file ~/.env \
      -e BIO_FILL_BULK_RATE_PER_MIN=4 \
      -e BIO_FILL_MAX_ALBUMS=2400 \
      -e BIO_FILL_ALBUM_AFTER_ID=<previous next_run.BIO_FILL_ALBUM_AFTER_ID> \
@@ -127,9 +127,11 @@ Precondition: `LML_ARTIST_IDENTITY_SPLIT_GATE` is not set false on the LML servi
      <image> --execute
    ```
 
-   `--stop-timeout` is not optional. `docker stop` sends SIGTERM and kills the container 10 seconds later by default, while the job stops only between batches and a batch in flight can take up to its bulk timeout: 5 seconds per album plus 5, so 30 seconds at the default batch size of 5. **The stop timeout must exceed the bulk timeout for the batch size in use**, or the kill lands mid-batch and the run ends with no `summary` line and no resume point. The writes count too: each album's UPDATE can wait up to the database statement timeout, `DB_STATEMENT_TIMEOUT_MS`, which defaults to 5 seconds and which this job does not raise. At the defaults that is 30 + 5 × 5 = 55 seconds, so 60 covers it; a batch size of 10 already needs more than 105. If the env file raises `DB_STATEMENT_TIMEOUT_MS`, raise `--stop-timeout` by the batch size times the difference.
+   `--stop-timeout` is not optional. `docker stop` sends SIGTERM and kills the container 10 seconds later by default, while the job stops only between batches and a batch in flight can take up to its bulk timeout: 5 seconds per album plus 5, plus LML's 25-second hard cap when no budget header is sent (the default), so 55 seconds at the default batch size of 5. **The stop timeout must exceed the bulk timeout for the batch size in use**, or the kill lands mid-batch and the run ends with no `summary` line and no resume point. The writes count too: each album's UPDATE can wait up to the database statement timeout, `DB_STATEMENT_TIMEOUT_MS`, which defaults to 5 seconds and which this job does not raise. At the defaults that is 55 + 5 × 5 = 80 seconds, so 90 covers it; a batch size of 10 needs more than 130. If the env file raises `DB_STATEMENT_TIMEOUT_MS`, raise `--stop-timeout` by the batch size times the difference.
 
-   The 15-second interval is slept after each batch finishes, so a cycle is the batch plus 15 seconds. LML measured 0.2 to 0.55 seconds per item for this cohort, so a batch is 1 to 3 seconds of LML time in every 16 to 18: about 17 to 19 albums a minute, two to two and a half hours a run before any live-DJ pause, six runs. Keep `LIVE_ACTIVITY_MAX_PAUSE_MS` finite: `0` is uncapped and lets a run sit paused through a whole show.
+   **Why no budget header.** LML clamps any `X-Caller-Budget-Ms` to its own `LML_SEARCH_BUDGET_MS`, 4 seconds by default, and once an item has used it LML skips the artist-details step and answers `degraded: deadline_exceeded`. With the header, the canary saw 12% of albums shed this way and the first chained run 25%, and some albums shed on every attempt, which the 200-id carry cannot outlast (BS#2978). Without it an item runs to LML's 25-second hard cap. Set `BIO_FILL_BULK_BUDGET_MS` only to bring the clamp back on purpose.
+
+   The 15-second interval is slept after each batch finishes, so a cycle is the batch plus 15 seconds. LML measured 0.2 to 0.55 seconds per item for this cohort, which would make a batch 1 to 3 seconds of LML time in every 16 to 18 and about 17 to 19 albums a minute. The first production run, with the 4-second clamp, measured about 11: batches took 6 to 12 seconds. Without the clamp the slow albums run longer, so size a 2,400-album run at three to four hours before any live-DJ pause. Keep `LIVE_ACTIVITY_MAX_PAUSE_MS` finite: `0` is uncapped and lets a run sit paused through a whole show.
 
    The chain is done when a run reports `reached_end: true` and its `next_run` carries no ids. Then run the final residue pass described under Verdicts.
 

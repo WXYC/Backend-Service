@@ -97,9 +97,15 @@ const resolveBatchSize = (raw: string | undefined): number => {
 export const RATE_PER_MIN_ENV = 'BIO_FILL_BULK_RATE_PER_MIN';
 export const RATE_PER_MIN_DEFAULT = 1;
 
-/** Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. */
+/**
+ * Per-item budget forwarded to LML as `X-Caller-Budget-Ms`; `0`, the default,
+ * sends no header. LML clamps any header to its `LML_SEARCH_BUDGET_MS` (4 s)
+ * and sheds an item's artist-details step once that runs out, which a
+ * production run saw on a quarter of its albums (BS#2978). With no header an
+ * item runs to LML's hard cap instead. Nobody is waiting on this job's answers.
+ */
 export const BUDGET_MS_ENV = 'BIO_FILL_BULK_BUDGET_MS';
-export const BUDGET_MS_DEFAULT = 25_000;
+export const BUDGET_MS_DEFAULT = 0;
 
 export const READ_TIMEOUT_ENV = 'BIO_FILL_READ_TIMEOUT_MS';
 
@@ -224,7 +230,7 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
   return {
     batchSize: resolveBatchSize(env[BATCH_SIZE_ENV]),
     ratePerMin: requirePositiveInt(env[RATE_PER_MIN_ENV], RATE_PER_MIN_ENV, RATE_PER_MIN_DEFAULT, ctx),
-    budgetMs: requirePositiveInt(env[BUDGET_MS_ENV], BUDGET_MS_ENV, BUDGET_MS_DEFAULT, ctx),
+    budgetMs: requireNonNegativeInt(env[BUDGET_MS_ENV], BUDGET_MS_ENV, BUDGET_MS_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     maxAlbums,
     afterAlbumId,
@@ -258,7 +264,14 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
  * (BS#1178). Mirrors `streaming-columns-drain`. */
 export const PER_ITEM_TIMEOUT_MS = 5_000;
 export const TIMEOUT_SLACK_MS = 5_000;
-export const computeBulkTimeoutMs = (batchSize: number): number => batchSize * PER_ITEM_TIMEOUT_MS + TIMEOUT_SLACK_MS;
+/** LML's `LML_SEARCH_HARD_TIMEOUT_MS` default: the only limit on an item sent
+ * without a budget header. */
+export const LML_HARD_CAP_MS = 25_000;
+/** With no budget header (`budgetMs` 0) one item can run to LML's hard cap, so
+ * the batch waits that long on top of the per-item slices rather than letting
+ * one slow album time out the other four. */
+export const computeBulkTimeoutMs = (batchSize: number, budgetMs: number): number =>
+  batchSize * PER_ITEM_TIMEOUT_MS + TIMEOUT_SLACK_MS + (budgetMs > 0 ? 0 : LML_HARD_CAP_MS);
 
 // -- Batch -------------------------------------------------------------------
 
@@ -346,8 +359,8 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
   try {
     const response: { results?: unknown } | null = await bulkLookupMetadata(buildBulkItems(candidates), {
       caller: JOB_NAME,
-      budgetMs: options.budgetMs,
-      timeoutMs: computeBulkTimeoutMs(candidates.length),
+      budgetMs: options.budgetMs > 0 ? options.budgetMs : null,
+      timeoutMs: computeBulkTimeoutMs(candidates.length, options.budgetMs),
     });
     // The client types `results` as an array but does not check it. A 2xx
     // whose body is not the bulk shape is no answer for any album, so it
