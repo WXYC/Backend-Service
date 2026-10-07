@@ -106,9 +106,28 @@ const escapeHtml = (s: string) =>
 const absoluteUrl = (path: string) =>
   `${(process.env.FRONTEND_SOURCE?.split(',')[0]?.trim() || 'http://localhost:3000').replace(/\/$/, '')}${path}`;
 
+/** An email address anywhere in a string. Deliberately generous: over-matching only redacts more. */
+const EMAIL_ADDRESS = /[^\s<>()[\]"',;:@]+@[^\s<>()[\]"',;@]*[^\s<>()[\]"',;@.]/g;
+const REDACTED_ADDRESS = '[email redacted]';
+const scrubAddresses = (text: string) => text.replace(EMAIL_ADDRESS, REDACTED_ADDRESS);
+
+/**
+ * A copy of `err` that is safe to log: SES messages can quote the recipient, so no address survives in the message or
+ * the stack (whose first line is the message). Anything that is not an `Error` is reported as its scrubbed string.
+ */
+const scrubbed = (err: unknown) => {
+  if (!(err instanceof Error)) return scrubAddresses(String(err));
+  const clean = new Error(scrubAddresses(err.message));
+  clean.name = err.name;
+  if (err.stack !== undefined) clean.stack = scrubAddresses(err.stack);
+  return clean;
+};
+
+/** The one place a failed send is logged and reported, for every sender in this file; never carries an address. */
 const reportFailure = (err: unknown, context: Record<string, unknown>) => {
-  console.error('[review-notices] Failed to send a review notice:', err);
-  Sentry.captureException(err, { tags: { subsystem: 'review-notices' }, extra: context });
+  const safe = scrubbed(err);
+  console.error('[review-notices] Failed to send a review notice:', safe);
+  Sentry.captureException(safe, { tags: { subsystem: 'review-notices' }, extra: context });
 };
 
 type NoticeLink = { path: string; label: string };
@@ -151,14 +170,16 @@ export const notifyMusicDirectors = async (message: Notice) => {
 
 /**
  * One email to one account's own address (BS#2864), through the same renderer and failure handling as
- * `notifyMusicDirectors`. Sends nothing when the account is gone or its ban is in force (`isBanInForce`: it cannot
- * sign in to follow the link). Never rejects.
+ * `notifyMusicDirectors`. Sends nothing when the account is gone, is no longer a station member (the inner join on
+ * `member`, as `musicDirectorEmails` has) or has its ban in force (`isBanInForce`: it cannot sign in to follow the
+ * link). Never rejects.
  */
 export const notifyAccount = async (userId: string, message: Notice) => {
   try {
     const [account] = await db
       .select({ email: user.email, banned: user.banned, banExpires: user.banExpires })
       .from(user)
+      .innerJoin(member, eq(member.userId, user.id))
       .where(eq(user.id, userId));
     if (!account || isBanInForce(account)) return;
     await sendNotificationEmail({ to: [account.email], subject: message.subject, ...render(message) });

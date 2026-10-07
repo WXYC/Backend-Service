@@ -16,9 +16,18 @@ jest.mock('@wxyc/authentication', () => ({
   ...jest.requireActual('../../../shared/authentication/src/ban-in-force'),
   sendNotificationEmail: (email: unknown) => mockSend(email),
 }));
+/** Every inner join a select made, as `<table> ON <condition>`, so a test can pin which tables a lookup joins. */
+const mockJoins: string[] = [];
+
 jest.mock('@wxyc/database', () => {
   const chain: any = {};
-  for (const m of ['from', 'innerJoin', 'leftJoin', 'where']) chain[m] = () => chain;
+  for (const m of ['from', 'leftJoin', 'where']) chain[m] = () => chain;
+  chain.innerJoin = (table: unknown, on: unknown) => {
+    const { getTableName, sql } = jest.requireActual('drizzle-orm');
+    const { PgDialect } = jest.requireActual('drizzle-orm/pg-core');
+    mockJoins.push(`${getTableName(table)} ON ${new PgDialect().sqlToQuery(sql`${on}`).sql}`);
+    return chain;
+  };
   chain.then = (resolve: (rows: unknown[]) => unknown, reject: (err: unknown) => unknown) => {
     const next = mockQueue.shift() ?? [];
     return next instanceof Error ? reject(next) : resolve(next);
@@ -161,6 +170,7 @@ describe('notices', () => {
   beforeEach(() => {
     process.env.FRONTEND_SOURCE = 'https://dj.example.org, http://localhost:3000';
     mockQueue.length = 0;
+    mockJoins.length = 0;
     mockSend.mockReset();
     mockSend.mockResolvedValue(undefined);
     mockCapture.mockReset();
@@ -299,6 +309,15 @@ describe('notices', () => {
       expect(mockSend).not.toHaveBeenCalled();
     });
 
+    test('an account is looked up through its station membership, so a former member is told nothing', async () => {
+      mockQueue.push(ACCOUNT);
+      await notifyReviewEdited({ ...AUTHOR, name: 'Test MD' });
+      expect(mockJoins).toEqual(['auth_member ON "auth_member"."user_id" = "auth_user"."id"']);
+      mockQueue.push([]);
+      await notifyReviewRecorded({ ...AUTHOR, name: 'Test MD' });
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
     test('sends to an account whose ban has expired', async () => {
       mockQueue.push([{ email: 'dj@example.org', banned: true, banExpires: new Date(Date.now() - 1e7) }]);
       await notifyReviewEdited({ ...AUTHOR, name: 'Test MD' });
@@ -315,6 +334,47 @@ describe('notices', () => {
       expect(mockCapture).toHaveBeenCalledWith(expect.objectContaining({ message: 'ses down' }), {
         tags: { subsystem: 'review-notices' },
         extra: { review_id: 3 },
+      });
+      jest.restoreAllMocks();
+    });
+  });
+
+  // SES errors can quote the recipient (`...identities failed the check: <address>`), and an address must reach neither
+  // the log nor Sentry (docs/pii.md), whichever sender failed.
+  describe('a failed send never logs or reports an email address', () => {
+    const ADDRESS = 'dj-private@example.org';
+    const failure = () =>
+      new Error(`Email address is not verified. The following identities failed the check: ${ADDRESS}.`);
+    const SENDERS = [
+      [
+        'notifyAccount',
+        async () => {
+          mockQueue.push([{ email: ADDRESS, banned: false, banExpires: null }]);
+          await notifyAccount('dj-1', { subject: 's', lines: [], links: [], context: { review_id: 3 } });
+        },
+      ],
+      [
+        'notifyMusicDirectors',
+        async () => {
+          mockQueue.push(DIRECTORS);
+          await notifyReviewSubmitted(NOTICE);
+        },
+      ],
+    ] as const;
+
+    test.each(SENDERS)('%s', async (_name, run) => {
+      const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
+      mockSend.mockRejectedValue(failure());
+      await run();
+      const everything = JSON.stringify([
+        logged.mock.calls.map((call) => call.map((arg) => (arg instanceof Error ? [arg.message, arg.stack] : arg))),
+        mockCapture.mock.calls.map(([err, hint]) => [(err as Error).message, (err as Error).stack, hint]),
+      ]);
+      expect(mockCapture).toHaveBeenCalled();
+      expect(everything).not.toContain('@example.org');
+      expect(everything).toContain('[email redacted]');
+      expect(mockCapture.mock.calls[0][0]).toMatchObject({
+        message: 'Email address is not verified. The following identities failed the check: [email redacted].',
       });
       jest.restoreAllMocks();
     });
