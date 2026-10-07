@@ -107,30 +107,37 @@ const absoluteUrl = (path: string) =>
   `${(process.env.FRONTEND_SOURCE?.split(',')[0]?.trim() || 'http://localhost:3000').replace(/\/$/, '')}${path}`;
 
 const reportFailure = (err: unknown, context: Record<string, unknown>) => {
-  console.error('[review-notices] Failed to notify the music directors:', err);
+  console.error('[review-notices] Failed to send a review notice:', err);
   Sentry.captureException(err, { tags: { subsystem: 'review-notices' }, extra: context });
 };
 
-/** The link to an intake item in the Pile, for the two notices about one. */
-const itemLink = (itemId: number) => ({ path: `/dashboard/admin/intake/${itemId}`, label: 'Open in the Pile' });
+type NoticeLink = { path: string; label: string };
+type Notice = { subject: string; lines: string[]; links: NoticeLink[]; context: Record<string, unknown> };
+
+/** The link to an intake item in the Pile, for the notices about one. */
+const itemLink = (itemId: number): NoticeLink => ({
+  path: `/dashboard/admin/intake/${itemId}`,
+  label: 'Open in the Pile',
+});
+
+/** Plain text: the lines, then each link's full URL on its own line. HTML: the lines, then one paragraph per anchor. One home, so the two senders cannot drift. */
+const render = ({ lines, links }: Pick<Notice, 'lines' | 'links'>) => ({
+  text: [...lines, ...links.map((l) => absoluteUrl(l.path))].join('\n'),
+  html:
+    lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('') +
+    links.map((l) => `<p><a href="${escapeHtml(absoluteUrl(l.path))}">${escapeHtml(l.label)}</a></p>`).join(''),
+});
 
 /**
  * One email per music director, sent concurrently. Never rejects: every failure is logged and reported to Sentry
  * (`context` is its `extra`) and swallowed, because the intake Pile is the source of truth. Callers start a notice after the commit and do
  * not await it (as `auth.definition.ts` does the password-reset send), so a slow or hung SES never delays or fails
- * a request that already committed. `link.path` is joined to the frontend's base URL here, which stays private.
+ * a request that already committed. Each link's `path` is joined to the frontend's base URL in `render`, which stays private.
  * `sendNotificationEmail` honors `EMAIL_ENABLED`.
  */
-export const notifyMusicDirectors = async (message: {
-  subject: string;
-  lines: string[];
-  link: { path: string; label: string };
-  context: Record<string, unknown>;
-}) => {
+export const notifyMusicDirectors = async (message: Notice) => {
   try {
-    const url = absoluteUrl(message.link.path);
-    const text = [...message.lines, url].join('\n');
-    const html = `${message.lines.map((l) => `<p>${escapeHtml(l)}</p>`).join('')}<p><a href="${escapeHtml(url)}">${escapeHtml(message.link.label)}</a></p>`;
+    const { text, html } = render(message);
     const sends = (await musicDirectorEmails()).map(async (email) =>
       sendNotificationEmail({ to: [email], subject: message.subject, text, html })
     );
@@ -142,10 +149,28 @@ export const notifyMusicDirectors = async (message: {
   }
 };
 
+/**
+ * One email to one account's own address (BS#2864), through the same renderer and failure handling as
+ * `notifyMusicDirectors`. Sends nothing when the account is gone or its ban is in force (`isBanInForce`: it cannot
+ * sign in to follow the link). Never rejects.
+ */
+export const notifyAccount = async (userId: string, message: Notice) => {
+  try {
+    const [account] = await db
+      .select({ email: user.email, banned: user.banned, banExpires: user.banExpires })
+      .from(user)
+      .where(eq(user.id, userId));
+    if (!account || isBanInForce(account)) return;
+    await sendNotificationEmail({ to: [account.email], subject: message.subject, ...render(message) });
+  } catch (err) {
+    reportFailure(err, message.context);
+  }
+};
+
 /** A review of an intake item is waiting to be accepted (the item did not move). */
 export const notifyReviewSubmitted = (n: ReviewNotice) =>
   notifyMusicDirectors({
-    link: itemLink(n.itemId),
+    links: [itemLink(n.itemId)],
     context: { item_id: n.itemId },
     subject: `Review waiting to be accepted: ${record(n.artist, n.album)}`,
     lines: [
@@ -164,7 +189,7 @@ export const notifyPass = async (item: { id: number; artist: string; album: stri
       () => undefined
     );
   return notifyMusicDirectors({
-    link: itemLink(item.id),
+    links: [itemLink(item.id)],
     context: { item_id: item.id },
     subject: `Request passed: ${record(item.artist, item.album)}`,
     lines: [
@@ -181,6 +206,70 @@ export const notifyFccNoteReported = ({ note, artist, album }: FccNoteNotice) =>
   notifyMusicDirectors({
     subject: `FCC note to confirm: ${record(artist, album)}`,
     lines: [`${note.reported_by} reported an FCC note on ${record(artist, album)}.`, `${note.track}: ${note.note}`],
-    link: { path: '/dashboard/admin/intake', label: 'Open FCC notes to confirm' },
+    links: [{ path: '/dashboard/admin/intake', label: 'Open FCC notes to confirm' }],
     context: { fcc_note_id: note.id },
+  });
+
+/** The record a review is about, named for the email (`{artist} – {album}`). */
+export type NoticeRecord = { artist: string; album: string };
+
+/** A review's author is told a music director edited it, or recorded it in their name; `name` is the account name (`auth_user.name`), null when it has none. */
+export type AuthorNotice = NoticeRecord & { reviewId: number; authorUserId: string; name: string | null };
+
+/** A printed copy: an intake item, or a release with no item. */
+export type PrintedCopy = { intake_item_id: number } | { album_id: number };
+
+/** The FCC line of a printed review changed: who edited, the new line, and the copies whose latest print is the review. */
+export type FccChangeNotice = NoticeRecord & {
+  reviewId: number;
+  editor: string | null;
+  fcc: string | null;
+  copies: PrintedCopy[];
+};
+
+const reviewLink = (reviewId: number): NoticeLink => ({
+  path: `/dashboard/reviews/${reviewId}`,
+  label: 'Open your review',
+});
+
+/** Notice 1: a music director edited the review of an account. */
+export const notifyReviewEdited = (n: AuthorNotice) =>
+  notifyAccount(n.authorUserId, {
+    subject: `Your review was edited: ${record(n.artist, n.album)}`,
+    lines: [
+      `${n.name ?? 'A music director'} edited your review of ${record(n.artist, n.album)}. The review's history shows what changed.`,
+    ],
+    links: [reviewLink(n.reviewId)],
+    context: { review_id: n.reviewId },
+  });
+
+/** Notice 2: a music director recorded a review in the account's name. */
+export const notifyReviewRecorded = (n: AuthorNotice) =>
+  notifyAccount(n.authorUserId, {
+    subject: `A review was recorded in your name: ${record(n.artist, n.album)}`,
+    lines: [
+      `${n.name ?? 'A music director'} recorded a review of ${record(n.artist, n.album)} in your name.`,
+      "You can edit it, and it isn't published anywhere until you choose where it can appear and how you're credited.",
+    ],
+    links: [reviewLink(n.reviewId)],
+    context: { review_id: n.reviewId },
+  });
+
+/** Notice 3: the music directors are told the slips on the covers are out of date. */
+export const notifyFccChanged = (n: FccChangeNotice) =>
+  notifyMusicDirectors({
+    subject: `FCC line changed on a printed review: ${record(n.artist, n.album)}`,
+    lines: [
+      `${n.editor ?? 'Someone'} changed the FCC line on the review of ${record(n.artist, n.album)} after it was printed.`,
+      `New FCC line: ${n.fcc || 'none'}`,
+      n.copies.length === 1
+        ? 'The printed slip is out of date. Reprint it from:'
+        : 'The printed slips are out of date. Reprint them from:',
+    ],
+    links: n.copies.map((c) =>
+      'intake_item_id' in c
+        ? itemLink(c.intake_item_id)
+        : { path: `/dashboard/album/${c.album_id}`, label: 'Open the album page' }
+    ),
+    context: { review_id: n.reviewId },
   });
