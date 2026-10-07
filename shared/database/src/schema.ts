@@ -3070,7 +3070,8 @@ export const fccNoteStatusEnum = wxyc_schema.enum('fcc_note_status', ['reported'
 
 /**
  * An FCC note a DJ reports against a release or a pile item, confirmed by a
- * music director. `reported_by` and `confirmed_by` are display-name snapshots
+ * music director. `reported_by` (required, BS#2862: the create refuses a caller
+ * with no account to snapshot) and `confirmed_by` are display-name snapshots
  * of `auth_user.name`; `confirmed_by` has no account column because the
  * contract's `FccNote` carries none.
  */
@@ -3083,7 +3084,7 @@ export const fcc_notes = wxyc_schema.table(
     track: text('track').notNull(),
     note: text('note').notNull(),
     status: fccNoteStatusEnum('status').notNull().default('reported'),
-    reported_by: varchar('reported_by', { length: 128 }),
+    reported_by: varchar('reported_by', { length: 128 }).notNull(),
     reported_by_user_id: varchar('reported_by_user_id', { length: 255 }).references(() => user.id, {
       onDelete: 'set null',
     }),

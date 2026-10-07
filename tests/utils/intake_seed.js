@@ -277,8 +277,8 @@ async function seedReviewPrint(overrides = {}) {
 }
 
 /**
- * Insert an `fcc_notes` row and return it, with placeholder `track` and `note` text and the column default
- * for `status`. `overrides` must name `album_id` or `intake_item_id` (CHECK `fcc_notes_target_ck`). No remove
+ * Insert an `fcc_notes` row and return it, with placeholder `track`, `note` and `reported_by` text and the column
+ * default for `status`. `overrides` must name `album_id` or `intake_item_id` (CHECK `fcc_notes_target_ck`). No remove
  * function: a note goes when its release or item is deleted.
  */
 async function seedFccNote(overrides = {}) {
@@ -286,7 +286,7 @@ async function seedFccNote(overrides = {}) {
     throw new Error('seedFccNote needs album_id or intake_item_id in overrides (fcc_notes_target_ck)');
   }
   const sql = getTestDb();
-  const row = { track: 'la paradoja', note: 'A placeholder note.', ...overrides };
+  const row = { track: 'la paradoja', note: 'A placeholder note.', reported_by: 'Test Reporter', ...overrides };
   const [note] = await sql`INSERT INTO ${sql(SCHEMA)}.fcc_notes ${sql(row)} RETURNING *`;
   return note;
 }

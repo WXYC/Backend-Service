@@ -88,7 +88,7 @@ describe('fileIntakeItem (BS#2803)', () => {
     expect(sets.intake_items).toMatchObject({ state: 'filed', album_id: 42, rotation_id: 5, filed_by: 'md-1' });
   });
 
-  it('clears the holder and the request, keeps the accept columns, and stamps every review and print of the item', async () => {
+  it('clears the holder and the request, keeps the accept columns, and stamps every review, print and FCC note of the item', async () => {
     const { tx } = await run(existing, [[{ id: 9 }], [reviewed]]);
     expect(sets.intake_items).toMatchObject({
       checked_out_by: null,
@@ -101,6 +101,7 @@ describe('fileIntakeItem (BS#2803)', () => {
     expect(sets.intake_items).not.toHaveProperty('accepted_at');
     expect(sets.reviews).toEqual({ album_id: 9 });
     expect(sets.review_prints).toEqual({ album_id: 9 });
+    expect(sets.fcc_notes).toEqual({ album_id: 9 });
     expect(tx.delete).toHaveBeenCalledTimes(1);
   });
 

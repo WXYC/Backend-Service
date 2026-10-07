@@ -26,6 +26,7 @@ import { album_reviews_route } from './routes/album-reviews.route.js';
 import { digital_archive_route } from './routes/digital-archive.route.js';
 import { intake_route } from './routes/intake.route.js';
 import { reviews_route } from './routes/reviews.route.js';
+import { fcc_notes_route } from './routes/fcc-notes.route.js';
 import { reconcileCatalogExportFlag } from './services/catalog-export-flag-reconcile.service.js';
 import { buildCorsMiddleware } from './middleware/cors.js';
 import { startAlbumPlaysRefresh, stopAlbumPlaysRefresh } from './services/album-plays-refresh.service.js';
@@ -110,6 +111,9 @@ app.use('/intake', intake_route);
 
 // In-app reviews: create and edit a draft (role-gated `reviews:write`) — BS#2802. Gates: routes/reviews.route.ts.
 app.use('/reviews', reviews_route);
+
+// FCC notes on the record: report and list (role-gated `reviews:write` / `reviews:read`) — BS#2862. Gates: routes/fcc-notes.route.ts.
+app.use('/fcc-notes', fcc_notes_route);
 
 // Business logic routes
 app.use('/labels', labels_route);
