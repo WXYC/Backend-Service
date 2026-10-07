@@ -1348,7 +1348,8 @@ const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number'] as const;
  * this endpoint yet"). Gated `catalog: ['write']`.
  *
  * Outcomes: 200 `ArtistRefileResult` (the genre-scoped `ArtistCard` plus `changed`, `previous_code_artist_number`,
- * `releases_to_relabel`) / 404 `Artist not found` or `Artist not filed under genre {n}` /
+ * `releases_to_relabel`) / 404 `Artist not found` (`code: 'artist_not_found'`) or `Artist not filed under genre {n}`
+ * (`code: 'artist_not_filed_in_genre'`; the message prefix stays stable for clients that fall back to it, BS#3023) /
  * 409 `lettered_compilation_section`, `various_artists_section` (a Various Artists bucket, BS#3022: `V/A` or `Z-` code
  * letters, never the name; refused even for its own number) or `artist_code_conflict` (with the contract `Artist` now
  * holding the slot: the first owner in `getArtistsByCode` order) / 503 `LockUnavailableRefusal` on lock contention.
@@ -1382,9 +1383,9 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
   const result = await libraryService.refileArtistInGenre(artistId, genreId, target);
   switch (result.outcome) {
     case 'artist_not_found':
-      throw new WxycError('Artist not found', 404);
+      throw new WxycError('Artist not found', 404, { code: 'artist_not_found' });
     case 'not_filed':
-      throw new WxycError(`Artist not filed under genre ${genreId}`, 404);
+      throw new WxycError(`Artist not filed under genre ${genreId}`, 404, { code: 'artist_not_filed_in_genre' });
     case 'lock_unavailable':
       res.status(503).json({
         message: 'Could not re-file: the shelf is being written to right now. Try again in a moment.',

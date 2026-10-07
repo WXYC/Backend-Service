@@ -100,13 +100,16 @@ describe('POST /library/artists/:id/refile', () => {
     });
 
     it.each([
-      ['artist_not_found', 'Artist not found'],
-      ['not_filed', 'Artist not filed under genre 6'],
-    ] as const)('throws a 404 for %s', async (outcome, message) => {
+      ['artist_not_found', 'Artist not found', 'artist_not_found'],
+      ['not_filed', 'Artist not filed under genre 6', 'artist_not_filed_in_genre'],
+    ] as const)('throws a 404 for %s carrying code %s', async (outcome, message, code) => {
       mockedService.refileArtistInGenre.mockResolvedValue({ outcome });
       const { req, res, next } = mockReqRes({ id: '431' }, { genre_id: 6, code_artist_number: 31 });
 
-      await expect(refileArtist(req as never, res, next)).rejects.toMatchObject({ statusCode: 404, message });
+      const error = await refileArtist(req as never, res, next).catch((e: unknown) => e);
+
+      expect(error).toMatchObject({ statusCode: 404 });
+      expect((error as { toApiErrorResponse(): unknown }).toApiErrorResponse()).toEqual({ message, code });
     });
 
     it('answers 409 lettered_compilation_section with no artist', async () => {
