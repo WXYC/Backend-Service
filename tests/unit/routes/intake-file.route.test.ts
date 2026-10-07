@@ -135,6 +135,12 @@ describe('POST /intake/:id/file arms (BS#2803)', () => {
     expect(mockFileIntakeItem).not.toHaveBeenCalled();
   });
 
+  test('the filing refusal for an item with no accepted review keeps its own message', async () => {
+    mockFileIntakeItem.mockResolvedValue({ outcome: 'not_reviewed' });
+    const res = await file({ kind: 'existing_release', album_id: 9 });
+    expect(res.body.message).toEqual('Intake item has no accepted review');
+  });
+
   test.each([
     [{ outcome: 'not_found' }, 404, undefined],
     [{ outcome: 'unknown_album' }, 400, undefined],

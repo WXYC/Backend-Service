@@ -54,6 +54,10 @@ const CONFLICT_MESSAGES = {
   not_reviewed: 'Intake item has no accepted review',
   state_changed: 'Intake item is no longer in the state this action needs',
 };
+const PRINT_REFUSALS = {
+  not_reviewed: 'This item has no accepted review to print.',
+  handwritten: "This item's accepted review is handwritten, so its slip is already on the sleeve.",
+};
 const conflict = (res: Response, reason: keyof typeof CONFLICT_MESSAGES) =>
   res.status(409).json({ message: CONFLICT_MESSAGES[reason], reason });
 
@@ -176,11 +180,12 @@ export const fileIntake: RequestHandler<{ id: string }> = async (req, res) => {
   res.json(result.item);
 };
 
-/** `POST /intake/:id/print` (BS#2804): the accepted review's slip, appended to the print log; the only refusal is `not_reviewed`. */
+/** `POST /intake/:id/print` (BS#2804): the accepted review's slip, appended to the print log; both refusals (no accepted review, handwritten) are 409 `not_reviewed` with their own message. */
 export const printIntake: RequestHandler<{ id: string }> = async (req, res) => {
   const result = await printIntakeItem(parseId(req.params.id), reviewsActor(req));
   if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
-  if (result.outcome === 'not_reviewed') return void conflict(res, 'not_reviewed');
+  if (result.outcome !== 'printed')
+    return void res.status(409).json({ message: PRINT_REFUSALS[result.outcome], reason: 'not_reviewed' });
   res.json(result.slip);
 };
 

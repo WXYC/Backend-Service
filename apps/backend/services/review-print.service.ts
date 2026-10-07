@@ -104,7 +104,8 @@ export const printIntakeItem = async (id: number, actor: Pick<ReviewsActor, 'id'
       item.accepted_review_id === null
         ? []
         : await tx.select().from(reviews).where(eq(reviews.id, item.accepted_review_id)).for('update');
-    if (!review || review.medium !== 'typed') return { outcome: 'not_reviewed' as const };
+    if (!review) return { outcome: 'not_reviewed' as const };
+    if (review.medium !== 'typed') return { outcome: 'handwritten' as const };
     const slip = await printSlip(tx, { intake_item_id: id, album_id: target.album_id ?? null }, item, review, actor.id);
     await tx
       .update(intake_items)
