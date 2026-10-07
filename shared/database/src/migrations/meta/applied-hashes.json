@@ -183,5 +183,7 @@
   "0184_2827-code-volume-letters-on-library-artist-view": "b6f00e61956da4e9ba4d7ca9203e6dc900a72786d3279d713a13158ae6c81b0d",
   "0185_2826-code-volume-letters-in-library-watermark-trigger": "a872fb4fe584dc418f74db1be842a95e05ed3f295abb544c2f76de9b1547f28a",
   "0186_2835-code-comp-letter-on-library-artist-view": "46dd21751adb7a97bf93934a5abcf9fe44339f73230980d1725be50d67bec777",
-  "0187_2862-fcc-notes-reported-by-not-null": "17bab4928a37eefde526b46debc4b353678e45576510eb294bcfd76a9dc654a5"
+  "0187_2862-fcc-notes-reported-by-not-null": "17bab4928a37eefde526b46debc4b353678e45576510eb294bcfd76a9dc654a5",
+  "0188_rotation-cards-last-changed-at": "2e865b0baea220eec0ca52829a9ad77082c459940642fd5152e340e6c82b5d52",
+  "0189_rotation-cards-last-changed-at-trigger": "6dbd19f1a27e90851f51230ba4954a755ef3c9028a8d8d07b05625bccd673a80"
 }
