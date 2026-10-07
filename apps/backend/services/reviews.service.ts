@@ -78,8 +78,9 @@ export const snapshotAuthor = (name: string | null | undefined) =>
  * release. `reviewId` must be a nested SQL, such as `outerRef(column)` or a bound parameter (`deleteReview`
  * passes one), never a bare `Column`: drizzle renders a bare column unqualified in a single-table select and it
  * would bind to the inner `p`. `scope` narrows which
- * prints count (`on_cover` asks only about the prints of one release's copies). Shared by `in_use` here and by
- * `deleteReview`'s print half, so the two cannot disagree.
+ * prints count, through the `id`, `intake_item_id` and `album_id` of `p` (`on_cover` asks only about the prints of one
+ * release's copies; `printedCopies` pins `p.id` to the one print row of its outer select, so each copy is one row). Shared by `in_use` here, by `deleteReview`'s print half,
+ * by `on_cover` and by `printedCopies`, so they cannot disagree.
  */
 export const latestPrintOfCopy = (
   reviewId: SQL,
