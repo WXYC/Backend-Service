@@ -50,6 +50,7 @@ jest.mock('@wxyc/database', () => {
         return c;
       },
       leftJoin: () => c,
+      innerJoin: () => c,
       orderBy: (...columns: any[]) => {
         const { sql } = jest.requireActual('drizzle-orm');
         const q = new PgDialect().sqlToQuery(
@@ -490,7 +491,7 @@ describe('recordReview (BS#2866: a music director records a review on behalf of 
 
   describe('the author', () => {
     test('a linked account is stored as author_user_id, and revision 1 is attributed to it', async () => {
-      mockQueue.push(item(), item(), [{ id: 'dj-1' }], [{ id: 11 }], [{ n: 0 }], [created]);
+      mockQueue.push(item(), item(), [{ id: 'dj-1' }], [{ id: 11 }], [{ n: 0 }], [created], []);
       await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, author_user_id: 'dj-1' }, MD);
       expect(mockInserts[0].values).toMatchObject({ author_user_id: 'dj-1', recorded_by_user_id: 'md-1' });
       expect(mockInserts[1].values).toMatchObject({ edited_by: 'Test Reviewer', edited_by_user_id: 'dj-1' });
@@ -762,14 +763,17 @@ describe('updateReview', () => {
       [{ n: 1 }],
       [{ id: 3 }],
       [{ n: 1 }],
-      [stored({})]
+      [stored({})],
+      []
     );
     mockUpdatedRow = stored({ fcc: 'x' });
     await updateReview(3, { fcc: 'x' }, DJ);
-    expect(mockStatements.at(-2)).toBe('insert review_revisions');
-    expect(mockStatements.at(-1)).toMatch(/^select#/);
-    expect(mockReads.at(-1)).toMatchObject({ handle: 'tx', table: 'reviews' });
-    expect(mockReads.at(-1)?.lock).toBeUndefined();
+    // Last of all comes the printed-copies read of the FCC notice; the read-back is the one before it.
+    expect(mockStatements.at(-3)).toBe('insert review_revisions');
+    expect(mockStatements.at(-2)).toMatch(/^select#/);
+    expect(mockReads.at(-2)).toMatchObject({ handle: 'tx', table: 'reviews' });
+    expect(mockReads.at(-2)?.lock).toBeUndefined();
+    expect(mockReads.at(-1)?.table).toBe('rp');
   });
 
   test('a missing review is not_found', async () => {
@@ -778,13 +782,13 @@ describe('updateReview', () => {
   });
 
   test('the author of a submitted review edits it and gets 200, whatever the slip', async () => {
-    script({}, [{ name: 'Test Reviewer' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+    script({}, [{ name: 'Test Reviewer' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})], []);
     mockUpdatedRow = stored({ fcc: 'x' });
     expect((await updateReview(3, { fcc: 'x' }, DJ)).outcome).toBe('updated');
   });
 
   test('a music director edits any submitted review', async () => {
-    script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+    script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})], [], []);
     mockUpdatedRow = stored({ fcc: 'x' });
     expect((await updateReview(3, { fcc: 'x' }, MD)).outcome).toBe('updated');
   });
@@ -813,7 +817,7 @@ describe('updateReview', () => {
     const editor = [{ name: 'Test Reviewer' }];
 
     test('an edit of a submitted review writes exactly one revision: next number, content as it now stands, editor snapshot and id', async () => {
-      script({}, editor, [{ n: 2 }], [{ id: 3 }], [{ n: 2 }], [stored({})]);
+      script({}, editor, [{ n: 2 }], [{ id: 3 }], [{ n: 2 }], [stored({})], []);
       mockUpdatedRow = stored({ review: 'new', fcc: 'x', buzzwords: 'warm' });
       await updateReview(3, { review: 'new', fcc: 'x' }, DJ);
       expect(mockInserts).toEqual([
@@ -835,14 +839,14 @@ describe('updateReview', () => {
     });
 
     test("a music director's edit is in the history under the director's name and id", async () => {
-      script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})], [], []);
       mockUpdatedRow = stored({ fcc: 'x' });
       await updateReview(3, { fcc: 'x' }, MD);
       expect(mockInserts[0].values).toMatchObject({ revision: 2, edited_by: 'Test MD', edited_by_user_id: 'md-1' });
     });
 
     test('a long account name is cut to 128 code points like reviews.author', async () => {
-      script({}, [{ name: 'n'.repeat(200) }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      script({}, [{ name: 'n'.repeat(200) }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})], []);
       mockUpdatedRow = stored({ fcc: 'x' });
       await updateReview(3, { fcc: 'x' }, DJ);
       expect(mockInserts[0].values.edited_by).toBe('n'.repeat(128));
@@ -868,14 +872,24 @@ describe('updateReview', () => {
     });
 
     test('a consent field in the same patch as a content change still writes one revision', async () => {
-      script({}, editor, [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      script({}, editor, [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})], []);
       mockUpdatedRow = stored({ fcc: 'x' });
       await updateReview(3, { fcc: 'x', credit: 'none' }, DJ);
       expect(mockInserts).toHaveLength(1);
     });
 
     test('the first edit of a submitted review with no history writes revision 1 (the content before the edit, the author, at submitted_at), then revision 2', async () => {
-      script({ review: 'before' }, editor, [{ n: 0 }], [{ id: 3 }], [{ n: 0 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      script(
+        { review: 'before' },
+        editor,
+        [{ n: 0 }],
+        [{ id: 3 }],
+        [{ n: 0 }],
+        [{ id: 3 }],
+        [{ n: 1 }],
+        [stored({})],
+        []
+      );
       mockUpdatedRow = stored({ review: 'after' });
       await updateReview(3, { review: 'after' }, MD);
       expect(mockInserts.map((i) => i.table)).toEqual(['review_revisions', 'review_revisions']);
@@ -911,7 +925,8 @@ describe('updateReview', () => {
         [{ n: 0 }],
         [{ id: 3 }],
         [{ n: 1 }],
-        [stored({})]
+        [stored({})],
+        []
       );
       mockUpdatedRow = stored({ review: 'after' });
       await updateReview(3, { review: 'after' }, MD);
@@ -946,7 +961,7 @@ describe('updateReview', () => {
     });
 
     test("a music director's patch of a review's text succeeds", async () => {
-      script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      script({}, [{ name: 'Test MD' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})], []);
       mockUpdatedRow = stored({ review: 'fixed' });
       expect((await updateReview(3, { review: 'fixed' }, MD)).outcome).toBe('updated');
     });
@@ -1305,5 +1320,238 @@ describe('deleteReview', () => {
   test('a missing review is not_found', async () => {
     mockQueue.push([]);
     expect(await deleteReview(3, MD)).toEqual({ outcome: 'not_found' });
+  });
+});
+
+describe('review notices decided in the transaction (BS#2864)', () => {
+  const RECORD = { artist: 'Juana Molina', album: 'DOGA' };
+  const stored = (o: object = {}) => ({
+    id: 3,
+    status: 'submitted',
+    medium: 'typed',
+    review: 'kept',
+    artist_blurb: null,
+    buzzwords: null,
+    recommended_tracks: null,
+    fcc: 'old line',
+    author: 'Cat Power Fan',
+    author_user_id: 'dj-1',
+    recorded_by_user_id: null,
+    intake_item_id: 8,
+    album_id: null,
+    submitted_at: new Date('2026-09-30T12:00:00.000Z'),
+    last_modified: new Date('2026-09-30T12:30:00.000Z'),
+    ...o,
+  });
+  /** An edit of a submitted review that has history: locks, the row, the editor's name, revision lookup and write, the read-back, then `more`. */
+  const edit = (current: object, editorName: string | null, ...more: unknown[][]) => {
+    mockQueue.push(
+      [{ item: 8 }],
+      [{ id: 8 }],
+      [{ id: 3 }],
+      [stored(current)],
+      [{ name: editorName }],
+      [{ n: 1 }],
+      [{ id: 3 }],
+      [{ n: 1 }],
+      [stored(current)],
+      ...more
+    );
+    mockUpdatedRow = stored(current);
+  };
+  const printedReads = () => mockReads.filter((r) => r.table === 'rp');
+
+  describe('notice 1: a music director edited the review', () => {
+    test("a music director's content edit of a submitted review with a linked author is told to that author, with the editor's name", async () => {
+      edit({}, 'Test MD', [RECORD]);
+      const result = await updateReview(3, { review: 'fixed' }, MD);
+      expect(result).toMatchObject({
+        authorNotice: { ...RECORD, reviewId: 3, authorUserId: 'dj-1', name: 'Test MD' },
+        fccNotice: undefined,
+      });
+    });
+
+    test('an editor with no account name is carried as null, for the "A music director" fallback', async () => {
+      edit({}, null, [RECORD]);
+      expect((await updateReview(3, { review: 'fixed' }, MD)).authorNotice).toMatchObject({ name: null });
+    });
+
+    test.each([
+      ["the author's own edit", { id: 'dj-1', manage: true }, { review: 'fixed' }, {}],
+      ['a review with no linked account', MD, { review: 'fixed' }, { author_user_id: null }],
+      [
+        'a draft, edited by whoever recorded it',
+        MD,
+        { review: 'fixed' },
+        { status: 'draft', author_user_id: 'dj-1', recorded_by_user_id: 'md-1' },
+      ],
+    ])('sends none for %s', async (_n, actor, patch, current) => {
+      edit(current, 'Test MD', [RECORD]);
+      const result = await updateReview(3, patch, actor);
+      expect(result).toMatchObject({ outcome: 'updated', authorNotice: undefined });
+    });
+
+    test.each([
+      ['a consent-only patch', { publish_apps: true }],
+      ['a patch that sends the stored values', { review: 'kept', fcc: 'old line' }],
+    ])('sends none for %s', async (_n, patch) => {
+      mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored()], [stored()]);
+      const result = await updateReview(3, patch, { id: 'dj-1', manage: false });
+      expect(result).toMatchObject({ outcome: 'updated', authorNotice: undefined, fccNotice: undefined });
+    });
+
+    test("a music director's consent-only patch is refused before any notice", async () => {
+      mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored()]);
+      expect(await updateReview(3, { publish_apps: true }, MD)).toEqual({ outcome: 'consent_forbidden' });
+    });
+  });
+
+  describe("notice 3: a printed review's FCC line changed", () => {
+    const fccNotice = async (rows: unknown[], actor = MD, patch = { fcc: 'new line' }) => {
+      edit({}, 'Test MD', rows, [RECORD]);
+      return (await updateReview(3, patch, actor)).fccNotice;
+    };
+
+    test('a copy whose latest print is this review: the notice carries the new line, the editor and the copy', async () => {
+      expect(await fccNotice([{ item: 8, album: null }])).toEqual({
+        ...RECORD,
+        reviewId: 3,
+        editor: 'Test MD',
+        fcc: 'new line',
+        copies: [{ intake_item_id: 8 }],
+      });
+    });
+
+    test('a print of an item carrying the filed release id is still the item copy, and prints of one copy are one', async () => {
+      const notice = await fccNotice([
+        { item: 8, album: 5 },
+        { item: 8, album: 5 },
+      ]);
+      expect(notice?.copies).toEqual([{ intake_item_id: 8 }]);
+    });
+
+    test('a release-only copy is the release, and the copies keep their order', async () => {
+      const notice = await fccNotice([
+        { item: 8, album: null },
+        { item: null, album: 9 },
+      ]);
+      expect(notice?.copies).toEqual([{ intake_item_id: 8 }, { album_id: 9 }]);
+    });
+
+    test('a review that is the latest print of no copy (never printed, or replaced on every sleeve) sends none', async () => {
+      edit({}, 'Test MD', []);
+      expect((await updateReview(3, { fcc: 'new line' }, { id: 'dj-1', manage: false })).fccNotice).toBeUndefined();
+    });
+
+    test('an edit that does not change the FCC line never asks which copies it is on', async () => {
+      edit({}, 'Test MD', [RECORD]);
+      await updateReview(3, { review: 'fixed', fcc: 'old line' }, MD);
+      expect(printedReads()).toEqual([]);
+    });
+
+    test('clearing the FCC line is a change, and the notice carries null', async () => {
+      const notice = await fccNotice([{ item: 8, album: null }], MD, { fcc: null });
+      expect(notice?.fcc).toBeNull();
+    });
+
+    test("an author's own edit of the line is told to the music directors too, and sends no notice 1", async () => {
+      edit({}, 'Cat Power Fan', [{ item: 8, album: null }], [RECORD]);
+      const result = await updateReview(3, { fcc: 'new line' }, { id: 'dj-1', manage: false });
+      expect(result.fccNotice).toMatchObject({ editor: 'Cat Power Fan', copies: [{ intake_item_id: 8 }] });
+      expect(result.authorNotice).toBeUndefined();
+    });
+
+    test("a music director's edit of someone else's printed review that changes the line sends both notices", async () => {
+      edit({}, 'Test MD', [{ item: 8, album: null }], [RECORD]);
+      const result = await updateReview(3, { fcc: 'new line' }, MD);
+      expect(result.authorNotice).toMatchObject({ authorUserId: 'dj-1' });
+      expect(result.fccNotice).toMatchObject({ copies: [{ intake_item_id: 8 }] });
+    });
+
+    test('a draft never sends it: a draft has no revision to compare', async () => {
+      mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored({ status: 'draft' })], [stored()]);
+      const result = await updateReview(3, { fcc: 'new line' }, { id: 'dj-1', manage: false });
+      expect(result).toMatchObject({ fccNotice: undefined });
+      expect(printedReads()).toEqual([]);
+    });
+
+    test("the copies read asks about this review's prints through latestPrintOfCopy, oldest print first", async () => {
+      await fccNotice([{ item: 8, album: null }]);
+      const [read] = printedReads();
+      expect(read.where).toContain('"rp"."review_id" = $1');
+      expect(read.where).toContain('"p"."id" = "rp"."id"');
+      expect(read.where).toContain('"n"."intake_item_id" IS NOT DISTINCT FROM "p"."intake_item_id"');
+      expect(read.where).toContain('("n"."printed_at", "n"."id") > ("p"."printed_at", "p"."id")');
+      expect(read.where).toContain('[3,3]');
+      expect(read.orderBy).toBe('"rp"."printed_at", "rp"."id"');
+    });
+
+    test("a release review names the release's displayed artist", async () => {
+      mockQueue.push(
+        [{ item: null }],
+        [{ id: 3 }],
+        [stored({ intake_item_id: null, album_id: 9 })],
+        [{ name: 'Test MD' }],
+        [{ n: 1 }],
+        [{ id: 3 }],
+        [{ n: 1 }],
+        [stored()],
+        [{ item: null, album: 9 }],
+        [RECORD]
+      );
+      mockUpdatedRow = stored({ intake_item_id: null, album_id: 9 });
+      await updateReview(3, { fcc: 'new line' }, MD);
+      const names = mockReads.at(-1);
+      expect(names?.table).toBe('library');
+      expect(names?.where).toContain('[9]');
+    });
+  });
+
+  describe("notice 2: a review recorded in the account's name", () => {
+    const ONBEHALF = { author: 'Test Reviewer', medium: 'handwritten' as const };
+    const ACCEPTED = (links: unknown[][]) =>
+      mockQueue.push([{ album_id: null, state: 'pool' }], [{ album_id: null, state: 'pool' }], ...links);
+
+    test('the accepted arm names the linked account, the record and the recorder', async () => {
+      ACCEPTED([[{ id: 'dj-1' }], [{ id: 11 }], [{ n: 0 }], [{ id: 11 }], [RECORD], [{ name: 'Test MD' }]]);
+      const result = await recordReview(
+        { intake_item_id: 4 },
+        {},
+        { ...ONBEHALF, accept: true, author_user_id: 'dj-1' },
+        MD
+      );
+      expect(result).toMatchObject({
+        outcome: 'created',
+        notice: { ...RECORD, reviewId: 11, authorUserId: 'dj-1', name: 'Test MD' },
+      });
+    });
+
+    test('the draft arm does too', async () => {
+      ACCEPTED([[{ id: 'dj-1' }], [{ id: 11 }], [RECORD], [{ name: 'Test MD' }]]);
+      const result = await recordReview(
+        { intake_item_id: 4 },
+        {},
+        { ...ONBEHALF, accept: false, author_user_id: 'dj-1' },
+        MD
+      );
+      expect(result).toMatchObject({ notice: { reviewId: 11, authorUserId: 'dj-1' } });
+    });
+
+    test('a review with no author_user_id tells nobody', async () => {
+      ACCEPTED([[{ id: 11 }]]);
+      const result = await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, accept: false }, MD);
+      expect(result).toMatchObject({ outcome: 'created', notice: undefined });
+    });
+
+    test("a review linked to the recorder's own account tells nobody", async () => {
+      ACCEPTED([[{ id: 'md-1' }], [{ id: 11 }]]);
+      const result = await recordReview(
+        { intake_item_id: 4 },
+        {},
+        { ...ONBEHALF, accept: false, author_user_id: 'md-1' },
+        MD
+      );
+      expect(result).toMatchObject({ outcome: 'created', notice: undefined });
+    });
   });
 });

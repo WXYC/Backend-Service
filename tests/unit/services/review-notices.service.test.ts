@@ -33,8 +33,12 @@ import { db } from '@wxyc/database';
 import {
   assignedLine,
   musicDirectorEmails,
+  notifyAccount,
+  notifyFccChanged,
   notifyFccNoteReported,
   notifyPass,
+  notifyReviewEdited,
+  notifyReviewRecorded,
   notifyReviewSubmitted,
   readReviewNotice,
   type AssignedLine,
@@ -243,6 +247,139 @@ describe('notices', () => {
       subject: 'Request passed: Juana Molina – DOGA',
       text: `${body}\n${URL}`,
       html: `<p>${body}</p>${LINK}`,
+    });
+  });
+
+  // The notices of BS#2864, copy decided by the station on 2026-10-06, pinned byte for byte.
+  describe('the account notices', () => {
+    const AUTHOR = { reviewId: 3, authorUserId: 'dj-1', artist: 'Juana Molina', album: 'DOGA' };
+    const ACCOUNT = [{ email: 'dj@example.org', banned: false, banExpires: null }];
+    const REVIEW_URL = 'https://dj.example.org/dashboard/reviews/3';
+    const OPEN = `<p><a href="${REVIEW_URL}">Open your review</a></p>`;
+    const SECOND =
+      "You can edit it, and it isn't published anywhere until you choose where it can appear and how you're credited.";
+
+    test.each([
+      ['a named editor', 'Test MD', 'Test MD'],
+      ['a null editor name', null, 'A music director'],
+    ])('notice 1 with %s is the decided copy', async (_n, name, shown) => {
+      mockQueue.push(ACCOUNT);
+      await notifyReviewEdited({ ...AUTHOR, name });
+      const line = `${shown} edited your review of Juana Molina – DOGA. The review's history shows what changed.`;
+      expect(sent()).toEqual({
+        to: ['dj@example.org'],
+        subject: 'Your review was edited: Juana Molina – DOGA',
+        text: `${line}\n${REVIEW_URL}`,
+        html: `<p>${line.replace("'", '&#39;')}</p>${OPEN}`,
+      });
+    });
+
+    test.each([
+      ['a named music director', 'Test MD', 'Test MD'],
+      ['a null name', null, 'A music director'],
+    ])('notice 2 with %s is the decided copy', async (_n, name, shown) => {
+      mockQueue.push(ACCOUNT);
+      await notifyReviewRecorded({ ...AUTHOR, name });
+      const first = `${shown} recorded a review of Juana Molina – DOGA in your name.`;
+      expect(sent()).toEqual({
+        to: ['dj@example.org'],
+        subject: 'A review was recorded in your name: Juana Molina – DOGA',
+        text: `${first}\n${SECOND}\n${REVIEW_URL}`,
+        html: `<p>${first}</p><p>${SECOND.replace(/'/g, '&#39;')}</p>${OPEN}`,
+      });
+    });
+
+    test.each([
+      ['no account', []],
+      ['a ban in force', [{ email: 'dj@example.org', banned: true, banExpires: null }]],
+      ['a ban that expires later', [{ email: 'dj@example.org', banned: true, banExpires: new Date(Date.now() + 1e7) }]],
+    ])('sends nothing to %s', async (_n, rows) => {
+      mockQueue.push(rows);
+      await notifyReviewEdited({ ...AUTHOR, name: 'Test MD' });
+      await notifyReviewRecorded({ ...AUTHOR, name: 'Test MD' });
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    test('sends to an account whose ban has expired', async () => {
+      mockQueue.push([{ email: 'dj@example.org', banned: true, banExpires: new Date(Date.now() - 1e7) }]);
+      await notifyReviewEdited({ ...AUTHOR, name: 'Test MD' });
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed send is reported under the review id and swallowed', async () => {
+      jest.spyOn(console, 'error').mockImplementation(() => {});
+      mockQueue.push(ACCOUNT);
+      mockSend.mockRejectedValueOnce(new Error('ses down'));
+      await expect(
+        notifyAccount('dj-1', { subject: 's', lines: [], links: [], context: { review_id: 3 } })
+      ).resolves.toBeUndefined();
+      expect(mockCapture).toHaveBeenCalledWith(expect.objectContaining({ message: 'ses down' }), {
+        tags: { subsystem: 'review-notices' },
+        extra: { review_id: 3 },
+      });
+      jest.restoreAllMocks();
+    });
+  });
+
+  describe('the FCC-line notice', () => {
+    const FCC_CHANGE = { reviewId: 3, artist: 'Juana Molina', album: 'DOGA', editor: 'Test MD', fcc: 'A clean line.' };
+    const first = 'Test MD changed the FCC line on the review of Juana Molina – DOGA after it was printed.';
+    const ITEM_URL = 'https://dj.example.org/dashboard/admin/intake/8';
+    const ALBUM_URL = 'https://dj.example.org/dashboard/album/9';
+
+    test('one printed copy: singular third line, one link, exact copy', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, copies: [{ intake_item_id: 8 }] });
+      const lines = [first, 'New FCC line: A clean line.', 'The printed slip is out of date. Reprint it from:'];
+      expect(mockSend.mock.calls.map(([e]) => (e as Sent).to)).toEqual([
+        ['md-one@example.org'],
+        ['md-two@example.org'],
+      ]);
+      expect(sent()).toEqual({
+        to: ['md-one@example.org'],
+        subject: 'FCC line changed on a printed review: Juana Molina – DOGA',
+        text: `${lines.join('\n')}\n${ITEM_URL}`,
+        html: `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open in the Pile</a></p>`,
+      });
+    });
+
+    test('several copies: plural third line, one link per copy in order, an album copy links to the album page', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, copies: [{ intake_item_id: 8 }, { album_id: 9 }] });
+      const lines = [first, 'New FCC line: A clean line.', 'The printed slips are out of date. Reprint them from:'];
+      expect(sent().text).toBe(`${lines.join('\n')}\n${ITEM_URL}\n${ALBUM_URL}`);
+      expect(sent().html).toBe(
+        `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open in the Pile</a></p><p><a href="${ALBUM_URL}">Open the album page</a></p>`
+      );
+    });
+
+    test.each([
+      ['null', null],
+      ['empty', ''],
+    ])('a %s new line reads "New FCC line: none"', async (_n, fcc) => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, fcc, copies: [{ intake_item_id: 8 }] });
+      expect(sent().text.split('\n')[1]).toBe('New FCC line: none');
+    });
+
+    test('a null editor name is "Someone"', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, editor: null, copies: [{ intake_item_id: 8 }] });
+      expect(sent().text.split('\n')[0]).toBe(
+        'Someone changed the FCC line on the review of Juana Molina – DOGA after it was printed.'
+      );
+    });
+
+    test('says neither "pool" nor "pile" in lower case', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, copies: [{ intake_item_id: 8 }, { album_id: 9 }] });
+      for (const part of [
+        sent().subject,
+        sent().text.replace(/https?:\S+/g, ''),
+        sent().html.replace(/<a href="[^"]*">/g, ''),
+      ]) {
+        expect(part).not.toMatch(/pool|pile/);
+      }
     });
   });
 

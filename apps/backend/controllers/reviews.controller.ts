@@ -3,7 +3,12 @@ import type { RequestHandler } from 'express';
 import * as reviewsService from '../services/reviews.service.js';
 import { AUTHOR_MAX, type OnBehalf, type ReviewFields } from '../services/reviews.service.js';
 import WxycError from '../utils/error.js';
-import { notifyReviewSubmitted } from '../services/review-notices.service.js';
+import {
+  notifyFccChanged,
+  notifyReviewEdited,
+  notifyReviewRecorded,
+  notifyReviewSubmitted,
+} from '../services/review-notices.service.js';
 import { parseBooleanQueryParam, parseInt4PathId, parseInt4QueryParam } from '../utils/query-params.js';
 import { parseRecordSubject } from '../utils/record-subject.js';
 import { reviewsActor } from '../utils/review-grants.js';
@@ -85,7 +90,8 @@ export const createReview: RequestHandler = async (req, res) => {
   }
   if (result.outcome === 'text_required') throw new WxycError('A typed review needs text to be accepted', 400);
   if (result.outcome === 'unknown_author') throw new WxycError('author_user_id names no account', 400);
-  // The notice to a linked DJ (BS#2864) is sent here, after the transaction has committed.
+  // After the commit and not awaited, like the submit notice: a failed send never fails the request.
+  if (result.notice) void notifyReviewRecorded(result.notice);
   res.json(result.review);
 };
 
@@ -100,6 +106,8 @@ export const patchReview: RequestHandler<{ id: string }> = async (req, res) => {
     throw new WxycError("Only the review's author may set its publishing choices", 403);
   if (result.outcome === 'text_required')
     throw new WxycError('A submitted typed review must keep its review text', 400);
+  if (result.authorNotice) void notifyReviewEdited(result.authorNotice);
+  if (result.fccNotice) void notifyFccChanged(result.fccNotice);
   res.json(result.review);
 };
 
