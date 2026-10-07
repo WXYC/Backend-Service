@@ -239,7 +239,7 @@ describe('the legacy bases (BS#2810)', () => {
       seedChain(chain);
       await expect(insertAlbum(ALBUM, basis)).rejects.toThrow(
         new RotationNotEligibleError(
-          'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.'
+          'This rotation entry is already linked to a release, or was added after reviews moved into the DJ site, so it needs a review before it can be catalogued.'
         )
       );
     });
@@ -293,6 +293,28 @@ describe('the legacy bases (BS#2810)', () => {
       seedChain(LEGACY, []);
       await expect(addToRotation(typed, basis)).rejects.toBeInstanceOf(RotationNotEligibleError);
       expect(db.insert).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a post-cutover typed-text row', POST_CUTOVER],
+      ['a linked row', LINKED],
+      ['a row that does not exist', []],
+    ])('words the refusal of %s exactly, as a move and not an import', async (_label, chain) => {
+      seedChain(chain);
+      await expect(addToRotation(typed, basis)).rejects.toThrow(
+        new RotationNotEligibleError(
+          "This rotation entry can't be moved to another bin this way. It is already linked to a release, or it was added after reviews moved into the DJ site."
+        )
+      );
+    });
+
+    it('words the lost kill race exactly', async () => {
+      seedChain(LEGACY, []);
+      await expect(addToRotation(typed, basis)).rejects.toThrow(
+        new RotationNotEligibleError(
+          'This rotation entry was taken out of rotation, linked, or moved while the move was saving. Nothing was changed; reload to see where it stands.'
+        )
+      );
     });
 
     it('is accepted with the gate off too', async () => {

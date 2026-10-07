@@ -733,6 +733,14 @@ const resolveRotationCardId = async (
   return newestRows[0]?.id;
 };
 
+/** The station's wording of a refused legacy basis (BS#3042): a move is not told it needs a review. */
+const LEGACY_REFUSALS = {
+  legacy_import:
+    'This rotation entry is already linked to a release, or was added after reviews moved into the DJ site, so it needs a review before it can be catalogued.',
+  legacy_move:
+    "This rotation entry can't be moved to another bin this way. It is already linked to a release, or it was added after reviews moved into the DJ site.",
+} as const;
+
 /**
  * Verifies a review-gate basis (BS#2807) on the transaction whose write it licenses. `pre_cutover` holds only while
  * the gate is off. `intake` holds only for an item with an accepted review (`mayFileItem`), read `FOR UPDATE` so an
@@ -759,9 +767,7 @@ const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
       FROM chain
     `)) as unknown as RotationChainRow[];
     if (!isLegacyRotationRow(chain, rotationId)) {
-      throw new RotationNotEligibleError(
-        'This rotation entry is already linked to a release, or was added after reviews moved into dj-site, so it needs a review before it can be catalogued.'
-      );
+      throw new RotationNotEligibleError(LEGACY_REFUSALS[basis.kind]);
     }
     // A moved record's chain is one record (BS#3007): only the newest row imports; `linkRotationToAlbum` links the rest.
     if (basis.kind === 'legacy_import' && chain.find((row) => row.id === rotationId)?.has_successor) {
@@ -940,7 +946,11 @@ export const addToRotation = async (
         tx,
         and(isNull(rotation.album_id), rotationActiveSql())
       );
-      if (!killed) throw new RotationNotEligibleError('The rotation row was already killed or linked');
+      if (!killed) {
+        throw new RotationNotEligibleError(
+          'This rotation entry was taken out of rotation, linked, or moved while the move was saving. Nothing was changed; reload to see where it stands.'
+        );
+      }
       values.moved_from_rotation_id = gateBasis.fromRotationId;
     }
     const cardId = await resolveRotationCardId(tx, values.rotation_bin, values.card_id);
