@@ -20,7 +20,7 @@
  *
  * The chosen guard is removal of the deploy path rather than a runtime
  * refusal inside `main()`. That is deliberate and it is the STRONGER of the
- * two: `.github/workflows/deploy-base.yml:454` builds `Dockerfile.${target}`
+ * two: the `Build and Push Image` step of `.github/workflows/deploy-base.yml` builds `Dockerfile.${target}`
  * from the repo root, so with no Dockerfile the image cannot be produced at
  * all — an operator gets a build failure instead of a container that runs and
  * then declines. A runtime refusal would additionally have had to live in

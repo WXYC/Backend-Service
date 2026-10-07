@@ -24,8 +24,8 @@ COPY ./shared/database/package* ./shared/database/
 # here but kept for parity and future-proofing. `.npmrc` is removed after install.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/concerts-similar-artists-enrichment/dist ./jobs/concerts-similar-artists-enrichment/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/concerts-similar-artists-enrichment/dist ./jobs/concerts-similar-artists-enrichment/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # Identifies the connection in pg_stat_activity during incident triage.
 ENV DB_APPLICATION_NAME=wxyc-concerts-similar-artists-enrichment

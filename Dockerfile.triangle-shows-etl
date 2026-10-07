@@ -18,7 +18,7 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder /jobs/triangle-shows-etl/dist ./jobs/triangle-shows-etl/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/triangle-shows-etl/dist ./jobs/triangle-shows-etl/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/triangle-shows-etl"]

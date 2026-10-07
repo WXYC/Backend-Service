@@ -21,9 +21,9 @@ COPY ./shared/lml-client/package* ./shared/lml-client/
 # NPM_TOKEN at install time. The .npmrc is removed afterwards.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/rotation-artist-backfill/dist ./jobs/rotation-artist-backfill/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /jobs/rotation-artist-backfill/dist ./jobs/rotation-artist-backfill/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 
 # This job's only DB read is one SELECT against `rotation`. 60 s is plenty.
 ENV DB_STATEMENT_TIMEOUT_MS=60000

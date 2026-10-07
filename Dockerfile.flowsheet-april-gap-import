@@ -17,8 +17,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/flowsheet-april-gap-import/dist ./jobs/flowsheet-april-gap-import/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/flowsheet-april-gap-import/dist ./jobs/flowsheet-april-gap-import/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # The date-window candidate scan and the Backend-side floor COUNT both walk
 # a meaningful slice of the 2.6M-row flowsheet table; the API's tight 5s

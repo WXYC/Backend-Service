@@ -23,10 +23,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # pattern in Dockerfile.backend / Dockerfile.flowsheet-metadata-backfill.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/library-artwork-url-backfill/dist ./jobs/library-artwork-url-backfill/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /jobs/library-artwork-url-backfill/dist ./jobs/library-artwork-url-backfill/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: per-row UPDATEs are tiny (single-column,
 # id-equality WHERE) but the SELECT batch joins library to artists; a tightly

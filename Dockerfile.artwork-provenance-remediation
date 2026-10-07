@@ -22,10 +22,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # Dockerfile.flowsheet-metadata-backfill.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/artwork-provenance-remediation/dist ./jobs/artwork-provenance-remediation/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /jobs/artwork-provenance-remediation/dist ./jobs/artwork-provenance-remediation/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: the enumeration reads every
 # Discogs-hosted `album_metadata.artwork_url` in one pass (41,333 rows as of

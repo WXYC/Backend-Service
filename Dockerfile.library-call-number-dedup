@@ -15,8 +15,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder /jobs/library-call-number-dedup/dist ./jobs/library-call-number-dedup/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/library-call-number-dedup/dist ./jobs/library-call-number-dedup/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # Bulk repoint workload. Async commit is safe: the job is idempotent (a merged
 # slot drops out of the `HAVING count(*) > 1` set) and each slot's writes are

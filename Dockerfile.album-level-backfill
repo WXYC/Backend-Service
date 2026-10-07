@@ -23,10 +23,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # pattern in Dockerfile.flowsheet-metadata-backfill / Dockerfile.backend.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/album-level-backfill/dist ./jobs/album-level-backfill/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /jobs/album-level-backfill/dist ./jobs/album-level-backfill/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Identifies the connection in pg_stat_activity during incident triage.
 ENV DB_APPLICATION_NAME=wxyc-album-level-backfill

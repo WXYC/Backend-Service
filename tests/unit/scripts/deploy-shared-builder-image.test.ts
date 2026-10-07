@@ -8,10 +8,12 @@
  * build` over the whole monorepo in its own `builder` stage. Since this is
  * an npm-workspaces repo, `npm ci` always installs the full dependency
  * tree regardless of which `--workspace` flags the build script passes, so
- * those 56 builder stages were ~0.7 GB of near-identical work, each cached
- * under its own per-target ECR ref (`<target>:buildcache`) and independently
- * pulled by its own `build` matrix job -- ~38 GB of ECR egress on a
- * full (54-target) fan-out. `Dockerfile.deploy-builder` now does that build
+ * those 56 builder stages were near-identical work, each cached under its
+ * own per-target ECR ref (`<target>:buildcache`). (An earlier version of this
+ * comment blamed ~0.7 GB per stage / ~38 GB per fan-out of ECR egress on
+ * that; the measured egress source was the bare `COPY --from=builder` pulling
+ * the base and install layers, which `--link` removes -- see
+ * `docs/deploy.md`.) `Dockerfile.deploy-builder` now does that build
  * exactly once per deploy and exports only the compiled `dist/**` output
  * (~9 MB across every workspace); every target's builder stage becomes
  * `ARG BUILDER_IMAGE` / `FROM ${BUILDER_IMAGE} AS builder`, fed by a new
@@ -109,7 +111,7 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
     }
   );
 
-  const COPY_FROM_BUILDER = /^COPY (?:--link )?--from=builder (\S+) (\S+)$/m;
+  const COPY_FROM_BUILDER = /^COPY --link --from=builder (\S+) (\S+)$/m;
   const COPY_FROM_BUILDER_G = new RegExp(COPY_FROM_BUILDER.source, 'gm');
 
   describe.each(nodeTargetDockerfiles())('%s', (name) => {
@@ -120,6 +122,10 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
       // The old per-target shape must never come back.
       expect(text).not.toMatch(/^FROM node:24-alpine AS builder$/m);
       expect(text).not.toMatch(/^RUN npm ci\b/m);
+    });
+
+    it('never uses the bare COPY --from=builder form, which forces BuildKit to pull the parent layers (BS#2912)', () => {
+      expect(text).not.toMatch(/^COPY --from=builder /m);
     });
 
     it('copies dist/** from the builder stage using an absolute path, not the old per-target prefix', () => {
@@ -138,7 +144,7 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
   });
 
   it.each([
-    ['COPY --from=builder /jobs/x/dist ./jobs/x/dist', true],
+    ['COPY --from=builder /jobs/x/dist ./jobs/x/dist', false],
     ['COPY --link --from=builder /jobs/x/dist ./jobs/x/dist', true],
     ['COPY --chown=1:1 --from=builder /jobs/x/dist ./jobs/x/dist', false],
   ])('COPY-line pattern: %s -> matches=%s', (line, matches) => {

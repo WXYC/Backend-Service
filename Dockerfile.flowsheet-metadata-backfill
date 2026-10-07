@@ -23,10 +23,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # pattern in Dockerfile.backend.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/flowsheet-metadata-backfill/dist ./jobs/flowsheet-metadata-backfill/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /jobs/flowsheet-metadata-backfill/dist ./jobs/flowsheet-metadata-backfill/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: a per-row UPDATE over the 1.86M-row
 # tail can spend tens of seconds on the rare hot batch (search_doc tsvector

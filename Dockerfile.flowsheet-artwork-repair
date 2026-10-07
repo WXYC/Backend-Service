@@ -22,10 +22,10 @@ COPY ./shared/metadata/package* ./shared/metadata/
 # Dockerfile.flowsheet-metadata-backfill.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/flowsheet-artwork-repair/dist ./jobs/flowsheet-artwork-repair/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
-COPY --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /jobs/flowsheet-artwork-repair/dist ./jobs/flowsheet-artwork-repair/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
 
 # Long-running per-statement timeout: the enumeration query's predicate
 # (`metadata_status='enriched_match' AND artwork_url IS NULL AND album_id IS

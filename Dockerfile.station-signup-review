@@ -17,8 +17,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/station-signup-review/dist ./jobs/station-signup-review/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/station-signup-review/dist ./jobs/station-signup-review/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # Statement timeout left at the API's 5s default, deliberately.
 #

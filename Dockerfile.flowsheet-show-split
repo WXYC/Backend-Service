@@ -15,8 +15,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder /jobs/flowsheet-show-split/dist ./jobs/flowsheet-show-split/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/flowsheet-show-split/dist ./jobs/flowsheet-show-split/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # Deliberately NOT the sibling one-shots' `DB_SYNCHRONOUS_COMMIT=off` tuning.
 # Those are resumable bulk backfills whose worst case on a lost commit is

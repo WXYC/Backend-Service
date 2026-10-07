@@ -22,8 +22,8 @@ COPY ./shared/lml-client/package* ./shared/lml-client/
 # pattern in Dockerfile.library-artwork-url-backfill / Dockerfile.backend.
 RUN npm install --omit=dev && rm -f .npmrc
 
-COPY --from=builder /jobs/library-canonical-entity-backfill/dist ./jobs/library-canonical-entity-backfill/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
-COPY --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /jobs/library-canonical-entity-backfill/dist ./jobs/library-canonical-entity-backfill/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/library-canonical-entity-backfill"]

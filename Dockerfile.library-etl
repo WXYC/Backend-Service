@@ -15,8 +15,8 @@ COPY ./shared/database/package* ./shared/database/
 
 RUN npm install --omit=dev
 
-COPY --from=builder /jobs/library-etl/dist ./jobs/library-etl/dist
-COPY --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /jobs/library-etl/dist ./jobs/library-etl/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
 
 # Override the @wxyc/database default of 5s. Bulk ETL queries (legacy joins,
 # album/release reconciliation passes) can run tens of seconds on a fresh
