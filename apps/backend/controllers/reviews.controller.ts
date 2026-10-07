@@ -3,7 +3,12 @@ import type { RequestHandler } from 'express';
 import * as reviewsService from '../services/reviews.service.js';
 import { AUTHOR_MAX, type OnBehalf, type ReviewFields } from '../services/reviews.service.js';
 import WxycError from '../utils/error.js';
-import { notifyReviewEdited, notifyReviewRecorded, notifyReviewSubmitted } from '../services/review-notices.service.js';
+import {
+  notifyFccChanged,
+  notifyReviewEdited,
+  notifyReviewRecorded,
+  notifyReviewSubmitted,
+} from '../services/review-notices.service.js';
 import { parseBooleanQueryParam, parseInt4PathId, parseInt4QueryParam } from '../utils/query-params.js';
 import { parseRecordSubject } from '../utils/record-subject.js';
 import { reviewsActor } from '../utils/review-grants.js';
@@ -103,6 +108,7 @@ export const patchReview: RequestHandler<{ id: string }> = async (req, res) => {
   if (result.outcome === 'text_required')
     throw new WxycError('A submitted typed review must keep its review text', 400);
   if (result.authorNotice) void notifyReviewEdited(result.authorNotice);
+  if (result.fccNotice) void notifyFccChanged(result.fccNotice);
   res.json(result.review);
 };
 

@@ -1338,6 +1338,7 @@ describe('review notices decided in the transaction (BS#2864)', () => {
     album_id: null,
     submitted_at: new Date('2026-09-30T12:00:00.000Z'),
     last_modified: new Date('2026-09-30T12:30:00.000Z'),
+    printed_at: new Date('2026-10-01T12:00:00.000Z'),
     ...o,
   });
   /** An edit of a submitted review that has history: locks, the row, the editor's name, revision lookup and write, the read-back, then `more`. */
@@ -1356,6 +1357,8 @@ describe('review notices decided in the transaction (BS#2864)', () => {
     );
     mockUpdatedRow = stored(current);
   };
+
+  const printedReads = () => mockReads.filter((r) => r.table === 'rp');
 
   describe('notice 1: a music director edited the review', () => {
     test("a music director's content edit of a submitted review with a linked author is told to that author, with the editor's name", async () => {
@@ -1417,6 +1420,130 @@ describe('review notices decided in the transaction (BS#2864)', () => {
     test("a music director's consent-only patch is refused before any notice", async () => {
       mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored()]);
       expect(await updateReview(3, { publish_apps: true }, MD)).toEqual({ outcome: 'consent_forbidden' });
+    });
+  });
+
+  describe("notice 3: a printed review's FCC line changed", () => {
+    /** A latest-print row of this review, as `printedCopies` reads it: the copy and the `fcc` of the revision that was printed. */
+    const print = (item: number | null, album: number | null, printedFcc: string | null = 'old line') => ({
+      item,
+      album,
+      revision: 5,
+      printedFcc,
+    });
+    const fccNotice = async (rows: unknown[], actor = MD, patch: { fcc: string | null } = { fcc: 'new line' }) => {
+      edit({}, 'Test MD', rows, [RECORD]);
+      return (await updateReview(3, patch, actor)).fccNotice;
+    };
+
+    test('a copy whose latest print is this review: the notice carries the new line, the editor and the copy', async () => {
+      expect(await fccNotice([print(8, null)])).toEqual({
+        ...RECORD,
+        reviewId: 3,
+        editor: 'Test MD',
+        fcc: 'new line',
+        copies: [{ intake_item_id: 8 }],
+      });
+    });
+
+    test('a print of an item carrying the filed release id is still the item copy', async () => {
+      const notice = await fccNotice([print(8, 5)]);
+      expect(notice?.copies).toEqual([{ intake_item_id: 8 }]);
+    });
+
+    test('a release-only copy is the release, and the copies keep their order', async () => {
+      const notice = await fccNotice([print(8, null), print(null, 9)]);
+      expect(notice?.copies).toEqual([{ intake_item_id: 8 }, { album_id: 9 }]);
+    });
+
+    // The slip carries the `fcc` of the revision that was printed (`review_prints.revision_id`), not of the one before the edit.
+    describe('the sleeve shows the printed revision, not the previous one', () => {
+      const editFcc = async (current: string, patch: string, printedFcc: string) => {
+        edit({ fcc: current }, 'Test MD', [print(8, null, printedFcc)], [RECORD]);
+        return (await updateReview(3, { fcc: patch }, MD)).fccNotice;
+      };
+
+      test('A printed, edited to B: the sleeve is out of date', async () => {
+        expect((await editFcc('A', 'B', 'A'))?.copies).toEqual([{ intake_item_id: 8 }]);
+      });
+
+      test('then edited back to A: the sleeve shows A, so no notice', async () => {
+        expect(await editFcc('B', 'A', 'A')).toBeUndefined();
+      });
+
+      test('then edited on to C: the sleeve (still A) is out of date again', async () => {
+        expect((await editFcc('B', 'C', 'A'))?.copies).toEqual([{ intake_item_id: 8 }]);
+      });
+    });
+
+    test('two copies printed at different revisions: an edit that matches one sleeve lists only the other', async () => {
+      edit({ fcc: 'B' }, 'Test MD', [print(8, null, 'A'), print(null, 9, 'B')], [RECORD]);
+      const notice = (await updateReview(3, { fcc: 'A' }, MD)).fccNotice;
+      expect(notice?.copies).toEqual([{ album_id: 9 }]);
+    });
+
+    test('an edit that matches every sleeve sends none', async () => {
+      edit({ fcc: 'B' }, 'Test MD', [print(8, null, 'A'), print(null, 9, 'A')], [RECORD]);
+      expect((await updateReview(3, { fcc: 'A' }, MD)).fccNotice).toBeUndefined();
+    });
+
+    test('a print whose revision is gone is of unknown content and is listed', async () => {
+      const notice = await fccNotice([{ item: 8, album: null, revision: null, printedFcc: null }], MD, { fcc: null });
+      expect(notice?.copies).toEqual([{ intake_item_id: 8 }]);
+    });
+
+    test('a review that is the latest print of no copy (replaced on every sleeve) sends none', async () => {
+      edit({}, 'Test MD', [], [RECORD]);
+      expect((await updateReview(3, { fcc: 'new line' }, { id: 'dj-1', manage: false })).fccNotice).toBeUndefined();
+    });
+
+    test('a review never printed sends none and never asks which copies it is on', async () => {
+      edit({ printed_at: null }, 'Test MD', [RECORD]);
+      expect((await updateReview(3, { fcc: 'new line' }, MD)).fccNotice).toBeUndefined();
+      expect(printedReads()).toEqual([]);
+    });
+
+    test('an edit that does not change the FCC line never asks which copies it is on', async () => {
+      edit({}, 'Test MD', [RECORD]);
+      await updateReview(3, { review: 'fixed', fcc: 'old line' }, MD);
+      expect(printedReads()).toEqual([]);
+    });
+
+    test('clearing the FCC line is a change, and the notice carries null', async () => {
+      const notice = await fccNotice([print(8, null)], MD, { fcc: null });
+      expect(notice?.fcc).toBeNull();
+    });
+
+    test("an author's own edit of the line is told to the music directors too, and sends no notice 1", async () => {
+      edit({}, 'Cat Power Fan', [print(8, null)], [RECORD]);
+      const result = await updateReview(3, { fcc: 'new line' }, { id: 'dj-1', manage: false });
+      expect(result.fccNotice).toMatchObject({ editor: 'Cat Power Fan', copies: [{ intake_item_id: 8 }] });
+      expect(result.authorNotice).toBeUndefined();
+    });
+
+    test("a music director's edit of someone else's printed review that changes the line sends both notices", async () => {
+      edit({}, 'Test MD', [print(8, null)], [RECORD]);
+      const result = await updateReview(3, { fcc: 'new line' }, MD);
+      expect(result.authorNotice).toMatchObject({ authorUserId: 'dj-1' });
+      expect(result.fccNotice).toMatchObject({ copies: [{ intake_item_id: 8 }] });
+    });
+
+    test('a draft never sends it: a draft has no revision to compare', async () => {
+      mockQueue.push([{ item: 8 }], [{ id: 8 }], [{ id: 3 }], [stored({ status: 'draft' })], [stored()]);
+      const result = await updateReview(3, { fcc: 'new line' }, { id: 'dj-1', manage: false });
+      expect(result).toMatchObject({ fccNotice: undefined });
+      expect(printedReads()).toEqual([]);
+    });
+
+    test("the copies read asks about this review's prints through latestPrintOfCopy, oldest print first, with each printed revision", async () => {
+      await fccNotice([print(8, null)]);
+      const [read] = printedReads();
+      expect(read.where).toContain('"rp"."review_id" = $1');
+      expect(read.where).toContain('"p"."id" = "rp"."id"');
+      expect(read.where).toContain('"n"."intake_item_id" IS NOT DISTINCT FROM "p"."intake_item_id"');
+      expect(read.where).toContain('("n"."printed_at", "n"."id") > ("p"."printed_at", "p"."id")');
+      expect(read.where).toContain('[3,3]');
+      expect(read.orderBy).toBe('"rp"."printed_at", "rp"."id"');
     });
   });
 
