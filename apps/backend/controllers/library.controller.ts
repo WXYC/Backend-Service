@@ -901,14 +901,16 @@ const UPDATABLE_ARTIST_FIELDS = ['alphabetical_name', 'artist_name'] as const;
 
 const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number'] as const;
 
-// Why each field has no write path on THIS ENDPOINT today -- verified
-// against the full write surface, not asserted. `genre_id` and `code_letters`
-// have no write path anywhere: `genre_artist_crossreference.genre_id` is only
-// ever `.insert()`ed -- by `POST /library/artists` -- and `artists.code_letters`
-// is likewise write-once. `code_artist_number` (`artist_genre_code`) is the one
-// exception since BS#2643: `POST /library/artists/{id}/refile` rewrites it,
-// which is why it is refused HERE (a call-number change needs that endpoint's
-// genre scope, occupancy check and bucket lock, not a bare column update).
+// Why each field has no write path on THIS ENDPOINT today. `genre_id` and
+// `code_letters` are not writable by any endpoint: `genre_artist_crossreference.genre_id`
+// is only ever `.insert()`ed -- by `POST /library/artists` -- and
+// `artists.code_letters` is likewise set once at create. (Batch jobs are a
+// different surface: `jobs/artist-unicode-dedup` rewrites `code_letters`, and
+// `jobs/library-etl` upserts `artist_genre_code`; neither is an endpoint.)
+// `code_artist_number` (`artist_genre_code`) is writable by exactly one
+// endpoint, `POST /library/artists/{id}/refile` (BS#2643), which is why it is
+// refused HERE: a call-number change needs that endpoint's genre scope,
+// occupancy check and bucket lock, not a bare column update.
 //
 // Re-verified for BS#2563, because `artist_name` becoming writable is exactly
 // the change that could have falsified the `code_letters` reason: it did not.
@@ -923,7 +925,8 @@ const ARTIST_NO_COLUMN_FIELDS = ['genre_id', 'code_letters', 'code_artist_number
 // `alphabetical_name` (the field that actually governs shelf ORDER) already
 // reached the same contradiction -- and refiling is a genre-scoped
 // crossreference rewrite plus a call-number reassignment, not a column
-// update, so it needs its own endpoint rather than a widened allowlist here.
+// update, so it has its own endpoint (`POST /library/artists/{id}/refile`,
+// BS#2643) rather than a widened allowlist here.
 const ARTIST_NO_COLUMN_FIELD_OWNERS: Record<(typeof ARTIST_NO_COLUMN_FIELDS)[number], string> = {
   genre_id:
     'no write path: genre_artist_crossreference.genre_id is set once by POST /library/artists and is never UPDATEd by any endpoint',
@@ -1341,7 +1344,7 @@ export const refileArtist: RequestHandler<{ id: string }> = async (req, res) => 
   }
   const genreId = record.genre_id;
   if (typeof genreId !== 'number' || !Number.isInteger(genreId) || genreId < 1 || genreId > INT4_MAX) {
-    throw new WxycError(`genre_id must be an integer between 1 and ${INT4_MAX}`, 400);
+    throw new WxycError(`Bad Request: genre_id must be an integer between 1 and ${INT4_MAX}`, 400);
   }
   const target = validateArtistCodeNumber(record.code_artist_number, 'code_artist_number');
 
