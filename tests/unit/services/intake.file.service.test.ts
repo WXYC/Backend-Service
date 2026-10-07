@@ -25,6 +25,7 @@ jest.mock('../../../apps/backend/services/library-filing.service', () => ({
 import { getTableName } from 'drizzle-orm';
 import { db } from '@wxyc/database';
 import { fileIntakeItem, mayFileItem } from '../../../apps/backend/services/intake.service';
+import { createLockLog } from '../../utils/lock-log-builder';
 
 describe('mayFileItem (BS#2803)', () => {
   it.each([
@@ -36,24 +37,7 @@ describe('mayFileItem (BS#2803)', () => {
 });
 
 describe('fileIntakeItem (BS#2803)', () => {
-  /** An awaitable stand-in for a drizzle builder resolving to `rows`; each lock is logged as `<table> for <strength>`. */
-  const log: string[] = [];
-  const sets: Record<string, Record<string, unknown>> = {};
-  const builder = (rows: unknown[], onSet?: (v: Record<string, unknown>) => void): unknown => {
-    let table = '';
-    const proxy: unknown = new Proxy(() => undefined, {
-      get: (_t, prop: string) => {
-        if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
-        return (...args: unknown[]) => {
-          if (prop === 'from') table = getTableName(args[0] as Parameters<typeof getTableName>[0]);
-          if (prop === 'for') log.push(`${table} for ${args[0] as string}`);
-          if (prop === 'set') onSet?.(args[0] as Record<string, unknown>);
-          return proxy;
-        };
-      },
-    });
-    return proxy;
-  };
+  const { builder, log, setsByTable: sets } = createLockLog();
   const reviewed = { state: 'reviewed', accepted_review_id: 3 };
   const newRelease = { kind: 'new_release', input: { release: { album_title: 'DOGA' } } } as never;
   const existing = { kind: 'existing_release', album_id: 9 } as const;
@@ -63,7 +47,7 @@ describe('fileIntakeItem (BS#2803)', () => {
     for (const key of Object.keys(sets)) delete sets[key];
     const tx = {
       select: jest.fn(() => builder(selects.shift() ?? [])),
-      update: jest.fn((table: never) => builder([], (v) => (sets[getTableName(table)] = v))),
+      update: jest.fn((table: never) => builder([], undefined, getTableName(table))),
       delete: jest.fn(() => builder([])),
     };
     jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
@@ -80,7 +64,7 @@ describe('fileIntakeItem (BS#2803)', () => {
   it('existing release: the library row FOR KEY SHARE, then the item FOR UPDATE, and no library insert', async () => {
     const { result } = await run(existing, [[{ id: 9 }], [reviewed]]);
     expect(result.outcome).toBe('filed');
-    expect(log).toEqual(['library for key share', 'intake_items for update']);
+    expect(log).toEqual(['library for key share id 9', 'intake_items for update id 7']);
     expect(mockFileLibraryRelease).not.toHaveBeenCalled();
     expect(sets.intake_items).toMatchObject({ album_id: 9, rotation_id: null });
   });
@@ -88,14 +72,14 @@ describe('fileIntakeItem (BS#2803)', () => {
   it('existing release: an album the locked read does not find is unknown_album and takes no item lock', async () => {
     const { result, tx } = await run(existing, [[]]);
     expect(result).toEqual({ outcome: 'unknown_album' });
-    expect(log).toEqual(['library for key share']);
+    expect(log).toEqual(['library for key share id 9']);
     expect(tx.update).not.toHaveBeenCalled();
   });
 
   it('new release: the item lock first, then fileLibraryRelease on the same transaction, and the item gets its ids', async () => {
     const { result, tx } = await run(newRelease, [[reviewed]]);
     expect(result.outcome).toBe('filed');
-    expect(log).toEqual(['intake_items for update']);
+    expect(log).toEqual(['intake_items for update id 7']);
     expect(mockFileLibraryRelease).toHaveBeenCalledWith(
       (newRelease as { input: unknown }).input,
       { kind: 'intake', intakeItemId: 7 },

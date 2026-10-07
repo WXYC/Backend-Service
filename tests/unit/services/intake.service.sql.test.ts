@@ -28,9 +28,10 @@ jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
   return { ...actual, reviewGateCutoverDate: jest.fn(actual.reviewGateCutoverDate) };
 });
 
-import { eq, getTableName, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, intake_items } from '@wxyc/database';
+import { createLockLog } from '../../utils/lock-log-builder';
 import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
 import {
   updateIntakeItem,
@@ -554,20 +555,8 @@ describe('RELEASE_ACCEPTED_REVIEW — the one UPDATE that takes a review off eve
 
 describe('deleteIntakeItem (BS#2854)', () => {
   /** A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows` and logs each method called on it. */
-  const calls: string[] = [];
-  const builder = (label: string, rows: unknown[]): unknown => {
-    calls.push(label);
-    const proxy: unknown = new Proxy(() => undefined, {
-      get: (_t, prop: string) => {
-        if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
-        return (...args: unknown[]) => {
-          if (prop === 'for') calls.push(`${label} for ${args[0] as string}`);
-          return proxy;
-        };
-      },
-    });
-    return proxy;
-  };
+  const { builder: lockBuilder, log: calls } = createLockLog();
+  const builder = (label: string, rows: unknown[]) => lockBuilder(rows, label);
   const run = async (selects: unknown[][]) => {
     calls.length = 0;
     const tx = {
@@ -586,7 +575,7 @@ describe('deleteIntakeItem (BS#2854)', () => {
       [{ authors: ['Test Reviewer', 'Test Visiting DJ'] }],
     ]);
     expect(result).toEqual({ outcome: 'deleted', authors: ['Test Reviewer', 'Test Visiting DJ'] });
-    expect(calls).toEqual(['select', 'select for update', 'select', 'delete']);
+    expect(calls).toEqual(['select', 'intake_items for update id 7', 'select', 'delete']);
     expect(tx.select).toHaveBeenCalledTimes(2);
     expect(tx.delete).toHaveBeenCalledTimes(1);
   });
@@ -613,23 +602,7 @@ describe('acceptReview (BS#2860)', () => {
    * A chainable, awaitable stand-in for a drizzle builder: it resolves to `rows`, remembers the table of its `from`, and
    * logs each lock as `<table> for <strength>` (plus ` with options` when `for` got a second argument such as `{ of }`).
    */
-  const log: string[] = [];
-  const sets: Record<string, unknown>[] = [];
-  const builder = (rows: unknown[]): unknown => {
-    let table = '';
-    const proxy: unknown = new Proxy(() => undefined, {
-      get: (_t, prop: string) => {
-        if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
-        return (...args: unknown[]) => {
-          if (prop === 'from') table = getTableName(args[0] as Parameters<typeof getTableName>[0]);
-          if (prop === 'for') log.push(`${table} for ${args[0] as string}${args.length > 1 ? ' with options' : ''}`);
-          if (prop === 'set') sets.push(args[0] as Record<string, unknown>);
-          return proxy;
-        };
-      },
-    });
-    return proxy;
-  };
+  const { builder, log, sets } = createLockLog();
   const dialect = new PgDialect();
   const MD = { id: 'md-1', manage: true };
   const own = { status: 'submitted', medium: 'typed', item: 7, album: null };
@@ -662,7 +635,7 @@ describe('acceptReview (BS#2860)', () => {
   it('locks the item FOR UPDATE, then the review FOR UPDATE, and writes once', async () => {
     const { result, tx } = await run({ review: own });
     expect(result.outcome).toBe('accepted');
-    expect(log).toEqual(['intake_items for update', 'reviews for update']);
+    expect(log).toEqual(['intake_items for update id 7', 'reviews for update id 3']);
     expect(tx.update).toHaveBeenCalledTimes(1);
   });
 
@@ -673,7 +646,7 @@ describe('acceptReview (BS#2860)', () => {
       review: { status: 'submitted', medium: 'typed', item: null, album: 9 },
     });
     expect(result.outcome).toBe('accepted');
-    expect(log).toEqual(['library for share', 'intake_items for update', 'reviews for update']);
+    expect(log).toEqual(['library for share id 9', 'intake_items for update id 7', 'reviews for update id 3']);
   });
 
   it('writes the pointer, the caller and now, withdraws any request, and sets reviewed unless filed or finalized, in one statement', async () => {
@@ -755,7 +728,7 @@ describe('acceptReview (BS#2860)', () => {
       review: { status: 'submitted', medium: 'typed', item: null, album: 4 },
     });
     expect(result).toEqual({ outcome: 'bad_review' });
-    expect(log).toEqual(['intake_items for update', 'reviews for update']);
+    expect(log).toEqual(['intake_items for update id 7', 'reviews for update id 3']);
     expect(tx.update).not.toHaveBeenCalled();
   });
 
