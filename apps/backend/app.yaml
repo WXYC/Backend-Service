@@ -4189,7 +4189,8 @@ paths:
         (`code_letters` is "not supported by this endpoint yet").
 
 
-        Gated at `requirePermissions({ catalog: ['write'] })`. Resubmitting the
+        Gated at `requirePermissions({ catalog: ['write'] })`. Outside a lettered
+        compilation section or a Various Artists bucket, resubmitting the
         artist's current number answers 200 `changed: false` without issuing an
         UPDATE (a real re-file advances the catalog watermark once, a full
         catalog re-download for every poller, the cost a rename pays), and is

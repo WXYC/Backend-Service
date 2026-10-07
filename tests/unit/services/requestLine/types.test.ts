@@ -5,7 +5,11 @@
  * Soundtracks, is ambiguous without the bin letter. Output must match
  * LML#1427's `LibraryItem.call_number` character for character.
  */
-import { computeCallNumber, type LibraryResult } from '../../../../apps/backend/services/requestLine/types';
+import {
+  computeCallNumber,
+  isVariousArtists,
+  type LibraryResult,
+} from '../../../../apps/backend/services/requestLine/types';
 
 function makeResult(overrides: Partial<LibraryResult>): LibraryResult {
   return {
@@ -206,5 +210,19 @@ describe('computeCallNumber', () => {
     ],
   ])('%s', (_description, overrides, expected) => {
     expect(computeCallNumber(makeResult(overrides))).toBe(expected);
+  });
+});
+
+describe('isVariousArtists (BS#3022 also guards the artist re-file)', () => {
+  it.each([
+    ['V/A', true],
+    ['  v/a ', true],
+    ['Z-R', true],
+    ['Z--', true],
+    ['z-r', false],
+    ['VA', false],
+    ['IS', false],
+  ])('%j -> %s', (codeLetters, expected) => {
+    expect(isVariousArtists(codeLetters)).toBe(expected);
   });
 });

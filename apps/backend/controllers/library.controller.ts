@@ -1348,10 +1348,11 @@ const REFILE_ARTIST_FIELDS = ['genre_id', 'code_artist_number'] as const;
  * this endpoint yet"). Gated `catalog: ['write']`.
  *
  * Outcomes: 200 `ArtistRefileResult` (the genre-scoped `ArtistCard` plus `changed`, `previous_code_artist_number`,
- * `releases_to_relabel`) / 404 `Artist not found` or `Artist not filed under genre {n}` / 409 `lettered_compilation_section`,
- * `various_artists_section` (a Various Artists bucket, BS#3022: `V/A` or `Z-` code letters, never the name; refused even for
- * its own number) or `artist_code_conflict` (with the contract `Artist` now holding the slot: the first owner in `getArtistsByCode`
- * order) / 503 `LockUnavailableRefusal` on lock contention. A resubmit of the artist's own number is a 200
+ * `releases_to_relabel`) / 404 `Artist not found` or `Artist not filed under genre {n}` /
+ * 409 `lettered_compilation_section`, `various_artists_section` (a Various Artists bucket, BS#3022: `V/A` or `Z-` code
+ * letters, never the name; refused even for its own number) or `artist_code_conflict` (with the contract `Artist` now
+ * holding the slot: the first owner in `getArtistsByCode` order) / 503 `LockUnavailableRefusal` on lock contention.
+ * Outside those two sections, a resubmit of the artist's own number is a 200
  * `changed: false` that issues no UPDATE, and is decided before the occupancy check so an artist sharing a contested
  * triple does not collide with its co-owner. See `libraryService.refileArtistInGenre` for the lock design, the catalog
  * watermark cost of a real re-file, and the residual race with `addArtist` (BS#2106).
