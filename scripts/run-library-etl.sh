@@ -11,6 +11,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 JOB_DIR="$PROJECT_ROOT/jobs/library-etl"
 
+# ── Guard (BS#2581) ─────────────────────────────────────────────────
+# The job refuses without this; fail before touching Docker or the database.
+if [ "${LEGACY_ETL_ALLOW_BACKWARDS_WRITE:-}" != "1" ]; then
+  echo "library-etl refuses to run without LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1." >&2
+  echo "It upserts from tubafrenzy's frozen catalog; read jobs/library-etl/README.md first." >&2
+  exit 1
+fi
+
 # ── Helper ──────────────────────────────────────────────────────────
 
 fail() {

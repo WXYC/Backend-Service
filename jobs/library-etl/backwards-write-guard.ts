@@ -12,8 +12,18 @@
  * Removing two columns from the refresh set would leave the other thirteen reverting.
  * `genre_artist_crossreference.artist_genre_code` (an artist's call number) is also
  * operator-editable now, via `POST /library/artists/{id}/refile` (BS#2643), and
- * `ensureGenreArtistCrossref` upserts it from upstream. So every run reverts
- * Backend-side edits to every release and artist that tubafrenzy ever held.
+ * `ensureGenreArtistCrossref` upserts it from upstream.
+ *
+ * A run is a backwards write by two mechanisms. (1) Phase 1's `ON CONFLICT ... DO
+ * UPDATE` and `ensureGenreArtistCrossref` reach only releases tubafrenzy reports
+ * modified since the `library-etl` watermark (none while MySQL is frozen), so the
+ * catalog-wide revert of dj-site edits and artist re-files needs a watermark reset
+ * (the full re-sync recipe) or clock skew. (2) Phase 2 (`runSecondaryImports`) runs
+ * on every pass, and `library-etl:secondary-full` froze on 2026-09-17, so the first
+ * run re-pulls the cross-reference tables and all ~140k `COMPILATION_TRACK_ARTIST`
+ * rows and writes them: `comment = excluded.comment` upserts, and `ON CONFLICT DO
+ * NOTHING` re-inserts rows Backend deleted (e.g. the mojibake rows BS#1996 plans to
+ * delete).
  *
  * The revert is not just a data problem: call-number relabelling is PHYSICAL, so a
  * revert leaves discs mislabelled the other way (see
@@ -35,14 +45,15 @@ export const backwardsWriteRefusalMessage = (jobName: string): string =>
     '',
     "tubafrenzy's catalog has been frozen since /wxycdb went dark on 2026-09-16, and",
     'dj-site now owns catalog edits. This job upserts FROM tubafrenzy on',
-    'legacy_release_id and overwrites the library columns it refreshes (code_number,',
-    'code_volume_letters, album_title, artist_id, genre_id, ...) and the',
-    'genre_artist_crossreference.artist_genre_code call number, reverting every',
-    'dj-site edit and artist re-file on rows that came from tubafrenzy.',
+    'legacy_release_id: for releases modified upstream since the watermark it',
+    'overwrites the library columns it refreshes (code_number, code_volume_letters,',
+    'album_title, artist_id, genre_id, ...) and genre_artist_crossreference.',
+    'artist_genre_code, reverting dj-site edits and artist re-files. A full re-sync',
+    '(deleting the library-etl rows from cronjob_runs) makes that catalog-wide, and',
+    'the revert is physical: relabelled discs end up mislabelled the other way.',
     '',
-    'The revert is physical as well as logical: discs already relabelled on the shelf',
-    'end up mislabelled the other way. A full re-sync (deleting the library-etl rows',
-    'from cronjob_runs) makes it catalog-wide.',
+    'Even a plain run re-pulls the cross-reference and compilation-track-artist',
+    'tables in full (secondary-full is overdue) and re-inserts rows Backend deleted.',
     '',
     `If you genuinely intend the import, set ${BACKWARDS_WRITE_ENV}=1 and read`,
     'jobs/library-etl/README.md first.',

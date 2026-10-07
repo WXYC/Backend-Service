@@ -388,8 +388,9 @@ Why 0.4: pg_trgm's 0.30 is far too permissive for short variants. The misprint `
 
 ## ETL Jobs
 
-The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. The rotation ETL (`jobs/rotation-etl/`) syncs rotation releases from tubafrenzy. All three require the standard database variables above plus these for SSH tunneling to the legacy server, and all three refuse to run unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set (each reverts Backend-side edits to tubafrenzy-sourced rows; library-etl: BS#2581):
+The library ETL (`scripts/run-library-etl.sh`) syncs the music library from the legacy MySQL database into PostgreSQL. The flowsheet ETL (`jobs/flowsheet-etl/`) syncs flowsheet entries and shows from tubafrenzy. The rotation ETL (`jobs/rotation-etl/`) syncs rotation releases from tubafrenzy. All three require the standard database variables above plus these for SSH tunneling to the legacy server, and all three refuse to run unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set (flowsheet-etl can overwrite dj-site-originated rows whose `legacy_*` key the mirror back-stamped; rotation-etl and library-etl revert Backend-side edits to rows that came from tubafrenzy; library-etl: BS#2581). The one variable opts in all three jobs, so never put it in the shared host `.env`: every cron container reads that file via `--env-file .env`. Pass it per invocation, e.g. `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1 npm run etl:library` or `docker run -e LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1 --env-file .env ...`.
 
+- `LEGACY_ETL_ALLOW_BACKWARDS_WRITE` — Must be exactly `1` for `flowsheet-etl`, `rotation-etl` or `library-etl` to run; otherwise they exit 1 before opening any connection. Per-invocation only.
 - `SSH_HOST` — Hostname of the legacy server
 - `SSH_USERNAME` — SSH login username
 - `SSH_PASSWORD` — SSH login password

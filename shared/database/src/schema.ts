@@ -2122,10 +2122,7 @@ export const library_watermark = wxyc_schema.table(
  * `jobs/library-etl`'s `package.json` now declares `job-type: one-shot`
  * (`cd8f058e`, wiki#89 Phase 3.5), so a fresh deploy no longer re-registers
  * its crontab entry. That commit's own message is explicit that it did not
- * remove any half-hourly crontab line already installed on a host — the deploy only ever
- * installs crontab lines, never deletes them — so whether one is still
- * firing anywhere is a separate, unverified fact this table does not depend
- * on either way (see "Un-deleting" below for why). The job stays invocable
+ * remove any half-hourly crontab line already installed on a host. The `# wxyc_library-etl` crontab line was removed by hand on 2026-09-17 (wiki#89 chain step 3), and a read-only check of the production host on 2026-10-07 found no library-etl, flowsheet-etl or rotation-etl line in the ec2-user or root crontab; a cron line would run its install-time image, which the BS#2581 guard does not cover. This table does not depend on that either way (see "Un-deleting" below for why). The job stays invocable
  * by hand regardless, and the upstream `LIBRARY_RELEASE` row a librarian
  * deleted in Backend still exists in tubafrenzy's MySQL. Whenever a run
  * re-selects that row — scheduled or by hand — it finds no `library` row
@@ -2177,8 +2174,7 @@ export const library_watermark = wxyc_schema.table(
  * sufficient, and it would be a mistake to read the `job-type: one-shot`
  * flip above as having made it sufficient — that flip stops a fresh DEPLOY
  * from re-registering the crontab entry, it says nothing about whether a
- * previously-installed half-hourly crontab line is still firing on some host, and the job
- * stays invocable by hand either way (see its README). So the operative fact
+ * previously-installed half-hourly crontab line is still firing. The `# wxyc_library-etl` crontab line was removed by hand on 2026-09-17 (wiki#89 chain step 3), and a read-only check of the production host on 2026-10-07 found no library-etl, flowsheet-etl or rotation-etl line in the ec2-user or root crontab; a cron line would run its install-time image, which the BS#2581 guard does not cover. The job stays invocable by hand (see its README). So the operative fact
  * is the one that was always true: the ETL only re-selects releases whose
  * upstream `TIME_LAST_MODIFIED` is newer than its `cronjob_runs` watermark,
  * and a Backend-side delete leaves that timestamp exactly where it was —

@@ -1225,8 +1225,10 @@ const findExistingRelease = async (
  * Columns the library-etl writes during INSERT and refreshes from `excluded.*`
  * on a legacy_release_id conflict. Upstream (tubafrenzy) is NO LONGER the
  * source of truth for them: its catalog is frozen and dj-site edits these
- * columns now, so a conflict-update reverts those edits. That is survivable
- * only because the whole job refuses to run without
+ * columns now. The conflict-update only reaches releases tubafrenzy reports
+ * modified since the watermark (none while frozen), so a catalog-wide revert
+ * needs a watermark reset; that is survivable only because the whole job
+ * refuses to run without
  * `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` (`./backwards-write-guard.ts`,
  * WXYC/Backend-Service#2581). Pinned by a unit test so PG-only / LML-resolved columns (`id`,
  * `plays`, `label`, `label_id`, `artwork_url`, `canonical_entity_*`,
@@ -1281,11 +1283,12 @@ const LEGACY_SOURCED_SET_WHERE = buildLegacySourcedSetWhere();
  * Why it exists: a Backend-side delete does not reach tubafrenzy, so the
  * upstream `LIBRARY_RELEASE` row survives. `package.json` now declares
  * `job-type: one-shot` (`cd8f058e`, wiki#89 Phase 3.5), so a fresh deploy no
- * longer re-registers this job's crontab entry — but that commit did not
- * remove any half-hourly crontab line already installed on a host (its own
- * message says so: the deploy only ever installs crontab lines, never
- * deletes them), so whether one is still firing anywhere is a separate,
- * unverified fact. This job also stays invocable by hand either way.
+ * longer re-registers this job's crontab entry. The `# wxyc_library-etl` line
+ * was removed by hand on 2026-09-17 (wiki#89 chain step 3), and a read-only
+ * check of the production host on 2026-10-07 found no library-etl,
+ * flowsheet-etl or rotation-etl line in the ec2-user or root crontab (a cron
+ * line would run its install-time image, which the BS#2581 guard does not
+ * cover). This job stays invocable by hand.
  * Whenever a run happens —
  * scheduled or by hand — the delta pass re-selects that row, finds no
  * `library` row carrying its `legacy_release_id`, and takes the INSERT
