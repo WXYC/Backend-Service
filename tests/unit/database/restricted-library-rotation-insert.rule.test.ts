@@ -17,8 +17,13 @@ const wxycLocalRules = require('../../../eslint-rules/restricted-library-rotatio
 
 const rule = wxycLocalRules.rules['restricted-library-rotation-insert'];
 
+// The TypeScript parser, so `as` / `!` / `satisfies` wrappers parse. It handles
+// plain JS too. Required (not imported) to avoid ESM/CJS default-interop doubt.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const tsParser = require('@typescript-eslint/parser') as { parseForESLint: unknown };
+
 const ruleTester = new RuleTester({
-  languageOptions: { ecmaVersion: 2022, sourceType: 'module' },
+  languageOptions: { ecmaVersion: 2022, sourceType: 'module', parser: tsParser },
 });
 
 const LIBRARY_SERVICE = 'apps/backend/services/library.service.ts';
@@ -61,6 +66,43 @@ ruleTester.run('restricted-library-rotation-insert', rule, {
     },
     // An interpolated table cannot be resolved, so it is not flagged.
     { code: `await db.execute(sql\`INSERT INTO \${table} (a) VALUES (1)\`);`, filename: OTHER_FILE },
+    // A parameter named `table` is not a restricted table binding, whether it
+    // is a plain template target or a schema-qualified one.
+    {
+      code: `async function replayCapturedRows(t, table) { await t.execute(sql\`INSERT INTO \${table} (a) VALUES (1)\`); }`,
+      filename: LIBRARY_SERVICE,
+    },
+    { code: `await db.execute(sql\`INSERT INTO \${reviews} (a) VALUES (1)\`);`, filename: OTHER_FILE },
+    // Interpolations that do not directly follow INSERT INTO are not targets.
+    { code: `await db.execute(sql\`INSERT INTO reviews (a) SELECT a FROM \${library}\`);`, filename: OTHER_FILE },
+    // Aliases of unrelated tables, and an import that only borrows a restricted name.
+    {
+      code: `import { reviews as library } from '@wxyc/database'; await db.insert(library).values(x);`,
+      filename: OTHER_FILE,
+    },
+    { code: `const t = reviews; await db.insert(t).values(x);`, filename: OTHER_FILE },
+    // Restricted-table forms are fine inside the gated functions.
+    {
+      code: `import { library as lib } from '@wxyc/database';
+        export async function insertAlbum(x) { return db.insert(lib).values(x); }`,
+      filename: LIBRARY_SERVICE,
+    },
+    {
+      code: `export const addToRotation = async (x) => {
+        const t = rotation;
+        const run = async (tx) => { await tx.insert(t as any).values(x); };
+        return db.transaction(run);
+      };`,
+      filename: LIBRARY_SERVICE,
+    },
+    {
+      code: `export async function insertAlbum(x) { await db.execute(sql\`INSERT INTO \${library} (a) VALUES (1)\`); }`,
+      filename: LIBRARY_SERVICE,
+    },
+    {
+      code: `export async function insertAlbum(x) { await db.insert(library!).values(x); await db.insert((library as X)).values(x); }`,
+      filename: LIBRARY_SERVICE,
+    },
     // Selecting from the tables is fine; only inserts are restricted.
     { code: `await db.select().from(library);`, filename: OTHER_FILE },
     // A non-sql tag is not SQL.
@@ -97,6 +139,87 @@ ruleTester.run('restricted-library-rotation-insert', rule, {
     },
     {
       code: `export const f = () => db.execute(sql\`insert into "library" (a) values (1)\`);`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    // Raw SQL with the Drizzle table object interpolated as the target.
+    {
+      code: `export const f = () => db.execute(sql\`INSERT INTO \${library} (a) VALUES (1)\`);`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    {
+      code: `export const f = () => db.execute(sql\`insert into \${rotation} (a) values (1)\`);`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'rotation', enclosing: 'f' } }],
+    },
+    {
+      code: `export const f = () => db.execute(sql\`INSERT INTO \${schema.rotation} (a) VALUES (1)\`);`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'rotation', enclosing: 'f' } }],
+    },
+    {
+      code: 'export const f = () => db.execute(sql`INSERT\n  INTO\n  ${library} (a) VALUES (1)`);',
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    {
+      code: `export const f = () => db.execute(sql\`INSERT INTO wxyc_schema.\${library} (a) VALUES (1)\`);`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    // Aliases: a renamed import, a local const, and TS wrappers.
+    {
+      code: `import { library as lib } from '@wxyc/database';
+        export async function f(x) { await db.insert(lib).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    {
+      code: `import { rotation as rot } from '@wxyc/database';
+        export const f = () => db.execute(sql\`INSERT INTO \${rot} (a) VALUES (1)\`);`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'rotation', enclosing: 'f' } }],
+    },
+    {
+      code: `export async function f(tx, x) { const t = library; await tx.insert(t).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    {
+      code: `import { rotation as rot } from '@wxyc/database';
+        const t = rot;
+        export async function f(tx, x) { await tx.insert(t).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'rotation', enclosing: 'f' } }],
+    },
+    {
+      code: `export async function f(tx, x) { const t = schema.rotation; await tx.insert(t).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'rotation', enclosing: 'f' } }],
+    },
+    {
+      code: `export async function f(tx, x) { await tx.insert(library as X).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    {
+      code: `export async function f(tx, x) { await tx.insert(library!).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    {
+      code: `export async function f(tx, x) { await tx.insert(rotation satisfies X).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'rotation', enclosing: 'f' } }],
+    },
+    {
+      code: `export async function f(tx, x) { await tx.insert((library)).values(x); }`,
+      filename: OTHER_FILE,
+      errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
+    },
+    {
+      code: `export async function f(tx, x) { const t = library as X; await tx.insert(t!).values(x); }`,
       filename: OTHER_FILE,
       errors: [{ messageId: 'restrictedInsert', data: { table: 'library', enclosing: 'f' } }],
     },
