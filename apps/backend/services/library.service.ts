@@ -4631,21 +4631,35 @@ export const DELETE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 export const REFILE_ARTIST_LOCK_TIMEOUT_MS = SUB_DEADLOCK_LOCK_TIMEOUT_MS;
 
 export type ArtistRefileOutcome =
-  | { outcome: 'refiled' | 'unchanged'; card: ArtistCardRow; previous: number; releases_to_relabel: number }
+  | {
+      outcome: 'refiled' | 'unchanged';
+      card: ArtistCardRow;
+      previous: number;
+      previous_letters: string;
+      releases_to_relabel: number;
+    }
   | { outcome: 'artist_not_found' | 'not_filed' | 'lettered_section' | 'various_artists_section' | 'lock_unavailable' }
+  | { outcome: 'letters_shared'; memberships: { genre_id: number; code_artist_number: number }[] }
   | { outcome: 'slot_taken'; occupant: FilingArtist };
 
 /**
- * BS#2643: re-file an artist's call number within ONE genre membership, `genre_artist_crossreference.artist_genre_code`
- * only. A one-row UPDATE: `library` stores no artist number and `library_artist_view` composes it at read time, so every
- * release re-labels on its own (the physical labels are the librarian's follow-up, reported as `releases_to_relabel`).
+ * BS#2643, BS#3035: re-file an artist's call number within ONE genre membership
+ * (`genre_artist_crossreference.artist_genre_code`) and, when `code_letters` differs from the stored letters under
+ * `trim().toUpperCase()`, re-letter the artist (`artists.code_letters`). Letters are artist-level, not per-membership,
+ * so a letters change is refused (`letters_shared`) when the artist has another membership or any `library` row in
+ * another genre. `library` stores neither value and `library_artist_view` composes them at read time, so every release
+ * re-labels on its own (the physical labels are the librarian's follow-up, reported as `releases_to_relabel`). Each
+ * write is only issued when its column changes, and a real write logs one `[library.refile]` JSON line after commit.
  *
  * One transaction, `lock_timeout` bounded (`REFILE_ARTIST_LOCK_TIMEOUT_MS`), so a live writer makes this stand down
  * (`lock_unavailable`) rather than queue indefinitely (the bound restarts on each new wait, so a hand-run job can still be
  * the side that hits the deadlock detector). **Lock design, in order:** (1) the artist's own `artists` row, `FOR NO KEY
  * UPDATE`, selected from `artists` alone, BEFORE the card is read -- `code_letters` names the bucket, so a read ahead of
  * the lock can check a stale bucket while a re-letter commits (and `NO KEY UPDATE` still admits the `KEY SHARE` an FK
- * insert takes). This is the same artists-row-then-crossreference order as `deleteArtistFromDB`. (2) The whole
+ * insert takes). This is the same artists-row-then-crossreference order as `deleteArtistFromDB`. (2) The DESTINATION
+ * shelf's advisory key, `pg_advisory_xact_lock(hashtextextended('artist-code-bucket:' || genre || ':' || letters, 0))`,
+ * on every path: the row locks below only fence a bucket that already has rows, so without it two artists re-lettered
+ * into the same slot of an EMPTY bucket would both pass the occupancy check and both write. (3) The whole destination
  * `(code_letters, genre_id)` bucket PLUS the artist's own crossreference rows (`artist_id = $a OR inArtistCodeBucket`),
  * in ONE statement over `genre_artist_crossreference` alone, `ORDER BY genre_id, artist_id`, plain `FOR UPDATE`. Alone,
  * so only that table's rows lock (a join would also lock up to 263 `artists` rows); never `.for('update', { of })`
@@ -4658,24 +4672,29 @@ export type ArtistRefileOutcome =
  *
  * **Watermark cost:** a real re-file advances the catalog watermark once (the statement-level trigger from migration
  * 0105), a full catalog re-download for every poller, the cost a rename pays. The trigger fires even for a zero-row
- * UPDATE, so the no-op path issues no UPDATE at all.
+ * UPDATE, so the no-op path issues no UPDATE at all. The occupancy check matches exact stored letters (prod holds no
+ * non-canonical `code_letters`, measured 2026-10-07; WXYC/Backend-Service#2199 tracks the create-path inflow).
  *
  * **Residual race, accepted:** `addArtist` inserts into a bucket without taking these locks, so a create landing the
  * same triple at the same instant as a re-file is not prevented. That is the check-then-act window BS#2106 records for
  * `addArtist` itself, accepted on the same grounds; the unique constraint stays out of scope (BS#2033, BS#2106).
  * Also not prevented: a hand-run job (for example `artist-unicode-dedup`) that re-letters ANOTHER artist into this
  * bucket, uncommitted, is invisible to the occupancy check, and the re-file writes after the job commits. The
- * destination-shelf advisory key PR 2b adds closes this for the endpoint's own re-letters, not for the jobs.
- * Also not prevented: a manual run of `jobs/library-etl` (needs `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`) upserts `artist_genre_code` from tubafrenzy's frozen value and
- * so reverts a re-file (WXYC/Backend-Service#2581).
+ * destination-shelf advisory key closes this for the endpoint's own re-letters, not for the jobs. The four hand-run
+ * jobs (`library-etl`, `artist-unicode-dedup`, `artist-conflation-split`, `library-call-number-dedup`) take no advisory
+ * key and some take the reverse lock order, so only `lock_timeout` protects against them. A manual run of
+ * `jobs/library-etl` (needs `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`) upserts `artist_genre_code` from tubafrenzy's frozen
+ * value and so reverts a re-file (WXYC/Backend-Service#2581), and likewise the letters.
  */
 export const refileArtistInGenre = async (
   artist_id: number,
   genre_id: number,
-  target: number
+  target: number,
+  code_letters?: string
 ): Promise<ArtistRefileOutcome> => {
+  let written: Record<string, unknown> | undefined;
   try {
-    return await db.transaction(async (tx): Promise<ArtistRefileOutcome> => {
+    const outcome = await db.transaction(async (tx): Promise<ArtistRefileOutcome> => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${REFILE_ARTIST_LOCK_TIMEOUT_MS}ms'`));
 
       // Lock the artist's own row FIRST, before anything reads `code_letters`: the bucket is derived from it, so a card
@@ -4690,6 +4709,20 @@ export const refileArtistInGenre = async (
       const card = await getArtistCardByIdInGenre(artist_id, genre_id, tx);
       if (!card) return { outcome: 'not_filed' };
 
+      // A letters change needs `normalize(sent) !== normalize(stored)`: sending the stored value back is never one.
+      const normalizeLetters = (value: string) => value.trim().toUpperCase();
+      const sentLetters = code_letters === undefined ? undefined : normalizeLetters(code_letters);
+      const newLetters =
+        sentLetters !== undefined && sentLetters !== normalizeLetters(card.code_letters) ? sentLetters : undefined;
+      const lettersChange = newLetters !== undefined;
+      const destLetters = newLetters ?? card.code_letters;
+
+      // Destination-shelf advisory lock, on every path: the row locks below only fence a bucket that already has rows,
+      // so two artists moving into the same slot of an EMPTY bucket would both pass the occupancy check.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended('artist-code-bucket:' || ${genre_id}::text || ':' || ${destLetters}::text, 0))`
+      );
+
       const bucket = await tx
         .select({
           artist_id: genre_artist_crossreference.artist_id,
@@ -4698,9 +4731,7 @@ export const refileArtistInGenre = async (
           code_comp_letter: genre_artist_crossreference.code_comp_letter,
         })
         .from(genre_artist_crossreference)
-        .where(
-          or(eq(genre_artist_crossreference.artist_id, artist_id), inArtistCodeBucket(card.code_letters, genre_id))
-        )
+        .where(or(eq(genre_artist_crossreference.artist_id, artist_id), inArtistCodeBucket(destLetters, genre_id)))
         .orderBy(asc(genre_artist_crossreference.genre_id), asc(genre_artist_crossreference.artist_id))
         .for('update');
       const own = bucket.find((row) => row.artist_id === artist_id && row.genre_id === genre_id);
@@ -4710,7 +4741,21 @@ export const refileArtistInGenre = async (
       // all. Decided before the no-op return (resubmitting its own number is a refusal too) and, like it, with no UPDATE.
       if (isVariousArtists(card.code_letters)) return { outcome: 'various_artists_section' };
 
+      if (lettersChange) {
+        const ownMemberships = bucket.filter((row) => row.artist_id === artist_id);
+        const strayRelease = (await tx.execute(
+          sql`SELECT 1 FROM ${library} WHERE ${library.artist_id} = ${artist_id} AND ${library.genre_id} <> ${genre_id} LIMIT 1`
+        )) as unknown as unknown[];
+        if (ownMemberships.length > 1 || strayRelease.length > 0) {
+          return {
+            outcome: 'letters_shared',
+            memberships: ownMemberships.map((row) => ({ genre_id: row.genre_id, code_artist_number: row.code_number })),
+          };
+        }
+      }
+
       const previous = own.code_number;
+      const previous_letters = card.code_letters;
       const countReleases = async (): Promise<number> => {
         const rows = (await tx.execute(
           sql`SELECT count(*)::int AS n FROM ${library} WHERE ${library.artist_id} = ${artist_id} AND ${library.genre_id} = ${genre_id}`
@@ -4718,18 +4763,19 @@ export const refileArtistInGenre = async (
         return Number(rows[0]?.n ?? 0);
       };
 
-      if (previous === target) {
+      if (!lettersChange && previous === target) {
         return {
           outcome: 'unchanged',
           card: { ...card, code_artist_number: previous },
           previous,
+          previous_letters,
           releases_to_relabel: await countReleases(),
         };
       }
 
       // The self-exclusion is defense in depth: a co-owner of this artist's own number is answered by the `unchanged`
       // return above, so `own` can only appear here if the locked row and the owner read disagree.
-      const owners = (await getArtistsByCode(card.code_letters, genre_id, target, tx)).filter(
+      const owners = (await getArtistsByCode(destLetters, genre_id, target, tx)).filter(
         (owner) => owner.artist_id !== artist_id
       );
       if (owners.length > 0) {
@@ -4747,20 +4793,41 @@ export const refileArtistInGenre = async (
         };
       }
 
-      await tx
-        .update(genre_artist_crossreference)
-        .set({ artist_genre_code: target })
-        .where(
-          and(eq(genre_artist_crossreference.artist_id, artist_id), eq(genre_artist_crossreference.genre_id, genre_id))
-        );
+      if (lettersChange) {
+        await tx
+          .update(artists)
+          .set({ code_letters: destLetters, last_modified: sql`NOW()` })
+          .where(eq(artists.id, artist_id));
+      }
+      if (previous !== target) {
+        await tx
+          .update(genre_artist_crossreference)
+          .set({ artist_genre_code: target })
+          .where(
+            and(
+              eq(genre_artist_crossreference.artist_id, artist_id),
+              eq(genre_artist_crossreference.genre_id, genre_id)
+            )
+          );
+      }
+      written = {
+        artist_id,
+        before: { code_letters: previous_letters, genre_id, code_artist_number: previous },
+        after: { code_letters: destLetters, genre_id, code_artist_number: target },
+        releases_moved: 0,
+      };
 
       return {
         outcome: 'refiled',
-        card: { ...card, code_artist_number: target },
+        card: { ...card, code_letters: destLetters, code_artist_number: target },
         previous,
+        previous_letters,
         releases_to_relabel: await countReleases(),
       };
     });
+    // Logged after commit so a rolled-back write leaves no record; the reverse re-file is the undo this line enables.
+    if (written) console.log(`[library.refile] ${JSON.stringify(written)}`);
+    return outcome;
   } catch (error) {
     if (isLockContentionError(error)) {
       Sentry.addBreadcrumb({

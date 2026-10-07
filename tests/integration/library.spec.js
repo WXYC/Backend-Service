@@ -4001,7 +4001,7 @@ describe('Library Artist Card (BS#2156)', () => {
     // BS#2563: the AC says the endpoint now allowlists the two name fields
     // and rejects anything else. These three real `artistCardModify.jsp`
     // fields (`ArtistAdminServlet.java:196-206` applies all five) still have
-    // no write path anywhere, so a client sending one gets a 400 naming why --
+    // no write path on THIS endpoint (two are written by POST .../refile), so a client sending one gets a 400 naming why --
     // not a 200 that looks like the edit took effect but silently didn't.
     test.each(['code_letters', 'genre_id', 'code_artist_number'])(
       'returns 400 rather than silently dropping %s',
@@ -4014,7 +4014,7 @@ describe('Library Artist Card (BS#2156)', () => {
           .send({ alphabetical_name: `Rejected ${artist.alphabetical_name}`, [field]: value })
           .expect(400);
         expectErrorContains(res, field);
-        expectErrorContains(res, 'no write path');
+        expectErrorContains(res, 'not writable on this endpoint');
 
         // The rejected PATCH did not take effect.
         const card = await auth.get(`/library/artists/${artist.id}`).expect(200);

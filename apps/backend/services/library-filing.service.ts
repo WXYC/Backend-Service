@@ -495,6 +495,49 @@ export const validateArtistCodeLetters = (code_letters: unknown): string => {
 };
 
 /**
+ * `artists.code_letters` is a Postgres `varchar(4)` column (`shared/database/
+ * src/schema.ts:439`) storing a trimmed, upper-case, ASCII value -- every one
+ * of the 24,078 rows in the production clone matches that shape, with `/` the
+ * only non-alphanumeric character in use (the `V/A` filing). Neither writer
+ * enforces that shape, though: `insertArtistWithGenreCrossreference` (`library.service.ts`) only
+ * NFC-normalizes -- no trim, no upper-case -- and the tubafrenzy `library-etl`
+ * job writes `codeLetters ?? '??'` verbatim (`jobs/library-etl/job.ts:441`),
+ * so a row filed non-canonically can already be sitting in the table.
+ *
+ * `.trim().toUpperCase()` is not a safe repair for that gap: it is neither
+ * length- nor charset-preserving for non-ASCII input
+ * (`'ß'.toUpperCase() === 'SS'`, `'ı'.toUpperCase() === 'I'`), so silently
+ * folding an out-of-domain value could match a DIFFERENT real artist's shelf
+ * code with no precondition that the input was canonical to begin with. (An
+ * earlier version of this comment claimed normalizing "can never turn a real
+ * hit into a miss" -- true only of the measured production snapshot, not of
+ * every possible input, which is exactly the gap this validation closes.)
+ *
+ * Reject anything outside the column's real domain instead: ASCII letters,
+ * digits, or `/`, 1-4 characters. A 5+ character value can never match a row
+ * either (BS#2149 review finding 2) -- unvalidated, it used to fall through
+ * to the 404 branch, whose own docs called that "safe to create an artist
+ * under it," right up until the artist insert's `varchar(4)` column threw
+ * SQLSTATE 22001 on the follow-up write and this route's sibling inherited a
+ * generic 500 plus a Sentry event. Restricted to this input charset,
+ * `.toUpperCase()` is always a deterministic, length- and charset-preserving
+ * map (`a`-`z` -> `A`-`Z`; digits and `/` are fixed points), so the fold
+ * hazard above cannot occur once this check has passed.
+ */
+const CANONICAL_CODE_LETTERS_PATTERN = /^[A-Za-z0-9/]{1,4}$/;
+
+export const validateCanonicalCodeLetters = (raw: string): string => {
+  const trimmed = raw.trim();
+  if (!CANONICAL_CODE_LETTERS_PATTERN.test(trimmed)) {
+    throw new WxycError(
+      "Invalid code_letters: must be 1-4 characters from A-Z, 0-9, or '/' (artists.code_letters is varchar(4))",
+      400
+    );
+  }
+  return trimmed.toUpperCase();
+};
+
+/**
  * Server-assigns the next `code_number` in the `(genre_id, code_letters)`
  * bucket via `generateArtistNumber` — the same generator behind the
  * `peekArtistNumber` preview route, NOT `generateAlbumCodeNumber`, which is
