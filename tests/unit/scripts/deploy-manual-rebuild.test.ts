@@ -12,8 +12,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parse as parseYaml } from 'yaml';
-import { findStep, runBashScript, stepEnvFrom, type Job, type Step } from '../../utils/workflow-step';
+import { findStep, loadWorkflow, runBashScript, stepEnvFrom, type Step } from '../../utils/workflow-step';
 
 const repoRoot = join(__dirname, '..', '..', '..');
 const workflows = join(repoRoot, '.github', 'workflows');
@@ -27,10 +26,8 @@ const runScript = (
   extraEnv: Record<string, string> = {}
 ) => runBashScript(step.run, { env: { ...stepEnvFrom(step, expressions), ...extraEnv }, cwd });
 
-const manualDoc = parseYaml(manual) as {
-  on: { workflow_dispatch: { inputs: Record<string, unknown> } };
-  jobs: Record<string, Job>;
-};
+const manualDoc = loadWorkflow('deploy-manual.yml');
+const baseDoc = loadWorkflow('deploy-base.yml');
 
 describe('deploy-manual.yml rebuild switch', () => {
   it('declares a boolean rebuild input defaulting to false', () => {
@@ -92,7 +89,7 @@ describe('deploy-manual.yml rebuild switch', () => {
  * job, a job whose root Dockerfile was removed (like a retired one-shot), and
  * a subdirectory that is not a target.
  */
-const validateInputs = (parseYaml(base) as { jobs: { validate_inputs: Job } }).jobs.validate_inputs;
+const validateInputs = baseDoc.jobs.validate_inputs;
 let fixture: string;
 beforeAll(() => {
   fixture = mkdtempSync(join(tmpdir(), 'deploy-validate-'));
@@ -164,7 +161,7 @@ describe('deploy-base.yml per-target validation', () => {
   });
 
   it('skips Validate Version Input Format and Validate Build Target on the automatic path (empty target, empty version)', () => {
-    const steps = validateInputs.steps as (Step & { if?: string })[];
+    const steps = validateInputs.steps;
     expect(steps.find((s) => s.name === 'Validate Version Input Format')?.if).toBe("inputs.version != ''");
     expect(steps.find((s) => s.name === 'Validate Build Target')?.if).toBe("inputs.target != ''");
   });
@@ -183,14 +180,14 @@ describe('deploy-base.yml per-target validation', () => {
 });
 
 describe('dispatch inputs reach run: scripts only through env:', () => {
-  const stepsOf = (doc: string) =>
-    Object.entries((parseYaml(doc) as { jobs: Record<string, Job> }).jobs).flatMap(([job, { steps = [] }]) =>
+  const stepsOf = (doc: ReturnType<typeof loadWorkflow>) =>
+    Object.entries(doc.jobs).flatMap(([job, { steps = [] }]) =>
       steps.filter((s) => s.run).map((s) => [`${job} / ${s.name ?? '(unnamed)'}`, s.run] as const)
     );
 
   it.each([
-    ...stepsOf(base).map((s) => ['deploy-base.yml', ...s]),
-    ...stepsOf(manual).map((s) => ['deploy-manual.yml', ...s]),
+    ...stepsOf(baseDoc).map((s) => ['deploy-base.yml', ...s]),
+    ...stepsOf(manualDoc).map((s) => ['deploy-manual.yml', ...s]),
   ])('%s: %s has no inputs interpolation in its script', (_file, _step, run) => {
     expect(run).not.toMatch(/\$\{\{\s*(github\.event\.)?inputs\./);
   });
@@ -198,12 +195,10 @@ describe('dispatch inputs reach run: scripts only through env:', () => {
   // Behaviour pin: 'latest' is an ordinary dispatch, a tag is a pinned dispatch, '' is rebuild/automatic.
   it.each<[string, string, string]>([
     ['latest', 'v9.8.7', 'v9.8.7'],
-    ['v1.2.3', 'v9.8.7', 'v1.2.3'],
-    ['', 'v9.8.7', 'v9.8.8'],
-  ])('Determine Deploy Version with version %j yields %s', (version, _latest, expected) => {
-    const job = Object.values((parseYaml(base) as { jobs: Record<string, Job> }).jobs).find((j) =>
-      j.steps?.some((st) => st.name === 'Determine Deploy Version')
-    );
+    ['v1.2.3', 'v1.2.3', 'v9.8.7'],
+    ['', 'v9.8.8', 'v9.8.7'],
+  ])('Determine Deploy Version with version %j yields %s', (version, expected, _latest) => {
+    const job = Object.values(baseDoc.jobs).find((j) => j.steps?.some((st) => st.name === 'Determine Deploy Version'));
     if (!job) throw new Error('job with Determine Deploy Version not found');
     const step = findStep(job, 'Determine Deploy Version');
     const out = join(fixture, `out-${version || 'empty'}`);

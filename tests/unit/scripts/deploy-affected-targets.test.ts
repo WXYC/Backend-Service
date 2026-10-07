@@ -251,7 +251,7 @@ describe('one-shot filter behavior', () => {
   const run = (opts: { resolvable?: string; base?: string; targets?: string[] }) => {
     const r = runBashScript(filterScript, {
       cwd: root,
-      pathPrepend: shimDir,
+      pathPrepend: shimDir(),
       env: {
         TARGETS: JSON.stringify(opts.targets ?? ALL),
         BASE: opts.base ?? base,
