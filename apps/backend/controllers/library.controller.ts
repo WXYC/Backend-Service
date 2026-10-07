@@ -197,7 +197,10 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
         tx
       );
       const link = await libraryService.linkRotationToAlbum(fromRotationId, album.id, tx);
-      if (link.outcome !== 'linked') throw new RotationNotEligibleError('The rotation row is already linked');
+      if (link.outcome !== 'linked')
+        throw new RotationNotEligibleError(
+          'This rotation entry was linked or moved to another bin while the import was saving. Nothing was created; reload to see where it stands.'
+        );
       flowsheetRowsLinked = link.flowsheetRowsLinked;
       return album;
     });
@@ -2483,6 +2486,11 @@ export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknow
       throw new WxycError('Album not found', 404);
     case 'already_linked':
       throw new WxycError('Rotation entry is already linked to a library release', 409);
+    case 'moved':
+      throw new WxycError(
+        'This rotation entry was moved to another bin. Link the entry in its current bin instead.',
+        409
+      );
     case 'linked':
       // BS#2410 (plan D7): how many of this rotation row's flowsheet plays the
       // link resolved. Deliberately NOT on the wire — dj-site has nothing to
