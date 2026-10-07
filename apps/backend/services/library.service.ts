@@ -948,7 +948,7 @@ export const addToRotation = async (
       );
       if (!killed) {
         throw new RotationNotEligibleError(
-          'This rotation entry was taken out of rotation, linked, or moved while the move was saving. Nothing was changed; reload to see where it stands.'
+          'This rotation entry was taken out of rotation, linked, or moved before the move could save. Nothing was changed; reload to see where it stands.'
         );
       }
       values.moved_from_rotation_id = gateBasis.fromRotationId;
