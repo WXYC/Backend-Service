@@ -42,6 +42,7 @@ const etlEnv = {
   REMOTE_DB_USER: 'etluser',
   REMOTE_DB_PASSWORD: 'etltest',
   REMOTE_DB_NAME: 'wxycmusic',
+  LEGACY_ETL_ALLOW_BACKWARDS_WRITE: '1',
 };
 
 const runETL = (jobPath: string, jobName: string, { resetLastRun = true } = {}) => {

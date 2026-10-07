@@ -5,6 +5,13 @@
  * Database and legacy MirrorSQL are mocked so the job module can load.
  */
 
+// The refuse-by-default guard (BS#2581) is covered in library-etl/backwards-write-guard.test.ts.
+// Importing job.ts invokes run() with mocked I/O, so allow it here rather than print the refusal.
+jest.mock('../../../jobs/library-etl/backwards-write-guard', () => ({
+  isBackwardsWriteAllowed: () => true,
+  backwardsWriteRefusalMessage: () => '',
+}));
+
 const mockSend = jest.fn().mockResolvedValue('');
 const mockClose = jest.fn();
 
@@ -1016,6 +1023,11 @@ describe('library-etl denylist race (BS#2112 review finding 2)', () => {
   });
 
   describe('reportStrandedResurrections', () => {
+    beforeEach(() => {
+      // The import-time run() may have set it; the "leaves the exit code alone" case needs a clean slate.
+      process.exitCode = undefined;
+    });
+
     afterEach(() => {
       process.exitCode = undefined;
     });
@@ -1134,6 +1146,28 @@ describe('library-etl denylist race (BS#2112 review finding 2)', () => {
     // Either there is no `return;` left in `run()` at all, or it comes after
     // phase 2 has already been invoked.
     expect(returnAfter === -1 || returnAfter > phaseTwo).toBe(true);
+  });
+});
+
+/**
+ * BS#2581 — the refuse-by-default guard must stay wired into run(). The guard module's own
+ * tests cannot see it being removed, so pin the call site in the job source.
+ */
+describe('run() backwards-write guard wiring (BS#2581)', () => {
+  it('checks the guard inside run() before the try block and before any DB or MySQL call', () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const jobSource = fs.readFileSync(path.resolve(__dirname, '../../../jobs/library-etl/job.ts'), 'utf-8');
+
+    const runStart = jobSource.indexOf('const run = async');
+    const guard = jobSource.indexOf('if (!isBackwardsWriteAllowed())', runStart);
+    const tryStart = jobSource.indexOf('try {', runStart);
+    const firstDbCall = jobSource.indexOf('getLastRunTimestamp(', runStart);
+
+    expect(runStart).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(runStart);
+    expect(guard).toBeLessThan(tryStart);
+    expect(guard).toBeLessThan(firstDbCall);
+    expect(jobSource.slice(guard, tryStart)).toContain('process.exitCode = 1');
   });
 });
 

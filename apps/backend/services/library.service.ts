@@ -4639,7 +4639,7 @@ export type ArtistRefileOutcome =
  * **Residual race, accepted:** `addArtist` inserts into a bucket without taking these locks, so a create landing the
  * same triple at the same instant as a re-file is not prevented. That is the check-then-act window BS#2106 records for
  * `addArtist` itself, accepted on the same grounds; the unique constraint stays out of scope (BS#2033, BS#2106).
- * Also not prevented: a manual run of `jobs/library-etl` upserts `artist_genre_code` from tubafrenzy's frozen value and
+ * Also not prevented: a manual run of `jobs/library-etl` (needs `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`) upserts `artist_genre_code` from tubafrenzy's frozen value and
  * so reverts a re-file (WXYC/Backend-Service#2581).
  */
 export const refileArtistInGenre = async (

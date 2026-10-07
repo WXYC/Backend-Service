@@ -4,7 +4,7 @@ Incremental synchronization of the music library from the legacy tubafrenzy MySQ
 
 **Do not run it after `REVIEW_GATE_CUTOVER_DATE`** (BS#2807, `docs/env-vars.md`). It writes `library` rows straight to the table, not through `insertAlbum`, so it sits outside the review gate, and a run after the date would catalogue releases that no review stands behind. It has been unscheduled since 2026-09-17; this is the reason not to re-arm it.
 
-**Refuses to run unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set** (WXYC/Backend-Service#2581), the same guard `jobs/flowsheet-etl` and `jobs/rotation-etl` carry. tubafrenzy's catalog has been frozen since `/wxycdb` went dark on 2026-09-16 and dj-site now edits the catalog, so every run is a backwards write: the conflict update reverts dj-site edits to the `LEGACY_SOURCED_LIBRARY_COLUMNS` and an artist's re-filed call number (`genre_artist_crossreference.artist_genre_code`, `POST /library/artists/{id}/refile`), and since relabelling is physical, a revert leaves discs mislabelled the other way. The guard is checked before any database or MySQL connection opens; with the variable set, behavior (including inserting new releases) is unchanged. The rationale is in `backwards-write-guard.ts`.
+**Refuses to run unless `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1` is set** (WXYC/Backend-Service#2581), the same guard `jobs/flowsheet-etl` and `jobs/rotation-etl` carry. tubafrenzy's catalog has been frozen since `/wxycdb` went dark on 2026-09-16 and dj-site now edits the catalog, so a run is a backwards write by two mechanisms. (1) Phase 1's `ON CONFLICT ... DO UPDATE` on `library` and `ensureGenreArtistCrossref` touch only releases tubafrenzy reports modified since the `library-etl` watermark, which is none while MySQL is frozen, so the catalog-wide revert of dj-site edits to the `LEGACY_SOURCED_LIBRARY_COLUMNS` and of an artist's re-filed call number (`genre_artist_crossreference.artist_genre_code`, `POST /library/artists/{id}/refile`) needs a watermark reset (the full re-sync recipe) or clock skew; relabelling is physical, so such a revert leaves discs mislabelled the other way. (2) Phase 2 (`runSecondaryImports`) runs on every pass, and `library-etl:secondary-full` froze on 2026-09-17, so the first run is a full pass that re-pulls `LIBRARY_CODE_CROSS_REFERENCE`, `RELEASE_CROSS_REFERENCE` and all ~140k `COMPILATION_TRACK_ARTIST` rows and writes them (`comment = excluded.comment` upserts; compilation-track-artist `ON CONFLICT DO NOTHING` re-inserts any row Backend deleted, such as the mojibake rows BS#1996 plans to delete). The guard is checked before any database or MySQL connection opens; with the variable set, behavior (including inserting new releases) is unchanged. The rationale is in `backwards-write-guard.ts`.
 
 ## How It Works
 
@@ -137,7 +137,9 @@ Then, in principle, **one** of:
   DELETE FROM wxyc_schema.cronjob_runs WHERE job_name = 'library-etl' OR job_name LIKE 'library-etl:%';
   ```
 
-  Whether this alone re-imports anything is not something this job verifies: `package.json` now declares `job-type: one-shot` (`cd8f058e`), so a fresh deploy no longer registers a crontab entry for this job (see [Delete denylist](#delete-denylist) above) — but that commit only ever installs crontab lines, it never removes one already installed on a host, so whether a previously-installed half-hourly line is still firing there is a separate, unverified fact. (Such a line now exits 1 at once unless the host's environment sets `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`.) If one is and the variable is set, this `DELETE` alone is enough to start the re-sync: the next scheduled tick finds no watermark and fires the full-catalog re-import unattended, within thirty minutes. If none is, the job has to be invoked by hand instead. Do not assume the quiet case — check the host's crontab, or invoke the job explicitly with `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`, rather than waiting to see which one happens.
+  Whether this alone re-imports anything: `package.json` declares `job-type: one-shot` (`cd8f058e`), so a deploy no longer registers a crontab entry, and the `# wxyc_library-etl` crontab line was removed by hand on 2026-09-17 (WXYC/wiki#89, chain step 3), and a read-only check of the production host on 2026-10-07 found no library-etl, flowsheet-etl or rotation-etl line in either the ec2-user or root crontab. Any cron line that did exist would run its install-time image (`deploy-base.yml` pins each line to the image tag), which the guard does not cover; only images built from BS#2581 onward refuse. So the job has to be invoked by hand, with `LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1`.
+
+  **The upstream may not be reachable.** Kattare hosting was slated to end 2026-09-22 (WXYC/wiki#143) and MySQL reachability is unconfirmed. The watermark `DELETE` happens before the job connects, so if the SSH MySQL fetch fails the rows are already gone and the next successful run is a full pass. The 2026-09-16 final dump is the remaining source of tubafrenzy data.
 
   The next run has no watermark, so `buildReleaseQuery` emits no `TIME_LAST_MODIFIED` predicate and re-selects the entire upstream catalog in one pass. Every other release re-upserts idempotently (the `setWhere` guard means unchanged rows are not touched), so it is slow rather than dangerous for unchanged rows — but it is **not** the harmless operation the older wording implied:
 
@@ -253,7 +255,7 @@ This compiles `job.ts` with tsup (esbuild) into `dist/job.js`.
 The runner script validates your environment, checks database connectivity, builds if needed, and runs the job with clear error messages if anything is wrong:
 
 ```bash
-npm run etl:library
+LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1 npm run etl:library
 ```
 
 This is the recommended way to run the job locally. It handles `.env` loading via `dotenvx` automatically.
@@ -275,7 +277,7 @@ Build and run the production container:
 npm run docker:build --workspace=@wxyc/library-etl
 
 # Run
-docker run --env-file .env wxyc_library_etl:ci
+docker run -e LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1 --env-file .env wxyc_library_etl:ci
 ```
 
 ### Scheduled Execution

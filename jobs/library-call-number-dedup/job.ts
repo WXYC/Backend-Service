@@ -38,14 +38,15 @@
  * SEQUENCING: run this AFTER `jobs/library-etl` stops — turndown Phase 3.5
  * (WXYC/wiki#89), which has NO CALENDAR DATE. `library-etl` upserts on
  * `legacy_release_id` and carries `code_number` + `code_volume_letters` in its
- * refresh set, so while that ETL is live it will overwrite a renumber and
+ * refresh set, so if that ETL is run it will overwrite a renumber and
  * reinstate a deleted row from the upstream MySQL catalog.
  *
  * Do NOT read the 2026-09-07 turndown date as this job's start date. That date
  * binds Surface 1 only (the flowsheet/playlist UI, Phase 3 / wiki#88), where
- * flowsheet-etl and rotation-etl stop — BS#1858 flips those two and
- * deliberately leaves library-etl alone. Surface 2 (/wxycdb catalog edit) is
- * chain-ready-gated; MySQL + library-etl survive frozen-scope past 9/7 if the
+ * flowsheet-etl and rotation-etl stop — BS#1858 flips those two to one-shot;
+ * library-etl was left alone then and, in images built from BS#2581 onward, refuses to
+ run without LEGACY_ETL_ALLOW_BACKWARDS_WRITE=1. Surface 2 (/wxycdb catalog edit) is
+ * chain-ready-gated; MySQL + library-etl may survive frozen-scope past 9/7 if the
  * chain isn't ready. Critical path is the MD catalog-edit UI (dj-site#1071).
  *
  * Also wait for PARITY SIGN-OFF, not just for the ETL to stop: Phase 3.5 ends
