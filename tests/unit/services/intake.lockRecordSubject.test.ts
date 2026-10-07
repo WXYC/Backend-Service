@@ -13,28 +13,11 @@ jest.mock('@wxyc/database', () => {
   return { ...realSchema, ...nyTime, db: drizzle({}) };
 });
 
-import { getTableName, type SQL } from 'drizzle-orm';
-import { PgDialect } from 'drizzle-orm/pg-core';
 import { lockRecordSubject } from '../../../apps/backend/services/intake.service';
+import { createLockLog } from '../../utils/lock-log-builder';
 
 describe('lockRecordSubject (BS#2968)', () => {
-  const log: string[] = [];
-  const builder = (rows: unknown[]): unknown => {
-    let table = '';
-    let bound: unknown[] = [];
-    const proxy: unknown = new Proxy(() => undefined, {
-      get: (_t, prop: string) => {
-        if (prop === 'then') return (resolve: (v: unknown) => void) => resolve(rows);
-        return (...args: unknown[]) => {
-          if (prop === 'from') table = getTableName(args[0] as Parameters<typeof getTableName>[0]);
-          if (prop === 'where') bound = new PgDialect().sqlToQuery(args[0] as SQL).params;
-          if (prop === 'for') log.push(`${table} for ${args[0] as string} id ${JSON.stringify(bound[0])}`);
-          return proxy;
-        };
-      },
-    });
-    return proxy;
-  };
+  const { builder, log } = createLockLog();
   const unfiled = { album_id: null, state: 'pool' };
   const filed = { album_id: 9, state: 'filed' };
 
