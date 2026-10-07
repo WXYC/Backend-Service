@@ -4,7 +4,7 @@
 
 import { config } from 'dotenv';
 import * as Sentry from '@sentry/node';
-import { warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
+import { SENTRY_DATA_COLLECTION, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
 
 config();
 
@@ -35,4 +35,7 @@ Sentry.init({
   release: process.env.SENTRY_RELEASE,
   environment: process.env.NODE_ENV || 'production',
   tracesSampleRate: resolveTracesSampleRate(),
+  // Sentry 10's data-collection posture: no end-user IPs, IP-bearing headers
+  // or request bodies (BS#3004).
+  dataCollection: SENTRY_DATA_COLLECTION,
 });
