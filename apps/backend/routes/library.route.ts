@@ -260,6 +260,22 @@ library_route.delete(
   libraryController.deleteRotationCard
 );
 
+// Station-wide rotation thresholds (one record, not per-user). The literal `/rotation/thresholds` shares method and
+// segment count with BOTH templated registrations below, `GET /rotation/:id` and `PATCH /rotation/:id`, so both
+// methods MUST be registered ahead of them or Express hands "thresholds" to `:id`. Pinned by
+// `library-rotation-route-order.route.test.ts`.
+library_route.get(
+  '/rotation/thresholds',
+  requirePermissions({ catalog: ['read'] }),
+  libraryController.getRotationThresholds
+);
+
+library_route.patch(
+  '/rotation/thresholds',
+  requirePermissions({ catalog: ['write'] }),
+  libraryController.updateRotationThresholds
+);
+
 // BS#2410: the single-row rotation read, for dj-site#1161's Import to Library
 // screen and its pre-submit staleness check. `catalog: ['read']`, matching
 // `GET /rotation` and `GET /rotation/uncatalogued` rather than the PATCH that
@@ -267,17 +283,17 @@ library_route.delete(
 //
 // Registered after every literal `/rotation/*` route above, and for this
 // registration that ordering is load-bearing rather than defensive: it shares
-// both method and segment count with two literals now (`GET /rotation/uncatalogued`,
-// `GET /rotation/cards`), so ahead of either it would capture the literal
-// segment as an id. It is the second such family on this router — `GET
+// both method and segment count with three literals now (`GET /rotation/uncatalogued`,
+// `GET /rotation/cards`, `GET /rotation/thresholds`), so ahead of any of them it
+// would capture the literal segment as an id. It is the second such family on this router — `GET
 // /artists/:id` below is the first, standing in the same relation to `GET
 // /artists/search`, `GET /artists/peek-code` and `GET /artists/by-code`.
 library_route.get('/rotation/:id', requirePermissions({ catalog: ['read'] }), libraryController.getRotationRow);
 
 // BS#2113: field-level rotation edit. Registered after every literal
 // `/rotation/*` route above so `:id` never shadows a more specific path —
-// belt-and-braces for this one, since no literal `PATCH /rotation/<name>`
-// exists to be shadowed today.
+// load-bearing now that the literal `PATCH /rotation/thresholds` above shares
+// its method and segment count.
 library_route.patch('/rotation/:id', requirePermissions({ catalog: ['write'] }), libraryController.updateRotation);
 
 library_route.post('/artists', requirePermissions({ catalog: ['write'] }), libraryController.addArtist);

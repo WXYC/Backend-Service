@@ -8,6 +8,10 @@ Route-table detail and routing notes moved verbatim out of `CLAUDE.md`. `CLAUDE.
 
 Form-review archive reads (ADR 0011). Role-gated `album_reviews:read` (dj+), NOT anonymous auth — it serves the whole archive with no `social_consent` filter, so the gate is the safety argument. Explicit projection: returns the reviewer's name as `reviewer` (decision 14, `docs/pii.md`); never `social_consent_raw` or the ETL bookkeeping columns. The public `wxycReviews` attach stays nameless.
 
+### `/library/rotation/thresholds`
+
+The station-wide rotation thresholds (`RotationThresholds`): per-bin `window_days` (H/M/L/S) and `card_stale_days`, held in the single-row `rotation_thresholds` table (migration seeds 60/60/60/60/30 only where absent). `GET` is `catalog: read`, `PATCH` is `catalog: write`. `PATCH` is partial at both levels (`{}` and `{"window_days": {}}` are 200 no-ops), each day count an integer in 1..365, an explicit `null` or an unknown key at either level a 400 naming it; the response is always the whole record. The literal path must stay registered above both `GET` and `PATCH /rotation/:id` (pinned by `library-rotation-route-order.route.test.ts`). Validation lives in `apps/backend/utils/rotation-thresholds.ts`, the single `UPDATE` in `apps/backend/services/rotation-thresholds.service.ts`.
+
 ### `/digital-archive`
 
 Presigned playback manifests into the auto-DJ Space (BS#2320, ADR 0014). Role-gated `digital_archive:listen` (dj+) AND flag-gated `DIGITAL_ARCHIVE_STREAMING_ENABLED`, checked before any DB read. 403 = off/below dj; 404 = permitted but nothing bound and servable — never a 200 with empty tracks.

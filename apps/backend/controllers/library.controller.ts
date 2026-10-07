@@ -17,6 +17,8 @@ import {
 import { gunzipSync } from 'node:zlib';
 import { ReviewRequiredError, RotationNotEligibleError, type GateBasis } from '../utils/review-gate-basis.js';
 import * as libraryService from '../services/library.service.js';
+import * as rotationThresholdsService from '../services/rotation-thresholds.service.js';
+import { parseRotationThresholdsPatch } from '../utils/rotation-thresholds.js';
 import * as catalogExportService from '../services/catalog-export.service.js';
 import * as bmiPerformanceService from '../services/bmi-performance.service.js';
 import * as labelsService from '../services/labels.service.js';
@@ -1906,6 +1908,26 @@ const parseCardId = (rawId: string): number => parseResourceId(rawId, 'rotation 
 export const getRotationCards: RequestHandler = async (_req, res) => {
   const cards = await libraryService.listRotationCardsFromDB();
   res.status(200).json(cards);
+};
+
+/**
+ * `GET /library/rotation/thresholds`: the station-wide rotation thresholds (`RotationThresholds`). Gated
+ * `catalog: ['read']`. Like `/rotation/cards`, its literal path must stay registered ahead of `GET /rotation/:id`;
+ * pinned by `library-rotation-route-order.route.test.ts`.
+ */
+export const getRotationThresholds: RequestHandler = async (_req, res) => {
+  res.status(200).json(await rotationThresholdsService.getRotationThresholds());
+};
+
+/**
+ * `PATCH /library/rotation/thresholds`: partial update of the station-wide thresholds. Gated `catalog: ['write']`.
+ * Partial at both levels, so `{}` and `{"window_days": {}}` are 200 no-ops. A day count must be an integer in 1..365;
+ * an explicit `null` or an unknown key at either level is a 400 naming it (unlike `PATCH /rotation/:id`, which drops
+ * unknown keys). The response is always the whole record after the write. Validation: `parseRotationThresholdsPatch`.
+ */
+export const updateRotationThresholds: RequestHandler = async (req, res) => {
+  const patch = parseRotationThresholdsPatch(req.body);
+  res.status(200).json(await rotationThresholdsService.updateRotationThresholds(patch));
 };
 
 export type AddRotationCardRequest = { bin: string; name?: string };
