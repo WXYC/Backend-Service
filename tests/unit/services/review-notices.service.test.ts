@@ -158,10 +158,10 @@ describe('notices', () => {
     line: { kind: 'pool' },
   };
   const DIRECTORS = [
-    { role: 'musicDirector', email: 'md-one@example.org', banned: false, banExpires: null },
-    { role: 'musicDirector', email: 'md-two@example.org', banned: null, banExpires: null },
-    { role: 'stationManager', email: 'manager@example.org', banned: false, banExpires: null },
-    { role: 'dj', email: 'dj@example.org', banned: false, banExpires: null },
+    { id: 'md-1', role: 'musicDirector', email: 'md-one@example.org', banned: false, banExpires: null },
+    { id: 'md-2', role: 'musicDirector', email: 'md-two@example.org', banned: null, banExpires: null },
+    { id: 'sm-1', role: 'stationManager', email: 'manager@example.org', banned: false, banExpires: null },
+    { id: 'dj-1', role: 'dj', email: 'dj@example.org', banned: false, banExpires: null },
   ];
   const URL = 'https://dj.example.org/dashboard/admin/intake/4';
   const LINK = `<p><a href="${URL}">Open in the Pile</a></p>`;
@@ -395,7 +395,14 @@ describe('notices', () => {
   });
 
   describe('the FCC-line notice', () => {
-    const FCC_CHANGE = { reviewId: 3, artist: 'Juana Molina', album: 'DOGA', editor: 'Test MD', fcc: 'A clean line.' };
+    const FCC_CHANGE = {
+      reviewId: 3,
+      artist: 'Juana Molina',
+      album: 'DOGA',
+      editor: 'Test MD',
+      editorUserId: 'md-3',
+      fcc: 'A clean line.',
+    };
     const first = 'Test MD changed the FCC line on the review of Juana Molina – DOGA after it was printed.';
     const ITEM_URL = 'https://dj.example.org/dashboard/admin/intake/8';
     const ALBUM_URL = 'https://dj.example.org/dashboard/album/9';
@@ -441,6 +448,18 @@ describe('notices', () => {
       expect(sent().text.split('\n')[0]).toBe(
         'Someone changed the FCC line on the review of Juana Molina – DOGA after it was printed.'
       );
+    });
+
+    test('the music director who made the edit is not emailed; the other one is', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, editorUserId: 'md-1', copies: [{ intake_item_id: 8 }] });
+      expect(mockSend.mock.calls.map(([e]) => (e as Sent).to)).toEqual([['md-two@example.org']]);
+    });
+
+    test('the editor is the only music director: nobody is emailed', async () => {
+      mockQueue.push(DIRECTORS.filter((r) => r.id !== 'md-2'));
+      await notifyFccChanged({ ...FCC_CHANGE, editorUserId: 'md-1', copies: [{ intake_item_id: 8 }] });
+      expect(mockSend).not.toHaveBeenCalled();
     });
 
     test('says neither "pool" nor "pile" in lower case', async () => {

@@ -1467,6 +1467,7 @@ describe('review notices decided in the transaction (BS#2864)', () => {
         ...RECORD,
         reviewId: 3,
         editor: 'Test MD',
+        editorUserId: 'md-1',
         fcc: 'new line',
         copies: [{ intake_item_id: 8 }],
       });

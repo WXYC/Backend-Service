@@ -550,7 +550,7 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
         : undefined;
     const fccNotice: FccChangeNotice | undefined =
       names && copies.length > 0
-        ? { ...names, reviewId: id, editor: editor!.name, fcc: patch.fcc ?? null, copies }
+        ? { ...names, reviewId: id, editor: editor!.name, editorUserId: editor!.userId, fcc: patch.fcc ?? null, copies }
         : undefined;
     return { outcome: 'updated' as const, review, authorNotice, fccNotice };
   });
