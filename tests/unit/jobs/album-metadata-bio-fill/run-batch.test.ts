@@ -81,7 +81,23 @@ describe('runBatch — the request', () => {
     expect(options).toEqual({
       caller: 'album-metadata-bio-fill',
       budgetMs: 25_000,
-      timeoutMs: computeBulkTimeoutMs(2),
+      timeoutMs: computeBulkTimeoutMs(2, 25_000),
+    });
+  });
+
+  // LML clamps any X-Caller-Budget-Ms to its 4 s LML_SEARCH_BUDGET_MS and then
+  // sheds an item's artist-details step as deadline_exceeded (BS#2978). `null`
+  // is the client's lever for sending no header at all; `undefined` would
+  // inherit the caller policy's budget and send one anyway.
+  it('sends no budget header when the budget is 0, and waits out LML hard cap', async () => {
+    bulkLookupMetadata.mockResolvedValue({ results: [filling(JUANA, 0), filling(JESSICA, 1)] } as never);
+
+    await runBatch([JUANA, JESSICA], { budgetMs: 0 });
+
+    expect(bulkLookupMetadata.mock.calls[0][1]).toEqual({
+      caller: 'album-metadata-bio-fill',
+      budgetMs: null,
+      timeoutMs: computeBulkTimeoutMs(2, 0),
     });
   });
 
@@ -240,8 +256,15 @@ describe('runBatch — only a fill writes', () => {
 });
 
 describe('computeBulkTimeoutMs', () => {
-  it('scales with batch size and clears the LML client 30s default at the default batch size', () => {
-    expect(computeBulkTimeoutMs(5)).toBe(30_000);
-    expect(computeBulkTimeoutMs(1)).toBe(10_000);
+  it.each([
+    // With a budget header LML stops each item at its budget.
+    [5, 4_000, 30_000],
+    [1, 4_000, 10_000],
+    // With none an item can run to LML's 25 s hard cap, so one slow album
+    // must not time out the whole batch.
+    [5, 0, 55_000],
+    [1, 0, 35_000],
+  ])('batch of %i with budget %i waits %i ms', (batchSize, budgetMs, expected) => {
+    expect(computeBulkTimeoutMs(batchSize, budgetMs)).toBe(expected);
   });
 });
