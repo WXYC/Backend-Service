@@ -27,8 +27,10 @@ import type { SpanJSON, TransactionEvent } from '@sentry/core';
  *     spikes does.
  *
  * Dropping these transactions has no effect on error reporting: `wxyc-canary`
- * alerts on `/healthcheck` failures via `beforeSend`/`setupExpressErrorHandler`
- * capture, which is a separate pipeline from `beforeSendTransaction`.
+ * alerts on `/healthcheck` failures via `beforeSend` and the Express error
+ * capture configured by `expressIntegration({ shouldHandleError })` in each
+ * app's `instrument.ts`, which is a separate pipeline from
+ * `beforeSendTransaction`.
  */
 const LIVENESS_PATHS = new Set(['/auth/ok', '/healthcheck']);
 

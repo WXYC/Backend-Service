@@ -28,7 +28,11 @@ export default defineConfig((options) => ({
   // `sns-validator` is CJS-only; bundling it into ESM produces a `Dynamic
   // require of "sns-validator" is not supported` at runtime. Mark external
   // so Node's CJS↔ESM interop resolves it through node_modules.
-  external: ['@sentry/node', 'sns-validator'],
+  // `@wxyc/lml-client` is external on purpose, not just because it is a
+  // dependency: the preload's Sentry filter checks `instanceof LmlClientError`
+  // against errors thrown from app.js, which only holds while both bundles
+  // import the one installed copy of the class (BS#2949).
+  external: ['@sentry/node', 'sns-validator', '@wxyc/lml-client'],
   onSuccess: options.watch
     ? 'node --import @sentry/node/import --import ./dist/instrument.js ./dist/app.js'
     : undefined,
