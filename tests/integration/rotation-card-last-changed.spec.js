@@ -151,6 +151,28 @@ describe('rotation_cards.last_changed_at', () => {
       await expectStamped(cardId, before);
     });
 
+    test('rescheduling a kill date to a different date stamps the row card', async () => {
+      const cardId = await newCard();
+      const rowId = await insertRotationRow(cardId, '2020-01-01');
+      await setSentinel(cardId);
+      const before = await clockBefore();
+
+      await sql`UPDATE ${sql(SCHEMA)}.rotation SET kill_date = '2021-01-01' WHERE id = ${rowId}`;
+
+      await expectStamped(cardId, before);
+    });
+
+    test('moving a row off its card (card A to no card) stamps A', async () => {
+      const a = await newCard();
+      const rowId = await insertRotationRow(a);
+      await setSentinel(a);
+      const before = await clockBefore();
+
+      await sql`UPDATE ${sql(SCHEMA)}.rotation SET card_id = NULL WHERE id = ${rowId}`;
+
+      await expectStamped(a, before);
+    });
+
     test('setting kill_date to its current value stamps nothing (the rotation-etl upsert shape)', async () => {
       const cardId = await newCard();
       const rowId = await insertRotationRow(cardId, '2020-01-01');
