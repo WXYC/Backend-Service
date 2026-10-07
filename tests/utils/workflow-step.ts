@@ -22,7 +22,8 @@ export const loadWorkflow = (file: string) =>
 /** The named step of a job, or its first `run:` step when no name is given. */
 export const findStep = (job: Job, name?: string) => {
   const found = name ? job.steps.find((s) => s.name === name) : job.steps.find((s) => s.run);
-  if (!found?.run) throw new Error(`step "${name ?? '(first run step)'}" not found or has no run:`);
+  if (!found) throw new Error(`step "${name ?? '(first run step)'}" not found`);
+  if (!found.run) throw new Error(`step "${found.name ?? '(unnamed)'}" has no run:`);
   return found as Step & { run: string };
 };
 
@@ -39,7 +40,7 @@ export const sliceScript = (run: string, fromMarker: string, toMarker: string) =
 export const stepEnvFrom = (step: Step, expressions: Record<string, string>) =>
   Object.fromEntries(
     Object.entries(step.env ?? {}).map(([key, expr]) => {
-      const value = expressions[expr];
+      const value = Object.hasOwn(expressions, expr) ? expressions[expr] : undefined;
       if (value === undefined) throw new Error(`unexpected env expression ${key}: ${expr}`);
       return [key, value];
     })
@@ -55,10 +56,23 @@ export const runBashScript = (
     encoding: 'utf8',
   });
 
-/** A directory holding a jq-backed `yq` (not installed on dev machines); removed after the calling suite. Call at describe scope. */
+/**
+ * A getter for a directory holding a jq-backed `yq` (not installed on dev
+ * machines). Created in `beforeAll` and removed in `afterAll` of the calling
+ * suite, so a `-t` filter that skips the suite never creates (or leaks) it.
+ * Call at describe scope; call the getter inside a test.
+ */
 export const makeYqShim = () => {
-  const dir = mkdtempSync(join(tmpdir(), 'yq-shim-'));
-  writeFileSync(join(dir, 'yq'), '#!/bin/sh\nexec jq "$@"\n', { mode: 0o755 });
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
+  let dir: string | undefined;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'yq-shim-'));
+    writeFileSync(join(dir, 'yq'), '#!/bin/sh\nexec jq "$@"\n', { mode: 0o755 });
+  });
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+  return () => {
+    if (!dir) throw new Error('makeYqShim directory used before beforeAll');
+    return dir;
+  };
 };
