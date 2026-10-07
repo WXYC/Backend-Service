@@ -43,6 +43,7 @@ import {
   assignedLine,
   musicDirectorEmails,
   notifyAccount,
+  notifyFccChanged,
   notifyFccNoteReported,
   notifyPass,
   notifyReviewEdited,
@@ -390,6 +391,68 @@ describe('notices', () => {
         message: 'Email address is not verified. The following identities failed the check: [email redacted].',
       });
       jest.restoreAllMocks();
+    });
+  });
+
+  describe('the FCC-line notice', () => {
+    const FCC_CHANGE = { reviewId: 3, artist: 'Juana Molina', album: 'DOGA', editor: 'Test MD', fcc: 'A clean line.' };
+    const first = 'Test MD changed the FCC line on the review of Juana Molina – DOGA after it was printed.';
+    const ITEM_URL = 'https://dj.example.org/dashboard/admin/intake/8';
+    const ALBUM_URL = 'https://dj.example.org/dashboard/album/9';
+
+    test('one printed copy: singular third line, one link, exact copy', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, copies: [{ intake_item_id: 8 }] });
+      const lines = [first, 'New FCC line: A clean line.', 'The printed slip is out of date. Reprint it from:'];
+      expect(mockSend.mock.calls.map(([e]) => (e as Sent).to)).toEqual([
+        ['md-one@example.org'],
+        ['md-two@example.org'],
+      ]);
+      expect(sent()).toEqual({
+        to: ['md-one@example.org'],
+        subject: 'FCC line changed on a printed review: Juana Molina – DOGA',
+        text: `${lines.join('\n')}\n${ITEM_URL}`,
+        html: `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open in the Pile</a></p>`,
+      });
+    });
+
+    test('several copies: plural third line, one link per copy in order, an album copy links to the album page', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, copies: [{ intake_item_id: 8 }, { album_id: 9 }] });
+      const lines = [first, 'New FCC line: A clean line.', 'The printed slips are out of date. Reprint them from:'];
+      expect(sent().text).toBe(`${lines.join('\n')}\n${ITEM_URL}\n${ALBUM_URL}`);
+      expect(sent().html).toBe(
+        `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open in the Pile</a></p><p><a href="${ALBUM_URL}">Open the album page</a></p>`
+      );
+    });
+
+    test.each([
+      ['null', null],
+      ['empty', ''],
+    ])('a %s new line reads "New FCC line: none"', async (_n, fcc) => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, fcc, copies: [{ intake_item_id: 8 }] });
+      expect(sent().text.split('\n')[1]).toBe('New FCC line: none');
+    });
+
+    test('a null editor name is "Someone"', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, editor: null, copies: [{ intake_item_id: 8 }] });
+      expect(sent().text.split('\n')[0]).toBe(
+        'Someone changed the FCC line on the review of Juana Molina – DOGA after it was printed.'
+      );
+    });
+
+    test('says neither "pool" nor "pile" in lower case', async () => {
+      mockQueue.push(DIRECTORS);
+      await notifyFccChanged({ ...FCC_CHANGE, copies: [{ intake_item_id: 8 }, { album_id: 9 }] });
+      for (const part of [
+        sent().subject,
+        sent().text.replace(/https?:\S+/g, ''),
+        sent().html.replace(/<a href="[^"]*">/g, ''),
+      ]) {
+        expect(part).not.toMatch(/pool|pile/);
+      }
     });
   });
 
