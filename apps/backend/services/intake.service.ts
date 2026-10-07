@@ -21,6 +21,9 @@ import { fileLibraryRelease, mapLibraryFilingError, type ValidatedFilingInput } 
 import { outerRef } from '../utils/sql-fragments.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { reviewGateCutoverDate } from '../utils/review-gate-cutover.js';
+import { mayFileItem } from '../utils/intake-filing-rule.js';
+
+export { mayFileItem };
 
 /**
  * Intake-item service behind `/intake` (BS#2796, slice 7 of BS#2791).
@@ -470,14 +473,6 @@ export const acceptReview = async (id: number, reviewId: number, actor: ReviewsA
   });
   return outcome === 'accepted' ? { outcome, item: (await getIntakeItem(id, true))! } : { outcome };
 };
-
-/**
- * Whether an item, read under its row lock, may be filed: a music director has accepted a review for it. A citation
- * does not stand in for one (decision 37; it only makes the cited release's reviews available to accept), so this
- * never consults it. Written once, for `POST /intake/{id}/file` and for the review gate's `intake` basis (BS#2807).
- */
-export const mayFileItem = (item: Pick<typeof intake_items.$inferSelect, 'accepted_review_id'>) =>
-  item.accepted_review_id !== null;
 
 /** Where `POST /intake/{id}/file` files the item: onto a release it creates (planned by `planLibraryFiling`) or one that exists. */
 export type IntakeFileArm =
