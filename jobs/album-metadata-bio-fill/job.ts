@@ -264,14 +264,20 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
  * (BS#1178). Mirrors `streaming-columns-drain`. */
 export const PER_ITEM_TIMEOUT_MS = 5_000;
 export const TIMEOUT_SLACK_MS = 5_000;
-/** LML's `LML_SEARCH_HARD_TIMEOUT_MS` default: the only limit on an item sent
- * without a budget header. */
+/** LML's `LML_SEARCH_HARD_TIMEOUT_MS` default. It bounds an item's search when
+ * no budget header is sent, and LML checks it only between enrichment steps, so
+ * a step that starts just before it can run past it. Keep in step with LML's
+ * setting; it is not overridden in production. */
 export const LML_HARD_CAP_MS = 25_000;
-/** With no budget header (`budgetMs` 0) one item can run to LML's hard cap, so
- * the batch waits that long on top of the per-item slices rather than letting
- * one slow album time out the other four. */
-export const computeBulkTimeoutMs = (batchSize: number, budgetMs: number): number =>
-  batchSize * PER_ITEM_TIMEOUT_MS + TIMEOUT_SLACK_MS + (budgetMs > 0 ? 0 : LML_HARD_CAP_MS);
+/**
+ * The bulk fetch timeout for a batch. `budgetHeaderMs` is the value sent as
+ * `X-Caller-Budget-Ms`, or `null` for none: then one item can run to LML's hard
+ * cap, so the batch waits that long on top of the per-item slices rather than
+ * letting one slow album time out the other four. An item that overruns even
+ * that costs a carried batch, not a lost one.
+ */
+export const computeBulkTimeoutMs = (batchSize: number, budgetHeaderMs: number | null): number =>
+  batchSize * PER_ITEM_TIMEOUT_MS + TIMEOUT_SLACK_MS + (budgetHeaderMs === null ? LML_HARD_CAP_MS : 0);
 
 // -- Batch -------------------------------------------------------------------
 
@@ -355,12 +361,15 @@ export const runBatch = async (candidates: FillCandidate[], options: { budgetMs:
   const result = emptyBatchResult(candidates.length);
   if (candidates.length === 0) return result;
 
+  // `null` is the client's lever for sending no header; `undefined` would
+  // inherit the caller policy's budget.
+  const budgetHeaderMs = options.budgetMs > 0 ? options.budgetMs : null;
   let results: BulkLookupResultItem[];
   try {
     const response: { results?: unknown } | null = await bulkLookupMetadata(buildBulkItems(candidates), {
       caller: JOB_NAME,
-      budgetMs: options.budgetMs > 0 ? options.budgetMs : null,
-      timeoutMs: computeBulkTimeoutMs(candidates.length, options.budgetMs),
+      budgetMs: budgetHeaderMs,
+      timeoutMs: computeBulkTimeoutMs(candidates.length, budgetHeaderMs),
     });
     // The client types `results` as an array but does not check it. A 2xx
     // whose body is not the bulk shape is no answer for any album, so it

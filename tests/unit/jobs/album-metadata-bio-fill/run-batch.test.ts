@@ -97,7 +97,7 @@ describe('runBatch — the request', () => {
     expect(bulkLookupMetadata.mock.calls[0][1]).toEqual({
       caller: 'album-metadata-bio-fill',
       budgetMs: null,
-      timeoutMs: computeBulkTimeoutMs(2, 0),
+      timeoutMs: computeBulkTimeoutMs(2, null),
     });
   });
 
@@ -262,9 +262,9 @@ describe('computeBulkTimeoutMs', () => {
     [1, 4_000, 10_000],
     // With none an item can run to LML's 25 s hard cap, so one slow album
     // must not time out the whole batch.
-    [5, 0, 55_000],
-    [1, 0, 35_000],
-  ])('batch of %i with budget %i waits %i ms', (batchSize, budgetMs, expected) => {
-    expect(computeBulkTimeoutMs(batchSize, budgetMs)).toBe(expected);
+    [5, null, 55_000],
+    [1, null, 35_000],
+  ])('batch of %i with budget header %p waits %i ms', (batchSize, budgetHeaderMs, expected) => {
+    expect(computeBulkTimeoutMs(batchSize, budgetHeaderMs)).toBe(expected);
   });
 });

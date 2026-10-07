@@ -123,6 +123,12 @@ describe('resolveOptions', () => {
     expect(() => resolveOptions({ [name]: value }, [])).toThrow(name);
   });
 
+  // The README's knob table offers `=0`; the default alone would not catch a
+  // parser that rejects it, since an unset variable never reaches validation.
+  it('takes an explicit 0 budget as "send no header"', () => {
+    expect(resolveOptions({ BIO_FILL_BULK_BUDGET_MS: '0' }, []).budgetMs).toBe(0);
+  });
+
   it('takes 0 for the no-bio guard as "disabled", the one failure guard an operator may need to turn off', () => {
     expect(resolveOptions({ BIO_FILL_MAX_CONSECUTIVE_NO_BIO_BATCHES: '0' }, []).maxConsecutiveNoBioBatches).toBe(0);
   });
