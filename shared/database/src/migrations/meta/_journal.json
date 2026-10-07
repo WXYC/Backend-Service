@@ -1296,6 +1296,20 @@
       "when": 1791345350098,
       "tag": "0187_2862-fcc-notes-reported-by-not-null",
       "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1791408610430,
+      "tag": "0188_rotation-cards-last-changed-at",
+      "breakpoints": true
+    },
+    {
+      "idx": 189,
+      "version": "7",
+      "when": 1791408621228,
+      "tag": "0189_rotation-cards-last-changed-at-trigger",
+      "breakpoints": true
     }
   ]
 }
