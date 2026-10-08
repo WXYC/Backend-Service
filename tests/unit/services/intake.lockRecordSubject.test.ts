@@ -10,7 +10,8 @@ jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../shared/database/src/schema');
   const { drizzle } = jest.requireActual('drizzle-orm/postgres-js');
   const nyTime = jest.requireActual('../../../shared/database/src/ny-time');
-  return { ...realSchema, ...nyTime, db: drizzle({}) };
+  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
+  return { ...realSchema, ...nyTime, ...staffName, db: drizzle({}) };
 });
 
 import { db } from '@wxyc/database';

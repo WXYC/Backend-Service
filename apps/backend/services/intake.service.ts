@@ -16,6 +16,7 @@ import {
   reviews,
   rotation,
   rotationActiveSql,
+  staffNameSql,
   user,
   type NewIntakeItem,
 } from '@wxyc/database';
@@ -60,7 +61,7 @@ export const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${rev
 /** The passes on an item as a JSON array, correlated on the outer `intake_items.id` through `outerRef` so it stays correct in a single-table select. */
 export const passesSql = sql<
   IntakeItemResponse['passes']
->`(SELECT coalesce(json_agg(json_build_object('dj_name', ${user.name}, 'passed_at', ${intake_item_passes.passed_at}) ORDER BY ${intake_item_passes.passed_at}, ${intake_item_passes.id}), '[]'::json) FROM ${intake_item_passes} JOIN ${user} ON ${user.id} = ${intake_item_passes.dj_id} WHERE ${intake_item_passes.intake_item_id} = ${outerRef(intake_items.id)})`;
+>`(SELECT coalesce(json_agg(json_build_object('dj_name', ${staffNameSql(user)}, 'passed_at', ${intake_item_passes.passed_at}) ORDER BY ${intake_item_passes.passed_at}, ${intake_item_passes.id}), '[]'::json) FROM ${intake_item_passes} JOIN ${user} ON ${user.id} = ${intake_item_passes.dj_id} WHERE ${intake_item_passes.intake_item_id} = ${outerRef(intake_items.id)})`;
 
 /**
  * The `author` of each review on the item, as a JSON array correlated on `intake_items.id`: oldest first by
@@ -96,8 +97,9 @@ export type IntakeFields = Pick<
 export type IntakeCitations = Pick<NewIntakeItem, 'cited_album_id' | 'cited_submission_id'>;
 
 /**
- * Every item column the contract exposes, plus the DJ display names. Names are
- * `auth_user.name` — the public-safe value — and `real_name` is never selected.
+ * Every item column the contract exposes, plus the staff names (`requested_dj_name`, `checked_out_by_name`, `passes[].dj_name`).
+ * Each is `staffNameSql`: the person's real name, else `auth_user.name`; read at request time, never stored. Only `reviews:read`
+ * callers reach this, so the real name goes to staff and never to a public read (docs/pii.md).
  * `passes` and `draft_authors` are correlated aggregates in the same statement (one query for the
  * whole list, not one per item) and are only present when `includePasses` (the caller holds `reviews: manage`).
  * `awaitingAcceptance` keeps items with a submitted review, no accepted one, and no filing.
@@ -117,8 +119,8 @@ export const buildIntakeSelect = (opts: {
       effective_state: effectiveState.as('effective_state'),
       overdue: overdue.as('overdue'),
       submitted_review_count: submittedReviewCount.as('submitted_review_count'),
-      requested_dj_name: requester.name,
-      checked_out_by_name: holder.name,
+      requested_dj_name: staffNameSql(requester).as('requested_dj_name'),
+      checked_out_by_name: staffNameSql(holder).as('checked_out_by_name'),
       ...(opts.includePasses && {
         passes: passesSql.as('passes'),
         draft_authors: reviewAuthorsSql(true).as('draft_authors'),

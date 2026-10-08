@@ -18,6 +18,8 @@ jest.mock('@wxyc/authentication', () => ({
 }));
 /** Every inner join a select made, as `<table> ON <condition>`, so a test can pin which tables a lookup joins. */
 const mockJoins: string[] = [];
+/** The field map of every `select(...)`, so a test can pin which expression a lookup reads the name from. */
+const mockSelected: Record<string, unknown>[] = [];
 
 jest.mock('@wxyc/database', () => {
   const chain: any = {};
@@ -32,13 +34,24 @@ jest.mock('@wxyc/database', () => {
     const next = mockQueue.shift() ?? [];
     return next instanceof Error ? reject(next) : resolve(next);
   };
-  return { ...jest.requireActual('../../../shared/database/src/schema'), db: { select: () => chain } };
+  return {
+    ...jest.requireActual('../../../shared/database/src/schema'),
+    ...jest.requireActual('../../../shared/database/src/staff-name'),
+    db: {
+      select: (fields?: Record<string, unknown>) => {
+        if (fields) mockSelected.push(fields);
+        return chain;
+      },
+    },
+  };
 });
 jest.mock('../../../apps/backend/services/intake.service', () => ({
   effectiveState: jest.requireActual('drizzle-orm').sql`effective_state`,
 }));
 
-import { db } from '@wxyc/database';
+import { sql } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { db, staffNameSql, user } from '@wxyc/database';
 import {
   assignedLine,
   musicDirectorEmails,
@@ -126,7 +139,21 @@ describe('assignedLine', () => {
   });
 });
 
+const renderField = (field: unknown) => new PgDialect().sqlToQuery(sql`${field}`).sql;
+
 describe('readReviewNotice', () => {
+  beforeEach(() => {
+    mockQueue.length = 0;
+    mockSelected.length = 0;
+  });
+
+  // The fragment's values (real name, null, blank, no account) are Postgres's; staff-name.test.ts pins them.
+  test('names the holder with the staff name of the joined account (BS#3052)', async () => {
+    mockQueue.push([]);
+    await readReviewNotice(db, 4, { author: 'Test Reviewer', author_user_id: 'dj-1' });
+    expect(renderField(mockSelected[0].holder_name)).toBe(renderField(staffNameSql(user)));
+  });
+
   test('answers the item as read, with the line decided from its holder', async () => {
     mockQueue.push([
       {
@@ -172,6 +199,7 @@ describe('notices', () => {
     process.env.FRONTEND_SOURCE = 'https://dj.example.org, http://localhost:3000';
     mockQueue.length = 0;
     mockJoins.length = 0;
+    mockSelected.length = 0;
     mockSend.mockReset();
     mockSend.mockResolvedValue(undefined);
     mockCapture.mockReset();
@@ -535,6 +563,13 @@ describe('notices', () => {
       });
       jest.restoreAllMocks();
     });
+  });
+
+  test('the pass email reads the DJ name through the staff-name lookup (BS#3052)', async () => {
+    mockQueue.push([{ name: 'Test Real Name' }], DIRECTORS);
+    await notifyPass({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-1');
+    expect(renderField(mockSelected[0].name)).toBe(renderField(staffNameSql(user)));
+    expect(sent(0).text).toContain('Test Real Name passed on the request');
   });
 
   test('neither email says "pool", a lower-case "pile" or a hyphen between artist and album', async () => {

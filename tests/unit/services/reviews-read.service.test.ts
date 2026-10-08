@@ -13,8 +13,10 @@ jest.mock('@wxyc/database', () => {
   const schema = jest.requireActual('../../../shared/database/src/schema');
   const { drizzle } = jest.requireActual('drizzle-orm/postgres-js');
   const real = drizzle.mock({ schema });
+  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
   return {
     ...schema,
+    ...staffName,
     db: {
       select: (fields: unknown) => {
         const builder = real.select(fields);

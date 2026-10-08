@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/node';
 import { eq, sql } from 'drizzle-orm';
-import { db, intake_items, member, user } from '@wxyc/database';
+import { db, intake_items, member, readStaffName, staffNameSql, user } from '@wxyc/database';
 import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
 import type { FccNoteResponse } from './fcc-notes.service.js';
 import { effectiveState, type IntakeItemState } from './intake.service.js';
@@ -70,7 +70,7 @@ export const readReviewNotice = async (
       checked_out_by: intake_items.checked_out_by,
       requested_dj_id: intake_items.requested_dj_id,
       effective_state: effectiveState,
-      holder_name: user.name,
+      holder_name: staffNameSql(user),
     })
     .from(intake_items)
     .leftJoin(
@@ -206,22 +206,20 @@ export const notifyReviewSubmitted = (n: ReviewNotice) =>
     ],
   });
 
-/** A DJ passed on a request; named by their account's display name (`auth_user.name`), never the real name. */
+/** A DJ passed on a request; named by their staff name (`readStaffName`: the real name, else `auth_user.name`). The notice goes to music directors only. */
 export const notifyPass = async (item: { id: number; artist: string; album: string }, djUserId: string) => {
   // The request already succeeded; a failed name lookup sends the notice without the name, never an error.
   const dj = await Promise.resolve()
-    .then(() => db.select({ name: user.name }).from(user).where(eq(user.id, djUserId)))
+    .then(() => readStaffName(db, djUserId))
     .then(
-      (rows) => rows[0],
-      () => undefined
+      (name) => name,
+      () => null
     );
   return notifyMusicDirectors({
     links: [itemLink(item.id)],
     context: { item_id: item.id },
     subject: `Request passed: ${record(item.artist, item.album)}`,
-    lines: [
-      `${dj?.name ?? 'A DJ'} passed on the request for ${record(item.artist, item.album)}. Any DJ can take it now.`,
-    ],
+    lines: [`${dj ?? 'A DJ'} passed on the request for ${record(item.artist, item.album)}. Any DJ can take it now.`],
   });
 };
 
