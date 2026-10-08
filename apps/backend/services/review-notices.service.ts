@@ -228,7 +228,7 @@ export const notifyPass = async (item: { id: number; artist: string; album: stri
 /** What the create hands back for the FCC-note notice: the note, the record it is on, and the reporter's user id. */
 export type FccNoteNotice = { note: FccNoteResponse; artist: string; album: string; reporterUserId: string };
 
-/** A DJ reported an FCC note; the music directors confirm it on their intake page. The reporter is `note.reported_by`, the account-name snapshot. */
+/** A DJ reported an FCC note; the music directors confirm it on their intake page. The reporter is `note.reported_by`, the snapshotted staff name (the real name, else the account name `auth_user.name`). */
 export const notifyFccNoteReported = ({ note, artist, album }: FccNoteNotice) =>
   notifyMusicDirectors({
     subject: `FCC note to confirm: ${record(artist, album)}`,
@@ -240,14 +240,14 @@ export const notifyFccNoteReported = ({ note, artist, album }: FccNoteNotice) =>
 /** The record a review is about, named for the email (`{artist} – {album}`). */
 export type NoticeRecord = { artist: string; album: string };
 
-/** A review's author is told a music director edited it, or recorded it in their name; `name` is the account name (`auth_user.name`), null when it has none. */
+/** A review's author is told a music director edited it, or recorded it in their name; `name` is the snapshotted staff name (the real name, falling back to the account name `auth_user.name`), null when it has neither. */
 export type AuthorNotice = NoticeRecord & { reviewId: number; authorUserId: string; name: string | null };
 
 /** A printed copy: an intake item, or a release with no item. */
 export type PrintedCopy = { intake_item_id: number } | { album_id: number };
 
 /**
- * The FCC line of a printed review changed: who edited (`editor`, the account name; `editorUserId`, the account, who is
+ * The FCC line of a printed review changed: who edited (`editor`, the snapshotted staff name: the real name, falling back to the account name; `editorUserId`, the account, who is
  * not emailed), the new line, and the copies whose sleeve slip is now out of date.
  */
 export type FccChangeNotice = NoticeRecord & {

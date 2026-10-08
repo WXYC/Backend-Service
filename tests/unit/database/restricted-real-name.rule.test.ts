@@ -69,6 +69,19 @@ ruleTester.run('restricted-real-name', rule, {
       code: `const staff = sql\`coalesce(nullif(btrim(\${account.realName}), ''), \${account.name})\`;`,
       filename: 'shared/database/src/staff-name.ts',
     },
+    // BS#3051: the two services that stamp the review and FCC-note names may
+    // import and call the staff-name helpers (an exact-path list, apart from
+    // the real_name allow-list), and the helper's own file may define them.
+    ...['apps/backend/services/reviews.service.ts', 'apps/backend/services/fcc-notes.service.ts'].map((filename) => ({
+      code: `import { db, readStaffName, staffNameSql } from '@wxyc/database'; const a = await readStaffName(tx, id); const b = staffNameSql(user);`,
+      filename,
+    })),
+    {
+      code: `export const readStaffName = async () => null; export const staffNameSql = () => '';`,
+      filename: 'shared/database/src/staff-name.ts',
+    },
+    // A non-allow-listed file may use a variable that merely resembles a helper.
+    { code: `const readStaffNames = []; staff.readStaffNameOf(1);`, filename: NON_ALLOW_LISTED_FILE },
     // Allow-listed path PREFIX: any file under the future one-shot
     // backfill job workspace.
     {
@@ -194,6 +207,28 @@ ruleTester.run('restricted-real-name', rule, {
       filename,
       errors: [{ messageId: 'restrictedRealName', data: { name: 'realName' } }],
     })),
+    // BS#3051: the staff-name helpers return a legal name without any
+    // `realName` access at the call site, so importing, re-exporting or
+    // member-accessing them outside the two stamping services is flagged,
+    // including in a public controller and in the other review services.
+    ...[
+      `import { readStaffName } from '@wxyc/database';`,
+      `import { db, staffNameSql as nameSql } from '@wxyc/database';`,
+      `export { staffNameSql } from '@wxyc/database';`,
+      `import * as database from '@wxyc/database'; const n = database.readStaffName(db, id);`,
+    ].flatMap((code) =>
+      [
+        NON_ALLOW_LISTED_FILE,
+        'apps/backend/controllers/flowsheet.controller.ts',
+        'apps/backend/services/intake.service.ts',
+        'apps/backend/services/review-notices.service.ts',
+        'apps/backend/services/reviews.service.ts.bak',
+      ].map((filename) => ({
+        code,
+        filename,
+        errors: [{ messageId: 'restrictedStaffName' }],
+      }))
+    ),
     // The hook-helper module is NOT allow-listed: its actual derivation
     // reads `djName`, not `realName`/`real_name` (see Track 2b), so a
     // `realName` read here would be a genuine new PII site, not the
