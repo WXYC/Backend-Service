@@ -19,10 +19,29 @@
  * scope for the query.
  *
  * Follows flowsheet-range.spec.js's getTestDb/supertest/cleanup pattern.
+ *
+ * BS#3051 adds the other direction. A STAFF account whose `real_name` is the
+ * sentinel (and whose `name` is a handle) writes a review, an edit and an FCC
+ * note through the real routes, which stamp `reviews.author`,
+ * `review_revisions.edited_by` and `fcc_notes.reported_by` with the staff name:
+ * the staff reads (`GET /reviews/{id}`, `/reviews/{id}/revisions`,
+ * `/fcc-notes`) must then carry the sentinel, as the positive control, while
+ * every public read (the flowsheet reads above and `GET /proxy/metadata/album`
+ * with the `wxycReviews` attach on) must still not. The CI containers run
+ * AUTH_BYPASS=true, so the role gates on those routes are pinned by
+ * tests/unit/routes/*-permissions.route.test.ts, not here.
  */
 
 const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
+const { createAuthRequest } = require('../utils/test_helpers');
+const { signInAnonymous } = require('../utils/anonymous_auth');
+const {
+  seedLibraryRelease,
+  removeSeededLibraryReleases,
+  seedFormSubmission,
+  removeSeededFormSubmissions,
+} = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -35,6 +54,18 @@ const SENTINEL_REAL_NAME = 'SENTINEL-REAL-NAME-93aF';
 const HANDLE = 'SENTINEL-HANDLE-93aF';
 const MARKER_ARTIST = 'DJ Real-Name Sentinel Probe Artist';
 const MARKER_TRACK = 'DJ Real-Name Sentinel Probe Track';
+
+// The staff account (BS#3051): the legal name is the sentinel, `name` is a
+// different handle, so a staff read that shows the sentinel is the real-name
+// choice and not a copy of `name`.
+const STAFF_ID = 'sentinel-staff-probe-user-000001';
+const STAFF_HANDLE = 'SENTINEL-STAFF-HANDLE-93aF';
+const STAFF_EMAIL = 'sentinel-staff-probe-93af@test.wxyc.org';
+const STAFF_USERNAME = 'sentinel_staff_probe_93af';
+const STAFF_ARTIST = 'Sentinel Staff Probe Artist';
+const STAFF_ALBUM = 'Sentinel Staff Probe Album';
+const STAFF_REVIEW = 'A placeholder review written by the staff probe account.';
+const FORM_REVIEW = 'A placeholder consented review from the form archive.';
 
 const USER_ID = 'sentinel-pii-probe-user-000001';
 const USER_EMAIL = 'sentinel-pii-probe-93af@test.wxyc.org';
@@ -64,7 +95,24 @@ function makeSql() {
 describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)', () => {
   let sql;
   let showId;
+  let staffShowId;
+  let staffAlbumId;
   const entryIds = {};
+
+  // Everything the staff probe leaves behind, children first. Also run before
+  // seeding, so a crashed run cannot leave rows that make this one misread.
+  const cleanStaff = async () => {
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".fcc_notes WHERE reported_by_user_id = $1`, [STAFF_ID]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author_user_id = $1`, [STAFF_ID]);
+    await sql.unsafe(
+      `DELETE FROM "${SCHEMA}".flowsheet WHERE show_id IN (SELECT id FROM "${SCHEMA}".shows WHERE primary_dj_id = $1)`,
+      [STAFF_ID]
+    );
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".shows WHERE primary_dj_id = $1`, [STAFF_ID]);
+    await removeSeededFormSubmissions();
+    await removeSeededLibraryReleases();
+    await sql.unsafe(`DELETE FROM auth_user WHERE id = $1`, [STAFF_ID]);
+  };
 
   beforeAll(async () => {
     sql = makeSql();
@@ -78,6 +126,7 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
     );
     await sql.unsafe(`DELETE FROM "${SCHEMA}".shows WHERE primary_dj_id = $1`, [USER_ID]);
     await sql.unsafe(`DELETE FROM auth_user WHERE id = $1`, [USER_ID]);
+    await cleanStaff();
 
     // Seed the auth_user row shaped exactly like the pre-Track-2 conflation:
     // `name` duplicates `real_name`. `dj_name` is a normal, resolvable
@@ -97,20 +146,45 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
     `;
     showId = showRows[0].id;
 
+    // The staff account: legal name = sentinel, `name` = its own handle. It
+    // hosts a show in the same window, with a play linked to a library release,
+    // so the public flowsheet reads below have it in scope and
+    // GET /proxy/metadata/album resolves the release through that play.
+    await sql`
+      INSERT INTO auth_user (id, name, email, real_name, dj_name, username, is_anonymous)
+      VALUES (${STAFF_ID}, ${STAFF_HANDLE}, ${STAFF_EMAIL}, ${SENTINEL_REAL_NAME}, ${STAFF_HANDLE}, ${STAFF_USERNAME}, false)
+    `;
+    staffAlbumId = (await seedLibraryRelease({ artist_name: STAFF_ARTIST, album_title: STAFF_ALBUM })).id;
+    await seedFormSubmission({
+      album_id: staffAlbumId,
+      artist_name: STAFF_ARTIST,
+      album_title: STAFF_ALBUM,
+      review: FORM_REVIEW,
+      social_consent: true,
+      reviewer_raw: SENTINEL_REAL_NAME,
+    });
+    const staffShowRows = await sql`
+      INSERT INTO ${sql(SCHEMA)}.shows (primary_dj_id, start_time, end_time)
+      VALUES (${STAFF_ID}, ${at(3 * 60 * 60 * 1000)}::timestamptz, NULL)
+      RETURNING id
+    `;
+    staffShowId = staffShowRows[0].id;
+
     const insertEntry = async (key, addTimeIso, entryType, extra = {}) => {
       const rows = await sql`
         INSERT INTO ${sql(SCHEMA)}.flowsheet
-          (show_id, add_time, entry_type, dj_name, artist_name, album_title, track_title, message, play_order)
+          (show_id, add_time, entry_type, dj_name, artist_name, album_title, track_title, message, play_order, album_id)
         VALUES (
-          ${showId},
+          ${extra.show_id ?? showId},
           ${addTimeIso}::timestamptz,
           ${entryType},
-          ${HANDLE},
+          ${extra.dj_name ?? HANDLE},
           ${extra.artist_name ?? null},
           ${extra.album_title ?? null},
           ${extra.track_title ?? null},
           ${extra.message ?? null},
-          ${extra.play_order ?? 1}
+          ${extra.play_order ?? 1},
+          ${extra.album_id ?? null}
         )
         RETURNING id`;
       entryIds[key] = rows[0].id;
@@ -123,6 +197,18 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
       artist_name: MARKER_ARTIST,
       album_title: 'Sentinel Probe Album',
       track_title: MARKER_TRACK,
+    });
+
+    // The staff account's play, linked to its library release: in the public
+    // window, and the flowsheet row GET /proxy/metadata/album resolves the
+    // release (and so the wxycReviews attach) through.
+    await insertEntry('staffTrack', at(4 * 60 * 60 * 1000), 'track', {
+      show_id: staffShowId,
+      dj_name: STAFF_HANDLE,
+      artist_name: STAFF_ARTIST,
+      album_title: STAFF_ALBUM,
+      track_title: MARKER_TRACK,
+      album_id: staffAlbumId,
     });
 
     // Far-future row — GET /flowsheet and GET /flowsheet/latest order by
@@ -147,6 +233,7 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
       await sql.unsafe(`DELETE FROM "${SCHEMA}".shows WHERE id = $1`, [showId]);
     }
     await sql.unsafe(`DELETE FROM auth_user WHERE id = $1`, [USER_ID]);
+    await cleanStaff();
     await sql.end({ timeout: 5 });
   });
 
@@ -237,6 +324,80 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
       for (const row of mine) {
         expect(row.dj_name).toBe(HANDLE);
       }
+    });
+  });
+
+  describe('staff real names (BS#3051): staff reads carry them, public reads never do', () => {
+    let staff;
+    let anonToken;
+    let reviewId;
+
+    beforeAll(async () => {
+      staff = createAuthRequest(request, `Bearer ${STAFF_ID}`);
+      const created = await staff.post('/reviews').send({ album_id: staffAlbumId, review: STAFF_REVIEW });
+      expect(created.status).toBe(200);
+      reviewId = created.body.id;
+      expect((await staff.post(`/reviews/${reviewId}/submit`)).status).toBe(200);
+      expect((await staff.patch(`/reviews/${reviewId}`).send({ review: `${STAFF_REVIEW} Edited.` })).status).toBe(200);
+      const reported = await staff
+        .post('/fcc-notes')
+        .send({ album_id: staffAlbumId, track: 'B2', note: 'A placeholder note.' });
+      expect(reported.status).toBe(200);
+      ({ token: anonToken } = await signInAnonymous());
+    });
+
+    describe('staff reads (positive control: the stamps are the real name)', () => {
+      it('GET /reviews/{id} stamps the author with the real name, not the handle', async () => {
+        const res = await staff.get(`/reviews/${reviewId}`);
+        expect(res.status).toBe(200);
+        expect(res.body.author).toBe(SENTINEL_REAL_NAME);
+        expect(JSON.stringify(res.body)).not.toContain(STAFF_HANDLE);
+      });
+
+      it('GET /reviews/{id}/revisions stamps every version, the first-edit backfill and the edit, with the real name', async () => {
+        const res = await staff.get(`/reviews/${reviewId}/revisions`);
+        expect(res.status).toBe(200);
+        expect(res.body.length).toBeGreaterThanOrEqual(2);
+        expect(res.body.map((r) => r.edited_by)).toEqual(res.body.map(() => SENTINEL_REAL_NAME));
+      });
+
+      it('GET /fcc-notes stamps the reporter with the real name', async () => {
+        const res = await staff.get('/fcc-notes').query({ album_id: staffAlbumId });
+        expect(res.status).toBe(200);
+        expect(res.body.map((n) => n.reported_by)).toEqual([SENTINEL_REAL_NAME]);
+      });
+    });
+
+    describe('public reads never carry it', () => {
+      it('GET /proxy/metadata/album serves the form archive, with the attach on, and neither the review author nor the reviewer', async () => {
+        const res = await request
+          .get('/proxy/metadata/album')
+          .set('Authorization', `Bearer ${anonToken}`)
+          .query({ artistName: STAFF_ARTIST, releaseTitle: STAFF_ALBUM });
+        expect(res.status).toBe(200);
+        // Positive control: the attach ran for this album (WXYC_REVIEWS_ENABLED is on in the CI containers), so the
+        // absence below is not an attach that never looked.
+        expect(res.body.wxycReviews.map((r) => r.review)).toEqual([FORM_REVIEW]);
+        expect(JSON.stringify(res.body)).not.toContain(SENTINEL_REAL_NAME);
+      });
+
+      it.each([
+        ['GET /flowsheet', () => '/flowsheet'],
+        ['GET /flowsheet/latest', () => '/flowsheet/latest'],
+        ['GET /flowsheet/range', () => `/flowsheet/range?start=${WINDOW_START}&end=${WINDOW_END}`],
+        ['GET /flowsheet/search', () => '/flowsheet/search'],
+        [
+          'GET /flowsheet/search by the staff handle',
+          () => `/flowsheet/search?q=${encodeURIComponent(`dj:${STAFF_HANDLE}`)}`,
+        ],
+      ])('%s, with the staff account in scope', (_label, path) => expectNoSentinelLeak(path()));
+
+      it('positive control: the staff show is in the public range, projecting the handle', async () => {
+        const res = await request.get(`/flowsheet/range?start=${WINDOW_START}&end=${WINDOW_END}`);
+        const show = res.body.shows.find((s) => s.id === staffShowId);
+        expect(show).toBeDefined();
+        expect(show.dj_name).toBe(STAFF_HANDLE);
+      });
     });
   });
 });

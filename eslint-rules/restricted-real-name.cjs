@@ -16,8 +16,9 @@
  * This rule targets the narrower, still-open half of that risk: a NEW read
  * or write of `real_name` itself, anywhere outside the small set of files
  * that legitimately handle it (provisioning, the auth definition, the
- * legacy mirror's tubafrenzy forward, the schema column definition, and
- * the pending name-backfill job). A new legitimate PII read requires an
+ * legacy mirror's tubafrenzy forward, the schema column definition, the
+ * pending name-backfill job, and `shared/database/src/staff-name.ts`, the
+ * single read behind the staff-only review stamps; BS#3051). A new legitimate PII read requires an
  * allow-list edit in the same PR — reviewable, grep-able, and it converts
  * "someone remembered the doctrine" into "CI failed."
  *
@@ -98,6 +99,10 @@ const ALLOW_LIST = [
   'shared/authentication/src/auth.definition.ts',
   // The `real_name` column definition itself.
   'shared/database/src/schema.ts',
+  // BS#3051: the one place the review surfaces read a legal name. The staff-only stamps
+  // (`reviews.author`, `edited_by`, `reported_by`, `confirmed_by`) go through `readStaffName`
+  // here, so the review, intake, FCC and notice services stay off this list (exact path).
+  'shared/database/src/staff-name.ts',
   // Future one-shot backfill job (Track 2d) — prefix, not yet written.
   'jobs/auth-user-name-backfill/',
   // BS#2281's dj_name scrub. It removes legal names that were frozen onto

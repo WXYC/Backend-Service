@@ -1150,6 +1150,21 @@ export {
   deriveUserPublicName,
 } from '../../shared/database/src/dj-name.js';
 
+// Stubs of shared/database/src/staff-name.ts (BS#3051). Not a source re-export:
+// the real module closes over the REAL `user` table, which would pull the real
+// schema (and the real drizzle-orm it needs) into every suite that loads this
+// mock. The decision itself — the fragment text and the fallback — is pinned
+// against SOURCE in tests/unit/database/staff-name.test.ts.
+export const AUTHOR_MAX = 128;
+export const snapshotAuthor = (name: string | null | undefined) =>
+  name == null ? null : [...name].slice(0, AUTHOR_MAX).join('');
+export const staffNameSql = jest.fn(
+  (account: { realName: unknown; name: unknown }) => sql`coalesce(${account.realName}, ${account.name})`
+);
+export const readStaffName = jest.fn((_handle: unknown, _userId: string): Promise<string | null> =>
+  Promise.resolve(null)
+);
+
 // Stubs of shared/database/src/last-logged-show-entry.ts (BS#2118 sites
 // 5/7/8). NOT re-exported from source, unlike the pure dj-name chain above:
 // the real module closes over the REAL `flowsheet` schema object, while

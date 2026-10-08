@@ -7,6 +7,7 @@ import {
   artists,
   intake_items,
   library,
+  readStaffName,
   review_prints,
   review_revisions,
   reviews,
@@ -68,19 +69,8 @@ export type ReviewFields = Partial<
   >
 >;
 
-/** `reviews.author` is `varchar(128)`; `auth_user.name` is 255, so a long name is cut to its first 128 code points (Postgres counts characters, not UTF-16 units). */
-export const AUTHOR_MAX = 128;
-export const snapshotAuthor = (name: string | null | undefined) =>
-  name == null ? null : [...name].slice(0, AUTHOR_MAX).join('');
-
-/**
- * The calling account's display name, snapshotted for a stamp (author, editor, recorder, reporter, confirmer): `auth_user.name`, never `real_name`,
- * cut by `snapshotAuthor`. Runs one select on the handle it is given, so a caller inside a transaction passes `tx`. `null` when the account is gone or has no name.
- */
-export const readAccountName = async (handle: Pick<typeof db, 'select'>, userId: string): Promise<string | null> => {
-  const [row] = await handle.select({ name: user.name }).from(user).where(eq(user.id, userId));
-  return snapshotAuthor(row?.name);
-};
+/** Re-exported for the controller's `author` length check; the stamp cut itself lives with `readStaffName`. */
+export { AUTHOR_MAX } from '@wxyc/database';
 
 /**
  * SQL for "review `reviewId` is the newest print of a copy": of an intake item, or, with no item, of a library
@@ -231,7 +221,7 @@ export const createReview = async (subject: RecordSubject, fields: ReviewFields,
           ).length > 0
         : await lockReleaseRow(tx, subject.album_id);
     if (!held) return { outcome: 'subject_not_held' as const };
-    const author = await readAccountName(tx, actor.id);
+    const author = await readStaffName(tx, actor.id);
     const [{ id }] = await tx
       .insert(reviews)
       .values({
@@ -362,7 +352,7 @@ export const recordReview = async (
             ...names,
             reviewId: row.id,
             authorUserId: author_user_id,
-            name: await readAccountName(tx, actor.id),
+            name: await readStaffName(tx, actor.id),
           };
         }
       }
@@ -468,7 +458,7 @@ const highestRevision = async (tx: Pick<typeof db, 'select'>, reviewId: number) 
  * reviews before it reads their revisions, never misses one: a writer holding only the FK's `FOR
  * KEY SHARE` could slip a row in. Inside `updateReview` the row is already locked, so this
  * changes nothing there. It does not lock the intake item: lock order stays the caller's job,
- * through `lockReviewAfterItem`. `editor.name` is a snapshot (`snapshotAuthor`); `at` defaults
+ * through `lockReviewAfterItem`. `editor.name` is a snapshot (`readStaffName`); `at` defaults
  * to the column's `now()`.
  */
 export const writeReviewRevision = async (
@@ -541,7 +531,7 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
     const fccChanged = revises && patch.fcc !== undefined && patch.fcc !== current.fcc && current.printed_at != null;
     let editor: { name: string | null; userId: string } | undefined;
     if (revises) {
-      editor = { name: await readAccountName(tx, actor.id), userId: actor.id };
+      editor = { name: await readStaffName(tx, actor.id), userId: actor.id };
       await writeFirstRevisionIfMissing(tx, current);
     }
     const [row] = await tx

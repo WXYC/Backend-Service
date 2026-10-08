@@ -1,9 +1,8 @@
 import { and, asc, eq, or, sql, type InferSelectModel } from 'drizzle-orm';
-import { artists, db, fcc_notes, intake_items, library } from '@wxyc/database';
+import { artists, db, fcc_notes, intake_items, library, readStaffName } from '@wxyc/database';
 import type { RecordSubject } from '../utils/record-subject.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { withLockedRecordSubject } from './intake.service.js';
-import { readAccountName } from './reviews.service.js';
 
 /**
  * FCC notes on the record (BS#2862, slice 13c of BS#2791): any DJ reports a note against a library release or an
@@ -60,7 +59,7 @@ export const createFccNote = async (
   actor: ReviewsActor
 ) => {
   const result = await withLockedRecordSubject(subject, 'share', async (tx, locked) => {
-    const reported_by = await readAccountName(tx, actor.id);
+    const reported_by = await readStaffName(tx, actor.id);
     if (reported_by === null) return { outcome: 'no_account' as const };
     const [{ id }] = await tx
       .insert(fcc_notes)
@@ -108,13 +107,13 @@ export const listReportedFccNotes = (): Promise<FccNoteResponse[]> =>
 
 /**
  * Confirms a note: one `UPDATE … WHERE id AND status = 'reported' RETURNING`, stamping the caller's account name
- * (`snapshotAuthor`, as the create does; never `real_name`) and the time, and answering the row it returned (with the
+ * (`readStaffName`, as the create does: the real name, else `auth_user.name`) and the time, and answering the row it returned (with the
  * record's artist and album, read in the same transaction after it). Neither this nor `deleteFccNote` reads an item or
  * a review, so each takes the note's own row lock and nothing else. A note already confirmed matches no row and is
  * answered unchanged, the first confirmer's stamp kept. `no_account` is a caller with no name to snapshot: nothing is written.
  */
 export const confirmFccNote = async (id: number, actor: Pick<ReviewsActor, 'id'>) => {
-  const confirmed_by = await readAccountName(db, actor.id);
+  const confirmed_by = await readStaffName(db, actor.id);
   if (confirmed_by === null) return { outcome: 'no_account' as const };
   return db.transaction(async (tx) => {
     const [confirmed] = await tx

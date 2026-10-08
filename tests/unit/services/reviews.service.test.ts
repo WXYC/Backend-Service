@@ -22,6 +22,8 @@ const mockReads: {
   lock?: string;
   of?: string;
   where: string;
+  /** The selected fields, when the select names them. */
+  columns?: Record<string, unknown>;
   /** The rendered ORDER BY, when the select has one. */
   orderBy?: string;
   /** Every join, in order: its kind and its rendered ON clause. */
@@ -38,12 +40,12 @@ jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/auth
 jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../shared/database/src/schema');
   // A thenable chain: whatever the builder is awaited on resolves the next scripted result set.
-  const chain = (handle: 'db' | 'tx'): any => {
+  const chain = (handle: 'db' | 'tx', columns?: Record<string, unknown>): any => {
     const { PgDialect, getTableName } = {
       PgDialect: jest.requireActual('drizzle-orm/pg-core').PgDialect,
       getTableName: jest.requireActual('drizzle-orm').getTableName,
     };
-    const read: (typeof mockReads)[number] = { handle, table: '', where: '' };
+    const read: (typeof mockReads)[number] = { handle, table: '', where: '', columns };
     mockReads.push(read);
     mockStatements.push(`select#${mockReads.length - 1}`);
     const recordJoin = (kind: 'left' | 'inner', on: any) => {
@@ -83,7 +85,7 @@ jest.mock('@wxyc/database', () => {
     return c;
   };
   const tx = {
-    select: () => chain('tx'),
+    select: (columns?: Record<string, unknown>) => chain('tx', columns),
     insert: (t: any) => ({
       values: (v: Record<string, unknown>) => {
         mockWrites.inserted = v;
@@ -136,20 +138,23 @@ jest.mock('@wxyc/database', () => {
     },
   };
   const sqlstate = jest.requireActual('../../../shared/database/src/sqlstate');
-  return { ...realSchema, ...sqlstate, db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) } };
+  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
+  return {
+    ...realSchema,
+    ...sqlstate,
+    ...staffName,
+    db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) },
+  };
 });
 
 import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from '../../../apps/backend/services/intake.service';
 import {
-  AUTHOR_MAX,
   createReview,
   deleteReview,
   editOutcome,
   lockReviewAfterItem,
-  readAccountName,
   recordReview,
   reviewVisibleTo,
-  snapshotAuthor,
   submitReview,
   updateReview,
   writeReviewRevision,
@@ -188,31 +193,40 @@ describe('the intake seam this slice builds on', () => {
   });
 });
 
-describe('snapshotAuthor', () => {
-  test('keeps a short name whole', () => {
-    expect(snapshotAuthor('Cat Power')).toBe('Cat Power');
+describe('the stamped names are staff names (BS#3051)', () => {
+  const render = (query: unknown) => new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(query).sql;
+  const staffNameText = () =>
+    render(jest.requireMock('@wxyc/database').staffNameSql(jest.requireMock('@wxyc/database').user));
+  /** The account-name lookups of the run: selects of a lone `name` from `auth_user`, rendered. */
+  const nameLookups = () =>
+    mockReads
+      .filter((r) => r.table === 'auth_user' && r.columns && Object.keys(r.columns).join() === 'name')
+      .map((r) => render(r.columns.name));
+
+  test('the author of a new review', async () => {
+    mockQueue.push([{ id: 4 }], [{ name: 'n' }], [{ id: 11 }]);
+    await createReview({ intake_item_id: 4 }, {}, DJ);
+    expect(nameLookups()).toEqual([staffNameText()]);
   });
 
-  test.each([['a'], ['😀']])('cuts a 200-code-point name of %s to its first 128 code points', (ch) => {
-    const out = snapshotAuthor(ch.repeat(200));
-    expect([...out]).toHaveLength(AUTHOR_MAX);
-    expect(out).toBe(ch.repeat(128));
-  });
-
-  test('has no name to snapshot for a missing account', () => {
-    expect(snapshotAuthor(undefined)).toBeNull();
-  });
-});
-
-describe('readAccountName', () => {
-  test.each([
-    ['a name', [{ name: 'Test Reviewer' }], 'Test Reviewer'],
-    ['a name over 128 code points', [{ name: '😀'.repeat(200) }], '😀'.repeat(128)],
-    ['a null name', [{ name: null }], null],
-    ['no row', [], null],
-  ])('reads %s from the handle it is given', async (_label, rows, expected) => {
-    const handle = { select: () => ({ from: () => ({ where: () => Promise.resolve(rows) }) }) };
-    expect(await readAccountName(handle as any, 'user-1')).toBe(expected);
+  test('the recorder named in the "recorded in your name" notice', async () => {
+    mockQueue.push(
+      [{ album_id: null, state: 'pool' }],
+      [{ album_id: null, state: 'pool' }],
+      [{ id: 'dj-1' }],
+      [{ id: 11 }],
+      [{ n: 0 }],
+      [{ id: 11 }],
+      [{ artist: 'Juana Molina', album: 'DOGA' }],
+      [{ name: 'Test MD' }]
+    );
+    await recordReview(
+      { intake_item_id: 4 },
+      {},
+      { author: 'Test Reviewer', medium: 'handwritten', accept: true, author_user_id: 'dj-1' },
+      MD
+    );
+    expect(nameLookups()).toEqual([staffNameText()]);
   });
 });
 
@@ -821,6 +835,18 @@ describe('updateReview', () => {
   ])('nulling the text of %s is allowed', async (_name, o) => {
     script(o, [{ name: 'n' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
     expect((await updateReview(3, { review: null }, DJ)).outcome).toBe('updated');
+  });
+
+  test('the editor of a revision is stamped with the staff name (BS#3051)', async () => {
+    script({ medium: 'handwritten' }, [{ name: 'n' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+    await updateReview(3, { review: null }, DJ);
+    const lookups = mockReads.filter(
+      (r) => r.table === 'auth_user' && r.columns && Object.keys(r.columns).join() === 'name'
+    );
+    const { staffNameSql, user } = jest.requireMock('@wxyc/database');
+    expect(
+      lookups.map((r) => new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(r.columns.name).sql)
+    ).toEqual([new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(staffNameSql(user)).sql]);
   });
 
   test('leaving review out of a patch keeps the stored text, so other fields still save', async () => {

@@ -2786,8 +2786,10 @@ export const reviewCreditEnum = wxyc_schema.enum('review_credit', ['dj_name', 'r
  *
  * `author` is text because most historical authors have no account;
  * `author_user_id` links the account when there is one and `recorded_by_user_id`
- * names who typed an on-behalf review. See `docs/pii.md` for why `author` is
- * never a published credit. `status` defaults to `submitted` so rows that
+ * names who typed an on-behalf review. For an account holder's own review it is
+ * a snapshot of the staff name (`readStaffName`, `staff-name.ts`: the real name,
+ * else `auth_user.name`, BS#3051), so a real name inside the station. See
+ * `docs/pii.md` for why `author` is never a published credit. `status` defaults to `submitted` so rows that
  * predate the column, including `reviews` rows inside delete snapshots written
  * before it existed, restore as submitted. Consent (`publish_*`, `credit`) is
  * collected, not acted on, in v1.
@@ -3043,8 +3045,8 @@ export type NewIntakeItemPass = InferInsertModel<typeof intake_item_passes>;
  * `docs/pii.md` classifies it the same way (Mixed): revision 1 copies
  * `reviews.author`, which for an on-behalf review is free text a music
  * director typed and often a real name, and a later edit snapshots the
- * editor's `auth_user.name`. `real_name` is never read. Consent fields are not
- * versioned.
+ * editor's staff name (`readStaffName`: the real name, else `auth_user.name`,
+ * BS#3051). Consent fields are not versioned.
  */
 export const review_revisions = wxyc_schema.table(
   'review_revisions',
@@ -3096,10 +3098,11 @@ export const review_prints = wxyc_schema.table(
 export const fccNoteStatusEnum = wxyc_schema.enum('fcc_note_status', ['reported', 'confirmed']);
 
 /**
- * An FCC note a DJ reports against a release or a pile item, confirmed by a
- * music director. `reported_by` (required, BS#2862: the create refuses a caller
- * with no account to snapshot) and `confirmed_by` are display-name snapshots
- * of `auth_user.name`; `confirmed_by` has no account column because the
+ * An FCC note a DJ reports against a release or an item on the review shelf,
+ * confirmed by a music director. `reported_by` (required, BS#2862: the create
+ * refuses a caller with no account to snapshot) and `confirmed_by` are
+ * snapshots of the staff name (`readStaffName`: the real name, else
+ * `auth_user.name`, BS#3051); `confirmed_by` has no account column because the
  * contract's `FccNote` carries none.
  */
 export const fcc_notes = wxyc_schema.table(

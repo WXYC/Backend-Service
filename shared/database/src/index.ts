@@ -24,3 +24,4 @@ export * from './sqlstate.js';
 export * from './account-audit.js';
 export * from './catalog-delete-snapshot.js';
 export * from './catalog-delete-envelope.js';
+export * from './staff-name.js';

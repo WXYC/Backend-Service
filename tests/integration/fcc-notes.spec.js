@@ -99,9 +99,12 @@ describe('/fcc-notes (BS#2862)', () => {
   afterAll(cleanup);
 
   describe('POST /fcc-notes', () => {
-    test('a DJ who holds nothing reports against a logged record: reported, under their account name, carrying the item’s record', async () => {
+    test('a DJ who holds nothing reports against a logged record: reported, under their staff name (real name, else account name), carrying the item’s record', async () => {
       const item = await pooledItem('item');
-      const [{ name }] = await sql.unsafe(`SELECT name FROM auth_user WHERE id = $1`, [global.primary_dj_id]);
+      const [{ name }] = await sql.unsafe(
+        `SELECT coalesce(nullif(btrim(real_name), ''), name) AS name FROM auth_user WHERE id = $1`,
+        [global.primary_dj_id]
+      );
 
       const res = await djA.post('/fcc-notes').send(note({ intake_item_id: item.id, track: '  B2  ' }));
 
@@ -221,10 +224,12 @@ describe('/fcc-notes (BS#2862)', () => {
   describe('confirm, delete and the waiting list (BS#2863)', () => {
     const reportedBy = (id, extra) => seedFccNote({ reported_by_user_id: id, ...extra });
 
-    test('a music director confirms a reported note, stamped with their account name and the time; a second confirm changes nothing', async () => {
+    test('a music director confirms a reported note, stamped with their staff name and the time; a second confirm changes nothing', async () => {
       const item = await pooledItem('confirm');
       const reported = await reportedBy(global.primary_dj_id, { intake_item_id: item.id });
-      const [{ name }] = await sql.unsafe(`SELECT name FROM auth_user WHERE username = 'test_station_manager'`);
+      const [{ name }] = await sql.unsafe(
+        `SELECT coalesce(nullif(btrim(real_name), ''), name) AS name FROM auth_user WHERE username = 'test_station_manager'`
+      );
 
       const first = await manager.post(`/fcc-notes/${reported.id}/confirm`);
 
