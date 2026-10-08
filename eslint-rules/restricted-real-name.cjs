@@ -58,6 +58,15 @@
  * e.g. the pending `jobs/auth-user-name-backfill/` one-shot job); any other
  * entry is an exact match.
  *
+ * ## The staff-name helpers (BS#3051)
+ *
+ * `shared/database/src/staff-name.ts` reads `real_name` for them, so a caller never writes a `realName` member access and the
+ * checks above cannot see it. Its two exports, `readStaffName` and `staffNameSql`, are therefore restricted too: importing,
+ * re-exporting or member-accessing either outside `STAFF_NAME_CALLERS` (exact paths: the two services that stamp the review
+ * and FCC-note names) is flagged. Calling one needs an import or a member access (`db.readStaffName`), so those are the
+ * shapes matched. The barrel (`shared/database/src/index.ts`) reaches them with `export *`, which this rule does not inspect.
+ * A new legitimate caller is an edit to `STAFF_NAME_CALLERS` and to docs/pii.md in the same PR.
+ *
  * ## Known gaps (documented, not closed)
  *
  * Two shapes this rule does not cover, both out of the plan's stated scope
@@ -77,6 +86,7 @@
 
 const path = require('path');
 
+const STAFF_NAME_FILE = 'shared/database/src/staff-name.ts';
 const RESTRICTED_NAMES = new Set(['realName', 'real_name']);
 
 // Repo-root-relative. Trailing "/" = prefix match (directory); otherwise
@@ -117,6 +127,13 @@ const ALLOW_LIST = [
   'jobs/flowsheet-dj-name-scrub/',
 ];
 
+// BS#3051: the files that may import or call the staff-name helpers (exact paths). Keep in sync with docs/pii.md.
+const STAFF_NAME_HELPERS = new Set(['readStaffName', 'staffNameSql']);
+const STAFF_NAME_CALLERS = ['apps/backend/services/reviews.service.ts', 'apps/backend/services/fcc-notes.service.ts'];
+
+const STAFF_NAME_MESSAGE =
+  "'{{name}}' returns a legal name (auth_user.real_name, docs/pii.md) and is for the review and FCC-note stamps only. Legitimate new caller: add the file to STAFF_NAME_CALLERS here and to docs/pii.md in the same PR; otherwise use dj_name / resolveDjDisplayName.";
+
 const MESSAGE =
   "'{{name}}' read/written outside the PII allow-list — auth_user.real_name is the sole legal-name carrier (docs/pii.md). Legitimate new site: add the file to ALLOW_LIST here and to docs/pii.md in the same PR; otherwise use dj_name / resolveDjDisplayName.";
 
@@ -146,6 +163,7 @@ const rule = {
     schema: [],
     messages: {
       restrictedRealName: MESSAGE,
+      restrictedStaffName: STAFF_NAME_MESSAGE,
     },
   },
 
@@ -154,9 +172,18 @@ const rule = {
     const filename = context.filename;
     const relativePath = toRepoRelativePath(filename, cwd);
 
-    if (isAllowListed(relativePath)) {
+    const checkRealName = !isAllowListed(relativePath);
+    const checkStaffName = !STAFF_NAME_CALLERS.includes(relativePath) && relativePath !== STAFF_NAME_FILE;
+
+    if (!checkRealName && !checkStaffName) {
       return {};
     }
+
+    const reportStaffName = (node, name) => {
+      if (checkStaffName && STAFF_NAME_HELPERS.has(name)) {
+        context.report({ node, messageId: 'restrictedStaffName', data: { name } });
+      }
+    };
 
     return {
       // Member-expression access: `user.realName`, `dj.real_name`,
@@ -168,6 +195,8 @@ const rule = {
       // an answer.
       MemberExpression(node) {
         const prop = node.property;
+        if (!node.computed && prop.type === 'Identifier') reportStaffName(prop, prop.name);
+        if (!checkRealName) return;
         if (!node.computed && prop.type === 'Identifier' && RESTRICTED_NAMES.has(prop.name)) {
           context.report({ node: prop, messageId: 'restrictedRealName', data: { name: prop.name } });
           return;
@@ -188,7 +217,7 @@ const rule = {
       // both ObjectExpression and ObjectPattern, but only the former is a
       // construction site; see the module docblock's Known Gaps section.
       Property(node) {
-        if (node.parent.type !== 'ObjectExpression') return;
+        if (!checkRealName || node.parent.type !== 'ObjectExpression') return;
         const key = node.key;
         if (!node.computed && key.type === 'Identifier' && RESTRICTED_NAMES.has(key.name)) {
           context.report({ node: key, messageId: 'restrictedRealName', data: { name: key.name } });
@@ -197,6 +226,14 @@ const rule = {
         if (key.type === 'Literal' && typeof key.value === 'string' && RESTRICTED_NAMES.has(key.value)) {
           context.report({ node: key, messageId: 'restrictedRealName', data: { name: key.value } });
         }
+      },
+
+      // BS#3051: `import { readStaffName } from ...` and `export { readStaffName } from ...`.
+      ImportSpecifier(node) {
+        reportStaffName(node.imported, node.imported.name ?? node.imported.value);
+      },
+      ExportSpecifier(node) {
+        reportStaffName(node.local, node.local.name ?? node.local.value);
       },
     };
   },
