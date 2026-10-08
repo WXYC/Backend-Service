@@ -66,6 +66,9 @@ describe('insertAlbum', () => {
     const outcome = insertAlbum(ALBUM, { kind: 'pre_cutover' });
     if (on) {
       await expect(outcome).rejects.toBeInstanceOf(ReviewRequiredError);
+      await expect(insertAlbum(ALBUM, { kind: 'pre_cutover' })).rejects.toThrow(
+        'Every new release needs a review: put it on the review shelf first.'
+      );
       expect(db.insert).not.toHaveBeenCalled();
     } else {
       await expect(outcome).resolves.toEqual({ id: 5 });

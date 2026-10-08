@@ -138,10 +138,10 @@ const reportFailure = (err: unknown, context: Record<string, unknown>) => {
 type NoticeLink = { path: string; label: string };
 type Notice = { subject: string; lines: string[]; links: NoticeLink[]; context: Record<string, unknown> };
 
-/** The link to an intake item in the Pile, for the notices about one. */
+/** The link to an intake item on the review shelf, for the notices about one. */
 const itemLink = (itemId: number): NoticeLink => ({
   path: `/dashboard/admin/intake/${itemId}`,
-  label: 'Open in the Pile',
+  label: 'Open on the review shelf',
 });
 
 /** Plain text: the lines, then each link's full URL on its own line. HTML: the lines, then one paragraph per anchor. One home, so the two senders cannot drift. */
@@ -154,7 +154,7 @@ const render = ({ lines, links }: Pick<Notice, 'lines' | 'links'>) => ({
 
 /**
  * One email per music director, sent concurrently. Never rejects: every failure is logged and reported to Sentry
- * (`context` is its `extra`) and swallowed, because the intake Pile is the source of truth. Callers start a notice after the commit and do
+ * (`context` is its `extra`) and swallowed, because the review shelf is the source of truth. Callers start a notice after the commit and do
  * not await it (as `auth.definition.ts` does the password-reset send), so a slow or hung SES never delays or fails
  * a request that already committed. Each link's `path` is joined to the frontend's base URL in `render`, which stays private.
  * `sendNotificationEmail` honors `EMAIL_ENABLED`. `excludeUserIds` names accounts that are not sent to even though

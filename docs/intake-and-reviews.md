@@ -41,7 +41,7 @@ Route and rule reference for `/intake` and `/reviews`, moved out of `CLAUDE.md`'
 ## `/fcc-notes`
 
 - `POST /fcc-notes` (BS#2862, `reviews:write`): exactly one of `album_id` and `intake_item_id` (parsed by `parseRecordSubject`, a 400 for both, neither or an id that is not a positive int4), plus `track` and `note`, each non-blank after trimming and with no length bound; answers 200 with the `FccNote`.
-- No hold rule: any DJ reports against any Pile item in any state and against any library release. A subject that names no release or item is a 400, not a 409.
+- No hold rule: any DJ reports against any logged record in any state and against any library release. A subject that names no release or item is a 400, not a 409.
 - The note is created `reported`, `reported_by` a `snapshotAuthor` snapshot of the caller's `auth_user.name` (never `real_name`) and `reported_by_user_id` the caller; a caller with no account row to snapshot is a 403 and nothing is written (migration 0187 makes `fcc_notes.reported_by` NOT NULL).
 - Locks go through `lockRecordSubject(tx, subject, 'share')`: the library row `FOR KEY SHARE` first (a missing release is the 400), then the item `FOR SHARE`. An item the lock does not find may have been filed between the unlocked read and the lock, so the transaction runs once more, and a second miss is the 400; the note is never written with a NULL `album_id` for a filed item.
 - A note of a `filed` or `finalized` item is stamped with the item's `album_id` at creation, and `POST /intake/{id}/file` stamps `album_id` on every note of the item in its own transaction (both arms, no status filter). A note keeps its `intake_item_id` after the stamp.
