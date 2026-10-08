@@ -1,5 +1,5 @@
 import * as Sentry from '@sentry/node';
-import { eq, sql } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 import { db, intake_items, member, readStaffName, staffNameSql, user } from '@wxyc/database';
 import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
 import type { FccNoteResponse } from './fcc-notes.service.js';
@@ -70,7 +70,8 @@ export const readReviewNotice = async (
       checked_out_by: intake_items.checked_out_by,
       requested_dj_id: intake_items.requested_dj_id,
       effective_state: effectiveState,
-      holder_name: staffNameSql(user),
+      // NULL when the left join finds no account (no holder or request), which `staffNameSql`'s `SQL<string>` does not say.
+      holder_name: staffNameSql(user) as SQL<string | null>,
     })
     .from(intake_items)
     .leftJoin(
@@ -211,10 +212,7 @@ export const notifyPass = async (item: { id: number; artist: string; album: stri
   // The request already succeeded; a failed name lookup sends the notice without the name, never an error.
   const dj = await Promise.resolve()
     .then(() => readStaffName(db, djUserId))
-    .then(
-      (name) => name,
-      () => null
-    );
+    .catch(() => null);
   return notifyMusicDirectors({
     links: [itemLink(item.id)],
     context: { item_id: item.id },
