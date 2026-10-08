@@ -37,6 +37,8 @@ const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.POR
 const { createAuthRequest } = require('../utils/test_helpers');
 const { signInAnonymous } = require('../utils/anonymous_auth');
 const {
+  seedIntakeItem,
+  removeSeededIntakeItems,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedFormSubmission,
@@ -109,6 +111,7 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
       [STAFF_ID]
     );
     await sql.unsafe(`DELETE FROM "${SCHEMA}".shows WHERE primary_dj_id = $1`, [STAFF_ID]);
+    await removeSeededIntakeItems();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
     await sql.unsafe(`DELETE FROM auth_user WHERE id = $1`, [STAFF_ID]);
@@ -331,9 +334,18 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
     let staff;
     let anonToken;
     let reviewId;
+    let intakeItemId;
 
     beforeAll(async () => {
       staff = createAuthRequest(request, `Bearer ${STAFF_ID}`);
+      // BS#3052: the staff account holds an intake item, so GET /intake names it by the computed staff name.
+      intakeItemId = (
+        await seedIntakeItem({
+          artist_name: STAFF_ARTIST,
+          album_title: STAFF_ALBUM,
+          checkout: { by: STAFF_ID },
+        })
+      ).id;
       const created = await staff.post('/reviews').send({ album_id: staffAlbumId, review: STAFF_REVIEW });
       expect(created.status).toBe(200);
       reviewId = created.body.id;
@@ -366,6 +378,12 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
         expect(res.status).toBe(200);
         expect(res.body.map((n) => n.reported_by)).toEqual([SENTINEL_REAL_NAME]);
       });
+
+      it('GET /intake names the holder of an item by the real name, computed at read time (BS#3052)', async () => {
+        const res = await staff.get('/intake');
+        expect(res.status).toBe(200);
+        expect(res.body.find((i) => i.id === intakeItemId).checked_out_by_name).toBe(SENTINEL_REAL_NAME);
+      });
     });
 
     describe('public reads never carry it', () => {
@@ -378,6 +396,12 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
         // Positive control: the attach ran for this album (WXYC_REVIEWS_ENABLED is on in the CI containers), so the
         // absence below is not an attach that never looked.
         expect(res.body.wxycReviews.map((r) => r.review)).toEqual([FORM_REVIEW]);
+        expect(JSON.stringify(res.body)).not.toContain(SENTINEL_REAL_NAME);
+      });
+
+      it('GET /intake refuses an anonymous caller, so the holder of an item is not served to it (BS#3052)', async () => {
+        const res = await request.get('/intake').set('Authorization', `Bearer ${anonToken}`);
+        expect(res.status).not.toBe(200);
         expect(JSON.stringify(res.body)).not.toContain(SENTINEL_REAL_NAME);
       });
 

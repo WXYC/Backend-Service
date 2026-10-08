@@ -84,17 +84,19 @@ describe('/intake (BS#2796)', () => {
     await cleanup();
 
     [{ id: formatId }] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format ORDER BY id LIMIT 1`);
-    // `real_name` is seeded with a marker so a leak anywhere in a response is a failed assertion.
-    for (const [suffix, name] of [
-      ['requested', 'Requested DJ Name'],
-      ['holder', 'Holder DJ Name'],
-      ['passer', 'Passing DJ Name'],
+    // BS#3052: the names are the staff name, so `real_name` is what shows when it has a value, and `name` when it is null or only whitespace.
+    for (const [suffix, name, realName] of [
+      ['requested', 'Requested DJ Name', 'Requested Real Name'],
+      ['holder', 'Holder DJ Name', 'Holder Real Name'],
+      ['passer', 'Passing DJ Name', 'Passing Real Name'],
+      ['null-holder', 'Null Holder DJ Name', null],
+      ['blank-holder', 'Blank Holder DJ Name', ' \t\u00a0 '],
     ]) {
       await seedAuthUser({
         id: USER_PREFIX + suffix,
         name,
         email: `${USER_PREFIX}${suffix}@test.wxyc.org`,
-        real_name: 'LEAKED REAL NAME',
+        real_name: realName,
       });
     }
 
@@ -130,6 +132,9 @@ describe('/intake (BS#2796)', () => {
       checked_out_by: `${USER_PREFIX}holder`,
       checked_out_at: daysAgo(2),
     });
+    for (const suffix of ['null-holder', 'blank-holder']) {
+      await seed(suffix, { state: 'checked_out', checked_out_by: USER_PREFIX + suffix, checked_out_at: daysAgo(1) });
+    }
     // No CHECK ties checked_out_at to the state, so the schema admits this row.
     await seed('checkout-no-stamp', { state: 'checked_out', checked_out_by: `${USER_PREFIX}holder` });
 
@@ -230,19 +235,31 @@ describe('/intake (BS#2796)', () => {
       expect(stamps).toEqual([...stamps].sort((a, b) => b - a));
     });
 
-    test('names come from auth_user.name; real_name never appears', async () => {
+    test('names are the real name when the account has one (BS#3052)', async () => {
       const res = await auth.get('/intake');
       const fresh = mine(res.body).find((i) => i.id === ids['fresh-request']);
-      expect(fresh.requested_dj_name).toBe('Requested DJ Name');
+      expect(fresh.requested_dj_name).toBe('Requested Real Name');
       const overdue = mine(res.body).find((i) => i.id === ids.overdue);
-      expect(overdue.checked_out_by_name).toBe('Holder DJ Name');
-      expect(res.text).not.toContain('LEAKED REAL NAME');
+      expect(overdue.checked_out_by_name).toBe('Holder Real Name');
     });
 
-    test('a caller holding reviews:manage sees passes on list items (name from auth_user.name)', async () => {
+    test.each([
+      ['null', 'null-holder', 'Null Holder DJ Name'],
+      ['only whitespace', 'blank-holder', 'Blank Holder DJ Name'],
+    ])('a holder whose real_name is %s is named by auth_user.name (BS#3052)', async (_case, key, expected) => {
+      const res = await auth.get('/intake');
+      expect(mine(res.body).find((i) => i.id === ids[key]).checked_out_by_name).toBe(expected);
+    });
+
+    test('a request whose DJ account is gone still has a null requested_dj_name (BS#3052)', async () => {
+      const res = await auth.get(`/intake/${ids['deleted-dj-request']}`);
+      expect(res.body.requested_dj_name).toBeNull();
+    });
+
+    test("a caller holding reviews:manage sees passes on list items (the passing DJ's real name)", async () => {
       const res = await auth.get('/intake');
       const pooled = mine(res.body).find((i) => i.id === ids.pool);
-      expect(pooled.passes).toEqual([{ dj_name: 'Passing DJ Name', passed_at: expect.any(String) }]);
+      expect(pooled.passes).toEqual([{ dj_name: 'Passing Real Name', passed_at: expect.any(String) }]);
       const unpassed = mine(res.body).find((i) => i.id === ids['tie-first']);
       expect(unpassed.passes).toEqual([]);
     });
@@ -251,7 +268,7 @@ describe('/intake (BS#2796)', () => {
       const res = await nonManager.get('/intake');
       expect(res.status).toBe(200);
       mine(res.body).forEach((i) => expect(i).not.toHaveProperty('passes'));
-      expect(res.text).not.toContain('Passing DJ Name');
+      expect(res.text).not.toMatch(/Passing (DJ|Real) Name/);
     });
 
     test('?state=bogus is a 400', async () => {

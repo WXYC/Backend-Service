@@ -20,7 +20,8 @@ jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../shared/database/src/schema');
   const { drizzle } = jest.requireActual('drizzle-orm/postgres-js');
   const nyTime = jest.requireActual('../../../shared/database/src/ny-time');
-  return { ...realSchema, ...nyTime, db: drizzle({}) };
+  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
+  return { ...realSchema, ...nyTime, ...staffName, db: drizzle({}) };
 });
 
 jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
@@ -28,9 +29,10 @@ jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
   return { ...actual, reviewGateCutoverDate: jest.fn(actual.reviewGateCutoverDate) };
 });
 
-import { eq, sql } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { db, intake_items } from '@wxyc/database';
+import { alias } from 'drizzle-orm/pg-core';
+import { db, intake_items, staffNameSql, user } from '@wxyc/database';
 import { createLockLog } from '../../utils/lock-log-builder';
 import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
 import {
@@ -111,11 +113,24 @@ describe('buildIntakeSelect — filter and order', () => {
       `order by "${SCHEMA}"."intake_items"."logged_at" desc, "${SCHEMA}"."intake_items"."id" desc`
     );
   });
+});
 
-  it('names DJs from auth_user.name and never reads real_name', () => {
-    const { sql: text } = render({ includePasses: true });
-    expect(text).not.toContain('real_name');
-    expect(text).toContain('"name"');
+// The value cases (a real name, null/blank falling back to auth_user.name, a deleted account) are Postgres's to decide: tests/unit/database/staff-name.test.ts
+// pins the fragment and tests/integration/intake-items.spec.js pins these fields.
+describe('buildIntakeSelect — staff names (BS#3052)', () => {
+  const dialect = new PgDialect();
+  const renderOf = (fragment: SQL) => dialect.sqlToQuery(fragment).sql;
+  const { sql: text } = render({ includePasses: true });
+
+  it.each([
+    ['requested_dj_name', 'requester'],
+    ['checked_out_by_name', 'holder'],
+  ])('%s is the staff name of the %s join', (field, aliasName) => {
+    expect(text).toContain(`${renderOf(staffNameSql(alias(user, aliasName)))} as "${field}"`);
+  });
+
+  it('names the passing DJ inside the passes aggregate with the staff name', () => {
+    expect(text).toContain(`json_build_object('dj_name', ${renderOf(staffNameSql(user))}, 'passed_at'`);
   });
 });
 

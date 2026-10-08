@@ -69,10 +69,16 @@ ruleTester.run('restricted-real-name', rule, {
       code: `const staff = sql\`coalesce(nullif(btrim(\${account.realName}), ''), \${account.name})\`;`,
       filename: 'shared/database/src/staff-name.ts',
     },
-    // BS#3051: the two services that stamp the review and FCC-note names may
-    // import and call the staff-name helpers (an exact-path list, apart from
-    // the real_name allow-list), and the helper's own file may define them.
-    ...['apps/backend/services/reviews.service.ts', 'apps/backend/services/fcc-notes.service.ts'].map((filename) => ({
+    // BS#3051/BS#3052: the services that stamp the review and FCC-note names, and the
+    // two that show a staff name on the intake lists and notices, may import and call
+    // the staff-name helpers (an exact-path list, apart from the real_name allow-list),
+    // and the helper's own file may define them.
+    ...[
+      'apps/backend/services/reviews.service.ts',
+      'apps/backend/services/fcc-notes.service.ts',
+      'apps/backend/services/intake.service.ts',
+      'apps/backend/services/review-notices.service.ts',
+    ].map((filename) => ({
       code: `import { db, readStaffName, staffNameSql } from '@wxyc/database'; const a = await readStaffName(tx, id); const b = staffNameSql(user);`,
       filename,
     })),
@@ -209,8 +215,8 @@ ruleTester.run('restricted-real-name', rule, {
     })),
     // BS#3051: the staff-name helpers return a legal name without any
     // `realName` access at the call site, so importing, re-exporting or
-    // member-accessing them outside the two stamping services is flagged,
-    // including in a public controller and in the other review services.
+    // member-accessing them outside the four staff-surface services is flagged,
+    // including in a public controller and in a look-alike path.
     ...[
       `import { readStaffName } from '@wxyc/database';`,
       `import { db, staffNameSql as nameSql } from '@wxyc/database';`,
@@ -220,8 +226,8 @@ ruleTester.run('restricted-real-name', rule, {
       [
         NON_ALLOW_LISTED_FILE,
         'apps/backend/controllers/flowsheet.controller.ts',
-        'apps/backend/services/intake.service.ts',
-        'apps/backend/services/review-notices.service.ts',
+        'apps/backend/controllers/intake.controller.ts',
+        'apps/backend/services/intake.service.ts.bak',
         'apps/backend/services/reviews.service.ts.bak',
       ].map((filename) => ({
         code,

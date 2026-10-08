@@ -494,9 +494,11 @@ components:
         days old, or whose `requested_dj_id` is null (the DJ's account was
         deleted), reads as `pool`; `overdue` is true for an item whose checkout
         (`checked_out_at`) is more than 14 days old, `checked_out` or `reviewed`
-        alike (a returned item has no checkout). A read never changes `state`. DJ names are
-        `auth_user.name`, never a real name. `passes` and `draft_authors` (the
-        `author` of each unsubmitted draft, oldest first; names only) are present only for
+        alike (a returned item has no checkout). A read never changes `state`. `requested_dj_name`,
+        `checked_out_by_name` and `passes[].dj_name` are the person's current real
+        name, or `auth_user.name` when they have none, read at request time.
+        `passes` and `draft_authors` (the stored `author` text of each
+        unsubmitted draft, oldest first; names only) are present only for
         callers holding `reviews: manage`. `submitted_review_count` counts the
         item's submitted reviews. `accepted_review_id`, `accepted_by` and
         `accepted_at` name the review a music director accepted. Swagger display only; the SSOT is
@@ -5637,7 +5639,7 @@ paths:
       summary: Delete an intake item (BS#2796)
       description: >-
         Grant `reviews: manage`. Refused with 409 `already_filed` once the item
-        is filed. `deleted_review_authors` names the `author` of every review the
+        is filed. `deleted_review_authors` names the stored `author` text of every review the
         delete took, drafts included, oldest first (names only, never content);
         the item is locked first, then its authors are read and it is deleted in
         one transaction.

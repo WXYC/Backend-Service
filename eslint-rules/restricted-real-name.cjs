@@ -62,8 +62,8 @@
  *
  * `shared/database/src/staff-name.ts` reads `real_name` for them, so a caller never writes a `realName` member access and the
  * checks above cannot see it. Its two exports, `readStaffName` and `staffNameSql`, are therefore restricted too: importing,
- * re-exporting or member-accessing either outside `STAFF_NAME_CALLERS` (exact paths: the two services that stamp the review
- * and FCC-note names) is flagged. Calling one needs an import or a member access (`db.readStaffName`), so those are the
+ * re-exporting or member-accessing either outside `STAFF_NAME_CALLERS` (exact paths: the services that stamp the review and
+ * FCC-note names, and the two that show a staff name on the intake lists and the review notices; BS#3052) is flagged. Calling one needs an import or a member access (`db.readStaffName`), so those are the
  * shapes matched. The barrel (`shared/database/src/index.ts`) reaches them with `export *`, which this rule does not inspect.
  * A new legitimate caller is an edit to `STAFF_NAME_CALLERS` and to docs/pii.md in the same PR.
  *
@@ -111,7 +111,8 @@ const ALLOW_LIST = [
   'shared/database/src/schema.ts',
   // BS#3051: the one place the review surfaces read a legal name. The staff-only stamps
   // (`reviews.author`, `edited_by`, `reported_by`, `confirmed_by`) go through `readStaffName`
-  // here, so the review, intake, FCC and notice services stay off this list (exact path).
+  // here, and the intake lists and review notices through `staffNameSql` (BS#3052), so the
+  // review, intake, FCC and notice services stay off this list (exact path).
   'shared/database/src/staff-name.ts',
   // Future one-shot backfill job (Track 2d) — prefix, not yet written.
   'jobs/auth-user-name-backfill/',
@@ -129,10 +130,15 @@ const ALLOW_LIST = [
 
 // BS#3051: the files that may import or call the staff-name helpers (exact paths). Keep in sync with docs/pii.md.
 const STAFF_NAME_HELPERS = new Set(['readStaffName', 'staffNameSql']);
-const STAFF_NAME_CALLERS = ['apps/backend/services/reviews.service.ts', 'apps/backend/services/fcc-notes.service.ts'];
+const STAFF_NAME_CALLERS = [
+  'apps/backend/services/reviews.service.ts',
+  'apps/backend/services/fcc-notes.service.ts',
+  'apps/backend/services/intake.service.ts',
+  'apps/backend/services/review-notices.service.ts',
+];
 
 const STAFF_NAME_MESSAGE =
-  "'{{name}}' returns a legal name (auth_user.real_name, docs/pii.md) and is for the review and FCC-note stamps only. Legitimate new caller: add the file to STAFF_NAME_CALLERS here and to docs/pii.md in the same PR; otherwise use dj_name / resolveDjDisplayName.";
+  "'{{name}}' returns a legal name (auth_user.real_name, docs/pii.md) and is for staff-only review surfaces only. Legitimate new caller: add the file to STAFF_NAME_CALLERS here and to docs/pii.md in the same PR; otherwise use dj_name / resolveDjDisplayName.";
 
 const MESSAGE =
   "'{{name}}' read/written outside the PII allow-list — auth_user.real_name is the sole legal-name carrier (docs/pii.md). Legitimate new site: add the file to ALLOW_LIST here and to docs/pii.md in the same PR; otherwise use dj_name / resolveDjDisplayName.";
