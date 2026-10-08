@@ -10,11 +10,13 @@ jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../shared/database/src/schema');
   const { drizzle } = jest.requireActual('drizzle-orm/postgres-js');
   const nyTime = jest.requireActual('../../../shared/database/src/ny-time');
-  return { ...realSchema, ...nyTime, db: drizzle({}) };
+  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
+  return { ...realSchema, ...nyTime, ...staffName, db: drizzle({}) };
 });
 
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { db, user } from '@wxyc/database';
+import type { SQL } from 'drizzle-orm';
+import { db, staffNameSql, user } from '@wxyc/database';
 import {
   confirmedFccNotesOf,
   confirmFccNote,
@@ -37,13 +39,18 @@ describe('createFccNote (BS#2862)', () => {
   const noteRow = { id: 11, artist_name: 'Juana Molina', album_title: 'DOGA' };
   let inserted: Record<string, unknown>[];
   let transaction: jest.SpyInstance;
+  let reporterLookups: unknown[];
 
   const run = async (subject: Parameters<typeof createFccNote>[0], selects: unknown[][]) => {
     log.length = 0;
     inserted = [];
+    reporterLookups = [];
     const queue = selects.map((rows) => [...rows]);
     const tx = {
-      select: jest.fn(() => builder(queue.shift() ?? [])),
+      select: jest.fn((columns?: Record<string, unknown>) => {
+        if (columns && Object.keys(columns).join() === 'name') reporterLookups.push(columns.name);
+        return builder(queue.shift() ?? []);
+      }),
       insert: jest.fn(() => ({
         values: (v: Record<string, unknown>) => {
           inserted.push(v);
@@ -92,6 +99,11 @@ describe('createFccNote (BS#2862)', () => {
     expect(result).toMatchObject({
       notice: { note: noteRow, artist: 'Juana Molina', album: 'DOGA', reporterUserId: 'dj-1' },
     });
+  });
+
+  it('stamps the reporter with the staff name (real name, else account name), looked up once', async () => {
+    await run({ album_id: 9 }, [[{ id: 9 }], [account], [noteRow]]);
+    expect(reporterLookups.map((c) => render(c).sql)).toEqual([render(staffNameSql(user)).sql]);
   });
 
   it('cuts a long account name to the 128 code points the column holds', async () => {
@@ -227,11 +239,11 @@ describe('confirmFccNote (BS#2863)', () => {
     expect(tx.select).toHaveBeenCalledTimes(1);
   });
 
-  it('the confirmer lookup reads the account name, keyed by the caller', async () => {
+  it('the confirmer lookup reads the staff name (real name, else account name), keyed by the caller', async () => {
     const { select, account } = await run([{ name: 'Test Reviewer' }], [{ id: 5 }], [note]);
     const columns = select.mock.calls[0][0] as Record<string, unknown>;
     expect(Object.keys(columns)).toEqual(['name']);
-    expect(columns.name).toBe(user.name);
+    expect(render(columns.name as SQL).sql).toBe(render(staffNameSql(user)).sql);
     expect(account.from[0]).toBe(user);
     expect(render(account.where[0])).toEqual({ sql: '"auth_user"."id" = $1', params: ['md-1'] });
   });

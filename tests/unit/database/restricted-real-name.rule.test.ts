@@ -63,6 +63,12 @@ ruleTester.run('restricted-real-name', rule, {
       code: `export const user = pgTable('auth_user', { realName: varchar('real_name', { length: 255 }) });`,
       filename: 'shared/database/src/schema.ts',
     },
+    // Allow-listed file (BS#3051): the staff-name helper, the one reader of
+    // the legal name behind the review stamps.
+    {
+      code: `const staff = sql\`coalesce(nullif(btrim(\${account.realName}), ''), \${account.name})\`;`,
+      filename: 'shared/database/src/staff-name.ts',
+    },
     // Allow-listed path PREFIX: any file under the future one-shot
     // backfill job workspace.
     {
@@ -172,6 +178,22 @@ ruleTester.run('restricted-real-name', rule, {
       filename: 'jobs/auth-user-name-backfill-other/job.ts',
       errors: [{ messageId: 'restrictedRealName', data: { name: 'realName' } }],
     },
+    // BS#3051: only the staff-name helper is allow-listed for the review
+    // stamps. The services that call it are not, and neither is a path that
+    // merely resembles it (the entry is an exact match, not a prefix).
+    ...[
+      'apps/backend/services/reviews.service.ts',
+      'apps/backend/services/intake.service.ts',
+      'apps/backend/services/fcc-notes.service.ts',
+      'apps/backend/services/review-notices.service.ts',
+      'shared/database/src/dj-name.ts',
+      'shared/database/src/staff-name.test.ts',
+      'shared/database/src/staff-name.ts.bak',
+    ].map((filename) => ({
+      code: `const leaked = account.realName;`,
+      filename,
+      errors: [{ messageId: 'restrictedRealName', data: { name: 'realName' } }],
+    })),
     // The hook-helper module is NOT allow-listed: its actual derivation
     // reads `djName`, not `realName`/`real_name` (see Track 2b), so a
     // `realName` read here would be a genuine new PII site, not the

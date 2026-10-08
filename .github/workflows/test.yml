@@ -735,6 +735,12 @@ jobs:
           # column was previously destructured away, with no gating coverage.
           CATALOG_TRACK_SEARCH_CTA_ENABLED: 'true'
           CATALOG_TRACK_SEARCH_DISCOGS_ENABLED: 'true'
+          # Consented WXYC DJ reviews on GET /proxy/metadata/album (ADR 0011,
+          # BS#3051): mirrors dev_env/docker-compose.yml so
+          # tests/integration/dj-real-name-sentinel.spec.js exercises the
+          # wxycReviews attach (gated in apps/backend/config/wxycReviews.ts,
+          # default false) when it proves the attach never carries a real name.
+          WXYC_REVIEWS_ENABLED: 'true'
           # Digital archive playback (BS#2320): mirrors
           # dev_env/docker-compose.yml's ci-profile default so the
           # presigned-manifest happy path and has_digital_audio are exercised

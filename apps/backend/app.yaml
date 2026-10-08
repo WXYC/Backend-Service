@@ -725,8 +725,8 @@ components:
         - $ref: '#/components/schemas/ReviewFields'
         - type: object
           description: >
-            An in-app review. `author` is a snapshot of the author's `auth_user.name`, cut to its
-            first 128 code points. There is no print lock: the author edits at any time.
+            An in-app review. `author` is a snapshot of the author's staff name (the real name, else
+            `auth_user.name`), cut to its first 128 code points. There is no print lock: the author edits at any time.
           properties:
             id: { type: integer }
             album_id: { type: integer, nullable: true }
@@ -774,7 +774,7 @@ components:
             type: string,
             nullable: true,
             maxLength: 128,
-            description: "On revision 1 the review's `author`; on later revisions a snapshot of the editor's display name",
+            description: "On revision 1 the review's `author`; on later revisions a snapshot of the editor's staff name (the real name, else `auth_user.name`)",
           }
         edited_by_user_id: { type: string, nullable: true }
         edited_at: { type: string, format: date-time }
@@ -813,7 +813,12 @@ components:
         track: { type: string }
         note: { type: string }
         status: { type: string, enum: [reported, confirmed] }
-        reported_by: { type: string, maxLength: 128, description: "Snapshot of the reporter's `auth_user.name`" }
+        reported_by:
+          {
+            type: string,
+            maxLength: 128,
+            description: "Snapshot of the reporter's staff name (the real name, else `auth_user.name`)",
+          }
         reported_by_user_id: { type: string, nullable: true, description: '`null` once that account is deleted' }
         reported_at: { type: string, format: date-time }
         confirmed_by: { type: string, nullable: true, maxLength: 128 }
@@ -6242,7 +6247,7 @@ paths:
     post:
       summary: Report an FCC note on a record (BS#2862)
       description: >-
-        Grant `reviews: write`. Any DJ may report against any library release or intake item in any state; no hold is needed. The note starts `reported`, under a snapshot of the caller's account name. A note against a filed or finalized item carries the item's release at once. Answers 200, not 201.
+        Grant `reviews: write`. Any DJ may report against any library release or intake item in any state; no hold is needed. The note starts `reported`, under a snapshot of the caller's staff name (the real name, else the account name). A note against a filed or finalized item carries the item's release at once. Answers 200, not 201.
       requestBody:
         required: true
         content:
@@ -6275,7 +6280,7 @@ paths:
     post:
       summary: Confirm an FCC note (BS#2863)
       description: >-
-        Grant `reviews: manage`. Sets `status` to `confirmed` and stamps `confirmed_by` (a snapshot of the caller's account name, never the real name) and `confirmed_at`, in one `UPDATE … WHERE status = 'reported'`. Confirming a note that is already confirmed answers 200 and changes nothing: the first confirmer's stamp stays. A caller with no account name to snapshot is a 403 and nothing is written. Only confirmed notes print on the slip.
+        Grant `reviews: manage`. Sets `status` to `confirmed` and stamps `confirmed_by` (a snapshot of the caller's staff name: the real name, else the account name) and `confirmed_at`, in one `UPDATE … WHERE status = 'reported'`. Confirming a note that is already confirmed answers 200 and changes nothing: the first confirmer's stamp stays. A caller with no account name to snapshot is a 403 and nothing is written. Only confirmed notes print on the slip.
       responses:
         '200':
           description: 'The note, confirmed'

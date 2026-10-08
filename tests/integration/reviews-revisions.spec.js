@@ -29,7 +29,10 @@ describe('/reviews revision history (BS#2861)', () => {
   let sql;
   let libraryId;
 
-  const userName = async (id) => (await sql.unsafe(`SELECT name FROM auth_user WHERE id = $1`, [id]))[0].name;
+  const userName = async (id) =>
+    (
+      await sql.unsafe(`SELECT coalesce(nullif(btrim(real_name), ''), name) AS name FROM auth_user WHERE id = $1`, [id])
+    )[0].name;
   const draftFor = (overrides = {}) =>
     seedReview({
       album_id: libraryId,
