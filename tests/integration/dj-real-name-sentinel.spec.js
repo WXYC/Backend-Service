@@ -399,12 +399,8 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
         expect(JSON.stringify(res.body)).not.toContain(SENTINEL_REAL_NAME);
       });
 
-      it('GET /intake refuses an anonymous caller, so the holder of an item is not served to it (BS#3052)', async () => {
-        const res = await request.get('/intake').set('Authorization', `Bearer ${anonToken}`);
-        // A valid anonymous token carries no staff role, so requirePermissions({ reviews: ['read'] }) answers 403.
-        expect(res.status).toBe(403);
-        expect(JSON.stringify(res.body)).not.toContain(SENTINEL_REAL_NAME);
-      });
+      // GET /intake's refusal of an anonymous caller is a role gate, which AUTH_BYPASS makes unreachable here; it is pinned in
+      // tests/unit/routes/intake-permissions.route.test.ts.
 
       it.each([
         ['GET /flowsheet', () => '/flowsheet'],
