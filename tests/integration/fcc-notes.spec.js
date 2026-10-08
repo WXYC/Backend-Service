@@ -99,7 +99,7 @@ describe('/fcc-notes (BS#2862)', () => {
   afterAll(cleanup);
 
   describe('POST /fcc-notes', () => {
-    test('a DJ who holds nothing reports against a Pile item: reported, under their account name, carrying the item’s record', async () => {
+    test('a DJ who holds nothing reports against a logged record: reported, under their account name, carrying the item’s record', async () => {
       const item = await pooledItem('item');
       const [{ name }] = await sql.unsafe(`SELECT name FROM auth_user WHERE id = $1`, [global.primary_dj_id]);
 

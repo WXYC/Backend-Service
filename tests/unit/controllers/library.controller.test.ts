@@ -6588,7 +6588,7 @@ describe('library.controller', () => {
 
   // BS#2807: after the cutover date a refused basis is the contract's 409 `review_required`.
   describe('the review gate (BS#2807)', () => {
-    const refusal = new ReviewRequiredError('Every new release needs a review: file it through the Pile');
+    const refusal = new ReviewRequiredError('Every new release needs a review: put it on the review shelf first.');
     const body409 = { message: refusal.message, reason: 'review_required' };
 
     beforeEach(() => {

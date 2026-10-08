@@ -778,7 +778,7 @@ const assertGateBasis = async (tx: DbTransaction, basis: GateBasis) => {
   }
   if (basis.kind === 'pre_cutover') {
     if (isGateOn()) {
-      throw new ReviewRequiredError('Every new release needs a review: file it through the Pile');
+      throw new ReviewRequiredError('Every new release needs a review: put it on the review shelf first.');
     }
     return;
   }

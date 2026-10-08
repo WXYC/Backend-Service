@@ -164,7 +164,7 @@ describe('notices', () => {
     { id: 'dj-1', role: 'dj', email: 'dj@example.org', banned: false, banExpires: null },
   ];
   const URL = 'https://dj.example.org/dashboard/admin/intake/4';
-  const LINK = `<p><a href="${URL}">Open in the Pile</a></p>`;
+  const LINK = `<p><a href="${URL}">Open on the review shelf</a></p>`;
   type Sent = { to: string[]; subject: string; text: string; html: string };
   const sent = (n = 0) => mockSend.mock.calls.at(n)![0] as Sent;
   const savedFrontend = process.env.FRONTEND_SOURCE;
@@ -419,7 +419,7 @@ describe('notices', () => {
         to: ['md-one@example.org'],
         subject: 'FCC line changed on a printed review: Juana Molina – DOGA',
         text: `${lines.join('\n')}\n${ITEM_URL}`,
-        html: `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open in the Pile</a></p>`,
+        html: `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open on the review shelf</a></p>`,
       });
     });
 
@@ -429,7 +429,7 @@ describe('notices', () => {
       const lines = [first, 'New FCC line: A clean line.', 'The printed slips are out of date. Reprint them from:'];
       expect(sent().text).toBe(`${lines.join('\n')}\n${ITEM_URL}\n${ALBUM_URL}`);
       expect(sent().html).toBe(
-        `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open in the Pile</a></p><p><a href="${ALBUM_URL}">Open the album page</a></p>`
+        `${lines.map((l) => `<p>${l}</p>`).join('')}<p><a href="${ITEM_URL}">Open on the review shelf</a></p><p><a href="${ALBUM_URL}">Open the album page</a></p>`
       );
     });
 
