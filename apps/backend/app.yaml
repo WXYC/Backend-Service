@@ -494,12 +494,16 @@ components:
         days old, or whose `requested_dj_id` is null (the DJ's account was
         deleted), reads as `pool`; `overdue` is true for an item whose checkout
         (`checked_out_at`) is more than 14 days old, `checked_out` or `reviewed`
-        alike (a returned item has no checkout). A read never changes `state`. `requested_dj_name`,
-        `checked_out_by_name` and `passes[].dj_name` are the person's current real
-        name, or `auth_user.name` when they have none, read at request time.
-        `passes` and `draft_authors` (the stored `author` text of each
-        unsubmitted draft, oldest first; names only) are present only for
-        callers holding `reviews: manage`. `submitted_review_count` counts the
+        alike (a returned item has no checkout). A read never changes `state`. Its three DJ-name
+        fields (`requested_dj_name`, `checked_out_by_name`, `passes[].dj_name`) hold the person's real
+        name as shown inside the station, falling back to their account name (on-air handle, else
+        username) when no real name is on file, current at read time. They are station-only: not for
+        any public or anonymous surface, because they hold a legal name, and never for client
+        telemetry (analytics properties, error breadcrumbs, logs). `passes` and `draft_authors` are
+        present only for callers holding `reviews: manage`; `draft_authors` is `reviews.author` free
+        text (oldest first; names only): a real name or account name for a DJ's own review, but
+        whatever the music director typed for an on-behalf review. It carries the same station-only
+        caveat as the three DJ-name fields; see `DELETE /intake/{id}`. `submitted_review_count` counts the
         item's submitted reviews. `accepted_review_id`, `accepted_by` and
         `accepted_at` name the review a music director accepted. Swagger display only; the SSOT is
         wxyc-shared/api.yaml.
@@ -520,10 +524,18 @@ components:
         accepted_at: { type: string, format: date-time, nullable: true }
         logged_at: { type: string, format: date-time }
         requested_dj_id: { type: string, nullable: true }
-        requested_dj_name: { type: string, nullable: true }
+        requested_dj_name:
+          type: string
+          nullable: true
+          description: >-
+          The requested DJ's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
         requested_at: { type: string, format: date-time, nullable: true }
         checked_out_by: { type: string, nullable: true }
-        checked_out_by_name: { type: string, nullable: true }
+        checked_out_by_name:
+          type: string
+          nullable: true
+          description: >-
+          The holder's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
         checked_out_at: { type: string, format: date-time, nullable: true }
         cited_album_id: { type: integer, nullable: true }
         cited_submission_id: { type: integer, nullable: true }
@@ -537,7 +549,10 @@ components:
           items:
             type: object
             properties:
-              dj_name: { type: string }
+              dj_name:
+                type: string
+                description: >-
+                  The passing DJ's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
               passed_at: { type: string, format: date-time }
         draft_authors:
           type: array
@@ -5639,10 +5654,15 @@ paths:
       summary: Delete an intake item (BS#2796)
       description: >-
         Grant `reviews: manage`. Refused with 409 `already_filed` once the item
-        is filed. `deleted_review_authors` names the stored `author` text of every review the
+        is filed. `deleted_review_authors` names the stored `reviews.author` text of every review the
         delete took, drafts included, oldest first (names only, never content);
         the item is locked first, then its authors are read and it is deleted in
-        one transaction.
+        one transaction. These are `reviews.author` snapshots, not `auth_user.name`: a real name
+        (falling back to the account name when none is on file) for an account-holding DJ's own
+        review, free text for a handwritten or on-behalf review, and so not guaranteed PII-free.
+        They exist for the music director's own in-station confirmation of what was removed:
+        station-only, not for any public or anonymous surface, because they hold a legal name, and
+        never for client telemetry (analytics properties, error breadcrumbs, logs).
       responses:
         '200':
           description: 'Deleted'

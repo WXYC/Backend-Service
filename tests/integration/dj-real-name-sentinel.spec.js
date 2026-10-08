@@ -401,7 +401,8 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
 
       it('GET /intake refuses an anonymous caller, so the holder of an item is not served to it (BS#3052)', async () => {
         const res = await request.get('/intake').set('Authorization', `Bearer ${anonToken}`);
-        expect(res.status).not.toBe(200);
+        // A valid anonymous token carries no staff role, so requirePermissions({ reviews: ['read'] }) answers 403.
+        expect(res.status).toBe(403);
         expect(JSON.stringify(res.body)).not.toContain(SENTINEL_REAL_NAME);
       });
 

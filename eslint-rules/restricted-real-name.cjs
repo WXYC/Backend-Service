@@ -111,8 +111,7 @@ const ALLOW_LIST = [
   'shared/database/src/schema.ts',
   // BS#3051: the one place the review surfaces read a legal name. The staff-only stamps
   // (`reviews.author`, `edited_by`, `reported_by`, `confirmed_by`) go through `readStaffName`
-  // here, and the intake lists and review notices through `staffNameSql` (BS#3052), so the
-  // review, intake, FCC and notice services stay off this list (exact path).
+  // here, so the review, intake, FCC and notice services stay off this list (exact path).
   'shared/database/src/staff-name.ts',
   // Future one-shot backfill job (Track 2d) — prefix, not yet written.
   'jobs/auth-user-name-backfill/',
