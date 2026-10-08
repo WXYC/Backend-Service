@@ -528,14 +528,14 @@ components:
           type: string
           nullable: true
           description: >-
-          The requested DJ's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
+            The requested DJ's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
         requested_at: { type: string, format: date-time, nullable: true }
         checked_out_by: { type: string, nullable: true }
         checked_out_by_name:
           type: string
           nullable: true
           description: >-
-          The holder's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
+            The holder's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
         checked_out_at: { type: string, format: date-time, nullable: true }
         cited_album_id: { type: integer, nullable: true }
         cited_submission_id: { type: integer, nullable: true }
