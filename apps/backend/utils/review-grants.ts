@@ -1,4 +1,4 @@
-import { AUTO_DJ_USERNAME, roleGrants } from '@wxyc/authentication';
+import { isServiceAccount, roleGrants } from '@wxyc/authentication';
 import type { Request } from 'express';
 
 /** Whether the caller holds `reviews: manage`: the music director's verbs, and the lift on the DJ-only limits in `/intake` and `/reviews`. */
@@ -17,11 +17,13 @@ export const reviewsActor = (req: Pick<Request, 'auth'>): ReviewsActor => ({
 export const canWriteReviews = (roles: Iterable<string | null | undefined>): boolean =>
   [...roles].some((role) => roleGrants(role, { reviews: ['write'] }));
 
-/** Whether an account can be asked to review: its roles grant `reviews: write` and it is not a service account (the auto-DJ, recognised by `AUTO_DJ_USERNAME`). The one account rule behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`. */
+/** Whether an account can be asked to review: its roles grant `reviews: write` and it is not a service account (the auto-DJ or the uptime canary, recognised by `isServiceAccount`). The one account rule behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`. */
 export const canBeAskedToReview = ({
   roles,
   username,
+  email,
 }: {
   roles: Iterable<string | null | undefined>;
   username: string | null | undefined;
-}): boolean => canWriteReviews(roles) && username !== AUTO_DJ_USERNAME;
+  email: string | null | undefined;
+}): boolean => canWriteReviews(roles) && !isServiceAccount({ username, email });

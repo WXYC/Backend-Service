@@ -157,6 +157,18 @@ void _assertEveryStatementKeyIsRouted;
 /** Username of the auto-DJ service account: minted by `apps/auth/create-auto-dj-user.ts`, left out of review requests by `canBeAskedToReview`. */
 export const AUTO_DJ_USERNAME = 'autodj';
 
+/** Email of the uptime canary's DJ-role account (wxyc-canary's README setup step provisions it with the `dj` role and no fixed username, so the email is the one documented identifier). */
+export const CANARY_EMAIL = 'canary@wxyc.org';
+
+/** Whether an account is a service account (the auto-DJ by `AUTO_DJ_USERNAME`, the uptime canary by `CANARY_EMAIL`): the one marker `canBeAskedToReview` tests, so a new automated account is added here and nowhere else. */
+export const isServiceAccount = ({
+  username,
+  email,
+}: {
+  username: string | null | undefined;
+  email: string | null | undefined;
+}): boolean => username === AUTO_DJ_USERNAME || email?.toLowerCase() === CANARY_EMAIL;
+
 export type AccessControlStatement = typeof statement;
 
 /**

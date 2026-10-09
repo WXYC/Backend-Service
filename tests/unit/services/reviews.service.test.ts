@@ -253,11 +253,12 @@ describe('listReviewers (BS#3058)', () => {
     ]);
   });
 
-  test('leaves out the auto-DJ service account, whatever its role', async () => {
+  test('leaves out the service accounts (the auto-DJ and the uptime canary), whatever their role', async () => {
     const open = { banned: null, banExpires: null };
     mockQueue.push([
-      { id: 'a', name: 'Test Reviewer A', role: 'dj', username: 'test.a', ...open },
-      { id: 'auto', name: 'Auto DJ', role: 'dj', username: 'autodj', ...open },
+      { id: 'a', name: 'Test Reviewer A', role: 'dj', username: 'test.a', email: 'test.a@example.org', ...open },
+      { id: 'auto', name: 'Auto DJ', role: 'dj', username: 'autodj', email: 'autodj@example.org', ...open },
+      { id: 'canary', name: 'Canary', role: 'dj', username: 'test.canary', email: 'canary@wxyc.org', ...open },
     ]);
     expect(await listReviewers()).toEqual([{ id: 'a', name: 'Test Reviewer A' }]);
   });
@@ -280,7 +281,15 @@ describe('listReviewers (BS#3058)', () => {
     const [read] = mockReads;
     const db = jest.requireMock('@wxyc/database');
     expect(read.table).toBe('auth_member');
-    expect(Object.keys(read.columns).sort()).toEqual(['banExpires', 'banned', 'id', 'name', 'role', 'username']);
+    expect(Object.keys(read.columns).sort()).toEqual([
+      'banExpires',
+      'banned',
+      'email',
+      'id',
+      'name',
+      'role',
+      'username',
+    ]);
     expect(render(read.columns.name)).toBe(render(db.staffNameSql(db.user)));
     expect(read.where).toBe('');
     expect(read.orderBy).toMatch(/^lower\(/);

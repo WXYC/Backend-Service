@@ -652,7 +652,7 @@ export type ReviewerResponse = { id: string; name: string };
 
 /**
  * `GET /reviews/reviewers` (BS#3058): accounts whose membership roles grant `reviews: write` (`canBeAskedToReview`, the rule
- * `/intake` applies to `dj_id`, which leaves out service accounts such as the auto-DJ), less any account whose ban is in force (`isBanInForce`: a lapsed ban counts as lifted, though
+ * `/intake` applies to `dj_id`, which leaves out service accounts such as the auto-DJ and the uptime canary), less any account whose ban is in force (`isBanInForce`: a lapsed ban counts as lifted, though
  * better-auth clears `auth_user.banned` only at the next sign-in), named by the staff name and sorted by it case-insensitively.
  * `name` is a real name: it goes in the response only.
  */
@@ -664,6 +664,7 @@ export const listReviewers = async (): Promise<ReviewerResponse[]> => {
       name,
       role: member.role,
       username: user.username,
+      email: user.email,
       banned: user.banned,
       banExpires: user.banExpires,
     })
@@ -671,8 +672,8 @@ export const listReviewers = async (): Promise<ReviewerResponse[]> => {
     .innerJoin(user, eq(member.userId, user.id))
     .orderBy(sql`lower(${name})`, user.id);
   const reviewers = new Map<string, ReviewerResponse>();
-  for (const { id, name: staffName, role, username, banned, banExpires } of rows) {
-    if (canBeAskedToReview({ roles: [role], username }) && !isBanInForce({ banned, banExpires }))
+  for (const { id, name: staffName, role, username, email, banned, banExpires } of rows) {
+    if (canBeAskedToReview({ roles: [role], username, email }) && !isBanInForce({ banned, banExpires }))
       reviewers.set(id, { id, name: staffName });
   }
   return [...reviewers.values()];
