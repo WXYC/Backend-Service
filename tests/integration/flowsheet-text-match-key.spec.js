@@ -52,14 +52,16 @@ describe('text_match_key', () => {
 });
 
 describe('candidate query', () => {
-  let a, b, c1, c2, beak;
+  let a, b, c1, c2, beak, bangs;
 
   beforeAll(async () => {
     a = await seedLibraryRelease({ artist_name: 'Jessica Pratt', album_title: 'Afterlife' });
     b = await seedLibraryRelease({ artist_name: 'Stereolab', album_title: 'Afterlife' });
-    c1 = await seedLibraryRelease({ artist_name: 'Chuquimamani-Condori', album_title: 'Edits' });
-    c2 = await seedLibraryRelease({ artist_id: c1.artist_id, album_title: 'Edits' });
+    // Synthetic names: a real pair would collide with the prod-clone overlay (dev_env/seed-clone.sql).
+    c1 = await seedLibraryRelease({ artist_name: 'Duplicate Fixture Artist', album_title: 'Duplicate Fixture Album' });
+    c2 = await seedLibraryRelease({ artist_id: c1.artist_id, album_title: 'Duplicate Fixture Album' });
     beak = await seedLibraryRelease({ artist_name: 'Beak>', album_title: '>>>' });
+    bangs = await seedLibraryRelease({ artist_name: '!!!', album_title: 'Myth Takes' });
   });
 
   afterAll(async () => {
@@ -88,7 +90,9 @@ describe('candidate query', () => {
   });
 
   test('duplicate library rows return both ids', async () => {
-    expect(await candidates('Chuquimamani Condori', 'Edits')).toEqual([c1.id, c2.id].sort((x, y) => x - y));
+    expect(await candidates('Duplicate  Fixture Artist', 'duplicate fixture album')).toEqual(
+      [c1.id, c2.id].sort((x, y) => x - y)
+    );
   });
 
   test('unknown title returns none', async () => {
@@ -98,5 +102,12 @@ describe('candidate query', () => {
   test('symbols-only title never matches', async () => {
     expect(beak.id).toBeDefined();
     expect(await candidates('Beak>', '>>>')).toEqual([]);
+  });
+
+  test('symbols-only artist never matches, even against a symbols-only library artist', async () => {
+    // Pins the artist-leg `<> ''` guard: both artists key to '' and both albums key equal, so without the guard
+    // this matches on '' = ''.
+    expect(bangs.id).toBeDefined();
+    expect(await candidates('???', 'Myth Takes')).toEqual([]);
   });
 });
