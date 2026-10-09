@@ -40,4 +40,13 @@ describe('linkage_source vocabulary', () => {
     );
     expect(literals).toEqual(expect.arrayContaining(['etl_legacy_id', 'dj_bin_pick']));
   });
+
+  // The bridge/fuzzy SQL scripts only mention their label in comments; the stamps builder is what writes it,
+  // taking the value as a free-form CLI argument.
+  it('scripts/build-flowsheet-stamps-sql.py is only invoked with LINKAGE_SOURCES values', () => {
+    const text = readFileSync(join(ROOT, 'scripts/build-flowsheet-stamps-sql.py'), 'utf8');
+    const values = [...text.matchAll(/--linkage-source\s+(\w+)/g)].map((m) => m[1]);
+    expect(values.length).toBeGreaterThan(0);
+    expect(values.filter((v) => !(LINKAGE_SOURCES as readonly string[]).includes(v))).toEqual([]);
+  });
 });
