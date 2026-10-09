@@ -17,6 +17,7 @@ const mockAuthContext = {
 
 jest.mock('@wxyc/authentication', () => ({
   auth: { $context: Promise.resolve(mockAuthContext) },
+  AUTO_DJ_USERNAME: 'autodj',
 }));
 
 const mockProvisionUser = jest.fn();

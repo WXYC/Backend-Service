@@ -154,6 +154,9 @@ const _assertEveryStatementKeyIsRouted: [UnroutedStatementKeys] extends [never]
   : ['statement key must be declared in stationStatement, not inline', UnroutedStatementKeys] = true;
 void _assertEveryStatementKeyIsRouted;
 
+/** Username of the auto-DJ service account: minted by `apps/auth/create-auto-dj-user.ts`, left out of review requests by `canBeAskedToReview`. */
+export const AUTO_DJ_USERNAME = 'autodj';
+
 export type AccessControlStatement = typeof statement;
 
 /**

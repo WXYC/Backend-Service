@@ -32,7 +32,7 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { auth } from '@wxyc/authentication';
+import { AUTO_DJ_USERNAME, auth } from '@wxyc/authentication';
 import { provisionUser } from './provision-user';
 
 export const createAutoDjUser = async (): Promise<void> => {
@@ -76,7 +76,7 @@ export const createAutoDjUser = async (): Promise<void> => {
     // PII/legal-name field stays empty. `role: 'dj'` keeps `user.role` null.
     await provisionUser({
       email,
-      username: 'autodj',
+      username: AUTO_DJ_USERNAME,
       // `name` is required (notNull) but is NOT the invariant carrier here —
       // `djName` below is. deriveUserNameOnCreate (databaseHooks.user.create.before,
       // shared/authentication/src/derive-user-display-name.ts) derives the stored
