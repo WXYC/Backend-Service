@@ -1,47 +1,42 @@
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
-import { DrizzleQueryError } from 'drizzle-orm/errors';
-import { authLogHandler, setAuthLogRedactor } from '../../../shared/authentication/src/auth-log';
-import { redactLogValue } from '@wxyc/observability';
+import { inspect } from 'util';
+import { authLogHandler, resetAuthLogRedactor } from '../../../shared/authentication/src/auth-log';
+import { installAuthLogRedaction } from '../../../apps/auth/log-redaction';
+import { realDrizzleQueryError } from '../../utils/postgres-js-errors';
 
-// A failed `auth_user.real_name` write quotes the legal name in the error's
-// message, stack and params (BS#3054). better-auth logs the raw caught error
-// through its `logger.log`; the auth app logs the same errors itself.
+// The registration module needs only the log seam from the authentication package, and the real one.
+jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth-log'));
+
+// A failed `auth_user.real_name` write quotes the legal name in the error's message, stack and params
+// (BS#3054). better-auth logs the raw caught error through its `logger.log`, and better-call's router
+// through `console.error`; the auth app logs the same errors itself.
 const SENTINEL = 'Test Reviewer';
-const failedWrite = () =>
-  new DrizzleQueryError(
-    'update "auth_user" set "real_name" = $1 where "id" = $2',
-    [SENTINEL, 'u1'],
-    new Error('timeout')
-  );
+const failedWrite = () => realDrizzleQueryError([SENTINEL, 'u1']);
+const everything = (calls: unknown[]) => inspect(calls, { depth: 10, showHidden: true });
 
-const read = (relPath: string) => readFileSync(resolve(__dirname, '../../..', relPath), 'utf8');
+describe('authLogHandler before any redactor is registered', () => {
+  beforeEach(resetAuthLogRedactor);
+  afterEach(() => jest.restoreAllMocks());
 
-describe('authLogHandler', () => {
-  afterEach(() => {
-    setAuthLogRedactor((value) => value);
-    jest.restoreAllMocks();
-  });
-
-  it('writes better-auth errors to console.error with bound parameters removed once the app registers the redactor', () => {
+  it('fails closed: an error is logged as its class name and a placeholder, never its message or itself', () => {
     const spy = jest.spyOn(console, 'error').mockImplementation();
-    setAuthLogRedactor(redactLogValue);
 
     authLogHandler('error', 'INTERNAL_SERVER_ERROR', failedWrite());
 
     const [line, logged] = spy.mock.calls[0];
+    expect(everything(spy.mock.calls)).not.toContain(SENTINEL);
     expect(line).toContain('ERROR [Better Auth]: INTERNAL_SERVER_ERROR');
-    expect(JSON.stringify([line, logged], Object.getOwnPropertyNames(logged))).not.toContain(SENTINEL);
-    expect(logged).toBeInstanceOf(DrizzleQueryError);
+    expect(logged).toBe('[DrizzleQueryError: details withheld, no log redactor registered]');
   });
 
-  it('redacts a message string that quotes the failed query', () => {
+  it('cuts a message string that quotes the failed query at its params', () => {
     const spy = jest.spyOn(console, 'error').mockImplementation();
-    setAuthLogRedactor(redactLogValue);
 
     authLogHandler('error', failedWrite().message);
 
-    expect(String(spy.mock.calls[0][0])).not.toContain(SENTINEL);
+    expect(everything(spy.mock.calls)).not.toContain(SENTINEL);
+    expect(String(spy.mock.calls[0][0])).toContain('update "auth_user"');
   });
 
   it.each([
@@ -57,13 +52,46 @@ describe('authLogHandler', () => {
   });
 });
 
-// The handlers below run on paths that write `auth_user.real_name`; none of them
-// is reachable without the database, so pin the wiring in the source.
-describe('auth app wiring', () => {
+describe('installAuthLogRedaction (what apps/auth/app.ts runs at startup)', () => {
+  let restore: () => void;
+  let consoleSpy: { error: jest.SpyInstance; warn: jest.SpyInstance };
+
+  beforeEach(() => {
+    consoleSpy = {
+      error: jest.spyOn(console, 'error').mockImplementation(),
+      warn: jest.spyOn(console, 'warn').mockImplementation(),
+    };
+    restore = installAuthLogRedaction();
+  });
+  afterEach(() => {
+    restore();
+    jest.restoreAllMocks();
+  });
+
+  it("redacts what better-auth's logger.log writes, keeping the error's class", () => {
+    authLogHandler('error', 'INTERNAL_SERVER_ERROR', failedWrite());
+
+    expect(everything(consoleSpy.error.mock.calls)).not.toContain(SENTINEL);
+    expect(consoleSpy.error.mock.calls[0][1].constructor.name).toBe('DrizzleQueryError');
+  });
+
+  it("redacts what better-call's router and the adapter write straight to the console", () => {
+    console.error('# SERVER_ERROR: ', failedWrite());
+    console.warn(failedWrite());
+
+    expect(everything([...consoleSpy.error.mock.calls, ...consoleSpy.warn.mock.calls])).not.toContain(SENTINEL);
+  });
+});
+
+// Behavior cannot reach these: `apps/auth/app.ts` calls `listen()` and the database when imported, and
+// better-auth is ESM-only (the router itself is driven in tests/unit/observability/console-redaction.test.ts).
+// So the wiring is pinned in the source.
+describe('auth app wiring (source pins)', () => {
+  const read = (relPath: string) => readFileSync(resolve(__dirname, '../../..', relPath), 'utf8');
   const app = read('apps/auth/app.ts');
 
-  it('registers the redactor for better-auth logging', () => {
-    expect(app).toContain('setAuthLogRedactor(redactLogValue);');
+  it('installs the log redaction at startup, and routes better-auth logging through the sink', () => {
+    expect(app).toContain('installAuthLogRedaction();');
     expect(read('shared/authentication/src/auth.definition.ts')).toContain('logger: { log: authLogHandler }');
   });
 

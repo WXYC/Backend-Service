@@ -8,13 +8,21 @@ import {
   redactSentryBreadcrumb,
   redactSentryEventQueryParams,
 } from '@wxyc/observability';
+import {
+  captureRealDrizzleQueryError,
+  postgresJsServerError,
+  realDrizzleQueryError,
+} from '../../utils/postgres-js-errors';
 
 const SENTINEL = 'Test Reviewer';
 const SQL = 'insert into "reviews" ("review", "author") values ($1, $2)';
 
-/** drizzle-orm's real error class, so the message format under test is Drizzle's own. */
+/**
+ * drizzle-orm's real error class, so the message format under test is Drizzle's own, around a driver
+ * error with postgres.js's real (non-configurable) property shape unless a cause is given.
+ */
 function queryError(params: string[] = ['great record', SENTINEL], cause?: unknown): DrizzleQueryError {
-  return new DrizzleQueryError(SQL, params, cause as Error | undefined);
+  return new DrizzleQueryError(SQL, params, (cause as Error | undefined) ?? postgresJsServerError(params));
 }
 
 function everything(error: unknown): string {
@@ -67,13 +75,100 @@ describe('redactQueryParams', () => {
     expect(redacted.cause).toBe(cause);
   });
 
-  it('drops the bound-value properties postgres.js attaches to its errors', () => {
-    const driver = Object.assign(new Error('boom'), { code: '23502', parameters: [SENTINEL], args: [SENTINEL] });
+  it('drops the bound-value properties postgres.js attaches to its errors, which it defines non-configurable', () => {
+    const driver = postgresJsServerError([SENTINEL], { code: '23502' });
+    expect(Object.getOwnPropertyDescriptor(driver, 'parameters')).toMatchObject({
+      writable: false,
+      configurable: false,
+    });
 
     const redacted = redactQueryParams(new Error('wrapper', { cause: driver })).cause as typeof driver;
 
     expect(everything(redacted)).not.toContain(SENTINEL);
-    expect(redacted.code).toBe('23502');
+    expect((redacted as { code?: string }).code).toBe('23502');
+  });
+
+  it('redacts a DrizzleQueryError around a postgres.js error without throwing', () => {
+    const error = realDrizzleQueryError([SENTINEL, 'u1'], { code: '23502' });
+
+    const redacted = redactQueryParams(error);
+
+    expect(everything(redacted)).not.toContain(SENTINEL);
+    expect(redacted).toBeInstanceOf(DrizzleQueryError);
+    expect((redacted.cause as { code?: string }).code).toBe('23502');
+    expect((redacted.cause as { query?: string }).query).toContain('update "auth_user"');
+  });
+
+  it('redacts the error drizzle and postgres.js really throw (closed port, no database)', async () => {
+    const error = await captureRealDrizzleQueryError(SENTINEL);
+    expect(Object.getOwnPropertyDescriptor(error.cause, 'parameters')?.configurable).toBe(false);
+
+    const redacted = redactQueryParams(error);
+
+    expect(error.message).toContain(SENTINEL);
+    expect(everything(redacted)).not.toContain(SENTINEL);
+    expect(redactLogValue({ arguments: [error] })).toBeDefined();
+  });
+
+  describe('never throws', () => {
+    const throwingMessage = () => {
+      const e = new Error('x');
+      Object.defineProperty(e, 'message', {
+        get() {
+          throw new Error('getter boom');
+        },
+      });
+      return e;
+    };
+    const throwingProperty = () => {
+      const e = new Error(`Failed query: ${SQL}\nparams: ${SENTINEL}`);
+      Object.defineProperty(e, 'code', {
+        get() {
+          throw new Error('getter boom');
+        },
+        enumerable: true,
+      });
+      return e;
+    };
+
+    it.each([
+      ['a frozen error', () => Object.freeze(queryError())],
+      ['an error whose message getter throws', throwingMessage],
+      ['an error with a throwing property getter', throwingProperty],
+      [
+        'a Proxy whose traps throw',
+        () =>
+          new Proxy(queryError(), {
+            ownKeys() {
+              throw new Error('trap boom');
+            },
+            getOwnPropertyDescriptor() {
+              throw new Error('trap boom');
+            },
+          }),
+      ],
+    ])('for %s, and the result holds no bound value', (_label, build) => {
+      let redacted: unknown;
+      expect(() => {
+        redacted = redactQueryParams(build());
+      }).not.toThrow();
+      expect(() => redactLogValue(build())).not.toThrow();
+      expect(() => redactSentryBreadcrumb({ message: 'm', data: { arguments: [build()] } })).not.toThrow();
+      expect(everything(redacted)).not.toContain(SENTINEL);
+    });
+
+    it('falls back to the class name and redacted message for an error it cannot copy', () => {
+      const redacted = redactQueryParams(
+        new Proxy(queryError(), {
+          ownKeys() {
+            throw new Error('trap boom');
+          },
+        })
+      );
+
+      expect(redacted).toMatchObject({ message: `Failed query: ${SQL}\nparams: [redacted]` });
+      expect(String((redacted as Error).name)).toBe('DrizzleQueryError');
+    });
   });
 
   it.each([
@@ -154,6 +249,27 @@ describe('redactSentryEventQueryParams', () => {
     expect(JSON.stringify(redactSentryEventQueryParams(event))).not.toContain(SENTINEL);
   });
 
+  it('drops the frames Sentry parses out of the params lines of the stack', () => {
+    const frames = [
+      { filename: 'node:internal/process/task_queues', function: 'run', lineno: 1 },
+      { filename: '/app/src/service.ts', function: 'save', lineno: 10 },
+      { filename: '<anonymous>', function: 'new Promise' },
+      { filename: 'record,Test Reviewer', function: '?' },
+    ];
+    const event: ErrorEvent = {
+      type: undefined,
+      exception: { values: [{ value: queryError().message, stacktrace: { frames } }] },
+    };
+
+    const result = redactSentryEventQueryParams(event);
+
+    expect(result.exception?.values?.[0].stacktrace?.frames?.map((f) => f.filename)).toEqual([
+      'node:internal/process/task_queues',
+      '/app/src/service.ts',
+      '<anonymous>',
+    ]);
+  });
+
   it('leaves an event with no exception untouched', () => {
     const event: ErrorEvent = { type: undefined, message: 'hello' };
 
@@ -194,7 +310,8 @@ describe('redactSentryBreadcrumb', () => {
     expect(redactSentryBreadcrumb({ message: 'ok', category: 'http' })).toEqual({ message: 'ok', category: 'http' });
   });
 
-  it('scrubs what Sentry actually sends: a console breadcrumb, then a captured event', () => {
+  // Sentry's console instrumentation attaches once per process, so both error shapes go through one init.
+  it('scrubs what Sentry actually sends: a console breadcrumb, then a captured event, for a postgres.js-shaped error and the one drizzle and postgres.js really throw', async () => {
     const sent: ErrorEvent[] = [];
     // The console integration wraps console.error as it stands at init, so mute it first and keep the wrapper.
     const muted = [jest.spyOn(console, 'error'), jest.spyOn(console, 'warn')].map((spy) => spy.mockImplementation());
@@ -204,23 +321,26 @@ describe('redactSentryBreadcrumb', () => {
       integrations: [SentryNode.consoleIntegration()],
       beforeBreadcrumb: redactSentryBreadcrumb,
       beforeSend: (event) => {
-        sent.push(event);
+        sent.push(redactSentryEventQueryParams(event));
         return null;
       },
     });
-    const error = queryError();
+    const errors = [queryError(), await captureRealDrizzleQueryError(SENTINEL)];
 
-    SentryNode.withIsolationScope(() => {
-      console.error('[UPDATE IDENTITY] Unexpected error:', error);
-      SentryNode.captureException(error);
-    });
+    for (const error of errors) {
+      SentryNode.withIsolationScope(() => {
+        console.error('[UPDATE IDENTITY] Unexpected error:', error);
+        SentryNode.captureException(error);
+      });
+    }
+    await SentryNode.flush(1000);
+    muted.forEach((spy) => spy.mockRestore());
 
-    return SentryNode.flush(1000).then(() => {
-      muted.forEach((spy) => spy.mockRestore());
-      expect(sent).toHaveLength(1);
-      expect(sent[0].breadcrumbs?.length).toBeGreaterThan(0);
-      expect(JSON.stringify(sent[0].breadcrumbs)).toContain('Failed query');
-      expect(JSON.stringify(sent[0].breadcrumbs)).not.toContain(SENTINEL);
-    });
+    expect(sent).toHaveLength(2);
+    for (const event of sent) {
+      expect(event.breadcrumbs?.length).toBeGreaterThan(0);
+      expect(JSON.stringify(event.breadcrumbs)).toContain('Failed query');
+      expect(JSON.stringify(event)).not.toContain(SENTINEL);
+    }
   });
 });

@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import { inspect } from 'util';
 
 // --- Mocks ---
 
@@ -27,6 +28,7 @@ jest.mock('../../../apps/auth/provision-user', () => ({
 }));
 
 // --- Import after mocks ---
+import { realDrizzleQueryError } from '../../utils/postgres-js-errors';
 import { createDefaultUser } from '../../../apps/auth/create-default-user';
 
 // --- Helpers ---
@@ -140,5 +142,21 @@ describe('createDefaultUser()', () => {
 
     expect(mockProvisionUser).not.toHaveBeenCalled();
     expect(mockSentryCaptureException).toHaveBeenCalledTimes(1);
+  });
+
+  // The configured real name is bound into the insert; a failed insert must not print it (BS#3054).
+  it('logs a failed provision without the bound real name, and still captures the original error', async () => {
+    setHappyEnv();
+    process.env.DEFAULT_USER_REAL_NAME = 'Test Reviewer';
+    const failure = realDrizzleQueryError(['Test Reviewer', 'u1']);
+    mockProvisionUser.mockRejectedValue(failure);
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(createDefaultUser()).resolves.toBeUndefined();
+
+    expect(inspect(consoleSpy.mock.calls, { depth: 10, showHidden: true })).not.toContain('Test Reviewer');
+    expect(consoleSpy.mock.calls[0][0]).toContain('[DEFAULT USER]');
+    expect(mockSentryCaptureException).toHaveBeenCalledWith(failure, expect.anything());
+    consoleSpy.mockRestore();
   });
 });

@@ -25,6 +25,7 @@
 
 import * as Sentry from '@sentry/node';
 import { auth } from '@wxyc/authentication';
+import { redactQueryParams } from '@wxyc/observability';
 import { provisionUser } from './provision-user';
 
 export const createDefaultUser = async (): Promise<void> => {
@@ -101,7 +102,8 @@ export const createDefaultUser = async (): Promise<void> => {
 
     console.log('Default user created successfully with admin role.');
   } catch (error) {
-    console.error('[DEFAULT USER] Error creating default user:', error);
+    // The configured real name is bound into the insert, so a failed one quotes it (BS#3054).
+    console.error('[DEFAULT USER] Error creating default user:', redactQueryParams(error));
     Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'default-user' } });
   }
 };

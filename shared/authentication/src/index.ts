@@ -1,5 +1,5 @@
 export * from './auth.definition';
-export { setAuthLogRedactor } from './auth-log';
+export { resetAuthLogRedactor, setAuthLogRedactor } from './auth-log';
 export * from './auth.roles';
 export * from './auth.middleware';
 export * from './auth.username';
