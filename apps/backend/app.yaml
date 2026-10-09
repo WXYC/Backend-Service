@@ -5789,7 +5789,7 @@ paths:
                 dj_id:
                   {
                     type: string,
-                    description: 'An account whose role grants `reviews: write` and that is not a service account (the auto-DJ); naming a service account is the same 400 as any other account that cannot review',
+                    description: 'An account whose role grants `reviews: write` and that is not a service account, such as the auto-DJ account; naming a service account is the same 400 as any other account that cannot review',
                   }
       responses:
         '200':
@@ -6120,9 +6120,9 @@ paths:
 
   /reviews/reviewers:
     get:
-      summary: The accounts that can write reviews (BS#3058)
+      summary: The accounts that can be asked to review (BS#3058)
       description: >-
-        Grant `reviews: manage`. The accounts whose membership role grants `reviews: write` (the test `/intake`'s `dj_id` applies), banned accounts left out, and service accounts (the auto-DJ) left out (a `dj_id` naming one is the same 400). `name` is the account's real name, else its account name when no real name is on file (never `dj_name`); sorted by `name`, case-insensitively. Staff-only: `name` can be a legal name, so it is never logged or sent to analytics.
+        Grant `reviews: manage`. The accounts whose membership role grants `reviews: write` (the test `/intake`'s `dj_id` applies), banned accounts left out, and service accounts, such as the auto-DJ account, left out (a `dj_id` naming one is the same 400). `name` is the account's real name, else its account name when no real name is on file (never `dj_name`); sorted by `name`, case-insensitively. Staff-only: `name` can be a legal name, so it is never logged or sent to analytics.
       responses:
         '200':
           description: 'The reviewers'
