@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   artists,
   db,
@@ -11,7 +11,7 @@ import {
 } from '@wxyc/database';
 import type { ReviewsActor } from '../utils/review-grants.js';
 import { confirmedFccNotesOf } from './fcc-notes.service.js';
-import { withLockedRecordSubject } from './intake.service.js';
+import { FILED_STATES, withLockedRecordSubject, writeAcceptance } from './intake.service.js';
 import { lockReleaseRow } from '../utils/release-row-lock.js';
 import { reviewInReleaseList, selectReleaseRecord, writeFirstRevisionIfMissing } from './reviews.service.js';
 
@@ -117,16 +117,46 @@ export const printIntakeItem = async (id: number, actor: Pick<ReviewsActor, 'id'
 };
 
 /**
+ * The one filed or finalized copy of a release, locked `FOR UPDATE` (BS#3075), in `acceptReview`'s order: the cited release
+ * `FOR SHARE` first when the review is the copy's citation (found by an unlocked read, honored only for the copy locked),
+ * then the copy. `citedLocked` is the release locked, if any. No copy, several, or one gone by the lock is `null`.
+ */
+const lockOnlyCopy = async (tx: Pick<typeof db, 'select'>, albumId: number, reviewId: number) => {
+  const copies = and(eq(intake_items.album_id, albumId), inArray(intake_items.state, FILED_STATES));
+  const read = await tx.select({ cited: intake_items.cited_album_id }).from(intake_items).where(copies);
+  if (read.length !== 1) return null;
+  const [peek] =
+    read[0].cited === null
+      ? []
+      : await tx.select({ album: reviews.album_id }).from(reviews).where(eq(reviews.id, reviewId));
+  const citedLocked = peek?.album === read[0].cited ? read[0].cited : null;
+  if (citedLocked !== null)
+    await tx.select({ id: library.id }).from(library).where(eq(library.id, citedLocked)).for('share');
+  const locked = await tx
+    .select({ id: intake_items.id, cited: intake_items.cited_album_id })
+    .from(intake_items)
+    .where(copies)
+    .for('update');
+  return locked.length === 1 ? { ...locked[0], citedLocked } : null;
+};
+
+/**
  * `POST /library/{id}/print` (BS#2865): prints a typed, submitted review in the release's list (`reviewInReleaseList`)
  * for a release that may have no intake item, in one transaction. Locks in `DELETE /library/{id}`'s order: the release
  * `FOR KEY SHARE` (the print row's foreign key would take it anyway, so after the review it would deadlock with a delete),
  * then the review `FOR UPDATE`. The row written has no item, so nothing on `intake_items` is written or locked and the log
  * is the only record; the membership check reads `intake_items` (the citing items of the release), unlocked. The slip's
  * artist is the release's displayed one (`alternate_artist_name`, else the artist's name). `not_found` is a missing release; `bad_review` is every other refusal, one answer for all of them.
+ *
+ * A release with exactly one filed or finalized copy (BS#3075) has the print counted for that copy, so a copy has one cover
+ * review: after the library row, `lockOnlyCopy` locks the copy, then the review, and the review must belong to the copy by
+ * `acceptReview`'s rule. The review becomes the copy's accepted one (`writeAcceptance`), the row names the copy, and
+ * the copy's `printed_by` and `printed_at` are stamped as `printIntakeItem` does. No copy, or several, keep the above.
  */
 export const printReleaseReview = async (id: number, reviewId: number, actor: Pick<ReviewsActor, 'id'>) =>
   db.transaction(async (tx) => {
     if (!(await lockReleaseRow(tx, id))) return { outcome: 'not_found' as const };
+    const copy = await lockOnlyCopy(tx, id, reviewId);
     const [review] = await tx
       .select()
       .from(reviews)
@@ -134,10 +164,24 @@ export const printReleaseReview = async (id: number, reviewId: number, actor: Pi
       .for('update');
     if (!review || review.medium !== 'typed' || review.status !== 'submitted')
       return { outcome: 'bad_review' as const };
+    const belongs =
+      copy === null ||
+      review.intake_item_id === copy.id ||
+      review.album_id === id ||
+      (copy.citedLocked !== null && copy.cited === copy.citedLocked && review.album_id === copy.citedLocked);
+    if (!belongs) return { outcome: 'bad_review' as const };
     // The release's displayed artist, by the one rule `selectReleaseRecord` holds.
     const [record] = await selectReleaseRecord(tx, id);
-    return {
-      outcome: 'printed' as const,
-      slip: await printSlip(tx, { intake_item_id: null, album_id: id }, record, review, actor.id),
-    };
+    if (copy === null)
+      return {
+        outcome: 'printed' as const,
+        slip: await printSlip(tx, { intake_item_id: null, album_id: id }, record, review, actor.id),
+      };
+    await writeAcceptance(tx, copy.id, review.id, actor);
+    const slip = await printSlip(tx, { intake_item_id: copy.id, album_id: id }, record, review, actor.id);
+    await tx
+      .update(intake_items)
+      .set({ printed_by: actor.id, printed_at: sql`now()` })
+      .where(eq(intake_items.id, copy.id));
+    return { outcome: 'printed' as const, slip };
   });
