@@ -43,7 +43,8 @@ function scrubText(text: string): string {
  * Decided by position, never by what follows a marker (a bound value can imitate a redaction):
  * - a stack that does not embed the message, or holds a marker before it, is cut at its first marker;
  * - so is one whose message span holds a marker unless the error is `intact`: its message is exactly the
- *   one it builds from its own `query` and `params` (a drizzle error), and the frames start right after it.
+ *   one it builds from its own `query` and `params` (a drizzle error), or it is a copy `redactError` made (its
+ *   `params` is the redaction, so that check cannot say so), and the frames start right after it.
  *   Anything else (a message cut at or after the marker, or a plain error that carries no query to check
  *   it against) leaves the rest of the params line, or a bound value's own `\n    at ` line, after the span;
  * - otherwise the text after the message is cut at its first marker (a message shortened before the marker).
@@ -71,7 +72,7 @@ function isError(value: unknown): value is Error {
   return value instanceof Error || types.isNativeError(value) || copies.has(value as object) || isSentryError(value);
 }
 
-/** The copies `redactError` made: a copy of a cross-realm error is no longer native, yet must still be followed down a cause chain. */
+/** The copies `redactError` made: a copy of a cross-realm error is no longer native, yet must still be followed down a cause chain, and a copy counts as `intact` when it is redacted again. */
 const copies = new WeakSet<object>();
 
 /** What stands in for an error the redaction cannot copy: it must never be the original. */
@@ -85,8 +86,6 @@ const UNLOGGABLE_VALUE = '[unloggable value]';
  * descriptors makes the redefinition throw on every real failed query.
  */
 function redactError(error: Error, depth: number): Error {
-  // A copy is already redacted, and its stack cannot pass for an intact failed query's (its `params` is the redaction): cutting it again would drop its frames.
-  if (copies.has(error)) return error;
   const cause = depth < MAX_DEPTH ? redactCause(error.cause, depth + 1) : error.cause;
   const rawMessage = String(error.message);
   const message = scrubText(rawMessage);
@@ -117,12 +116,15 @@ function redactError(error: Error, depth: number): Error {
   }
   set('message', message, false);
   const { query: rawQuery, params } = error as { query?: unknown; params?: unknown };
+  // A copy is redacted again like any error, but counts as intact: its frames start right after its message, and its `params` is the redaction, so the check below could not say so.
   const intact =
-    typeof rawQuery === 'string' &&
-    Array.isArray(params) &&
-    rawMessage === `Failed query: ${rawQuery}${PARAMS_MARKER}${params}`;
+    copies.has(error) ||
+    (typeof rawQuery === 'string' &&
+      Array.isArray(params) &&
+      rawMessage === `Failed query: ${rawQuery}${PARAMS_MARKER}${params}`);
   if (typeof rawStack === 'string') set('stack', scrubStack(rawStack, rawMessage, message, intact), false);
-  else if (Object.hasOwn(error, 'stack')) set('stack', undefined, false);
+  // An own `undefined` hides any `stack` accessor the copy would inherit, whatever it answers on later reads.
+  else set('stack', undefined, false);
   if (Object.hasOwn(error, 'cause')) set('cause', cause, false);
   for (const key of PARAM_PROPERTIES) {
     if (Object.hasOwn(error, key)) set(key, '[redacted]', Object.prototype.propertyIsEnumerable.call(error, key));
@@ -241,7 +243,8 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
     // Content backstop. A link the copy chain does not own reaches it: a copy with no own `cause` inherits a
     // `cause` getter that hands back the raw inner error (`copy.cause` is then not a copy), and there this check
     // is the only thing keeping that error's params line out of the frames. Everywhere else the copy's stack was
-    // cut by position first, and `i <= MAX_DEPTH` keeps raw links out of the loop.
+    // cut by position first (a copy that was written back to is redacted again, and its `stack` is always its
+    // own), and `i <= MAX_DEPTH` keeps raw links out of the loop.
     if (UNREDACTED_PARAMS.test(String(link.stack))) {
       delete target.stacktrace;
       break;
@@ -292,7 +295,12 @@ function rawChainHoldsParams(error: unknown): boolean {
       if (String(next.stack).includes(PARAMS_MARKER)) return true;
       const { errors } = next as { errors?: unknown };
       pending.push(next.cause);
-      if (Array.isArray(errors)) for (const member of errors) pending.push(member);
+      // Only errors are queued, so a hole or a non-error in a huge `errors` array fills nothing (the visit itself is linear in its length).
+      if (Array.isArray(errors)) {
+        errors.forEach((member) => {
+          if (isError(member)) pending.push(member);
+        });
+      }
     }
     return false;
   } catch {

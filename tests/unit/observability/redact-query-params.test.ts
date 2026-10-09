@@ -135,7 +135,7 @@ describe('redactQueryParams', () => {
   });
 
   // The auth app logs `redactQueryParams(error)` and its console wrapper redacts that copy again (BS#3070).
-  it('returns a copy it made unchanged when asked to redact it again, frames included', () => {
+  it('keeps the frames of a copy it redacts again, and leaves no bound value in it', () => {
     const copy = redactQueryParams(queryError());
     const frames = (error: Error) =>
       String(error.stack)
@@ -143,10 +143,41 @@ describe('redactQueryParams', () => {
         .filter((line) => line.startsWith('    at '));
 
     expect(frames(copy as Error).length).toBeGreaterThan(0);
-    expect(redactQueryParams(copy)).toBe(copy);
-    expect(redactLogValue(copy)).toBe(copy);
+    const again = redactQueryParams(copy);
+    expect(frames(again as Error)).toEqual(frames(copy as Error));
+    expect(everything(again)).not.toContain(SENTINEL);
     expect(frames(redactLogValue(copy) as Error)).toEqual(frames(copy as Error));
     expect(everything(redactLogValue(copy))).not.toContain(SENTINEL);
+  });
+
+  // A copy is an ordinary writable object: a copy is not trusted by identity, so putting the raw values back does not get them logged.
+  it.each(['message', 'stack', 'params', 'cause'] as const)(
+    'redacts a copy again after its %s is set back from the raw error',
+    (field) => {
+      const raw = queryError();
+      const copy = redactQueryParams(raw) as Error & Record<string, unknown>;
+      Object.defineProperty(copy, field, {
+        value: (raw as unknown as Record<string, unknown>)[field],
+        writable: true,
+        configurable: true,
+      });
+
+      const again = redactQueryParams(copy);
+
+      expect(everything(again)).not.toContain(SENTINEL);
+      expect(everything(redactLogValue(copy))).not.toContain(SENTINEL);
+    }
+  );
+
+  // `redactError` copies the thrown error and `MAX_DEPTH` causes; the copy at the 8th cause keeps the raw driver error as its `cause`.
+  it('redacts the copy made at the 8th cause when it is redacted on its own', () => {
+    let error: Error = queryError();
+    for (let i = 0; i < 8; i++) error = new Error(`wrapper ${i}`, { cause: error });
+    let link = redactQueryParams(error) as Error;
+    for (let i = 0; i < 8; i++) link = link.cause as Error;
+
+    expect(everything(link)).toContain(SENTINEL);
+    expect(everything(redactQueryParams(link))).not.toContain(SENTINEL);
   });
 
   // `stack` is read once: a stateful accessor cannot hand the decisions one string and the copy another.
@@ -167,6 +198,26 @@ describe('redactQueryParams', () => {
     expect(copy).not.toBe(error);
     expect(typeof (copy as Error).stack).toBe('string');
     expect(String((copy as Error).stack)).toContain('params: [redacted]');
+    expect(everything(copy)).not.toContain(SENTINEL);
+  });
+
+  // The copy's own `stack: undefined` hides an accessor it would otherwise inherit, whose state lives outside the instance.
+  it('shadows a stack accessor inherited from the prototype, which answers nothing on its first read and the raw stack after', () => {
+    let reads = 0;
+    class Stateful extends Error {
+      get stack() {
+        return reads++ === 0
+          ? undefined
+          : `Error: Failed query: select 1\nparams: ${SENTINEL}\n    at elsewhere (file.js:1:1)`;
+      }
+    }
+    const error = new Stateful(`Failed query: select 1\nparams: ${SENTINEL}`);
+    delete (error as { stack?: unknown }).stack;
+
+    const copy = redactQueryParams(error);
+
+    expect(copy).not.toBe(error);
+    expect(Object.hasOwn(copy as Error, 'stack')).toBe(true);
     expect(everything(copy)).not.toContain(SENTINEL);
   });
 

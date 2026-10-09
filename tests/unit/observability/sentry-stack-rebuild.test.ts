@@ -397,6 +397,22 @@ describe('an error that never held a params marker', () => {
       },
       {},
     ],
+    [
+      // The walk skips holes and non-errors where it reads `errors`, so a huge sparse array fills nothing; its iterator is
+      // a trap, so a walk that iterates the array (every index, hole or not) ends in its catch and withholds the stacktraces.
+      'an AggregateError whose errors array is sparse',
+      () => {
+        const aggregate = new AggregateError(members(3), 'agg');
+        aggregate.errors.length = 1_000_000;
+        Object.defineProperty(aggregate.errors, Symbol.iterator, {
+          value() {
+            throw new Error('iterated');
+          },
+        });
+        return aggregate;
+      },
+      {},
+    ],
     ['a cause cycle', cyclic, {}],
     ['a cause cycle with linkedErrors limit 12', cyclic, limit12],
     ['a plain chain of 12 with linkedErrors limit 12', () => chain(12), limit12],
@@ -418,7 +434,8 @@ describe('an error whose cause getter builds a fresh error on every read', () =>
   let reads = 0;
   class Lazy extends Error {
     get cause() {
-      reads++;
+      // A tripwire: a walk with no budget ends in its own catch here, so the read count below fails fast instead of running out of memory.
+      if (++reads > 20_000) throw new Error('tripwire');
       return new Lazy('lazy');
     }
   }
