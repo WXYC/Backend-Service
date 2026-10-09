@@ -1,6 +1,6 @@
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
 
-import { reviewsActor } from '../../../apps/backend/utils/review-grants';
+import { canWriteReviews, reviewsActor } from '../../../apps/backend/utils/review-grants';
 
 describe('reviewsActor', () => {
   test.each([
@@ -9,5 +9,19 @@ describe('reviewsActor', () => {
     ['reviews: manage', { id: 'u1', role: 'musicDirector' }, { id: 'u1', manage: true }],
   ])('builds the caller from %s', (_label, auth, expected) => {
     expect(reviewsActor({ auth } as any)).toEqual(expected);
+  });
+});
+
+describe('canWriteReviews (the one test behind /intake dj_id and GET /reviews/reviewers)', () => {
+  test.each([
+    [['dj'], true],
+    [['musicDirector'], true],
+    [['stationManager'], true],
+    [['member', 'dj'], true],
+    [['member'], false],
+    [[], false],
+    [[null, undefined], false],
+  ])('%j is %s', (roles, expected) => {
+    expect(canWriteReviews(roles)).toBe(expected);
   });
 });

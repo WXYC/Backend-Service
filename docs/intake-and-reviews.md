@@ -38,6 +38,7 @@ Route and rule reference for `/intake` and `/reviews`, moved out of `CLAUDE.md`'
 - BS#2866: `POST /reviews` with `author`/`author_user_id`/`medium`/`accept` (`reviews:manage`, else 403) is `recordReview`: free-text `author` (required, kept whole, 400 over 128 code points), a linked `author_user_id` (unknown is 400) who is then the author, `medium` `typed` or `handwritten` (no text needed), no surface ticked and `credit` null (sending either is 400), the subject in any state with no hold rule.
 - `accept` (default true, `intake_item_id` subjects only) creates the review `submitted` and accepted in one transaction through `writeSubmission` and `writeAcceptance`, the same writes submit and accept use; a typed review then needs text.
 - A review of a `filed`/`finalized` item carries its `album_id`; locks are the library row `FOR KEY SHARE`, then the item (`FOR UPDATE` with accept, `FOR SHARE` without).
+- BS#3058: `GET /reviews/reviewers` (`reviews:manage`, registered before `/:id`) lists the non-banned accounts whose membership roles pass `canWriteReviews` (`utils/review-grants.ts`), the same test as `/intake`'s `dj_id` 400. `name` is `staffNameSql` (real name, else account name; never `dj_name`), sorted case-insensitively; it goes in the body only, never a log or tag.
 
 ## `/fcc-notes`
 
