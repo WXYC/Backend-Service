@@ -110,6 +110,21 @@ describe('review reads (BS#2805)', () => {
     expect(last()).toContain('ai.accepted_review_id');
   });
 
+  // BS#3075: one fragment decides in_use, on_cover, deleteReview and printedCopies, so the supersession lives in it and nowhere else.
+  test('latestPrintOfCopy lets a print with no item count only while its release does not have exactly one filed or finalized copy', () => {
+    const { sql: text } = new PgDialect().sqlToQuery(sql`${latestPrintOfCopy(sql`${reviews.id}`)}`);
+    expect(flat(text)).toContain(
+      'AND ("p"."intake_item_id" IS NOT NULL OR (SELECT count(*) FROM "wxyc_schema"."intake_items" AS oc WHERE oc.album_id = "p"."album_id" AND oc.state IN (\'filed\', \'finalized\')) <> 1) AND NOT EXISTS'
+    );
+  });
+
+  test('the album list reaches that rule through the same fragment for on_cover, and in_use through it too', async () => {
+    await listReviews({ album_id: 9 }, ACTOR);
+    const rule = '(SELECT count(*) FROM "wxyc_schema"."intake_items" AS oc WHERE oc.album_id = "p"."album_id"';
+    // in_use and the album list's on_cover half: two renderings of the one fragment.
+    expect(last().split(rule).length - 1).toBe(2);
+  });
+
   test.each([
     ['getReview', () => getReview(3, ACTOR)],
     ['the plain list', () => listReviews({}, ACTOR)],

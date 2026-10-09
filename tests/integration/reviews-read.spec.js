@@ -164,9 +164,11 @@ describe('/reviews reads (BS#2805)', () => {
     list = await albumList(djA, copy.id);
     expect(list[0]).toMatchObject({ id: r1.id, on_cover: true });
 
+    // `copy` has exactly one filed copy (citingItem): a print with no item no longer covers it (BS#3075). r3 stays in use through its print for `release`'s copy.
     await seedReviewPrint({ album_id: copy.id, review_id: r3.id, revision_id: revs[1].id, printed_at: day(13) });
     list = await albumList(djA, copy.id);
-    expect(list.find((r) => r.id === r3.id).on_cover).toBe(true);
+    expect(list.find((r) => r.id === r3.id).on_cover).toBe(false);
+    expect(list.filter((r) => r.on_cover).map((r) => r.id)).toEqual([r1.id]);
   });
 
   test('printed_at and printed_revision_id name the latest print by printed_at, not the last one inserted', async () => {
