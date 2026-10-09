@@ -21,7 +21,7 @@
  *        race with a concurrent delete), leave the row unlinked.
  */
 import { eq } from 'drizzle-orm';
-import { db, flowsheet, library, pickPrimaryLibraryRow } from '@wxyc/database';
+import { db, flowsheet, library, pickPrimaryLibraryRow, type LinkageSource } from '@wxyc/database';
 import { lookupMetadata } from '@wxyc/lml-client';
 import { mapLookupToCanonicalEntity } from './library.service.js';
 import { classifyLinkageError, incrementLinkageMetric, reportLinkageError } from './linkage-metrics.service.js';
@@ -42,7 +42,7 @@ async function findLibraryRowsByCanonicalEntity(canonicalEntityId: string): Prom
 async function setFlowsheetLinkage(
   flowsheetId: number,
   libraryId: number,
-  source: string,
+  source: LinkageSource,
   confidence: number
 ): Promise<void> {
   await db

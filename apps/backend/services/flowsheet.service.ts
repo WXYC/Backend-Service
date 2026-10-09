@@ -28,6 +28,7 @@ import {
   showDjNameOverride,
   lastLoggedShowEntryOrderBy,
   lastLoggedShowEntryOrderBySql,
+  type LinkageSource,
 } from '@wxyc/database';
 import {
   ALBUM_METADATA_PROJECTION,
@@ -241,7 +242,7 @@ export type FSEntryRaw = {
   legacy_release_id: number | null;
   add_time: Date | null;
   dj_name: string | null;
-  linkage_source: string | null;
+  linkage_source: LinkageSource | null;
   linkage_confidence: number | null;
   linked_at: Date | null;
   artwork_url: string | null;

@@ -1414,6 +1414,23 @@ export const library_urls = wxyc_schema.table(
   }
 );
 
+/**
+ * Closed vocabulary for `flowsheet.linkage_source` (BS#3078). The column stays open `text` (no pg enum, no
+ * migration), like `ComposerSource`; this union is the compile-time guard. Raw-SQL writers are checked by
+ * `tests/unit/database/linkage-source-vocabulary.test.ts`.
+ */
+export const LINKAGE_SOURCES = [
+  'etl_legacy_id',
+  'dj_bin_pick',
+  'lml_high_confidence',
+  'human_review',
+  'tubafrenzy_mirror',
+  'direct_text_match',
+  'discogs_local_bridge',
+  'fuzzy_trigram_match',
+] as const;
+export type LinkageSource = (typeof LINKAGE_SOURCES)[number];
+
 export type NewFSEntry = InferInsertModel<typeof flowsheet>;
 export type FSEntry = InferSelectModel<typeof flowsheet>;
 /**
@@ -1562,11 +1579,8 @@ export const flowsheet = wxyc_schema.table(
     // heuristic regresses, and weight differently in ranking. Setting
     // these on new linkages is handled in B-2.1 / B-2.2 / B-3.1; this
     // migration only adds the columns nullable. Source values are
-    // enum-like text: 'etl_legacy_id' | 'dj_bin_pick' | 'lml_high_confidence'
-    // | 'human_review' | 'tubafrenzy_mirror' | 'direct_text_match'
-    // | 'discogs_local_bridge' (scripts/discogs-bridge-flowsheet.sql)
-    // | 'fuzzy_trigram_match' (scripts/fuzzy-trigram-flowsheet.sql).
-    linkage_source: text('linkage_source'),
+    // enum-like text, typed by `LinkageSource` (no pg enum, no migration).
+    linkage_source: text('linkage_source').$type<LinkageSource>(),
     linkage_confidence: real('linkage_confidence'),
     linked_at: timestamp('linked_at', { withTimezone: true }),
     // BMI composer for this playcut, written by apps/enrichment-worker

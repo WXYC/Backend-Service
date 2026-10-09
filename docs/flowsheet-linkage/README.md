@@ -76,16 +76,16 @@ The auto-accept gate is `linkage.confidence < AUTO_ACCEPT_THRESHOLD` where `AUTO
 
 ## Schema
 
-| Column                                 | Type          | Migration | Purpose                                                                                                                                                                |
-| -------------------------------------- | ------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `library.canonical_entity_id`          | `text`        | 0061      | Opaque, source-namespaced (`discogs:release:<id>`). B-tree indexed for the flowsheet-side lookup.                                                                      |
-| `library.canonical_entity_confidence`  | `real`        | 0061      | Confidence band stored at link time.                                                                                                                                   |
-| `library.canonical_entity_resolved_at` | `timestamptz` | 0061      | Audit + retry policy. NULL means "never resolved".                                                                                                                     |
-| `flowsheet.linkage_source`             | `text`        | 0062      | One of `etl_legacy_id`, `dj_bin_pick`, `lml_high_confidence`, `human_review`, `tubafrenzy_mirror`, `direct_text_match`, `discogs_local_bridge`, `fuzzy_trigram_match`. |
-| `flowsheet.linkage_confidence`         | `real`        | 0062      | Confidence band stored at link time.                                                                                                                                   |
-| `flowsheet.linked_at`                  | `timestamptz` | 0062      | Stamps when the link was made (lets B-2.2 retry rules age weak matches).                                                                                               |
-| `flowsheet.legacy_link_attempted_at`   | `timestamptz` | 0063      | Marker stamped by `jobs/broken-fk-recovery` when the FK resolver tried and failed. Lets B-2.2 sweep both never-had-FK rows AND broken-FK residuals in the same pass.   |
-| `flowsheet_linkage_review`             | table         | 0067      | Manual review queue: stores the flowsheet id, ranked candidate library ids and confidences, and the operator's decision.                                               |
+| Column                                 | Type          | Migration | Purpose                                                                                                                                                              |
+| -------------------------------------- | ------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `library.canonical_entity_id`          | `text`        | 0061      | Opaque, source-namespaced (`discogs:release:<id>`). B-tree indexed for the flowsheet-side lookup.                                                                    |
+| `library.canonical_entity_confidence`  | `real`        | 0061      | Confidence band stored at link time.                                                                                                                                 |
+| `library.canonical_entity_resolved_at` | `timestamptz` | 0061      | Audit + retry policy. NULL means "never resolved".                                                                                                                   |
+| `flowsheet.linkage_source`             | `text`        | 0062      | One of the closed `LINKAGE_SOURCES` vocabulary (`LinkageSource`, exported from `@wxyc/database`); the list lives there.                                              |
+| `flowsheet.linkage_confidence`         | `real`        | 0062      | Confidence band stored at link time.                                                                                                                                 |
+| `flowsheet.linked_at`                  | `timestamptz` | 0062      | Stamps when the link was made (lets B-2.2 retry rules age weak matches).                                                                                             |
+| `flowsheet.legacy_link_attempted_at`   | `timestamptz` | 0063      | Marker stamped by `jobs/broken-fk-recovery` when the FK resolver tried and failed. Lets B-2.2 sweep both never-had-FK rows AND broken-FK residuals in the same pass. |
+| `flowsheet_linkage_review`             | table         | 0067      | Manual review queue: stores the flowsheet id, ranked candidate library ids and confidences, and the operator's decision.                                             |
 
 Migration numbers are illustrative — the canonical numbers are in `shared/database/src/migrations/meta/_journal.json`.
 
