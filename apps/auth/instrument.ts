@@ -7,6 +7,7 @@ import * as Sentry from '@sentry/node';
 import {
   SENTRY_DATA_COLLECTION,
   filterSentryTransactionEvent,
+  redactSentryEventQueryParams,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
 import { resolveTracesSampleRate } from './sentry-config.js';
@@ -30,9 +31,13 @@ Sentry.init({
   // path, since better-auth's mount makes /auth/ok's transaction "GET /auth" —
   // and strips Express middleware bookkeeping spans from every surviving
   // transaction (BS#2089).
-  // Error reporting (beforeSend / the Express error filter) is untouched —
+  // Error reporting (the Express error filter) is untouched —
   // wxyc-canary depends on /healthcheck errors surfacing there.
   beforeSendTransaction: filterSentryTransactionEvent,
+  // A failed Drizzle query's message quotes every bound value, which since
+  // BS#3051 can be a staff member's legal name; the SQL stays, the values go
+  // (BS#3054). Error capture itself is unchanged.
+  beforeSend: redactSentryEventQueryParams,
   // Sentry 11 defaults to span streaming, which never builds a transaction
   // event, so `beforeSendTransaction` above would never run (BS#2948). Pin the
   // transaction lifecycle Sentry 10 used until the filter moves to streaming
