@@ -11,6 +11,8 @@ export const reviews_route = Router();
 // and cannot see these gates.
 // Reads (BS#2805) are gated by `reviews: read`; draft visibility is the service's `reviewVisibleTo`.
 reviews_route.get('/', requirePermissions({ reviews: ['read'] }), reviewsController.listReviews);
+// Registered before `/:id`, which would otherwise take "reviewers" for an id.
+reviews_route.get('/reviewers', requirePermissions({ reviews: ['manage'] }), reviewsController.listReviewers);
 reviews_route.get('/:id', requirePermissions({ reviews: ['read'] }), reviewsController.getReview);
 reviews_route.get('/:id/revisions', requirePermissions({ reviews: ['read'] }), reviewsController.listReviewRevisions);
 reviews_route.post('/', requirePermissions({ reviews: ['write'] }), reviewsController.createReview);

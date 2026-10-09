@@ -7,7 +7,9 @@ import {
   artists,
   intake_items,
   library,
+  member,
   readStaffName,
+  staffNameSql,
   review_prints,
   review_revisions,
   reviews,
@@ -15,7 +17,7 @@ import {
   type NewReview,
   type Review,
 } from '@wxyc/database';
-import type { ReviewsActor } from '../utils/review-grants.js';
+import { canWriteReviews, type ReviewsActor } from '../utils/review-grants.js';
 import { outerRef } from '../utils/sql-fragments.js';
 import {
   FILED_STATES,
@@ -640,3 +642,23 @@ export const deleteReview = async (id: number, actor: ReviewsActor) =>
     await tx.delete(reviews).where(eq(reviews.id, id));
     return { outcome: 'deleted' as const };
   });
+
+/**
+ * `GET /reviews/reviewers` (BS#3058): accounts whose membership roles grant `reviews: write` (`canWriteReviews`, the test `/intake`
+ * applies to `dj_id`), banned accounts left out, named by the staff name and sorted by it case-insensitively. `name` is a real name:
+ * it goes in the response only.
+ */
+export const listReviewers = async (): Promise<{ id: string; name: string }[]> => {
+  const name = staffNameSql(user);
+  const rows = await db
+    .select({ id: user.id, name, role: member.role })
+    .from(member)
+    .innerJoin(user, eq(member.userId, user.id))
+    .where(sql`${user.banned} is not true`)
+    .orderBy(sql`lower(${name})`, user.id);
+  const reviewers = new Map<string, { id: string; name: string }>();
+  for (const { id, name: staffName, role } of rows) {
+    if (!reviewers.has(id) && canWriteReviews([role])) reviewers.set(id, { id, name: staffName });
+  }
+  return [...reviewers.values()];
+};

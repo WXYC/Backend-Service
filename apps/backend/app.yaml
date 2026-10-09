@@ -779,6 +779,18 @@ components:
               type: integer
               description: How many versions are kept. 0 for a draft, 1 once submitted, more after edits; a review submitted before edit history began counts 0 until its first edit, which brings it to 2.
 
+    Reviewer:
+      type: object
+      description: 'An account that can write reviews. Staff-only: `name` can be a real name.'
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          description: 'The `auth_user.id`, the value to send as `dj_id` or `author_user_id`.'
+        name:
+          type: string
+          description: 'The real name, else the account name (on-air handle, else username) when none is on file. Never `dj_name`.'
+
     ReviewRevision:
       type: object
       description: One saved version of a submitted review. Consent fields are not versioned.
@@ -6101,6 +6113,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReviewConflictError'
+
+  /reviews/reviewers:
+    get:
+      summary: The accounts that can write reviews (BS#3058)
+      description: >-
+        Grant `reviews: manage`. The accounts whose membership role grants `reviews: write` (the test `/intake`'s `dj_id` applies), banned accounts left out. `name` is the account's real name, else its account name when no real name is on file (never `dj_name`); sorted by `name`, case-insensitively. Staff-only: `name` can be a legal name, so it is never logged or sent to analytics.
+      responses:
+        '200':
+          description: 'The reviewers'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reviewers]
+                properties:
+                  reviewers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Reviewer'
+        '401':
+          description: 'Authentication required'
+        '403':
+          description: 'Caller lacks `reviews: manage`'
 
   /reviews/{id}:
     parameters:

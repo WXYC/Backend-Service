@@ -39,6 +39,7 @@ const mockDelete = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockGet = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockList = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 const mockRevisions = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
+const mockReviewers = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
 
 jest.mock('@wxyc/database', () => ({
   reviewCreditEnum: jest.requireActual('../../../shared/database/src/schema').reviewCreditEnum,
@@ -57,6 +58,7 @@ jest.mock('../../../apps/backend/services/reviews.service', () => ({
   getReview: mockGet,
   listReviews: mockList,
   listReviewRevisions: mockRevisions,
+  listReviewers: mockReviewers,
 }));
 
 import { reviews_route } from '../../../apps/backend/routes/reviews.route';
@@ -502,5 +504,27 @@ describe('GET /reviews/:id/revisions (BS#2861)', () => {
     mockRevisions.mockResolvedValue(undefined);
     expect((await get('/reviews/3/revisions')).status).toBe(404);
     expect((await get('/reviews/abc/revisions')).status).toBe(400);
+  });
+});
+
+describe('GET /reviews/reviewers (BS#3058)', () => {
+  const get = () => request(app).get('/reviews/reviewers').set('Authorization', 'Bearer t');
+
+  beforeEach(() => {
+    mockReviewers.mockReset().mockResolvedValue([{ id: 'u1', name: 'Test Reviewer' }]);
+    mockGet.mockReset().mockResolvedValue(REVIEW);
+  });
+
+  test.each(['musicDirector', 'stationManager'])('%s may list, and /:id does not swallow the path', async (role) => {
+    mockRole(role);
+    const res = await get();
+    expect([res.status, res.body]).toEqual([200, { reviewers: [{ id: 'u1', name: 'Test Reviewer' }] }]);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  test.each(['dj', 'member', undefined])('%s is refused before any query', async (role) => {
+    mockRole(role);
+    expect((await get()).status).toBe(403);
+    expect(mockReviewers).not.toHaveBeenCalled();
   });
 });

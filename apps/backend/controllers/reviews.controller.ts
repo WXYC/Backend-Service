@@ -160,3 +160,8 @@ export const listReviewRevisions: RequestHandler<{ id: string }> = async (req, r
   if (!revisions) throw new WxycError('Review not found', 404);
   res.json(revisions);
 };
+
+/** `GET /reviews/reviewers`: the accounts a music director can ask to review or record a review for. A failure reaches the errorHandler, which redacts query parameters. */
+export const listReviewers: RequestHandler = async (_req, res) => {
+  res.json({ reviewers: await reviewsService.listReviewers() });
+};

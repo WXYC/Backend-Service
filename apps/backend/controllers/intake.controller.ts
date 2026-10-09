@@ -1,4 +1,3 @@
-import { roleGrants } from '@wxyc/authentication';
 import { intakeItemStateEnum } from '@wxyc/database';
 import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
@@ -12,7 +11,7 @@ import { notifyPass } from '../services/review-notices.service.js';
 import { printIntakeItem } from '../services/review-print.service.js';
 import WxycError from '../utils/error.js';
 import { parseBooleanQueryParam, parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
-import { holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
+import { canWriteReviews, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
 /**
@@ -115,7 +114,7 @@ export const deleteIntake: RequestHandler<{ id: string }> = async (req, res) => 
 const parseRequestedDj = async (raw: unknown) => {
   if (typeof raw !== 'string' || raw === '') throw new WxycError('dj_id is required', 400);
   const roles = await intakeService.memberRoles(raw);
-  if (!roles.some((role) => roleGrants(role, { reviews: ['write'] }))) {
+  if (!canWriteReviews(roles)) {
     throw new WxycError('dj_id must name an account that can review', 400);
   }
   return raw;

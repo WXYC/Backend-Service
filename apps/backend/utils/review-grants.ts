@@ -12,3 +12,7 @@ export const reviewsActor = (req: Pick<Request, 'auth'>): ReviewsActor => ({
   id: (req.auth?.id ?? req.auth?.sub) as string,
   manage: holdsReviewsManage(req),
 });
+
+/** Whether any of an account's membership roles grants `reviews: write`: the one test behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`, so the 400 and the list cannot drift. */
+export const canWriteReviews = (roles: Iterable<string | null | undefined>): boolean =>
+  [...roles].some((role) => roleGrants(role, { reviews: ['write'] }));
