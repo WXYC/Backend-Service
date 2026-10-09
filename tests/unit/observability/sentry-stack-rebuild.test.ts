@@ -159,6 +159,34 @@ describe('redactSentryEventQueryParams rebuilds the stack from the redacted erro
     expect(event.exception?.values?.at(-1)?.stacktrace).toBeUndefined();
   });
 
+  it('sends no frame built from a params line whose first bound value starts with the redaction text', async () => {
+    const error = new Error(
+      `Failed query: select 1\nparams: [redacted] my review,${DJ_NAME},${SENTINEL},${BOUND_TIMESTAMP}`
+    );
+    expect(error.stack).toContain('params: ');
+    error.message = 'Failed query: select 1';
+
+    const event = await captureThroughSentry(error);
+
+    expect(heldBy(event)).toEqual([]);
+  });
+
+  it('sends no bound value from a query error nine causes deep whose message was shortened', async () => {
+    const inner = await captureFailedStationSignupInsert();
+    // V8 formats `stack` on first read, so read it before shortening the message.
+    expect(inner.stack).toContain('params: ');
+    inner.message = inner.message.slice(0, inner.message.indexOf('\nparams: '));
+    let error: Error = inner;
+    for (let i = 0; i < 9; i++) error = new Error(`wrapper ${i}`, { cause: error });
+
+    const event = await captureThroughSentry(error, {
+      integrations: [SentryNode.linkedErrorsIntegration({ limit: 12 })],
+    });
+
+    expect(event.exception?.values).toHaveLength(11);
+    expect(heldBy(event)).toEqual([]);
+  });
+
   it('withholds a stack it cannot rebuild rather than keep one built from the params lines', () => {
     const message = `Failed query: select 1\nparams: abc,${DJ_NAME},${SENTINEL},2026-10-08T16:23:45.123Z`;
     const event: ErrorEvent = {
