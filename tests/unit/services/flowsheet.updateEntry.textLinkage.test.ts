@@ -259,6 +259,22 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     expect(params).toEqual(['Quiet Signs', 'Jessica Pratt Band', 'Quiet Signs', 'Jessica Pratt Band']);
   });
 
+  // Off-contract (api.yaml types both fields non-nullable), but the UPDATE writes NULL, so the lookup must see ''.
+  it.each([
+    ['album_title', { album_title: null }, ['', 'Jessica Pratt', '', 'Jessica Pratt']],
+    ['artist_name', { artist_name: null }, ['Quiet Signs', '', 'Quiet Signs', '']],
+  ])(
+    "looks up '' for an explicit null %s and clears the direct_text_match link",
+    async (_field, patch, expectedParams) => {
+      mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
+      mockLookup.mockReturnValue([]);
+      await updateEntry(7, patch);
+      const { params } = new PgDialect().sqlToQuery(mockLookupWhere.mock.calls[0][0]);
+      expect(params).toEqual(expectedParams);
+      expect(setArg()).toMatchObject({ ...patch, album_id: null, ...CLEARED });
+    }
+  );
+
   it('orders the current album_id first so the candidate cap can never truncate it out', async () => {
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
     mockLookup.mockReturnValue([{ id: 9 }, { id: 5 }]);

@@ -1161,7 +1161,10 @@ export type TextMatchLookupOptions = {
  * `album_artist`, matching `scripts/direct-link-flowsheet.sql`. A symbols-only name keys to `''`, so both
  * legs are guarded `<> ''`.
  *
- * `options.executor` defaults to the pool `db`; a caller inside a transaction passes its own handle (BS#2474).
+ * `options.executor` defaults to the pool `db`, which is right for a caller outside a transaction. A caller
+ * holding a transaction that must survive a failed lookup passes a savepoint (`trx.transaction((sp) => ...)`),
+ * not the bare transaction handle: a failed query on the bare handle aborts the transaction (25P02) even when
+ * the error is caught (BS#2474).
  * `options.currentAlbumId` sorts that row first, so the candidate cap can never truncate it out of a
  * keep-the-current-link check.
  */
@@ -1253,8 +1256,8 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
         // transaction (25P02) and take the UPDATE down with it; the savepoint rolls back alone.
         const ids = await trx.transaction((sp) =>
           findLibraryReleasesByText(
-            entry.artist_name ?? current.artist_name ?? '',
-            entry.album_title ?? current.album_title ?? '',
+            (entry.artist_name !== undefined ? entry.artist_name : current.artist_name) ?? '',
+            (entry.album_title !== undefined ? entry.album_title : current.album_title) ?? '',
             { executor: sp, currentAlbumId: current.album_id }
           )
         );
