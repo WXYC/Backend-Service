@@ -1,9 +1,9 @@
 import { inspect } from 'util';
-import { DrizzleQueryError } from 'drizzle-orm/errors';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 import WxycError from '../../../apps/backend/utils/error';
 import { LmlClientError } from '@wxyc/lml-client';
 import { Request, Response, NextFunction } from 'express';
+import { captureRealDrizzleQueryError, realDrizzleQueryError } from '../../utils/postgres-js-errors';
 
 function mockResponse() {
   const statusMock = jest.fn().mockReturnThis();
@@ -290,20 +290,25 @@ describe('errorHandler middleware', () => {
   describe('failed-query parameters', () => {
     const SENTINEL = 'Test Reviewer';
 
-    it('logs no bound value for an unhandled failed query, and still answers 500', () => {
-      const { res, statusMock } = mockResponse();
-      const sql = 'insert into "reviews" ("author") values ($1)';
-      const error = new DrizzleQueryError(sql, [SENTINEL], new Error('connection terminated'));
+    it.each([
+      [
+        'a DrizzleQueryError around a postgres.js-shaped error',
+        () => Promise.resolve(realDrizzleQueryError([SENTINEL, 'u1'])),
+      ],
+      ['the error drizzle and postgres.js really throw', () => captureRealDrizzleQueryError(SENTINEL)],
+    ])('logs no bound value for %s, and still answers 500', async (_label, build) => {
+      const { res, statusMock, jsonMock } = mockResponse();
+      const error = await build();
       const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
 
       errorHandler(error, mockReq, res, mockNext);
 
-      const logged = inspect(consoleSpy.mock.calls, { depth: 10 });
+      const logged = inspect(consoleSpy.mock.calls, { depth: 10, showHidden: true });
       expect(logged).not.toContain(SENTINEL);
-      expect(logged).toContain(sql);
+      expect(logged).toContain('update "auth_user"');
       expect(logged).toContain('DrizzleQueryError');
-      expect(logged).toContain('connection terminated');
       expect(statusMock).toHaveBeenCalledWith(500);
+      expect(jsonMock).toHaveBeenCalledWith({ message: 'Internal server error' });
       consoleSpy.mockRestore();
     });
   });

@@ -17,7 +17,6 @@ import {
   revealStationPasscode,
   revokeStationPasscode,
   rotateStationPasscode,
-  setAuthLogRedactor,
   StationPasscodeCapExceededError,
   StationPasscodeDecryptionError,
   StationPasscodeKeyUnsetError,
@@ -30,7 +29,8 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
-import { redactLogValue, redactQueryParams } from '@wxyc/observability';
+import { redactQueryParams } from '@wxyc/observability';
+import { installAuthLogRedaction } from './log-redaction';
 import {
   adminPrefixAuditMiddleware,
   mountAuthenticatedAccountAudit,
@@ -52,9 +52,9 @@ import { resolveOrganization } from './resolve-organization';
 import { approveSelfSignup, readStationSignupStatus, StationSignupAdminError } from './station-signup-admin';
 import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
 
-// better-auth logs the raw error it caught, and a failed query's message quotes its bound values, legal names
-// included. Registered here, not in instrument.ts, because instrument.js is bundled apart from the app (BS#3054).
-setAuthLogRedactor(redactLogValue);
+// Before any request can reach the better-auth router (BS#3054). Registered here, not in instrument.ts, because
+// instrument.js is bundled apart from the app.
+installAuthLogRedaction();
 
 const port = process.env.AUTH_PORT || '8082';
 

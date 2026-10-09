@@ -7,3 +7,4 @@ export {
   redactSentryBreadcrumb,
   redactSentryEventQueryParams,
 } from './redact-query-params.js';
+export { installConsoleRedaction } from './console-redaction.js';
