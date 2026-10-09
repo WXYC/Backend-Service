@@ -11,7 +11,7 @@ import { notifyPass } from '../services/review-notices.service.js';
 import { printIntakeItem } from '../services/review-print.service.js';
 import WxycError from '../utils/error.js';
 import { parseBooleanQueryParam, parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
-import { canWriteReviews, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
+import { canBeAskedToReview, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
 /**
@@ -110,11 +110,10 @@ export const deleteIntake: RequestHandler<{ id: string }> = async (req, res) => 
   res.json({ deleted_review_authors: result.authors });
 };
 
-/** `/request`'s `dj_id` must name an account whose membership role can accept, or the request would sit in `requested` with nobody able to answer it. */
+/** `/request`'s `dj_id` must name an account whose membership role can accept and that is not a service account (the auto-DJ), or the request would sit in `requested` with nobody able to answer it. */
 const parseRequestedDj = async (raw: unknown) => {
   if (typeof raw !== 'string' || raw === '') throw new WxycError('dj_id is required', 400);
-  const roles = await intakeService.memberRoles(raw);
-  if (!canWriteReviews(roles)) {
+  if (!canBeAskedToReview(await intakeService.memberAccount(raw))) {
     throw new WxycError('dj_id must name an account that can review', 400);
   }
   return raw;

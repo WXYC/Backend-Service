@@ -1,4 +1,4 @@
-import { roleGrants } from '@wxyc/authentication';
+import { AUTO_DJ_USERNAME, roleGrants } from '@wxyc/authentication';
 import type { Request } from 'express';
 
 /** Whether the caller holds `reviews: manage`: the music director's verbs, and the lift on the DJ-only limits in `/intake` and `/reviews`. */
@@ -13,6 +13,15 @@ export const reviewsActor = (req: Pick<Request, 'auth'>): ReviewsActor => ({
   manage: holdsReviewsManage(req),
 });
 
-/** Whether any of an account's membership roles grants `reviews: write`: the one role test behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`, so the two cannot drift on roles. The ban rule is not shared: the list leaves out an account whose ban is in force, and `/intake` does not check bans. */
+/** Whether any of an account's membership roles grants `reviews: write`: the one role test behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`, so the two cannot drift on roles. Service accounts are left out one level up, in `canBeAskedToReview`. The ban rule is not shared: the list leaves out an account whose ban is in force, and `/intake` does not check bans. */
 export const canWriteReviews = (roles: Iterable<string | null | undefined>): boolean =>
   [...roles].some((role) => roleGrants(role, { reviews: ['write'] }));
+
+/** Whether an account can be asked to review: its roles grant `reviews: write` and it is not a service account (the auto-DJ, recognised by `AUTO_DJ_USERNAME`). The one account rule behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`. */
+export const canBeAskedToReview = ({
+  roles,
+  username,
+}: {
+  roles: Iterable<string | null | undefined>;
+  username: string | null | undefined;
+}): boolean => canWriteReviews(roles) && username !== AUTO_DJ_USERNAME;

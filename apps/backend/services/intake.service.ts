@@ -636,6 +636,12 @@ export const finalizeIntakeItem = async (id: number, finalizedBy: string) => {
   return outcome.outcome === 'finalized' ? { ...outcome, item: (await getIntakeItem(id, false))! } : outcome;
 };
 
-/** The `auth_member` roles of an account — empty when the account is unknown or has no membership. */
-export const memberRoles = async (userId: string) =>
-  (await db.select({ role: member.role }).from(member).where(eq(member.userId, userId))).map((r) => r.role);
+/** The `auth_member` roles and username of an account — no roles and a null username when the account is unknown or has no membership. */
+export const memberAccount = async (userId: string) => {
+  const rows = await db
+    .select({ role: member.role, username: user.username })
+    .from(member)
+    .innerJoin(user, eq(member.userId, user.id))
+    .where(eq(member.userId, userId));
+  return { roles: rows.map((r) => r.role), username: rows[0]?.username ?? null };
+};

@@ -30,7 +30,7 @@ const mockRole = (role?: string, sub = 'caller-id') =>
   });
 
 const mockTransition = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
-const mockMemberRoles = jestGlobals.fn<(...args: any[]) => Promise<string[]>>();
+const mockMemberAccount = jestGlobals.fn<(...args: any[]) => Promise<{ roles: string[]; username: string | null }>>();
 
 jest.mock('@wxyc/database', () => ({
   intakeItemStateEnum: jest.requireActual('../../../shared/database/src/schema').intakeItemStateEnum,
@@ -39,7 +39,7 @@ const mockNotifyPass = jestGlobals.fn<(...args: any[]) => Promise<void>>();
 jest.mock('../../../apps/backend/services/review-notices.service', () => ({ notifyPass: mockNotifyPass }));
 jest.mock('../../../apps/backend/services/intake.service', () => ({
   transitionIntakeItem: mockTransition,
-  memberRoles: mockMemberRoles,
+  memberAccount: mockMemberAccount,
 }));
 
 // The controller imports the filing seam (BS#2803), whose service module reads real schema tables at load.
@@ -77,7 +77,7 @@ const refused = (allowed: readonly string[]) =>
 beforeEach(() => {
   mockedJwtVerify.mockReset();
   mockTransition.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM });
-  mockMemberRoles.mockReset().mockResolvedValue(['dj']);
+  mockMemberAccount.mockReset().mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
   mockNotifyPass.mockReset();
 });
 
@@ -102,7 +102,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
     mockRole(role);
     expect((await post(path, body)).status).toBe(403);
     expect(mockTransition).not.toHaveBeenCalled();
-    expect(mockMemberRoles).not.toHaveBeenCalled();
+    expect(mockMemberAccount).not.toHaveBeenCalled();
   });
 
   test('state_changed is a 409 with the closed reason', async () => {
@@ -174,20 +174,26 @@ describe('POST /intake/:id/request — dj_id', () => {
   });
 
   test('an unknown account (no membership) is a 400 and changes nothing', async () => {
-    mockMemberRoles.mockResolvedValue([]);
+    mockMemberAccount.mockResolvedValue({ roles: [], username: null });
     expect((await post('request', { dj_id: 'ghost' })).status).toBe(400);
     expect(mockTransition).not.toHaveBeenCalled();
   });
 
   test('a member (reviews: []) is a 400 and changes nothing', async () => {
-    mockMemberRoles.mockResolvedValue(['member']);
+    mockMemberAccount.mockResolvedValue({ roles: ['member'], username: 'test.member' });
     expect((await post('request', { dj_id: 'm-1' })).status).toBe(400);
     expect(mockTransition).not.toHaveBeenCalled();
   });
 
+  test('the auto-DJ service account is the same 400 and changes nothing', async () => {
+    mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'autodj' });
+    expect((await post('request', { dj_id: 'auto-1' })).status).toBe(400);
+    expect(mockTransition).not.toHaveBeenCalled();
+  });
+
   test('a DJ is a 200', async () => {
-    mockMemberRoles.mockResolvedValue(['dj']);
+    mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
     expect((await post('request', { dj_id: 'dj-2' })).status).toBe(200);
-    expect(mockMemberRoles).toHaveBeenCalledWith('dj-2');
+    expect(mockMemberAccount).toHaveBeenCalledWith('dj-2');
   });
 });

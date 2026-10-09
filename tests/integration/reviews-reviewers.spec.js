@@ -26,6 +26,7 @@ describe('GET /reviews/reviewers (BS#3058)', () => {
       ['sm', 'stationManager', 'Cat Handle', null, false],
       ['blank', 'dj', 'Dan Handle', ' \t ', false],
       ['member', 'member', 'Eve Handle', 'Eve Test Reviewer', false],
+      ['autodj', 'dj', 'Auto Handle', null, false],
       ['banned', 'dj', 'Fay Handle', 'Fay Test Reviewer', true],
       // A ban that lapsed an hour ago: better-auth clears `banned` only at the next sign-in, so the row still says true.
       ['lapsed', 'dj', 'Gus Handle', 'Gus Test Reviewer', true, new Date(Date.now() - 3_600_000)],
@@ -39,6 +40,8 @@ describe('GET /reviews/reviewers (BS#3058)', () => {
         dj_name: `On Air ${suffix}`,
         banned,
         ban_expires: banExpires,
+        // The auto-DJ service account is recognised by its username; it holds the dj role yet is never listed.
+        ...(suffix === 'autodj' && { username: 'autodj' }),
       });
       await sql`INSERT INTO auth_member (id, organization_id, user_id, role) VALUES (${`${user.id}-m`}, ${organizationId}, ${user.id}, ${role})`;
     }
