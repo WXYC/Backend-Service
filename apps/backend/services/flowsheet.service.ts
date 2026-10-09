@@ -1202,6 +1202,8 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   // UPDATE; `UpdateRequestBody` must never carry linkage columns (BS#1099). The pre-read is FOR UPDATE
   // so two one-field PATCHes in flight each merge against the other's committed field (BS#3065).
   return db.transaction(async (trx) => {
+    // The re-match lookup below deliberately runs on the pool `db`, not `trx`: a lookup error must not abort
+    // this transaction (25P02) and take the UPDATE down with it.
     const [current] = await trx
       .select({
         entry_type: flowsheet.entry_type,
@@ -1222,7 +1224,9 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
     } else if (entry.album_id === null) {
       linkSet = CLEARED_LINK;
     } else if (
-      (entry.artist_name !== undefined || entry.album_title !== undefined) &&
+      // Fires on a CHANGE, not on the patch carrying the field: editors resend unchanged artist/album on every save.
+      ((entry.artist_name !== undefined && entry.artist_name !== current.artist_name) ||
+        (entry.album_title !== undefined && entry.album_title !== current.album_title)) &&
       current.entry_type === 'track' &&
       (current.album_id == null || current.linkage_source === 'direct_text_match')
     ) {
@@ -1243,7 +1247,10 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
         }
       } catch (err) {
         // The text edit still applies and the link is left as it was; a failed lookup never fails the PATCH.
-        Sentry.captureException(err, { tags: { tool: 'flowsheet', subsystem: 'text-linkage' } });
+        Sentry.captureException(err, {
+          tags: { tool: 'flowsheet', subsystem: 'text-linkage' },
+          extra: { entry_id },
+        });
       }
     }
 
