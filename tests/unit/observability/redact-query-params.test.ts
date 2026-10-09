@@ -66,12 +66,21 @@ describe('redactQueryParams', () => {
     expect(String(redacted.stack)).toContain(`Failed query: ${SQL}`);
   });
 
-  // Both guards decide on the params line alone, never on a bound value: a first value that merely
+  // The guards decide by the position of the params marker, never by what follows it or what a bound value says: a first value that merely
   // starts with the redaction text must not pass for a redacted line (the writer would choose the prefix).
   it.each([
     ['a first bound value that starts with the redaction text', `[redacted] my review,DJ Cat Scratch,${SENTINEL},ts`],
     ['a first bound value that is the redaction text followed by a separator', `[redacted],${SENTINEL},ts`],
     ['a first bound value that is the redaction text and a line break', `[redacted]\nmy review,${SENTINEL},ts`],
+    [
+      'a first bound value that imitates the redaction and a stack frame',
+      `[redacted]\n    at ${SENTINEL},DJ Cat Scratch,ts`,
+    ],
+    ['a first bound value that imitates the redaction and an async frame', `[redacted]\n    at async ${SENTINEL},ts`],
+    [
+      'a first bound value that imitates the redaction, a frame and a second marker',
+      `[redacted]\n    at ${SENTINEL},ts\nparams: z`,
+    ],
   ])('cuts the stack of a shortened message whose params line has %s', (_label, bound) => {
     const error = new Error(`Failed query: select 1\nparams: ${bound}`);
     // V8 formats `stack` on first read, so read it before shortening the message.
