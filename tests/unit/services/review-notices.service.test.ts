@@ -34,16 +34,14 @@ jest.mock('@wxyc/database', () => {
     const next = mockQueue.shift() ?? [];
     return next instanceof Error ? reject(next) : resolve(next);
   };
-  return {
-    ...jest.requireActual('../../../shared/database/src/schema'),
-    ...jest.requireActual('../../../shared/database/src/staff-name'),
+  return jest.requireActual('../../utils/real-database-module').realDatabaseModule({
     db: {
       select: (fields?: Record<string, unknown>) => {
         if (fields) mockSelected.push(fields);
         return chain;
       },
     },
-  };
+  });
 });
 jest.mock('../../../apps/backend/services/intake.service', () => ({
   effectiveState: jest.requireActual('drizzle-orm').sql`effective_state`,
