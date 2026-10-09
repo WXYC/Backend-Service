@@ -94,6 +94,14 @@ describe('updateEntry — linkage provenance on album_id', () => {
     expect(mockLookup).not.toHaveBeenCalled();
   });
 
+  it('keeps rule precedence: a pick wins over a carried album_title and never calls the matcher', async () => {
+    mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
+    mockLookup.mockReturnValue([{ id: 5 }]);
+    await updateEntry(7, { album_id: 42, album_title: 'x' });
+    expect(setArg()).toMatchObject({ album_id: 42, linkage_source: 'dj_bin_pick', linkage_confidence: null });
+    expect(mockLookup).not.toHaveBeenCalled();
+  });
+
   it('clears all three linkage columns when the patch sets album_id: null', async () => {
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'dj_bin_pick' })]);
     await updateEntry(7, { album_id: null });
@@ -107,6 +115,20 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     {
       name: 'one candidate on an unlinked track links it',
       row: track(),
+      candidates: [{ id: 5 }],
+      expected: { album_id: 5, linkage_source: 'direct_text_match', linkage_confidence: 1 },
+    },
+    {
+      name: 'an artist_name edit with one candidate links an unlinked track',
+      row: track(),
+      patch: { artist_name: 'Jessica Pratt Band' },
+      candidates: [{ id: 5 }],
+      expected: { album_id: 5, linkage_source: 'direct_text_match', linkage_confidence: 1 },
+    },
+    {
+      name: 'an artist_name edit with one candidate relinks a direct_text_match track',
+      row: track({ album_id: 9, linkage_source: 'direct_text_match' }),
+      patch: { artist_name: 'Jessica Pratt Band' },
       candidates: [{ id: 5 }],
       expected: { album_id: 5, linkage_source: 'direct_text_match', linkage_confidence: 1 },
     },
@@ -140,13 +162,13 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
       candidates: [{ id: 5 }, { id: 6 }],
       expected: { album_id: null, ...CLEARED },
     },
-  ])('$name', async ({ row, candidates, expected }) => {
+  ])('$name', async ({ row, candidates, expected, patch = { album_title: 'Quiet Signs (Deluxe)' } }) => {
     mockPreRead.mockReturnValue([row]);
     mockLookup.mockReturnValue(candidates);
-    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' });
+    await updateEntry(7, patch);
     expect(mockLookup).toHaveBeenCalledTimes(1);
     const set = setArg();
-    expect(set.album_title).toBe('Quiet Signs (Deluxe)');
+    expect(set).toMatchObject(patch);
     if (expected === null) {
       expect(set).not.toHaveProperty('album_id');
       expect(set).not.toHaveProperty('linkage_source');
@@ -161,6 +183,16 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     ['a NULL-source row with an album_id', track({ album_id: 9 }), { artist_name: 'x' }],
     ['a talkset', track({ entry_type: 'talkset' }), { artist_name: 'x' }],
     ['a patch touching neither artist nor album', track(), { track_title: 'x' }],
+    [
+      'a patch carrying unchanged artist/album plus a track_title change',
+      track({ album_id: 9, linkage_source: 'direct_text_match' }),
+      { artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', track_title: 'x' },
+    ],
+    [
+      'a patch carrying unchanged artist/album plus a request_flag toggle',
+      track({ album_id: 9, linkage_source: 'direct_text_match' }),
+      { artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', request_flag: true },
+    ],
   ])('never calls the matcher or touches the link on %s', async (_name, row, patch) => {
     mockPreRead.mockReturnValue([row]);
     await updateEntry(7, patch);
@@ -178,6 +210,14 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     expect(params).toEqual(['Quiet Signs (Deluxe)', 'Jessica Pratt', 'Quiet Signs (Deluxe)', 'Jessica Pratt']);
   });
 
+  it('looks up an artist-only patch with the patched artist and the locked album title', async () => {
+    mockPreRead.mockReturnValue([track()]);
+    mockLookup.mockReturnValue([{ id: 5 }]);
+    await updateEntry(7, { artist_name: 'Jessica Pratt Band' });
+    const { params } = new PgDialect().sqlToQuery(mockLookupWhere.mock.calls[0][0]);
+    expect(params).toEqual(['Quiet Signs', 'Jessica Pratt Band', 'Quiet Signs', 'Jessica Pratt Band']);
+  });
+
   it('applies the text edit and leaves the link alone when the lookup rejects, reporting to Sentry', async () => {
     const boom = new Error('lookup failed');
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
@@ -188,6 +228,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     expect(setArg()).toEqual({ album_title: 'Quiet Signs (Deluxe)' });
     expect(Sentry.captureException).toHaveBeenCalledWith(boom, {
       tags: { tool: 'flowsheet', subsystem: 'text-linkage' },
+      extra: { entry_id: 7 },
     });
   });
 });
