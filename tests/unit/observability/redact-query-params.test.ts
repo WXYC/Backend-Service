@@ -54,6 +54,18 @@ describe('redactQueryParams', () => {
     expect(redacted.stack).toContain('redact-query-params.test');
   });
 
+  it('cuts the stack at a params line a shortened message leaves behind', () => {
+    const error = queryError();
+    // V8 formats `stack` on first read, so read it before shortening the message.
+    expect(error.stack).toContain(SENTINEL);
+    error.message = `Failed query: ${SQL}`;
+
+    const redacted = redactQueryParams(error);
+
+    expect(String(redacted.stack)).not.toContain(SENTINEL);
+    expect(String(redacted.stack)).toContain(`Failed query: ${SQL}`);
+  });
+
   it('keeps the input class and its other own properties, and leaves the input untouched', () => {
     const original = Object.assign(queryError(), { code: '23505', status: 409, expose: true });
 

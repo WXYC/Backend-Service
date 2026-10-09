@@ -16,6 +16,8 @@ import type { Breadcrumb, ErrorEvent, EventHint, Exception, StackFrame } from '@
  */
 const PARAMS_MARKER = '\nparams: ';
 const REDACTED_PARAMS = `${PARAMS_MARKER}[redacted]`;
+/** A params marker followed by anything but the redaction: bound values still in the text. */
+const UNREDACTED_PARAMS = /\nparams: (?!\[redacted\])/;
 const FAILING_ROW = /^Failing row contains \(/;
 const REDACTED_FAILING_ROW = 'Failing row contains ([redacted])';
 const MAX_DEPTH = 8;
@@ -32,12 +34,15 @@ function scrubText(text: string): string {
 /**
  * `stack` with the original `message` swapped for its scrubbed form where the
  * stack embeds it (V8 writes `${name}: ${message}` first), keeping the frames.
- * A stack that does not embed the message is cut at the params marker instead.
+ * A stack that does not embed the message is cut at the params marker instead, as is one
+ * that still holds a params line after the swap (a message shortened after V8 formatted the stack).
  */
 function scrubStack(stack: string, message: string, scrubbedMessage: string): string {
   const at = stack.indexOf(message);
   if (at === -1) return scrubText(stack);
-  return stack.slice(0, at) + scrubbedMessage + stack.slice(at + message.length);
+  const swapped = stack.slice(0, at) + scrubbedMessage + stack.slice(at + message.length);
+  const left = swapped.search(UNREDACTED_PARAMS);
+  return left === -1 ? swapped : swapped.slice(0, left) + REDACTED_PARAMS;
 }
 
 function carriesRow(error: Error): boolean {
@@ -102,6 +107,8 @@ function minimalError(error: unknown): Error | string {
     const { name, message } = error as Error;
     const safe = new Error(scrubText(String(message)));
     safe.name = String(Object.getPrototypeOf(error)?.constructor?.name ?? name);
+    // Its own stack would be the helper's call stack, and the rebuild would send that as the throw site.
+    delete safe.stack;
     return safe;
   } catch {
     return UNLOGGABLE_ERROR;
@@ -119,7 +126,7 @@ function redactCause(cause: unknown, depth: number): unknown {
  * `cause`. The copy has the input's prototype and its other own properties as
  * plain values. It is total: it runs on the error path, so anything unexpected
  * (a throwing getter, a Proxy, a frozen exotic) yields a minimal error carrying
- * the class name and redacted message, or `[unloggable error]`, never a throw.
+ * the class name and redacted message (no stack), or `[unloggable error]`, never a throw.
  * Duck-typed on the message rather than `instanceof DrizzleQueryError` because
  * `instrument.js` is bundled separately from the app. An error with nothing to
  * redact, and any non-`Error` value, comes back as the same object.
@@ -193,8 +200,14 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
   const stackParser = getClient()?.getOptions().stackParser;
   if (!stackParser || !isError(original)) return rebuilt;
   let link: unknown = redactQueryParams(original);
-  for (let i = 0; i < values.length && isError(link); i++, link = (link as Error).cause) {
+  // `redactError` copies the thrown error and `MAX_DEPTH` causes; a link past that is the raw error.
+  for (let i = 0; i < values.length && i <= MAX_DEPTH && isError(link); i++, link = (link as Error).cause) {
     const target = values[values.length - 1 - i];
+    // A copy whose stack still holds a params line (nothing needed copying) must not be parsed into frames.
+    if (UNREDACTED_PARAMS.test(String(link.stack))) {
+      delete target.stacktrace;
+      break;
+    }
     const fresh = exceptionFromError(stackParser, link);
     // A different class means the chain does not line up (an AggregateError added values): leave it to the fallback.
     if (fresh.type !== target.type) break;

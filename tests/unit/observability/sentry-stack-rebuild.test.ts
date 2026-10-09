@@ -1,5 +1,5 @@
 import * as SentryNode from '@sentry/node';
-import type { ErrorEvent } from '@sentry/core';
+import type { ErrorEvent, EventHint } from '@sentry/core';
 import { redactSentryBreadcrumb, redactSentryEventQueryParams } from '@wxyc/observability';
 import { SIGNUP_DJ_NAME, SIGNUP_REAL_NAME, captureFailedStationSignupInsert } from '../../utils/postgres-js-errors';
 
@@ -10,6 +10,8 @@ const SENTINEL = SIGNUP_REAL_NAME;
 const DJ_NAME = SIGNUP_DJ_NAME;
 const TIMESTAMP = '2026-10-08';
 // Every word of both names and the bound timestamp, so a frame holding any piece of them fails.
+// Joined at run time so the test's own source (which Sentry attaches as context lines) does not hold the value.
+const BOUND_TIMESTAMP = ['2026-10-08T16', '23', '45.123Z'].join(':');
 const BOUND_WORDS = [...SENTINEL.split(' '), ...DJ_NAME.split(' '), TIMESTAMP];
 
 /** Which bound values appear anywhere in the event (a list, so a failure names them without dumping the event). */
@@ -17,11 +19,16 @@ const heldBy = (event: ErrorEvent) =>
   [SENTINEL, DJ_NAME, '16:23:45'].filter((needle) => JSON.stringify(event).includes(needle));
 
 /** Everything @sentry/node sends for one captured error, through its default integrations and this repo's hooks. */
-async function captureThroughSentry(error: unknown): Promise<ErrorEvent> {
+async function captureThroughSentry(
+  error: unknown,
+  options: Partial<SentryNode.NodeOptions> = {},
+  beforeSend: (event: ErrorEvent, hint: EventHint) => ErrorEvent = redactSentryEventQueryParams
+): Promise<ErrorEvent> {
   const sent: ErrorEvent[] = [];
   SentryNode.init({
     dsn: 'https://public@example.invalid/1',
-    beforeSend: redactSentryEventQueryParams,
+    ...options,
+    beforeSend,
     beforeBreadcrumb: redactSentryBreadcrumb,
     transport: () => ({
       send: (envelope) => {
@@ -69,7 +76,87 @@ describe('redactSentryEventQueryParams rebuilds the stack from the redacted erro
       'signup failed',
     ]);
     expect(heldBy(event)).toEqual([]);
-    expect(values.every((value) => (value.stacktrace?.frames?.length ?? 0) > 0)).toBe(true);
+    // Each value carries its own frames: postgres.js's connection error is thrown from node:net, the outer error here.
+    const framesOf = (value: (typeof values)[number]) => (value.stacktrace?.frames ?? []).map((f) => f.filename ?? '');
+    expect(framesOf(values[0]).some((file) => file.includes('node:net'))).toBe(true);
+    expect(framesOf(values[0]).some((file) => file.includes('sentry-stack-rebuild.test'))).toBe(false);
+    expect(framesOf(values[2]).some((file) => file.includes('sentry-stack-rebuild.test'))).toBe(true);
+    expect(framesOf(values[2]).some((file) => file.includes('node:net'))).toBe(false);
+  });
+
+  it('carries the source context lines over to the rebuilt frames', async () => {
+    const event = await captureThroughSentry(await captureFailedStationSignupInsert());
+
+    const own = (event.exception?.values ?? [])
+      .flatMap((value) => value.stacktrace?.frames ?? [])
+      .filter((frame) => /sentry-stack-rebuild\.test/.test(frame.filename ?? ''));
+    expect(own.length).toBeGreaterThan(0);
+    expect(own.every((frame) => typeof frame.context_line === 'string' && frame.context_line.length > 0)).toBe(true);
+  });
+
+  it('leaves a value whose class does not match the chain to the in-place scrub, which drops its stack', async () => {
+    const event = await captureThroughSentry(await captureFailedStationSignupInsert(), {}, (sent, hint) => {
+      const last = sent.exception?.values?.at(-1);
+      if (last) last.type = 'NotTheThrownClass';
+      return redactSentryEventQueryParams(sent, hint);
+    });
+
+    const last = event.exception?.values?.at(-1);
+    expect(heldBy(event)).toEqual([]);
+    expect(last?.value).toContain('params: [redacted]');
+    expect(last?.stacktrace).toBeUndefined();
+  });
+
+  it('sends no helper frames when the error cannot be copied (a throwing detail getter)', async () => {
+    const error = new Error(`Failed query: select 1\nparams: ${DJ_NAME},${SENTINEL},${BOUND_TIMESTAMP}`);
+    Object.defineProperty(error, 'detail', {
+      get() {
+        throw new Error('unreadable');
+      },
+    });
+
+    const event = await captureThroughSentry(error);
+
+    const value = event.exception?.values?.at(-1);
+    expect(heldBy(event)).toEqual([]);
+    expect(value?.value).toBe('Failed query: select 1\nparams: [redacted]');
+    expect(JSON.stringify(event.exception)).not.toMatch(/minimalError|redactQueryParams|rebuildExceptionValues/);
+    expect(value?.stacktrace).toBeUndefined();
+  });
+
+  it('drops the stack when a message shortened after the stack was formatted leaves the params lines in it', async () => {
+    const error = await captureFailedStationSignupInsert();
+    // V8 formats `stack` on first read, so read it before shortening the message.
+    expect(error.stack).toContain('params: ');
+    error.message = error.message.slice(0, error.message.indexOf('\nparams: '));
+
+    const event = await captureThroughSentry(error);
+
+    expect(heldBy(event)).toEqual([]);
+    expect(event.exception?.values?.at(-1)?.value).toContain('Failed query');
+  });
+
+  it('sends no bound value from a query error nine causes deep when linkedErrors follows twelve', async () => {
+    let error: Error = await captureFailedStationSignupInsert();
+    for (let i = 0; i < 9; i++) error = new Error(`wrapper ${i}`, { cause: error });
+
+    const event = await captureThroughSentry(error, {
+      integrations: [SentryNode.linkedErrorsIntegration({ limit: 12 })],
+    });
+
+    expect(event.exception?.values).toHaveLength(11);
+    expect(heldBy(event)).toEqual([]);
+  });
+
+  it('withholds the stack of a copy that still holds a params line (a plain error whose message was shortened)', async () => {
+    const error = new Error(`Failed query: select 1\nparams: ${DJ_NAME},${SENTINEL},${BOUND_TIMESTAMP}`);
+    expect(error.stack).toContain('params: ');
+    error.message = 'select 1 failed';
+
+    const event = await captureThroughSentry(error);
+
+    expect(heldBy(event)).toEqual([]);
+    expect(event.exception?.values?.at(-1)?.stacktrace).toBeUndefined();
   });
 
   it('withholds a stack it cannot rebuild rather than keep one built from the params lines', () => {
