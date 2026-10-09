@@ -3,6 +3,7 @@ import type { ErrorEvent, EventHint } from '@sentry/core';
 import { createHash } from 'crypto';
 import { inspect } from 'util';
 import {
+  installConsoleRedaction,
   redactLogValue,
   redactQueryParams,
   redactSentryBreadcrumb,
@@ -400,9 +401,10 @@ describe('an error that never held a params marker', () => {
     [
       // The walk skips holes and non-errors where it reads `errors`, so a huge sparse array fills nothing; its iterator is
       // a trap, so a walk that iterates the array (every index, hole or not) ends in its catch and withholds the stacktraces.
-      'an AggregateError whose errors array is sparse',
+      // The `null` pins the filter: queued, it would throw in the visit (`null.stack`), which also withholds them.
+      'an AggregateError whose errors array is sparse and holds non-errors',
       () => {
-        const aggregate = new AggregateError(members(3), 'agg');
+        const aggregate = new AggregateError([...members(3), null, undefined, 'text', {}], 'agg');
         aggregate.errors.length = 1_000_000;
         Object.defineProperty(aggregate.errors, Symbol.iterator, {
           value() {
@@ -463,6 +465,29 @@ describe('an error whose cause getter builds a fresh error on every read', () =>
     expect(values.length).toBeGreaterThan(1);
     expect(values.map((value) => value.stacktrace)).toEqual(values.map(() => undefined));
   }, 30_000);
+});
+
+// A copy counts as intact only while its stack is the one `redactError` gave it. A first bound value can imitate the redaction and a
+// frame, so a copy whose stack was put back from the raw error must be judged like the raw error, not by what its first value says.
+describe('a copy whose stack was put back from the raw error', () => {
+  it('reaches no log line, console wrapper output or Sentry frame, though a bound value imitates the redaction and a frame', async () => {
+    const raw = realDrizzleQueryError([`[redacted]\n    at ${DJ_NAME}`, SENTINEL, 'u1']);
+    const copy = redactQueryParams(raw) as Error;
+    copy.stack = raw.stack;
+    const written = jest.fn();
+    const target = { error: written, warn: jest.fn() };
+    const restore = installConsoleRedaction(target);
+    target.error('[STATION SIGNUP] Unexpected error:', copy);
+    restore();
+    const event = await captureThroughSentry(copy);
+
+    expect({
+      raw: leaksIn(dump(redactQueryParams(raw))),
+      log: leaksIn(dump(redactQueryParams(copy)) + dump(redactLogValue(copy))),
+      wrapper: leaksIn(dump(written.mock.calls)),
+      sent: leaksIn(JSON.stringify(event)),
+    }).toEqual({ raw: [], log: [], wrapper: [], sent: [] });
+  });
 });
 
 // The content backstop in the rebuild loop: reached through a link the copy chain does not own.
@@ -537,6 +562,24 @@ describe('an object that Sentry follows as an error without being one', () => {
   ])('as %s sends no frame built from its params line', async (_label, make) => {
     const event = await captureThroughSentry(make());
 
+    expect(leaksIn(JSON.stringify(event))).toEqual([]);
+  });
+
+  // The walk asks `isError` of a member once, when it queues it: a member whose tag answers differently on a later read must not be skipped.
+  it('as an AggregateError member whose tag answers Error once and Object after sends no frame built from its params line', async () => {
+    let armed = false;
+    let reads = 0;
+    const member = tagged();
+    Object.defineProperty(member, Symbol.toStringTag, {
+      get: () => (!armed || reads++ === 0 ? 'Error' : 'Object'),
+    });
+
+    const event = await captureThroughSentry(new AggregateError([member], 'bootstrap failed'), {}, (sent, hint) => {
+      armed = true;
+      return redactSentryEventQueryParams(sent, hint);
+    });
+
+    expect(event.exception?.values?.length).toBeGreaterThan(1);
     expect(leaksIn(JSON.stringify(event))).toEqual([]);
   });
 

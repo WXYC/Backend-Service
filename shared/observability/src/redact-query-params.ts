@@ -43,8 +43,8 @@ function scrubText(text: string): string {
  * Decided by position, never by what follows a marker (a bound value can imitate a redaction):
  * - a stack that does not embed the message, or holds a marker before it, is cut at its first marker;
  * - so is one whose message span holds a marker unless the error is `intact`: its message is exactly the
- *   one it builds from its own `query` and `params` (a drizzle error), or it is a copy `redactError` made (its
- *   `params` is the redaction, so that check cannot say so), and the frames start right after it.
+ *   one it builds from its own `query` and `params` (a drizzle error), or it is a copy `redactError` made whose stack is still
+ *   the one it gave it (its `params` is the redaction, so that check cannot say so), and the frames start right after it.
  *   Anything else (a message cut at or after the marker, or a plain error that carries no query to check
  *   it against) leaves the rest of the params line, or a bound value's own `\n    at ` line, after the span;
  * - otherwise the text after the message is cut at its first marker (a message shortened before the marker).
@@ -72,8 +72,10 @@ function isError(value: unknown): value is Error {
   return value instanceof Error || types.isNativeError(value) || copies.has(value as object) || isSentryError(value);
 }
 
-/** The copies `redactError` made: a copy of a cross-realm error is no longer native, yet must still be followed down a cause chain, and a copy counts as `intact` when it is redacted again. */
+/** The copies `redactError` made: a copy of a cross-realm error is no longer native, yet must still be followed down a cause chain. */
 const copies = new WeakSet<object>();
+/** The stack `redactError` gave each copy: a copy counts as `intact` when it is redacted again only while its stack is still that string. */
+const copyStacks = new WeakMap<object, string>();
 
 /** What stands in for an error the redaction cannot copy: it must never be the original. */
 const UNLOGGABLE_ERROR = '[unloggable error]';
@@ -116,9 +118,10 @@ function redactError(error: Error, depth: number): Error {
   }
   set('message', message, false);
   const { query: rawQuery, params } = error as { query?: unknown; params?: unknown };
-  // A copy is redacted again like any error, but counts as intact: its frames start right after its message, and its `params` is the redaction, so the check below could not say so.
+  // A copy is redacted again like any error. It counts as intact only while its stack is the one `redactError` gave it (its frames then start
+  // right after its message, and its `params` is the redaction, so the check below could not say so); a stack put back from elsewhere is judged like the raw error's.
   const intact =
-    copies.has(error) ||
+    (typeof rawStack === 'string' && copyStacks.get(error) === rawStack) ||
     (typeof rawQuery === 'string' &&
       Array.isArray(params) &&
       rawMessage === `Failed query: ${rawQuery}${PARAMS_MARKER}${params}`);
@@ -134,6 +137,7 @@ function redactError(error: Error, depth: number): Error {
     set('query', scrubText(query), Object.prototype.propertyIsEnumerable.call(error, 'query'));
   if (carriesRow(error)) set('detail', REDACTED_FAILING_ROW, true);
   copies.add(clean);
+  if (typeof clean.stack === 'string') copyStacks.set(clean, clean.stack);
   return clean;
 }
 
@@ -165,7 +169,9 @@ function redactCause(cause: unknown, depth: number): unknown {
  * the class name and redacted message (no stack), or `[unloggable error]`, never a throw.
  * Duck-typed on the message rather than `instanceof DrizzleQueryError` because
  * `instrument.js` is bundled separately from the app. An error with nothing to
- * redact, and any non-`Error` value, comes back as the same object.
+ * redact, and any non-`Error` value, comes back as the same object; a copy of a
+ * failed query does not, since its redacted `params` or stack still holds the
+ * marker, so it is copied again.
  *
  * Which call sites use it, and what it leaves unredacted, is in docs/pii.md, "Failed-query
  * parameters: how the redaction works and what it leaves". A new route or job that catches
@@ -285,16 +291,18 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
 function rawChainHoldsParams(error: unknown): boolean {
   try {
     const seen = new Set<unknown>();
-    const pending: unknown[] = [error];
+    // Each value is asked `isError` once, when it is queued, so one whose answer changes between reads cannot be queued and then skipped.
+    const pending: Error[] = isError(error) ? [error] : [];
     while (pending.length > 0) {
-      const next = pending.pop();
-      if (!isError(next) || seen.has(next)) continue;
+      const next = pending.pop() as Error;
+      if (seen.has(next)) continue;
       // A getter that builds a new error on every read has no end: past this many errors the walk cannot tell, and answers true.
       if (seen.size >= WALK_BUDGET) return true;
       seen.add(next);
       if (String(next.stack).includes(PARAMS_MARKER)) return true;
       const { errors } = next as { errors?: unknown };
-      pending.push(next.cause);
+      const { cause } = next;
+      if (isError(cause)) pending.push(cause);
       // Only errors are queued, so a hole or a non-error in a huge `errors` array fills nothing (the visit itself is linear in its length).
       if (Array.isArray(errors)) {
         errors.forEach((member) => {

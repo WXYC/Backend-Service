@@ -150,7 +150,7 @@ describe('redactQueryParams', () => {
     expect(everything(redactLogValue(copy))).not.toContain(SENTINEL);
   });
 
-  // A copy is an ordinary writable object: a copy is not trusted by identity, so putting the raw values back does not get them logged.
+  // A copy is an ordinary writable object: it is trusted only while its stack is the one it was given, so putting the raw values back does not get them logged.
   it.each(['message', 'stack', 'params', 'cause'] as const)(
     'redacts a copy again after its %s is set back from the raw error',
     (field) => {
