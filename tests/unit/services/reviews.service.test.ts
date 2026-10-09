@@ -38,7 +38,6 @@ const mockExecuted: string[] = [];
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
 
 jest.mock('@wxyc/database', () => {
-  const realSchema = jest.requireActual('../../../shared/database/src/schema');
   // A thenable chain: whatever the builder is awaited on resolves the next scripted result set.
   const chain = (handle: 'db' | 'tx', columns?: Record<string, unknown>): any => {
     const { PgDialect, getTableName } = {
@@ -138,13 +137,10 @@ jest.mock('@wxyc/database', () => {
     },
   };
   const sqlstate = jest.requireActual('../../../shared/database/src/sqlstate');
-  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
-  return {
-    ...realSchema,
+  return jest.requireActual('../../utils/real-database-module').realDatabaseModule({
     ...sqlstate,
-    ...staffName,
     db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) },
-  };
+  });
 });
 
 import { FILED_STATES, RELEASE_ACCEPTED_REVIEW, effectiveState } from '../../../apps/backend/services/intake.service';

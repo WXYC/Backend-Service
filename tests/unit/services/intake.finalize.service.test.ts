@@ -8,11 +8,10 @@ jest.unmock('drizzle-orm');
 const mockRotationActiveSql = jest.fn();
 jest.mock('@wxyc/database', () => {
   const realSchema = jest.requireActual('../../../shared/database/src/schema');
-  const { drizzle } = jest.requireActual('drizzle-orm/postgres-js');
-  const nyTime = jest.requireActual('../../../shared/database/src/ny-time');
-  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
   mockRotationActiveSql.mockImplementation(realSchema.rotationActiveSql);
-  return { ...realSchema, ...nyTime, ...staffName, rotationActiveSql: mockRotationActiveSql, db: drizzle({}) };
+  return jest
+    .requireActual('../../utils/real-database-module')
+    .realDatabaseModule({ rotationActiveSql: mockRotationActiveSql });
 });
 
 import { getTableName } from 'drizzle-orm';

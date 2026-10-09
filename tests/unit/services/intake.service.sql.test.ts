@@ -16,13 +16,7 @@
 
 jest.unmock('drizzle-orm');
 
-jest.mock('@wxyc/database', () => {
-  const realSchema = jest.requireActual('../../../shared/database/src/schema');
-  const { drizzle } = jest.requireActual('drizzle-orm/postgres-js');
-  const nyTime = jest.requireActual('../../../shared/database/src/ny-time');
-  const staffName = jest.requireActual('../../../shared/database/src/staff-name');
-  return { ...realSchema, ...nyTime, ...staffName, db: drizzle({}) };
-});
+jest.mock('@wxyc/database', () => jest.requireActual('../../utils/real-database-module').realDatabaseModule());
 
 jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
   const actual = jest.requireActual('../../../apps/backend/utils/review-gate-cutover');
