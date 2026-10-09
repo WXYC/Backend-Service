@@ -141,17 +141,23 @@ const lockOnlyCopy = async (tx: Pick<typeof db, 'select'>, albumId: number, revi
 };
 
 /**
- * `POST /library/{id}/print` (BS#2865): prints a typed, submitted review in the release's list (`reviewInReleaseList`)
+ * `POST /library/{id}/print` (BS#2865, BS#3075): prints a typed, submitted review in the release's list (`reviewInReleaseList`)
  * for a release that may have no intake item, in one transaction. Locks in `DELETE /library/{id}`'s order: the release
  * `FOR KEY SHARE` (the print row's foreign key would take it anyway, so after the review it would deadlock with a delete),
- * then the review `FOR UPDATE`. The row written has no item, so nothing on `intake_items` is written or locked and the log
- * is the only record; the membership check reads `intake_items` (the citing items of the release), unlocked. The slip's
- * artist is the release's displayed one (`alternate_artist_name`, else the artist's name). `not_found` is a missing release; `bad_review` is every other refusal, one answer for all of them.
+ * then `lockOnlyCopy`'s locks (below), then the review `FOR UPDATE`. The slip's artist is the release's displayed one
+ * (`alternate_artist_name`, else the artist's name). `not_found` is a missing release; `bad_review` is every other refusal,
+ * one answer for all of them. The membership check reads `intake_items` (the citing items of the release), unlocked.
  *
- * A release with exactly one filed or finalized copy (BS#3075) has the print counted for that copy, so a copy has one cover
- * review: after the library row, `lockOnlyCopy` locks the copy, then the review, and the review must belong to the copy by
- * `acceptReview`'s rule. The review becomes the copy's accepted one (`writeAcceptance`), the row names the copy, and
- * the copy's `printed_by` and `printed_at` are stamped as `printIntakeItem` does. No copy, or several, keep the above.
+ * A release with exactly one filed or finalized copy has the print counted for that copy, so a copy has one cover review:
+ * the review must belong to the copy by `acceptReview`'s rule (its own, a review of the release the copy was filed as, or a
+ * typed review of the release it cites), becomes the copy's accepted review (`writeAcceptance`), the row names the copy and
+ * the release, and the copy's `printed_by` and `printed_at` are stamped as `printIntakeItem` does. Any print with no item
+ * written earlier on that release stops counting (`latestPrintOfCopy`).
+ *
+ * With no copy, or several, the row has no item and nothing on `intake_items` is written, and a release whose unlocked read
+ * finds none or several takes no `intake_items` lock at all. The exception is a count that is one in the unlocked read and
+ * not in the locked one (a second copy filed in between): the print falls back to no item only after `lockOnlyCopy` has
+ * taken the copies `FOR UPDATE` (and the cited release `FOR SHARE`, when the review is the citation's), still before the review.
  */
 export const printReleaseReview = async (id: number, reviewId: number, actor: Pick<ReviewsActor, 'id'>) =>
   db.transaction(async (tx) => {

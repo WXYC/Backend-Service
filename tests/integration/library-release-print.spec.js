@@ -15,6 +15,7 @@ const {
   seedAcceptance,
   seedIntakeItem,
   seedLibraryRelease,
+  seedReviewPrint,
   removeSeededLibraryReleases,
   seedReview,
   managerAccessToken,
@@ -155,6 +156,49 @@ describe('POST /library/{id}/print (BS#2865)', () => {
     for (const copy of [first, second]) {
       expect(await itemRow(copy.id)).toMatchObject({ accepted_review_id: null, printed_by: null, printed_at: null });
     }
+  });
+
+  // BS#3075, decided by the station 2026-10-09: a release with exactly one filed or finalized copy has that copy's review as its one cover,
+  // with no exception for a print with no item that was written before the copy was filed.
+  const coverOf = async (albumId) =>
+    (await manager.get(`/reviews?album_id=${albumId}`).expect(200)).body.filter((r) => r.on_cover).map((r) => r.id);
+  const reviewOf = async (reviewId, albumId) =>
+    (await manager.get(`/reviews?album_id=${albumId}`).expect(200)).body.find((r) => r.id === reviewId);
+
+  test('a print with no item written before the release’s one copy was filed stops being on the cover: after the album-page print exactly one review is, the copy’s', async () => {
+    const albumId = await release('superseded');
+    const earlier = await typedReview(albumId, { review: 'Printed before any copy was logged.' });
+    await seedReviewPrint({ album_id: albumId, review_id: earlier.id });
+    // No copy: the print with no item is on the cover and holds its review, as before.
+    expect(await coverOf(albumId)).toEqual([earlier.id]);
+    expect(await reviewOf(earlier.id, albumId)).toMatchObject({ on_cover: true, in_use: true });
+
+    const item = await seedIntakeItem({ state: 'filed', album_id: albumId });
+    // One copy, no review accepted for it: nothing is on the cover, and nothing physical depends on the older print.
+    expect(await coverOf(albumId)).toEqual([]);
+    expect(await reviewOf(earlier.id, albumId)).toMatchObject({ on_cover: false, in_use: false });
+
+    const printed = await typedReview(albumId, { review: 'Printed from the album page.' });
+    await manager.post(`/library/${albumId}/print`).send({ review_id: printed.id }).expect(200);
+    expect(await coverOf(albumId)).toEqual([printed.id]);
+    expect((await itemRow(item.id)).accepted_review_id).toBe(printed.id);
+    expect(await reviewOf(earlier.id, albumId)).toMatchObject({ on_cover: false, in_use: false });
+    // in_use is what lets its author delete it (the same fragment decides both).
+    await djA.delete(`/reviews/${earlier.id}`).expect(204);
+  });
+
+  test('a release with two logged copies keeps an earlier print with no item on the cover and in use, as before', async () => {
+    const albumId = await release('two-copies-earlier');
+    const earlier = await typedReview(albumId, { review: 'Printed before the copies were logged.' });
+    await seedReviewPrint({ album_id: albumId, review_id: earlier.id });
+    await seedIntakeItem({ state: 'filed', album_id: albumId });
+    await seedIntakeItem({ state: 'finalized', album_id: albumId });
+    expect(await coverOf(albumId)).toEqual([earlier.id]);
+    expect(await reviewOf(earlier.id, albumId)).toMatchObject({ on_cover: true, in_use: true });
+    const newer = await typedReview(albumId, { review: 'Printed from the album page.' });
+    await manager.post(`/library/${albumId}/print`).send({ review_id: newer.id }).expect(200);
+    expect(await coverOf(albumId)).toEqual([newer.id]);
+    expect(await reviewOf(earlier.id, albumId)).toMatchObject({ on_cover: false, in_use: false });
   });
 
   test('a compilation filed under a Various Artists bucket prints its alternate artist name, not the bucket', async () => {

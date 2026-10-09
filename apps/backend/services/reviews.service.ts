@@ -77,7 +77,10 @@ export { AUTHOR_MAX } from '@wxyc/database';
 
 /**
  * SQL for "review `reviewId` is the newest print of a copy": of an intake item, or, with no item, of a library
- * release. `reviewId` must be a nested SQL, such as `outerRef(column)` or a bound parameter (`deleteReview`
+ * release. A print with no item stops counting once its release has exactly one filed or finalized copy (BS#3075, decided by
+ * the station 2026-10-09: that copy's review is the one cover, with no exception for an older physical copy): nothing
+ * physical depends on the item-less print any more, so it neither covers nor holds the review (`in_use`). With no copy, or
+ * two or more, it counts as before. `reviewId` must be a nested SQL, such as `outerRef(column)` or a bound parameter (`deleteReview`
  * passes one), never a bare `Column`: drizzle renders a bare column unqualified in a single-table select and it
  * would bind to the inner `p`. `scope` narrows which
  * prints count, through the `id`, `intake_item_id` and `album_id` of `p` (`on_cover` asks only about the prints of one
@@ -90,7 +93,7 @@ export const latestPrintOfCopy = (
 ) => {
   const p = alias(review_prints, 'p');
   const n = alias(review_prints, 'n');
-  return sql`EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId}${scope ? sql` AND ${scope(p)}` : sql``} AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id})))`;
+  return sql`EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId}${scope ? sql` AND ${scope(p)}` : sql``} AND (${p.intake_item_id} IS NOT NULL OR (SELECT count(*) FROM ${intake_items} AS oc WHERE oc.album_id = ${p.album_id} AND oc.state IN ('filed', 'finalized')) <> 1) AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id})))`;
 };
 
 const reviewRef = outerRef(reviews.id);
@@ -168,7 +171,7 @@ export type ReviewFilters = { album_id?: number; intake_item_id?: number; mine?:
  * `GET /reviews`: one statement. Filters combine with AND; the read rule always applies. Newest first
  * (`submitted_at`, a visible draft by `last_modified`, then `id`). With `album_id` the release's reviews are
  * `reviews.album_id` = the release plus those of the release an item filed as it cites; the reviews on the
- * cover of this release (`on_cover`: accepted for, or the latest print of, a copy of it) lead, and the SAME
+ * cover of this release (`on_cover`: accepted for, or the latest print of, a copy of it, or its latest print with no item while it does not have exactly one copy) lead, and the SAME
  * `on_cover` select alias is the first sort key, so the field and the order cannot disagree.
  */
 export const listReviews = async (filters: ReviewFilters, actor: ReviewsActor) => {

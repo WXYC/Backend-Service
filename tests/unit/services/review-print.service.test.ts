@@ -317,6 +317,8 @@ describe('printReleaseReview (BS#2865)', () => {
       ['one copy', [copy], [copy], 41],
       ['two copies', [copy, other], [], null],
       ['a copy gone between the read and the lock', [copy], [], null],
+      // Filing takes the library row only FOR KEY SHARE, so a second copy can land between the two reads: it makes two, and the print takes no item.
+      ['a second copy filed between the read and the lock', [copy], [copy, other], null],
     ])('%s: the print row names item %p', async (_name, read, locked, itemId) => {
       const { result, inserts, tx } = await runRelease([[{ id: 12 }], ...copyReads(read, locked), ...afterLocks()]);
       expect(result.outcome).toBe('printed');
@@ -332,6 +334,22 @@ describe('printReleaseReview (BS#2865)', () => {
         ]);
         expect(sets[1]).toHaveProperty('printed_at');
       }
+    });
+
+    // Only a filed or finalized item is a copy of the release. `album_id` is set by filing alone, so today the filter excludes no row a
+    // real release holds (equivalent in practice); this pins the predicate itself, for the day an item carries a release without being filed.
+    it.each([
+      ['the unlocked read', 0],
+      ['the locked read', 1],
+    ])('%s asks for this release’s filed and finalized items only', async (_name, which) => {
+      await runRelease([[{ id: 12 }], ...copyReads([copy], [copy]), ...afterLocks()]);
+      const dialect = new PgDialect();
+      const [read, locked] = wheres.map((w) => dialect.sqlToQuery(w)).filter((q) => q.sql.includes('"album_id"'));
+      const { sql: text, params } = [read, locked][which];
+      expect(text).toBe(
+        '("wxyc_schema"."intake_items"."album_id" = $1 and "wxyc_schema"."intake_items"."state" in ($2, $3))'
+      );
+      expect(params).toEqual([12, 'filed', 'finalized']);
     });
 
     it('locks the library row, the copy, then the review', async () => {
