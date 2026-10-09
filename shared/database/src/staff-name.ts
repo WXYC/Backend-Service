@@ -6,7 +6,7 @@
  * docs/pii.md explains why). Every other file reaches the column through here, and the same rule flags an import or member access of
  * `readStaffName`/`staffNameSql` outside the four staff-surface services (`STAFF_NAME_CALLERS`), so a public surface cannot pick it up by
  * accident (the barrel's `export *` is the one shape the rule does not see): `readStaffName` stamps `reviews.author`, `review_revisions.edited_by`, `fcc_notes.reported_by` and
- * `fcc_notes.confirmed_by`, all read only by role-gated `reviews:*` routes; `staffNameSql` names the requester, holder and passer on `/intake` (BS#3052) and the holder in the review notices (the passing DJ in the notices is named by `readStaffName`). Nothing here is for a public read, and
+ * `fcc_notes.confirmed_by`, all read only by role-gated `reviews:*` routes; `staffNameSql` names the requester, holder and passer on `/intake` (BS#3052) the reviewer list on `GET /reviews/reviewers` (BS#3058) and the holder in the review notices (the passing DJ in the notices is named by `readStaffName`). Nothing here is for a public read, and
  * deliberately dependency-light like `dj-name.ts`, which stays off the allow-list.
  */
 import { eq, sql, type SQL } from 'drizzle-orm';
