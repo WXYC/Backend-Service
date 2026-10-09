@@ -22,11 +22,14 @@ const {
   seedLibraryRelease,
   removeSeededLibraryReleases,
   managerAccessToken,
+  seedAuthUser,
+  removeSeededAuthUsers,
 } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE-TX';
 const MEMBER_ID = 'test-member-id-000000000000000001';
+const AUTO_DJ_ID = 'itest-intake-tx-autodj';
 
 const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
 
@@ -59,11 +62,20 @@ describe('/intake transitions (BS#2798)', () => {
     await cleanup();
     [{ id: formatId }] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format ORDER BY id LIMIT 1`);
 
+    // The auto-DJ service account (BS#3076): the dj role grants `reviews: write`, so only its username, the literal
+    // reviews-reviewers.spec.js seeds too (that spec and this one must not run in parallel: the username is unique), keeps it
+    // from being asked to review. Written as the literal on purpose: the shared constant lives behind the
+    // authentication barrel, which this tier cannot load, and the literal pins the stored value's case.
+    const autoDj = await seedAuthUser({ id: AUTO_DJ_ID, name: 'Auto DJ', username: 'autodj' });
+    const [{ id: organizationId }] = await sql`SELECT id FROM auth_organization LIMIT 1`;
+    await sql`INSERT INTO auth_member (id, organization_id, user_id, role) VALUES (${`${autoDj.id}-m`}, ${organizationId}, ${autoDj.id}, 'dj')`;
+
     libraryId = (await seedLibraryRelease({ album_title: `${PREFIX} filed`, artist_name: PREFIX, format_id: formatId }))
       .id;
   });
 
   afterAll(async () => {
+    await removeSeededAuthUsers();
     await cleanup();
   });
 
@@ -143,6 +155,7 @@ describe('/intake transitions (BS#2798)', () => {
     test.each([
       ['an unknown account', { dj_id: 'no-such-user' }],
       ['a member account', { dj_id: MEMBER_ID }],
+      ['the auto-DJ service account', { dj_id: AUTO_DJ_ID }],
       ['a non-string', { dj_id: 12 }],
       ['nothing', {}],
     ])('dj_id naming %s is 400 and changes nothing', async (_n, body) => {
