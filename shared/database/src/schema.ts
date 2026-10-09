@@ -1416,7 +1416,8 @@ export const library_urls = wxyc_schema.table(
 
 /**
  * Closed vocabulary for `flowsheet.linkage_source` (BS#3078). The column stays open `text` (no pg enum, no
- * migration), like `ComposerSource`; this union is the compile-time guard. Raw-SQL writers are checked by
+ * migration), like `ComposerSource`; this union is the compile-time guard (pinned by
+ * `linkage-source.type-test.ts`). Raw-SQL writers and the stamps builder's `--linkage-source` choices are checked by
  * `tests/unit/database/linkage-source-vocabulary.test.ts`.
  */
 export const LINKAGE_SOURCES = [

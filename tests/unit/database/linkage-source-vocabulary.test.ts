@@ -4,7 +4,8 @@ import { LINKAGE_SOURCES } from '../../../shared/database/src/schema';
 
 /**
  * BS#3078: `flowsheet.linkage_source` is typed as a closed `LinkageSource` union for TypeScript writers; this
- * suite covers the two things the compiler cannot see: raw-SQL writers. The type-level guard lives in `shared/database/src/linkage-source.typecheck.ts`.
+ * suite covers the two writers the compiler cannot see: raw-SQL literals, and the Python stamps builder behind the
+ * bridge/fuzzy scripts. The type-level guard lives in `shared/database/src/linkage-source.type-test.ts`.
  */
 
 const ROOT = join(__dirname, '../../..');
@@ -41,12 +42,27 @@ describe('linkage_source vocabulary', () => {
     expect(literals).toEqual(expect.arrayContaining(['etl_legacy_id', 'dj_bin_pick']));
   });
 
-  // The bridge/fuzzy SQL scripts only mention their label in comments; the stamps builder is what writes it,
-  // taking the value as a free-form CLI argument.
-  it('scripts/build-flowsheet-stamps-sql.py is only invoked with LINKAGE_SOURCES values', () => {
-    const text = readFileSync(join(ROOT, 'scripts/build-flowsheet-stamps-sql.py'), 'utf8');
-    const values = [...text.matchAll(/--linkage-source\s+(\w+)/g)].map((m) => m[1]);
-    expect(values.length).toBeGreaterThan(0);
-    expect(values.filter((v) => !(LINKAGE_SOURCES as readonly string[]).includes(v))).toEqual([]);
+  // The bridge/fuzzy SQL scripts only mention their label in comments; the stamps builder writes it, from its
+  // `--linkage-source` argument. argparse `choices` makes the builder refuse a non-member, so pin that tuple to the
+  // union, and every documented invocation (the runbooks the operator copies) to it.
+  const BUILDER = 'scripts/build-flowsheet-stamps-sql.py';
+
+  it('the stamps builder accepts exactly LINKAGE_SOURCES', () => {
+    const text = readFileSync(join(ROOT, BUILDER), 'utf8');
+    const tuple = text.match(/^LINKAGE_SOURCES = \(([\s\S]*?)^\)/m);
+    expect(tuple).not.toBeNull();
+    const values = [...(tuple?.[1] ?? '').matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+    expect([...values].sort()).toEqual([...LINKAGE_SOURCES].sort());
+    expect(text).toMatch(/"--linkage-source",\s*required=True,\s*choices=LINKAGE_SOURCES,/);
   });
+
+  it.each([BUILDER, 'scripts/discogs-bridge-flowsheet.sql', 'scripts/fuzzy-trigram-flowsheet.sql'])(
+    '%s documents --linkage-source only with LINKAGE_SOURCES values',
+    (file) => {
+      const text = readFileSync(join(ROOT, file), 'utf8');
+      const values = [...text.matchAll(/--linkage-source[\s=]+(\w+)/g)].map((m) => m[1]);
+      expect(values.length).toBeGreaterThan(0);
+      expect(values.filter((v) => !(LINKAGE_SOURCES as readonly string[]).includes(v))).toEqual([]);
+    }
+  );
 });
