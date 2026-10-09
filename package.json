@@ -80,7 +80,7 @@
     "shared/*"
   ],
   "devDependencies": {
-    "@dotenvx/dotenvx": "^2.32.4",
+    "@dotenvx/dotenvx": "^2.33.0",
     "@eslint/js": "^10.0.1",
     "@types/eventsource": "^3.0.0",
     "@types/jest": "^30.0.0",
@@ -94,7 +94,7 @@
     "drizzle-kit": "^0.31.11",
     "drizzle-orm": "^0.45.3",
     "esbuild": "^0.25.0",
-    "eslint": "^10.11.0",
+    "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-security": "^4.2.0",
     "git-merge-append": "github:jakebromberg/git-merge-append",
@@ -111,7 +111,7 @@
     "tsx": "^4.23.15",
     "turbo": "^2.11.7",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.71.0",
+    "typescript-eslint": "^8.71.1",
     "wait-on": "^9.5.1",
     "yaml": "^2.9.1"
   },
