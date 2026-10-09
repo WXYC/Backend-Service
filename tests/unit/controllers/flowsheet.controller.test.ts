@@ -82,6 +82,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   attachUpcomingShows: mockAttachUpcomingShows,
   attachCriticReviews: mockAttachCriticReviews,
   addTrack: mockAddTrack,
+  findLibraryReleasesByText: jest.fn<() => Promise<number[]>>().mockResolvedValue([]),
   addHourlyBreakpoint: mockAddHourlyBreakpoint,
   fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
   getLatestShow: mockGetLatestShow,

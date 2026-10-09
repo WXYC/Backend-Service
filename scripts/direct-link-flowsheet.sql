@@ -4,7 +4,7 @@
 --
 -- Why this exists:
 --   About 6.7% of unlinked flowsheet rows have an exact normalized text twin
---   in the library — `lower + strip leading "the " + strip non-alphanumeric`
+--   in the library — wxyc_schema.text_match_key() (see Normalization below)
 --   collapses most punctuation/case differences without any external lookup.
 --   For those rows we link them in a single prod transaction; the residual
 --   falls through to the rest of the SQL-direct chain.

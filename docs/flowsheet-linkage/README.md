@@ -1,6 +1,6 @@
 # Flowsheet ↔ Library Linkage
 
-How a flowsheet `track` row gets matched to the library album it represents, why we route the match through LML's canonical-entity layer instead of text-comparing the two tables, and where the seams are between this work and Epic A's catalog search.
+How a flowsheet `track` row gets matched to the library album it represents, how the live paths match by normalized text (the original design routed the match through LML's canonical-entity layer instead; that forward path was removed in commit `d45c1d58`, 2026-06-03, and the sections describing it below are historical), and where the seams are between this work and Epic A's catalog search.
 
 ## Why this exists
 
@@ -19,7 +19,7 @@ Backfill no longer routes through LML. The empirical numbers we landed on change
 
 The remaining ~666K residual is bounded by library-catalog coverage (albums simply not in WXYC's library), not by any matching strategy. LML's data source is the same Discogs corpus our local snapshot already covers, so re-running an LML-driven backfill against the residual would mostly produce 429s and "no candidate" outcomes.
 
-The exact-text pass computes both sides with `wxyc_schema.text_match_key()` (migration 0191): fold Unicode form and diacritics, lowercase, strip a leading "the ", delete every non-alphanumeric run. A key of `''` (a symbols-only title like `>>>`) never matches. The insert and edit paths share the same function.
+The exact-text pass computes both sides with `wxyc_schema.text_match_key()` (migration 0191): fold Unicode form and diacritics, lowercase, strip a leading "the ", delete every non-alphanumeric run. A key of `''` (a symbols-only title like `>>>`) never matches. The insert path (`addEntry`), the edit path (`updateEntry`) and the job pass share the same function.
 
 The three SQL-direct passes live under `scripts/` and document their own normalization, confidence, idempotency, and reversal:
 
@@ -27,9 +27,11 @@ The three SQL-direct passes live under `scripts/` and document their own normali
 - `scripts/discogs-bridge-flowsheet.sql` — flowsheet → local Discogs snapshot → library via `canonical_entity_id` (`linkage_source='discogs_local_bridge'`, confidence 0.9).
 - `scripts/fuzzy-trigram-flowsheet.sql` — `pg_trgm` similarity match with same-album tie-break (`linkage_source='fuzzy_trigram_match'`, confidence 0.85).
 
-The forward path (live `addEntry` linkage) still goes through LML — the rate ceiling that breaks backfill is fine for one row at a time on a webhook.
+The live paths do not go through LML either: the historical LML forward path (live `addEntry` linkage) was removed in commit `d45c1d58` (2026-06-03), and the three text writers described under [Live write paths](#live-write-paths) replaced it.
 
 ## Architecture
+
+**Historical:** this is the removed LML forward-path design (commit `d45c1d58`, 2026-06-03); the live paths match by `text_match_key` instead.
 
 Two-sided canonical resolution. Library rows and flowsheet rows both resolve to the same opaque external identifier (a Discogs release id today; the column type allows MusicBrainz / other resolvers later). Linkage flows through that identifier, not through text:
 
@@ -74,16 +76,16 @@ The auto-accept gate is `linkage.confidence < AUTO_ACCEPT_THRESHOLD` where `AUTO
 
 ## Schema
 
-| Column                                 | Type          | Migration | Purpose                                                                                                                                                              |
-| -------------------------------------- | ------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `library.canonical_entity_id`          | `text`        | 0061      | Opaque, source-namespaced (`discogs:release:<id>`). B-tree indexed for the flowsheet-side lookup.                                                                    |
-| `library.canonical_entity_confidence`  | `real`        | 0061      | Confidence band stored at link time.                                                                                                                                 |
-| `library.canonical_entity_resolved_at` | `timestamptz` | 0061      | Audit + retry policy. NULL means "never resolved".                                                                                                                   |
-| `flowsheet.linkage_source`             | `text`        | 0062      | One of `etl_legacy_id`, `dj_bin_pick`, `lml_high_confidence`, `human_review`, `tubafrenzy_mirror`, `direct_text_match`.                                              |
-| `flowsheet.linkage_confidence`         | `real`        | 0062      | Confidence band stored at link time.                                                                                                                                 |
-| `flowsheet.linked_at`                  | `timestamptz` | 0062      | Stamps when the link was made (lets B-2.2 retry rules age weak matches).                                                                                             |
-| `flowsheet.legacy_link_attempted_at`   | `timestamptz` | 0063      | Marker stamped by `jobs/broken-fk-recovery` when the FK resolver tried and failed. Lets B-2.2 sweep both never-had-FK rows AND broken-FK residuals in the same pass. |
-| `flowsheet_linkage_review`             | table         | 0067      | Manual review queue: stores the flowsheet id, ranked candidate library ids and confidences, and the operator's decision.                                             |
+| Column                                 | Type          | Migration | Purpose                                                                                                                                                                |
+| -------------------------------------- | ------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `library.canonical_entity_id`          | `text`        | 0061      | Opaque, source-namespaced (`discogs:release:<id>`). B-tree indexed for the flowsheet-side lookup.                                                                      |
+| `library.canonical_entity_confidence`  | `real`        | 0061      | Confidence band stored at link time.                                                                                                                                   |
+| `library.canonical_entity_resolved_at` | `timestamptz` | 0061      | Audit + retry policy. NULL means "never resolved".                                                                                                                     |
+| `flowsheet.linkage_source`             | `text`        | 0062      | One of `etl_legacy_id`, `dj_bin_pick`, `lml_high_confidence`, `human_review`, `tubafrenzy_mirror`, `direct_text_match`, `discogs_local_bridge`, `fuzzy_trigram_match`. |
+| `flowsheet.linkage_confidence`         | `real`        | 0062      | Confidence band stored at link time.                                                                                                                                   |
+| `flowsheet.linked_at`                  | `timestamptz` | 0062      | Stamps when the link was made (lets B-2.2 retry rules age weak matches).                                                                                               |
+| `flowsheet.legacy_link_attempted_at`   | `timestamptz` | 0063      | Marker stamped by `jobs/broken-fk-recovery` when the FK resolver tried and failed. Lets B-2.2 sweep both never-had-FK rows AND broken-FK residuals in the same pass.   |
+| `flowsheet_linkage_review`             | table         | 0067      | Manual review queue: stores the flowsheet id, ranked candidate library ids and confidences, and the operator's decision.                                               |
 
 Migration numbers are illustrative — the canonical numbers are in `shared/database/src/migrations/meta/_journal.json`.
 
@@ -91,12 +93,15 @@ Migration numbers are illustrative — the canonical numbers are in `shared/data
 
 ### Live write paths
 
-| Path                   | File                                                                        | Behavior                                                                                                                                                                                                                                                                        |
-| ---------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `addAlbum` (library)   | `apps/backend/services/library.service.ts`                                  | After insert, kicks off LML lookup + writes `canonical_entity_id` if a candidate exists. Failure is non-fatal — the row stays unresolved and the B-1.2 backfill re-tries it later.                                                                                              |
-| `addEntry` (flowsheet) | `apps/backend/controllers/flowsheet.controller.ts` → `fireAndForgetLinkage` | Skips if `album_id` is already set (bin-pick) or `artist_name` is empty (message). Otherwise calls `runLmlLinkage` after the HTTP response is sent. Errors are routed through `reportLinkageError` so the operator sees one consistent `subsystem='lml-linkage'` Sentry filter. |
+| Path                      | File                                                                       | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `addAlbum` (library)      | `apps/backend/services/library.service.ts`                                 | After insert, kicks off LML lookup + writes `canonical_entity_id` if a candidate exists. Failure is non-fatal — the row stays unresolved and the B-1.2 backfill re-tries it later.                                                                                                                                                                                                                                                                                                                                                                                              |
+| `addEntry` (flowsheet)    | `apps/backend/controllers/flowsheet.controller.ts` → `annotateTextLinkage` | BS#3066. For `entry_type` `track` only (a track-shaped body carrying another type is skipped), a typed row (no `album_id`, or a library-miss `album_id`) is looked up with `findLibraryReleasesByText`; exactly one catalog release links it as `direct_text_match`, confidence 1.0, and zero or several leave it unlinked. Rotation plays arriving with `album_id: null` are linked the same way. Typed fields are never rewritten and `label_id` is not derived. A lookup failure is non-fatal (Sentry `subsystem: 'text-linkage'`). A picked entry is stamped `dj_bin_pick`. |
+| `updateEntry` (flowsheet) | `apps/backend/services/flowsheet.service.ts`                               | BS#3065. Re-matches text when artist or album actually change; see the edit-path notes in the service.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-`fireAndForgetLinkage` runs after `res.send()`; the HTTP response is never blocked on LML. The unit suite proves both paths in `tests/unit/controllers/flowsheet.addEntry.linkage.test.ts`; the integration spec at `tests/integration/flowsheet-linkage.spec.js` exercises the full live stack end-to-end against the mock LML server.
+The insert-path lookup runs synchronously before the insert, on the default pool (`addEntry` holds no transaction there). The unit suite is `tests/unit/controllers/flowsheet.addEntry.textLinkage.test.ts`; the end-to-end cases are the "text linkage on insert" and "text linkage on edit" blocks in `tests/integration/flowsheet.spec.js`. Six catalog titles are symbols-only (`>>>`, `( )`, `$`, `++++`, `?`, `:)`): their key is `''`, so they are linkable only by a pick.
+
+The text writers that exist are: insert (`addEntry`), edit (`updateEntry`) and the job pass (`legacy-linkage-resolve`, below; disabled until BS#3063). All stamp `direct_text_match`.
 
 ### Backfill jobs
 
@@ -121,7 +126,7 @@ When the canonical-entity lookup returns multiple library rows, `pickPrimaryLibr
 3. Most flowsheet plays in the last 12 months.
 4. Lowest `library.id` (deterministic tiebreaker — proxies "first imported, longest in the catalog").
 
-Returns `null` only when the candidate set raced with a concurrent delete; callers treat that as a transient no-match and let the next sweep retry. The forward path uses this helper directly; the SQL-direct backfill scripts express the same priority order in the equivalent `MIN(library_id)` plus shared-canonical fallback so the same album wins the tie-break in every context.
+Returns `null` only when the candidate set raced with a concurrent delete; callers treat that as a transient no-match and let the next sweep retry. The removed LML forward path used this helper directly; the SQL-direct backfill scripts express the same priority order in the equivalent `MIN(library_id)` plus shared-canonical fallback (historical: the live text writers do not tie-break, they refuse ambiguity and leave the row unlinked).
 
 ### Review queue (B-3.1)
 
@@ -139,11 +144,11 @@ A web UI is out of scope for v1. Volume needs to materially exceed the CLI's thr
 
 `apps/backend/services/linkage-metrics.service.ts` exposes:
 
-- **In-process counters** keyed by outcome (`linked_high_conf`, `gray_zone_review`, `no_candidate`, `lml_error`, `lml_timeout`). The forward path increments them; SQL-direct backfill rows are accounted for via post-run `SELECT count(*) GROUP BY linkage_source`, not the in-process counters.
+- **In-process counters** keyed by outcome (`linked_high_conf`, `gray_zone_review`, `no_candidate`, `lml_error`, `lml_timeout`). The removed LML forward path incremented them; SQL-direct backfill rows are accounted for via post-run `SELECT count(*) GROUP BY linkage_source`, not the in-process counters.
 - **SQL-backed gauges**:
   - `getCumulativeLinkageCoverage()` — fraction of all track rows with `album_id` set. Watch this fall as B-2.2 sweeps run.
   - `getRecentLinkageRate(hours)` — fraction of recently inserted rows that are linked. A falling ratio means the forward worker is behind.
-- **Sentry tagging**: `reportLinkageError` tags every captured exception with `subsystem='lml-linkage'` and `path='forward'|'review'` so the operator can filter the Sentry issue stream by subsystem instead of by stack trace. (`path='backfill'` was reachable while the LML-driven backfill existed; the SQL-direct scripts surface failures as psql errors instead of Sentry events.)
+- **Sentry tagging** (historical, LML forward path): `reportLinkageError` tagged every captured exception with `subsystem='lml-linkage'` and `path='forward'|'review'` so the operator can filter the Sentry issue stream by subsystem instead of by stack trace. The live text paths report `subsystem: 'text-linkage'`. (`path='backfill'` was reachable while the LML-driven backfill existed; the SQL-direct scripts surface failures as psql errors instead of Sentry events.)
 
 ## Cross-epic interaction with Epic A
 
@@ -151,10 +156,10 @@ Epic A (catalog search ranking, see `docs/catalog-search/`) and Epic B share two
 
 | Surface                              | Role in Epic A                                                                         | Role in Epic B                                                                                                                                                                                                                                     |
 | ------------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `library.artist_name` (denormalized) | Drives the `search_doc` tsvector and the `library_artist_name_trgm_idx` trigram index. | Read by the LML-linkage forward path indirectly via `library` joins, but linkage matches on `canonical_entity_id`, not text.                                                                                                                       |
+| `library.artist_name` (denormalized) | Drives the `search_doc` tsvector and the `library_artist_name_trgm_idx` trigram index. | Read by the historical LML-linkage forward path via `library` joins, which matched on `canonical_entity_id`; the live paths match on `text_match_key` of the typed text.                                                                           |
 | `album_plays` materialized view      | Powers the play-count factor in the catalog ranker.                                    | The view aggregates `flowsheet WHERE entry_type='track' GROUP BY album_id`. **Every row Epic B links makes Epic A's ranker more accurate.** Going from 40% → ~55% linkage moves ~290K plays from "uncounted" to "counted" in the per-album rollup. |
 
-Implication: Epic B is most valuable to Epic A when the backfill has run to completion. The SQL-direct backfill takes minutes rather than days, so the coverage gap closes in a single maintenance window once the forward path is live.
+Implication: Epic B is most valuable to Epic A when the backfill has run to completion. The SQL-direct backfill takes minutes rather than days, so the coverage gap closes in a single maintenance window once the text-linkage paths are live.
 
 ## Related issues
 

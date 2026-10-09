@@ -704,6 +704,50 @@ describe('Update Flowsheet Entries', () => {
     expect(cleared.body.track_position).toBeNull();
   });
 
+  describe('text linkage on insert (BS#3066)', () => {
+    let release;
+    let sql;
+
+    beforeAll(async () => {
+      sql = makeSql();
+      release = await seedLibraryRelease({
+        artist_name: 'Linkage Insert Fixture Artist',
+        album_title: 'Linkage Insert Fixture Album',
+      });
+    });
+
+    afterAll(async () => {
+      await removeSeededLibraryReleases();
+      await sql.end();
+    });
+
+    test('a typed play naming one catalog release is linked, with the typed text unchanged', async () => {
+      const typed = {
+        artist_name: 'LINKAGE insert fixture artist!',
+        album_title: 'linkage Insert Fixture album',
+        track_title: 'Linkage Insert Fixture Track',
+      };
+      const created = await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({ album_id: null, ...typed })
+        .expect(201);
+
+      const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
+      const track = res.body.entries.find((e) => e.id === created.body.id);
+      expect(track.album_id).toBe(release.id);
+      expect(track.artist_name).toBe(typed.artist_name);
+      expect(track.album_title).toBe(typed.album_title);
+      expect(track.track_title).toBe(typed.track_title);
+
+      const [row] = await sql`
+        SELECT linkage_source, linkage_confidence, linked_at FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${created.body.id}`;
+      expect(row.linkage_source).toBe('direct_text_match');
+      expect(row.linkage_confidence).toBe(1);
+      expect(row.linked_at).not.toBeNull();
+    });
+  });
+
   describe('text linkage on edit (BS#3065)', () => {
     let release;
     let sql;
@@ -997,6 +1041,14 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
         track_title: 'Carry the Zero',
       })
       .expect(201);
+
+    // BS#3066: the insert path now links this typed pair (it names one seeded release). Reset the
+    // link columns to simulate a row the insert leaves unlinked (legacy, ambiguous or failed lookup)
+    // so cohort (c) of rotationBinExpr stays covered.
+    await sql`
+      UPDATE ${sql(SCHEMA)}.flowsheet
+      SET album_id = NULL, linkage_source = NULL, linkage_confidence = NULL, linked_at = NULL
+      WHERE track_title = 'Carry the Zero' AND artist_name = 'Built to Spill' AND rotation_id IS NULL`;
 
     const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
     const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');

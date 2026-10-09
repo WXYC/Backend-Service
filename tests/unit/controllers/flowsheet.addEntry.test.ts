@@ -3,6 +3,7 @@ import { jest } from '@jest/globals';
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: jest.fn(),
   resolveDjNameForShow: jest.fn().mockResolvedValue(null),
+  findLibraryReleasesByText: jest.fn().mockResolvedValue([]),
 }));
 
 import { addEntry } from '../../../apps/backend/controllers/flowsheet.controller';
