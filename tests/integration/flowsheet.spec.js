@@ -1031,7 +1031,7 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
   test('rotation_bin populated via library+artists denorm fallback when album_id and rotation_id are both NULL', async () => {
     // Simulates the worst case: snapshot branch wrote no album_id and no rotation_id,
     // only the typed/picker-seeded artist+album strings.
-    await request
+    const created = await request
       .post('/flowsheet')
       .set('Authorization', global.access_token)
       .send({
@@ -1048,7 +1048,7 @@ describe('rotation_bin read-path fallback (dj-site#750)', () => {
     await sql`
       UPDATE ${sql(SCHEMA)}.flowsheet
       SET album_id = NULL, linkage_source = NULL, linkage_confidence = NULL, linked_at = NULL
-      WHERE track_title = 'Carry the Zero' AND artist_name = 'Built to Spill' AND rotation_id IS NULL`;
+      WHERE id = ${created.body.id}`;
 
     const res = await request.get('/flowsheet').query({ limit: 5 }).send().expect(200);
     const track = res.body.entries.find((e) => e.entry_type === 'track' && e.track_title === 'Carry the Zero');

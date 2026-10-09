@@ -795,8 +795,9 @@ export const library = wxyc_schema.table(
       // `text_match_key` (0191: also strips a leading "the " and every
       // non-alphanumeric run; indexed by `library_text_match_album_idx`, which
       // is SQL-only, with no declaration to put this note beside). Neither
-      // `fold_artist_name` nor `text_match_key` trims, so ' Edits' and 'Edits'
-      // are equal under this index (which trims) and differ under
+      // `fold_artist_name` nor `text_match_key` trims, and the leading "the "
+      // strip is anchored at the start, so ' The Edits' and 'The Edits' are equal
+      // under this index (which trims) but key to 'theedits' and 'edits' under
       // `text_match_key`. Postgres accepts CREATE OR REPLACE FUNCTION
       // wxyc_schema.text_match_key without error while the index depends on it,
       // so any later migration that changes the function body must
