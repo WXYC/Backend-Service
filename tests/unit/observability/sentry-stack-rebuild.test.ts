@@ -1,5 +1,6 @@
 import * as SentryNode from '@sentry/node';
 import type { ErrorEvent, EventHint } from '@sentry/core';
+import { createHash } from 'crypto';
 import { inspect } from 'util';
 import {
   redactLogValue,
@@ -355,7 +356,11 @@ describe('a failed query whose message was cut after the stack was formatted', (
 
 // The issue's constraint: an error that never held a params marker produces the event it would without the hook.
 describe('an error that never held a params marker', () => {
-  const sentException = (event: ErrorEvent) => JSON.stringify({ exception: event.exception, extra: event.extra });
+  // A length and a digest, not the serialized event: a failure then names the case instead of diffing megabytes.
+  const sentException = (event: ErrorEvent) => {
+    const text = JSON.stringify({ exception: event.exception, extra: event.extra });
+    return { length: text.length, sha256: createHash('sha256').update(text).digest('hex') };
+  };
 
   /** The event for the same error made twice at one call site, without the hook and with it. */
   async function eventsWithAndWithoutHook(make: () => Error, options: Partial<SentryNode.NodeOptions> = {}) {
@@ -380,8 +385,9 @@ describe('an error that never held a params marker', () => {
 
   it.each([
     ['an AggregateError of 70 plain errors', () => new AggregateError(members(70), 'agg'), {}],
-    // More members than any fixed budget a walk of the raw chain could have (a budget that ran out used to answer "found").
-    ['an AggregateError of 5000 plain errors', () => new AggregateError(members(5000), 'agg'), {}],
+    // Past the 64 nodes and the round powers of two (256, 1024) a small budget on the walk would be, and below its
+    // 10,000-error budget (the case past it is the fresh-error-per-read getter below). Each member is a Sentry value, so the cost is Sentry's.
+    ['an AggregateError of 2000 plain errors', () => new AggregateError(members(2000), 'agg'), {}],
     [
       'an AggregateError whose member causes the aggregate',
       () => {
@@ -395,11 +401,74 @@ describe('an error that never held a params marker', () => {
     ['a cause cycle with linkedErrors limit 12', cyclic, limit12],
     ['a plain chain of 12 with linkedErrors limit 12', () => chain(12), limit12],
     ['a plain chain of 30 with linkedErrors limit 12', () => chain(30), limit12],
-  ])('%s sends the event it would without the hook', async (_label, make, options) => {
-    const { without, withHook } = await eventsWithAndWithoutHook(make, options);
+  ])(
+    '%s sends the event it would without the hook',
+    async (_label, make, options) => {
+      const { without, withHook } = await eventsWithAndWithoutHook(make, options);
 
-    expect(sentException(withHook)).toBe(sentException(without));
-    expect(withHook.exception?.values?.some((value) => value.stacktrace === undefined)).toBe(false);
+      expect(sentException(withHook)).toEqual(sentException(without));
+      expect(withHook.exception?.values?.some((value) => value.stacktrace === undefined)).toBe(false);
+    },
+    30_000
+  );
+});
+
+// Sentry stops at its `limit`; the hook's walk of the raw chain must stop too (BS#3070).
+describe('an error whose cause getter builds a fresh error on every read', () => {
+  let reads = 0;
+  class Lazy extends Error {
+    get cause() {
+      reads++;
+      return new Lazy('lazy');
+    }
+  }
+  // The throwing `detail` makes the copy fall back to the minimal error, so the rebuild stops at the first value and the walk runs.
+  const lazy = () => {
+    const error = new Lazy('lazy');
+    Object.defineProperty(error, 'detail', {
+      get() {
+        throw new Error('unreadable');
+      },
+    });
+    return error;
+  };
+
+  // Counted rather than timed: building an error costs far more under jest's source maps than in a bare process, so a
+  // wall-clock bound would measure the machine. Without the budget the walk never returns, so reaching the assertions is the proof.
+  it('is sent after the walk gives up at its budget, with the values the rebuild did not reach left without a stacktrace', async () => {
+    reads = 0;
+
+    const event = await captureThroughSentry(lazy());
+
+    const values = event.exception?.values ?? [];
+    expect(reads).toBeGreaterThan(9_000);
+    expect(reads).toBeLessThan(10_100);
+    expect(values.length).toBeGreaterThan(1);
+    expect(values.map((value) => value.stacktrace)).toEqual(values.map(() => undefined));
+  }, 30_000);
+});
+
+// The content backstop in the rebuild loop: reached through a link the copy chain does not own.
+describe('a cause that is an inherited getter returning a raw failed query', () => {
+  class Wrapper extends Error {
+    constructor(
+      message: string,
+      private readonly inner: Error
+    ) {
+      super(message);
+      this.name = 'Error';
+    }
+
+    get cause() {
+      return this.inner;
+    }
+  }
+
+  it('sends no frame built from the inner error params line', async () => {
+    const event = await captureThroughSentry(new Wrapper('signup failed', await captureFailedStationSignupInsert()));
+
+    expect(event.exception?.values?.length).toBeGreaterThan(1);
+    expect(heldBy(event)).toEqual([]);
   });
 });
 

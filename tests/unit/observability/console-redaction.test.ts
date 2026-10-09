@@ -1,8 +1,9 @@
 import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
+import { inspect } from 'util';
 import { build } from 'esbuild';
-import { installConsoleRedaction } from '@wxyc/observability';
+import { installConsoleRedaction, redactQueryParams } from '@wxyc/observability';
 import { realDrizzleQueryError } from '../../utils/postgres-js-errors';
 
 const SENTINEL = 'Test Reviewer';
@@ -24,6 +25,21 @@ describe('installConsoleRedaction', () => {
     restore();
     expect(target.error).toBe(error);
     expect(target.warn).toBe(warn);
+  });
+
+  // The five failed-name-write call sites log `redactQueryParams(error)`, and this wrapper redacts that copy a second time (BS#3070).
+  it('keeps the call-site frames of an error a call site already redacted, and still holds no bound value', () => {
+    const error = jest.fn();
+    const target = { error, warn: jest.fn() };
+    const restore = installConsoleRedaction(target);
+
+    target.error('[STATION SIGNUP] Unexpected error:', redactQueryParams(realDrizzleQueryError([SENTINEL, 'u1'])));
+
+    const logged = error.mock.calls[0][1] as Error;
+    expect(String(logged.stack)).toContain('console-redaction.test');
+    expect(String(logged.stack)).toContain('params: [redacted]');
+    expect(inspect(logged, { depth: 10, showHidden: true })).not.toContain(SENTINEL);
+    restore();
   });
 
   it('is idempotent', () => {

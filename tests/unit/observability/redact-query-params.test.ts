@@ -134,6 +134,42 @@ describe('redactQueryParams', () => {
     expect(String(plain.stack)).toBe(`Error: Failed query: ${SQL}\nparams: [redacted]`);
   });
 
+  // The auth app logs `redactQueryParams(error)` and its console wrapper redacts that copy again (BS#3070).
+  it('returns a copy it made unchanged when asked to redact it again, frames included', () => {
+    const copy = redactQueryParams(queryError());
+    const frames = (error: Error) =>
+      String(error.stack)
+        .split('\n')
+        .filter((line) => line.startsWith('    at '));
+
+    expect(frames(copy as Error).length).toBeGreaterThan(0);
+    expect(redactQueryParams(copy)).toBe(copy);
+    expect(redactLogValue(copy)).toBe(copy);
+    expect(frames(redactLogValue(copy) as Error)).toEqual(frames(copy as Error));
+    expect(everything(redactLogValue(copy))).not.toContain(SENTINEL);
+  });
+
+  // `stack` is read once: a stateful accessor cannot hand the decisions one string and the copy another.
+  it.each([
+    ['the raw stack on the first two reads, then a non-string', (raw: string, reads: number) => (reads < 3 ? raw : 42)],
+    [
+      'the raw stack on the first read, then another stack',
+      (raw: string, reads: number) => (reads < 2 ? raw : 'Error: other\n    at elsewhere (file.js:1:1)'),
+    ],
+  ])('uses one read of a stack accessor that returns %s', (_label, answer) => {
+    const error = new Error(`Failed query: select 1\nparams: ${SENTINEL}`);
+    const raw = String(error.stack);
+    let reads = 0;
+    Object.defineProperty(error, 'stack', { get: () => answer(raw, ++reads), configurable: true });
+
+    const copy = redactQueryParams(error);
+
+    expect(copy).not.toBe(error);
+    expect(typeof (copy as Error).stack).toBe('string');
+    expect(String((copy as Error).stack)).toContain('params: [redacted]');
+    expect(everything(copy)).not.toContain(SENTINEL);
+  });
+
   it('keeps the input class and its other own properties, and leaves the input untouched', () => {
     const original = Object.assign(queryError(), { code: '23505', status: 409, expose: true });
 
