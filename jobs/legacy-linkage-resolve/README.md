@@ -14,12 +14,19 @@ Consumers of the linkage this restores: album metadata enrichment, the rotation 
 
 ## What it does
 
-Two passes, both pure SQL, both anti-joined on `album_id IS NULL`:
+Three passes, all pure SQL, all anti-joined on `album_id IS NULL`. The first two are unbounded in time; the third (text-match, [BS#3061](https://github.com/WXYC/Backend-Service/issues/3061)) is windowed and **ships disabled**:
 
-| Pass        | Join                                                               | Writes                                                               |
-| ----------- | ------------------------------------------------------------------ | -------------------------------------------------------------------- |
-| `flowsheet` | `flowsheet.legacy_release_id` = `library.legacy_release_id`        | `album_id`                                                           |
-| `rotation`  | `rotation.legacy_library_release_id` = `library.legacy_release_id` | `album_id`, and NULLs `artist_name` / `album_title` / `record_label` |
+| Pass         | Join                                                                                                      | Writes                                                                                                        |
+| ------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `flowsheet`  | `flowsheet.legacy_release_id` = `library.legacy_release_id`                                               | `album_id`                                                                                                    |
+| `rotation`   | `rotation.legacy_library_release_id` = `library.legacy_release_id`                                        | `album_id`, and NULLs `artist_name` / `album_title` / `record_label`                                          |
+| `text-match` | `wxyc_schema.text_match_key()` equality on artist and album title (migration 0191), unique candidate only | `flowsheet.album_id`, `linkage_source = 'direct_text_match'`, `linkage_confidence = 1.0`, `linked_at = now()` |
+
+**The text-match pass (BS#3061)** re-applies the insert-path rule to recent unlinked `entry_type = 'track'` plays whose library row was filed _after_ they were logged (DJ-site plays never carry a `legacy_release_id`, so the `flowsheet` pass cannot reach them). Same rule, label and confidence as the insert path, the edit path and `scripts/direct-link-flowsheet.sql`, so there is one `direct_text_match` population under one reversal predicate. Both key legs must be non-empty and exactly one library row may match. It never touches `rotation.album_id`.
+
+**The window is a cost bound, not a watermark.** The cohort is limited to `add_time > now() - <window>` so a half-hourly run is not a rescan of the whole `flowsheet` table. It is anchored to `now()`, never to the `cronjob_runs` heartbeat (which stays a liveness signal only), so a missed run strands nothing inside the window. Plays older than the window are out of this pass's reach by design.
+
+**Ships disabled.** The pass writes nothing unless `LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS` is a positive integer; merging redeploys this job, and a live first run would link a whole window of past plays — the population the ops backfill [BS#3063](https://github.com/WXYC/Backend-Service/issues/3063) keeps behind a scope query, a dry run and owner approval. Setting the variable on the cron host is that manual step, done under #3063. `--dry-run` always reports the would-link count (configured window, else 90 days) so the first run can be scoped before enabling.
 
 `ANALYZE` runs after any pass that actually wrote rows, per [`docs/bulk-update-playbook.md`](../../docs/bulk-update-playbook.md). The `flowsheet` UPDATE deliberately omits `updated_at` — migration 0084's trigger owns that column.
 
@@ -40,10 +47,11 @@ Exits non-zero on failure so the cron surfaces it; errors are also captured to S
 
 ## Environment
 
-| Variable                        | Default | Purpose                                                                                                                                                                    |
-| ------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SENTRY_DSN`                    | unset   | **Required for signal (a).** Without a DSN the SDK no-ops, so both the check-in and the warning-level signals silently vanish. Same DSN the existing `captureError` needs. |
-| `LINKAGE_RESOLVE_MAX_GAP_HOURS` | `4`     | Hours between successful runs before the heartbeat gap is worth a warning. Eight consecutive missed runs at the `*/30` cadence.                                            |
+| Variable                                 | Default                   | Purpose                                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SENTRY_DSN`                             | unset                     | **Required for signal (a).** Without a DSN the SDK no-ops, so both the check-in and the warning-level signals silently vanish. Same DSN the existing `captureError` needs.                                                                                                                                                |
+| `LINKAGE_RESOLVE_MAX_GAP_HOURS`          | `4`                       | Hours between successful runs before the heartbeat gap is worth a warning. Eight consecutive missed runs at the `*/30` cadence.                                                                                                                                                                                           |
+| `LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS` | unset (**pass disabled**) | Positive integer: enables the text-match pass over plays added in the last N days (a cost bound, not a watermark). Unset, empty or `0` skips with one log line; a malformed value skips with a warning and never falls back to a default. Enabling is the manual step tracked in BS#3063. `--dry-run` uses 90 when unset. |
 
 ## Schedule
 
