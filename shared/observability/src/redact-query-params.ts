@@ -25,6 +25,8 @@ const UNREDACTED_PARAMS = /\nparams: (?!\[redacted\](?:\n {4}at |$))/;
 const FAILING_ROW = /^Failing row contains \(/;
 const REDACTED_FAILING_ROW = 'Failing row contains ([redacted])';
 const MAX_DEPTH = 8;
+/** How many distinct errors `rawChainHoldsParams` visits before it gives up; well above any real chain or `AggregateError`. */
+const WALK_BUDGET = 10_000;
 
 /** Own properties of a driver or Drizzle error that hold bound values. */
 const PARAM_PROPERTIES = ['params', 'parameters', 'args'] as const;
@@ -83,12 +85,16 @@ const UNLOGGABLE_VALUE = '[unloggable value]';
  * descriptors makes the redefinition throw on every real failed query.
  */
 function redactError(error: Error, depth: number): Error {
+  // A copy is already redacted, and its stack cannot pass for an intact failed query's (its `params` is the redaction): cutting it again would drop its frames.
+  if (copies.has(error)) return error;
   const cause = depth < MAX_DEPTH ? redactCause(error.cause, depth + 1) : error.cause;
   const rawMessage = String(error.message);
   const message = scrubText(rawMessage);
   const hasParamProperty = PARAM_PROPERTIES.some((key) => Object.hasOwn(error, key));
   // A stack formatted before the message was shortened can still hold a params line: that error is copied so `scrubStack` cuts it.
-  const stackHoldsParams = String(error.stack).includes(PARAMS_MARKER);
+  // Read once and used for every decision below, so a stateful `stack` accessor cannot leave the raw stack on the copy.
+  const rawStack: unknown = error.stack;
+  const stackHoldsParams = String(rawStack).includes(PARAMS_MARKER);
   if (message === rawMessage && cause === error.cause && !hasParamProperty && !carriesRow(error) && !stackHoldsParams)
     return error;
 
@@ -98,6 +104,7 @@ function redactError(error: Error, depth: number): Error {
   const set = (key: string | symbol, value: unknown, enumerable: boolean) =>
     Object.defineProperty(clean, key, { value, enumerable, writable: true, configurable: true });
   for (const key of Reflect.ownKeys(error)) {
+    if (key === 'stack') continue;
     try {
       set(
         key,
@@ -114,7 +121,8 @@ function redactError(error: Error, depth: number): Error {
     typeof rawQuery === 'string' &&
     Array.isArray(params) &&
     rawMessage === `Failed query: ${rawQuery}${PARAMS_MARKER}${params}`;
-  if (typeof error.stack === 'string') set('stack', scrubStack(error.stack, rawMessage, message, intact), false);
+  if (typeof rawStack === 'string') set('stack', scrubStack(rawStack, rawMessage, message, intact), false);
+  else if (Object.hasOwn(error, 'stack')) set('stack', undefined, false);
   if (Object.hasOwn(error, 'cause')) set('cause', cause, false);
   for (const key of PARAM_PROPERTIES) {
     if (Object.hasOwn(error, key)) set(key, '[redacted]', Object.prototype.propertyIsEnumerable.call(error, key));
@@ -230,10 +238,10 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
   let i = 0;
   for (; i < values.length && i <= MAX_DEPTH && isError(link); i++, link = (link as Error).cause) {
     const target = values[values.length - 1 - i];
-    // Defence in depth, and unreachable by construction (no test can fail without it): `redactError` copies every
-    // error whose stack holds the marker and `scrubStack` cuts the copy by position, `i <= MAX_DEPTH` keeps raw
-    // links out, `minimalError` has no stack, and a non-string stack makes Sentry's own parser throw before
-    // `beforeSend`. Kept so a future change to any of them cannot parse a params line into frames.
+    // Content backstop. A link the copy chain does not own reaches it: a copy with no own `cause` inherits a
+    // `cause` getter that hands back the raw inner error (`copy.cause` is then not a copy), and there this check
+    // is the only thing keeping that error's params line out of the frames. Everywhere else the copy's stack was
+    // cut by position first, and `i <= MAX_DEPTH` keeps raw links out of the loop.
     if (UNREDACTED_PARAMS.test(String(link.stack))) {
       delete target.stacktrace;
       break;
@@ -268,7 +276,8 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
 
 /**
  * Whether `error`, its `cause` chain or its `errors` (to any depth and fan-out, each error once, so a cycle ends)
- * holds a params marker in its stack. True only when one does or when the walk throws (a getter, a Proxy): it cannot tell then.
+ * holds a params marker in its stack. True only when one does, when the walk throws (a getter, a Proxy), or when it
+ * passes `WALK_BUDGET` distinct errors (a getter that builds a fresh error on every read): it cannot tell then.
  */
 function rawChainHoldsParams(error: unknown): boolean {
   try {
@@ -277,6 +286,8 @@ function rawChainHoldsParams(error: unknown): boolean {
     while (pending.length > 0) {
       const next = pending.pop();
       if (!isError(next) || seen.has(next)) continue;
+      // A getter that builds a new error on every read has no end: past this many errors the walk cannot tell, and answers true.
+      if (seen.size >= WALK_BUDGET) return true;
       seen.add(next);
       if (String(next.stack).includes(PARAMS_MARKER)) return true;
       const { errors } = next as { errors?: unknown };
