@@ -26,7 +26,7 @@ jest.mock('../../../apps/backend/utils/review-gate-cutover', () => {
 import { eq, sql, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { alias } from 'drizzle-orm/pg-core';
-import { db, intake_items, staffNameSql, user } from '@wxyc/database';
+import { db, intake_items, member, staffNameSql, user } from '@wxyc/database';
 import { createLockLog } from '../../utils/lock-log-builder';
 import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
 import {
@@ -41,6 +41,7 @@ import {
   submittedReviewCount,
   passesSql,
   acceptReview,
+  memberAccount,
 } from '../../../apps/backend/services/intake.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -744,5 +745,41 @@ describe('acceptReview (BS#2860)', () => {
       review: { status: 'submitted', medium: 'typed', item: null, album: 9 },
     });
     expect(result.outcome).toBe('bad_review');
+  });
+});
+
+describe('memberAccount (BS#3076) — the request path reads the username the shared review rule needs', () => {
+  const run = async (rows: Array<{ role: string; username: string | null }>) => {
+    const calls: { fields?: unknown; from?: unknown; join?: unknown[]; where?: unknown } = {};
+    const chain = {
+      from: (t: unknown) => ((calls.from = t), chain),
+      innerJoin: (...a: unknown[]) => ((calls.join = a), chain),
+      where: (w: unknown) => ((calls.where = w), Promise.resolve(rows)),
+    };
+    jest.spyOn(db, 'select').mockImplementation(((fields: unknown) => ((calls.fields = fields), chain)) as never);
+    return { result: await memberAccount('u-1'), calls };
+  };
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('selects the member role and the account username, from the membership joined to its user', async () => {
+    const { calls } = await run([]);
+    expect(calls.fields).toEqual({ role: member.role, username: user.username });
+    expect(calls.from).toBe(member);
+    expect(calls.join?.[0]).toBe(user);
+    const join = new PgDialect().sqlToQuery(calls.join?.[1] as SQL);
+    expect(join.sql).toBe(new PgDialect().sqlToQuery(eq(member.userId, user.id)).sql);
+  });
+
+  it('answers every role and the username', async () => {
+    const { result } = await run([
+      { role: 'dj', username: 'autodj' },
+      { role: 'member', username: 'autodj' },
+    ]);
+    expect(result).toEqual({ roles: ['dj', 'member'], username: 'autodj' });
+  });
+
+  it('answers no roles and a null username for an account with no membership', async () => {
+    expect((await run([])).result).toEqual({ roles: [], username: null });
   });
 });

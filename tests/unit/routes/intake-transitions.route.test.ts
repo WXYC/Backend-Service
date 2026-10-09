@@ -185,9 +185,14 @@ describe('POST /intake/:id/request — dj_id', () => {
     expect(mockTransition).not.toHaveBeenCalled();
   });
 
-  test('the auto-DJ service account is the same 400 and changes nothing', async () => {
+  test('the auto-DJ service account is the same 400, with the same body and no new reason, and changes nothing', async () => {
+    mockMemberAccount.mockResolvedValue({ roles: ['member'], username: 'test.member' });
+    const member = await post('request', { dj_id: 'm-1' });
+    expect(member.body).toEqual(expect.objectContaining({ message: 'dj_id must name an account that can review' }));
     mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'autodj' });
-    expect((await post('request', { dj_id: 'auto-1' })).status).toBe(400);
+    const res = await post('request', { dj_id: 'auto-1' });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(member.body);
     expect(mockTransition).not.toHaveBeenCalled();
   });
 
