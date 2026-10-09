@@ -9,4 +9,4 @@ export const accepted: NewFSEntry['linkage_source'] = 'direct_text_match';
 export const typo: NewFSEntry['linkage_source'] = 'direct_text_mach';
 
 // @ts-expect-error a non-member string fails in an insert row
-export const row: NewFSEntry = { show_id: 1, linkage_source: 'bogus' };
+export const row: NewFSEntry = { show_id: 1, play_order: 1, linkage_source: 'bogus' };
