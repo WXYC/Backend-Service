@@ -1,6 +1,6 @@
 import { spawnSync } from 'child_process';
-import { mkdirSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { dirname, resolve } from 'path';
 import { build } from 'esbuild';
 import { installConsoleRedaction } from '@wxyc/observability';
 import { realDrizzleQueryError } from '../../utils/postgres-js-errors';
@@ -39,11 +39,27 @@ describe('installConsoleRedaction', () => {
   });
 });
 
+/** The `better-auth` that Node resolves from `fromDir`: the nearest `node_modules/better-auth` walking up. */
+function installedBetterAuth(fromDir: string): { dir: string; version: string } {
+  for (let dir = fromDir; ; dir = dirname(dir)) {
+    const manifest = resolve(dir, 'node_modules/better-auth/package.json');
+    if (existsSync(manifest))
+      return { dir: dirname(manifest), version: JSON.parse(readFileSync(manifest, 'utf8')).version };
+    if (dirname(dir) === dir) throw new Error(`better-auth is not installed above ${fromDir}`);
+  }
+}
+
 // better-auth is ESM-only, so the real router runs in a child process: the fixture is bundled with
-// esbuild next to node_modules (so it resolves better-auth) and its real stdout/stderr are captured.
+// esbuild and its real stdout/stderr are captured. The bundle is written under shared/authentication so
+// the child resolves the better-auth (and better-call) that the auth app runs, not the root copy.
 describe('better-auth router logging of a failed name write', () => {
-  const outDir = resolve(__dirname, '../../../node_modules/.cache/console-redaction-test');
+  const authDir = resolve(__dirname, '../../../shared/authentication');
+  const outDir = resolve(authDir, 'node_modules/.cache/console-redaction-test');
   const outFile = resolve(outDir, 'drive-better-call.mjs');
+
+  it("runs the better-auth that shared/authentication resolves, so a bump of the app's copy is exercised", () => {
+    expect(installedBetterAuth(outDir)).toEqual(installedBetterAuth(authDir));
+  });
 
   beforeAll(async () => {
     mkdirSync(outDir, { recursive: true });
