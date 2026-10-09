@@ -8,8 +8,10 @@ import {
   redactSentryEventQueryParams,
 } from '@wxyc/observability';
 import {
+  MESSAGE_CUTS,
   SIGNUP_DJ_NAME,
   SIGNUP_REAL_NAME,
+  alteredFailedQuery,
   captureFailedStationSignupInsert,
   realDrizzleQueryError,
 } from '../../utils/postgres-js-errors';
@@ -288,5 +290,174 @@ describe('redactSentryEventQueryParams rebuilds the stack from the redacted erro
 
     expect(heldBy(result)).toEqual([]);
     expect(result.exception?.values?.[0].value).toBe('Failed query: select 1\nparams: [redacted]');
+  });
+});
+
+// Each of a name's last word and the bound time, so a cut that keeps only the rest of a params line still fails.
+// Built at run time: Sentry attaches this file's own lines to frames as context.
+const LEAK_PIECES = [SENTINEL.split(' ').at(-1), DJ_NAME.split(' ').at(-1), BOUND_TIMESTAMP.slice(11, 19)] as string[];
+const leaksIn = (text: string) => LEAK_PIECES.filter((piece) => text.includes(piece));
+const dump = (value: unknown) => inspect(value, { depth: 10, showHidden: true });
+const KINDS = ['drizzle', 'plain'] as const;
+
+/** Everything one altered failed query can reach: the log line, a console breadcrumb, and what Sentry sends. */
+async function sinksOf(error: Error) {
+  const breadcrumb = redactSentryBreadcrumb({ message: 'console', data: { arguments: [redactQueryParams(error)] } });
+  const event = await captureThroughSentry(error);
+  return {
+    log: leaksIn(dump(redactQueryParams(error)) + dump(redactLogValue(error))),
+    breadcrumb: leaksIn(dump(breadcrumb)),
+    sent: leaksIn(JSON.stringify(event)),
+    event,
+  };
+}
+
+// A message cut at or after the start of the params marker (a length cap is the likeliest edit) leaves the rest of
+// the params line after the swapped message with no marker in it; the position rule alone cannot cut that.
+describe('a failed query whose message was cut after the stack was formatted', () => {
+  it.each(KINDS.flatMap((kind) => MESSAGE_CUTS.map(([label, at]) => [kind, label, at] as const)))(
+    'a %s error cut %s reaches no log line, console breadcrumb or Sentry frame',
+    async (kind, _label, at) => {
+      const { log, breadcrumb, sent, event } = await sinksOf(alteredFailedQuery(kind, (m) => m.slice(0, at(m))));
+
+      expect({ log, breadcrumb, sent }).toEqual({ log: [], breadcrumb: [], sent: [] });
+      expect(event.exception?.values?.at(-1)?.value).toContain('Failed query');
+    }
+  );
+
+  it.each(KINDS)(
+    'a %s error cut just before the marker reaches no log line, console breadcrumb or Sentry frame',
+    async (kind) => {
+      const { log, breadcrumb, sent } = await sinksOf(
+        alteredFailedQuery(kind, (m) => m.slice(0, m.indexOf('\nparams: ')))
+      );
+
+      expect({ log, breadcrumb, sent }).toEqual({ log: [], breadcrumb: [], sent: [] });
+    }
+  );
+
+  // The message becomes text the stack holds only inside the params line, so "the marker comes before the message" must cut.
+  it.each(KINDS.flatMap((kind) => [['a bound value', 'great record'] as const].map((row) => [kind, ...row] as const)))(
+    'a %s error reworded to %s reaches no log line, console breadcrumb or Sentry frame',
+    async (kind, _label, reworded) => {
+      const { log, breadcrumb, sent } = await sinksOf(alteredFailedQuery(kind, () => reworded));
+
+      expect({ log, breadcrumb, sent }).toEqual({ log: [], breadcrumb: [], sent: [] });
+    }
+  );
+
+  it.each(KINDS)('a %s error reworded to the bare marker reaches no log line or Sentry frame', async (kind) => {
+    const { log, breadcrumb, sent } = await sinksOf(alteredFailedQuery(kind, () => '\nparams: '));
+
+    expect({ log, breadcrumb, sent }).toEqual({ log: [], breadcrumb: [], sent: [] });
+  });
+});
+
+// The issue's constraint: an error that never held a params marker produces the event it would without the hook.
+describe('an error that never held a params marker', () => {
+  const sentException = (event: ErrorEvent) => JSON.stringify({ exception: event.exception, extra: event.extra });
+
+  /** The event for the same error made twice at one call site, without the hook and with it. */
+  async function eventsWithAndWithoutHook(make: () => Error, options: Partial<SentryNode.NodeOptions> = {}) {
+    const [first, second] = [0, 1].map(() => make());
+    const without = await captureThroughSentry(first, options, (event) => event);
+    const withHook = await captureThroughSentry(second, options);
+    return { without, withHook };
+  }
+  const members = (count: number) => Array.from({ length: count }, (_, i) => new Error(`member ${i}`));
+  const limit12 = { integrations: [SentryNode.linkedErrorsIntegration({ limit: 12 })] };
+  const cyclic = () => {
+    const a = new Error('a');
+    const b = new TypeError('b', { cause: a });
+    a.cause = b;
+    return a;
+  };
+  const chain = (length: number) => {
+    let error = new Error('root');
+    for (let i = 1; i < length; i++) error = new Error(`wrapper ${i}`, { cause: error });
+    return error;
+  };
+
+  it.each([
+    ['an AggregateError of 70 plain errors', () => new AggregateError(members(70), 'agg'), {}],
+    // More members than any fixed budget a walk of the raw chain could have (a budget that ran out used to answer "found").
+    ['an AggregateError of 5000 plain errors', () => new AggregateError(members(5000), 'agg'), {}],
+    [
+      'an AggregateError whose member causes the aggregate',
+      () => {
+        const aggregate = new AggregateError([], 'agg');
+        aggregate.errors.push(new Error('member', { cause: aggregate }));
+        return aggregate;
+      },
+      {},
+    ],
+    ['a cause cycle', cyclic, {}],
+    ['a cause cycle with linkedErrors limit 12', cyclic, limit12],
+    ['a plain chain of 12 with linkedErrors limit 12', () => chain(12), limit12],
+    ['a plain chain of 30 with linkedErrors limit 12', () => chain(30), limit12],
+  ])('%s sends the event it would without the hook', async (_label, make, options) => {
+    const { without, withHook } = await eventsWithAndWithoutHook(make, options);
+
+    expect(sentException(withHook)).toBe(sentException(without));
+    expect(withHook.exception?.values?.some((value) => value.stacktrace === undefined)).toBe(false);
+  });
+});
+
+describe('the rebuild asked to decide about values it did not reach', () => {
+  it('withholds their stacktraces when the walk of the raw chain throws, since it cannot tell', async () => {
+    let armed = false;
+    // Sentry has read `errors` by the time `beforeSend` runs; only the hook's own walk still reads it.
+    const aggregate = new AggregateError([new Error('member')], 'agg');
+    Object.defineProperty(aggregate, 'errors', {
+      get() {
+        if (armed) throw new Error('unreadable');
+        return [new Error('member')];
+      },
+    });
+
+    const event = await captureThroughSentry(aggregate, {}, (sent, hint) => {
+      armed = true;
+      return redactSentryEventQueryParams(sent, hint);
+    });
+
+    const values = event.exception?.values ?? [];
+    expect(values.length).toBeGreaterThan(1);
+    expect(values.slice(0, -1).map((value) => value.stacktrace)).toEqual(values.slice(0, -1).map(() => undefined));
+  });
+
+  it('keeps those stacktraces when the walk completes and no raw error held a marker', async () => {
+    const aggregate = new AggregateError([new Error('member')], 'agg');
+
+    const event = await captureThroughSentry(aggregate);
+
+    expect(event.exception?.values?.[0].stacktrace).toBeDefined();
+  });
+});
+
+// Sentry follows an object tagged `[object Error]` down `cause` and `errors`, so the guards must walk it too.
+describe('an object that Sentry follows as an error without being one', () => {
+  const taggedAfter = (shortened: Error) => ({
+    [Symbol.toStringTag]: 'Error',
+    name: 'Error',
+    message: 'Failed query: select 1',
+    stack: String(shortened.stack),
+  });
+
+  const tagged = () => taggedAfter(alteredFailedQuery('drizzle', (m) => m));
+
+  it.each([
+    ['a cause', () => new Error('signup failed', { cause: tagged() })],
+    ['an AggregateError member', () => new AggregateError([tagged()], 'bootstrap failed')],
+  ])('as %s sends no frame built from its params line', async (_label, make) => {
+    const event = await captureThroughSentry(make());
+
+    expect(leaksIn(JSON.stringify(event))).toEqual([]);
+  });
+
+  // An AggregateError's `errors` are not descended into on the log side (a documented limit), so only a cause is pinned.
+  it('as a cause logs no params line', () => {
+    const error = new Error('signup failed', { cause: tagged() });
+
+    expect(leaksIn(dump(redactQueryParams(error)) + dump(redactLogValue(error)))).toEqual([]);
   });
 });
