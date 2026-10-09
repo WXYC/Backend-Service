@@ -217,6 +217,48 @@ describe('redactLogValue', () => {
     expect(everything(redactLogValue(value))).not.toContain(SENTINEL);
   });
 
+  it('returns the same object when nothing in it needs redacting, so the logger prints it unchanged', () => {
+    const circular: Record<string, unknown> = { note: 'ok' };
+    circular.self = circular;
+    const withGetter = {
+      get lazy() {
+        throw new Error('must not be called');
+      },
+    };
+    const values = [
+      { a: 1, b: ['x', { c: 'y' }] },
+      ['x', 1, { y: 2 }],
+      withGetter,
+      { [Symbol('key')]: 1, n: 1 },
+      Object.assign(Object.create(null), { n: 1 }),
+      circular,
+      Object.freeze({ n: 1 }),
+    ];
+
+    for (const value of values) expect(redactLogValue(value)).toBe(value);
+  });
+
+  it('copies only what changes: other members, accessors and symbol keys of the copy survive', () => {
+    const key = Symbol('key');
+    let reads = 0;
+    const value = {
+      [key]: 'kept',
+      get lazy() {
+        reads++;
+        return 'computed';
+      },
+      wrapped: queryError(),
+    };
+
+    const result = redactLogValue(value) as typeof value;
+
+    expect(result).not.toBe(value);
+    expect(everything(result.wrapped)).not.toContain(SENTINEL);
+    expect(result[key]).toBe('kept');
+    expect(Object.getOwnPropertyDescriptor(result, 'lazy')?.get).toBeDefined();
+    expect(reads).toBe(0);
+  });
+
   it('passes other values through', () => {
     const date = new Date();
     expect(redactLogValue(date)).toBe(date);
@@ -247,27 +289,6 @@ describe('redactSentryEventQueryParams', () => {
     };
 
     expect(JSON.stringify(redactSentryEventQueryParams(event))).not.toContain(SENTINEL);
-  });
-
-  it('drops the frames Sentry parses out of the params lines of the stack', () => {
-    const frames = [
-      { filename: 'node:internal/process/task_queues', function: 'run', lineno: 1 },
-      { filename: '/app/src/service.ts', function: 'save', lineno: 10 },
-      { filename: '<anonymous>', function: 'new Promise' },
-      { filename: 'record,Test Reviewer', function: '?' },
-    ];
-    const event: ErrorEvent = {
-      type: undefined,
-      exception: { values: [{ value: queryError().message, stacktrace: { frames } }] },
-    };
-
-    const result = redactSentryEventQueryParams(event);
-
-    expect(result.exception?.values?.[0].stacktrace?.frames?.map((f) => f.filename)).toEqual([
-      'node:internal/process/task_queues',
-      '/app/src/service.ts',
-      '<anonymous>',
-    ]);
   });
 
   it('leaves an event with no exception untouched', () => {

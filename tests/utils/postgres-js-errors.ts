@@ -1,6 +1,7 @@
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
+import { user } from '../../shared/database/src/schema';
 
 /**
  * Error shapes the way the real driver and ORM build them (BS#3054). A fixture
@@ -53,4 +54,35 @@ export async function captureRealDrizzleQueryError(bound: string): Promise<Drizz
     await client.end({ timeout: 0 });
   }
   throw new Error('expected the query to fail');
+}
+
+export const SIGNUP_REAL_NAME = 'Test Reviewer';
+export const SIGNUP_DJ_NAME = 'DJ Cat Scratch';
+
+/**
+ * A `DrizzleQueryError` for a failed station-signup-shaped `auth_user` insert, thrown by drizzle and
+ * postgres.js against a closed port. Its params line ends `...,<real name>,<DJ name>,...,<ISO timestamp>`,
+ * so Sentry's line parser reads a frame (with a line number) out of it.
+ */
+export async function captureFailedStationSignupInsert(): Promise<DrizzleQueryError> {
+  const client = postgres('postgres://user:pass@127.0.0.1:1/db', { max: 1, connect_timeout: 2 });
+  try {
+    await drizzle(client)
+      .insert(user)
+      .values({
+        id: 'abc123',
+        name: SIGNUP_DJ_NAME,
+        email: 'dj@example.org',
+        username: 'djcat',
+        realName: SIGNUP_REAL_NAME,
+        djName: SIGNUP_DJ_NAME,
+        selfSignupAt: new Date('2026-10-08T16:23:45.123Z'),
+      });
+  } catch (error) {
+    if (error instanceof DrizzleQueryError) return error;
+    throw error;
+  } finally {
+    await client.end({ timeout: 0 });
+  }
+  throw new Error('expected the insert to fail');
 }
