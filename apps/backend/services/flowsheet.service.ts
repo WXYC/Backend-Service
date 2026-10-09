@@ -40,7 +40,7 @@ import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
-import { PgSelectQueryBuilder, QueryBuilder } from 'drizzle-orm/pg-core';
+import { PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
 
 /**
  * The PII-safe DJ-name chain now lives in `@wxyc/database` (`dj-name.ts`), so
@@ -1143,6 +1143,41 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
   return qb;
 }
 
+// Schema-qualified `text_match_key(text)` (migration 0191, BS#3064), derived from `WXYC_SCHEMA_NAME` the same
+// way `FOLD_ARTIST_NAME_FN` in library.service.ts is so the per-worker test schema resolves.
+const TEXT_MATCH_SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
+export const TEXT_MATCH_KEY_FN = sql.raw(`"${TEXT_MATCH_SCHEMA}"."text_match_key"`);
+const TEXT_MATCH_CANDIDATE_LIMIT = 10;
+const CLEARED_LINK = { linkage_source: null, linkage_confidence: null, linked_at: null } as const;
+
+/**
+ * Library rows whose album title and artist name both key (`text_match_key`) equal to the given text. Joins
+ * `artists` rather than reading the nullable `library.artist_name`, and ignores `alternate_artist_name` and
+ * `album_artist`, matching `scripts/direct-link-flowsheet.sql`. A symbols-only name keys to `''`, so both
+ * legs are guarded `<> ''`.
+ */
+export const buildLibraryReleasesByTextQuery = (artist_name: string, album_title: string) => {
+  const albumKey = sql`${TEXT_MATCH_KEY_FN}(${album_title}::text)`;
+  const artistKey = sql`${TEXT_MATCH_KEY_FN}(${artist_name}::text)`;
+  return db
+    .select({ id: library.id })
+    .from(library)
+    .innerJoin(artists, eq(artists.id, library.artist_id))
+    .where(
+      and(
+        sql`${TEXT_MATCH_KEY_FN}(${library.album_title}) = ${albumKey}`,
+        sql`${TEXT_MATCH_KEY_FN}(${artists.artist_name}) = ${artistKey}`,
+        sql`${albumKey} <> ''`,
+        sql`${artistKey} <> ''`
+      )
+    )
+    .limit(TEXT_MATCH_CANDIDATE_LIMIT);
+};
+
+/** Ids of the matching library rows: none, one, or several when the catalog is ambiguous. Throws on DB error. */
+export const findLibraryReleasesByText = async (artist_name: string, album_title: string): Promise<number[]> =>
+  (await buildLibraryReleasesByTextQuery(artist_name, album_title)).map((row) => row.id);
+
 // Returns undefined when the UPDATE matches no row (entry deleted out from
 // under the edit); the controller maps that to a 404 (PR #1532 review).
 export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry | undefined> => {
@@ -1163,8 +1198,62 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   if (entry.segue !== undefined) updateSet.segue = entry.segue;
   if (entry.message !== undefined) updateSet.message = entry.message;
 
-  const response = await db.update(flowsheet).set(updateSet).where(eq(flowsheet.id, entry_id)).returning();
-  return response[0];
+  // Provenance stamps are server-side only, through this internally-typed set merged into the one
+  // UPDATE; `UpdateRequestBody` must never carry linkage columns (BS#1099). The pre-read is FOR UPDATE
+  // so two one-field PATCHes in flight each merge against the other's committed field (BS#3065).
+  return db.transaction(async (trx) => {
+    const [current] = await trx
+      .select({
+        entry_type: flowsheet.entry_type,
+        artist_name: flowsheet.artist_name,
+        album_title: flowsheet.album_title,
+        album_id: flowsheet.album_id,
+        linkage_source: flowsheet.linkage_source,
+      })
+      .from(flowsheet)
+      .where(eq(flowsheet.id, entry_id))
+      .for('update')
+      .limit(1);
+    if (!current) return undefined;
+
+    let linkSet: PgUpdateSetSource<typeof flowsheet> = {};
+    if (entry.album_id != null) {
+      linkSet = { linkage_source: 'dj_bin_pick', linkage_confidence: null, linked_at: sql`now()` };
+    } else if (entry.album_id === null) {
+      linkSet = CLEARED_LINK;
+    } else if (
+      (entry.artist_name !== undefined || entry.album_title !== undefined) &&
+      current.entry_type === 'track' &&
+      (current.album_id == null || current.linkage_source === 'direct_text_match')
+    ) {
+      try {
+        const ids = await findLibraryReleasesByText(
+          entry.artist_name ?? current.artist_name ?? '',
+          entry.album_title ?? current.album_title ?? ''
+        );
+        if (ids.length === 1) {
+          linkSet = {
+            album_id: ids[0],
+            linkage_source: 'direct_text_match',
+            linkage_confidence: 1,
+            linked_at: sql`now()`,
+          };
+        } else if (current.album_id == null || !ids.includes(current.album_id)) {
+          linkSet = { album_id: null, ...CLEARED_LINK };
+        }
+      } catch (err) {
+        // The text edit still applies and the link is left as it was; a failed lookup never fails the PATCH.
+        Sentry.captureException(err, { tags: { tool: 'flowsheet', subsystem: 'text-linkage' } });
+      }
+    }
+
+    const response = await trx
+      .update(flowsheet)
+      .set({ ...updateSet, ...linkSet })
+      .where(eq(flowsheet.id, entry_id))
+      .returning();
+    return response[0];
+  });
 };
 
 export const startShow = async (

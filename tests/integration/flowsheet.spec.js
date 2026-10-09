@@ -1,6 +1,7 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const postgres = require('postgres');
 const fls_util = require('../utils/flowsheet_util');
+const { seedLibraryRelease, removeSeededLibraryReleases } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 
@@ -701,6 +702,61 @@ describe('Update Flowsheet Entries', () => {
 
     expect(cleared.body.id).toEqual(entry_id);
     expect(cleared.body.track_position).toBeNull();
+  });
+
+  describe('text linkage on edit (BS#3065)', () => {
+    let release;
+    let sql;
+
+    beforeAll(async () => {
+      sql = makeSql();
+      release = await seedLibraryRelease({
+        artist_name: 'Linkage Edit Fixture Artist',
+        album_title: 'Linkage Edit Fixture Album',
+      });
+    });
+
+    afterAll(async () => {
+      await removeSeededLibraryReleases();
+      await sql.end();
+    });
+
+    test('a text edit unlinks a direct_text_match row, and restoring the text relinks it', async () => {
+      const created = await request
+        .post('/flowsheet')
+        .set('Authorization', global.access_token)
+        .send({ album_id: release.id, track_title: 'Linkage Edit Fixture Track' })
+        .expect(201);
+      const entry_id = created.body.id;
+      // The April backfill's shape: a link a DJ never chose.
+      await sql`
+        UPDATE ${sql(SCHEMA)}.flowsheet
+        SET linkage_source = 'direct_text_match', linkage_confidence = 1, linked_at = now()
+        WHERE id = ${entry_id}`;
+
+      const patch = (data) =>
+        request.patch('/flowsheet').set('Authorization', global.access_token).send({ entry_id, data }).expect(200);
+      const linkage = async () =>
+        (
+          await sql`SELECT album_id, linkage_source, linkage_confidence, linked_at
+                    FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${entry_id}`
+        )[0];
+
+      await patch({ album_title: 'Not In The Catalog' });
+      expect(await linkage()).toEqual({
+        album_id: null,
+        linkage_source: null,
+        linkage_confidence: null,
+        linked_at: null,
+      });
+
+      await patch({ album_title: 'linkage edit fixture album' });
+      const relinked = await linkage();
+      expect(relinked.album_id).toBe(release.id);
+      expect(relinked.linkage_source).toBe('direct_text_match');
+      expect(relinked.linkage_confidence).toBe(1);
+      expect(relinked.linked_at).not.toBeNull();
+    });
   });
 });
 
