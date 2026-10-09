@@ -52,6 +52,28 @@ describe('authLogHandler before any redactor is registered', () => {
   });
 });
 
+// `resetAuthLogRedactor` assigns the fail-closed redactor itself, so only a fresh module instance shows what a
+// process that never registers one (the backend, jobs, scripts) starts with.
+describe('authLogHandler in a process that never registers a redactor', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('starts fail closed: the first log of a failed write withholds the bound value', () => {
+    const spy = jest.spyOn(console, 'error').mockImplementation();
+    const error = failedWrite();
+
+    jest.isolateModules(() => {
+      const fresh = jest.requireActual<typeof import('../../../shared/authentication/src/auth-log')>(
+        '../../../shared/authentication/src/auth-log'
+      );
+      fresh.authLogHandler('error', 'INTERNAL_SERVER_ERROR', error);
+      fresh.authLogHandler('error', error.message);
+    });
+
+    expect(everything(spy.mock.calls)).not.toContain(SENTINEL);
+    expect(spy.mock.calls[0][1]).toBe('[DrizzleQueryError: details withheld, no log redactor registered]');
+  });
+});
+
 describe('installAuthLogRedaction (what apps/auth/app.ts runs at startup)', () => {
   let restore: () => void;
   let consoleSpy: { error: jest.SpyInstance; warn: jest.SpyInstance };
