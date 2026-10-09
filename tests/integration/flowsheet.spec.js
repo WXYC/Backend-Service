@@ -726,6 +726,7 @@ describe('Update Flowsheet Entries', () => {
         artist_name: 'LINKAGE insert fixture artist!',
         album_title: 'linkage Insert Fixture album',
         track_title: 'Linkage Insert Fixture Track',
+        record_label: 'Linkage Insert Fixture Label',
       };
       const created = await request
         .post('/flowsheet')
@@ -739,6 +740,7 @@ describe('Update Flowsheet Entries', () => {
       expect(track.artist_name).toBe(typed.artist_name);
       expect(track.album_title).toBe(typed.album_title);
       expect(track.track_title).toBe(typed.track_title);
+      expect(track.record_label).toBe(typed.record_label);
 
       const [row] = await sql`
         SELECT linkage_source, linkage_confidence, linked_at FROM ${sql(SCHEMA)}.flowsheet WHERE id = ${created.body.id}`;

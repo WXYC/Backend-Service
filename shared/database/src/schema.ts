@@ -791,24 +791,27 @@ export const library = wxyc_schema.table(
       // together or neither. Contrast `rotation.artist_name` /
       // `rotation.album_title`, which ARE nullable — arm 2's coalesce is
       // load-bearing.
-      // Key ladder, each rung a strict coarsening of the last: bare `lower()` ⊂ `fold_artist_name` (0134: NFD, strip combining marks) ⊂
+      // Key ladder, each rung a strict coarsening of the last: bare `lower()` ⊂
+      // `fold_artist_name` (0134: NFD, strip combining marks) ⊂
       // `text_match_key` (0191: also strips a leading "the " and every
       // non-alphanumeric run; indexed by `library_text_match_album_idx`, which
       // is SQL-only, with no declaration to put this note beside). Neither
       // `fold_artist_name` nor `text_match_key` trims, and the leading "the "
-      // strip is anchored at the start, so ' The Edits' and 'The Edits' are equal
-      // under this index (which trims) but key to 'theedits' and 'edits' under
-      // `text_match_key`. Postgres accepts CREATE OR REPLACE FUNCTION
+      // strip is anchored at the start, so ' The Edits' and 'The Edits' are
+      // equal under this index (which trims) but key to 'theedits' and 'edits'
+      // under `text_match_key`. Postgres accepts CREATE OR REPLACE FUNCTION
       // wxyc_schema.text_match_key without error while the index depends on it,
-      // so any later migration that changes the function body must
-      // REINDEX INDEX CONCURRENTLY wxyc_schema.library_text_match_album_idx in
-      // the same migration, or the index keeps old-body keys and the candidate
-      // query silently misses rows. NFD exposes the Japanese dakuten/handakuten
-      // marks (U+3099/U+309A), which are not alphanumeric, so the delete step
-      // removes them: text_match_key('ポップ') = text_match_key('ホップ'). Both
-      // legs share the function, so real matches still link; Japanese text is
-      // not preserved byte for byte. The TS-side `relaxedAlbumKey` / `looseTitleKey` keep word
-      // boundaries, so they sit beside this ladder rather than on it.
+      // so any later migration that changes the function body must rebuild the
+      // index in the same migration with a plain REINDEX INDEX
+      // wxyc_schema.library_text_match_album_idx (not CONCURRENTLY, which
+      // cannot run inside the migration's transaction), or the index keeps
+      // old-body keys and the candidate query silently misses rows. NFD exposes
+      // the Japanese dakuten/handakuten marks (U+3099/U+309A), which are not
+      // alphanumeric, so the delete step removes them: text_match_key('ポップ') =
+      // text_match_key('ホップ'). Both legs share the function, so real matches
+      // still link; Japanese text is not preserved byte for byte. The TS-side
+      // `relaxedAlbumKey` / `looseTitleKey` keep word boundaries, so they sit
+      // beside this ladder rather than on it.
       normAlbumTitleIdx: index('library_norm_album_title_idx').on(sql`lower(trim(coalesce(${table.album_title}, '')))`),
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),

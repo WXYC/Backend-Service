@@ -147,7 +147,7 @@ A web UI is out of scope for v1. Volume needs to materially exceed the CLI's thr
 - **In-process counters** keyed by outcome (`linked_high_conf`, `gray_zone_review`, `no_candidate`, `lml_error`, `lml_timeout`). The removed LML forward path incremented them; SQL-direct backfill rows are accounted for via post-run `SELECT count(*) GROUP BY linkage_source`, not the in-process counters.
 - **SQL-backed gauges**:
   - `getCumulativeLinkageCoverage()` — fraction of all track rows with `album_id` set. Watch this fall as B-2.2 sweeps run.
-  - `getRecentLinkageRate(hours)` — fraction of recently inserted rows that are linked. A falling ratio means the forward worker is behind.
+  - `getRecentLinkageRate(hours)` — fraction of recently inserted rows that are linked. A falling ratio means more recent plays name no single catalog release: the insert path links at write time, so there is no background worker to fall behind.
 - **Sentry tagging** (historical, LML forward path): `reportLinkageError` tagged every captured exception with `subsystem='lml-linkage'` and `path='forward'|'review'` so the operator can filter the Sentry issue stream by subsystem instead of by stack trace. The live text paths report `subsystem: 'text-linkage'`. (`path='backfill'` was reachable while the LML-driven backfill existed; the SQL-direct scripts surface failures as psql errors instead of Sentry events.)
 
 ## Cross-epic interaction with Epic A

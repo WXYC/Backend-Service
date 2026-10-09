@@ -667,7 +667,8 @@ const broadcastFlowsheetRefetch = (source: string): void => {
 
 /**
  * Build a track row from the request's own snapshot fields, with
- * `album_id: null`. Shared by both routes that land here: an explicit
+ * `album_id: null` (`annotateTextLinkage` may then link it, BS#3066).
+ * Shared by both routes that land here: an explicit
  * `album_id: null` (BS#933) and a positive `album_id` that misses in
  * `library` (BS#1680 — library linkage is an enrichment annotation, not a
  * precondition for recording the play; see the not-found branch above).
@@ -722,7 +723,8 @@ async function annotateTextLinkage(fsEntry: NewFSEntry, show_id: number): Promis
 }
 
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
-// or it's not provided in which case whe just throw the data provided into the table w/ album_id = NULL
+// or it's not provided, in which case the typed fields are inserted as sent,
+// linked only when their text names one release (BS#3066)
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res) => {
   const { body } = req;
   const latestShow = await flowsheet_service.getLatestShow();
@@ -915,7 +917,8 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     // entry was the wrong disposition: library linkage is an enrichment
     // annotation, not a precondition for recording the play. BS#1680 falls
     // through to the same snapshot-fields path used for an explicit
-    // `album_id: null`, keeping the DJ's play recorded with `album_id: null`,
+    // `album_id: null`, keeping the DJ's play recorded from its snapshot fields
+    // (linked only if `annotateTextLinkage` finds one release by text, BS#3066),
     // and logs a Sentry warning so the desync stays visible for data-hygiene
     // follow-up — the same asymmetric-fallback philosophy as the LML-timeout
     // degrade (BS#873) and the nameless-DJ marker suppression (epic #1288).
@@ -961,9 +964,10 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     await sendProjectedEntry(res, 201, completedEntry);
   } else {
     // No album_id (explicit null from the dj-site rotation snapshot, BS#933,
-    // or simply omitted): insert the request's own snapshot fields with
-    // album_id: null. Shares `buildSnapshotFieldsEntry` with the lookup-miss
-    // fallback above (BS#1680) so both routes into this shape stay identical.
+    // or simply omitted): insert the request's own snapshot fields, linked
+    // only if `annotateTextLinkage` finds one release by text (BS#3066).
+    // Shares `buildSnapshotFieldsEntry` with the lookup-miss fallback above
+    // (BS#1680) so both routes into this shape stay identical.
     const fsEntry = await annotateTextLinkage(buildSnapshotEntryOrRefuse(), latestShow.id);
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     pushRefetchForCommittedRow(completedEntry);
