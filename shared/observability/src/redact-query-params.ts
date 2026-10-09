@@ -17,8 +17,9 @@ import type { Breadcrumb, ErrorEvent, EventHint, Exception, StackFrame } from '@
 const PARAMS_MARKER = '\nparams: ';
 const REDACTED_PARAMS = `${PARAMS_MARKER}[redacted]`;
 /**
- * A params marker followed by anything but the whole redaction (the next stack frame, or the end of the
- * text): bound values still in the text. A first bound value that merely starts with `[redacted]` does not pass.
+ * Backstop for the Sentry rebuild only: a params marker followed by anything but the whole redaction. It reads
+ * content, and a bound value can imitate it (`[redacted]\n    at ...`), so nothing that decides what is
+ * cut or copied uses it; those decisions go by the position of the marker.
  */
 const UNREDACTED_PARAMS = /\nparams: (?!\[redacted\](?:\n {4}at |$))/;
 const FAILING_ROW = /^Failing row contains \(/;
@@ -37,15 +38,14 @@ function scrubText(text: string): string {
 /**
  * `stack` with the original `message` swapped for its scrubbed form where the
  * stack embeds it (V8 writes `${name}: ${message}` first), keeping the frames.
- * A stack that does not embed the message is cut at the params marker instead, as is one
- * that still holds a params line after the swap (a message shortened after V8 formatted the stack).
+ * Decided by position, never by what follows a marker (a bound value can imitate a redaction): a stack that
+ * does not embed the message, or holds a params marker before it, is cut at its first marker; otherwise the
+ * text after the message is cut at its first marker (a message shortened after V8 formatted the stack).
  */
 function scrubStack(stack: string, message: string, scrubbedMessage: string): string {
   const at = stack.indexOf(message);
-  if (at === -1) return scrubText(stack);
-  const swapped = stack.slice(0, at) + scrubbedMessage + stack.slice(at + message.length);
-  const left = swapped.search(UNREDACTED_PARAMS);
-  return left === -1 ? swapped : swapped.slice(0, left) + REDACTED_PARAMS;
+  if (at === -1 || stack.slice(0, at).includes(PARAMS_MARKER)) return scrubText(stack);
+  return stack.slice(0, at) + scrubbedMessage + scrubText(stack.slice(at + message.length));
 }
 
 function carriesRow(error: Error): boolean {
@@ -55,8 +55,11 @@ function carriesRow(error: Error): boolean {
 
 /** `instanceof Error` misses errors from another realm (Node core errors under a vm context), so also ask the engine. */
 function isError(value: unknown): value is Error {
-  return value instanceof Error || types.isNativeError(value);
+  return value instanceof Error || types.isNativeError(value) || copies.has(value as object);
 }
+
+/** The copies `redactError` made: a copy of a cross-realm error is no longer native, yet must still be followed down a cause chain. */
+const copies = new WeakSet<object>();
 
 /** What stands in for an error the redaction cannot copy: it must never be the original. */
 const UNLOGGABLE_ERROR = '[unloggable error]';
@@ -74,7 +77,7 @@ function redactError(error: Error, depth: number): Error {
   const message = scrubText(rawMessage);
   const hasParamProperty = PARAM_PROPERTIES.some((key) => Object.hasOwn(error, key));
   // A stack formatted before the message was shortened can still hold a params line: that error is copied so `scrubStack` cuts it.
-  const stackHoldsParams = UNREDACTED_PARAMS.test(String(error.stack));
+  const stackHoldsParams = String(error.stack).includes(PARAMS_MARKER);
   if (message === rawMessage && cause === error.cause && !hasParamProperty && !carriesRow(error) && !stackHoldsParams)
     return error;
 
@@ -104,6 +107,7 @@ function redactError(error: Error, depth: number): Error {
   if (typeof query === 'string')
     set('query', scrubText(query), Object.prototype.propertyIsEnumerable.call(error, 'query'));
   if (carriesRow(error)) set('detail', REDACTED_FAILING_ROW, true);
+  copies.add(clean);
   return clean;
 }
 
@@ -210,7 +214,9 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
   let i = 0;
   for (; i < values.length && i <= MAX_DEPTH && isError(link); i++, link = (link as Error).cause) {
     const target = values[values.length - 1 - i];
-    // A link whose stack still holds a params line must not be parsed into frames.
+    // Defence in depth, and unreachable by construction: `redactError` copies every error whose stack holds the
+    // marker and `scrubStack` cuts the copy, `minimalError` has no stack, and a non-string stack makes Sentry's
+    // own parser throw before `beforeSend`. Kept so a future change to either cannot parse a params line into frames.
     if (UNREDACTED_PARAMS.test(String(link.stack))) {
       delete target.stacktrace;
       break;
@@ -234,9 +240,26 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
     else delete target.stacktrace;
     rebuilt.add(target);
   }
-  // Values past the bound are the raw errors, whose stacks may hold params lines: they get no stacktrace.
-  if (i > MAX_DEPTH) for (const unreached of values.slice(0, values.length - i)) delete unreached.stacktrace;
+  // Values the loop did not reach are the raw errors (past the bound) or ones it could not match (a minimal-error
+  // fallback, a class mismatch, a link without a `cause`): they get no stacktrace if any raw error in the chain has a params line in its stack.
+  if (i < values.length && (i > MAX_DEPTH || rawChainHoldsParams(original))) {
+    for (const unreached of values.slice(0, values.length - i)) delete unreached.stacktrace;
+  }
   return rebuilt;
+}
+
+/** Whether `error`, its `cause` chain or its `errors` holds a params marker in its stack. Bounded, and true when it cannot tell. */
+function rawChainHoldsParams(error: unknown, budget = { left: 64 }): boolean {
+  try {
+    if (!isError(error)) return false;
+    if (budget.left-- <= 0) return true;
+    if (String(error.stack).includes(PARAMS_MARKER)) return true;
+    const { errors } = error as { errors?: unknown };
+    const members = Array.isArray(errors) ? errors : [];
+    return [error.cause, ...members].some((member) => rawChainHoldsParams(member, budget));
+  } catch {
+    return true;
+  }
 }
 
 /** `scrubText` on every string reachable from `node` (plain objects and arrays, to a bounded depth), in place. */

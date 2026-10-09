@@ -1,7 +1,18 @@
 import * as SentryNode from '@sentry/node';
 import type { ErrorEvent, EventHint } from '@sentry/core';
-import { redactSentryBreadcrumb, redactSentryEventQueryParams } from '@wxyc/observability';
-import { SIGNUP_DJ_NAME, SIGNUP_REAL_NAME, captureFailedStationSignupInsert } from '../../utils/postgres-js-errors';
+import { inspect } from 'util';
+import {
+  redactLogValue,
+  redactQueryParams,
+  redactSentryBreadcrumb,
+  redactSentryEventQueryParams,
+} from '@wxyc/observability';
+import {
+  SIGNUP_DJ_NAME,
+  SIGNUP_REAL_NAME,
+  captureFailedStationSignupInsert,
+  realDrizzleQueryError,
+} from '../../utils/postgres-js-errors';
 
 // Sentry parses `error.stack` into `exception.values[].stacktrace` before `beforeSend` runs, so a params line
 // that survives in the stack text becomes frames carrying the bound values (BS#3054). These tests send a
@@ -148,7 +159,7 @@ describe('redactSentryEventQueryParams rebuilds the stack from the redacted erro
     expect(heldBy(event)).toEqual([]);
   });
 
-  it('withholds the stack of a copy that still holds a params line (a plain error whose message was shortened)', async () => {
+  it('copies a plain error whose message was reworded after the stack was formatted, and sends no stacktrace from the cut stack', async () => {
     const error = new Error(`Failed query: select 1\nparams: ${DJ_NAME},${SENTINEL},${BOUND_TIMESTAMP}`);
     expect(error.stack).toContain('params: ');
     error.message = 'select 1 failed';
@@ -169,6 +180,72 @@ describe('redactSentryEventQueryParams rebuilds the stack from the redacted erro
     const event = await captureThroughSentry(error);
 
     expect(heldBy(event)).toEqual([]);
+  });
+
+  // A first bound value shaped like the redaction plus a frame must not pass for a redacted params line (BS#3070).
+  it.each([
+    ['a stack frame', `[redacted]\n    at ${SENTINEL},${DJ_NAME},${BOUND_TIMESTAMP}`],
+    ['a function frame', `[redacted]\n    at review (${SENTINEL} ${DJ_NAME}:1:2)`],
+    ['an async frame', `[redacted]\n    at async ${SENTINEL},${BOUND_TIMESTAMP}`],
+    ['a frame and a second marker', `[redacted]\n    at ${SENTINEL},${BOUND_TIMESTAMP}\nparams: z`],
+  ])(
+    'sends no frame or log text from a shortened message whose first bound value imitates the redaction and %s',
+    async (_label, bound) => {
+      const error = new Error(`Failed query: select 1\nparams: ${bound}`);
+      expect(error.stack).toContain('params: ');
+      error.message = 'Failed query: select 1';
+
+      const event = await captureThroughSentry(error);
+
+      expect(heldBy(event)).toEqual([]);
+      expect(inspect(redactQueryParams(error))).not.toContain(SENTINEL);
+      expect(inspect(redactLogValue(error))).not.toContain(SENTINEL);
+    }
+  );
+
+  // The rebuild cannot reach these values, so the in-place fallback must not keep frames built from the params lines.
+  describe('when the rebuild cannot reach a shortened query error', () => {
+    const shortened = () => {
+      const error = realDrizzleQueryError([DJ_NAME, SENTINEL, BOUND_TIMESTAMP]);
+      // V8 formats `stack` on first read, so read it before shortening the message.
+      expect(error.stack).toContain('params: ');
+      error.message = error.message.slice(0, error.message.indexOf('\nparams: '));
+      return error;
+    };
+    const unreadableDetail = <T extends Error>(error: T): T =>
+      Object.defineProperty(error, 'detail', {
+        get() {
+          throw new Error('unreadable');
+        },
+      });
+
+    it('after the minimal-error fallback names a class Sentry did not (a throwing detail getter)', async () => {
+      const event = await captureThroughSentry(unreadableDetail(shortened()));
+
+      expect(heldBy(event)).toEqual([]);
+      expect(event.exception?.values?.at(-1)?.stacktrace).toBeUndefined();
+    });
+
+    it('when the minimal copy of the outer error has no cause to follow', async () => {
+      const event = await captureThroughSentry(unreadableDetail(new Error('signup failed', { cause: shortened() })));
+
+      const values = event.exception?.values ?? [];
+      expect(values).toHaveLength(3);
+      expect(heldBy(event)).toEqual([]);
+      expect(values.some((value) => value.type === 'DrizzleQueryError' && value.stacktrace !== undefined)).toBe(false);
+    });
+
+    it('inside an AggregateError', async () => {
+      const event = await captureThroughSentry(new AggregateError([shortened()], 'bootstrap failed'));
+
+      expect(heldBy(event)).toEqual([]);
+    });
+
+    it('keeps the stacktrace of an unreached value whose chain holds no params line', async () => {
+      const event = await captureThroughSentry(unreadableDetail(new Error('signup failed', { cause: new Error('x') })));
+
+      expect(event.exception?.values?.[0].stacktrace).toBeDefined();
+    });
   });
 
   it('sends no bound value from a query error nine causes deep whose message was shortened', async () => {
