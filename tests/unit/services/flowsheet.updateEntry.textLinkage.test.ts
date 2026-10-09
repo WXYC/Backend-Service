@@ -10,8 +10,10 @@
  *     matcher: one candidate links, several keep the current link only if it is among them, none clears.
  *     Rows linked any other way, and non-track rows, are never touched by an edit.
  *
- * The transaction, the locked pre-read and the final UPDATE are scripted; the matcher is the real
- * `findLibraryReleasesByText` over a scripted `db`, so a lookup that rejects exercises the real catch.
+ * The transaction, the locked pre-read, the savepoint and the final UPDATE are scripted; the matcher is the real
+ * `findLibraryReleasesByText` over the scripted savepoint, so a lookup that rejects exercises the real catch. The
+ * pool `db.select` is scripted separately so a lookup that escapes the transaction onto the pool, which wedges
+ * the pool under concurrent edits (BS#2474), is caught.
  */
 
 jest.unmock('drizzle-orm');
@@ -26,6 +28,10 @@ const mockPreRead = jest.fn();
 const mockUpdateSet = jest.fn();
 const mockForLock = jest.fn();
 const mockLookupWhere = jest.fn();
+const mockLookupOrderBy = jest.fn();
+const mockSavepoint = jest.fn();
+const mockSavepointSelect = jest.fn();
+const mockPoolSelect = jest.fn();
 
 /** A thenable drizzle-shaped chain: every builder method returns it, and awaiting it yields `result()`. */
 const chain = (result: () => unknown, hooks: Record<string, (...args: any[]) => void> = {}) => {
@@ -45,6 +51,17 @@ const chain = (result: () => unknown, hooks: Record<string, (...args: any[]) => 
 };
 
 jest.mock('@wxyc/database', () => {
+  const lookupChain = () =>
+    chain(() => mockLookup(), {
+      where: (...args) => mockLookupWhere(...args),
+      orderBy: (...args) => mockLookupOrderBy(...args),
+    });
+  const savepoint = {
+    select: () => {
+      mockSavepointSelect();
+      return lookupChain();
+    },
+  };
   const trx = {
     select: () =>
       chain(() => mockPreRead(), {
@@ -54,16 +71,25 @@ jest.mock('@wxyc/database', () => {
       chain(() => [{ id: 7 }], {
         set: (...args) => mockUpdateSet(...args),
       }),
+    // drizzle's nested `transaction` is a SAVEPOINT on the same connection; a rejection propagates like the real one.
+    transaction: (cb: (sp: typeof savepoint) => unknown) => {
+      mockSavepoint();
+      return Promise.resolve().then(() => cb(savepoint));
+    },
   };
   const scriptedDb = {
     transaction: (cb: (t: typeof trx) => unknown) => Promise.resolve(cb(trx)),
-    select: () => chain(() => mockLookup(), { where: (...args) => mockLookupWhere(...args) }),
+    select: () => {
+      mockPoolSelect();
+      return lookupChain();
+    },
   };
   return jest.requireActual('../../utils/real-database-module').realDatabaseModule({ db: scriptedDb });
 });
 
 import * as Sentry from '@sentry/node';
 import { PgDialect } from 'drizzle-orm/pg-core';
+import { library } from '@wxyc/database';
 import { updateEntry } from '../../../apps/backend/services/flowsheet.service';
 
 const track = (over: Record<string, unknown> = {}) => ({
@@ -133,6 +159,14 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
       expected: { album_id: 5, linkage_source: 'direct_text_match', linkage_confidence: 1 },
     },
     {
+      // The classic and mobile editors resend every text field on each save; only the album changed here.
+      name: 'a full-row save that changes album_title and resends the unchanged artist_name links an unlinked track',
+      row: track(),
+      patch: { artist_name: 'Jessica Pratt', album_title: 'Quiet Signs (Deluxe)', track_title: 'x', record_label: 'y' },
+      candidates: [{ id: 5 }],
+      expected: { album_id: 5, linkage_source: 'direct_text_match', linkage_confidence: 1 },
+    },
+    {
       name: 'one candidate on a direct_text_match row relinks it',
       row: track({ album_id: 9, linkage_source: 'direct_text_match' }),
       candidates: [{ id: 5 }],
@@ -154,6 +188,13 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
       name: 'several candidates excluding the current album_id clear the link',
       row: track({ album_id: 9, linkage_source: 'direct_text_match' }),
       candidates: [{ id: 5 }, { id: 6 }],
+      expected: { album_id: null, ...CLEARED },
+    },
+    {
+      // The current link sorts first, so a full page without it means the current id is not in the group at all.
+      name: 'a full page of 10 candidates excluding the current album_id clears the link',
+      row: track({ album_id: 9, linkage_source: 'direct_text_match' }),
+      candidates: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19].map((id) => ({ id })),
       expected: { album_id: null, ...CLEARED },
     },
     {
@@ -218,6 +259,17 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     expect(params).toEqual(['Quiet Signs', 'Jessica Pratt Band', 'Quiet Signs', 'Jessica Pratt Band']);
   });
 
+  it('orders the current album_id first so the candidate cap can never truncate it out', async () => {
+    mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
+    mockLookup.mockReturnValue([{ id: 9 }, { id: 5 }]);
+    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' });
+    const [preferCurrent, byId] = mockLookupOrderBy.mock.calls[0];
+    const { sql: text, params } = new PgDialect().sqlToQuery(preferCurrent);
+    expect(text).toMatch(/^\("[^"]+"\."library"\."id" = \$1\) desc$/);
+    expect(params).toEqual([9]);
+    expect(byId).toBe(library.id);
+  });
+
   it('applies the text edit and leaves the link alone when the lookup rejects, reporting to Sentry', async () => {
     const boom = new Error('lookup failed');
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
@@ -225,6 +277,8 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
       throw boom;
     });
     await expect(updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' })).resolves.toEqual({ id: 7 });
+    // The failed lookup ran inside the savepoint, which rolls back alone; the outer UPDATE still runs.
+    expect(mockSavepoint).toHaveBeenCalledTimes(1);
     expect(setArg()).toEqual({ album_title: 'Quiet Signs (Deluxe)' });
     expect(Sentry.captureException).toHaveBeenCalledWith(boom, {
       tags: { tool: 'flowsheet', subsystem: 'text-linkage' },
@@ -234,6 +288,18 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
 });
 
 describe('updateEntry — transaction shape', () => {
+  it('runs the re-match lookup on a savepoint of the transaction, never on the pool db', async () => {
+    // A pool read while the transaction holds its connection wedges the pool once every connection is held
+    // by an edit waiting on one (BS#2474). The savepoint keeps a failed lookup from aborting the UPDATE.
+    mockPreRead.mockReturnValue([track()]);
+    mockLookup.mockReturnValue([{ id: 5 }]);
+    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' });
+    expect(mockSavepoint).toHaveBeenCalledTimes(1);
+    expect(mockSavepointSelect).toHaveBeenCalledTimes(1);
+    expect(mockLookup).toHaveBeenCalledTimes(1);
+    expect(mockPoolSelect).not.toHaveBeenCalled();
+  });
+
   it('pre-reads the row FOR UPDATE', async () => {
     mockPreRead.mockReturnValue([track()]);
     await updateEntry(7, { track_title: 'x' });

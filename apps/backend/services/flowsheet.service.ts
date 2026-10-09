@@ -1150,16 +1150,29 @@ export const TEXT_MATCH_KEY_FN = sql.raw(`"${TEXT_MATCH_SCHEMA}"."text_match_key
 const TEXT_MATCH_CANDIDATE_LIMIT = 10;
 const CLEARED_LINK = { linkage_source: null, linkage_confidence: null, linked_at: null } as const;
 
+export type TextMatchLookupOptions = {
+  executor?: Pick<typeof db, 'select'>;
+  currentAlbumId?: number | null;
+};
+
 /**
  * Library rows whose album title and artist name both key (`text_match_key`) equal to the given text. Joins
  * `artists` rather than reading the nullable `library.artist_name`, and ignores `alternate_artist_name` and
  * `album_artist`, matching `scripts/direct-link-flowsheet.sql`. A symbols-only name keys to `''`, so both
  * legs are guarded `<> ''`.
+ *
+ * `options.executor` defaults to the pool `db`; a caller inside a transaction passes its own handle (BS#2474).
+ * `options.currentAlbumId` sorts that row first, so the candidate cap can never truncate it out of a
+ * keep-the-current-link check.
  */
-export const buildLibraryReleasesByTextQuery = (artist_name: string, album_title: string) => {
+export const buildLibraryReleasesByTextQuery = (
+  artist_name: string,
+  album_title: string,
+  { executor = db, currentAlbumId = null }: TextMatchLookupOptions = {}
+) => {
   const albumKey = sql`${TEXT_MATCH_KEY_FN}(${album_title}::text)`;
   const artistKey = sql`${TEXT_MATCH_KEY_FN}(${artist_name}::text)`;
-  return db
+  return executor
     .select({ id: library.id })
     .from(library)
     .innerJoin(artists, eq(artists.id, library.artist_id))
@@ -1171,12 +1184,16 @@ export const buildLibraryReleasesByTextQuery = (artist_name: string, album_title
         sql`${artistKey} <> ''`
       )
     )
+    .orderBy(...(currentAlbumId == null ? [] : [desc(sql`(${library.id} = ${currentAlbumId})`)]), library.id)
     .limit(TEXT_MATCH_CANDIDATE_LIMIT);
 };
 
 /** Ids of the matching library rows: none, one, or several when the catalog is ambiguous. Throws on DB error. */
-export const findLibraryReleasesByText = async (artist_name: string, album_title: string): Promise<number[]> =>
-  (await buildLibraryReleasesByTextQuery(artist_name, album_title)).map((row) => row.id);
+export const findLibraryReleasesByText = async (
+  artist_name: string,
+  album_title: string,
+  options?: TextMatchLookupOptions
+): Promise<number[]> => (await buildLibraryReleasesByTextQuery(artist_name, album_title, options)).map((row) => row.id);
 
 // Returns undefined when the UPDATE matches no row (entry deleted out from
 // under the edit); the controller maps that to a 404 (PR #1532 review).
@@ -1202,8 +1219,6 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   // UPDATE; `UpdateRequestBody` must never carry linkage columns (BS#1099). The pre-read is FOR UPDATE
   // so two one-field PATCHes in flight each merge against the other's committed field (BS#3065).
   return db.transaction(async (trx) => {
-    // The re-match lookup below deliberately runs on the pool `db`, not `trx`: a lookup error must not abort
-    // this transaction (25P02) and take the UPDATE down with it.
     const [current] = await trx
       .select({
         entry_type: flowsheet.entry_type,
@@ -1231,9 +1246,17 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
       (current.album_id == null || current.linkage_source === 'direct_text_match')
     ) {
       try {
-        const ids = await findLibraryReleasesByText(
-          entry.artist_name ?? current.artist_name ?? '',
-          entry.album_title ?? current.album_title ?? ''
+        // On a savepoint of `trx`, not the pool and not bare `trx` (BS#3065). A bare `db` read here would borrow a
+        // SECOND pool connection while this one sits reserved — the wedge case being every pool connection held
+        // by an edit awaiting a pool read none of them can be granted (BS#2474; `addToRotation`'s identity-read
+        // comment in library.service.ts has the mechanics). A failed read on bare `trx` would abort the
+        // transaction (25P02) and take the UPDATE down with it; the savepoint rolls back alone.
+        const ids = await trx.transaction((sp) =>
+          findLibraryReleasesByText(
+            entry.artist_name ?? current.artist_name ?? '',
+            entry.album_title ?? current.album_title ?? '',
+            { executor: sp, currentAlbumId: current.album_id }
+          )
         );
         if (ids.length === 1) {
           linkSet = {
