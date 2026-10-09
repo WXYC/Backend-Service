@@ -179,13 +179,34 @@ describe('/reviews submit and delete (BS#2854)', () => {
     });
 
     test('a release-level print (no intake item) is in use only while it is the newest print of that release', async () => {
-      const older = await reviewFor({ album_id: libraryId });
-      const newer = await reviewFor({ album_id: libraryId });
-      await seedReviewPrint({ album_id: libraryId, review_id: older.id, printed_at: '2026-09-01T12:00:00Z' });
+      // A release of its own with no copy: libraryId has filed items by now, which is the case below.
+      const bare = (await seedLibraryRelease({ artist_name: `${PREFIX} bare`, album_title: `${PREFIX} bare release` }))
+        .id;
+      const older = await reviewFor({ album_id: bare });
+      const newer = await reviewFor({ album_id: bare });
+      await seedReviewPrint({ album_id: bare, review_id: older.id, printed_at: '2026-09-01T12:00:00Z' });
       expect((await djA.delete(`/reviews/${older.id}`)).status).toBe(409);
-      await seedReviewPrint({ album_id: libraryId, review_id: newer.id, printed_at: '2026-09-02T12:00:00Z' });
+      await seedReviewPrint({ album_id: bare, review_id: newer.id, printed_at: '2026-09-02T12:00:00Z' });
       expect((await djA.delete(`/reviews/${older.id}`)).status).toBe(204);
     });
+
+    test.each([
+      ['one filed copy', ['filed'], 204],
+      ['one finalized copy', ['finalized'], 204],
+      ['two logged copies', ['filed', 'finalized'], 409],
+    ])(
+      'a release-level print written before the release was logged is in use before the release is logged and, with %s, deletable only if that is exactly one copy (BS#3075)',
+      async (name, states, expected) => {
+        const albumId = (
+          await seedLibraryRelease({ artist_name: `${PREFIX} ${name}`, album_title: `${PREFIX} ${name}` })
+        ).id;
+        const review = await reviewFor({ album_id: albumId });
+        await seedReviewPrint({ album_id: albumId, review_id: review.id, printed_at: '2026-09-01T12:00:00Z' });
+        expect((await djA.delete(`/reviews/${review.id}`)).status).toBe(409);
+        for (const state of states) await item(`${name} ${state}`, { state, album_id: albumId });
+        expect((await djA.delete(`/reviews/${review.id}`)).status).toBe(expected);
+      }
+    );
 
     test.each([
       ['held by a DJ', true, 'checked_out'],
