@@ -1,5 +1,5 @@
 import { types } from 'node:util';
-import { exceptionFromError, getClient } from '@sentry/core';
+import { exceptionFromError, getClient, isError as isSentryError } from '@sentry/core';
 import type { Breadcrumb, ErrorEvent, EventHint, Exception, StackFrame } from '@sentry/core';
 
 /**
@@ -38,14 +38,21 @@ function scrubText(text: string): string {
 /**
  * `stack` with the original `message` swapped for its scrubbed form where the
  * stack embeds it (V8 writes `${name}: ${message}` first), keeping the frames.
- * Decided by position, never by what follows a marker (a bound value can imitate a redaction): a stack that
- * does not embed the message, or holds a params marker before it, is cut at its first marker; otherwise the
- * text after the message is cut at its first marker (a message shortened after V8 formatted the stack).
+ * Decided by position, never by what follows a marker (a bound value can imitate a redaction):
+ * - a stack that does not embed the message, or holds a marker before it, is cut at its first marker;
+ * - so is one whose message span holds a marker unless the error is `intact`: its message is exactly the
+ *   one it builds from its own `query` and `params` (a drizzle error), and the frames start right after it.
+ *   Anything else (a message cut at or after the marker, or a plain error that carries no query to check
+ *   it against) leaves the rest of the params line, or a bound value's own `\n    at ` line, after the span;
+ * - otherwise the text after the message is cut at its first marker (a message shortened before the marker).
  */
-function scrubStack(stack: string, message: string, scrubbedMessage: string): string {
+function scrubStack(stack: string, message: string, scrubbedMessage: string, intact: boolean): string {
   const at = stack.indexOf(message);
-  if (at === -1 || stack.slice(0, at).includes(PARAMS_MARKER)) return scrubText(stack);
-  return stack.slice(0, at) + scrubbedMessage + scrubText(stack.slice(at + message.length));
+  const first = stack.indexOf(PARAMS_MARKER);
+  if (at === -1 || (first !== -1 && first < at)) return scrubText(stack);
+  const end = at + message.length;
+  if (first !== -1 && first < end && !(intact && /^(?:\n {4}at |$)/.test(stack.slice(end)))) return scrubText(stack);
+  return stack.slice(0, at) + scrubbedMessage + scrubText(stack.slice(end));
 }
 
 function carriesRow(error: Error): boolean {
@@ -53,9 +60,13 @@ function carriesRow(error: Error): boolean {
   return typeof detail === 'string' && FAILING_ROW.test(detail);
 }
 
-/** `instanceof Error` misses errors from another realm (Node core errors under a vm context), so also ask the engine. */
+/**
+ * What Sentry follows as an error, so the guards walk exactly what it walks: `instanceof Error` misses errors from
+ * another realm (Node core errors under a vm context), so also ask the engine, and Sentry also takes an object
+ * tagged `[object Error]` (and its other error tags) as a `cause` or an `errors` member.
+ */
 function isError(value: unknown): value is Error {
-  return value instanceof Error || types.isNativeError(value) || copies.has(value as object);
+  return value instanceof Error || types.isNativeError(value) || copies.has(value as object) || isSentryError(value);
 }
 
 /** The copies `redactError` made: a copy of a cross-realm error is no longer native, yet must still be followed down a cause chain. */
@@ -98,7 +109,12 @@ function redactError(error: Error, depth: number): Error {
     }
   }
   set('message', message, false);
-  if (typeof error.stack === 'string') set('stack', scrubStack(error.stack, rawMessage, message), false);
+  const { query: rawQuery, params } = error as { query?: unknown; params?: unknown };
+  const intact =
+    typeof rawQuery === 'string' &&
+    Array.isArray(params) &&
+    rawMessage === `Failed query: ${rawQuery}${PARAMS_MARKER}${params}`;
+  if (typeof error.stack === 'string') set('stack', scrubStack(error.stack, rawMessage, message, intact), false);
   if (Object.hasOwn(error, 'cause')) set('cause', cause, false);
   for (const key of PARAM_PROPERTIES) {
     if (Object.hasOwn(error, key)) set(key, '[redacted]', Object.prototype.propertyIsEnumerable.call(error, key));
@@ -214,9 +230,10 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
   let i = 0;
   for (; i < values.length && i <= MAX_DEPTH && isError(link); i++, link = (link as Error).cause) {
     const target = values[values.length - 1 - i];
-    // Defence in depth, and unreachable by construction: `redactError` copies every error whose stack holds the
-    // marker and `scrubStack` cuts the copy, `minimalError` has no stack, and a non-string stack makes Sentry's
-    // own parser throw before `beforeSend`. Kept so a future change to either cannot parse a params line into frames.
+    // Defence in depth, and unreachable by construction (no test can fail without it): `redactError` copies every
+    // error whose stack holds the marker and `scrubStack` cuts the copy by position, `i <= MAX_DEPTH` keeps raw
+    // links out, `minimalError` has no stack, and a non-string stack makes Sentry's own parser throw before
+    // `beforeSend`. Kept so a future change to any of them cannot parse a params line into frames.
     if (UNREDACTED_PARAMS.test(String(link.stack))) {
       delete target.stacktrace;
       break;
@@ -241,22 +258,32 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
     rebuilt.add(target);
   }
   // Values the loop did not reach are the raw errors (past the bound) or ones it could not match (a minimal-error
-  // fallback, a class mismatch, a link without a `cause`): they get no stacktrace if any raw error in the chain has a params line in its stack.
-  if (i < values.length && (i > MAX_DEPTH || rawChainHoldsParams(original))) {
+  // fallback, a class mismatch, a link without a `cause`): they get no stacktrace if a raw error in the chain held a
+  // marker. Only that decides: a chain that never held one (a long chain, a big AggregateError) is left as Sentry built it.
+  if (i < values.length && rawChainHoldsParams(original)) {
     for (const unreached of values.slice(0, values.length - i)) delete unreached.stacktrace;
   }
   return rebuilt;
 }
 
-/** Whether `error`, its `cause` chain or its `errors` holds a params marker in its stack. Bounded, and true when it cannot tell. */
-function rawChainHoldsParams(error: unknown, budget = { left: 64 }): boolean {
+/**
+ * Whether `error`, its `cause` chain or its `errors` (to any depth and fan-out, each error once, so a cycle ends)
+ * holds a params marker in its stack. True only when one does or when the walk throws (a getter, a Proxy): it cannot tell then.
+ */
+function rawChainHoldsParams(error: unknown): boolean {
   try {
-    if (!isError(error)) return false;
-    if (budget.left-- <= 0) return true;
-    if (String(error.stack).includes(PARAMS_MARKER)) return true;
-    const { errors } = error as { errors?: unknown };
-    const members = Array.isArray(errors) ? errors : [];
-    return [error.cause, ...members].some((member) => rawChainHoldsParams(member, budget));
+    const seen = new Set<unknown>();
+    const pending: unknown[] = [error];
+    while (pending.length > 0) {
+      const next = pending.pop();
+      if (!isError(next) || seen.has(next)) continue;
+      seen.add(next);
+      if (String(next.stack).includes(PARAMS_MARKER)) return true;
+      const { errors } = next as { errors?: unknown };
+      pending.push(next.cause);
+      if (Array.isArray(errors)) for (const member of errors) pending.push(member);
+    }
+    return false;
   } catch {
     return true;
   }

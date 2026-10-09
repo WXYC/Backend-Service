@@ -86,3 +86,38 @@ export async function captureFailedStationSignupInsert(): Promise<DrizzleQueryEr
   }
   throw new Error('expected the insert to fail');
 }
+
+const ALTERED_SQL =
+  'update "reviews" set "review" = $1, "dj_name" = $2, "real_name" = $3, "updated_at" = $4 where "id" = $5';
+/** The first value is DJ text with a line shaped like a stack frame, the way a review body can be, and it binds before the names. */
+export const ALTERED_BOUND = [
+  `great record\n    at ${SIGNUP_REAL_NAME},${SIGNUP_DJ_NAME}`,
+  SIGNUP_DJ_NAME,
+  SIGNUP_REAL_NAME,
+  '2026-10-08T16:23:45.123Z',
+  'r1',
+];
+
+/**
+ * A failed query whose message was changed after V8 formatted its stack (V8 formats `stack` on first read, so the
+ * stack still holds the original message and the params line). `drizzle` is drizzle's real class, `plain` an `Error`
+ * with the same message and nothing else. `alter` gets the original message and returns the new one.
+ */
+export function alteredFailedQuery(kind: 'drizzle' | 'plain', alter: (message: string) => string): Error {
+  const drizzleError = new DrizzleQueryError(ALTERED_SQL, ALTERED_BOUND, postgresJsServerError(ALTERED_BOUND));
+  const error = kind === 'drizzle' ? drizzleError : new Error(drizzleError.message);
+  if (!String(error.stack).includes('\nparams: '))
+    throw new Error('the stack must hold the params line before the message changes');
+  error.message = alter(error.message);
+  return error;
+}
+
+const MARKER = '\nparams: ';
+/** Where a length cap or an edit can land in the message; each is the new message's length. */
+export const MESSAGE_CUTS: ReadonlyArray<[string, (message: string) => number]> = [
+  ['inside the marker', (m) => m.indexOf(MARKER) + 4],
+  ['right after the marker', (m) => m.indexOf(MARKER) + MARKER.length],
+  ['inside the first value', (m) => m.indexOf(MARKER) + MARKER.length + 3],
+  ["at the first value's own frame-shaped line", (m) => m.indexOf('\n    at ')],
+  ['inside a later value', (m) => m.lastIndexOf(SIGNUP_REAL_NAME) + 4],
+];

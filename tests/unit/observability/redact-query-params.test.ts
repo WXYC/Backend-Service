@@ -104,6 +104,36 @@ describe('redactQueryParams', () => {
     expect(inspect(redactLogValue(error))).not.toContain(SENTINEL);
   });
 
+  // `scrubStack` decides by position alone. These two stacks are ones no code path produces today (nothing assigns `stack`),
+  // so each pins one clause of the rule directly: an intact message (the one the error rebuilds from its own query and
+  // params) is still cut when a marker comes before it, or when anything but the frames follows it.
+  it('cuts a stack that holds a params line before an intact message', () => {
+    const error = queryError();
+    error.stack = `Error: wrapped\nparams: DJ Cat Scratch,${SENTINEL}\n${error.stack}`;
+
+    const redacted = redactQueryParams(error);
+
+    expect(everything(redacted)).not.toContain(SENTINEL);
+    expect(everything(redactLogValue(error))).not.toContain(SENTINEL);
+  });
+
+  it('cuts a stack where anything but the frames follows an intact message', () => {
+    const error = queryError();
+    error.stack = String(error.stack).replace(error.message, `${error.message}, DJ Cat Scratch,${SENTINEL}`);
+
+    const redacted = redactQueryParams(error);
+
+    expect(everything(redacted)).not.toContain(SENTINEL);
+  });
+
+  it('keeps the frames of an intact failed query, and drops those of a plain error whose message holds a params line it cannot be checked against', () => {
+    const intact = redactQueryParams(queryError());
+    const plain = redactQueryParams(new Error(`Failed query: ${SQL}\nparams: great record,${SENTINEL}`));
+
+    expect(String(intact.stack)).toContain('\n    at ');
+    expect(String(plain.stack)).toBe(`Error: Failed query: ${SQL}\nparams: [redacted]`);
+  });
+
   it('keeps the input class and its other own properties, and leaves the input untouched', () => {
     const original = Object.assign(queryError(), { code: '23505', status: 409, expose: true });
 
