@@ -136,9 +136,7 @@ jest.mock('@wxyc/database', () => {
       return Promise.resolve(mockQueue.shift());
     },
   };
-  const sqlstate = jest.requireActual('../../../shared/database/src/sqlstate');
   return jest.requireActual('../../utils/real-database-module').realDatabaseModule({
-    ...sqlstate,
     db: { ...tx, select: () => chain('db'), transaction: (cb: any) => cb(tx) },
   });
 });

@@ -1,7 +1,7 @@
 /**
  * A `@wxyc/database` module double that keeps the real, client-free parts of
  * the package: the Drizzle schema plus every pure module the barrel re-exports
- * that a service under unit test imports (`ny-time`, `staff-name`). `db` is a
+ * that a service under unit test imports (`ny-time`, `staff-name`, `sqlstate`). `db` is a
  * client-less `drizzle({})` that builds SQL but never connects.
  *
  * Use it from specs that render and assert the real SQL a service builds. Use
@@ -28,6 +28,7 @@ export function realDatabaseModule(overrides: Record<string, unknown> = {}): Rec
     ...jest.requireActual('../../shared/database/src/schema'),
     ...jest.requireActual('../../shared/database/src/ny-time'),
     ...jest.requireActual('../../shared/database/src/staff-name'),
+    ...jest.requireActual('../../shared/database/src/sqlstate'),
     db: drizzle({}),
     ...overrides,
   };
