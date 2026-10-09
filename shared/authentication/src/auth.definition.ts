@@ -31,6 +31,7 @@ import {
 } from 'better-auth/plugins';
 import { generateId } from '@better-auth/core/utils/id';
 import { and, eq, sql } from 'drizzle-orm';
+import { authLogHandler } from './auth-log';
 import { WXYCRoles } from './auth.roles';
 import {
   applyDeviceApproveRoleGate,
@@ -123,6 +124,8 @@ const adminFlagSyncDeps = (hookName: string): AdminFlagSyncDeps => ({
 // better-auth's internal anonymous plugin types (unexported subpath).
 // The `as` is safe — all Auth instances share the same runtime API surface.
 export const auth = betterAuth({
+  // better-auth logs the raw caught error, bound parameters included; route it through the redactor (BS#3054).
+  logger: { log: authLogHandler },
   database: drizzleAdapter(db, {
     provider: 'pg',
     schema: {

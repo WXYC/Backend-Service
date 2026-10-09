@@ -98,19 +98,62 @@ describe('data collection', () => {
 
 // A failed Drizzle query's message quotes every bound value, which since
 // BS#3051 can be a staff member's legal name (BS#3054). Both Express servers
-// write staff names, so both register the scrub on error events.
+// write staff names, so both register the scrub on error events and breadcrumbs.
 describe('failed-query parameter scrub', () => {
-  it.each([
+  const APPS = [
     ['backend', '../../../apps/backend/instrument'],
     ['auth', '../../../apps/auth/instrument'],
-  ])('%s registers a beforeSend that redacts bound parameters', (_app, relPath) => {
+  ];
+
+  type InitOptions = {
+    beforeSend?: (event: unknown) => { exception?: { values?: Array<{ value?: string }> } } | null;
+    beforeBreadcrumb?: (breadcrumb: unknown) => { message?: string; data?: { arguments?: unknown[] } } | null;
+  };
+
+  function initOptionsFor(relPath: string): InitOptions {
     jest.isolateModules(() => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       require(relPath);
     });
-    const initOptions = mockInit.mock.calls[0][0] as { beforeSend?: (event: unknown) => unknown };
-    const event = { exception: { values: [{ value: 'Failed query: select 1\nparams: Test Reviewer' }] } };
+    return mockInit.mock.calls[0][0] as InitOptions;
+  }
 
-    expect(JSON.stringify(initOptions.beforeSend?.(event))).not.toContain('Test Reviewer');
+  it.each(APPS)(
+    '%s registers a beforeSend that redacts bound parameters and still reports the error',
+    (_app, relPath) => {
+      const event = {
+        exception: { values: [{ type: 'DrizzleQueryError', value: 'Failed query: select 1\nparams: Test Reviewer' }] },
+      };
+
+      const sent = initOptionsFor(relPath).beforeSend?.(event);
+
+      expect(sent).not.toBeNull();
+      expect(sent?.exception?.values?.[0]).toEqual({
+        type: 'DrizzleQueryError',
+        value: 'Failed query: select 1\nparams: [redacted]',
+      });
+    }
+  );
+
+  it.each(APPS)(
+    '%s registers a beforeBreadcrumb that redacts console arguments and keeps the breadcrumb',
+    (_app, relPath) => {
+      const error = new Error('Failed query: select 1\nparams: Test Reviewer');
+      const breadcrumb = { category: 'console', message: error.message, data: { arguments: ['oops', error] } };
+
+      const kept = initOptionsFor(relPath).beforeBreadcrumb?.(breadcrumb);
+
+      expect(kept).not.toBeNull();
+      expect(JSON.stringify(kept, Object.getOwnPropertyNames(error))).not.toContain('Test Reviewer');
+      expect((kept?.data?.arguments?.[1] as Error).message).toBe('Failed query: select 1\nparams: [redacted]');
+    }
+  );
+
+  // Sentry 11's Express channel puts `error.message` in the failing layer's span
+  // status. Static trace lifecycle drops that message from the transaction JSON;
+  // span streaming would send it as an attribute, bound parameters included.
+  // Moving the filter to streaming (BS#2959) must scrub span statuses first.
+  it.each(APPS)('%s pins traceLifecycle: static, which keeps span status messages out of Sentry', (_app, relPath) => {
+    expect(initOptionsFor(relPath)).toMatchObject({ traceLifecycle: 'static' });
   });
 });

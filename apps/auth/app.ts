@@ -17,6 +17,7 @@ import {
   revealStationPasscode,
   revokeStationPasscode,
   rotateStationPasscode,
+  setAuthLogRedactor,
   StationPasscodeCapExceededError,
   StationPasscodeDecryptionError,
   StationPasscodeKeyUnsetError,
@@ -29,6 +30,7 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
+import { redactLogValue, redactQueryParams } from '@wxyc/observability';
 import {
   adminPrefixAuditMiddleware,
   mountAuthenticatedAccountAudit,
@@ -49,6 +51,10 @@ import { syncAdminRoles } from './sync-admin-roles';
 import { resolveOrganization } from './resolve-organization';
 import { approveSelfSignup, readStationSignupStatus, StationSignupAdminError } from './station-signup-admin';
 import { E2E_INCOMPLETE_USER_ID, E2E_INCOMPLETE_USER_PASSWORD } from './e2e-test-constants';
+
+// better-auth logs the raw error it caught, and a failed query's message quotes its bound values, legal names
+// included. Registered here, not in instrument.ts, because instrument.js is bundled apart from the app (BS#3054).
+setAuthLogRedactor(redactLogValue);
 
 const port = process.env.AUTH_PORT || '8082';
 
@@ -489,7 +495,7 @@ app.post('/auth/admin/provision-user', async (req, res) => {
     if (error instanceof ProvisionError) {
       return res.status(error.statusCode).json({ error: error.message });
     }
-    console.error('[PROVISION USER] Unexpected error:', error);
+    console.error('[PROVISION USER] Unexpected error:', redactQueryParams(error));
     Sentry.captureException(error, { tags: { subsystem: 'provision-user' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
@@ -752,7 +758,7 @@ const completeOnboardingHandler = async (req: Request, res: Response) => {
     if (error instanceof CompleteOnboardingError) {
       return res.status(error.statusCode).json({ error: error.message, code: error.code });
     }
-    console.error('[COMPLETE ONBOARDING] Unexpected error:', error);
+    console.error('[COMPLETE ONBOARDING] Unexpected error:', redactQueryParams(error));
     Sentry.captureException(error, { tags: { subsystem: 'complete-onboarding' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
@@ -770,7 +776,7 @@ const updateIdentityHandler = async (req: Request, res: Response) => {
     if (error instanceof UpdateIdentityError) {
       return res.status(error.statusCode).json({ error: error.message, code: error.code });
     }
-    console.error('[UPDATE IDENTITY] Unexpected error:', error);
+    console.error('[UPDATE IDENTITY] Unexpected error:', redactQueryParams(error));
     Sentry.captureException(error, { tags: { subsystem: 'update-identity' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
@@ -791,7 +797,7 @@ const stationSignupHandler = async (req: Request, res: Response) => {
     if (error instanceof StationSignupError) {
       return res.status(error.statusCode).json({ error: error.message, code: error.code });
     }
-    console.error('[STATION SIGNUP] Unexpected error:', error);
+    console.error('[STATION SIGNUP] Unexpected error:', redactQueryParams(error));
     Sentry.captureException(error, { tags: { subsystem: 'station-signup' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
