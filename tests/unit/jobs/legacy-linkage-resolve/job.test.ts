@@ -40,7 +40,7 @@ jest.mock('@sentry/node', () => ({
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { db, flowsheet, library, rotation, getLastRunTimestamp, updateLastRun } from '@wxyc/database';
+import { db, artists, flowsheet, library, rotation, getLastRunTimestamp, updateLastRun } from '@wxyc/database';
 import * as logger from '../../../../jobs/legacy-linkage-resolve/logger';
 import {
   CHECKIN_MARGIN_MINUTES,
@@ -172,23 +172,31 @@ const queuePass = (execute: jest.Mock, pass: PassMock): void => {
   if (pass.resolved > 0) execute.mockResolvedValueOnce([]); // ANALYZE
 };
 
-/** Queue both passes' statements for a full non-dry run, flowsheet then rotation. */
-const queueRun = (flowsheetPass: PassMock, rotationPass: PassMock): void => {
+/**
+ * Queue the passes' statements for a full non-dry run: flowsheet, rotation,
+ * then (BS#3061) text-match. The text-match pass is disabled unless
+ * `LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS` is set, so it queues nothing unless
+ * a third pass is given — callers that pass one must also set the env var.
+ */
+const queueRun = (flowsheetPass: PassMock, rotationPass: PassMock, textMatchPass?: PassMock): void => {
   const execute = db.execute as jest.Mock;
   queuePass(execute, flowsheetPass);
   queuePass(execute, rotationPass);
+  if (textMatchPass) queuePass(execute, textMatchPass);
 };
 
-/** A dry run issues only the two candidate COUNTs — no combined statement, no ANALYZE. */
-const queueDryRun = (flowsheetCandidates: number, rotationCandidates: number): void => {
+/** A dry run issues only the three candidate COUNTs (text-match always reports) — no combined statement, no ANALYZE. */
+const queueDryRun = (flowsheetCandidates: number, rotationCandidates: number, textMatchCandidates = 0): void => {
   const execute = db.execute as jest.Mock;
   execute.mockResolvedValueOnce([{ count: flowsheetCandidates }]);
   execute.mockResolvedValueOnce([{ count: rotationCandidates }]);
+  execute.mockResolvedValueOnce([{ count: textMatchCandidates }]);
 };
 
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.LINKAGE_RESOLVE_MAX_GAP_HOURS;
+  delete process.env.LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS;
   (getLastRunTimestamp as jest.Mock).mockResolvedValue(null);
   (updateLastRun as jest.Mock).mockResolvedValue(undefined);
   mockWithMonitor.mockImplementation((_slug: string, callback: () => unknown) => callback());
@@ -252,6 +260,23 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
     'SET album_id = l.id, artist_name = NULL, album_title = NULL, record_label = NULL FROM l, cohort c ' +
     'WHERE r.id = c.id AND r.legacy_library_release_id = l.legacy_release_id AND r.album_id IS NULL ' +
     'RETURNING 1 ) SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
+  // BS#3061. The text-match cohort is the one statement body shared by the
+  // dry-run COUNT and the drain; `$1` renders as its literal window (90 on a
+  // dry run with the env var unset). Both `album_id IS NULL` conjuncts, both
+  // `<> ''` key legs and the unique-candidate HAVING are load-bearing.
+  const textMatchCohortSql = (days: number) =>
+    'SELECT f.id, min(l.id) AS library_id FROM f ' +
+    'JOIN l ON "wxyc_schema"."text_match_key"(l.album_title) = "wxyc_schema"."text_match_key"(f.album_title) ' +
+    'JOIN a ON a.id = l.artist_id AND "wxyc_schema"."text_match_key"(a.artist_name) = "wxyc_schema"."text_match_key"(f.artist_name) ' +
+    `WHERE f.album_id IS NULL AND f.entry_type = 'track' AND f.add_time > now() - make_interval(days => ${days}::int) ` +
+    `AND "wxyc_schema"."text_match_key"(f.artist_name) <> '' AND "wxyc_schema"."text_match_key"(f.album_title) <> '' ` +
+    'GROUP BY f.id HAVING count(DISTINCT l.id) = 1';
+  const TEXT_MATCH_COUNT_SQL = (days: number) => `SELECT COUNT(*)::int AS count FROM ( ${textMatchCohortSql(days)} ) c`;
+  const TEXT_MATCH_DRAIN_SQL = (days: number) =>
+    `WITH cohort AS ( ${textMatchCohortSql(days)} ), upd AS ( UPDATE f SET album_id = c.library_id, ` +
+    "linkage_source = 'direct_text_match', linkage_confidence = 1.0, linked_at = now() FROM cohort c " +
+    'WHERE f.id = c.id AND f.album_id IS NULL RETURNING 1 ) ' +
+    'SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
   // BS#2413. Allowlisted alongside the repair statements because it is the
   // guard that keeps them from waiting five minutes, and a silent drop would
   // restore the failure mode without changing any other assertion here.
@@ -334,12 +359,44 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
     expect(statements[2]).toBe(FLOWSHEET_DRAIN_SQL);
   });
 
-  it('a dry run issues only the two candidate COUNTs — no combined statement, no ANALYZE', async () => {
-    queueDryRun(4, 2);
+  it('a dry run issues only the three candidate COUNTs — no combined statement, no ANALYZE', async () => {
+    queueDryRun(4, 2, 1);
 
     await runResolve(true);
 
-    expect(normalizedExecutedSql()).toEqual([FLOWSHEET_COUNT_SQL, ROTATION_COUNT_SQL]);
+    expect(normalizedExecutedSql()).toEqual([FLOWSHEET_COUNT_SQL, ROTATION_COUNT_SQL, TEXT_MATCH_COUNT_SQL(90)]);
+  });
+
+  it('text-match drain statement matches the allowlisted statement exactly, behind its COUNT and lock timeout', async () => {
+    process.env.LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS = '30';
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 0, resolved: 0 }, { candidates: 4, resolved: 4 });
+
+    await runResolve(false);
+
+    expect(normalizedExecutedSql().slice(2)).toEqual([
+      TEXT_MATCH_COUNT_SQL(30),
+      SET_LOCK_TIMEOUT_SQL,
+      TEXT_MATCH_DRAIN_SQL(30),
+      'ANALYZE "wxyc_schema"."flowsheet"',
+    ]);
+  });
+
+  it('text-match drain statement interpolates flowsheet/library/artists at each ${...} site', async () => {
+    process.env.LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS = '30';
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 0, resolved: 0 }, { candidates: 4, resolved: 4 });
+
+    await runResolve(false);
+
+    // The tables sit inside the nested cohort fragment, so walk the pre-render
+    // `values` tree; the text allowlist cannot tell a swapped table apart.
+    const tables: unknown[] = [];
+    const walk = (node: unknown): void => {
+      const values = (node as { values?: unknown[] } | undefined)?.values;
+      if (Array.isArray(values)) values.forEach(walk);
+      else if (node && typeof node === 'object' && !('raw' in node)) tables.push(node);
+    };
+    walk(executeCallMatching(/upd AS/));
+    expect(tables).toEqual([flowsheet, library, artists, flowsheet]);
   });
 
   it('reads no cronjob_runs row into any repair statement', async () => {
@@ -873,5 +930,128 @@ describe('legacy-linkage-resolve: lock guard (BS#2413)', () => {
 
     expect(db.transaction).not.toHaveBeenCalled();
     expect(findSqlMatching(/lock_timeout/i)).toBeUndefined();
+  });
+});
+
+describe('legacy-linkage-resolve: text-match pass ships disabled (BS#3061)', () => {
+  const ENV = 'LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS';
+  const idle = { candidates: 0, resolved: 0 };
+  const textMatchSql = (): string[] => normalizedExecutedSql().filter((text) => /text_match_key/.test(text));
+
+  it.each([[undefined], [''], ['  '], ['0']])(
+    '%j skips the pass: no statements, one info log, no warning',
+    async (raw) => {
+      if (raw !== undefined) process.env[ENV] = raw;
+      const logSpy = jest.spyOn(logger, 'log').mockImplementation(() => undefined);
+      try {
+        queueRun(idle, idle);
+
+        const result = await runResolve(false);
+
+        expect(textMatchSql()).toEqual([]);
+        expect(result.textMatch).toEqual({ candidates: 0, resolved: 0, residual: 0, deferred: false });
+        expect(logSpy.mock.calls.filter((call) => call[1] === 'text-match')).toHaveLength(1);
+        expect(mockCaptureMessage).not.toHaveBeenCalled();
+      } finally {
+        logSpy.mockRestore();
+      }
+    }
+  );
+
+  it.each([['abc'], ['-3'], ['2.5'], ['1e1x']])(
+    'malformed %j skips the pass with a warning, never a default window',
+    async (raw) => {
+      process.env[ENV] = raw;
+      queueRun(idle, idle);
+
+      const result = await runResolve(false);
+
+      expect(textMatchSql()).toEqual([]);
+      expect(result.textMatch.resolved).toBe(0);
+      expect(mockCaptureMessage).toHaveBeenCalledWith(
+        `${JOB_NAME}.text_match_window_invalid`,
+        expect.objectContaining({ level: 'warning' })
+      );
+    }
+  );
+
+  it('a positive integer enables the pass and bounds the cohort to that window', async () => {
+    process.env[ENV] = '45';
+    queueRun(idle, idle, { candidates: 3, resolved: 3 });
+
+    const result = await runResolve(false);
+
+    expect(result.textMatch).toEqual({ candidates: 3, resolved: 3, residual: 0, deferred: false });
+    expect(textMatchSql().every((text) => text.includes('make_interval(days => 45::int)'))).toBe(true);
+  });
+
+  it('an enabled pass with an empty cohort issues its COUNT and nothing else', async () => {
+    process.env[ENV] = '45';
+    queueRun(idle, idle, idle);
+
+    await runResolve(false);
+
+    expect(textMatchSql()).toHaveLength(1);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined, 90, undefined],
+    ['30', 30, undefined],
+    ['0', 90, undefined],
+    ['abc', 90, 'warn'],
+  ])('dry run with %j reports the would-link count over a %s-day window', async (raw, days, warn) => {
+    if (raw !== undefined) process.env[ENV] = raw;
+    queueDryRun(0, 0, 11);
+
+    const result = await runResolve(true);
+
+    expect(result.textMatch).toEqual({ candidates: 11, resolved: 0, residual: null, deferred: false });
+    expect(textMatchSql()).toHaveLength(1);
+    expect(textMatchSql()[0]).toContain(`make_interval(days => ${days}::int)`);
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(warn ? 1 : 0);
+  });
+
+  it('warns on a shortfall through the shared drain check', async () => {
+    process.env[ENV] = '45';
+    queueRun(idle, idle, { candidates: 5, resolved: 2 });
+
+    await runOnce(false);
+
+    expect(mockCaptureMessage.mock.calls[0][0]).toBe(`${JOB_NAME}.unresolved_candidates`);
+    expect(mockCaptureMessage.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        tags: expect.objectContaining({ step: 'drain-text-match' }),
+        extra: expect.objectContaining({ pass: 'text-match', residual: 3 }),
+      })
+    );
+  });
+
+  it('stands down on lock contention, withholding the heartbeat', async () => {
+    process.env[ENV] = '45';
+    queueRun(idle, idle, { candidates: 4, resolved: 0, defer: '55P03' });
+
+    const result = await runOnce(false);
+
+    expect(result.textMatch).toEqual({
+      candidates: 4,
+      resolved: 0,
+      residual: null,
+      deferred: true,
+      standDown: 'lock_contention',
+    });
+    expect(updateLastRun).not.toHaveBeenCalled();
+    expect(mockCaptureMessage.mock.calls.map((call) => call[0])).toEqual([`${JOB_NAME}.lock_contention`]);
+  });
+
+  it('stands down on a retired candidate (flowsheet album_id FK), withholding the heartbeat', async () => {
+    process.env[ENV] = '45';
+    queueRun(idle, idle, { candidates: 4, resolved: 0, retire: 'flowsheet_album_id_library_id_fk' });
+
+    const result = await runOnce(false);
+
+    expect(result.textMatch.standDown).toBe('retired_candidate');
+    expect(updateLastRun).not.toHaveBeenCalled();
+    expect(mockCaptureMessage.mock.calls.map((call) => call[0])).toEqual([`${JOB_NAME}.retired_linkage_candidate`]);
   });
 });

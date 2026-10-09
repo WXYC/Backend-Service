@@ -87,6 +87,7 @@ import {
   flowsheet,
   rotation,
   library,
+  artists,
   closeDatabaseConnection,
   getLastRunTimestamp,
   updateLastRun,
@@ -307,7 +308,7 @@ export type PassResult = {
   deferred: boolean;
   standDown?: 'lock_contention' | 'retired_candidate';
 };
-export type RunResult = { flowsheet: PassResult; rotation: PassResult };
+export type RunResult = { flowsheet: PassResult; rotation: PassResult; textMatch: PassResult };
 
 /**
  * Runs one pass's data-modifying CTE inside an explicit transaction that
@@ -386,7 +387,8 @@ const countUnresolvedFlowsheetCandidates = async (): Promise<number> => {
  * column on `flowsheet`.
  *
  * NEVER add a time bound to the `cohort` CTE below (or the rotation one
- * further down). The `cronjob_runs` row BS#2064 introduced is a liveness
+ * further down; the text-match pass's `now()`-anchored cost window is the one
+ * deliberate exception, see its docblock). The `cronjob_runs` row BS#2064 introduced is a liveness
  * **heartbeat**, not a delta watermark: filtering the cohort on `last_run`
  * would permanently strand every row whose `library` row landed during a
  * window the job missed, which is the exact bug this job exists to prevent.
@@ -588,6 +590,102 @@ const resolveRotationAlbumIds = async (dryRun: boolean): Promise<PassResult> => 
   return { candidates, resolved, residual: Math.max(candidates - resolved, 0), deferred: false };
 };
 
+/**
+ * BS#3061: the third pass re-applies `text_match_key()` (migration 0191) to
+ * recent unlinked track rows — the same rule, label and confidence as the
+ * insert path, the edit path and `scripts/direct-link-flowsheet.sql`, so there
+ * is still one `direct_text_match` population under one reversal predicate.
+ *
+ * SHIPS DISABLED. It writes nothing unless `LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS`
+ * is a positive integer; enabling is the manual step tracked in BS#3063. Unset,
+ * empty or `0` skips with one log line; a malformed value skips with a warning
+ * and never falls back to a default window. `--dry-run` always reports a count:
+ * the configured window if one is set, else `TEXT_MATCH_DRY_RUN_WINDOW_DAYS`.
+ *
+ * The window is a COST bound on the cohort (so a `*\/30` run is not a rescan of
+ * the whole table), NOT a watermark: it is anchored to `now()`, never to
+ * `cronjob_runs.last_run`, so a missed run strands nothing inside the window.
+ */
+export const TEXT_MATCH_WINDOW_ENV = 'LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS';
+export const TEXT_MATCH_DRY_RUN_WINDOW_DAYS = 90;
+
+const textMatchKey = (column: unknown) => sql`${sql.raw(`"${SCHEMA}"."text_match_key"`)}(${column})`;
+
+const textMatchCohort = (days: number) => sql`
+  SELECT f.id, min(l.id) AS library_id
+  FROM ${flowsheet} f
+  JOIN ${library} l ON ${textMatchKey(sql`l.album_title`)} = ${textMatchKey(sql`f.album_title`)}
+  JOIN ${artists} a ON a.id = l.artist_id AND ${textMatchKey(sql`a.artist_name`)} = ${textMatchKey(sql`f.artist_name`)}
+  WHERE f.album_id IS NULL
+    AND f.entry_type = 'track'
+    AND f.add_time > now() - make_interval(days => ${days}::int)
+    AND ${textMatchKey(sql`f.artist_name`)} <> ''
+    AND ${textMatchKey(sql`f.album_title`)} <> ''
+  GROUP BY f.id
+  HAVING count(DISTINCT l.id) = 1
+`;
+
+const SKIPPED_PASS: PassResult = { candidates: 0, resolved: 0, residual: 0, deferred: false };
+
+/** Window in days; `null` = disabled (unset, empty, `0`) or malformed (warns). */
+const configuredTextMatchWindow = (): number | null => {
+  const raw = process.env[TEXT_MATCH_WINDOW_ENV];
+  if (raw === undefined || ['', '0'].includes(raw.trim())) return null;
+  try {
+    return requirePositiveInt(raw, TEXT_MATCH_WINDOW_ENV, TEXT_MATCH_DRY_RUN_WINDOW_DAYS, { unit: 'days' });
+  } catch (error) {
+    captureWarning(`${JOB_NAME}.text_match_window_invalid`, 'text-match', { error: errorMessage(error) });
+    return null;
+  }
+};
+
+const resolveTextMatchAlbumIds = async (dryRun: boolean): Promise<PassResult> => {
+  const days = configuredTextMatchWindow();
+  if (days === null && !dryRun) {
+    log(
+      'info',
+      'text-match',
+      `Text-match pass disabled; set ${TEXT_MATCH_WINDOW_ENV} to a positive integer to enable.`
+    );
+    return SKIPPED_PASS;
+  }
+  const window = days ?? TEXT_MATCH_DRY_RUN_WINDOW_DAYS;
+
+  const [row] = (await db.execute(sql`
+    SELECT COUNT(*)::int AS count FROM (${textMatchCohort(window)}) c
+  `)) as unknown as Array<{ count: number | string }>;
+  const seen = Number(row?.count ?? 0);
+
+  if (dryRun) return { candidates: seen, resolved: 0, residual: null, deferred: false };
+  if (seen === 0) return SKIPPED_PASS;
+
+  // `upd` repeats `f.album_id IS NULL` — see `resolveFlowsheetAlbumIds`.
+  const measured = await runGuardedDrain(sql`
+    WITH cohort AS (${textMatchCohort(window)}),
+    upd AS (
+      UPDATE ${flowsheet} f
+      SET album_id = c.library_id,
+          linkage_source = 'direct_text_match',
+          linkage_confidence = 1.0,
+          linked_at = now()
+      FROM cohort c
+      WHERE f.id = c.id
+        AND f.album_id IS NULL
+      RETURNING 1
+    )
+    SELECT
+      (SELECT COUNT(*)::int FROM cohort) AS candidates,
+      (SELECT COUNT(*)::int FROM upd) AS resolved
+  `);
+
+  if ('standDown' in measured) {
+    return { candidates: seen, resolved: 0, residual: null, deferred: true, standDown: measured.standDown };
+  }
+  const { candidates, resolved } = measured;
+  if (resolved > 0) await db.execute(sql.raw(`ANALYZE "${SCHEMA}"."flowsheet"`));
+  return { candidates, resolved, residual: Math.max(candidates - resolved, 0), deferred: false };
+};
+
 export const runResolve = async (dryRun: boolean): Promise<RunResult> => {
   const flowsheetResult = await resolveFlowsheetAlbumIds(dryRun);
   log('info', 'resolve-flowsheet', 'Flowsheet linkage pass complete.', {
@@ -611,7 +709,10 @@ export const runResolve = async (dryRun: boolean): Promise<RunResult> => {
     deferred: rotationResult.deferred,
   });
 
-  return { flowsheet: flowsheetResult, rotation: rotationResult };
+  const textMatchResult = await resolveTextMatchAlbumIds(dryRun);
+  log('info', 'resolve-text-match', 'Text-match linkage pass complete.', { dry_run: dryRun, ...textMatchResult });
+
+  return { flowsheet: flowsheetResult, rotation: rotationResult, textMatch: textMatchResult };
 };
 
 // ---- Liveness (BS#2064) ----
@@ -741,6 +842,7 @@ const passesOf = (result: RunResult) =>
   [
     ['flowsheet', result.flowsheet],
     ['rotation', result.rotation],
+    ['text-match', result.textMatch],
   ] as const;
 
 /**
@@ -756,7 +858,8 @@ const passesOf = (result: RunResult) =>
  * don't rename it back to something lock-specific without also giving the
  * retired-candidate stand-down its own heartbeat gate.
  */
-export const hasStandDown = (result: RunResult): boolean => result.flowsheet.deferred || result.rotation.deferred;
+export const hasStandDown = (result: RunResult): boolean =>
+  result.flowsheet.deferred || result.rotation.deferred || result.textMatch.deferred;
 
 /**
  * BS#2413. A stand-down is reported on its own fingerprint, never folded into
@@ -951,6 +1054,7 @@ const run = async () => {
       dry_run: dryRun,
       flowsheet_resolved: result.flowsheet.resolved,
       rotation_resolved: result.rotation.resolved,
+      text_match_resolved: result.textMatch.resolved,
       // BS#2413: `…_resolved: 0` on a stand-down means "did not run", not
       // "found nothing" — the two are the exact pair this job's liveness work
       // exists to keep distinguishable, so the terminal line says which.
