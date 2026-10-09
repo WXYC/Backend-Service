@@ -1,7 +1,7 @@
 /**
  * Driven by console-redaction.test.ts in a child process (better-auth is
  * ESM-only, so jest cannot load it). Mounts a route that throws a failed-query
- * error on the real better-auth 1.6 router (the auth app's copy) (which nests better-call's router),
+ * error on the auth app's copy of the real better-auth 1.6 router, which nests better-call's router,
  * sends it a request, and prints the response status. What the router logs goes
  * to the child's real stdout/stderr.
  */

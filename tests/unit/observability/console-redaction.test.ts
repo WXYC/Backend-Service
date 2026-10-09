@@ -61,6 +61,10 @@ describe('better-auth router logging of a failed name write', () => {
     expect(installedBetterAuth(outDir)).toEqual(installedBetterAuth(authDir));
   });
 
+  it('leaves better-auth external to the bundle, so the child loads it from node_modules', () => {
+    expect(readFileSync(outFile, 'utf8')).toMatch(/from ["']better-auth["']/);
+  });
+
   beforeAll(async () => {
     mkdirSync(outDir, { recursive: true });
     await build({

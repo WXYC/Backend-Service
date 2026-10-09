@@ -66,6 +66,35 @@ describe('redactQueryParams', () => {
     expect(String(redacted.stack)).toContain(`Failed query: ${SQL}`);
   });
 
+  // Both guards decide on the params line alone, never on a bound value: a first value that merely
+  // starts with the redaction text must not pass for a redacted line (the writer would choose the prefix).
+  it.each([
+    ['a first bound value that starts with the redaction text', `[redacted] my review,DJ Cat Scratch,${SENTINEL},ts`],
+    ['a first bound value that is the redaction text followed by a separator', `[redacted],${SENTINEL},ts`],
+    ['a first bound value that is the redaction text and a line break', `[redacted]\nmy review,${SENTINEL},ts`],
+  ])('cuts the stack of a shortened message whose params line has %s', (_label, bound) => {
+    const error = new Error(`Failed query: select 1\nparams: ${bound}`);
+    // V8 formats `stack` on first read, so read it before shortening the message.
+    expect(error.stack).toContain(SENTINEL);
+    error.message = 'Failed query: select 1';
+
+    expect(String(redactQueryParams(error).stack)).not.toContain(SENTINEL);
+    expect(inspect(redactQueryParams(error))).not.toContain(SENTINEL);
+    expect(inspect(redactLogValue(error))).not.toContain(SENTINEL);
+  });
+
+  it('copies an error whose message needs nothing but whose stack still holds a params line, so the log line is clean', () => {
+    const error = new Error(`Failed query: select 1\nparams: DJ Cat Scratch,${SENTINEL},ts`);
+    expect(error.stack).toContain(SENTINEL);
+    error.message = 'select 1 failed';
+
+    const redacted = redactQueryParams(error);
+
+    expect(redacted).not.toBe(error);
+    expect(inspect(redacted)).not.toContain(SENTINEL);
+    expect(inspect(redactLogValue(error))).not.toContain(SENTINEL);
+  });
+
   it('keeps the input class and its other own properties, and leaves the input untouched', () => {
     const original = Object.assign(queryError(), { code: '23505', status: 409, expose: true });
 

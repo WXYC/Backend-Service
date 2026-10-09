@@ -16,8 +16,11 @@ import type { Breadcrumb, ErrorEvent, EventHint, Exception, StackFrame } from '@
  */
 const PARAMS_MARKER = '\nparams: ';
 const REDACTED_PARAMS = `${PARAMS_MARKER}[redacted]`;
-/** A params marker followed by anything but the redaction: bound values still in the text. */
-const UNREDACTED_PARAMS = /\nparams: (?!\[redacted\])/;
+/**
+ * A params marker followed by anything but the whole redaction (the next stack frame, or the end of the
+ * text): bound values still in the text. A first bound value that merely starts with `[redacted]` does not pass.
+ */
+const UNREDACTED_PARAMS = /\nparams: (?!\[redacted\](?:\n {4}at |$))/;
 const FAILING_ROW = /^Failing row contains \(/;
 const REDACTED_FAILING_ROW = 'Failing row contains ([redacted])';
 const MAX_DEPTH = 8;
@@ -70,7 +73,10 @@ function redactError(error: Error, depth: number): Error {
   const rawMessage = String(error.message);
   const message = scrubText(rawMessage);
   const hasParamProperty = PARAM_PROPERTIES.some((key) => Object.hasOwn(error, key));
-  if (message === rawMessage && cause === error.cause && !hasParamProperty && !carriesRow(error)) return error;
+  // A stack formatted before the message was shortened can still hold a params line: that error is copied so `scrubStack` cuts it.
+  const stackHoldsParams = UNREDACTED_PARAMS.test(String(error.stack));
+  if (message === rawMessage && cause === error.cause && !hasParamProperty && !carriesRow(error) && !stackHoldsParams)
+    return error;
 
   // Same class, and every own property (code, status, expose, ...) as a plain value;
   // only the value-bearing ones change. A property whose getter throws is left out.
@@ -201,9 +207,10 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
   if (!stackParser || !isError(original)) return rebuilt;
   let link: unknown = redactQueryParams(original);
   // `redactError` copies the thrown error and `MAX_DEPTH` causes; a link past that is the raw error.
-  for (let i = 0; i < values.length && i <= MAX_DEPTH && isError(link); i++, link = (link as Error).cause) {
+  let i = 0;
+  for (; i < values.length && i <= MAX_DEPTH && isError(link); i++, link = (link as Error).cause) {
     const target = values[values.length - 1 - i];
-    // A copy whose stack still holds a params line (nothing needed copying) must not be parsed into frames.
+    // A link whose stack still holds a params line must not be parsed into frames.
     if (UNREDACTED_PARAMS.test(String(link.stack))) {
       delete target.stacktrace;
       break;
@@ -227,6 +234,8 @@ function rebuildExceptionValues(values: Exception[], original: unknown): Set<Exc
     else delete target.stacktrace;
     rebuilt.add(target);
   }
+  // Values past the bound are the raw errors, whose stacks may hold params lines: they get no stacktrace.
+  if (i > MAX_DEPTH) for (const unreached of values.slice(0, values.length - i)) delete unreached.stacktrace;
   return rebuilt;
 }
 
