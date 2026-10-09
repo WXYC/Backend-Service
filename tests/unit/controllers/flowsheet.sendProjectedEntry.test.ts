@@ -56,6 +56,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   removeTrack: mockRemoveTrack,
   updateEntry: mockUpdateEntry,
   fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
+  findLibraryReleasesByText: jest.fn<() => Promise<number[]>>().mockResolvedValue([]),
 }));
 
 const mockGetDiscogsUnavailableFlagsById = jest.fn<() => Promise<unknown>>();

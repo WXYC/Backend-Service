@@ -791,11 +791,22 @@ export const library = wxyc_schema.table(
       // together or neither. Contrast `rotation.artist_name` /
       // `rotation.album_title`, which ARE nullable — arm 2's coalesce is
       // load-bearing.
-      // Key ladder, each rung a strict coarsening of the last: `lower()` (this
-      // index) ⊂ `fold_artist_name` (0134: NFD, strip combining marks) ⊂
+      // Key ladder, each rung a strict coarsening of the last: bare `lower()` ⊂ `fold_artist_name` (0134: NFD, strip combining marks) ⊂
       // `text_match_key` (0191: also strips a leading "the " and every
       // non-alphanumeric run; indexed by `library_text_match_album_idx`, which
-      // is SQL-only). The TS-side `relaxedAlbumKey` / `looseTitleKey` keep word
+      // is SQL-only, with no declaration to put this note beside). Neither
+      // `fold_artist_name` nor `text_match_key` trims, so ' Edits' and 'Edits'
+      // are equal under this index (which trims) and differ under
+      // `text_match_key`. Postgres accepts CREATE OR REPLACE FUNCTION
+      // wxyc_schema.text_match_key without error while the index depends on it,
+      // so any later migration that changes the function body must
+      // REINDEX INDEX CONCURRENTLY wxyc_schema.library_text_match_album_idx in
+      // the same migration, or the index keeps old-body keys and the candidate
+      // query silently misses rows. NFD exposes the Japanese dakuten/handakuten
+      // marks (U+3099/U+309A), which are not alphanumeric, so the delete step
+      // removes them: text_match_key('ポップ') = text_match_key('ホップ'). Both
+      // legs share the function, so real matches still link; Japanese text is
+      // not preserved byte for byte. The TS-side `relaxedAlbumKey` / `looseTitleKey` keep word
       // boundaries, so they sit beside this ladder rather than on it.
       normAlbumTitleIdx: index('library_norm_album_title_idx').on(sql`lower(trim(coalesce(${table.album_title}, '')))`),
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
@@ -1548,7 +1559,9 @@ export const flowsheet = wxyc_schema.table(
     // these on new linkages is handled in B-2.1 / B-2.2 / B-3.1; this
     // migration only adds the columns nullable. Source values are
     // enum-like text: 'etl_legacy_id' | 'dj_bin_pick' | 'lml_high_confidence'
-    // | 'human_review' | 'tubafrenzy_mirror' | 'direct_text_match'.
+    // | 'human_review' | 'tubafrenzy_mirror' | 'direct_text_match'
+    // | 'discogs_local_bridge' (scripts/discogs-bridge-flowsheet.sql)
+    // | 'fuzzy_trigram_match' (scripts/fuzzy-trigram-flowsheet.sql).
     linkage_source: text('linkage_source'),
     linkage_confidence: real('linkage_confidence'),
     linked_at: timestamp('linked_at', { withTimezone: true }),

@@ -24,6 +24,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addTrack: mockAddTrack,
   getAlbumFromDB: mockGetAlbumFromDB,
   fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
+  findLibraryReleasesByText: jest.fn<() => Promise<number[]>>().mockResolvedValue([]),
 }));
 
 // SSE broadcast seam (BS#2621): `addEntry`'s marker branch pushes a liveFs

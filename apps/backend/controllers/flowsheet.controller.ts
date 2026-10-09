@@ -698,6 +698,29 @@ function buildSnapshotFieldsEntry(body: FSEntryRequestBody, show_id: number, dj_
   };
 }
 
+/**
+ * BS#3057: annotate a typed track row with the one catalog release its text names. Enrichment, not
+ * precondition — any failure leaves the row unlinked and the play recorded. Typed fields are never
+ * rewritten and `label_id` is not derived. Runs on the default pool: `addEntry` holds no transaction here.
+ */
+async function annotateTextLinkage(fsEntry: NewFSEntry, show_id: number): Promise<NewFSEntry> {
+  if ((fsEntry.entry_type ?? 'track') !== 'track') return fsEntry;
+  try {
+    const ids = await flowsheet_service.findLibraryReleasesByText(fsEntry.artist_name ?? '', fsEntry.album_title ?? '');
+    if (ids.length !== 1) return fsEntry;
+    return {
+      ...fsEntry,
+      album_id: ids[0],
+      linkage_source: 'direct_text_match',
+      linkage_confidence: 1,
+      linked_at: new Date(),
+    };
+  } catch (err) {
+    Sentry.captureException(err, { tags: { tool: 'flowsheet', subsystem: 'text-linkage' }, extra: { show_id } });
+    return fsEntry;
+  }
+}
+
 // either an id is provided (meaning it came from the user's bin or was fuzzy found)
 // or it's not provided in which case whe just throw the data provided into the table w/ album_id = NULL
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res) => {
@@ -902,7 +925,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       // artist_name / track_title and throws on the reject path (BS#1680
       // review: the Sentry warning must not fire when the entry was rejected,
       // not recorded).
-      const fsEntry = buildSnapshotEntryOrRefuse();
+      const fsEntry = await annotateTextLinkage(buildSnapshotEntryOrRefuse(), latestShow.id);
       Sentry.captureMessage('Flowsheet album_id not found in library — degrading to snapshot fields', {
         level: 'warning',
         tags: { tool: 'flowsheet' },
@@ -928,6 +951,9 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       segue: body.segue ?? false,
       show_id: latestShow.id,
       dj_name,
+      linkage_source: 'dj_bin_pick',
+      linkage_confidence: null,
+      linked_at: new Date(),
     };
 
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
@@ -938,7 +964,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
     // or simply omitted): insert the request's own snapshot fields with
     // album_id: null. Shares `buildSnapshotFieldsEntry` with the lookup-miss
     // fallback above (BS#1680) so both routes into this shape stay identical.
-    const fsEntry = buildSnapshotEntryOrRefuse();
+    const fsEntry = await annotateTextLinkage(buildSnapshotEntryOrRefuse(), latestShow.id);
     const completedEntry: FSEntry = await flowsheet_service.addTrack(fsEntry);
     pushRefetchForCommittedRow(completedEntry);
     await sendProjectedEntry(res, 201, completedEntry);
