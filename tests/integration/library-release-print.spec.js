@@ -3,7 +3,8 @@
  * The CI containers run AUTH_BYPASS=true, so the route grant is pinned by tests/unit/routes/library-print.route.test.ts.
  * This tier pins what real rows add: the print-log row with no intake item, the refusals, the review leading
  * `GET /reviews?album_id=` as `on_cover` and `in_use`, a review reached only through a citation, the slip's artist for a
- * compilation filed under a Various Artists bucket, and the print-log row coming back when a deleted release is restored.
+ * compilation filed under a Various Artists bucket, the print-log row coming back when a deleted release is restored, and a
+ * release with one logged copy (BS#3075), whose print is the copy's.
  */
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
@@ -11,6 +12,7 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   removeSeededIntakeItems,
+  seedAcceptance,
   seedIntakeItem,
   seedLibraryRelease,
   removeSeededLibraryReleases,
@@ -38,6 +40,13 @@ describe('POST /library/{id}/print (BS#2865)', () => {
     });
   const printsOf = (albumId) =>
     sql.unsafe(`SELECT * FROM "${SCHEMA}".review_prints WHERE album_id = $1 ORDER BY id`, [albumId]);
+  const itemRow = async (id) =>
+    (
+      await sql.unsafe(
+        `SELECT accepted_review_id, printed_by, printed_at FROM "${SCHEMA}".intake_items WHERE id = $1`,
+        [id]
+      )
+    )[0];
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author LIKE $1`, [`${PREFIX}%`]);
     await removeSeededIntakeItems();
@@ -86,10 +95,10 @@ describe('POST /library/{id}/print (BS#2865)', () => {
     expect(refused.body.reason).toBe('in_use');
   });
 
-  test('a review reached only through a citation prints: a filed copy of this release cites the release the review is on', async () => {
+  test('a review reached only through a citation prints for the release’s one logged copy, which cites the release the review is on', async () => {
     const albumId = await release('citing');
     const citedId = await release('cited');
-    await seedIntakeItem({
+    const item = await seedIntakeItem({
       artist_name: `${PREFIX} citing`,
       album_title: `${PREFIX} citing album`,
       state: 'filed',
@@ -107,9 +116,45 @@ describe('POST /library/{id}/print (BS#2865)', () => {
     });
     const prints = await printsOf(albumId);
     expect(prints).toHaveLength(1);
-    expect(prints[0]).toMatchObject({ review_id: review.id, revision_id: res.body.revision_id, intake_item_id: null });
+    expect(prints[0]).toMatchObject({
+      review_id: review.id,
+      revision_id: res.body.revision_id,
+      intake_item_id: item.id,
+    });
+    expect(await itemRow(item.id)).toMatchObject({ accepted_review_id: review.id });
     const list = await manager.get(`/reviews?album_id=${albumId}`).expect(200);
     expect(list.body[0]).toMatchObject({ id: review.id, on_cover: true });
+  });
+
+  test('a release with one logged copy: the printed review replaces the copy’s review on the cover, and the copy is stamped printed', async () => {
+    const albumId = await release('one-copy');
+    const item = await seedIntakeItem({ state: 'filed', album_id: albumId });
+    const before = await typedReview(albumId, { review: 'Review on the cover.' });
+    await seedAcceptance({ intake_item_id: item.id, review_id: before.id });
+    const printed = await typedReview(albumId, { review: 'Fresh review.' });
+    await manager.post(`/library/${albumId}/print`).send({ review_id: printed.id }).expect(200);
+
+    const prints = await printsOf(albumId);
+    expect(prints).toHaveLength(1);
+    expect(prints[0]).toMatchObject({ review_id: printed.id, intake_item_id: item.id });
+    const stamped = await itemRow(item.id);
+    expect(stamped.accepted_review_id).toBe(printed.id);
+    expect(stamped.printed_by).not.toBeNull();
+    expect(stamped.printed_at).not.toBeNull();
+    const list = await manager.get(`/reviews?album_id=${albumId}`).expect(200);
+    expect(list.body.filter((r) => r.on_cover).map((r) => r.id)).toEqual([printed.id]);
+  });
+
+  test('a release with two logged copies keeps the print with no item and writes nothing on either copy', async () => {
+    const albumId = await release('two-copies');
+    const first = await seedIntakeItem({ state: 'filed', album_id: albumId });
+    const second = await seedIntakeItem({ state: 'finalized', album_id: albumId });
+    const review = await typedReview(albumId);
+    await manager.post(`/library/${albumId}/print`).send({ review_id: review.id }).expect(200);
+    expect((await printsOf(albumId))[0]).toMatchObject({ review_id: review.id, intake_item_id: null });
+    for (const copy of [first, second]) {
+      expect(await itemRow(copy.id)).toMatchObject({ accepted_review_id: null, printed_by: null, printed_at: null });
+    }
   });
 
   test('a compilation filed under a Various Artists bucket prints its alternate artist name, not the bucket', async () => {

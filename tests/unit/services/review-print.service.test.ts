@@ -221,9 +221,10 @@ describe('printReleaseReview (BS#2865)', () => {
   const record = { artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again', record_label: 'Drag City' };
   const typed = { ...review, status: 'submitted' };
 
-  /** The selects of one print: the release lock, the review, the record, then printSlip's own reads. */
+  /** The selects of one print of a release with no copy: the release lock, the copy read, the review, the record, then printSlip's own reads. */
   const releasePrint = (overrides: { release?: unknown[]; review?: unknown[] } = {}) => [
     overrides.release ?? [{ id: 12 }],
+    [],
     overrides.review ?? [typed],
     [record],
     [{ n: 2 }],
@@ -233,6 +234,8 @@ describe('printReleaseReview (BS#2865)', () => {
   const runRelease = async (selects: unknown[][]) => {
     log.length = 0;
     wheres.length = 0;
+    sets.length = 0;
+    for (const key of Object.keys(setsByTable)) delete setsByTable[key];
     const inserts: Inserted[] = [];
     const tx = {
       select: jest.fn(() => builder(selects.shift() ?? [])),
@@ -242,7 +245,7 @@ describe('printReleaseReview (BS#2865)', () => {
           return Promise.resolve();
         }),
       })),
-      update: jest.fn(),
+      update: jest.fn((table: never) => builder([], undefined, getTableName(table))),
     };
     jest.spyOn(db, 'transaction').mockImplementation((cb: never) => (cb as (t: unknown) => unknown)(tx) as never);
     const result = await printReleaseReview(12, 3, { id: 'md-1' });
@@ -283,7 +286,7 @@ describe('printReleaseReview (BS#2865)', () => {
 
   it('names the release’s displayed artist on the slip: its alternate artist name when set, else the artist’s name', async () => {
     const { tx } = await runRelease(releasePrint());
-    const { artist_name } = tx.select.mock.calls[2][0] as unknown as { artist_name: SQL };
+    const { artist_name } = tx.select.mock.calls[3][0] as unknown as { artist_name: SQL };
     expect(new PgDialect().sqlToQuery(artist_name).sql).toBe(
       'coalesce(nullif("wxyc_schema"."library"."alternate_artist_name", \'\'), "wxyc_schema"."artists"."artist_name")'
     );
@@ -294,6 +297,85 @@ describe('printReleaseReview (BS#2865)', () => {
     expect(result).toEqual({ outcome: 'not_found' });
     expect(tx.select).toHaveBeenCalledTimes(1);
     expect(inserts).toEqual([]);
+  });
+
+  describe('a release with one logged copy (BS#3075)', () => {
+    const copy = { id: 41, cited: null };
+    const citing = { id: 41, cited: 5 };
+    const other = { id: 42, cited: null };
+    const afterLocks = (r: object = { ...typed, album_id: 12 }) => [[r], [record], [{ n: 2 }], [revision]];
+    /** The selects after the release lock: the unlocked copy read, the citation's peek and lock, the locked copy read. */
+    const copyReads = (read: object[], locked: object[], citation: unknown[][] = []) => [
+      read,
+      ...(read.length === 1 ? [...citation, locked] : []),
+    ];
+    const peek = [[{ album: 5 }], [{ id: 5 }]];
+
+    // A print counts for the release's one filed or finalized copy; none, or several, keep the print with no item.
+    it.each([
+      ['no copy', [], [], null],
+      ['one copy', [copy], [copy], 41],
+      ['two copies', [copy, other], [], null],
+      ['a copy gone between the read and the lock', [copy], [], null],
+    ])('%s: the print row names item %p', async (_name, read, locked, itemId) => {
+      const { result, inserts, tx } = await runRelease([[{ id: 12 }], ...copyReads(read, locked), ...afterLocks()]);
+      expect(result.outcome).toBe('printed');
+      expect(inserts).toEqual([
+        ['review_prints', { intake_item_id: itemId, album_id: 12, review_id: 3, revision_id: 55, printed_by: 'md-1' }],
+      ]);
+      if (itemId === null) {
+        expect(tx.update).not.toHaveBeenCalled();
+      } else {
+        expect(sets).toEqual([
+          expect.objectContaining({ accepted_review_id: 3, accepted_by: 'md-1' }),
+          expect.objectContaining({ printed_by: 'md-1' }),
+        ]);
+        expect(sets[1]).toHaveProperty('printed_at');
+      }
+    });
+
+    it('locks the library row, the copy, then the review', async () => {
+      await runRelease([[{ id: 12 }], ...copyReads([copy], [copy]), ...afterLocks()]);
+      expect(log).toEqual(['library for key share id 12', 'intake_items for update id 12', 'reviews for update id 3']);
+    });
+
+    it('locks the cited release for share before the copy when the review is the citation’s', async () => {
+      const { inserts } = await runRelease([
+        [{ id: 12 }],
+        ...copyReads([citing], [citing], peek),
+        ...afterLocks({ ...typed, album_id: 5, intake_item_id: null }),
+      ]);
+      expect(log).toEqual([
+        'library for key share id 12',
+        'library for share id 5',
+        'intake_items for update id 12',
+        'reviews for update id 3',
+      ]);
+      expect(inserts[0][1]).toMatchObject({ intake_item_id: 41, album_id: 12 });
+    });
+
+    it.each([
+      ['the copy’s own', { album_id: null, intake_item_id: 41 }],
+      ['the release’s', { album_id: 12, intake_item_id: null }],
+    ])('%s review belongs to the copy', async (_name, fields) => {
+      const { result } = await runRelease([
+        [{ id: 12 }],
+        ...copyReads([copy], [copy]),
+        ...afterLocks({ ...typed, ...fields }),
+      ]);
+      expect(result.outcome).toBe('printed');
+    });
+
+    it('answers bad_review and writes nothing for a citation’s review the locked copy no longer cites', async () => {
+      const { result, inserts, tx } = await runRelease([
+        [{ id: 12 }],
+        ...copyReads([citing], [copy], peek),
+        ...afterLocks({ ...typed, album_id: 5, intake_item_id: null }),
+      ]);
+      expect(result).toEqual({ outcome: 'bad_review' });
+      expect(inserts).toEqual([]);
+      expect(tx.update).not.toHaveBeenCalled();
+    });
   });
 
   it.each([
