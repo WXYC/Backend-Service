@@ -35,7 +35,10 @@ const mockWritesTo: { verb: 'update' | 'delete'; table: string; set?: Record<str
 const mockExecuted: string[] = [];
 
 // The default unit stub for the auth package has no `roleGrants`; `holdsReviewsManage` needs the real one.
-jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
+jest.mock('@wxyc/authentication', () => ({
+  ...jest.requireActual('../../../shared/authentication/src/auth.roles'),
+  ...jest.requireActual('../../../shared/authentication/src/ban-in-force'),
+}));
 
 jest.mock('@wxyc/database', () => {
   // A thenable chain: whatever the builder is awaited on resolves the next scripted result set.
@@ -231,15 +234,17 @@ describe('the stamped names are staff names (BS#3051)', () => {
 
 describe('listReviewers (BS#3058)', () => {
   const render = (query: unknown) => new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(query).sql;
+  const HOUR = 3_600_000;
 
   test('keeps accounts whose roles grant reviews: write, once each, in the order the query returned', async () => {
+    const open = { banned: null, banExpires: null };
     mockQueue.push([
-      { id: 'a', name: 'Test Reviewer A', role: 'member' },
-      { id: 'a', name: 'Test Reviewer A', role: 'dj' },
-      { id: 'b', name: 'Test Reviewer B', role: 'musicDirector' },
-      { id: 'c', name: 'Test Reviewer C', role: 'stationManager' },
-      { id: 'd', name: 'Test Reviewer D', role: 'member' },
-      { id: 'a', name: 'Test Reviewer A', role: 'musicDirector' },
+      { id: 'a', name: 'Test Reviewer A', role: 'member', ...open },
+      { id: 'a', name: 'Test Reviewer A', role: 'dj', ...open },
+      { id: 'b', name: 'Test Reviewer B', role: 'musicDirector', ...open },
+      { id: 'c', name: 'Test Reviewer C', role: 'stationManager', ...open },
+      { id: 'd', name: 'Test Reviewer D', role: 'member', ...open },
+      { id: 'a', name: 'Test Reviewer A', role: 'musicDirector', ...open },
     ]);
     expect(await listReviewers()).toEqual([
       { id: 'a', name: 'Test Reviewer A' },
@@ -248,15 +253,27 @@ describe('listReviewers (BS#3058)', () => {
     ]);
   });
 
-  test('names by the staff name, leaves banned accounts out, sorts case-insensitively, and reads no dj_name', async () => {
+  // The ban rule is `isBanInForce`: an expired ban counts as lifted though better-auth clears `banned` only at the next sign-in.
+  test.each([
+    ['no ban', { banned: null, banExpires: null }, true],
+    ['banned = false', { banned: false, banExpires: null }, true],
+    ['a ban with no expiry', { banned: true, banExpires: null }, false],
+    ['a ban expiring in the future', { banned: true, banExpires: new Date(Date.now() + HOUR) }, false],
+    ['a lapsed ban', { banned: true, banExpires: new Date(Date.now() - HOUR) }, true],
+  ])('%s: listed is %s', async (_label, ban, listed) => {
+    mockQueue.push([{ id: 'a', name: 'Test Reviewer A', role: 'dj', ...ban }]);
+    expect(await listReviewers()).toEqual(listed ? [{ id: 'a', name: 'Test Reviewer A' }] : []);
+  });
+
+  test('names by the staff name, reads the ban columns rather than filtering in SQL, sorts case-insensitively, and reads no dj_name', async () => {
     mockQueue.push([]);
     await listReviewers();
     const [read] = mockReads;
     const db = jest.requireMock('@wxyc/database');
     expect(read.table).toBe('auth_member');
-    expect(Object.keys(read.columns).sort()).toEqual(['id', 'name', 'role']);
+    expect(Object.keys(read.columns).sort()).toEqual(['banExpires', 'banned', 'id', 'name', 'role']);
     expect(render(read.columns.name)).toBe(render(db.staffNameSql(db.user)));
-    expect(read.where).toMatch(/"banned" is not true/i);
+    expect(read.where).toBe('');
     expect(read.orderBy).toMatch(/^lower\(/);
   });
 });

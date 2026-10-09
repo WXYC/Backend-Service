@@ -13,6 +13,6 @@ export const reviewsActor = (req: Pick<Request, 'auth'>): ReviewsActor => ({
   manage: holdsReviewsManage(req),
 });
 
-/** Whether any of an account's membership roles grants `reviews: write`: the one test behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`, so the 400 and the list cannot drift. */
+/** Whether any of an account's membership roles grants `reviews: write`: the one role test behind `/intake`'s `dj_id` check and `GET /reviews/reviewers`, so the two cannot drift on roles. The ban rule is not shared: the list leaves out an account whose ban is in force, and `/intake` does not check bans. */
 export const canWriteReviews = (roles: Iterable<string | null | undefined>): boolean =>
   [...roles].some((role) => roleGrants(role, { reviews: ['write'] }));
