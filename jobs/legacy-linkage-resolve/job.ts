@@ -659,7 +659,12 @@ const resolveTextMatchAlbumIds = async (dryRun: boolean): Promise<PassResult> =>
   if (dryRun) return { candidates: seen, resolved: 0, residual: null, deferred: false };
   if (seen === 0) return SKIPPED_PASS;
 
-  // `upd` repeats `f.album_id IS NULL` — see `resolveFlowsheetAlbumIds`.
+  // `upd` repeats `f.album_id IS NULL` — see `resolveFlowsheetAlbumIds` — and
+  // also re-joins `library` + `artists` to re-check `entry_type` and both key
+  // legs against the row's *current* text. `cohort` is frozen, so after a
+  // concurrent edit of the play's artist/album that leaves `album_id` NULL,
+  // EvalPlanQual re-evaluates only the UPDATE's own WHERE; without the text
+  // re-check the row would be linked to the release its old title matched.
   const measured = await runGuardedDrain(sql`
     WITH cohort AS (${textMatchCohort(window)}),
     upd AS (
@@ -669,8 +674,15 @@ const resolveTextMatchAlbumIds = async (dryRun: boolean): Promise<PassResult> =>
           linkage_confidence = 1.0,
           linked_at = now()
       FROM cohort c
+      JOIN ${library} l ON l.id = c.library_id
+      JOIN ${artists} a ON a.id = l.artist_id
       WHERE f.id = c.id
         AND f.album_id IS NULL
+        AND f.entry_type = 'track'
+        AND ${textMatchKey(sql`f.album_title`)} = ${textMatchKey(sql`l.album_title`)}
+        AND ${textMatchKey(sql`f.artist_name`)} = ${textMatchKey(sql`a.artist_name`)}
+        AND ${textMatchKey(sql`f.artist_name`)} <> ''
+        AND ${textMatchKey(sql`f.album_title`)} <> ''
       RETURNING 1
     )
     SELECT
