@@ -561,7 +561,8 @@ export const artists = wxyc_schema.table(
       // class away from `artists_normalized_name_idx` (0092,
       // `normalize_artist_name`) and `artists_fold_name_idx` (0134,
       // `fold_artist_name`) — three near-identical names for three different
-      // normalizations. If a future plan change makes arm 3 drive from the
+      // normalizations (a fourth, `text_match_key` from 0191, is laddered at
+      // `library_norm_album_title_idx`). If a future plan change makes arm 3 drive from the
       // artist side, re-measure before adding it.
     };
   }
@@ -790,6 +791,12 @@ export const library = wxyc_schema.table(
       // together or neither. Contrast `rotation.artist_name` /
       // `rotation.album_title`, which ARE nullable — arm 2's coalesce is
       // load-bearing.
+      // Key ladder, each rung a strict coarsening of the last: `lower()` (this
+      // index) ⊂ `fold_artist_name` (0134: NFD, strip combining marks) ⊂
+      // `text_match_key` (0191: also strips a leading "the " and every
+      // non-alphanumeric run; indexed by `library_text_match_album_idx`, which
+      // is SQL-only). The TS-side `relaxedAlbumKey` / `looseTitleKey` keep word
+      // boundaries, so they sit beside this ladder rather than on it.
       normAlbumTitleIdx: index('library_norm_album_title_idx').on(sql`lower(trim(coalesce(${table.album_title}, '')))`),
       genreIdIdx: index('genre_id_idx').on(table.genre_id),
       formatIdIdx: index('format_id_idx').on(table.format_id),
@@ -1541,7 +1548,7 @@ export const flowsheet = wxyc_schema.table(
     // these on new linkages is handled in B-2.1 / B-2.2 / B-3.1; this
     // migration only adds the columns nullable. Source values are
     // enum-like text: 'etl_legacy_id' | 'dj_bin_pick' | 'lml_high_confidence'
-    // | 'human_review' | 'tubafrenzy_mirror'.
+    // | 'human_review' | 'tubafrenzy_mirror' | 'direct_text_match'.
     linkage_source: text('linkage_source'),
     linkage_confidence: real('linkage_confidence'),
     linked_at: timestamp('linked_at', { withTimezone: true }),

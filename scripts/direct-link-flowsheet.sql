@@ -9,10 +9,13 @@
 --   For those rows we link them in a single prod transaction; the residual
 --   falls through to the rest of the SQL-direct chain.
 --
--- Normalization (applied to both sides):
---   - lowercase
---   - strip leading 'the '
---   - strip non-alphanumeric (collapses punctuation, parens, dashes)
+-- Normalization (applied to both sides): wxyc_schema.text_match_key() (migration
+-- 0191, BS#3064). Updated 2026-10-08: the rule used to be an inline
+-- lower(regexp_replace(...)) pair here; it now lives in the function so the
+-- insert path, the edit path and this script cannot drift. The function folds
+-- Unicode form and diacritics, lowercases, strips a leading 'the ' and deletes
+-- every non-alphanumeric run. A key that comes out '' (a symbols-only title
+-- such as '>>>') never matches: see the <> '' guards on the join.
 --
 -- Confidence: 1.0. The HAVING count(DISTINCT l.id) = 1 clause excludes
 -- ambiguous matches (same normalized text resolves to >1 library row,
@@ -44,8 +47,8 @@ SET statement_timeout = '600s';
 WITH unlinked AS (
   SELECT
     f.id,
-    lower(regexp_replace(regexp_replace(coalesce(f.artist_name, ''), '^the\s+', '', 'i'), '[^a-z0-9 ]+', '', 'gi')) AS artist_norm,
-    lower(regexp_replace(regexp_replace(coalesce(f.album_title, ''), '^the\s+', '', 'i'), '[^a-z0-9 ]+', '', 'gi')) AS album_norm
+    wxyc_schema.text_match_key(f.artist_name) AS artist_norm,
+    wxyc_schema.text_match_key(f.album_title) AS album_norm
   FROM wxyc_schema.flowsheet f
   WHERE f.album_id IS NULL
     AND f.entry_type = 'track'
@@ -56,8 +59,8 @@ WITH unlinked AS (
 lib AS (
   SELECT
     l.id,
-    lower(regexp_replace(regexp_replace(coalesce(a.artist_name, ''), '^the\s+', '', 'i'), '[^a-z0-9 ]+', '', 'gi')) AS artist_norm,
-    lower(regexp_replace(regexp_replace(coalesce(l.album_title, ''), '^the\s+', '', 'i'), '[^a-z0-9 ]+', '', 'gi')) AS album_norm
+    wxyc_schema.text_match_key(a.artist_name) AS artist_norm,
+    wxyc_schema.text_match_key(l.album_title) AS album_norm
   FROM wxyc_schema.library l
   LEFT JOIN wxyc_schema.artists a ON a.id = l.artist_id
 ),
@@ -67,6 +70,8 @@ unique_matches AS (
   JOIN lib l
     ON l.artist_norm = u.artist_norm
    AND l.album_norm  = u.album_norm
+   AND u.artist_norm <> ''
+   AND u.album_norm  <> ''
   GROUP BY u.id
   HAVING count(DISTINCT l.id) = 1
 )

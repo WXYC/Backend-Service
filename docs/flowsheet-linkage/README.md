@@ -19,6 +19,8 @@ Backfill no longer routes through LML. The empirical numbers we landed on change
 
 The remaining ~666K residual is bounded by library-catalog coverage (albums simply not in WXYC's library), not by any matching strategy. LML's data source is the same Discogs corpus our local snapshot already covers, so re-running an LML-driven backfill against the residual would mostly produce 429s and "no candidate" outcomes.
 
+The exact-text pass computes both sides with `wxyc_schema.text_match_key()` (migration 0191): fold Unicode form and diacritics, lowercase, strip a leading "the ", delete every non-alphanumeric run. A key of `''` (a symbols-only title like `>>>`) never matches. The insert and edit paths share the same function.
+
 The three SQL-direct passes live under `scripts/` and document their own normalization, confidence, idempotency, and reversal:
 
 - `scripts/direct-link-flowsheet.sql` — exact normalized text match (`linkage_source='direct_text_match'`, confidence 1.0).
@@ -77,7 +79,7 @@ The auto-accept gate is `linkage.confidence < AUTO_ACCEPT_THRESHOLD` where `AUTO
 | `library.canonical_entity_id`          | `text`        | 0061      | Opaque, source-namespaced (`discogs:release:<id>`). B-tree indexed for the flowsheet-side lookup.                                                                    |
 | `library.canonical_entity_confidence`  | `real`        | 0061      | Confidence band stored at link time.                                                                                                                                 |
 | `library.canonical_entity_resolved_at` | `timestamptz` | 0061      | Audit + retry policy. NULL means "never resolved".                                                                                                                   |
-| `flowsheet.linkage_source`             | `text`        | 0062      | One of `etl_legacy_id`, `dj_bin_pick`, `lml_high_confidence`, `human_review`, `tubafrenzy_mirror`.                                                                   |
+| `flowsheet.linkage_source`             | `text`        | 0062      | One of `etl_legacy_id`, `dj_bin_pick`, `lml_high_confidence`, `human_review`, `tubafrenzy_mirror`, `direct_text_match`.                                              |
 | `flowsheet.linkage_confidence`         | `real`        | 0062      | Confidence band stored at link time.                                                                                                                                 |
 | `flowsheet.linked_at`                  | `timestamptz` | 0062      | Stamps when the link was made (lets B-2.2 retry rules age weak matches).                                                                                             |
 | `flowsheet.legacy_link_attempted_at`   | `timestamptz` | 0063      | Marker stamped by `jobs/broken-fk-recovery` when the FK resolver tried and failed. Lets B-2.2 sweep both never-had-FK rows AND broken-FK residuals in the same pass. |
