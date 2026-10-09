@@ -275,7 +275,13 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
   const TEXT_MATCH_DRAIN_SQL = (days: number) =>
     `WITH cohort AS ( ${textMatchCohortSql(days)} ), upd AS ( UPDATE f SET album_id = c.library_id, ` +
     "linkage_source = 'direct_text_match', linkage_confidence = 1.0, linked_at = now() FROM cohort c " +
-    'WHERE f.id = c.id AND f.album_id IS NULL RETURNING 1 ) ' +
+    'JOIN l ON l.id = c.library_id JOIN a ON a.id = l.artist_id ' +
+    // EvalPlanQual re-check: the frozen cohort cannot see a concurrent text edit.
+    "WHERE f.id = c.id AND f.album_id IS NULL AND f.entry_type = 'track' " +
+    'AND "wxyc_schema"."text_match_key"(f.album_title) = "wxyc_schema"."text_match_key"(l.album_title) ' +
+    'AND "wxyc_schema"."text_match_key"(f.artist_name) = "wxyc_schema"."text_match_key"(a.artist_name) ' +
+    `AND "wxyc_schema"."text_match_key"(f.artist_name) <> '' AND "wxyc_schema"."text_match_key"(f.album_title) <> '' ` +
+    'RETURNING 1 ) ' +
     'SELECT (SELECT COUNT(*)::int FROM cohort) AS candidates, (SELECT COUNT(*)::int FROM upd) AS resolved';
   // BS#2413. Allowlisted alongside the repair statements because it is the
   // guard that keeps them from waiting five minutes, and a silent drop would
@@ -381,6 +387,23 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
     ]);
   });
 
+  it("text-match drain's own WHERE re-checks entry_type and both text-key legs (EvalPlanQual re-check of a concurrent text edit)", async () => {
+    process.env.LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS = '30';
+    queueRun({ candidates: 0, resolved: 0 }, { candidates: 0, resolved: 0 }, { candidates: 4, resolved: 4 });
+
+    await runResolve(false);
+
+    const drain = normalizedExecutedSql().find((q) => q.includes('upd AS')) ?? '';
+    const updateWhere = drain.slice(drain.indexOf('UPDATE'));
+    expect(updateWhere).toContain("f.entry_type = 'track'");
+    expect(updateWhere).toContain(
+      '"wxyc_schema"."text_match_key"(f.album_title) = "wxyc_schema"."text_match_key"(l.album_title)'
+    );
+    expect(updateWhere).toContain(
+      '"wxyc_schema"."text_match_key"(f.artist_name) = "wxyc_schema"."text_match_key"(a.artist_name)'
+    );
+  });
+
   it('text-match drain statement interpolates flowsheet/library/artists at each ${...} site', async () => {
     process.env.LINKAGE_RESOLVE_TEXT_MATCH_WINDOW_DAYS = '30';
     queueRun({ candidates: 0, resolved: 0 }, { candidates: 0, resolved: 0 }, { candidates: 4, resolved: 4 });
@@ -396,7 +419,7 @@ describe('legacy-linkage-resolve: repair cohort stays unbounded in time', () => 
       else if (node && typeof node === 'object' && !('raw' in node)) tables.push(node);
     };
     walk(executeCallMatching(/upd AS/));
-    expect(tables).toEqual([flowsheet, library, artists, flowsheet]);
+    expect(tables).toEqual([flowsheet, library, artists, flowsheet, library, artists]);
   });
 
   it('reads no cronjob_runs row into any repair statement', async () => {
