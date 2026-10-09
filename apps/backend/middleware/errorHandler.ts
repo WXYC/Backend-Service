@@ -1,5 +1,6 @@
 import WxycError from '../utils/error.js';
 import { LmlClientError } from '@wxyc/lml-client';
+import { redactQueryParams } from '@wxyc/observability';
 import { Request, Response, NextFunction } from 'express';
 
 function hasStatusCode(error: Error): error is WxycError | LmlClientError {
@@ -73,7 +74,8 @@ function errorHandler(err: any, req: Request, res: Response, next: NextFunction)
     console.error(`[${req.method} ${req.url}] ${error.name} ${clientStatus}: ${error.message}`);
     res.status(clientStatus).json({ message: error.message });
   } else {
-    console.error(`[${req.method} ${req.url}] Unhandled error:`, error);
+    // A driver error's message quotes its bound values, legal names included (BS#3054).
+    console.error(`[${req.method} ${req.url}] Unhandled error:`, redactQueryParams(error));
     res.status(500).json({ message: 'Internal server error' });
   }
 }

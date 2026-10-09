@@ -1,3 +1,4 @@
+import { inspect } from 'util';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 import WxycError from '../../../apps/backend/utils/error';
 import { LmlClientError } from '@wxyc/lml-client';
@@ -278,6 +279,33 @@ describe('errorHandler middleware', () => {
       errorHandler(error, mockReq, res, mockNext);
 
       expect(consoleSpy).toHaveBeenCalledWith("[GET /flowsheet/latest] URIError 400: Failed to decode param '%2'");
+      consoleSpy.mockRestore();
+    });
+  });
+
+  // drizzle-orm's DrizzleQueryError carries every bound value in its message,
+  // stack and `params` property; since BS#3051 that includes a staff member's
+  // legal name, which must not reach the container logs (BS#3054).
+  describe('failed-query parameters', () => {
+    const SENTINEL = 'Test Reviewer';
+
+    it('logs no bound value for an unhandled failed query, and still answers 500', () => {
+      const { res, statusMock } = mockResponse();
+      const sql = 'insert into "reviews" ("author") values ($1)';
+      const error = Object.assign(new Error(`Failed query: ${sql}\nparams: ${SENTINEL}`), {
+        query: sql,
+        params: [SENTINEL],
+        cause: new Error('connection terminated'),
+      });
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+
+      errorHandler(error, mockReq, res, mockNext);
+
+      const logged = inspect(consoleSpy.mock.calls, { depth: 10 });
+      expect(logged).not.toContain(SENTINEL);
+      expect(logged).toContain(sql);
+      expect(logged).toContain('connection terminated');
+      expect(statusMock).toHaveBeenCalledWith(500);
       consoleSpy.mockRestore();
     });
   });

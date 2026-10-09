@@ -95,3 +95,22 @@ describe('data collection', () => {
     expect(initOptions.dataCollection).toEqual(SENTRY_DATA_COLLECTION);
   });
 });
+
+// A failed Drizzle query's message quotes every bound value, which since
+// BS#3051 can be a staff member's legal name (BS#3054). Both Express servers
+// write staff names, so both register the scrub on error events.
+describe('failed-query parameter scrub', () => {
+  it.each([
+    ['backend', '../../../apps/backend/instrument'],
+    ['auth', '../../../apps/auth/instrument'],
+  ])('%s registers a beforeSend that redacts bound parameters', (_app, relPath) => {
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require(relPath);
+    });
+    const initOptions = mockInit.mock.calls[0][0] as { beforeSend?: (event: unknown) => unknown };
+    const event = { exception: { values: [{ value: 'Failed query: select 1\nparams: Test Reviewer' }] } };
+
+    expect(JSON.stringify(initOptions.beforeSend?.(event))).not.toContain('Test Reviewer');
+  });
+});
