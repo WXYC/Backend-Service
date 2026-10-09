@@ -9,7 +9,9 @@
  *  - both `<> ''` guards are present. A symbols-only name keys to `''`, and without the guard `'' = ''` matches
  *    every library row whose own key is empty;
  *  - `artists` is joined, not the denormalized and nullable `library.artist_name`;
- *  - the candidate list is capped, so an ambiguous catalog cannot return an unbounded set.
+ *  - the candidate list is capped, so an ambiguous catalog cannot return an unbounded set;
+ *  - the edit path's current link sorts first, so the cap can never truncate it out of the keep-current check;
+ *    otherwise the order is by id, so a capped page is deterministic.
  *
  * The mechanism is the one `flowsheet.getOpenShows.sql.test.ts` established: the real schema plus a real,
  * never-connected drizzle instance, so `.toSQL()` renders without touching a client.
@@ -50,9 +52,19 @@ describe('buildLibraryReleasesByTextQuery — rendered statement (BS#3065)', () 
     expect(text).toContain(`${KEY}($4::text) <> ''`);
   });
 
-  it('caps the candidate list at 10', () => {
-    expect(text).toMatch(/limit \$5$/);
+  it('caps the candidate list at 10, ordered by id', () => {
+    expect(text).toMatch(new RegExp(`order by "${SCHEMA}"\\."library"\\."id" limit \\$5$`));
     expect(params[4]).toBe(10);
+  });
+
+  it('sorts the current album_id first, ahead of the cap, when one is given', () => {
+    const withCurrent = buildLibraryReleasesByTextQuery('Jessica Pratt', 'Afterlife', { currentAlbumId: 42 }).toSQL();
+    expect(withCurrent.sql).toMatch(
+      new RegExp(
+        `order by \\("${SCHEMA}"\\."library"\\."id" = \\$5\\) desc, "${SCHEMA}"\\."library"\\."id" limit \\$6$`
+      )
+    );
+    expect(withCurrent.params).toEqual(['Afterlife', 'Jessica Pratt', 'Afterlife', 'Jessica Pratt', 42, 10]);
   });
 
   it('binds album then artist, each twice, as parameters', () => {
