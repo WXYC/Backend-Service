@@ -7,6 +7,7 @@ import * as Sentry from '@sentry/node';
 import {
   SENTRY_DATA_COLLECTION,
   filterSentryTransactionEvent,
+  redactSentryBreadcrumb,
   redactSentryEventQueryParams,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
@@ -38,6 +39,9 @@ Sentry.init({
   // BS#3051 can be a staff member's legal name; the SQL stays, the values go
   // (BS#3054). Error capture itself is unchanged.
   beforeSend: redactSentryEventQueryParams,
+  // The console integration also keeps the raw console arguments in `data.arguments`; scrub them as the breadcrumb
+  // is recorded, while they are still Error objects, so transaction events are covered too (BS#3054).
+  beforeBreadcrumb: redactSentryBreadcrumb,
   // Sentry 11 defaults to span streaming, which never builds a transaction
   // event, so `beforeSendTransaction` above would never run (BS#2948). Pin the
   // transaction lifecycle Sentry 10 used until the filter moves to streaming

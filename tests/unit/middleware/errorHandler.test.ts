@@ -1,4 +1,5 @@
 import { inspect } from 'util';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 import WxycError from '../../../apps/backend/utils/error';
 import { LmlClientError } from '@wxyc/lml-client';
@@ -292,11 +293,7 @@ describe('errorHandler middleware', () => {
     it('logs no bound value for an unhandled failed query, and still answers 500', () => {
       const { res, statusMock } = mockResponse();
       const sql = 'insert into "reviews" ("author") values ($1)';
-      const error = Object.assign(new Error(`Failed query: ${sql}\nparams: ${SENTINEL}`), {
-        query: sql,
-        params: [SENTINEL],
-        cause: new Error('connection terminated'),
-      });
+      const error = new DrizzleQueryError(sql, [SENTINEL], new Error('connection terminated'));
       const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
 
       errorHandler(error, mockReq, res, mockNext);
@@ -304,6 +301,7 @@ describe('errorHandler middleware', () => {
       const logged = inspect(consoleSpy.mock.calls, { depth: 10 });
       expect(logged).not.toContain(SENTINEL);
       expect(logged).toContain(sql);
+      expect(logged).toContain('DrizzleQueryError');
       expect(logged).toContain('connection terminated');
       expect(statusMock).toHaveBeenCalledWith(500);
       consoleSpy.mockRestore();
