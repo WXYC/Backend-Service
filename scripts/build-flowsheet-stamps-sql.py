@@ -34,6 +34,19 @@ import argparse
 import csv
 import sys
 
+# Mirrors LINKAGE_SOURCES in shared/database/src/schema.ts (BS#3078); kept equal by
+# tests/unit/database/linkage-source-vocabulary.test.ts.
+LINKAGE_SOURCES = (
+    "etl_legacy_id",
+    "dj_bin_pick",
+    "lml_high_confidence",
+    "human_review",
+    "tubafrenzy_mirror",
+    "direct_text_match",
+    "discogs_local_bridge",
+    "fuzzy_trigram_match",
+)
+
 
 def pg_quote(s: str) -> str:
     if s is None:
@@ -47,6 +60,7 @@ def main() -> None:
     ap.add_argument(
         "--linkage-source",
         required=True,
+        choices=LINKAGE_SOURCES,
         help="value to write into flowsheet.linkage_source (e.g. discogs_local_bridge)",
     )
     ap.add_argument(
