@@ -1161,10 +1161,10 @@ export type TextMatchLookupOptions = {
  * `album_artist`, matching `scripts/direct-link-flowsheet.sql`. A symbols-only name keys to `''`, so both
  * legs are guarded `<> ''`.
  *
- * `options.executor` defaults to the pool `db`, which is right for a caller outside a transaction. A caller
- * holding a transaction that must survive a failed lookup passes a savepoint (`trx.transaction((sp) => ...)`),
- * not the bare transaction handle: a failed query on the bare handle aborts the transaction (25P02) even when
- * the error is caught (BS#2474).
+ * `options.executor` defaults to the pool `db`, which is right only for a caller outside a transaction: a caller
+ * holding one must not borrow a second pool connection (BS#2474). It passes a savepoint
+ * (`trx.transaction((sp) => ...)`), not the bare transaction handle: a failed query on the bare handle aborts the
+ * transaction (25P02) even when the error is caught (BS#3065).
  * `options.currentAlbumId` sorts that row first, so the candidate cap can never truncate it out of a
  * keep-the-current-link check.
  */
@@ -1191,7 +1191,10 @@ export const buildLibraryReleasesByTextQuery = (
     .limit(TEXT_MATCH_CANDIDATE_LIMIT);
 };
 
-/** Ids of the matching library rows: none, one, or several when the catalog is ambiguous. Throws on DB error. */
+/**
+ * Ids of the matching library rows: none, one, or several when the catalog is ambiguous. Throws on DB error. See
+ * `buildLibraryReleasesByTextQuery` for `options`: a caller inside a transaction passes a savepoint, never the pool.
+ */
 export const findLibraryReleasesByText = async (
   artist_name: string,
   album_title: string,
