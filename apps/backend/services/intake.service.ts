@@ -315,7 +315,7 @@ export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> 
  * The `SET` that takes an accepted review off an item: the three accept columns cleared together (never left to the
  * foreign key's `SET NULL`, which would let `accepted_by` and `accepted_at` outlive the pointer), and a `reviewed`
  * item sent back to its checkout (`checked_out`, when `checked_out_at` is set, even if the holder's account is gone, which a
- * music director may still return) or the pile (`pool`). Any other state is kept: a filed or finalized
+ * music director may still return) or the review shelf (`pool`). Any other state is kept: a filed or finalized
  * item only loses the pointer. Flat `CASE`, not nested: two bare literals nested resolve to `text`, which cannot
  * meet the enum column.
  */
