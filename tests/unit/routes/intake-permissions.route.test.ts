@@ -257,12 +257,14 @@ describe('GET /intake limit and active', () => {
     expect(mockListIntakeItems).toHaveBeenCalledWith(expect.objectContaining({ active: true, state: 'filed' }));
   });
 
+  test.each(['0', '-1', '101', 'abc', ''])('limit=%j is a 400 with the one message, before any query', async (raw) => {
+    const res = await bearer(request(app).get('/intake').query({ limit: raw }));
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('limit must be an integer from 1 to 100');
+    expect(mockListIntakeItems).not.toHaveBeenCalled();
+  });
+
   test.each([
-    ['limit', '0'],
-    ['limit', '101'],
-    ['limit', 'abc'],
-    ['limit', '-1'],
-    ['limit', ''],
     ['active', 'maybe'],
     ['active', 'TRUE'],
   ])('%s=%j is a 400 before any query', async (key, raw) => {

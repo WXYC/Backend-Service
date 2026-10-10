@@ -33,6 +33,19 @@ const LIST_LIMIT_MAX = 100;
 
 const parseId = (raw: string) => parseInt4PathId(raw, 'intake item');
 
+/** `GET /intake?limit=`: absent means every match; anything else must be an integer from 1 to `LIST_LIMIT_MAX`, and every failure gets the one message. */
+const parseLimit = (raw: unknown): number | undefined => {
+  const invalid = () => new WxycError(`limit must be an integer from 1 to ${LIST_LIMIT_MAX}`, 400);
+  let limit: number | undefined;
+  try {
+    limit = parseInt4QueryParam(raw, 'limit');
+  } catch {
+    throw invalid();
+  }
+  if (limit !== undefined && limit > LIST_LIMIT_MAX) throw invalid();
+  return limit;
+};
+
 /** The varchar(128) trio plus the two nullable ids; `undefined` means "not supplied". */
 const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partial<IntakeFields> & IntakeCitations => {
   const required = (key: 'artist_name' | 'album_title') =>
@@ -71,10 +84,7 @@ export const listIntake: RequestHandler = async (req, res) => {
   const { state } = req.query;
   const awaitingAcceptance = parseBooleanQueryParam(req.query.awaiting_acceptance, 'awaiting_acceptance');
   const active = parseBooleanQueryParam(req.query.active, 'active');
-  const limit = parseInt4QueryParam(req.query.limit, 'limit');
-  if (limit !== undefined && limit > LIST_LIMIT_MAX) {
-    throw new WxycError(`limit must be an integer from 1 to ${LIST_LIMIT_MAX}`, 400);
-  }
+  const limit = parseLimit(req.query.limit);
   if (state !== undefined && !intakeItemStateEnum.enumValues.includes(state as IntakeItemState)) {
     throw new WxycError(`Invalid Parameter: state must be one of ${intakeItemStateEnum.enumValues.join(', ')}`, 400);
   }
