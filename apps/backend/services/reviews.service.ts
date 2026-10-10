@@ -22,6 +22,7 @@ import { canBeAskedToReview, type ReviewsActor } from '../utils/review-grants.js
 import { outerRef } from '../utils/sql-fragments.js';
 import {
   FILED_STATES,
+  filedStateSql,
   RELEASE_ACCEPTED_REVIEW,
   effectiveState,
   lockRecordSubject,
@@ -85,7 +86,8 @@ export { AUTHOR_MAX } from '@wxyc/database';
  * would bind to the inner `p`. `scope` narrows which
  * prints count, through the `id`, `intake_item_id` and `album_id` of `p` (`on_cover` asks only about the prints of one
  * release's copies; `printedCopies` pins `p.id` to the one print row of its outer select, so each copy is one row). Shared by `in_use` here, by `deleteReview`'s print half,
- * by `on_cover` and by `printedCopies`, so they cannot disagree.
+ * by `on_cover` and by `printedCopies`, so they cannot disagree. Its count of copies is the write half's `lockOnlyCopy`
+ * (`review-print.service.ts`), which must agree with it: both read the set from `FILED_STATES`.
  */
 export const latestPrintOfCopy = (
   reviewId: SQL,
@@ -93,7 +95,7 @@ export const latestPrintOfCopy = (
 ) => {
   const p = alias(review_prints, 'p');
   const n = alias(review_prints, 'n');
-  return sql`EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId}${scope ? sql` AND ${scope(p)}` : sql``} AND (${p.intake_item_id} IS NOT NULL OR (SELECT count(*) FROM ${intake_items} AS oc WHERE oc.album_id = ${p.album_id} AND oc.state IN ('filed', 'finalized')) <> 1) AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id})))`;
+  return sql`EXISTS (SELECT 1 FROM ${review_prints} AS p WHERE ${p.review_id} = ${reviewId}${scope ? sql` AND ${scope(p)}` : sql``} AND (${p.intake_item_id} IS NOT NULL OR (SELECT count(*) FROM ${intake_items} AS oc WHERE oc.album_id = ${p.album_id} AND ${filedStateSql(sql`oc.state`)}) <> 1) AND NOT EXISTS (SELECT 1 FROM ${review_prints} AS n WHERE ${n.intake_item_id} IS NOT DISTINCT FROM ${p.intake_item_id} AND (${p.intake_item_id} IS NOT NULL OR ${n.album_id} = ${p.album_id}) AND (${n.printed_at}, ${n.id}) > (${p.printed_at}, ${p.id})))`;
 };
 
 const reviewRef = outerRef(reviews.id);
@@ -161,7 +163,7 @@ export const listReviewRevisions = async (id: number, actor: ReviewsActor) => {
  * belongs to a release a `filed`/`finalized` item of it cites. `POST /library/{id}/print` (BS#2865) decides by it too.
  */
 export const reviewInReleaseList = (albumId: number): SQL => {
-  const cited = sql`(SELECT ci.cited_album_id FROM ${intake_items} AS ci WHERE ci.album_id = ${albumId} AND ci.state IN ('filed', 'finalized') AND ci.cited_album_id IS NOT NULL)`;
+  const cited = sql`(SELECT ci.cited_album_id FROM ${intake_items} AS ci WHERE ci.album_id = ${albumId} AND ${filedStateSql(sql`ci.state`)} AND ci.cited_album_id IS NOT NULL)`;
   return sql`(${reviews.album_id} = ${albumId} OR ${reviews.album_id} IN ${cited})`;
 };
 
@@ -187,9 +189,9 @@ export const listReviews = async (filters: ReviewFilters, actor: ReviewsActor) =
       .where(and(...conditions))
       .orderBy(...newest)) as ReviewResponse[];
   }
-  const releaseCopies = sql`(SELECT ci.id FROM ${intake_items} AS ci WHERE ci.album_id = ${filters.album_id} AND ci.state IN ('filed', 'finalized'))`;
+  const releaseCopies = sql`(SELECT ci.id FROM ${intake_items} AS ci WHERE ci.album_id = ${filters.album_id} AND ${filedStateSql(sql`ci.state`)})`;
   conditions.push(reviewInReleaseList(filters.album_id));
-  const onCover = sql<boolean>`(${acceptedBy(sql`ai.album_id = ${filters.album_id} AND ai.state IN ('filed', 'finalized')`)} OR ${latestPrintOfCopy(
+  const onCover = sql<boolean>`(${acceptedBy(sql`ai.album_id = ${filters.album_id} AND ${filedStateSql(sql`ai.state`)}`)} OR ${latestPrintOfCopy(
     reviewRef,
     (p) =>
       sql`(${p.intake_item_id} IN ${releaseCopies} OR (${p.intake_item_id} IS NULL AND ${p.album_id} = ${filters.album_id}))`

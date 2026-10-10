@@ -119,7 +119,8 @@ export const printIntakeItem = async (id: number, actor: Pick<ReviewsActor, 'id'
 /**
  * The one filed or finalized copy of a release, locked `FOR UPDATE` (BS#3075), in `acceptReview`'s order: the cited release
  * `FOR SHARE` first when the review is the copy's citation (found by an unlocked read, honored only for the copy locked),
- * then the copy. `citedLocked` is the release locked, if any. No copy, several, or one gone by the lock is `null`.
+ * then the copy. `citedLocked` is the release locked, if any. No copy, several, or one gone by the lock is `null`. This is the
+ * write half of what `latestPrintOfCopy` (`reviews.service.ts`) counts as a copy; both use `FILED_STATES`.
  */
 const lockOnlyCopy = async (tx: Pick<typeof db, 'select'>, albumId: number, reviewId: number) => {
   const copies = and(eq(intake_items.album_id, albumId), inArray(intake_items.state, FILED_STATES));

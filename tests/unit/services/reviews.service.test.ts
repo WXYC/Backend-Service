@@ -1350,7 +1350,7 @@ describe('deleteReview', () => {
       expect(q).toContain('not exists');
       expect(q).toMatch(/is not distinct from/);
       expect(q).toMatch(/\("n"\."printed_at", "n"\."id"\) > \("p"\."printed_at", "p"\."id"\)/);
-      expect(mockExecuted[0]).toContain('[3]');
+      expect(mockExecuted[0]).toContain('[3,"filed","finalized"]');
     });
 
     test('may delete an unaccepted, unprinted draft or submitted review', async () => {
@@ -1674,7 +1674,7 @@ describe('review notices decided in the transaction (BS#2864)', () => {
       expect(read.where).toContain('"p"."id" = "rp"."id"');
       expect(read.where).toContain('"n"."intake_item_id" IS NOT DISTINCT FROM "p"."intake_item_id"');
       expect(read.where).toContain('("n"."printed_at", "n"."id") > ("p"."printed_at", "p"."id")');
-      expect(read.where).toContain('[3,3]');
+      expect(read.where).toContain('[3,3,"filed","finalized"]');
       expect(read.orderBy).toBe('"rp"."printed_at", "rp"."id"');
     });
 

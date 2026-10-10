@@ -657,7 +657,8 @@ describe('acceptReview (BS#2860)', () => {
   it('writes the pointer, the caller and now, withdraws any request, and sets reviewed unless filed or finalized, in one statement', async () => {
     await run({ review: own });
     const set = dialect.sqlToQuery(sql`${sets[0].state}`);
-    expect(set.sql).toMatch(/CASE WHEN .*"state" IN \('filed', 'finalized'\) THEN .*"state" ELSE 'reviewed' END/);
+    expect(set.sql).toMatch(/CASE WHEN .*"state" IN \(\$1, \$2\) THEN .*"state" ELSE 'reviewed' END/);
+    expect(set.params).toEqual(['filed', 'finalized']);
     expect(sets[0]).toMatchObject({
       accepted_review_id: 3,
       accepted_by: 'md-1',
