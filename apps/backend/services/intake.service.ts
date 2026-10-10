@@ -115,46 +115,61 @@ export type IntakeCitations = Pick<NewIntakeItem, 'cited_album_id' | 'cited_subm
  * `passes` and `draft_authors` are correlated aggregates in the same statement (one query for the
  * whole list, not one per item) and are only present when `includePasses` (the caller holds `reviews: manage`).
  * `awaitingAcceptance` keeps items with a submitted review, no accepted one, and no filing.
+ * Filed and finalized reads order by `filed_at` descending, NULLs last (a filed row with no stamp has no filing
+ * time to rank by), then `id`; every other read orders by `logged_at` descending, then `id`.
  */
 export const buildIntakeSelect = (opts: {
   state?: IntakeItemState;
   id?: number;
   includePasses: boolean;
   awaitingAcceptance?: boolean;
+  /** Drops items whose effective state is filed or finalized. */
+  active?: boolean;
+  /** Applied after ordering; absent means every match. */
+  limit?: number;
 }) => {
   const requester = alias(user, 'requester');
   const holder = alias(user, 'holder');
   const exposed = Object.fromEntries(Object.entries(getTableColumns(intake_items)).filter(([k]) => !UNEXPOSED.has(k)));
-  return db
-    .select({
-      ...exposed,
-      effective_state: effectiveState.as('effective_state'),
-      overdue: overdue.as('overdue'),
-      submitted_review_count: submittedReviewCount.as('submitted_review_count'),
-      requested_dj_name: staffNameSql(requester).as('requested_dj_name'),
-      checked_out_by_name: staffNameSql(holder).as('checked_out_by_name'),
-      ...(opts.includePasses && {
-        passes: passesSql.as('passes'),
-        draft_authors: reviewAuthorsSql(true).as('draft_authors'),
-      }),
-    })
-    .from(intake_items)
-    .leftJoin(requester, eq(requester.id, intake_items.requested_dj_id))
-    .leftJoin(holder, eq(holder.id, intake_items.checked_out_by))
-    .where(
-      and(
-        opts.state === undefined ? undefined : sql`(${effectiveState}) = ${opts.state}`,
-        opts.id === undefined ? undefined : eq(intake_items.id, opts.id),
-        opts.awaitingAcceptance
-          ? and(
-              sql`${submittedReviewCount} > 0`,
-              sql`${intake_items.accepted_review_id} IS NULL`,
-              notInArray(intake_items.state, FILED_STATES)
-            )
-          : undefined
+  return (
+    db
+      .select({
+        ...exposed,
+        effective_state: effectiveState.as('effective_state'),
+        overdue: overdue.as('overdue'),
+        submitted_review_count: submittedReviewCount.as('submitted_review_count'),
+        requested_dj_name: staffNameSql(requester).as('requested_dj_name'),
+        checked_out_by_name: staffNameSql(holder).as('checked_out_by_name'),
+        ...(opts.includePasses && {
+          passes: passesSql.as('passes'),
+          draft_authors: reviewAuthorsSql(true).as('draft_authors'),
+        }),
+      })
+      .from(intake_items)
+      .leftJoin(requester, eq(requester.id, intake_items.requested_dj_id))
+      .leftJoin(holder, eq(holder.id, intake_items.checked_out_by))
+      .where(
+        and(
+          opts.state === undefined ? undefined : sql`(${effectiveState}) = ${opts.state}`,
+          opts.id === undefined ? undefined : eq(intake_items.id, opts.id),
+          opts.awaitingAcceptance
+            ? and(
+                sql`${submittedReviewCount} > 0`,
+                sql`${intake_items.accepted_review_id} IS NULL`,
+                notInArray(intake_items.state, FILED_STATES)
+              )
+            : undefined,
+          opts.active ? sql`NOT (${filedStateSql(sql`(${effectiveState})`)})` : undefined
+        )
       )
-    )
-    .orderBy(desc(intake_items.logged_at), desc(intake_items.id));
+      .orderBy(
+        ...(opts.state !== undefined && FILED_STATES.includes(opts.state)
+          ? [sql`${intake_items.filed_at} DESC NULLS LAST`, desc(intake_items.id)]
+          : [desc(intake_items.logged_at), desc(intake_items.id)])
+      )
+      // drizzle renders no LIMIT clause for undefined; its signature just does not say so.
+      .limit(opts.limit as number)
+  );
 };
 
 export const listIntakeItems = (filters: Parameters<typeof buildIntakeSelect>[0]) =>

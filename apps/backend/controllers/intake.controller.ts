@@ -10,7 +10,12 @@ import {
 import { notifyPass } from '../services/review-notices.service.js';
 import { printIntakeItem } from '../services/review-print.service.js';
 import WxycError from '../utils/error.js';
-import { parseBooleanQueryParam, parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
+import {
+  parseBooleanQueryParam,
+  parseInt4BodyId,
+  parseInt4PathId,
+  parseInt4QueryParam,
+} from '../utils/query-params.js';
 import { canBeAskedToReview, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
@@ -23,6 +28,8 @@ import { normalizeOptionalText, validateTextField } from '../utils/text-fields.j
  */
 
 const TEXT_MAX = 128;
+/** The contract's ceiling on `GET /intake?limit=`. */
+const LIST_LIMIT_MAX = 100;
 
 const parseId = (raw: string) => parseInt4PathId(raw, 'intake item');
 
@@ -63,6 +70,11 @@ const conflict = (res: Response, reason: keyof typeof CONFLICT_MESSAGES) =>
 export const listIntake: RequestHandler = async (req, res) => {
   const { state } = req.query;
   const awaitingAcceptance = parseBooleanQueryParam(req.query.awaiting_acceptance, 'awaiting_acceptance');
+  const active = parseBooleanQueryParam(req.query.active, 'active');
+  const limit = parseInt4QueryParam(req.query.limit, 'limit');
+  if (limit !== undefined && limit > LIST_LIMIT_MAX) {
+    throw new WxycError(`limit must be an integer from 1 to ${LIST_LIMIT_MAX}`, 400);
+  }
   if (state !== undefined && !intakeItemStateEnum.enumValues.includes(state as IntakeItemState)) {
     throw new WxycError(`Invalid Parameter: state must be one of ${intakeItemStateEnum.enumValues.join(', ')}`, 400);
   }
@@ -71,6 +83,8 @@ export const listIntake: RequestHandler = async (req, res) => {
       state: state as IntakeItemState | undefined,
       includePasses: holdsReviewsManage(req),
       awaitingAcceptance,
+      active,
+      limit,
     })
   );
 };

@@ -5547,6 +5547,12 @@ paths:
         `awaiting_acceptance=true` keeps items with a submitted review, no
         accepted review, and a state that is not `filed` or `finalized`
         (ANDed with `state`); `false` is the same as leaving it out.
+        `active=true` drops items whose effective state is `filed` or
+        `finalized` (ANDed with the other filters, so `active=true&state=filed`
+        is `[]`); `false` is the same as leaving it out. With `state=filed` or
+        `state=finalized` the order is `filed_at` descending with a null
+        `filed_at` last, then `id` descending. `limit` (1-100) keeps the first
+        N items of that order; absent means every match.
       parameters:
         - name: state
           in: query
@@ -5558,6 +5564,18 @@ paths:
           required: false
           schema:
             type: boolean
+        - name: active
+          in: query
+          required: false
+          schema:
+            type: boolean
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
       responses:
         '200':
           description: 'The matching items'
@@ -5568,7 +5586,7 @@ paths:
                 items:
                   $ref: '#/components/schemas/IntakeItem'
         '400':
-          description: '`state` is not an intake item state, or `awaiting_acceptance` is not `true` or `false`'
+          description: '`state` is not an intake item state, `awaiting_acceptance` or `active` is not `true` or `false`, or `limit` is not an integer from 1 to 100'
         '401':
           description: 'Authentication required'
         '403':
