@@ -110,6 +110,45 @@ describe('buildIntakeSelect — filter and order', () => {
   });
 });
 
+describe('buildIntakeSelect — filing-time order, active and limit (BS#3092)', () => {
+  const t = `"${SCHEMA}"."intake_items"`;
+
+  it.each([['filed' as const], ['finalized' as const]])(
+    'a state=%s read orders by filed_at DESC NULLS LAST, then id DESC',
+    (state) => {
+      const { sql: text } = render({ state, includePasses: false });
+      expect(text).toContain(`order by ${t}."filed_at" DESC NULLS LAST, ${t}."id" desc`);
+      expect(text).not.toContain(`${t}."logged_at" desc`);
+    }
+  );
+
+  it.each([['pool' as const], ['reviewed' as const], [undefined]])(
+    'a state=%s read keeps logged_at DESC, id DESC',
+    (state) => {
+      const { sql: text } = render({ state, includePasses: false });
+      expect(text).toContain(`order by ${t}."logged_at" desc, ${t}."id" desc`);
+    }
+  );
+
+  it('active drops the filed states from the effective state, binding them as parameters', () => {
+    const { sql: text, params } = render({ active: true, includePasses: false });
+    expect(text).toMatch(/where not \(\(case when .* end\) in \(\$1, \$2\)\)/is);
+    expect(params).toEqual(['filed', 'finalized']);
+  });
+
+  it('without active or limit the statement carries neither the filter nor a limit', () => {
+    const { sql: text } = render({ active: false, includePasses: false });
+    expect(text).not.toMatch(/ not \(/i);
+    expect(text).not.toMatch(/limit/i);
+  });
+
+  it('limit lands after the order as a bound parameter', () => {
+    const { sql: text, params } = render({ limit: 7, includePasses: false });
+    expect(text).toMatch(/order by .* limit \$1$/is);
+    expect(params).toEqual([7]);
+  });
+});
+
 // The value cases (a real name, null/blank falling back to auth_user.name, a deleted account) are Postgres's to decide: tests/unit/database/staff-name.test.ts
 // pins the fragment and tests/integration/intake-items.spec.js pins these fields.
 describe('buildIntakeSelect — staff names (BS#3052)', () => {

@@ -159,6 +159,7 @@ describe('/intake — passes visibility', () => {
       state: undefined,
       includePasses: expected,
       awaitingAcceptance: false,
+      active: false,
     });
   });
 
@@ -196,7 +197,12 @@ describe('GET /intake — ?state=', () => {
   test.each(['pool', 'requested', 'checked_out', 'reviewed', 'filed', 'finalized'])('accepts %s', async (state) => {
     const res = await bearer(request(app).get('/intake').query({ state }));
     expect(res.status).toBe(200);
-    expect(mockListIntakeItems).toHaveBeenCalledWith({ state, includePasses: false, awaitingAcceptance: false });
+    expect(mockListIntakeItems).toHaveBeenCalledWith({
+      state,
+      includePasses: false,
+      awaitingAcceptance: false,
+      active: false,
+    });
   });
 
   // BS#2860: `false` is the same as leaving it out; anything else, a repeated key included, is a 400.
@@ -210,6 +216,7 @@ describe('GET /intake — ?state=', () => {
       state: 'pool',
       includePasses: false,
       awaitingAcceptance: expected,
+      active: false,
     });
   });
 
@@ -224,6 +231,52 @@ describe('GET /intake — ?state=', () => {
     expect((await bearer(request(app).get('/intake?awaiting_acceptance=true&awaiting_acceptance=true'))).status).toBe(
       400
     );
+  });
+});
+
+// BS#3092: `limit` is 1-100 and `active` a strict boolean; both are 400s before any query runs.
+describe('GET /intake limit and active', () => {
+  beforeEach(() => {
+    mockedJwtVerify.mockReset();
+    mockListIntakeItems.mockReset().mockResolvedValue([]);
+    mockRole('dj');
+  });
+
+  test.each([
+    ['1', 1],
+    ['100', 100],
+  ])('limit=%s is passed through as %i', async (raw, expected) => {
+    const res = await bearer(request(app).get('/intake').query({ limit: raw }));
+    expect(res.status).toBe(200);
+    expect(mockListIntakeItems).toHaveBeenCalledWith(expect.objectContaining({ limit: expected, active: false }));
+  });
+
+  test('active=true is passed through alongside state', async () => {
+    const res = await bearer(request(app).get('/intake').query({ active: 'true', state: 'filed' }));
+    expect(res.status).toBe(200);
+    expect(mockListIntakeItems).toHaveBeenCalledWith(expect.objectContaining({ active: true, state: 'filed' }));
+  });
+
+  test.each([
+    ['limit', '0'],
+    ['limit', '101'],
+    ['limit', 'abc'],
+    ['limit', '-1'],
+    ['limit', ''],
+    ['active', 'maybe'],
+    ['active', 'TRUE'],
+  ])('%s=%j is a 400 before any query', async (key, raw) => {
+    const res = await bearer(
+      request(app)
+        .get('/intake')
+        .query({ [key]: raw })
+    );
+    expect(res.status).toBe(400);
+    expect(mockListIntakeItems).not.toHaveBeenCalled();
+  });
+
+  test('a repeated limit is a 400', async () => {
+    expect((await bearer(request(app).get('/intake?limit=1&limit=2'))).status).toBe(400);
   });
 });
 

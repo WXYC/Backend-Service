@@ -271,6 +271,119 @@ describe('/intake (BS#2796)', () => {
       expect(res.text).not.toMatch(/Passing (DJ|Real) Name/);
     });
 
+    describe('limit, active and filing-time order (BS#3092)', () => {
+      // Minutes ago, so these rank ahead of the daysAgo() filed rows seeded above and any limit lands on them.
+      const minutesAgo = (n) => new Date(Date.now() - n * 60 * 1000).toISOString();
+      const filedRow = (filed_at, extra = {}) => ({
+        state: 'filed',
+        album_id: libraryId,
+        filed_at,
+        // logged_at runs the other way from filed_at, so the two orderings cannot agree by accident.
+        ...extra,
+      });
+
+      beforeAll(async () => {
+        await seed('filed-new', filedRow(minutesAgo(10), { logged_at: daysAgo(40) }));
+        await seed('filed-mid', filedRow(minutesAgo(20), { logged_at: daysAgo(35) }));
+        await seed('filed-old', filedRow(minutesAgo(30), { logged_at: daysAgo(5) }));
+        await seed('filed-tie-a', filedRow(minutesAgo(40)));
+        await seed('filed-tie-b', filedRow(minutesAgo(40)));
+        await seed('filed-undated', filedRow(null, { logged_at: daysAgo(1) }));
+        await seed('finalized-new', {
+          state: 'finalized',
+          album_id: libraryId,
+          filed_at: minutesAgo(5),
+          finalized_at: minutesAgo(4),
+        });
+        await seed('reviewed', { state: 'reviewed', logged_at: daysAgo(6) });
+        await seedReview({ intake_item_id: ids['reviewed'], review: 'A submitted review' });
+      });
+
+      const FILED_ORDER = ['filed-new', 'filed-mid', 'filed-old', 'filed-tie-b', 'filed-tie-a'];
+
+      test('?state=filed&limit=2 returns the two most recently filed, newest first, whatever the logged_at order', async () => {
+        const res = await auth.get('/intake').query({ state: 'filed', limit: 2 });
+        expect(res.status).toBe(200);
+        expect(res.body).toHaveLength(2);
+        expect(keysOf(res.body)).toEqual(['filed-new', 'filed-mid']);
+      });
+
+      test('?state=filed with no limit returns every filed item by filed_at descending, ties by id descending', async () => {
+        const res = await auth.get('/intake').query({ state: 'filed' });
+        expect(res.status).toBe(200);
+        const keys = keysOf(res.body);
+        expect(keys.filter((k) => FILED_ORDER.includes(k))).toEqual(FILED_ORDER);
+        expect(keys).toContain('filed');
+        expect(keys.indexOf('filed')).toBeGreaterThan(keys.indexOf('filed-tie-a'));
+      });
+
+      test('?state=finalized is ordered by filed_at descending too', async () => {
+        const res = await auth.get('/intake').query({ state: 'finalized' });
+        expect(res.status).toBe(200);
+        const keys = keysOf(res.body);
+        expect(keys.slice(0, 2)).toEqual(['finalized-new', 'finalized']);
+      });
+
+      test('a filed item with a null filed_at sorts after every dated one, with and without a limit', async () => {
+        const all = await auth.get('/intake').query({ state: 'filed' });
+        const keys = keysOf(all.body);
+        const dated = all.body.filter((i) => i.filed_at !== null).length;
+        expect(keys.indexOf('filed-undated')).toBeGreaterThan(keys.indexOf('filed'));
+        expect(all.body.slice(0, dated).every((i) => i.filed_at !== null)).toBe(true);
+
+        const limited = await auth.get('/intake').query({ state: 'filed', limit: dated + 1 });
+        expect(limited.body).toHaveLength(dated + 1);
+        expect(limited.body[dated].id).toBe(ids['filed-undated']);
+      });
+
+      test('?limit=2 with no state returns the two most recently logged items', async () => {
+        const res = await auth.get('/intake').query({ limit: 2 });
+        expect(res.status).toBe(200);
+        const all = await auth.get('/intake');
+        expect(res.body.map((i) => i.id)).toEqual(all.body.slice(0, 2).map((i) => i.id));
+      });
+
+      test('?active=true drops filed and finalized items and keeps every other state, a stale request included', async () => {
+        const res = await auth.get('/intake').query({ active: 'true' });
+        expect(res.status).toBe(200);
+        const keys = keysOf(res.body);
+        expect(keys).toEqual(expect.arrayContaining(['pool', 'fresh-request', 'stale-request', 'overdue', 'reviewed']));
+        mine(res.body).forEach((i) => expect(['filed', 'finalized']).not.toContain(i.effective_state));
+        expect(keys).not.toContain('filed');
+        expect(keys).not.toContain('finalized');
+      });
+
+      test('?active=false is the same as no parameter', async () => {
+        const [withFalse, without] = [await auth.get('/intake').query({ active: 'false' }), await auth.get('/intake')];
+        expect(withFalse.status).toBe(200);
+        expect(withFalse.body.map((i) => i.id)).toEqual(without.body.map((i) => i.id));
+      });
+
+      test('?active=true&state=filed is an empty list, not a 400', async () => {
+        const res = await auth.get('/intake').query({ active: 'true', state: 'filed' });
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual([]);
+      });
+
+      test('?active=true&awaiting_acceptance=true returns only items satisfying both', async () => {
+        const res = await auth.get('/intake').query({ active: 'true', awaiting_acceptance: 'true' });
+        expect(res.status).toBe(200);
+        expect(keysOf(res.body)).toEqual(['reviewed']);
+        const alone = await auth.get('/intake').query({ awaiting_acceptance: 'true' });
+        expect(keysOf(alone.body)).toContain('reviewed');
+      });
+
+      test.each([
+        ['limit=0', { limit: '0' }],
+        ['limit=101', { limit: '101' }],
+        ['limit=abc', { limit: 'abc' }],
+        ['active=maybe', { active: 'maybe' }],
+      ])('?%s is a 400', async (_case, query) => {
+        const res = await auth.get('/intake').query(query);
+        expect(res.status).toBe(400);
+      });
+    });
+
     test('?state=bogus is a 400', async () => {
       const res = await auth.get('/intake').query({ state: 'bogus' });
       expect(res.status).toBe(400);
