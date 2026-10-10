@@ -39,6 +39,9 @@ import {
   listReviewRevisions,
   listReviews,
 } from '../../../apps/backend/services/reviews.service';
+import { FILED_STATES } from '../../../apps/backend/services/intake.service';
+import fs from 'fs';
+import path from 'path';
 import { sql } from 'drizzle-orm';
 import { reviews } from '../../../shared/database/src/schema';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -112,10 +115,54 @@ describe('review reads (BS#2805)', () => {
 
   // BS#3075: one fragment decides in_use, on_cover, deleteReview and printedCopies, so the supersession lives in it and nowhere else.
   test('latestPrintOfCopy lets a print with no item count only while its release does not have exactly one filed or finalized copy', () => {
-    const { sql: text } = new PgDialect().sqlToQuery(sql`${latestPrintOfCopy(sql`${reviews.id}`)}`);
+    const { sql: text, params } = new PgDialect().sqlToQuery(sql`${latestPrintOfCopy(sql`${reviews.id}`)}`);
     expect(flat(text)).toContain(
-      'AND ("p"."intake_item_id" IS NOT NULL OR (SELECT count(*) FROM "wxyc_schema"."intake_items" AS oc WHERE oc.album_id = "p"."album_id" AND oc.state IN (\'filed\', \'finalized\')) <> 1) AND NOT EXISTS'
+      'AND ("p"."intake_item_id" IS NOT NULL OR (SELECT count(*) FROM "wxyc_schema"."intake_items" AS oc WHERE oc.album_id = "p"."album_id" AND oc.state IN ($1, $2)) <> 1) AND NOT EXISTS'
     );
+    expect(params).toEqual(FILED_STATES);
+  });
+
+  // `in_use` is built when reviews.service loads, so the stubbed set is installed before the module under test is required.
+  test('every filed-state fragment follows FILED_STATES', async () => {
+    let isolated!: typeof import('../../../apps/backend/services/reviews.service');
+    await jest.isolateModulesAsync(async () => {
+      const intake = await import('../../../apps/backend/services/intake.service');
+      intake.FILED_STATES.splice(0, intake.FILED_STATES.length, 'reviewed', 'pool', 'checked_out');
+      isolated = await import('../../../apps/backend/services/reviews.service');
+    });
+    const dialect = new PgDialect();
+    const print = dialect.sqlToQuery(sql`${isolated.latestPrintOfCopy(sql`${reviews.id}`)}`);
+    expect(print.sql).toContain('oc.state IN ($1, $2, $3)');
+    expect(print.params).toEqual(['reviewed', 'pool', 'checked_out']);
+    expect(dialect.sqlToQuery(sql`${isolated.reviewInReleaseList(9)}`).params).toEqual([
+      9,
+      9,
+      'reviewed',
+      'pool',
+      'checked_out',
+    ]);
+    mockCaptured.length = 0;
+    await isolated.listReviews({ album_id: 9 }, ACTOR);
+    const { sql: text, params } = mockCaptured[0];
+    // in_use's print, on_cover's accepted half, releaseCopies, on_cover's print (the count), and the membership rule.
+    expect(text.match(/\.state IN \(\$\d+, \$\d+, \$\d+\)/g)).toHaveLength(5);
+    expect(params.filter((v) => v === 'reviewed')).toHaveLength(5);
+    expect(params.filter((v) => v === 'filed' || v === 'finalized')).toHaveLength(0);
+  });
+
+  test('no filed/finalized literal is spelled in the services outside the FILED_STATES declaration', () => {
+    const dir = path.join(__dirname, '../../../apps/backend/services');
+    const offenders = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.ts'))
+      .flatMap((f) =>
+        fs
+          .readFileSync(path.join(dir, f), 'utf8')
+          .split('\n')
+          .filter((line) => /'filed',\s*'finalized'/.test(line) && !line.includes('export const FILED_STATES'))
+          .map((line) => `${f}: ${line.trim()}`)
+      );
+    expect(offenders).toEqual([]);
   });
 
   test('the album list reaches that rule through the same fragment for on_cover, and in_use through it too', async () => {

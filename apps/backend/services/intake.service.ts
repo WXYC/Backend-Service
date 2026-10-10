@@ -50,6 +50,18 @@ export type IntakeItemState = (typeof intakeItemStateEnum.enumValues)[number];
 /** States past which an item is catalogued, so it can no longer be edited or deleted. */
 export const FILED_STATES: IntakeItemState[] = ['filed', 'finalized'];
 
+/**
+ * "`column` is a filed or finalized state" for a raw `sql` fragment, rendered `column IN ($1, $2)` from `FILED_STATES`
+ * (read at call time). Drizzle reads use `inArray(..., FILED_STATES)`; every hand-written fragment uses this, so no
+ * spelling of the set can drift from it. `latestPrintOfCopy` (reads) and `lockOnlyCopy` (writes) must agree on what a
+ * copy is, and both go through `FILED_STATES`.
+ */
+export const filedStateSql = (column: SQL): SQL =>
+  sql`${column} IN (${sql.join(
+    FILED_STATES.map((state) => sql`${state}`),
+    sql`, `
+  )})`;
+
 /** Columns the contract's `IntakeItem` does not carry: the audit columns. */
 const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by']);
 
@@ -425,7 +437,7 @@ export const writeAcceptance = (
       accepted_review_id: reviewId,
       accepted_by: actor.id,
       accepted_at: sql`now()`,
-      state: sql`CASE WHEN ${intake_items.state} IN ('filed', 'finalized') THEN ${intake_items.state} ELSE 'reviewed' END`,
+      state: sql`CASE WHEN ${filedStateSql(sql`${intake_items.state}`)} THEN ${intake_items.state} ELSE 'reviewed' END`,
       ...CLEAR_REQUEST,
     })
     .where(eq(intake_items.id, itemId));

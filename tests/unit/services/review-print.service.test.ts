@@ -279,9 +279,9 @@ describe('printReleaseReview (BS#2865)', () => {
     const dialect = new PgDialect();
     const [reviewWhere] = wheres.map((w) => dialect.sqlToQuery(w)).filter((q) => q.sql.includes('"reviews"."id"'));
     expect(reviewWhere.sql).toBe(
-      '("wxyc_schema"."reviews"."id" = $1 and ("wxyc_schema"."reviews"."album_id" = $2 OR "wxyc_schema"."reviews"."album_id" IN (SELECT ci.cited_album_id FROM "wxyc_schema"."intake_items" AS ci WHERE ci.album_id = $3 AND ci.state IN (\'filed\', \'finalized\') AND ci.cited_album_id IS NOT NULL)))'
+      '("wxyc_schema"."reviews"."id" = $1 and ("wxyc_schema"."reviews"."album_id" = $2 OR "wxyc_schema"."reviews"."album_id" IN (SELECT ci.cited_album_id FROM "wxyc_schema"."intake_items" AS ci WHERE ci.album_id = $3 AND ci.state IN ($4, $5) AND ci.cited_album_id IS NOT NULL)))'
     );
-    expect(reviewWhere.params).toEqual([3, 12, 12]);
+    expect(reviewWhere.params).toEqual([3, 12, 12, 'filed', 'finalized']);
   });
 
   it('names the release’s displayed artist on the slip: its alternate artist name when set, else the artist’s name', async () => {
@@ -411,8 +411,8 @@ describe('reviewInReleaseList (BS#2865)', () => {
   it('matches the release’s own reviews and those of a release a filed or finalized copy cites', () => {
     const { sql: text, params } = new PgDialect().sqlToQuery(reviewInReleaseList(12));
     expect(text).toBe(
-      '("wxyc_schema"."reviews"."album_id" = $1 OR "wxyc_schema"."reviews"."album_id" IN (SELECT ci.cited_album_id FROM "wxyc_schema"."intake_items" AS ci WHERE ci.album_id = $2 AND ci.state IN (\'filed\', \'finalized\') AND ci.cited_album_id IS NOT NULL))'
+      '("wxyc_schema"."reviews"."album_id" = $1 OR "wxyc_schema"."reviews"."album_id" IN (SELECT ci.cited_album_id FROM "wxyc_schema"."intake_items" AS ci WHERE ci.album_id = $2 AND ci.state IN ($3, $4) AND ci.cited_album_id IS NOT NULL))'
     );
-    expect(params).toEqual([12, 12]);
+    expect(params).toEqual([12, 12, 'filed', 'finalized']);
   });
 });
