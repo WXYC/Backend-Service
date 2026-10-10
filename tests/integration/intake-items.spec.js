@@ -286,14 +286,25 @@ describe('/intake (BS#2796)', () => {
         await seed('filed-new', filedRow(minutesAgo(10), { logged_at: daysAgo(40) }));
         await seed('filed-mid', filedRow(minutesAgo(20), { logged_at: daysAgo(35) }));
         await seed('filed-old', filedRow(minutesAgo(30), { logged_at: daysAgo(5) }));
-        await seed('filed-tie-a', filedRow(minutesAgo(40)));
-        await seed('filed-tie-b', filedRow(minutesAgo(40)));
+        // One shared filed_at, and the higher id logged earlier: id descending (tie-b first) agrees with neither insertion order nor logged_at descending (both tie-a first).
+        const tiedFiledAt = minutesAgo(40);
+        await seed('filed-tie-a', filedRow(tiedFiledAt, { logged_at: daysAgo(10) }));
+        await seed('filed-tie-b', filedRow(tiedFiledAt, { logged_at: daysAgo(20) }));
         await seed('filed-undated', filedRow(null, { logged_at: daysAgo(1) }));
-        await seed('finalized-new', {
+        // Filed most recently, but logged earliest and with the lower id; finalized-b is filed earlier, logged later, with the higher id. filed_at order is a, b, 'finalized'; logged_at order is b, 'finalized', a; id order is b, a, 'finalized'.
+        await seed('finalized-a', {
           state: 'finalized',
           album_id: libraryId,
           filed_at: minutesAgo(5),
           finalized_at: minutesAgo(4),
+          logged_at: daysAgo(50),
+        });
+        await seed('finalized-b', {
+          state: 'finalized',
+          album_id: libraryId,
+          filed_at: minutesAgo(15),
+          finalized_at: minutesAgo(14),
+          logged_at: daysAgo(3),
         });
         await seed('reviewed', { state: 'reviewed', logged_at: daysAgo(6) });
         await seedReview({ intake_item_id: ids['reviewed'], review: 'A submitted review' });
@@ -317,23 +328,21 @@ describe('/intake (BS#2796)', () => {
         expect(keys.indexOf('filed')).toBeGreaterThan(keys.indexOf('filed-tie-a'));
       });
 
-      test('?state=finalized is ordered by filed_at descending too', async () => {
+      test('?state=finalized is ordered by filed_at descending too, whatever the logged_at and id order', async () => {
         const res = await auth.get('/intake').query({ state: 'finalized' });
         expect(res.status).toBe(200);
-        const keys = keysOf(res.body);
-        expect(keys.slice(0, 2)).toEqual(['finalized-new', 'finalized']);
+        expect(keysOf(res.body)).toEqual(['finalized-a', 'finalized-b', 'finalized']);
       });
 
-      test('a filed item with a null filed_at sorts after every dated one, with and without a limit', async () => {
-        const all = await auth.get('/intake').query({ state: 'filed' });
-        const keys = keysOf(all.body);
-        const dated = all.body.filter((i) => i.filed_at !== null).length;
-        expect(keys.indexOf('filed-undated')).toBeGreaterThan(keys.indexOf('filed'));
-        expect(all.body.slice(0, dated).every((i) => i.filed_at !== null)).toBe(true);
-
-        const limited = await auth.get('/intake').query({ state: 'filed', limit: dated + 1 });
-        expect(limited.body).toHaveLength(dated + 1);
-        expect(limited.body[dated].id).toBe(ids['filed-undated']);
+      test('a filed item with a null filed_at sorts after every dated one', async () => {
+        // The NULLS LAST clause itself is pinned in the unit SQL test; a limited read cannot be scoped to this file's rows, so only the unlimited list is asserted here.
+        const res = await auth.get('/intake').query({ state: 'filed' });
+        expect(res.status).toBe(200);
+        const firstNull = res.body.findIndex((i) => i.filed_at === null);
+        expect(res.body.slice(0, firstNull).every((i) => i.filed_at !== null)).toBe(true);
+        expect(res.body.slice(firstNull).every((i) => i.filed_at === null)).toBe(true);
+        expect(res.body.map((i) => i.id)).toContain(ids['filed-undated']);
+        expect(res.body.findIndex((i) => i.id === ids['filed-undated'])).toBeGreaterThanOrEqual(firstNull);
       });
 
       test('?limit=2 with no state returns the two most recently logged items', async () => {
