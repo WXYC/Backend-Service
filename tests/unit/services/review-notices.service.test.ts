@@ -54,6 +54,7 @@ import {
   assignedLine,
   musicDirectorEmails,
   notifyAccount,
+  notifyDigitalTaken,
   notifyFccChanged,
   notifyFccNoteReported,
   notifyPass,
@@ -283,6 +284,41 @@ describe('notices', () => {
       subject: 'Request passed: Juana Molina – DOGA',
       text: `${body}\n${URL}`,
       html: `<p>${body}</p>${LINK}`,
+    });
+  });
+
+  // The station's copy of 2026-10-11 (BS#3102), pinned byte for byte: the taker is named by staff name and their account address is the line's last words.
+  describe('the digital-taken notice', () => {
+    const ITEM_4 = { id: 4, artist: 'Juana Molina', album: 'DOGA' };
+    const TAKER = { name: 'Test Taker', email: 'taker@example.org' };
+
+    test('goes to every music director but the taker, in the decided copy, from one lookup of the taker', async () => {
+      mockQueue.push([TAKER], DIRECTORS);
+      await notifyDigitalTaken(ITEM_4, 'md-1');
+      const body = 'Test Taker took Juana Molina – DOGA to review. Send the files to taker@example.org.';
+      expect(mockSelected[0]).toEqual({ name: expect.anything(), email: user.email });
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(sent()).toEqual({
+        to: ['md-two@example.org'],
+        subject: 'Send the files: Juana Molina – DOGA',
+        text: `${body}\n${URL}`,
+        html: `<p>${body}</p>${LINK}`,
+      });
+    });
+
+    test.each([
+      ['finds no account', []],
+      ['fails', new Error('db down')],
+    ])('sends nothing and reports it when the taker lookup %s', async (_how, lookup) => {
+      jest.spyOn(console, 'error').mockImplementation(() => {});
+      mockQueue.push(lookup, DIRECTORS);
+      await expect(notifyDigitalTaken(ITEM_4, 'md-1')).resolves.toBeUndefined();
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(mockCapture).toHaveBeenCalledTimes(1);
+      expect(mockCapture).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { subsystem: 'review-notices' },
+        extra: { item_id: 4 },
+      });
     });
   });
 
