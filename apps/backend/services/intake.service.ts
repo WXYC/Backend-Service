@@ -476,7 +476,9 @@ export const transitionIntakeItem = async (action: IntakeAction, id: number, act
 /**
  * The accept's one write, for a caller that already holds the item (and the review) locked in the order `acceptReview` uses and has
  * checked that the review belongs to the record: the review becomes the item's accepted one, an unfiled item becomes `reviewed`
- * (a filed or finalized one keeps its state), and a pending request is withdrawn. The holder is untouched.
+ * (a filed or finalized one keeps its state), and a pending request is withdrawn. The holder is untouched, with one exception: a digital
+ * album has no disc to return, so taking it is a claim to review it, and the claim ends here (`checked_out_by` and `checked_out_at` cleared in
+ * the same update; BS#3101). A disc keeps its holder.
  */
 export const writeAcceptance = (
   tx: Pick<typeof db, 'update'>,
@@ -491,6 +493,8 @@ export const writeAcceptance = (
       accepted_by: actor.id,
       accepted_at: sql`now()`,
       state: sql`CASE WHEN ${filedStateSql(sql`${intake_items.state}`)} THEN ${intake_items.state} ELSE 'reviewed' END`,
+      checked_out_by: sql`CASE WHEN ${intake_items.digital} THEN NULL ELSE ${intake_items.checked_out_by} END`,
+      checked_out_at: sql`CASE WHEN ${intake_items.digital} THEN NULL ELSE ${intake_items.checked_out_at} END`,
       ...CLEAR_REQUEST,
     })
     .where(eq(intake_items.id, itemId));
