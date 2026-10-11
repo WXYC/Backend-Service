@@ -296,7 +296,10 @@ describe('notices', () => {
       mockQueue.push([TAKER], DIRECTORS);
       await notifyDigitalTaken(ITEM_4, 'md-1');
       const body = 'Test Taker took Juana Molina – DOGA to review. Send the files to taker@example.org.';
-      expect(mockSelected[0]).toEqual({ name: expect.anything(), email: user.email });
+      expect(Object.keys(mockSelected[0])).toEqual(['name', 'email']);
+      expect(mockSelected[0].email).toBe(user.email);
+      // The fragment's values are Postgres's; staff-name.test.ts pins them. Here the lookup must select the fragment, not `user.name` or `user.realName`.
+      expect(renderField(mockSelected[0].name)).toBe(renderField(staffNameSql(user)));
       expect(mockSend).toHaveBeenCalledTimes(1);
       expect(sent()).toEqual({
         to: ['md-two@example.org'],

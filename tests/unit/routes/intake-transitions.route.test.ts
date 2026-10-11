@@ -36,7 +36,11 @@ jest.mock('@wxyc/database', () => ({
   intakeItemStateEnum: jest.requireActual('../../../shared/database/src/schema').intakeItemStateEnum,
 }));
 const mockNotifyPass = jestGlobals.fn<(...args: any[]) => Promise<void>>();
-jest.mock('../../../apps/backend/services/review-notices.service', () => ({ notifyPass: mockNotifyPass }));
+const mockNotifyDigital = jestGlobals.fn<(...args: any[]) => Promise<void>>();
+jest.mock('../../../apps/backend/services/review-notices.service', () => ({
+  notifyPass: mockNotifyPass,
+  notifyDigitalTaken: mockNotifyDigital,
+}));
 jest.mock('../../../apps/backend/services/intake.service', () => ({
   transitionIntakeItem: mockTransition,
   memberAccount: mockMemberAccount,
@@ -79,6 +83,7 @@ beforeEach(() => {
   mockTransition.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM });
   mockMemberAccount.mockReset().mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
   mockNotifyPass.mockReset();
+  mockNotifyDigital.mockReset();
 });
 
 describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
@@ -90,6 +95,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual(ITEM);
     expect(mockNotifyPass).toHaveBeenCalledTimes(action === 'pass' ? 1 : 0);
+    expect(mockNotifyDigital).not.toHaveBeenCalled();
     expect(mockTransition).toHaveBeenCalledWith(
       action,
       7,
@@ -123,6 +129,43 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
       const res = await post(path, body);
       expect([res.status, res.body]).toEqual([200, item]);
       expect(mockNotifyPass).toHaveBeenCalledWith({ id: 7, artist: 'Juana Molina', album: 'DOGA' }, 'caller-id');
+    }, 2000);
+  }
+
+  // A digital item (BS#3102) is taken only by checkout and accept; nothing else may start the notice.
+  const takes = action === 'checkout' || action === 'accept';
+  test(`${takes ? 'starts' : 'never starts'} the digital notice for an updated digital item`, async () => {
+    mockRole('stationManager');
+    const item = { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA', digital: true };
+    mockTransition.mockResolvedValueOnce({ outcome: 'updated', item });
+    const res = await post(path, body);
+    expect([res.status, res.body]).toEqual([200, item]);
+    expect(mockNotifyDigital).toHaveBeenCalledTimes(takes ? 1 : 0);
+    if (takes) {
+      expect(mockNotifyDigital).toHaveBeenCalledWith({ id: 7, artist: 'Juana Molina', album: 'DOGA' }, 'caller-id');
+    }
+  });
+
+  if (takes) {
+    test('a disc sends no digital notice', async () => {
+      mockRole('stationManager');
+      mockTransition.mockResolvedValueOnce({
+        outcome: 'updated',
+        item: { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA', digital: false },
+      });
+      expect((await post(path, body)).status).toBe(200);
+      expect(mockNotifyDigital).not.toHaveBeenCalled();
+    });
+
+    // A hung SES must not hold a take that already committed.
+    test('a digital notice that never settles does not hold the response', async () => {
+      mockRole('dj');
+      const item = { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA', digital: true };
+      mockTransition.mockResolvedValueOnce({ outcome: 'updated', item });
+      mockNotifyDigital.mockReturnValueOnce(new Promise<void>(() => {}));
+      const res = await post(path, body);
+      expect([res.status, res.body]).toEqual([200, item]);
+      expect(mockNotifyDigital).toHaveBeenCalledWith({ id: 7, artist: 'Juana Molina', album: 'DOGA' }, 'caller-id');
     }, 2000);
   }
 
