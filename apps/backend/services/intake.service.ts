@@ -4,6 +4,7 @@ import {
   db,
   extractConstraintName,
   extractSqlState,
+  format,
   intake_item_passes,
   intake_items,
   intakeItemStateEnum,
@@ -105,6 +106,9 @@ export type IntakeFields = Pick<
   'artist_name' | 'album_title' | 'record_label' | 'label_id' | 'format_id' | 'discogs_release_id'
 >;
 
+/** What `POST /intake` carries: a digital album has no `format_id` of its own, the service stores the CD-R format's. */
+export type NewIntakeFields = Omit<IntakeFields, 'format_id'> & { format_id?: number; digital?: boolean };
+
 /** The two citation kinds, mutually exclusive (the table's CHECK); `null` clears one. */
 export type IntakeCitations = Pick<NewIntakeItem, 'cited_album_id' | 'cited_submission_id'>;
 
@@ -182,12 +186,24 @@ export const getIntakeItem = async (id: number, includePasses: boolean): Promise
 const isUnknownReference = (error: unknown) =>
   extractSqlState(error) === '23503' && !extractConstraintName(error)?.includes('logged_by');
 
-/** Logs an item into `pool`; `logged_at` takes its column default. `unknown_reference` is a `format_id`/`label_id` FK miss (23503). */
-export const logIntakeItem = async (fields: IntakeFields, loggedBy: string) => {
+/** Logs an item into `pool`; `logged_at` takes its column default. `unknown_reference` is a `format_id`/`label_id` FK miss (23503); `no_cdr_format` is a digital album with no `cdr` format row to store (nothing written). */
+export const logIntakeItem = async (fields: NewIntakeFields, loggedBy: string) => {
+  let formatId = fields.format_id;
+  if (fields.digital) {
+    // Matched by lower-cased name, as the library ETL matches formats.
+    const [cdr] = await db
+      .select({ id: format.id })
+      .from(format)
+      .where(sql`lower(${format.format_name}) = 'cdr'`)
+      .orderBy(format.id)
+      .limit(1);
+    if (!cdr) return { outcome: 'no_cdr_format' as const };
+    formatId = cdr.id;
+  }
   try {
     const [{ id }] = await db
       .insert(intake_items)
-      .values({ ...fields, logged_by: loggedBy })
+      .values({ ...fields, format_id: formatId as number, logged_by: loggedBy })
       .returning({ id: intake_items.id });
     return { outcome: 'logged' as const, item: (await getIntakeItem(id, true))! };
   } catch (error) {
@@ -299,6 +315,16 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
 
 export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
   const query = buildIntakePatch(id, patch); // throws the 400 before any write
+  if (patch.format_id !== undefined) {
+    // `digital` never changes, so reading it ahead of the write cannot race; a filed item still answers `already_filed`.
+    const [row] = await db
+      .select({ digital: intake_items.digital, state: intake_items.state })
+      .from(intake_items)
+      .where(eq(intake_items.id, id));
+    if (row?.digital && !FILED_STATES.includes(row.state)) {
+      throw new WxycError('format_id cannot be changed on a digital album: its format is CD-R until it is filed', 400);
+    }
+  }
   try {
     const rows = await query;
     if (rows.length === 0) {

@@ -333,10 +333,23 @@ describe('/intake/:id and bodies', () => {
         record_label: 'Sonamos',
         label_id: undefined,
         format_id: 1,
+        digital: false,
         discogs_release_id: undefined,
       },
       'test-user-id'
     );
+  });
+
+  test('POST digital: true with no format_id reaches the service without one', async () => {
+    const res = await bearer(request(app).post('/intake').send({ artist_name: 'a', album_title: 'b', digital: true }));
+    expect(res.status).toBe(200);
+    expect(mockLogIntakeItem.mock.calls[0][0]).toMatchObject({ digital: true, format_id: undefined });
+  });
+
+  test('POST digital with no cdr format is a 409 carrying a code', async () => {
+    mockLogIntakeItem.mockResolvedValue({ outcome: 'no_cdr_format' });
+    const res = await bearer(request(app).post('/intake').send({ artist_name: 'a', album_title: 'b', digital: true }));
+    expect([res.status, res.body.code]).toEqual([409, 'no_cdr_format']);
   });
 
   test.each([
@@ -345,6 +358,9 @@ describe('/intake/:id and bodies', () => {
     ['over-length artist_name', { ...NEW_ITEM, artist_name: 'x'.repeat(129) }],
     ['over-length record_label', { ...NEW_ITEM, record_label: 'x'.repeat(129) }],
     ['missing format_id', { artist_name: 'a', album_title: 'b' }],
+    ['digital: false with no format_id', { artist_name: 'a', album_title: 'b', digital: false }],
+    ['digital: true with a format_id', { ...NEW_ITEM, digital: true }],
+    ['a non-boolean digital', { ...NEW_ITEM, digital: 'true' }],
     ['non-integer format_id', { ...NEW_ITEM, format_id: 1.5 }],
     ['string label_id', { ...NEW_ITEM, label_id: '3' }],
     ['discogs_release_id past int4', { ...NEW_ITEM, discogs_release_id: 2147483648 }],

@@ -185,6 +185,19 @@ describe('POST /intake/:id/file (BS#2803)', () => {
     });
   });
 
+  describe('digital items (BS#3100)', () => {
+    test('filing a digital item leaves digital true and files it under the request body’s format', async () => {
+      const { item } = await reviewedItem('digital', { digital: true });
+
+      const res = await fileNew(item.id);
+
+      expect(res.status).toBe(200);
+      expect(res.body.digital).toBe(true);
+      const after = await itemRow(item.id);
+      expect([after.state, after.digital]).toEqual(['filed', true]);
+    });
+  });
+
   describe('existing release', () => {
     test('stamps without inserting a library row, and clears the holder', async () => {
       const release = await seedLibraryRelease({ artist_name: PREFIX, album_title: `${PREFIX} existing` });

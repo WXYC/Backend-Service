@@ -458,6 +458,89 @@ describe('/intake (BS#2796)', () => {
       expect(res.status).toBe(400);
     });
 
+    describe('digital albums (BS#3100)', () => {
+      const rowOf = async (id) => (await sql.unsafe(`SELECT * FROM "${SCHEMA}".intake_items WHERE id = $1`, [id]))[0];
+      const countMine = async () =>
+        Number(
+          (
+            await sql.unsafe(`SELECT count(*) FROM "${SCHEMA}".intake_items WHERE artist_name = $1`, [
+              `${PREFIX} digital`,
+            ])
+          )[0].count
+        );
+      const cdrId = async () =>
+        (await sql.unsafe(`SELECT id FROM "${SCHEMA}".format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`))[0]
+          .id;
+      const body = (extra) => ({ artist_name: `${PREFIX} digital`, album_title: 'Files', ...extra });
+
+      test.each([
+        ['digital with no format_id stores the CD-R format', { digital: true }, 200, { digital: true, cdr: true }],
+        ['digital with a format_id', { digital: true, format_id: 1 }, 400, null],
+        ['neither digital nor format_id', {}, 400, null],
+        ['digital: false with no format_id', { digital: false }, 400, null],
+        [
+          'digital: false with a format_id behaves as before',
+          { digital: false, format_id: 1 },
+          200,
+          { digital: false },
+        ],
+        ['a non-boolean digital', { digital: 'yes' }, 400, null],
+      ])('POST: %s', async (_name, extra, status, stored) => {
+        const before = await countMine();
+        const res = await auth.post('/intake').send(body(extra));
+        expect(res.status).toBe(status);
+        if (!stored) return expect(await countMine()).toBe(before);
+        expect(res.body.digital).toBe(stored.digital);
+        const row = await rowOf(res.body.id);
+        expect(row.digital).toBe(stored.digital);
+        expect(row.format_id).toBe(stored.cdr ? await cdrId() : 1);
+      });
+
+      test('POST digital with no cdr format row is a 409 ApiErrorResponse and writes nothing', async () => {
+        const id = await cdrId();
+        await sql.unsafe(
+          `UPDATE "${SCHEMA}".format SET format_name = format_name || '-renamed' WHERE lower(format_name) = 'cdr'`
+        );
+        try {
+          const before = await countMine();
+          const res = await auth.post('/intake').send(body({ digital: true }));
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({ code: 'no_cdr_format' });
+          expect(typeof res.body.message).toBe('string');
+          expect(await countMine()).toBe(before);
+        } finally {
+          await sql.unsafe(
+            `UPDATE "${SCHEMA}".format SET format_name = regexp_replace(format_name, '-renamed$', '') WHERE id = $1`,
+            [id]
+          );
+        }
+      });
+
+      test('GET /intake and GET /intake/:id return digital, true and false', async () => {
+        const digital = (await auth.post('/intake').send(body({ digital: true }))).body;
+        const disc = ids.pool;
+        expect((await auth.get(`/intake/${digital.id}`)).body.digital).toBe(true);
+        expect((await auth.get(`/intake/${disc}`)).body.digital).toBe(false);
+        const list = mine(await auth.get('/intake').then((r) => r.body));
+        expect(list.find((i) => i.id === digital.id).digital).toBe(true);
+        expect(list.find((i) => i.id === disc).digital).toBe(false);
+      });
+
+      test('PATCH with format_id on a digital item is a 400 and changes nothing; on a disc item it applies', async () => {
+        const digitalId = await seed('digital-patch', { digital: true, format_id: await cdrId() });
+        const before = await rowOf(digitalId);
+        const refused = await auth.patch(`/intake/${digitalId}`).send({ album_title: 'Changed', format_id: formatId });
+        expect(refused.status).toBe(400);
+        expect(await rowOf(digitalId)).toEqual(before);
+        expect((await auth.patch(`/intake/${digitalId}`).send({ album_title: 'Changed' })).status).toBe(200);
+
+        const discId = await seed('disc-patch');
+        const applied = await auth.patch(`/intake/${discId}`).send({ format_id: formatId });
+        expect(applied.status).toBe(200);
+        expect(applied.body.format_id).toBe(formatId);
+      });
+    });
+
     // REVIEW_GATE_CUTOVER_DATE is deliberately unset here (setting it would break every spec that creates releases, BS#2807): any existing release or submission is citable. The cutover-date arms are pinned in the unit tier.
     describe('PATCH citations (BS#2797), cutover unset', () => {
       const citationsOf = async (id) =>

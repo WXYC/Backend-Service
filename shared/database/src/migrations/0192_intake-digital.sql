@@ -1,0 +1,3 @@
+-- BS#3100: an intake item can be a digital album (it arrived as files, and is burned onto CD-R once its review is chosen). `format_id` still holds the CD-R format; this flag records that no disc exists yet. DEFAULT false is the backfill: every existing row is a disc.
+-- DDL-only: a constant default on PG11+ rewrites nothing.
+ALTER TABLE "wxyc_schema"."intake_items" ADD COLUMN "digital" boolean DEFAULT false NOT NULL;
