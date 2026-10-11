@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/node';
 import { eq, sql, type SQL } from 'drizzle-orm';
-import { db, intake_items, member, readStaffName, staffNameSql, user } from '@wxyc/database';
+import { db, intake_items, member, readStaffName, snapshotAuthor, staffNameSql, user } from '@wxyc/database';
 import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
 import type { FccNoteResponse } from './fcc-notes.service.js';
 import { effectiveState, type IntakeItemState } from './intake.service.js';
@@ -219,6 +219,35 @@ export const notifyPass = async (item: { id: number; artist: string; album: stri
     subject: `Request passed: ${record(item.artist, item.album)}`,
     lines: [`${dj ?? 'A DJ'} passed on the request for ${record(item.artist, item.album)}. Any DJ can take it now.`],
   });
+};
+
+/**
+ * A DJ took a digital album (BS#3102): the music directors, but not the taker, are told to send the files to the taker's
+ * account address. The name and address come from one lookup; with no account or a failed lookup nothing is sent and the
+ * failure is reported, because the line is useless without the address.
+ */
+export const notifyDigitalTaken = async (item: { id: number; artist: string; album: string }, takerUserId: string) => {
+  const context = { item_id: item.id };
+  let taker: { name: string | null; email: string } | undefined;
+  try {
+    [taker] = await db
+      .select({ name: staffNameSql(user), email: user.email })
+      .from(user)
+      .where(eq(user.id, takerUserId));
+    if (!taker) throw new Error('The taker of a digital album has no account');
+  } catch (err) {
+    return reportFailure(err, context);
+  }
+  const what = record(item.artist, item.album);
+  return notifyMusicDirectors(
+    {
+      links: [itemLink(item.id)],
+      context,
+      subject: `Send the files: ${what}`,
+      lines: [`${snapshotAuthor(taker.name) ?? 'A DJ'} took ${what} to review. Send the files to ${taker.email}.`],
+    },
+    { excludeUserIds: [takerUserId] }
+  );
 };
 
 /** What the create hands back for the FCC-note notice: the note, the record it is on, and the reporter's user id. */
