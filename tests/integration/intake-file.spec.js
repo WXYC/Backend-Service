@@ -187,14 +187,22 @@ describe('POST /intake/:id/file (BS#2803)', () => {
 
   describe('digital items (BS#3100)', () => {
     test('filing a digital item leaves digital true and files it under the request body’s format', async () => {
-      const { item } = await reviewedItem('digital', { digital: true });
+      // The item holds the CD-R format, as `POST /intake` stores it; the body names a different one, so a filing that took the item's format would differ.
+      const [{ id: cdrFormatId }] = await sql`
+        SELECT id FROM ${sql(SCHEMA)}.format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`;
+      const body = newRelease(uniqueSuffix());
+      expect(cdrFormatId).not.toBe(body.release.format_id);
+      const { item } = await reviewedItem('digital', { digital: true, format_id: cdrFormatId });
 
-      const res = await fileNew(item.id);
+      const res = await file(item.id, body);
+      if (res.status === 200) filedAlbumIds.push(res.body.album_id);
 
       expect(res.status).toBe(200);
       expect(res.body.digital).toBe(true);
       const after = await itemRow(item.id);
       expect([after.state, after.digital]).toEqual(['filed', true]);
+      const [filed] = await sql`SELECT format_id FROM ${sql(SCHEMA)}.library WHERE id = ${after.album_id}`;
+      expect(filed.format_id).toBe(body.release.format_id);
     });
   });
 

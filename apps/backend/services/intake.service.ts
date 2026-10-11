@@ -106,8 +106,11 @@ export type IntakeFields = Pick<
   'artist_name' | 'album_title' | 'record_label' | 'label_id' | 'format_id' | 'discogs_release_id'
 >;
 
-/** What `POST /intake` carries: a digital album has no `format_id` of its own, the service stores the CD-R format's. */
-export type NewIntakeFields = Omit<IntakeFields, 'format_id'> & { format_id?: number; digital?: boolean };
+/** What `POST /intake` carries for its kind: a digital album has no `format_id` of its own (the service stores the CD-R format's), and a disc must have one. */
+export type NewIntakeKind = { digital: true; format_id?: undefined } | { digital?: false; format_id: number };
+
+/** What `POST /intake` carries, so the compiler holds every caller to the kind rule: a disc create without a `format_id` does not compile. */
+export type NewIntakeFields = Omit<IntakeFields, 'format_id'> & NewIntakeKind;
 
 /** The two citation kinds, mutually exclusive (the table's CHECK); `null` clears one. */
 export type IntakeCitations = Pick<NewIntakeItem, 'cited_album_id' | 'cited_submission_id'>;
@@ -186,24 +189,33 @@ export const getIntakeItem = async (id: number, includePasses: boolean): Promise
 const isUnknownReference = (error: unknown) =>
   extractSqlState(error) === '23503' && !extractConstraintName(error)?.includes('logged_by');
 
+/**
+ * The CD-R format a digital album is stored under: the lowest id among the formats whose lower-cased `format_name` is `cdr`
+ * (matched by lower-cased name, as the library ETL matches formats; `format_name` has no unique constraint, so the order makes a tie deterministic).
+ * Built apart from `logIntakeItem` so a test can render it.
+ */
+export const buildCdrFormatLookup = () =>
+  db
+    .select({ id: format.id })
+    .from(format)
+    .where(sql`lower(${format.format_name}) = 'cdr'`)
+    .orderBy(format.id)
+    .limit(1);
+
 /** Logs an item into `pool`; `logged_at` takes its column default. `unknown_reference` is a `format_id`/`label_id` FK miss (23503); `no_cdr_format` is a digital album with no `cdr` format row to store (nothing written). */
 export const logIntakeItem = async (fields: NewIntakeFields, loggedBy: string) => {
-  let formatId = fields.format_id;
+  let formatId: number;
   if (fields.digital) {
-    // Matched by lower-cased name, as the library ETL matches formats.
-    const [cdr] = await db
-      .select({ id: format.id })
-      .from(format)
-      .where(sql`lower(${format.format_name}) = 'cdr'`)
-      .orderBy(format.id)
-      .limit(1);
+    const [cdr] = await buildCdrFormatLookup();
     if (!cdr) return { outcome: 'no_cdr_format' as const };
     formatId = cdr.id;
+  } else {
+    formatId = fields.format_id;
   }
   try {
     const [{ id }] = await db
       .insert(intake_items)
-      .values({ ...fields, format_id: formatId as number, logged_by: loggedBy })
+      .values({ ...fields, format_id: formatId, logged_by: loggedBy })
       .returning({ id: intake_items.id });
     return { outcome: 'logged' as const, item: (await getIntakeItem(id, true))! };
   } catch (error) {

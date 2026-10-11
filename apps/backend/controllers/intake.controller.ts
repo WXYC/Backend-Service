@@ -7,6 +7,7 @@ import type {
   IntakeFields,
   IntakeItemState,
   NewIntakeFields,
+  NewIntakeKind,
 } from '../services/intake.service.js';
 import {
   completeLibraryFiling,
@@ -59,28 +60,48 @@ const parseDigital = (raw: unknown): boolean => {
   return raw;
 };
 
-/** The varchar(128) trio plus the two nullable ids; `undefined` means "not supplied". */
-const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partial<IntakeFields> & IntakeCitations => {
-  const required = (key: 'artist_name' | 'album_title') =>
-    body[key] === undefined && !requireAll ? undefined : validateTextField(body[key], key, TEXT_MAX);
+/** `format_id` and `digital` on `POST /intake`: a digital album carries no `format_id` (the service stores the CD-R format's), a disc must. */
+const parseKind = (body: Record<string, unknown>): NewIntakeKind => {
   const format_id = parseInt4BodyId(body.format_id, 'format_id');
-  // `digital` is a create-only field (the contract's PATCH has no `digital`), so a patch body's is ignored.
-  const digital = requireAll ? parseDigital(body.digital) : undefined;
-  if (digital && format_id !== undefined) throw new WxycError('format_id must be omitted when digital is true', 400);
-  if (requireAll && !digital && format_id === undefined) throw new WxycError('format_id is required', 400);
+  const digital = parseDigital(body.digital);
+  if (digital) {
+    if (format_id !== undefined) throw new WxycError('format_id must be omitted when digital is true', 400);
+    return { digital, format_id };
+  }
+  if (format_id === undefined) throw new WxycError('format_id is required', 400);
+  return { digital, format_id };
+};
+
+/** The three optional logging columns, parsed the same way on create and on patch; `undefined` means "not supplied". */
+const parseOptionals = (body: Record<string, unknown>) => ({
+  record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
+  label_id: parseInt4BodyId(body.label_id, 'label_id', { nullable: true }),
+  discogs_release_id: parseInt4BodyId(body.discogs_release_id, 'discogs_release_id', { nullable: true }),
+});
+
+/** The `POST /intake` body: both names are required, and the kind rule is in the return type, so no cast is needed downstream. A new item starts uncited. */
+const parseNewFields = (body: Record<string, unknown>): NewIntakeFields => {
+  const kind = parseKind(body);
   return {
-    ...(requireAll && { digital }),
-    artist_name: required('artist_name'),
-    album_title: required('album_title'),
-    record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
-    label_id: parseInt4BodyId(body.label_id, 'label_id', { nullable: true }),
+    ...kind,
+    artist_name: validateTextField(body.artist_name, 'artist_name', TEXT_MAX),
+    album_title: validateTextField(body.album_title, 'album_title', TEXT_MAX),
+    ...parseOptionals(body),
+  };
+};
+
+/** The `PATCH /intake/{id}` body: any subset; `undefined` means "not supplied". `digital` is create-only (the contract's PATCH has no `digital`), so a patch body's is ignored. */
+const parsePatchFields = (body: Record<string, unknown>): Partial<IntakeFields> & IntakeCitations => {
+  const optionalText = (key: 'artist_name' | 'album_title') =>
+    body[key] === undefined ? undefined : validateTextField(body[key], key, TEXT_MAX);
+  const format_id = parseInt4BodyId(body.format_id, 'format_id');
+  return {
+    artist_name: optionalText('artist_name'),
+    album_title: optionalText('album_title'),
+    ...parseOptionals(body),
     format_id,
-    discogs_release_id: parseInt4BodyId(body.discogs_release_id, 'discogs_release_id', { nullable: true }),
-    // Citations are set by PATCH only; a new item starts uncited.
-    ...(!requireAll && {
-      cited_album_id: parseInt4BodyId(body.cited_album_id, 'cited_album_id', { nullable: true }),
-      cited_submission_id: parseInt4BodyId(body.cited_submission_id, 'cited_submission_id', { nullable: true }),
-    }),
+    cited_album_id: parseInt4BodyId(body.cited_album_id, 'cited_album_id', { nullable: true }),
+    cited_submission_id: parseInt4BodyId(body.cited_submission_id, 'cited_submission_id', { nullable: true }),
   };
 };
 
@@ -123,7 +144,7 @@ export const getIntake: RequestHandler<{ id: string }> = async (req, res) => {
 };
 
 export const logIntake: RequestHandler = async (req, res) => {
-  const fields = parseFields(req.body ?? {}, true) as NewIntakeFields;
+  const fields = parseNewFields(req.body ?? {});
   const result = await intakeService.logIntakeItem(fields, (req.auth?.id ?? req.auth?.sub) as string);
   if (result.outcome === 'no_cdr_format') {
     throw new WxycError('The format list has no CD-R format to store a digital album under', 409, {
@@ -136,7 +157,7 @@ export const logIntake: RequestHandler = async (req, res) => {
 
 export const patchIntake: RequestHandler<{ id: string }> = async (req, res) => {
   const body = req.body ?? {};
-  const patch = Object.fromEntries(Object.entries(parseFields(body, false)).filter(([, v]) => v !== undefined));
+  const patch = Object.fromEntries(Object.entries(parsePatchFields(body)).filter(([, v]) => v !== undefined));
   if (patch.cited_album_id != null && patch.cited_submission_id != null) {
     throw new WxycError('cited_album_id and cited_submission_id cannot both be set', 400);
   }
