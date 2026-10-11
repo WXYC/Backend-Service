@@ -98,7 +98,12 @@ describe('/intake accept-review (BS#2860)', () => {
     });
 
     describe('a digital album (BS#3101): choosing its review ends the DJ’s claim', () => {
-      const heldDigital = (key, overrides = {}) => held(key, { digital: true, ...overrides });
+      // `POST /intake` stores a digital album under the CD-R format, so the seeds do too.
+      const cdrFormatId = async () =>
+        (await sql.unsafe(`SELECT id FROM "${SCHEMA}".format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`))[0]
+          .id;
+      const heldDigital = async (key, overrides = {}) =>
+        held(key, { digital: true, format_id: await cdrFormatId(), ...overrides });
       const acceptedDigital = async (key) => {
         const out = await heldDigital(key);
         const review = await reviewOn({ intake_item_id: out.id });
@@ -111,6 +116,11 @@ describe('/intake accept-review (BS#2860)', () => {
         const review = await reviewOn({ intake_item_id: out.id });
         const res = await accept(out.id, review.id);
         expect([res.status, res.body.state, res.body.overdue]).toEqual([200, 'reviewed', false]);
+        expect([res.body.checked_out_by, res.body.checked_out_at, res.body.checked_out_by_name]).toEqual([
+          null,
+          null,
+          null,
+        ]);
         const after = await itemRow(out.id);
         expect([after.state, after.checked_out_by, after.checked_out_at]).toEqual(['reviewed', null, null]);
       });
@@ -139,6 +149,7 @@ describe('/intake accept-review (BS#2860)', () => {
       test('a pending request is still withdrawn', async () => {
         const requested = await item('digital-requested', {
           digital: true,
+          format_id: await cdrFormatId(),
           state: 'requested',
           requested_dj_id: global.secondary_dj_id,
           requested_at: now(),

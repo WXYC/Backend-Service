@@ -510,7 +510,8 @@ export const writeAcceptance = (
  * on a non-null id: two NULL `album_id`s must never match. A missing review, a draft and another record's review
  * answer one `bad_review`, so a draft's existence is not revealed. Every effective state has an answer, so there is no
  * conflict outcome: the item becomes `reviewed` unless filed or finalized, which only swap the pointer; a pending
- * request is withdrawn; the holder is untouched.
+ * request is withdrawn; the holder is untouched, except for a digital album, whose claim ends here (`checked_out_by` and `checked_out_at`
+ * cleared, since nothing was lent out; BS#3101).
  */
 export const acceptReview = async (id: number, reviewId: number, actor: ReviewsActor) => {
   const outcome = await db.transaction(async (tx) => {
