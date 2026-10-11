@@ -18,8 +18,8 @@ export type NoticeItem = {
 
 /**
  * The four cases of the assigned line. A record is out when `checked_out_at` is set (epic decision 38) and its
- * holder is `checked_out_by`, which is NULL once that DJ's account is deleted — still out, never the pool. A live
- * request (effective state `requested`) is held by the requested DJ; an expired one reads as the pool. An author
+ * holder is `checked_out_by`, which is NULL once that DJ's account is deleted — still out, never the review shelf. A live
+ * request (effective state `requested`) is held by the requested DJ; an expired one reads as the review shelf. An author
  * with no linked account is never the holder.
  */
 export const assignedLine = (
