@@ -7,14 +7,22 @@ const mockTransition = jest.fn<(...args: unknown[]) => unknown>();
 const mockNotifyDigital = jest.fn<(...args: unknown[]) => Promise<void>>();
 const mockNotifyPass = jest.fn<(...args: unknown[]) => Promise<void>>();
 
-jest.mock('../../../apps/backend/services/intake.service', () => ({ transitionIntakeItem: mockTransition }));
+const mockMemberAccount = jest.fn<(...args: unknown[]) => Promise<unknown>>();
+
+jest.mock('../../../apps/backend/services/intake.service', () => ({
+  transitionIntakeItem: mockTransition,
+  memberAccount: mockMemberAccount,
+}));
 jest.mock('../../../apps/backend/services/review-notices.service', () => ({
   notifyPass: mockNotifyPass,
   notifyDigitalTaken: mockNotifyDigital,
 }));
 jest.mock('../../../apps/backend/services/review-print.service', () => ({ printIntakeItem: jest.fn() }));
 jest.mock('../../../apps/backend/services/library-filing.service', () => ({}));
-jest.mock('../../../apps/backend/utils/review-grants', () => ({ reviewsActor: () => ({ id: 'dj-1', manage: false }) }));
+jest.mock('../../../apps/backend/utils/review-grants', () => ({
+  reviewsActor: () => ({ id: 'dj-1', manage: false }),
+  canBeAskedToReview: () => true,
+}));
 
 import type { Request, Response } from 'express';
 import { acceptIntake, checkoutIntake } from '../../../apps/backend/controllers/intake.controller';
@@ -31,6 +39,7 @@ const call = async (handler: typeof checkoutIntake, result: object) => {
 beforeEach(() => {
   jest.clearAllMocks();
   mockNotifyDigital.mockResolvedValue(undefined);
+  mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
 });
 
 describe.each([
@@ -63,8 +72,19 @@ describe.each([
   });
 });
 
-test('the other transitions never start the digital notice', async () => {
-  const { releaseIntake } = await import('../../../apps/backend/controllers/intake.controller');
-  await call(releaseIntake, { outcome: 'updated', item: item(true) });
+test.each([
+  ['release', 'releaseIntake'],
+  ['request', 'requestIntake'],
+  ['cancel request', 'cancelIntakeRequest'],
+  ['pass', 'passIntake'],
+] as const)('%s never starts the digital notice, even for an updated digital item', async (_name, exported) => {
+  const handlers = await import('../../../apps/backend/controllers/intake.controller');
+  mockTransition.mockResolvedValue({ outcome: 'updated', item: item(true) });
+  await handlers[exported](
+    { params: { id: '4' }, body: { dj_id: 'dj-2' } } as unknown as Request<{ id: string }>,
+    respond(),
+    jest.fn()
+  );
+  expect(mockTransition).toHaveBeenCalledTimes(1);
   expect(mockNotifyDigital).not.toHaveBeenCalled();
 });
