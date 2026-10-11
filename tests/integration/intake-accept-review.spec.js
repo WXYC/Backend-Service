@@ -97,6 +97,59 @@ describe('/intake accept-review (BS#2860)', () => {
       expect(kept.checked_out_at).not.toBeNull();
     });
 
+    describe('a digital album (BS#3101): choosing its review ends the DJ’s claim', () => {
+      const heldDigital = (key, overrides = {}) => held(key, { digital: true, ...overrides });
+      const acceptedDigital = async (key) => {
+        const out = await heldDigital(key);
+        const review = await reviewOn({ intake_item_id: out.id });
+        expect((await accept(out.id, review.id)).status).toBe(200);
+        return { out, review };
+      };
+
+      test('accept clears the holder and checkout time, and the item is reviewed and not overdue', async () => {
+        const out = await heldDigital('digital-accept', { checked_out_at: daysAgo(20) });
+        const review = await reviewOn({ intake_item_id: out.id });
+        const res = await accept(out.id, review.id);
+        expect([res.status, res.body.state, res.body.overdue]).toEqual([200, 'reviewed', false]);
+        const after = await itemRow(out.id);
+        expect([after.state, after.checked_out_by, after.checked_out_at]).toEqual(['reviewed', null, null]);
+      });
+
+      test('a disc keeps its holder (the digital condition is what clears it)', async () => {
+        const out = await held('disc-keeps', { digital: false });
+        await accept(out.id, (await reviewOn({ intake_item_id: out.id })).id);
+        const after = await itemRow(out.id);
+        expect([after.state, after.checked_out_by]).toEqual(['reviewed', global.primary_dj_id]);
+        expect(after.checked_out_at).not.toBeNull();
+      });
+
+      test('a music director’s release of the accepted item is 409 state_changed', async () => {
+        const { out } = await acceptedDigital('digital-release');
+        const res = await manager.post(`/intake/${out.id}/release`);
+        expect([res.status, res.body.reason]).toEqual([409, 'state_changed']);
+      });
+
+      test('deleting the accepted review returns the item to the review shelf', async () => {
+        const { out, review } = await acceptedDigital('digital-delete');
+        expect((await manager.delete(`/reviews/${review.id}`)).status).toBe(204);
+        const after = await itemRow(out.id);
+        expect([after.state, after.checked_out_by, after.accepted_review_id]).toEqual(['pool', null, null]);
+      });
+
+      test('a pending request is still withdrawn', async () => {
+        const requested = await item('digital-requested', {
+          digital: true,
+          state: 'requested',
+          requested_dj_id: global.secondary_dj_id,
+          requested_at: now(),
+        });
+        const review = await reviewOn({ intake_item_id: requested.id });
+        expect((await accept(requested.id, review.id)).status).toBe(200);
+        const after = await itemRow(requested.id);
+        expect([after.state, after.requested_dj_id, after.requested_at]).toEqual(['reviewed', null, null]);
+      });
+    });
+
     test('accepting again swaps the pointer and leaves the state', async () => {
       const pooled = await item('swap');
       const first = await reviewOn({ intake_item_id: pooled.id });

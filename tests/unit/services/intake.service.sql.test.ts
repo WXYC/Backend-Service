@@ -38,6 +38,7 @@ import {
   buildTransition,
   deleteIntakeItem,
   RELEASE_ACCEPTED_REVIEW,
+  writeAcceptance,
   refusalOutcome,
   reviewAuthorsSql,
   submittedReviewCount,
@@ -706,7 +707,8 @@ describe('acceptReview (BS#2860)', () => {
       requested_dj_id: null,
       requested_at: null,
     });
-    expect(Object.keys(sets[0])).not.toEqual(expect.arrayContaining(['checked_out_by', 'checked_out_at']));
+    // The holder columns are written only through the digital guard (BS#3101), pinned in the writeAcceptance block below.
+    expect(Object.keys(sets[0])).toEqual(expect.arrayContaining(['checked_out_by', 'checked_out_at']));
   });
 
   it.each([['the item is missing', { cited: null, item: undefined }, 'not_found']])('%s', async () => {
@@ -876,5 +878,20 @@ describe('digital albums (BS#3100)', () => {
     if (status) return expect(update).rejects.toMatchObject({ statusCode: status });
     // Past the digital check the write itself runs, and the never-connected db rejects it for another reason.
     await expect(update).rejects.not.toMatchObject({ statusCode: 400 });
+  });
+});
+
+describe('writeAcceptance — a digital album has no disc, so choosing its review ends the claim (BS#3101)', () => {
+  const text = (writeAcceptance(db, 1, 2, { id: 'u' }) as unknown as { toSQL: () => { sql: string } })
+    .toSQL()
+    .sql.toLowerCase();
+
+  it('clears the holder only where the item is digital, in the same statement', () => {
+    expect(text).toMatch(
+      /"checked_out_by" = case when (?:"[a-z_]+"\.)*"digital" then null else (?:"[a-z_]+"\.)*"checked_out_by" end/
+    );
+    expect(text).toMatch(
+      /"checked_out_at" = case when (?:"[a-z_]+"\.)*"digital" then null else (?:"[a-z_]+"\.)*"checked_out_at" end/
+    );
   });
 });
