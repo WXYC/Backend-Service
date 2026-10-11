@@ -5592,7 +5592,7 @@ paths:
         '403':
           description: 'Caller lacks `reviews: read`'
     post:
-      summary: Log an item into the intake pool (BS#2796)
+      summary: Log an item onto the review shelf (BS#2796)
       description: 'Grant `reviews: manage`. Stamps `logged_by` and `logged_at`; the item starts in `pool`.'
       requestBody:
         required: true
@@ -5727,7 +5727,7 @@ paths:
         schema:
           type: integer
     post:
-      summary: Check an item out of the pool (BS#2798)
+      summary: Check an item off the review shelf (BS#2798)
       description: >-
         Grant `reviews: write`. From effective `pool` (an expired request included) to `checked_out`, stamping `checked_out_by` and `checked_out_at` and clearing any stale request fields. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
       responses:
@@ -5793,7 +5793,7 @@ paths:
         schema:
           type: integer
     post:
-      summary: Request a DJ review a pooled item (BS#2798)
+      summary: Request a DJ review an item on the review shelf (BS#2798)
       description: >-
         Grant `reviews: manage`. From effective `pool` to `requested`, stamping `requested_dj_id` and `requested_at`. Re-requesting a DJ who already passed is allowed. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
       requestBody:
