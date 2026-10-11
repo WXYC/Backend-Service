@@ -94,6 +94,8 @@ async function removeSeededAuthUsers() {
  * defaults (a WXYC-representative artist/album and fixture format). Returns the inserted row.
  * The id is recorded for `removeSeededIntakeItems`.
  *
+ * `overrides.digital: true` seeds a digital album; pass the CD-R format's id as `format_id` with it, as `POST /intake` stores.
+ *
  * `overrides.checkout` is `{ by, at }`: it writes `checked_out_by` and `checked_out_at` together, because a checkout
  * is `checked_out_at` (epic decision 38) and a held item carries both. `at` defaults to the database's `now()`; `by:
  * null` is honored, for a test of a removed holder. `at: null` with a holder given throws, because that shape (a

@@ -514,6 +514,10 @@ components:
         record_label: { type: string, nullable: true, maxLength: 128 }
         label_id: { type: integer, nullable: true }
         format_id: { type: integer }
+        digital:
+          type: boolean
+          description: >-
+            True when the album reached the station as files, not a disc. `format_id` is then the CD-R format from the moment it is logged. It stays true after filing.
         discogs_release_id: { type: integer, nullable: true }
         state: { $ref: '#/components/schemas/IntakeItemState' }
         effective_state: { $ref: '#/components/schemas/IntakeItemState' }
@@ -573,10 +577,20 @@ components:
         format_id: { type: integer }
         discogs_release_id: { type: integer, nullable: true }
 
+    NewIntakeItemRequest:
+      description: >-
+        `POST /intake` body: the logging fields plus `digital`. `format_id` is required unless `digital` is true and must be omitted when it is, because the server then stores the CD-R format itself.
+      allOf:
+        - $ref: '#/components/schemas/IntakeItemFields'
+        - type: object
+          properties:
+            digital:
+              { type: boolean, description: 'True when the album reached the station as files. Defaults to false.' }
+
     IntakeItemPatch:
       type: object
       description: >-
-        Any subset of the `IntakeItemFields`, plus setting or clearing the citation. `cited_album_id` and
+        Any subset of the `IntakeItemFields`, plus setting or clearing the citation. `digital` is not a patch field, and a `format_id` is refused with a 400 on an item whose `digital` is true. `cited_album_id` and
         `cited_submission_id` are mutually exclusive as non-null values: a patch may not carry both non-null, but
         may set one while clearing the other. Setting one citation clears the other, so the single-key form
         `{cited_submission_id: 12}` is the canonical switch.
@@ -5599,7 +5613,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/IntakeItemFields'
+              $ref: '#/components/schemas/NewIntakeItemRequest'
       responses:
         '200':
           description: 'The logged item'
@@ -5608,11 +5622,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/IntakeItem'
         '400':
-          description: 'Validation failure, or an unknown `format_id`/`label_id`'
+          description: 'Validation failure, an unknown `format_id`/`label_id`, `digital` true with a `format_id`, or neither `digital` nor a `format_id`'
         '401':
           description: 'Authentication required'
         '403':
           description: 'Caller lacks `reviews: manage`'
+        '409':
+          description: '`digital` is true and the server has no format named `cdr` to store (`code: no_cdr_format`); nothing is written'
 
   /intake/{id}:
     parameters:
@@ -5667,7 +5683,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/IntakeItem'
         '400':
-          description: 'Validation failure, both citations set, or no editable field'
+          description: 'Validation failure, both citations set, no editable field, or a `format_id` sent for an item whose `digital` is true'
         '401':
           description: 'Authentication required'
         '403':

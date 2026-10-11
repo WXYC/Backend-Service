@@ -3002,6 +3002,8 @@ export const intake_items = wxyc_schema.table(
     format_id: integer('format_id')
       .references(() => format.id)
       .notNull(),
+    // An album that arrived as files: `format_id` is the CD-R format, burned once its review is chosen. Never cleared.
+    digital: boolean('digital').notNull().default(false),
     discogs_release_id: integer('discogs_release_id'),
     state: intakeItemStateEnum('state').notNull().default('pool'),
     logged_by: varchar('logged_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),

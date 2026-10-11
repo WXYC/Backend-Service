@@ -1,7 +1,13 @@
 import { intakeItemStateEnum } from '@wxyc/database';
 import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
-import type { IntakeAction, IntakeCitations, IntakeFields, IntakeItemState } from '../services/intake.service.js';
+import type {
+  IntakeAction,
+  IntakeCitations,
+  IntakeFields,
+  IntakeItemState,
+  NewIntakeFields,
+} from '../services/intake.service.js';
 import {
   completeLibraryFiling,
   planLibraryFiling,
@@ -46,13 +52,24 @@ const parseLimit = (raw: unknown): number | undefined => {
   return limit;
 };
 
+/** `digital` on `POST /intake`: absent means a disc; anything but a boolean is a 400. */
+const parseDigital = (raw: unknown): boolean => {
+  if (raw === undefined) return false;
+  if (typeof raw !== 'boolean') throw new WxycError('digital must be a boolean', 400);
+  return raw;
+};
+
 /** The varchar(128) trio plus the two nullable ids; `undefined` means "not supplied". */
 const parseFields = (body: Record<string, unknown>, requireAll: boolean): Partial<IntakeFields> & IntakeCitations => {
   const required = (key: 'artist_name' | 'album_title') =>
     body[key] === undefined && !requireAll ? undefined : validateTextField(body[key], key, TEXT_MAX);
   const format_id = parseInt4BodyId(body.format_id, 'format_id');
-  if (requireAll && format_id === undefined) throw new WxycError('format_id is required', 400);
+  // `digital` is a create-only field (the contract's PATCH has no `digital`), so a patch body's is ignored.
+  const digital = requireAll ? parseDigital(body.digital) : undefined;
+  if (digital && format_id !== undefined) throw new WxycError('format_id must be omitted when digital is true', 400);
+  if (requireAll && !digital && format_id === undefined) throw new WxycError('format_id is required', 400);
   return {
+    ...(requireAll && { digital }),
     artist_name: required('artist_name'),
     album_title: required('album_title'),
     record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
@@ -106,8 +123,13 @@ export const getIntake: RequestHandler<{ id: string }> = async (req, res) => {
 };
 
 export const logIntake: RequestHandler = async (req, res) => {
-  const fields = parseFields(req.body ?? {}, true) as IntakeFields;
+  const fields = parseFields(req.body ?? {}, true) as NewIntakeFields;
   const result = await intakeService.logIntakeItem(fields, (req.auth?.id ?? req.auth?.sub) as string);
+  if (result.outcome === 'no_cdr_format') {
+    throw new WxycError('The format list has no CD-R format to store a digital album under', 409, {
+      code: 'no_cdr_format',
+    });
+  }
   if (result.outcome === 'unknown_reference') throw new WxycError('format_id or label_id does not exist', 400);
   res.json(result.item);
 };

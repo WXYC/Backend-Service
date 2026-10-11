@@ -31,6 +31,7 @@ import { createLockLog } from '../../utils/lock-log-builder';
 import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-cutover';
 import {
   updateIntakeItem,
+  logIntakeItem,
   buildIntakePatch,
   buildIntakeSelect,
   buildTransition,
@@ -821,5 +822,43 @@ describe('memberAccount (BS#3076) — the request path reads the username the sh
 
   it('answers no roles and a null username for an account with no membership', async () => {
     expect((await run([])).result).toEqual({ roles: [], username: null, email: null });
+  });
+});
+
+describe('digital albums (BS#3100)', () => {
+  const selectChain = (rows: unknown[]) => {
+    const chain: Record<string, unknown> = {};
+    for (const m of ['from', 'where', 'orderBy', 'limit']) chain[m] = jest.fn(() => chain);
+    chain.then = (resolve: (v: unknown[]) => unknown) => Promise.resolve(rows).then(resolve);
+    return chain;
+  };
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('selects the digital column on every intake read', () => {
+    expect(render({ includePasses: false }).sql).toContain(`"${SCHEMA}"."intake_items"."digital"`);
+  });
+
+  it('logs a digital album under no format and writes nothing when there is no cdr format row', async () => {
+    jest.spyOn(db, 'select').mockReturnValue(selectChain([]) as never);
+    const insert = jest.spyOn(db, 'insert');
+    await expect(
+      logIntakeItem({ artist_name: 'Juana Molina', album_title: 'DOGA', digital: true }, 'u1')
+    ).resolves.toEqual({
+      outcome: 'no_cdr_format',
+    });
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a digital item', { digital: true, state: 'pool' }, 400],
+    ['a filed digital item', { digital: true, state: 'filed' }, undefined],
+    ['a disc item', { digital: false, state: 'pool' }, undefined],
+  ])('PATCH format_id on %s', async (_name, row, status) => {
+    jest.spyOn(db, 'select').mockReturnValue(selectChain([row]) as never);
+    const update = updateIntakeItem(1, { format_id: 2 });
+    if (status) return expect(update).rejects.toMatchObject({ statusCode: status });
+    // Past the digital check the write itself runs, and the never-connected db rejects it for another reason.
+    await expect(update).rejects.not.toMatchObject({ statusCode: 400 });
   });
 });

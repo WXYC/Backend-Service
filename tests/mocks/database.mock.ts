@@ -647,6 +647,7 @@ export const intake_items = {
   record_label: 'intake_items.record_label',
   label_id: 'intake_items.label_id',
   format_id: 'intake_items.format_id',
+  digital: 'intake_items.digital',
   discogs_release_id: 'intake_items.discogs_release_id',
   state: 'intake_items.state',
   logged_by: 'intake_items.logged_by',
