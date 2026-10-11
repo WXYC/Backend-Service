@@ -497,10 +497,11 @@ describe('/intake (BS#2796)', () => {
       });
 
       test('POST digital with no cdr format row is a 409 ApiErrorResponse and writes nothing', async () => {
-        const id = await cdrId();
-        await sql.unsafe(
-          `UPDATE "${SCHEMA}".format SET format_name = format_name || '-renamed' WHERE lower(format_name) = 'cdr'`
-        );
+        // Every row the lookup would match is renamed, so every one is restored: the ids come back from the UPDATE itself.
+        const renamed = (
+          await sql`UPDATE ${sql(SCHEMA)}.format SET format_name = format_name || '-renamed' WHERE lower(format_name) = 'cdr' RETURNING id`
+        ).map((row) => row.id);
+        expect(renamed.length).toBeGreaterThan(0);
         try {
           const before = await countMine();
           const res = await auth.post('/intake').send(body({ digital: true }));
@@ -509,10 +510,7 @@ describe('/intake (BS#2796)', () => {
           expect(typeof res.body.message).toBe('string');
           expect(await countMine()).toBe(before);
         } finally {
-          await sql.unsafe(
-            `UPDATE "${SCHEMA}".format SET format_name = regexp_replace(format_name, '-renamed$', '') WHERE id = $1`,
-            [id]
-          );
+          await sql`UPDATE ${sql(SCHEMA)}.format SET format_name = regexp_replace(format_name, '-renamed$', '') WHERE id = ANY(${renamed})`;
         }
       });
 
@@ -534,10 +532,16 @@ describe('/intake (BS#2796)', () => {
         expect(await rowOf(digitalId)).toEqual(before);
         expect((await auth.patch(`/intake/${digitalId}`).send({ album_title: 'Changed' })).status).toBe(200);
 
+        // A format other than the one the item holds, so a PATCH that dropped `format_id` for disc items would leave the stored value as it was.
+        const [{ id: otherFormatId }] = await sql.unsafe(
+          `SELECT id FROM "${SCHEMA}".format WHERE id <> $1 ORDER BY id LIMIT 1`,
+          [formatId]
+        );
         const discId = await seed('disc-patch');
-        const applied = await auth.patch(`/intake/${discId}`).send({ format_id: formatId });
+        const applied = await auth.patch(`/intake/${discId}`).send({ format_id: otherFormatId });
         expect(applied.status).toBe(200);
-        expect(applied.body.format_id).toBe(formatId);
+        expect(applied.body.format_id).toBe(otherFormatId);
+        expect((await rowOf(discId)).format_id).toBe(otherFormatId);
       });
     });
 

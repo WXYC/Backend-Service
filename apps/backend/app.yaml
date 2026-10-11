@@ -489,7 +489,7 @@ components:
     IntakeItem:
       type: object
       description: >
-        One physical copy logged for a DJ review (BS#2796). `effective_state`
+        One record a music director logged and that is waiting for a review (BS#2791): either a disc the station holds, or an album that arrived as files (`digital`), which a music director burns onto CD-R once its review is chosen. `effective_state`
         equals `state` except a `requested` item whose request is more than 7
         days old, or whose `requested_dj_id` is null (the DJ's account was
         deleted), reads as `pool`; `overdue` is true for an item whose checkout
@@ -568,7 +568,7 @@ components:
 
     IntakeItemFields:
       type: object
-      description: The logging fields. `POST` requires `artist_name`, `album_title` and `format_id`; `PATCH` takes any subset.
+      description: The logging fields. `POST` requires `artist_name` and `album_title`, and `format_id` unless `digital` is true (see `NewIntakeItemRequest`); `PATCH` takes any subset.
       properties:
         artist_name: { type: string, maxLength: 128 }
         album_title: { type: string, maxLength: 128 }

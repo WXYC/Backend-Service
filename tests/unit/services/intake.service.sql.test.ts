@@ -32,6 +32,7 @@ import { reviewGateCutoverDate } from '../../../apps/backend/utils/review-gate-c
 import {
   updateIntakeItem,
   logIntakeItem,
+  buildCdrFormatLookup,
   buildIntakePatch,
   buildIntakeSelect,
   buildTransition,
@@ -837,6 +838,21 @@ describe('digital albums (BS#3100)', () => {
 
   it('selects the digital column on every intake read', () => {
     expect(render({ includePasses: false }).sql).toContain(`"${SCHEMA}"."intake_items"."digital"`);
+  });
+
+  // `format_name` has no unique constraint and a music director can add any name, so the match is by lower-cased name and a tie goes to the lowest id.
+  describe('the CD-R format lookup', () => {
+    const { sql: text, params } = buildCdrFormatLookup().toSQL();
+    const f = `"${SCHEMA}"."format"`;
+
+    it('matches the name lower-cased, so CDR and Cdr are the CD-R format', () => {
+      expect(text).toContain(`where lower(${f}."format_name") = 'cdr'`);
+    });
+
+    it('takes the lowest id among the matches, so a tie is deterministic', () => {
+      expect(text.endsWith(`order by ${f}."id" limit $1`)).toBe(true);
+      expect(params).toEqual([1]);
+    });
   });
 
   it('logs a digital album under no format and writes nothing when there is no cdr format row', async () => {
