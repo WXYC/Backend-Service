@@ -82,7 +82,7 @@ const stationStatement = {
   // to `member` the next time `catalog: read` is re-granted for an unrelated
   // reason.
   digital_archive: ['listen'],
-  // `reviews` gates the in-app review workflow (ADR 0006): the pile, checkout,
+  // `reviews` gates the in-app review workflow (ADR 0006): the review shelf, checkout,
   // accept/pass, and authoring for DJs; logging, release, delete, and editing
   // any review for musicDirector and stationManager. Opens at `dj`, so
   // first-semester DJs review records as part of their assignments. Its own

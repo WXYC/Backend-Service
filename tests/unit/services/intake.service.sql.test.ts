@@ -584,7 +584,7 @@ describe('RELEASE_ACCEPTED_REVIEW — the one UPDATE that takes a review off eve
     expect(rendered.params.slice(0, 3)).toEqual([null, null, null]);
   });
 
-  it('sends a reviewed item back to its checkout (checked_out_at set, holder account or not) else to the pool, and keeps every other state', () => {
+  it('sends a reviewed item back to its checkout (checked_out_at set, holder account or not) else to the review shelf, and keeps every other state', () => {
     expect(text).toMatch(
       /case when .*"state" = 'reviewed' and .*"checked_out_at" is not null then 'checked_out' when .*"state" = 'reviewed' then 'pool' else .*"state" end/
     );

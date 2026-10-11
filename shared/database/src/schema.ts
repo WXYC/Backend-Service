@@ -3058,7 +3058,7 @@ export const intake_items = wxyc_schema.table(
 export type IntakeItem = InferSelectModel<typeof intake_items>;
 export type NewIntakeItem = InferInsertModel<typeof intake_items>;
 
-// A DJ declining a pooled item. Gone with the item or with the DJ's account.
+// A DJ declining an item on the review shelf. Gone with the item or with the DJ's account.
 export const intake_item_passes = wxyc_schema.table(
   'intake_item_passes',
   {

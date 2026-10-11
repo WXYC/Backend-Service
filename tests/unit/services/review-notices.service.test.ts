@@ -113,9 +113,9 @@ describe('assignedLine', () => {
       null,
       { kind: 'removed_holder' },
     ],
-    ['the pool', ITEM({}), 'dj-1', { kind: 'pool' }],
+    ['the review shelf', ITEM({}), 'dj-1', { kind: 'pool' }],
     [
-      'an expired request (reads as the pool)',
+      'an expired request (reads as the review shelf)',
       ITEM({ requested_dj_id: 'dj-2', effective_state: 'pool' }),
       'dj-1',
       { kind: 'pool' },
