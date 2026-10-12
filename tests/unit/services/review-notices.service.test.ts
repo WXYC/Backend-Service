@@ -49,7 +49,7 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { db, staffNameSql, user } from '@wxyc/database';
+import { db, intake_items, staffNameSql, user } from '@wxyc/database';
 import {
   assignedLine,
   musicDirectorEmails,
@@ -152,6 +152,13 @@ describe('readReviewNotice', () => {
     expect(renderField(mockSelected[0].holder_name)).toBe(renderField(staffNameSql(user)));
   });
 
+  // The flag the notice branches on is the item's own column, not a constant or another expression (BS#3103).
+  test("reads the item's own digital column (BS#3103)", async () => {
+    mockQueue.push([]);
+    await readReviewNotice(db, 4, { author: 'Test Reviewer', author_user_id: 'dj-1' });
+    expect(renderField(mockSelected[0].digital)).toBe(renderField(intake_items.digital));
+  });
+
   test('answers the item as read, with the line decided from its holder', async () => {
     mockQueue.push([
       {
@@ -235,12 +242,14 @@ describe('notices', () => {
 
   // The station's copy of 2026-10-06 (BS#2806), pinned whole: subject, plain text (the sentences on separate
   // lines, then the full URL) and HTML (the same sentences, then the link). `{artist} – {album}` is an en dash.
-  test.each([
+  // Copy round 5 (2026-10-11, BS#3103): a digital album is taken, not checked out, so each case carries a disc and a digital second sentence. Every (case, kind) pair reports as its own row.
+  const SUBMIT_CASES: [string, string | null, ReviewNotice['line'], string, string, string][] = [
     [
       'from the holder',
       NOTICE.author,
       { kind: 'holder' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
+      'This review is from the DJ who has the record.',
       'This review is from the DJ who has the record.',
     ],
     [
@@ -249,6 +258,7 @@ describe('notices', () => {
       { kind: 'other_dj', holderName: 'Test Holder' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
       'This review is from another DJ; the record is with Test Holder.',
+      'This review is from another DJ; Test Holder has taken the record.',
     ],
     [
       "from another DJ, while the holder's name is null",
@@ -256,6 +266,7 @@ describe('notices', () => {
       { kind: 'other_dj', holderName: null },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
       'This review is from another DJ; the record is checked out to a different DJ.',
+      'This review is from another DJ; a different DJ has taken the record.',
     ],
     [
       'from another DJ, while the holder was removed',
@@ -263,6 +274,7 @@ describe('notices', () => {
       { kind: 'removed_holder' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
       "This review is from another DJ; the record is checked out and its holder's account was removed.",
+      'This review is from another DJ; the record was taken by an account that has since been removed.',
     ],
     [
       'from another DJ, while nobody has the record',
@@ -270,6 +282,7 @@ describe('notices', () => {
       { kind: 'pool' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
       'This review is from another DJ; nobody has the record checked out.',
+      'This review is from another DJ; nobody has taken the record.',
     ],
     [
       'with a null author snapshot',
@@ -277,60 +290,23 @@ describe('notices', () => {
       { kind: 'pool' },
       'A review of Juana Molina – DOGA by a DJ is waiting to be accepted.',
       'This review is from another DJ; nobody has the record checked out.',
+      'This review is from another DJ; nobody has taken the record.',
     ],
-  ] as const)('the submit email, %s, is the decided copy', async (_name, author, line, first, second) => {
+  ];
+  test.each(
+    SUBMIT_CASES.flatMap(([name, author, line, first, disc, digital]) => [
+      [`${name}, for a disc`, false, author, line, first, disc] as const,
+      [`${name}, for a digital album`, true, author, line, first, digital] as const,
+    ])
+  )('the submit email, %s, is the decided copy', async (_name, isDigital, author, line, first, second) => {
     mockQueue.push(DIRECTORS);
-    await notifyReviewSubmitted({ ...NOTICE, author, line });
+    await notifyReviewSubmitted({ ...NOTICE, author, line, digital: isDigital });
     expect(sent()).toEqual({
       to: ['md-one@example.org'],
       subject: 'Review waiting to be accepted: Juana Molina – DOGA',
       text: `${first}\n${second}\n${URL}`,
       html: `<p>${first}</p><p>${second.replace("'", '&#39;')}</p>${LINK}`,
     });
-  });
-
-  // Copy round 5 (2026-10-11, BS#3103): a digital album is taken, not checked out. The holder line is the same for both kinds.
-  test.each([
-    [
-      'from the holder',
-      { kind: 'holder' },
-      'This review is from the DJ who has the record.',
-      'This review is from the DJ who has the record.',
-    ],
-    [
-      'from another DJ, while a named DJ has the record',
-      { kind: 'other_dj', holderName: 'Test Holder' },
-      'This review is from another DJ; the record is with Test Holder.',
-      'This review is from another DJ; Test Holder has taken the record.',
-    ],
-    [
-      "from another DJ, while the holder's name is null",
-      { kind: 'other_dj', holderName: null },
-      'This review is from another DJ; the record is checked out to a different DJ.',
-      'This review is from another DJ; a different DJ has taken the record.',
-    ],
-    [
-      'from another DJ, while the holder was removed',
-      { kind: 'removed_holder' },
-      "This review is from another DJ; the record is checked out and its holder's account was removed.",
-      'This review is from another DJ; the record was taken by an account that has since been removed.',
-    ],
-    [
-      'from another DJ, while nobody has the record',
-      { kind: 'pool' },
-      'This review is from another DJ; nobody has the record checked out.',
-      'This review is from another DJ; nobody has taken the record.',
-    ],
-  ] as const)('the submit email, %s, picks the disc or the digital sentence', async (_name, line, disc, digital) => {
-    for (const [isDigital, expected] of [
-      [false, disc],
-      [true, digital],
-    ] as const) {
-      mockQueue.push(DIRECTORS);
-      mockSend.mockClear();
-      await notifyReviewSubmitted({ ...NOTICE, line, digital: isDigital });
-      expect(sent().text.split('\n')[1]).toBe(expected);
-    }
   });
 
   test.each([
