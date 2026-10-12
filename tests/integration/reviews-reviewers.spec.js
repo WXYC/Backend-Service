@@ -7,18 +7,15 @@
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
-const { getTestDb } = require('../utils/db');
 const { seedAuthUser, seedMember, removeSeededAuthUsers, managerAccessToken } = require('../utils/intake_seed');
 
 const PREFIX = 'itest-reviewers-';
 
 describe('GET /reviews/reviewers (BS#3058)', () => {
   let manager;
-  let sql;
 
   beforeAll(async () => {
     manager = createAuthRequest(request, `Bearer ${await managerAccessToken()}`);
-    sql = getTestDb();
     const accounts = [
       ['dj', 'dj', 'zed Handle', 'Zed Test Reviewer', false],
       ['md', 'musicDirector', 'bee Handle', 'bee Test Reviewer', false],

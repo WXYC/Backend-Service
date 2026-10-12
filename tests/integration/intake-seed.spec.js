@@ -150,17 +150,25 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
 
   test('seedMember writes one <userId>-m row with the role, in the oldest organization, and it goes with the user', async () => {
     const sql = getTestDb();
-    const user = await seedAuthUser();
-    const member = await seedMember(user.id, 'musicDirector');
+    // The existing organization is read before the newer one exists, by its own ORDER BY, so the seeder's query is not its own oracle.
     const [oldest] = await sql`SELECT id FROM auth_organization ORDER BY created_at ASC LIMIT 1`;
-    expect(member).toMatchObject({
-      id: `${user.id}-m`,
-      user_id: user.id,
-      role: 'musicDirector',
-      organization_id: oldest.id,
-    });
-    await removeSeededAuthUsers();
-    expect(await sql`SELECT id FROM auth_member WHERE user_id = ${user.id}`).toEqual([]);
+    const newerId = 'itest-seed-member-newer-org';
+    await sql`INSERT INTO auth_organization (id, name, slug, created_at) VALUES (${newerId}, 'ITEST newer org', ${newerId}, now() + interval '1 day')`;
+    try {
+      const user = await seedAuthUser();
+      const member = await seedMember(user.id, 'musicDirector');
+      expect(member).toMatchObject({
+        id: `${user.id}-m`,
+        user_id: user.id,
+        role: 'musicDirector',
+        organization_id: oldest.id,
+      });
+      expect(member.organization_id).not.toBe(newerId);
+      await removeSeededAuthUsers();
+      expect(await sql`SELECT id FROM auth_member WHERE user_id = ${user.id}`).toEqual([]);
+    } finally {
+      await sql`DELETE FROM auth_organization WHERE id = ${newerId}`;
+    }
   });
 
   test('only intake_seed.js selects the CD-R format by name or inserts into auth_member (intake-items.spec.js renames the row, which is not a lookup)', () => {
@@ -169,8 +177,16 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
       path.join(testsDir, 'utils', 'intake_seed.js'),
       path.join(testsDir, 'integration', 'intake-seed.spec.js'),
     ];
-    // A SELECT ... FROM format ... lower(format_name) = 'cdr' (the rename UPDATE has no FROM), or the membership INSERT.
-    const needles = [/SELECT[^;`]*?\bformat\b[^;`]*?lower\(format_name\)\s*=\s*'cdr'/i, /INSERT\s+INTO\s+auth_member/i];
+    // Two shapes: a SELECT from the format table that matches the lower-cased name against cdr, or compares it with ILIKE
+    // (the rename UPDATE has no SELECT), and the membership INSERT. Both allow a quoted or schema-qualified table or column
+    // and an alias prefix. A table name interpolated into a template cannot be caught by a text walk.
+    const column = '(?:\\w+\\.)?"?format_name"?';
+    const cdrLookup = new RegExp(
+      `SELECT[^;\`]*?\\bformat\\b[^;\`]*?(?:lower\\(\\s*${column}\\s*\\)\\s*=|${column}\\s+ILIKE)\\s*'cdr'`,
+      'i'
+    );
+    const memberInsert = /INSERT\s+INTO\s+(?:"?public"?\s*\.\s*)?"?auth_member\b/i;
+    const needles = [cdrLookup, memberInsert];
     const others = sourceFilesUnder(testsDir, [path.join(testsDir, 'report')]).filter(
       (file) => !owners.includes(file) && needles.some((needle) => needle.test(fs.readFileSync(file, 'utf8')))
     );
