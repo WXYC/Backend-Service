@@ -158,6 +158,7 @@ describe('readReviewNotice', () => {
       {
         artist: 'Juana Molina',
         album: 'DOGA',
+        digital: false,
         checked_out_at: AT,
         checked_out_by: 'dj-2',
         requested_dj_id: null,
@@ -170,8 +171,26 @@ describe('readReviewNotice', () => {
       artist: 'Juana Molina',
       album: 'DOGA',
       author: 'Test Reviewer',
+      digital: false,
       line: { kind: 'other_dj', holderName: 'Test Holder' },
     });
+  });
+
+  test.each([[true], [false]])("carries the item's digital flag (%s) with the line (BS#3103)", async (digital) => {
+    mockQueue.push([
+      {
+        artist: 'Juana Molina',
+        album: 'DOGA',
+        digital,
+        checked_out_at: null,
+        checked_out_by: null,
+        requested_dj_id: null,
+        effective_state: 'pool',
+        holder_name: null,
+      },
+    ]);
+    const notice = await readReviewNotice(db, 4, { author: 'Test Reviewer', author_user_id: 'dj-1' });
+    expect(notice?.digital).toBe(digital);
   });
 });
 
@@ -181,6 +200,7 @@ describe('notices', () => {
     artist: 'Juana Molina',
     album: 'DOGA',
     author: 'Test Reviewer',
+    digital: false,
     line: { kind: 'pool' },
   };
   const DIRECTORS = [
@@ -268,6 +288,50 @@ describe('notices', () => {
       text: `${first}\n${second}\n${URL}`,
       html: `<p>${first}</p><p>${second.replace("'", '&#39;')}</p>${LINK}`,
     });
+  });
+
+  // Copy round 5 (2026-10-11, BS#3103): a digital album is taken, not checked out. The holder line is the same for both kinds.
+  test.each([
+    [
+      'from the holder',
+      { kind: 'holder' },
+      'This review is from the DJ who has the record.',
+      'This review is from the DJ who has the record.',
+    ],
+    [
+      'from another DJ, while a named DJ has the record',
+      { kind: 'other_dj', holderName: 'Test Holder' },
+      'This review is from another DJ; the record is with Test Holder.',
+      'This review is from another DJ; Test Holder has taken the record.',
+    ],
+    [
+      "from another DJ, while the holder's name is null",
+      { kind: 'other_dj', holderName: null },
+      'This review is from another DJ; the record is checked out to a different DJ.',
+      'This review is from another DJ; a different DJ has taken the record.',
+    ],
+    [
+      'from another DJ, while the holder was removed',
+      { kind: 'removed_holder' },
+      "This review is from another DJ; the record is checked out and its holder's account was removed.",
+      'This review is from another DJ; the record was taken by an account that has since been removed.',
+    ],
+    [
+      'from another DJ, while nobody has the record',
+      { kind: 'pool' },
+      'This review is from another DJ; nobody has the record checked out.',
+      'This review is from another DJ; nobody has taken the record.',
+    ],
+  ] as const)('the submit email, %s, picks the disc or the digital sentence', async (_name, line, disc, digital) => {
+    for (const [isDigital, expected] of [
+      [false, disc],
+      [true, digital],
+    ] as const) {
+      mockQueue.push(DIRECTORS);
+      mockSend.mockClear();
+      await notifyReviewSubmitted({ ...NOTICE, line, digital: isDigital });
+      expect(sent().text.split('\n')[1]).toBe(expected);
+    }
   });
 
   test.each([
