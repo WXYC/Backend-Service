@@ -826,6 +826,17 @@ jobs:
           STATION_PASSCODE_KEY: '5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b'
         run: npm run ci:test
 
+      # Review notices (BS#2806, BS#2864, BS#3102) start after the commit and swallow every failure into
+      # `reportFailure`, so a broken lookup answers 200 and no spec fails. Their one trace is this log line;
+      # tests/integration/review-notices-lookups.spec.js drives each notice so a broken lookup writes it.
+      - name: Fail on review notice failures in the backend log
+        if: always() && env.RUN_TESTS == 'true'
+        run: |
+          if [ -f /tmp/backend.log ] && grep -n -F '[review-notices] Failed to send a review notice:' /tmp/backend.log; then
+            echo "::error::The backend reported a failed review notice (lines above)."
+            exit 1
+          fi
+
       - name: Show service logs on failure
         if: env.RUN_TESTS == 'true' && failure()
         run: |
