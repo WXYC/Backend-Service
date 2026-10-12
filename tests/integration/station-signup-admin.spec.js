@@ -37,6 +37,7 @@ jest.unmock('drizzle-orm');
 
 const path = require('path');
 const { getTestDb } = require('../utils/db');
+const { seedMember } = require('../utils/intake_seed');
 
 const distDir = path.join(__dirname, '..', '..', 'jobs', 'station-signup-review', 'dist');
 const { queryPendingSelfSignups } = require(path.join(distDir, 'query.cjs'));
@@ -108,7 +109,6 @@ describe('station-signup manager API (BS#2362, real endpoints, real Postgres)', 
   let managerCookie;
   let djCookie;
   let managerUserId;
-  let organizationId;
   /** Seeded `auth_user` ids, deleted in afterEach (auth_member CASCADEs). */
   const userIds = [];
   let previousDowngradeFlag;
@@ -130,10 +130,7 @@ describe('station-signup manager API (BS#2362, real endpoints, real Postgres)', 
       )
     `;
     userIds.push(id);
-    await sql`
-      INSERT INTO auth_member (id, organization_id, user_id, role)
-      VALUES (${`${id}-m`}, ${organizationId}, ${id}, ${memberRole})
-    `;
+    await seedMember(id, memberRole);
     return id;
   }
 
@@ -180,10 +177,6 @@ describe('station-signup manager API (BS#2362, real endpoints, real Postgres)', 
     const managerRows = await sql`SELECT id FROM auth_user WHERE username = 'test_station_manager'`;
     if (managerRows.length === 0) throw new Error('test_station_manager fixture account is missing');
     managerUserId = managerRows[0].id;
-
-    const orgs = await sql`SELECT id FROM auth_organization ORDER BY created_at ASC LIMIT 1`;
-    if (orgs.length === 0) throw new Error('No auth_organization row; cannot seed auth_member.');
-    organizationId = orgs[0].id;
 
     previousDowngradeFlag = process.env.STATION_SIGNUP_DOWNGRADE_ENABLED;
     process.env.STATION_SIGNUP_DOWNGRADE_ENABLED = 'true';

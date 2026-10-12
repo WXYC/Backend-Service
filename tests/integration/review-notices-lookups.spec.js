@@ -21,6 +21,7 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   seedAuthUser,
+  seedMember,
   removeSeededAuthUsers,
   seedIntakeItem,
   removeSeededIntakeItems,
@@ -28,7 +29,6 @@ const {
   managerAccessToken,
 } = require('../utils/intake_seed');
 
-const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-NOTICES';
 
 describe('review notices driven through HTTP (BS#3109)', () => {
@@ -36,12 +36,10 @@ describe('review notices driven through HTTP (BS#3109)', () => {
   let manager;
   let taker;
   let author;
-  let cdrFormatId;
 
-  const seedMember = async (key, role, overrides = {}) => {
+  const seedUser = async (key, role, overrides = {}) => {
     const user = await seedAuthUser({ name: `${PREFIX} ${key}`, ...overrides });
-    const [{ id: organizationId }] = await sql`SELECT id FROM auth_organization LIMIT 1`;
-    await sql`INSERT INTO auth_member (id, organization_id, user_id, role) VALUES (${`${user.id}-m`}, ${organizationId}, ${user.id}, ${role})`;
+    await seedMember(user.id, role);
     return user;
   };
   const asUser = (user) => createAuthRequest(request, `Bearer ${user.id}`);
@@ -49,7 +47,6 @@ describe('review notices driven through HTTP (BS#3109)', () => {
     seedIntakeItem({
       artist_name: `${PREFIX} ${key}`,
       album_title: `Album ${key}`,
-      format_id: cdrFormatId,
       digital: true,
       ...overrides,
     });
@@ -57,13 +54,10 @@ describe('review notices driven through HTTP (BS#3109)', () => {
   beforeAll(async () => {
     sql = getTestDb();
     manager = createAuthRequest(request, `Bearer ${await managerAccessToken()}`);
-    [{ id: cdrFormatId }] = await sql.unsafe(
-      `SELECT id FROM "${SCHEMA}".format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`
-    );
     // A music director to receive each notice (so `musicDirectorEmails` has a row to read), a DJ to take and pass, and a DJ whose review is edited.
-    await seedMember('director', 'musicDirector');
-    taker = await seedMember('taker', 'dj');
-    author = await seedMember('author', 'dj');
+    await seedUser('director', 'musicDirector');
+    taker = await seedUser('taker', 'dj');
+    author = await seedUser('author', 'dj');
   });
 
   afterAll(async () => {

@@ -35,6 +35,7 @@ jest.unmock('drizzle-orm');
 
 const path = require('path');
 const { getTestDb } = require('../utils/db');
+const { seedMember } = require('../utils/intake_seed');
 
 const distDir = path.join(__dirname, '..', '..', 'jobs', 'station-signup-review', 'dist');
 // The REAL compiled cores -- no reimplementation, so the behavior under test
@@ -50,7 +51,6 @@ const SENTINEL_AUTH_USER_ROLE = 'user';
 
 describe('station-signup-review downgrade (REAL fns, real PG)', () => {
   let sql;
-  let organizationId;
   let previousFlag;
   const userIds = [];
   const showIds = [];
@@ -78,10 +78,7 @@ describe('station-signup-review downgrade (REAL fns, real PG)', () => {
       )
     `;
     userIds.push(id);
-    await sql`
-      INSERT INTO auth_member (id, organization_id, user_id, role)
-      VALUES (${`${id}-m`}, ${organizationId}, ${id}, ${memberRole})
-    `;
+    await seedMember(id, memberRole);
     return id;
   }
 
@@ -128,12 +125,6 @@ describe('station-signup-review downgrade (REAL fns, real PG)', () => {
     sql = getTestDb();
     previousFlag = process.env.STATION_SIGNUP_DOWNGRADE_ENABLED;
     process.env.STATION_SIGNUP_DOWNGRADE_ENABLED = 'true';
-
-    const orgs = await sql`SELECT id FROM auth_organization ORDER BY created_at ASC LIMIT 1`;
-    if (orgs.length === 0) {
-      throw new Error('No auth_organization row in the integration database; cannot seed auth_member.');
-    }
-    organizationId = orgs[0].id;
   });
 
   afterAll(async () => {
@@ -392,7 +383,7 @@ describe('station-signup-review downgrade (REAL fns, real PG)', () => {
       VALUES (${id}, 'SSR Bystander', ${`${id}@test.wxyc.org`}, ${SENTINEL_AUTH_USER_ROLE}, now() - interval '400 days')
     `;
     userIds.push(id);
-    await sql`INSERT INTO auth_member (id, organization_id, user_id, role) VALUES (${`${id}-m`}, ${organizationId}, ${id}, 'dj')`;
+    await seedMember(id, 'dj');
 
     const pending = (await queryPendingSelfSignups()).filter((r) => r.userId === id);
 
