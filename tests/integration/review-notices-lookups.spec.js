@@ -1,15 +1,19 @@
 /**
  * Drives each after-commit review notice through HTTP once (BS#3109), as seeded real accounts.
  *
- * The notices (`apps/backend/services/review-notices.service.ts`) start after the commit, are not awaited, and swallow
- * every failure into `reportFailure`, so the response is 200 whether or not their lookups work. These tests assert
- * only the HTTP outcome; the guard step after "Run Integration Tests" in `.github/workflows/test.yml` fails the job
- * when `/tmp/backend.log` carries the `[review-notices] Failed to send a review notice:` prefix. The guard runs in CI
- * only: the local `ci:testmock` stack keeps its logs in Docker. The CI containers run AUTH_BYPASS=true, so a raw
+ * The notices (`apps/backend/services/review-notices.service.ts`) start after the commit and are not awaited, so the
+ * response is 200 whether or not their lookups work. These tests assert only the HTTP outcome; the guard step after
+ * "Run Integration Tests" in `.github/workflows/test.yml` fails the job when `/tmp/backend.log` carries the
+ * `[review-notices] Failed to send a review notice:` prefix. That catches only failures that reach `reportFailure`
+ * (`musicDirectorEmails`, `notifyAccount`'s account read, `notifyDigitalTaken`'s taker lookup). `notifyPass`'s own name
+ * read is wrapped in `.catch(() => null)`: a failure there writes no line and the notice goes out as 'A DJ', so the
+ * guard does not see it; its SQL is covered by the in-transaction `readStaffName` read on the PATCH test below, whose
+ * 200 fails on a broken read. The guard runs in CI only: the local `ci:testmock` stack keeps its logs in Docker. The CI containers run AUTH_BYPASS=true, so a raw
  * user-id Bearer acts as that account (it must exist in `auth_user`: a taker with no account is reported on purpose).
  *
- * Triggers: `notifyDigitalTaken` (checkout, and accepting a request), `notifyPass`, `notifyAccount` (a music
- * director edits a DJ's submitted review) and `musicDirectorEmails` (every one of them, via a seeded music director).
+ * Triggers: `notifyDigitalTaken` (checkout, and accepting a request), `notifyPass` (its `musicDirectorEmails` read and
+ * the send), `notifyAccount` (a music director edits a DJ's submitted review) and `musicDirectorEmails` (every one of
+ * them, via a seeded music director).
  */
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);

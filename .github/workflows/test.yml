@@ -826,9 +826,13 @@ jobs:
           STATION_PASSCODE_KEY: '5a859c11b96205498dda4b3cbe21c1c956d472104ee1d85ca2058cb8535ab28b'
         run: npm run ci:test
 
-      # Review notices (BS#2806, BS#2864, BS#3102) start after the commit and swallow every failure into
-      # `reportFailure`, so a broken lookup answers 200 and no spec fails. Their one trace is this log line;
-      # tests/integration/review-notices-lookups.spec.js drives each notice so a broken lookup writes it.
+      # Review notices (BS#2806, BS#2864, BS#3102) start after the commit and swallow their failures into
+      # `reportFailure`, so a broken lookup answers 200 and no spec fails. That log line is the trace this step greps
+      # for; tests/integration/review-notices-lookups.spec.js drives each notice so a broken one writes it. It catches
+      # only failures that reach `reportFailure` (musicDirectorEmails, notifyAccount's account read, notifyDigitalTaken's
+      # taker lookup). notifyPass's name read is wrapped in `.catch(() => null)`: a failure there writes no line and the
+      # notice goes out as 'A DJ'; its SQL is covered by the in-transaction readStaffName read on the PATCH /reviews path.
+      # The fixed string and the /tmp/backend.log path are pinned by tests/unit/scripts/ci-review-notice-log-guard.test.ts.
       - name: Fail on review notice failures in the backend log
         if: always() && env.RUN_TESTS == 'true'
         run: |
