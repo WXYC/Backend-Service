@@ -23,6 +23,7 @@ const {
   removeSeededLibraryReleases,
   managerAccessToken,
   seedAuthUser,
+  seedMember,
   removeSeededAuthUsers,
 } = require('../utils/intake_seed');
 
@@ -67,8 +68,7 @@ describe('/intake transitions (BS#2798)', () => {
     // from being asked to review. Written as the literal on purpose: the shared constant lives behind the
     // authentication barrel, which this tier cannot load, and the literal pins the stored value's case.
     const autoDj = await seedAuthUser({ id: AUTO_DJ_ID, name: 'Auto DJ', username: 'autodj' });
-    const [{ id: organizationId }] = await sql`SELECT id FROM auth_organization LIMIT 1`;
-    await sql`INSERT INTO auth_member (id, organization_id, user_id, role) VALUES (${`${autoDj.id}-m`}, ${organizationId}, ${autoDj.id}, 'dj')`;
+    await seedMember(autoDj.id, 'dj');
 
     libraryId = (await seedLibraryRelease({ album_title: `${PREFIX} filed`, artist_name: PREFIX, format_id: formatId }))
       .id;

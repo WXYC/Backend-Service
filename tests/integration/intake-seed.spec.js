@@ -22,6 +22,7 @@ const {
   seedReviewRevision,
   seedReviewPrint,
   seedFccNote,
+  seedMember,
   seedFormSubmission,
   removeSeededFormSubmissions,
   SEEDED_CODE_LETTERS,
@@ -143,6 +144,35 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     const needle = new RegExp(`SEEDED_CODE_LETTERS|['"]${SEEDED_CODE_LETTERS}['"]`);
     const others = sourceFilesUnder(testsDir, [path.join(testsDir, 'report')]).filter(
       (file) => !owners.includes(file) && needle.test(fs.readFileSync(file, 'utf8'))
+    );
+    expect(others).toEqual([]);
+  });
+
+  test('seedMember writes one <userId>-m row with the role, in the oldest organization, and it goes with the user', async () => {
+    const sql = getTestDb();
+    const user = await seedAuthUser();
+    const member = await seedMember(user.id, 'musicDirector');
+    const [oldest] = await sql`SELECT id FROM auth_organization ORDER BY created_at ASC LIMIT 1`;
+    expect(member).toMatchObject({
+      id: `${user.id}-m`,
+      user_id: user.id,
+      role: 'musicDirector',
+      organization_id: oldest.id,
+    });
+    await removeSeededAuthUsers();
+    expect(await sql`SELECT id FROM auth_member WHERE user_id = ${user.id}`).toEqual([]);
+  });
+
+  test('only intake_seed.js selects the CD-R format by name or inserts into auth_member (intake-items.spec.js renames the row, which is not a lookup)', () => {
+    const testsDir = path.resolve(__dirname, '..');
+    const owners = [
+      path.join(testsDir, 'utils', 'intake_seed.js'),
+      path.join(testsDir, 'integration', 'intake-seed.spec.js'),
+    ];
+    // A SELECT ... FROM format ... lower(format_name) = 'cdr' (the rename UPDATE has no FROM), or the membership INSERT.
+    const needles = [/SELECT[^;`]*?\bformat\b[^;`]*?lower\(format_name\)\s*=\s*'cdr'/i, /INSERT\s+INTO\s+auth_member/i];
+    const others = sourceFilesUnder(testsDir, [path.join(testsDir, 'report')]).filter(
+      (file) => !owners.includes(file) && needles.some((needle) => needle.test(fs.readFileSync(file, 'utf8')))
     );
     expect(others).toEqual([]);
   });

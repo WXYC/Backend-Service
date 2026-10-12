@@ -8,7 +8,7 @@
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
-const { seedAuthUser, removeSeededAuthUsers, managerAccessToken } = require('../utils/intake_seed');
+const { seedAuthUser, seedMember, removeSeededAuthUsers, managerAccessToken } = require('../utils/intake_seed');
 
 const PREFIX = 'itest-reviewers-';
 
@@ -19,7 +19,6 @@ describe('GET /reviews/reviewers (BS#3058)', () => {
   beforeAll(async () => {
     manager = createAuthRequest(request, `Bearer ${await managerAccessToken()}`);
     sql = getTestDb();
-    const [{ id: organizationId }] = await sql`SELECT id FROM auth_organization LIMIT 1`;
     const accounts = [
       ['dj', 'dj', 'zed Handle', 'Zed Test Reviewer', false],
       ['md', 'musicDirector', 'bee Handle', 'bee Test Reviewer', false],
@@ -43,7 +42,7 @@ describe('GET /reviews/reviewers (BS#3058)', () => {
         // The auto-DJ service account is recognised by its username; it holds the dj role yet is never listed.
         ...(suffix === 'autodj' && { username: 'autodj' }),
       });
-      await sql`INSERT INTO auth_member (id, organization_id, user_id, role) VALUES (${`${user.id}-m`}, ${organizationId}, ${user.id}, ${role})`;
+      await seedMember(user.id, role);
     }
   });
 

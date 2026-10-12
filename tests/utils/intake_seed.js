@@ -30,7 +30,7 @@
  *
  * Usage:
  *   const {
- *     seedAuthUser, removeSeededAuthUsers,
+ *     seedAuthUser, seedMember, removeSeededAuthUsers,
  *     seedIntakeItem,
  *     seedLibraryRelease, removeSeededLibraryReleases,
  *     seedReview, seedReviewRevision, seedReviewPrint, seedFccNote,
@@ -79,6 +79,24 @@ async function seedAuthUser(overrides = {}) {
   const [user] = await sql`INSERT INTO auth_user ${sql(row)} RETURNING *`;
   seededUserIds.push(user.id);
   return user;
+}
+
+/**
+ * Insert the `auth_member` row (id `<userId>-m`) that gives `userId` its station `role`, in the oldest organization
+ * (`ORDER BY created_at ASC`). Throws when there is no organization. It has no remover: the row goes with the user
+ * (`auth_member.user_id` is `ON DELETE CASCADE`), whether `removeSeededAuthUsers` or a spec's own cleanup deletes it.
+ * Returns the inserted row.
+ */
+async function seedMember(userId, role) {
+  const sql = getTestDb();
+  const [org] = await sql`SELECT id FROM auth_organization ORDER BY created_at ASC LIMIT 1`;
+  if (!org)
+    throw new Error(
+      `seedMember: no auth_organization row in the integration database; cannot seed a ${role} membership for ${userId}`
+    );
+  const [member] =
+    await sql`INSERT INTO auth_member (id, organization_id, user_id, role) VALUES (${`${userId}-m`}, ${org.id}, ${userId}, ${role}) RETURNING *`;
+  return member;
 }
 
 /** Delete every user seeded by `seedAuthUser` (ids already deleted by a test are fine). */
@@ -349,6 +367,7 @@ async function managerUserId() {
 }
 
 module.exports = {
+  seedMember,
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
