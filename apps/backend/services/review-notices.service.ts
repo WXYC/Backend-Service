@@ -35,26 +35,42 @@ export const assignedLine = (
 
 const requestedHolder = (item: NoticeItem) => (item.effective_state === 'requested' ? item.requested_dj_id : null);
 
-/** The assigned line's sentence, in the copy the station decided on 2026-10-06 (BS#2806). */
-const lineText = (line: AssignedLine) => {
+/** The assigned line's sentence, in the copy the station decided on 2026-10-06 (BS#2806); a digital album is taken, not checked out (copy round 5, 2026-10-11, BS#3103). */
+const lineText = (line: AssignedLine, digital: boolean) => {
   switch (line.kind) {
     case 'holder':
       return 'This review is from the DJ who has the record.';
     case 'other_dj':
+      if (digital) {
+        return line.holderName === null
+          ? 'This review is from another DJ; a different DJ has taken the record.'
+          : `This review is from another DJ; ${line.holderName} has taken the record.`;
+      }
       return line.holderName === null
         ? 'This review is from another DJ; the record is checked out to a different DJ.'
         : `This review is from another DJ; the record is with ${line.holderName}.`;
     case 'removed_holder':
-      return "This review is from another DJ; the record is checked out and its holder's account was removed.";
+      return digital
+        ? 'This review is from another DJ; the record was taken by an account that has since been removed.'
+        : "This review is from another DJ; the record is checked out and its holder's account was removed.";
     case 'pool':
-      return 'This review is from another DJ; nobody has the record checked out.';
+      return digital
+        ? 'This review is from another DJ; nobody has taken the record.'
+        : 'This review is from another DJ; nobody has the record checked out.';
   }
 };
 
 /** `{artist} – {album}`, joined by an en dash, never a hyphen. */
 const record = (artist: string, album: string) => `${artist} – ${album}`;
 
-export type ReviewNotice = { itemId: number; artist: string; album: string; author: string | null; line: AssignedLine };
+export type ReviewNotice = {
+  itemId: number;
+  artist: string;
+  album: string;
+  author: string | null;
+  digital: boolean;
+  line: AssignedLine;
+};
 
 /** Reads the item as the submit saw it: call inside the submit's transaction, after its locks. */
 export const readReviewNotice = async (
@@ -66,6 +82,7 @@ export const readReviewNotice = async (
     .select({
       artist: intake_items.artist_name,
       album: intake_items.album_title,
+      digital: intake_items.digital,
       checked_out_at: intake_items.checked_out_at,
       checked_out_by: intake_items.checked_out_by,
       requested_dj_id: intake_items.requested_dj_id,
@@ -84,7 +101,7 @@ export const readReviewNotice = async (
     .where(eq(intake_items.id, itemId));
   if (!row) return undefined;
   const line = assignedLine(row, review.author_user_id, row.holder_name);
-  return { itemId, artist: row.artist, album: row.album, author: review.author, line };
+  return { itemId, artist: row.artist, album: row.album, author: review.author, digital: row.digital, line };
 };
 
 /**
@@ -203,7 +220,7 @@ export const notifyReviewSubmitted = (n: ReviewNotice) =>
     subject: `Review waiting to be accepted: ${record(n.artist, n.album)}`,
     lines: [
       `A review of ${record(n.artist, n.album)} by ${n.author ?? 'a DJ'} is waiting to be accepted.`,
-      lineText(n.line),
+      lineText(n.line, n.digital),
     ],
   });
 

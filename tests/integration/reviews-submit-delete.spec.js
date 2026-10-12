@@ -95,6 +95,15 @@ describe('/reviews submit and delete (BS#2854)', () => {
       ]);
     });
 
+    // The notice's line is not observable here (EMAIL_ENABLED=false, and the response carries no notice), so this pins
+    // that the real read of a digital item held by another DJ, which now selects `digital`, still submits (BS#3103).
+    test("a review on a digital item checked out to another DJ submits; the notice's read of the item does not fail", async () => {
+      const digitalItem = await item('digital', { digital: true, checkout: { by: global.secondary_dj_id } });
+      const draft = await reviewFor({ intake_item_id: digitalItem.id }, { status: 'draft', submitted_at: null });
+      const res = await djA.post(`/reviews/${draft.id}/submit`);
+      expect([res.status, res.body.status]).toEqual([200, 'submitted']);
+    });
+
     test('submitting twice is 409 not_draft and writes no second revision', async () => {
       const draft = await reviewFor({ album_id: libraryId }, { status: 'draft', submitted_at: null });
       expect((await djA.post(`/reviews/${draft.id}/submit`)).status).toBe(200);
