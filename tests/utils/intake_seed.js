@@ -90,11 +90,25 @@ async function removeSeededAuthUsers() {
 }
 
 /**
+ * The id `POST /intake` stores a digital album under: the lowest id whose lower-cased `format_name` is `cdr`
+ * (the query of `buildCdrFormatLookup`). Throws when no such row exists.
+ */
+async function cdrFormatId() {
+  const sql = getTestDb();
+  const [row] = await sql`SELECT id FROM ${sql(SCHEMA)}.format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`;
+  if (!row)
+    throw new Error(
+      `cdrFormatId: no format row named cdr in ${SCHEMA}.format; a digital album has nowhere to be stored`
+    );
+  return row.id;
+}
+
+/**
  * Insert an `intake_items` row. `overrides` is a column -> value map layered over the NOT NULL
  * defaults (a WXYC-representative artist/album and fixture format). Returns the inserted row.
  * The id is recorded for `removeSeededIntakeItems`.
  *
- * `overrides.digital: true` seeds a digital album; pass the CD-R format's id as `format_id` with it, as `POST /intake` stores.
+ * `overrides.digital: true` seeds a digital album under the CD-R format (`cdrFormatId()`), as `POST /intake` stores it; an explicit `format_id` still wins, and with no `cdr` format row the seed throws.
  *
  * `overrides.checkout` is `{ by, at }`: it writes `checked_out_by` and `checked_out_at` together, because a checkout
  * is `checked_out_at` (epic decision 38) and a held item carries both. `at` defaults to the database's `now()`; `by:
@@ -113,7 +127,7 @@ async function seedIntakeItem(overrides = {}) {
   const row = {
     artist_name: 'Jessica Pratt',
     album_title: 'On Your Own Love Again',
-    format_id: FORMAT_ID,
+    format_id: columns.digital && columns.format_id === undefined ? await cdrFormatId() : FORMAT_ID,
     ...(checkout && {
       state: 'checked_out',
       checked_out_by: checkout.by,
@@ -338,6 +352,7 @@ module.exports = {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  cdrFormatId,
   removeSeededIntakeItems,
   seedAcceptance,
   seedLibraryRelease,

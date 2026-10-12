@@ -24,6 +24,7 @@ const {
   seedReview,
   seedReviewPrint,
   seedAcceptance,
+  cdrFormatId,
   managerAccessToken,
   managerUserId,
 } = require('../utils/intake_seed');
@@ -188,11 +189,10 @@ describe('POST /intake/:id/file (BS#2803)', () => {
   describe('digital items (BS#3100)', () => {
     test('filing a digital item leaves digital true and files it under the request body’s format', async () => {
       // The item holds the CD-R format, as `POST /intake` stores it; the body names a different one, so a filing that took the item's format would differ.
-      const [{ id: cdrFormatId }] = await sql`
-        SELECT id FROM ${sql(SCHEMA)}.format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`;
+      const cdrId = await cdrFormatId();
       const body = newRelease(uniqueSuffix());
-      expect(cdrFormatId).not.toBe(body.release.format_id);
-      const { item } = await reviewedItem('digital', { digital: true, format_id: cdrFormatId });
+      expect(cdrId).not.toBe(body.release.format_id);
+      const { item } = await reviewedItem('digital', { digital: true });
 
       const res = await file(item.id, body);
       if (res.status === 200) filedAlbumIds.push(res.body.album_id);

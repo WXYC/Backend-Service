@@ -27,6 +27,7 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  cdrFormatId,
   seedLibraryRelease,
   removeSeededLibraryReleases,
   seedReview,
@@ -468,9 +469,6 @@ describe('/intake (BS#2796)', () => {
             ])
           )[0].count
         );
-      const cdrId = async () =>
-        (await sql.unsafe(`SELECT id FROM "${SCHEMA}".format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`))[0]
-          .id;
       const body = (extra) => ({ artist_name: `${PREFIX} digital`, album_title: 'Files', ...extra });
 
       test.each([
@@ -493,7 +491,7 @@ describe('/intake (BS#2796)', () => {
         expect(res.body.digital).toBe(stored.digital);
         const row = await rowOf(res.body.id);
         expect(row.digital).toBe(stored.digital);
-        expect(row.format_id).toBe(stored.cdr ? await cdrId() : 1);
+        expect(row.format_id).toBe(stored.cdr ? await cdrFormatId() : 1);
       });
 
       test('POST digital with no cdr format row is a 409 ApiErrorResponse and writes nothing', async () => {
@@ -525,7 +523,7 @@ describe('/intake (BS#2796)', () => {
       });
 
       test('PATCH with format_id on a digital item is a 400 and changes nothing; on a disc item it applies', async () => {
-        const digitalId = await seed('digital-patch', { digital: true, format_id: await cdrId() });
+        const digitalId = await seed('digital-patch', { digital: true, format_id: await cdrFormatId() });
         const before = await rowOf(digitalId);
         const refused = await auth.patch(`/intake/${digitalId}`).send({ album_title: 'Changed', format_id: formatId });
         expect(refused.status).toBe(400);
