@@ -56,7 +56,8 @@ describe('/intake (BS#2796)', () => {
     const row = {
       artist_name: `${PREFIX} ${key}`,
       album_title: `Album ${key}`,
-      format_id: formatId,
+      // A digital seed leaves the format to the seeder, which stores the CD-R format as POST /intake does.
+      ...(!overrides.digital && { format_id: formatId }),
       logged_at: daysAgo(30),
       ...overrides,
     };
