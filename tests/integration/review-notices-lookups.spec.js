@@ -18,7 +18,6 @@
 
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 const { createAuthRequest } = require('../utils/test_helpers');
-const { getTestDb } = require('../utils/db');
 const {
   seedAuthUser,
   seedMember,
@@ -32,7 +31,6 @@ const {
 const PREFIX = 'ITEST-NOTICES';
 
 describe('review notices driven through HTTP (BS#3109)', () => {
-  let sql;
   let manager;
   let taker;
   let author;
@@ -52,7 +50,6 @@ describe('review notices driven through HTTP (BS#3109)', () => {
     });
 
   beforeAll(async () => {
-    sql = getTestDb();
     manager = createAuthRequest(request, `Bearer ${await managerAccessToken()}`);
     // A music director to receive each notice (so `musicDirectorEmails` has a row to read), a DJ to take and pass, and a DJ whose review is edited.
     await seedUser('director', 'musicDirector');
