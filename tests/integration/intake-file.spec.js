@@ -193,6 +193,7 @@ describe('POST /intake/:id/file (BS#2803)', () => {
       const body = newRelease(uniqueSuffix());
       expect(cdrId).not.toBe(body.release.format_id);
       const { item } = await reviewedItem('digital', { digital: true });
+      expect(item.format_id).toBe(cdrId);
 
       const res = await file(item.id, body);
       if (res.status === 200) filedAlbumIds.push(res.body.album_id);

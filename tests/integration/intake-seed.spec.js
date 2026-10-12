@@ -300,24 +300,50 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
   });
 
   describe('the format of an intake item', () => {
-    const lookup = async () => {
+    const formatNamed = async (name) => {
       const sql = getTestDb();
-      const [row] =
-        await sql`SELECT id FROM ${sql(SCHEMA)}.format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`;
+      const [row] = await sql`SELECT id FROM ${sql(SCHEMA)}.format WHERE format_name = ${name} ORDER BY id LIMIT 1`;
       return row.id;
     };
 
     test.each([
-      ['a digital seed with no format_id stores the CD-R format', { digital: true }, 'cdr'],
-      ['an explicit format_id wins over the CD-R default', { digital: true, format_id: 1 }, 1],
-      ['a disc seed keeps the fixture format', {}, 1],
+      ['a digital seed with no format_id stores the CD-R format', { digital: true }, async () => cdrFormatId()],
+      [
+        'an explicit format_id wins over the CD-R default',
+        // Neither the seeder's disc default nor the CD-R id, so a seeder that ignored the explicit id could not land on it by accident.
+        async () => ({ digital: true, format_id: await formatNamed('vinyl') }),
+        async () => formatNamed('vinyl'),
+      ],
+      ['a disc seed keeps the fixture format', {}, async () => 1],
     ])('%s', async (_name, overrides, expected) => {
-      const item = await seedIntakeItem(overrides);
-      expect(item.format_id).toBe(expected === 'cdr' ? await lookup() : expected);
+      const item = await seedIntakeItem(typeof overrides === 'function' ? await overrides() : overrides);
+      expect(item.format_id).toBe(await expected());
     });
 
-    test('cdrFormatId is the lowest id whose lower-cased name is cdr', async () => {
-      expect(await cdrFormatId()).toBe(await lookup());
+    test('cdrFormatId returns the lowest id among the cdr rows and matches the name whatever its case', async () => {
+      const sql = getTestDb();
+      // Its own oracle: every format row read plainly and filtered in JS, so it shares no SQL with the helper.
+      const oracle = async () =>
+        (await sql`SELECT id, format_name FROM ${sql(SCHEMA)}.format ORDER BY id`).filter(
+          (row) => row.format_name.toLowerCase() === 'cdr'
+        )[0].id;
+      const original = await oracle();
+      expect(await cdrFormatId()).toBe(original);
+
+      let extraId;
+      try {
+        // A later, upper-case duplicate: the helper must still answer the original (lowest id).
+        [{ id: extraId }] = await sql`INSERT INTO ${sql(SCHEMA)}.format (format_name) VALUES ('CDR') RETURNING id`;
+        expect(extraId).toBeGreaterThan(original);
+        expect(await cdrFormatId()).toBe(original);
+
+        // The original in upper case: the helper must still find it, so it matches the name case-insensitively.
+        await sql`UPDATE ${sql(SCHEMA)}.format SET format_name = 'CDR' WHERE id = ${original}`;
+        expect(await cdrFormatId()).toBe(original);
+      } finally {
+        await sql`UPDATE ${sql(SCHEMA)}.format SET format_name = 'cdr' WHERE id = ${original}`;
+        if (extraId !== undefined) await sql`DELETE FROM ${sql(SCHEMA)}.format WHERE id = ${extraId}`;
+      }
     });
   });
 });
