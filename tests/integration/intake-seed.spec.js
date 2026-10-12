@@ -12,6 +12,7 @@ const {
   seedAuthUser,
   removeSeededAuthUsers,
   seedIntakeItem,
+  cdrFormatId,
   removeSeededIntakeItems,
   seedAcceptance,
   managerUserId,
@@ -296,5 +297,27 @@ describe('intake_seed release, review, revision, print, FCC-note and form-review
     await removeSeededFormSubmissions();
     const rows = await sql`SELECT id FROM ${sql(SCHEMA)}.album_review_submissions WHERE id = ${submission.id}`;
     expect(rows).toHaveLength(0);
+  });
+
+  describe('the format of an intake item', () => {
+    const lookup = async () => {
+      const sql = getTestDb();
+      const [row] =
+        await sql`SELECT id FROM ${sql(SCHEMA)}.format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`;
+      return row.id;
+    };
+
+    test.each([
+      ['a digital seed with no format_id stores the CD-R format', { digital: true }, 'cdr'],
+      ['an explicit format_id wins over the CD-R default', { digital: true, format_id: 1 }, 1],
+      ['a disc seed keeps the fixture format', {}, 1],
+    ])('%s', async (_name, overrides, expected) => {
+      const item = await seedIntakeItem(overrides);
+      expect(item.format_id).toBe(expected === 'cdr' ? await lookup() : expected);
+    });
+
+    test('cdrFormatId is the lowest id whose lower-cased name is cdr', async () => {
+      expect(await cdrFormatId()).toBe(await lookup());
+    });
   });
 });

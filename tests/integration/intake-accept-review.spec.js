@@ -99,11 +99,7 @@ describe('/intake accept-review (BS#2860)', () => {
 
     describe('a digital album (BS#3101): choosing its review ends the DJ’s claim', () => {
       // `POST /intake` stores a digital album under the CD-R format, so the seeds do too.
-      const cdrFormatId = async () =>
-        (await sql.unsafe(`SELECT id FROM "${SCHEMA}".format WHERE lower(format_name) = 'cdr' ORDER BY id LIMIT 1`))[0]
-          .id;
-      const heldDigital = async (key, overrides = {}) =>
-        held(key, { digital: true, format_id: await cdrFormatId(), ...overrides });
+      const heldDigital = (key, overrides = {}) => held(key, { digital: true, ...overrides });
       const acceptedDigital = async (key) => {
         const out = await heldDigital(key);
         const review = await reviewOn({ intake_item_id: out.id });
@@ -149,7 +145,6 @@ describe('/intake accept-review (BS#2860)', () => {
       test('a pending request is still withdrawn', async () => {
         const requested = await item('digital-requested', {
           digital: true,
-          format_id: await cdrFormatId(),
           state: 'requested',
           requested_dj_id: global.secondary_dj_id,
           requested_at: now(),
