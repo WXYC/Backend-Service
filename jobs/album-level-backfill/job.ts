@@ -63,14 +63,18 @@ export const BULK_BATCH_SIZE_DEFAULT = 5;
 export const BULK_RATE_PER_MIN_ENV = 'BACKFILL_BULK_RATE_PER_MIN';
 export const BULK_RATE_PER_MIN_DEFAULT = 1;
 
-/** Per-ITEM budget forwarded to LML as `X-Caller-Budget-Ms` (A8 / LML#345).
- * Caps each individual cascade inside the bulk call, NOT the whole batch.
- * The fetch-level timeout is computed dynamically by `computeBulkTimeoutMs`. */
+/** Per-ITEM budget forwarded to LML as `X-Caller-Budget-Ms`; `0`, the
+ * default, sends no header (BS#2986). LML clamps any header to its
+ * `LML_SEARCH_BUDGET_MS` (4 s) and, once an item has used that, skips the
+ * rest of its enrichment tail (`fetch_artwork`, `enrich_metadata`) and
+ * answers `degraded: deadline_exceeded` — the very fields this job writes.
+ * With no header an item runs to LML's hard cap instead. Nobody is waiting
+ * on this job's answers. The fetch-level timeout is `computeBulkTimeoutMs`. */
 export const BULK_BUDGET_MS_ENV = 'BACKFILL_BULK_BUDGET_MS';
-export const BULK_BUDGET_MS_DEFAULT = 25_000;
+export const BULK_BUDGET_MS_DEFAULT = 0;
 
 /** Per-item slice of the bulk fetch timeout. Sized from LML's realized
- * concurrency for cascade-bound items: `BULK_BUDGET_MS_DEFAULT` divided
+ * concurrency for cascade-bound items: the then-default 25 s budget divided
  * by LML's 5-permit Discogs semaphore, not its 10-wide bulk fan-out.
  * The earlier `25_000 / 10 = 2_500` derivation held for warm-cache items
  * but broke under live `enrichment-worker` contention — the 2026-05-28
@@ -84,11 +88,21 @@ export const BULK_PER_ITEM_TIMEOUT_MS = 5_000;
  * HTTP overhead + JSON encode/decode + safety margin. */
 export const BULK_TIMEOUT_SLACK_MS = 5_000;
 
+/** LML's `LML_SEARCH_HARD_TIMEOUT_MS` default. It bounds an item's search when
+ * no budget header is sent, and LML checks it only between enrichment steps,
+ * so a step that starts just before it can run past it. Keep in step with
+ * LML's setting; it is not overridden in production. */
+export const LML_HARD_CAP_MS = 25_000;
+
 /** Scale the LML-client fetch timeout to batch size. The shared
  * `lmlFetch` default (30 s) is sized against the single-item endpoint;
- * bulk wall-clock scales with batch size, so callers must override. */
-export const computeBulkTimeoutMs = (batchSize: number): number =>
-  batchSize * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS;
+ * bulk wall-clock scales with batch size, so callers must override.
+ * `budgetHeaderMs` is the value sent as `X-Caller-Budget-Ms`, or `null` for
+ * none: then one item can run to LML's hard cap, so the batch waits that long
+ * on top of the per-item slices rather than letting one slow album time out
+ * the rest. */
+export const computeBulkTimeoutMs = (batchSize: number, budgetHeaderMs: number | null): number =>
+  batchSize * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS + (budgetHeaderMs === null ? LML_HARD_CAP_MS : 0);
 
 /** Statement timeout for the post-pass UPDATE. The 2026-05-23 drain-accel
  * flipped 309k rows in 80 min; 857k is ~3h; 4h gives a 30% margin. */
@@ -406,11 +420,14 @@ export const runBatch = async (
   // itself throws (LmlClientError on the fetch timeout, BS#1076), treat
   // the whole batch as N errors and let the per-row drain cron retry on
   // its next sweep. Idempotency holds: nothing was UPSERTed.
-  const timeoutMs = computeBulkTimeoutMs(items.length);
+  // `null` is the client's lever for sending no header; `undefined` would
+  // inherit the caller policy's budget.
+  const budgetHeaderMs = options.budgetMs > 0 ? options.budgetMs : null;
+  const timeoutMs = computeBulkTimeoutMs(items.length, budgetHeaderMs);
   let response;
   try {
     response = await bulkLookupMetadata(items, {
-      budgetMs: options.budgetMs,
+      budgetMs: budgetHeaderMs,
       timeoutMs,
       caller: 'album-level-backfill',
     });
@@ -557,7 +574,7 @@ export const resolveOptions = (
   return {
     batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
     ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
-    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
+    budgetMs: requireNonNegativeInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
     postPassTimeoutMs: requirePositiveInt(
       env[POST_PASS_TIMEOUT_ENV],
       POST_PASS_TIMEOUT_ENV,

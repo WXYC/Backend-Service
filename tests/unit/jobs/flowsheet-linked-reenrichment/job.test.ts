@@ -54,8 +54,10 @@ import {
   BULK_RATE_PER_MIN_DEFAULT,
   BULK_RATE_PER_MIN_ENV,
   BULK_BUDGET_MS_DEFAULT,
+  BULK_BUDGET_MS_ENV,
   BULK_PER_ITEM_TIMEOUT_MS,
   BULK_TIMEOUT_SLACK_MS,
+  LML_HARD_CAP_MS,
   FLIP_BATCH_SIZE_DEFAULT,
   FLIP_BATCH_SIZE_ENV,
   FLIP_TIMEOUT_DEFAULT,
@@ -106,6 +108,7 @@ const renderInsertChain = (): { valuesArg: unknown; conflictArg: unknown } => {
 const RESET_ENV_KEYS = [
   BULK_BATCH_SIZE_ENV,
   BULK_RATE_PER_MIN_ENV,
+  BULK_BUDGET_MS_ENV,
   FLIP_BATCH_SIZE_ENV,
   ALBUM_AFTER_ID_ENV,
   LIVE_ACTIVITY_LOOKBACK_ENV,
@@ -481,7 +484,26 @@ describe('runBatch', () => {
     ]);
     expect(opts).toEqual({
       budgetMs: 25000,
-      timeoutMs: computeBulkTimeoutMs(2),
+      timeoutMs: computeBulkTimeoutMs(2, 25000),
+      caller: 'flowsheet-linked-reenrichment',
+    });
+  });
+
+  // LML clamps any X-Caller-Budget-Ms to its 4 s LML_SEARCH_BUDGET_MS and then
+  // sheds the enrichment tail as deadline_exceeded (BS#2986). `null` is the
+  // client's lever for sending no header; `undefined` would inherit the caller
+  // policy's budget and send one anyway.
+  it('sends no budget header when the budget is 0, and waits out LML hard cap', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [
+        { index: 0, status: 'no_match', lookup: { results: [] } },
+        { index: 1, status: 'no_match', lookup: { results: [] } },
+      ],
+    });
+    await runBatch([1, 2], { budgetMs: 0, dryRun: false });
+    expect(mockBulkLookupMetadata.mock.calls[0][1]).toEqual({
+      budgetMs: null,
+      timeoutMs: computeBulkTimeoutMs(2, null),
       caller: 'flowsheet-linked-reenrichment',
     });
   });
@@ -585,15 +607,24 @@ describe('runBatch', () => {
 });
 
 describe('computeBulkTimeoutMs', () => {
-  it('is linear in batchSize', () => {
-    for (const n of [1, 5, 10, 20]) {
-      expect(computeBulkTimeoutMs(n)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
-    }
+  it.each([
+    // With a budget header LML stops each item at its (clamped) budget.
+    [5, 25_000, 30_000],
+    [1, 25_000, 10_000],
+    // With none an item can run to LML's 25 s hard cap, so one slow album
+    // must not time out the whole batch.
+    [5, null, 55_000],
+    [1, null, 35_000],
+  ])('batch of %i with budget header %p waits %i ms', (batchSize, budgetHeaderMs, expected) => {
+    expect(computeBulkTimeoutMs(batchSize, budgetHeaderMs)).toBe(expected);
   });
-  it('keeps the default batch under one per-item budget + slack', () => {
-    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBeLessThanOrEqual(
-      BULK_BUDGET_MS_DEFAULT + BULK_TIMEOUT_SLACK_MS
-    );
+  it('is linear in batchSize, plus the hard cap with no header', () => {
+    for (const n of [1, 5, 10, 20]) {
+      expect(computeBulkTimeoutMs(n, 4_000)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
+      expect(computeBulkTimeoutMs(n, null)).toBe(
+        n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS + LML_HARD_CAP_MS
+      );
+    }
   });
 });
 
@@ -652,6 +683,22 @@ describe('resolveOptions', () => {
     expect(
       resolveOptions({ ...stripEnv(process.env), [LIVE_ACTIVITY_LOOKBACK_ENV]: '0' }, []).liveActivityLookbackSeconds
     ).toBe(0);
+  });
+
+  it('defaults the budget to 0, which sends no header (BS#2986)', () => {
+    expect(BULK_BUDGET_MS_DEFAULT).toBe(0);
+    expect(resolveOptions(stripEnv(process.env), []).budgetMs).toBe(0);
+  });
+
+  it.each([
+    ['0', 0],
+    ['4000', 4000],
+  ])('accepts %s for LINKED_REENRICH_BULK_BUDGET_MS', (raw, expected) => {
+    expect(resolveOptions({ ...stripEnv(process.env), [BULK_BUDGET_MS_ENV]: raw }, []).budgetMs).toBe(expected);
+  });
+
+  it.each(['-1', '1.5', 'none'])('rejects %s for LINKED_REENRICH_BULK_BUDGET_MS', (raw) => {
+    expect(() => resolveOptions({ ...stripEnv(process.env), [BULK_BUDGET_MS_ENV]: raw }, [])).toThrow();
   });
 
   it('throws on invalid env', () => {

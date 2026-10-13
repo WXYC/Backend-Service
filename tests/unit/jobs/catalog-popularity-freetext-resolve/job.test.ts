@@ -61,6 +61,7 @@ import {
   BULK_BUDGET_MS_ENV,
   BULK_PER_ITEM_TIMEOUT_MS,
   BULK_TIMEOUT_SLACK_MS,
+  LML_HARD_CAP_MS,
   NO_MATCH_TTL_DAYS_DEFAULT,
   NO_MATCH_TTL_DAYS_ENV,
   MAX_PAIRS_PER_RUN_DEFAULT,
@@ -599,7 +600,26 @@ describe('runBatch', () => {
     ]);
     expect(opts).toEqual({
       budgetMs: 25000,
-      timeoutMs: computeBulkTimeoutMs(2),
+      timeoutMs: computeBulkTimeoutMs(2, 25000),
+      caller: 'catalog-popularity-freetext-resolve',
+    });
+  });
+
+  // LML clamps any X-Caller-Budget-Ms to its 4 s LML_SEARCH_BUDGET_MS and then
+  // sheds the enrichment tail, artwork included, as deadline_exceeded
+  // (BS#2986). `null` is the client's lever for sending no header; `undefined`
+  // would inherit the caller policy's budget and send one anyway.
+  it('sends no budget header when the budget is 0, and waits out LML hard cap', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [
+        { index: 0, status: 'no_match', lookup: { results: [] } },
+        { index: 1, status: 'no_match', lookup: { results: [] } },
+      ],
+    });
+    await runBatch([pairA, pairB], { budgetMs: 0, dryRun: false });
+    expect(mockBulkLookupMetadata.mock.calls[0][1]).toEqual({
+      budgetMs: null,
+      timeoutMs: computeBulkTimeoutMs(2, null),
       caller: 'catalog-popularity-freetext-resolve',
     });
   });
@@ -695,9 +715,24 @@ describe('runBatch', () => {
 // ---------------------------------------------------------------------------
 
 describe('computeBulkTimeoutMs', () => {
-  it('is linear in batchSize', () => {
+  it.each([
+    // With a budget header LML stops each item at its (clamped) budget.
+    [5, 25_000, 30_000],
+    [1, 25_000, 10_000],
+    // With none an item can run to LML's 25 s hard cap, so one slow pair
+    // must not time out the whole batch.
+    [5, null, 55_000],
+    [1, null, 35_000],
+  ])('batch of %i with budget header %p waits %i ms', (batchSize, budgetHeaderMs, expected) => {
+    expect(computeBulkTimeoutMs(batchSize, budgetHeaderMs)).toBe(expected);
+  });
+
+  it('is linear in batchSize, plus the hard cap with no header', () => {
     for (const n of [1, 5, 10, 50, 100]) {
-      expect(computeBulkTimeoutMs(n)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
+      expect(computeBulkTimeoutMs(n, 4_000)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
+      expect(computeBulkTimeoutMs(n, null)).toBe(
+        n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS + LML_HARD_CAP_MS
+      );
     }
   });
 });
@@ -754,6 +789,25 @@ describe('resolveOptions', () => {
 
   it('throws on invalid batch size', () => {
     expect(() => resolveOptions({ ...stripEnv(process.env), [BULK_BATCH_SIZE_ENV]: '0' }, [])).toThrow();
+  });
+
+  it('defaults the budget to 0, which sends no header (BS#2986)', () => {
+    expect(BULK_BUDGET_MS_DEFAULT).toBe(0);
+  });
+
+  it.each([
+    ['0', 0],
+    ['4000', 4000],
+  ])('accepts %s for FREETEXT_RESOLVE_BULK_BUDGET_MS in both modes', (raw, expected) => {
+    const env = { ...stripEnv(process.env), [BULK_BUDGET_MS_ENV]: raw };
+    expect(resolveOptions(env, []).budgetMs).toBe(expected);
+    expect(resolveReverifyOptions(env, []).budgetMs).toBe(expected);
+  });
+
+  it.each(['-1', '1.5', 'none'])('rejects %s for FREETEXT_RESOLVE_BULK_BUDGET_MS in both modes', (raw) => {
+    const env = { ...stripEnv(process.env), [BULK_BUDGET_MS_ENV]: raw };
+    expect(() => resolveOptions(env, [])).toThrow();
+    expect(() => resolveReverifyOptions(env, [])).toThrow();
   });
 
   it('throws on a malformed FREETEXT_RESOLVE_STOP_BY_UTC', () => {
@@ -1214,6 +1268,21 @@ describe('runReverifyBatch', () => {
     album: 'Donuts',
     discogs_release_id: 9999,
   };
+
+  it.each([
+    [0, null],
+    [4000, 4000],
+  ])('sends budget %i to LML as header %p, with the matching bulk timeout', async (budgetMs, header) => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [{ index: 0, status: 'no_match', lookup: { results: [] } }],
+    });
+    await runReverifyBatch([target], { budgetMs, execute: false });
+    expect(mockBulkLookupMetadata.mock.calls[0][1]).toEqual({
+      budgetMs: header,
+      timeoutMs: computeBulkTimeoutMs(1, header),
+      caller: 'catalog-popularity-freetext-resolve',
+    });
+  });
 
   it('nulls a trust-rejected row when --execute is set', async () => {
     mockBulkLookupMetadata.mockResolvedValue({

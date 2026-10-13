@@ -149,10 +149,16 @@ export const BATCH_SIZE_DEFAULT = 5;
 export const RATE_PER_MIN_ENV = 'DRAIN_BULK_RATE_PER_MIN';
 export const RATE_PER_MIN_DEFAULT = 1;
 
-/** Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. This job is a
- * batch drain, not the live lane, so it keeps the header (BS#1914 / #1978). */
+/** Per-item budget forwarded to LML as `X-Caller-Budget-Ms`; `0`, the
+ * default, sends no header (BS#2986). LML clamps any header to its
+ * `LML_SEARCH_BUDGET_MS` (4 s) and, once an item has used that, skips the
+ * rest of its enrichment tail, and answers `degraded: deadline_exceeded`.
+ * The tail's last step, `enrich_metadata`, is where LML finds the Spotify and
+ * Apple links; a shed answer is still a `match`, so this job writes it with
+ * both left `'unresolved'` and the row leaves the cohort. With no header an item runs
+ * to LML's hard cap instead. Nobody is waiting on this job's answers. */
 export const BUDGET_MS_ENV = 'DRAIN_BULK_BUDGET_MS';
-export const BUDGET_MS_DEFAULT = 25_000;
+export const BUDGET_MS_DEFAULT = 0;
 
 /** Statement timeout for the enumeration scan and the count queries. */
 export const READ_TIMEOUT_ENV = 'DRAIN_READ_TIMEOUT_MS';
@@ -177,7 +183,16 @@ export const LIVE_ACTIVITY_LOOKBACK_DEFAULT = 300;
  * fire mid-batch on a cascade-heavy chunk (BS#1178). */
 export const PER_ITEM_TIMEOUT_MS = 5_000;
 export const TIMEOUT_SLACK_MS = 5_000;
-export const computeBulkTimeoutMs = (batchSize: number): number => batchSize * PER_ITEM_TIMEOUT_MS + TIMEOUT_SLACK_MS;
+/** LML's `LML_SEARCH_HARD_TIMEOUT_MS` default. It bounds an item's search when
+ * no budget header is sent, and LML checks it only between enrichment steps,
+ * so a step that starts just before it can run past it. Keep in step with
+ * LML's setting; it is not overridden in production. */
+export const LML_HARD_CAP_MS = 25_000;
+/** The bulk fetch timeout for a batch. `budgetHeaderMs` is the value sent as
+ * `X-Caller-Budget-Ms`, or `null` for none: then one item can run to LML's
+ * hard cap, so the batch waits that long on top of the per-item slices. */
+export const computeBulkTimeoutMs = (batchSize: number, budgetHeaderMs: number | null): number =>
+  batchSize * PER_ITEM_TIMEOUT_MS + TIMEOUT_SLACK_MS + (budgetHeaderMs === null ? LML_HARD_CAP_MS : 0);
 
 // -- The cohort predicate ----------------------------------------------------
 
@@ -478,11 +493,14 @@ export const runBatch = async (candidates: DrainCandidate[], options: { budgetMs
   const result = emptyBatchResult(candidates.length);
 
   const items = buildBulkItems(candidates);
+  // `null` is the client's lever for sending no header; `undefined` would
+  // inherit the caller policy's budget.
+  const budgetHeaderMs = options.budgetMs > 0 ? options.budgetMs : null;
   let response: Awaited<ReturnType<typeof bulkLookupMetadata>>;
   try {
     response = await bulkLookupMetadata(items, {
-      budgetMs: options.budgetMs,
-      timeoutMs: computeBulkTimeoutMs(items.length),
+      budgetMs: budgetHeaderMs,
+      timeoutMs: computeBulkTimeoutMs(items.length, budgetHeaderMs),
       caller: 'streaming-columns-drain',
     });
   } catch (err) {
@@ -604,7 +622,7 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
   return {
     batchSize: requirePositiveInt(env[BATCH_SIZE_ENV], BATCH_SIZE_ENV, BATCH_SIZE_DEFAULT, ctx),
     ratePerMin: requirePositiveInt(env[RATE_PER_MIN_ENV], RATE_PER_MIN_ENV, RATE_PER_MIN_DEFAULT, ctx),
-    budgetMs: requirePositiveInt(env[BUDGET_MS_ENV], BUDGET_MS_ENV, BUDGET_MS_DEFAULT, ctx),
+    budgetMs: requireNonNegativeInt(env[BUDGET_MS_ENV], BUDGET_MS_ENV, BUDGET_MS_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     maxAlbums: requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, MAX_ALBUMS_DEFAULT, ctx),
     liveActivityLookbackSeconds: requireNonNegativeInt(
