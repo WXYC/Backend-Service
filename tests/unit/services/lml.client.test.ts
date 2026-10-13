@@ -1175,9 +1175,9 @@ describe('lml.client', () => {
     it('BS#1914: a per-call budgetMs >= timeoutMs is NOT sanitized away — that branch is policy-table-only', async () => {
       // Mirrors the postLookup regression guard above: extending the >=
       // timeoutMs rejection to per-call overrides would flip
-      // album-level-backfill's trailing partial batch (batchSize <= 4,
-      // where computeBulkTimeoutMs(batchSize) <= BULK_BUDGET_MS_DEFAULT)
-      // from "sends the header" to "omits it" every run.
+      // album-level-backfill's trailing partial batch (batchSize <= 4, where
+      // the header-bearing timeout batchSize * 5000 + 5000 <= an operator's
+      // explicit 25000 budget) from "sends the header" to "omits it".
       mockFetch.mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({ results: [] }),
@@ -1194,11 +1194,12 @@ describe('lml.client', () => {
       expect(init.headers).toMatchObject({ 'X-Caller-Budget-Ms': '5000' });
     });
 
-    // BS#1914 regression: the three bulk offline drains' real shape —
-    // `budgetMs: BULK_BUDGET_MS_DEFAULT` (25000) paired with `timeoutMs:
-    // computeBulkTimeoutMs(batchSize) = batchSize * 5000 + 5000` — puts
-    // `budgetMs >= timeoutMs` at every `batchSize <= 4`, which includes the
-    // trailing partial batch of any run. The header must go out regardless.
+    // BS#1914 regression: the three bulk offline drains with an explicit
+    // positive budget (the default since BS#2986 is 0, which omits the
+    // header) — `budgetMs: 25000` paired with the header-bearing `timeoutMs =
+    // batchSize * 5000 + 5000` — put `budgetMs >= timeoutMs` at every
+    // `batchSize <= 4`, which includes the trailing partial batch of any run.
+    // The header must go out regardless.
     it.each([
       ['album-level-backfill', 1, 10000],
       ['album-level-backfill', 4, 25000], // the exact tie the review flagged

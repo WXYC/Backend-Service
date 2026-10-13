@@ -472,10 +472,11 @@ function sanitizeBudgetMs(caller: LmlCaller, timeoutMs: number, budgetMs: number
  *     `28000 >= 8000` on every single call.
  *   - `jobs/album-level-backfill` / `jobs/flowsheet-linked-reenrichment` /
  *     `jobs/catalog-popularity-freetext-resolve`: each computes
- *     `timeoutMs = batchSize * 5000 + 5000` and passes an explicit
- *     `budgetMs` (`BULK_BUDGET_MS_DEFAULT`, `25000`) — `budgetMs >=
- *     timeoutMs` whenever `batchSize <= 4`, which includes every run's
- *     trailing partial batch.
+ *     its bulk timeout as `batchSize * 5000 + 5000` and, when an operator
+ *     sets a positive `*_BULK_BUDGET_MS` (the default is `0`, which omits
+ *     the header; BS#2986), passes it as an explicit `budgetMs` — e.g.
+ *     `25000 >= timeoutMs` whenever `batchSize <= 4`, which includes every
+ *     run's trailing partial batch.
  *
  * So only the always-safe `<= 0` branch applies here, plus a
  * `Number.isFinite` check `sanitizeBudgetMs` doesn't need: every value that
