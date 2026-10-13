@@ -24,12 +24,20 @@ If `linked_pending / unique_album_ids > 5`, the dedup payoff justifies the run.
 
 1. `SELECT DISTINCT album_id` from pending flowsheet rows with non-null `album_id`.
 2. Resolve each chunk of album_ids to `(artist_name, album_title)` via `library` + `artists` join.
-3. Call LML `POST /api/v1/lookup/bulk` with batches of `BACKFILL_BULK_BATCH_SIZE` items (default 5, lowered from 10 in BS#1197). The per-batch fetch timeout scales with this value (`batchSize × 2.5 s + 5 s` slack) so a cascade-heavy batch can't exhaust the shared LML-client's 30 s default (BS#1178). The 2026-05-28 Phase 3 canary measured 38–50 % per-batch timeouts at `batchSize=10` vs 3–10 % at `batchSize=5` under live `enrichment-worker` contention, so smaller batches yield _higher_ net throughput.
+3. Call LML `POST /api/v1/lookup/bulk` with batches of `BACKFILL_BULK_BATCH_SIZE` items (default 5, lowered from 10 in BS#1197), with no budget header by default (see "No budget header" below). The per-batch fetch timeout scales with this value (`batchSize × 5 s + 5 s` slack, plus LML's 25-second hard cap when no header is sent) so a cascade-heavy batch can't exhaust the shared LML-client's 30 s default (BS#1178). The 2026-05-28 Phase 3 canary measured 38–50 % per-batch timeouts at `batchSize=10` vs 3–10 % at `batchSize=5` under live `enrichment-worker` contention, so smaller batches yield _higher_ net throughput.
 4. For each `match` result, UPSERT into `album_metadata` with the same race-guarded `setWhere: updated_at < NOW()` shape the enrichment-worker uses.
 5. After all bulk calls complete, ANALYZE `album_metadata`.
 6. Cooperative pause until quiet, then post-pass UPDATE: `WITH matched AS (UPDATE flowsheet ... FROM album_metadata) SELECT count(*)`. Scoped inside `db.transaction` + `SET LOCAL statement_timeout`.
 
 `no_match` items are not written to `album_metadata` (a row there semantically means "LML matched this album"); the per-row drain cron handles them via inline synthesized search URLs. `error` items are logged and left pending for the next drain-cron sweep.
+
+## No budget header (BS#2986)
+
+`BACKFILL_BULK_BUDGET_MS` defaults to `0`, which sends no `X-Caller-Budget-Ms` header. It used to default to `25000`, but LML does not honor 25 seconds: it clamps any header to its own `LML_SEARCH_BUDGET_MS`, 4 seconds on production. Once an item has used its 4 seconds, LML skips the rest of the enrichment tail (`fetch_artwork`, then `enrich_metadata`, where the Spotify and Apple links and the bio come from) and answers `degraded: deadline_exceeded`. Under that clamp a shed album is still a `match`. If LML skipped `fetch_artwork`, the album gets no `album_metadata` row and stays pending. If it skipped only `enrich_metadata`, the job writes a row with artwork and no streaming links or bio, and the post-pass flips its plays to `enriched_match`: the frozen shape `streaming-columns-drain` had to heal (BS#2295).
+
+**Measured rate: not measurable.** The job's last runs (May 2026, BS#1041 / BS#1078) predate LML's enrichment-tail shed (LML#930, July 2026) and Sentry's 30-day span retention, and their logs were not kept. Under the same clamp, `catalog-popularity-freetext-resolve` shed at least one item in 62% of its bulk requests over the 30 days to 2026-10-13, and `album-metadata-bio-fill` in 27 of its 29 before it dropped the header (BS#2978).
+
+**Decision: send no header.** The fields this job writes come from the two steps a 4-second budget skips. With no header an item's search is bounded by LML's `LML_SEARCH_HARD_TIMEOUT_MS`, 25 seconds, which the bulk timeout assumes (`LML_HARD_CAP_MS`): 55 seconds for a batch of 5, up from 30. The cost is time: LML also drops its empty-results cutoff, so a no-match album searches until the cascade ends or the hard cap. `album-metadata-bio-fill`'s headerless requests took 9.9 s at the median and 14.8 s at p95, and 0 of 1,164 were shed. A positive value still sends the header, for anyone who wants the 4-second clamp back on purpose.
 
 ## Run procedure (production)
 
@@ -78,7 +86,7 @@ psql "$DATABASE_URL" -c "
 | ------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BACKFILL_BULK_BATCH_SIZE`                  | `5`                | Items per LML bulk request. LML caps at 100. Raising this scales the fetch timeout (BS#1178); empirical post-LML#370 ceiling under live worker contention is 5 (BS#1197). |
 | `BACKFILL_BULK_RATE_PER_MIN`                | `1`                | Batches per minute. At the default batch size, 1/min ≈ 5 items/min sustained.                                                                                             |
-| `BACKFILL_BULK_BUDGET_MS`                   | `25000`            | Per-item budget forwarded to LML as `X-Caller-Budget-Ms`. NOT the batch fetch timeout.                                                                                    |
+| `BACKFILL_BULK_BUDGET_MS`                   | `0`                | Per-item budget sent to LML as `X-Caller-Budget-Ms`; `0` sends no header. LML clamps any value to 4 s. See "No budget header". NOT the batch fetch timeout.               |
 | `ALBUM_LEVEL_BACKFILL_POST_PASS_TIMEOUT_MS` | `14400000` (4h)    | `SET LOCAL statement_timeout` for the post-pass UPDATE.                                                                                                                   |
 | `ALBUM_LEVEL_BACKFILL_READ_TIMEOUT_MS`      | `300000` (5min)    | `SET LOCAL statement_timeout` for the enumerate scan + per-batch resolveAlbums lookup.                                                                                    |
 | `LIVE_ACTIVITY_LOOKBACK_SECONDS`            | `300`              | Cooperative-pause lookback window; `0` disables.                                                                                                                          |

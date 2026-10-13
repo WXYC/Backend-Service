@@ -86,12 +86,20 @@ That asymmetry is pre-existing and is **not** something this drain can fix — i
 | -------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------- |
 | `DRAIN_BULK_BATCH_SIZE`          | `5`            | Items per LML bulk request. LML caps at 100; 5 is the BS#1197 empirical ceiling under live worker contention. |
 | `DRAIN_BULK_RATE_PER_MIN`        | `1`            | Batches per minute. At the default batch size, ~5 albums/min.                                                 |
-| `DRAIN_BULK_BUDGET_MS`           | `25000`        | Per-item `X-Caller-Budget-Ms`. Kept — this is a batch drain, not the live lane (BS#1914 / #1978).             |
+| `DRAIN_BULK_BUDGET_MS`           | `0`            | Per-item `X-Caller-Budget-Ms`; `0` sends no header. LML clamps any value to 4 s. See "No budget header".      |
 | `DRAIN_READ_TIMEOUT_MS`          | `300000`       | Statement timeout for the counts and the enumeration.                                                         |
 | `DRAIN_MAX_ALBUMS`               | `0` (uncapped) | Stop after N albums. Set it for the bounded canary run.                                                       |
 | `LIVE_ACTIVITY_LOOKBACK_SECONDS` | `300`          | Cooperative-pause window. `0` disables.                                                                       |
 | `LIVE_ACTIVITY_PAUSE_MS`         | `30000`        | Per-iteration pause. Shared knob (`@wxyc/database`, BS#2147).                                                 |
 | `LIVE_ACTIVITY_MAX_PAUSE_MS`     | `1800000`      | Cumulative pause ceiling; the run stops rather than spinning through a whole show. `0` = uncapped.            |
+
+## No budget header (BS#2986)
+
+`DRAIN_BULK_BUDGET_MS` defaults to `0`, which sends no `X-Caller-Budget-Ms` header. It used to default to `25000` and called that a deliberate BS#1914 choice, but LML does not honor 25 seconds: it clamps any header to its own `LML_SEARCH_BUDGET_MS`, 4 seconds on production. Once an item has used its 4 seconds, LML skips the rest of the enrichment tail and answers `degraded: deadline_exceeded`. The tail's last step, `enrich_metadata`, is where LML finds the Spotify and Apple links, so it is the step most likely to be skipped. A shed answer is still a `match`, so this job writes it: synthesized search URLs, Spotify and Apple left `'unresolved'`, and the row leaves the cohort. Only the bounded `streaming-reask.ts` sweep can then recover the two verified links.
+
+**Measured rate: not measurable.** The only run (2026-08-28 to 2026-08-30 PDT, BS#2295) is older than Sentry's 30-day span retention, its containers ran with `--rm`, and the job does not log `degraded`. Its 13 `indeterminate` verdicts do not count deadline sheds, which the job writes as matches. The cohort is now empty, so the decision matters for the next run, should one be needed. A sibling, `catalog-popularity-freetext-resolve`, shed at least one item in 62% of its bulk requests over the same 4-second clamp.
+
+**Decision: send no header.** The links this job exists for come from the step a 4-second budget most often skips, and a shed is written, not retried. With no header an item's search is bounded by LML's `LML_SEARCH_HARD_TIMEOUT_MS`, 25 seconds, which the bulk timeout assumes (`LML_HARD_CAP_MS`): 55 seconds for a batch of 5, up from 30. The cost is time: LML also drops its empty-results cutoff, so a no-match album searches until the cascade ends or the hard cap. `album-metadata-bio-fill` made the same switch (BS#2978) and its headerless requests took 9.9 s at the median and 14.8 s at p95. A positive value still sends the header, for anyone who wants the 4-second clamp back on purpose.
 
 ## Run procedure (production)
 
@@ -112,15 +120,17 @@ docker ps -a --filter name=flowsheet-metadata-backfill-cron --format '{{.Status}
 docker run --rm --env-file .env <ECR-URI>/streaming-columns-drain:<tag>
 
 # 5. Bounded canary FIRST. 25 albums, ~5 minutes at the defaults.
-docker run --rm --env-file .env -e DRAIN_MAX_ALBUMS=25 \
+docker run --rm --stop-timeout 90 --env-file .env -e DRAIN_MAX_ALBUMS=25 \
   <ECR-URI>/streaming-columns-drain:<tag> --execute
 
 #    Then spot-check one drained album on the live V2 feed before going wider.
 
 # 6. Full run, off-peak.
-docker run --rm --env-file .env \
+docker run --rm --stop-timeout 90 --env-file .env \
   <ECR-URI>/streaming-columns-drain:<tag> --execute 2>&1 | tee /tmp/streaming-columns-drain.log
 ```
+
+`--stop-timeout` matters because `docker stop` kills the container 10 seconds after SIGTERM by default, while the job stops only between batches. A batch in flight can take up to its bulk timeout (55 seconds at the default batch of 5 with no budget header) plus each album's UPDATE, up to `DB_STATEMENT_TIMEOUT_MS` (5 seconds by default) apiece: 55 + 5 × 5 = 80 seconds, so 90 covers it. A larger batch needs proportionally more.
 
 At the default pacing (batch 5, 1 batch/min) the run takes roughly `cohort / 5` minutes. Size it from the dry-run's `enumerated` before committing to a window; raise `DRAIN_BULK_RATE_PER_MIN` for a catch-up run but keep `DRAIN_BULK_BATCH_SIZE` at 5 so the per-batch fetch-timeout headroom stays intact (BS#1078 Phase 3 evidence).
 

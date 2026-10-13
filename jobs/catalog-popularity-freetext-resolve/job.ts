@@ -83,24 +83,44 @@ export const BULK_BATCH_SIZE_DEFAULT = 5;
 export const BULK_RATE_PER_MIN_ENV = 'FREETEXT_RESOLVE_BULK_RATE_PER_MIN';
 export const BULK_RATE_PER_MIN_DEFAULT = 1;
 
-/** Per-ITEM budget forwarded to LML as `X-Caller-Budget-Ms`. Caps each
- * individual cascade inside the bulk call. */
+/** Per-ITEM budget forwarded to LML as `X-Caller-Budget-Ms`; `0`, the
+ * default, sends no header (BS#2986). LML clamps any header to its
+ * `LML_SEARCH_BUDGET_MS` (4 s) and, once an item has used that, skips the
+ * rest of its enrichment tail, `fetch_artwork` included, and answers
+ * `degraded: deadline_exceeded`. `verdictFromLookup` reads the release id off
+ * that artwork, so a shed pair was recorded as a no-match and not retried for
+ * `NO_MATCH_TTL_DAYS`. With no header an item runs to LML's hard cap instead.
+ * Nobody is waiting on this job's answers. */
 export const BULK_BUDGET_MS_ENV = 'FREETEXT_RESOLVE_BULK_BUDGET_MS';
-export const BULK_BUDGET_MS_DEFAULT = 25_000;
+export const BULK_BUDGET_MS_DEFAULT = 0;
+
+/** The `X-Caller-Budget-Ms` value for a configured budget: `null`, the
+ * client's lever for sending no header, for `0`. `undefined` would inherit
+ * the caller policy's budget instead. */
+const budgetHeaderFor = (budgetMs: number): number | null => (budgetMs > 0 ? budgetMs : null);
 
 /** Per-item slice of the bulk fetch timeout. Sized from LML's realized
- * concurrency for cascade-bound items (`BULK_BUDGET_MS / 5`), matching
- * `album-level-backfill`'s post-#1198 derivation. */
+ * concurrency for cascade-bound items (the then-default 25 s budget / 5),
+ * matching `album-level-backfill`'s post-#1198 derivation. */
 export const BULK_PER_ITEM_TIMEOUT_MS = 5_000;
 
 /** Fixed slack on top of `batchSize × BULK_PER_ITEM_TIMEOUT_MS`. */
 export const BULK_TIMEOUT_SLACK_MS = 5_000;
 
+/** LML's `LML_SEARCH_HARD_TIMEOUT_MS` default. It bounds an item's search when
+ * no budget header is sent, and LML checks it only between enrichment steps,
+ * so a step that starts just before it can run past it. Keep in step with
+ * LML's setting; it is not overridden in production. */
+export const LML_HARD_CAP_MS = 25_000;
+
 /** Scale the LML-client fetch timeout to batch size (the shared default is
  * sized for the single-item endpoint; bulk wall-clock scales with batch
- * size). Identical to `album-level-backfill#computeBulkTimeoutMs`. */
-export const computeBulkTimeoutMs = (batchSize: number): number =>
-  batchSize * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS;
+ * size). `budgetHeaderMs` is the value sent as `X-Caller-Budget-Ms`, or `null`
+ * for none: then one item can run to LML's hard cap, so the batch waits that
+ * long on top of the per-item slices. Identical to
+ * `album-level-backfill#computeBulkTimeoutMs`. */
+export const computeBulkTimeoutMs = (batchSize: number, budgetHeaderMs: number | null): number =>
+  batchSize * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS + (budgetHeaderMs === null ? LML_HARD_CAP_MS : 0);
 
 /** No-match retry TTL (days). A pair that came back no-match is re-attempted
  * once its `attempt_at` is older than this — a later Discogs addition can
@@ -523,11 +543,12 @@ export const runBatch = async (
     return { batchSize: 0, match: 0, no_match: 0, error: 0, upserts: 0, unexpected_index: 0, trust_rejected: 0 };
   }
 
-  const timeoutMs = computeBulkTimeoutMs(items.length);
+  const budgetHeaderMs = budgetHeaderFor(options.budgetMs);
+  const timeoutMs = computeBulkTimeoutMs(items.length, budgetHeaderMs);
   let response: BulkLookupResponse;
   try {
     response = await bulkLookupMetadata(items, {
-      budgetMs: options.budgetMs,
+      budgetMs: budgetHeaderMs,
       timeoutMs,
       caller: JOB_NAME,
     });
@@ -701,7 +722,7 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
   return {
     batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
     ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
-    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
+    budgetMs: requireNonNegativeInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
     noMatchTtlDays: requirePositiveInt(
       env[NO_MATCH_TTL_DAYS_ENV],
       NO_MATCH_TTL_DAYS_ENV,
@@ -1079,11 +1100,12 @@ export const runReverifyBatch = async (
   };
   if (items.length === 0) return empty;
 
-  const timeoutMs = computeBulkTimeoutMs(items.length);
+  const budgetHeaderMs = budgetHeaderFor(options.budgetMs);
+  const timeoutMs = computeBulkTimeoutMs(items.length, budgetHeaderMs);
   let response: BulkLookupResponse;
   try {
     response = await bulkLookupMetadata(items, {
-      budgetMs: options.budgetMs,
+      budgetMs: budgetHeaderMs,
       timeoutMs,
       caller: JOB_NAME,
     });
@@ -1174,7 +1196,7 @@ export const resolveReverifyOptions = (
   return {
     batchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
     ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
-    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
+    budgetMs: requireNonNegativeInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     liveActivityLookbackSeconds: requireNonNegativeInt(
       env[LIVE_ACTIVITY_LOOKBACK_ENV],

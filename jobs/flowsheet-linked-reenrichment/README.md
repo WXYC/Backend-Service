@@ -24,6 +24,14 @@ No `entry_type='track'` narrow — BS#1443's audit froze the count at exactly th
 
 `metadata_attempt_at` is never written and `metadata_status='pending'` is never set, so BS#1011 / BS#895 are untouched.
 
+## No budget header (BS#2986)
+
+`LINKED_REENRICH_BULK_BUDGET_MS` defaults to `0`, which sends no `X-Caller-Budget-Ms` header for Lane B. It used to default to `25000`, but LML does not honor 25 seconds: it clamps any header to its own `LML_SEARCH_BUDGET_MS`, 4 seconds on production. Once an item has used its 4 seconds, LML skips the rest of the enrichment tail (`fetch_artwork`, then `enrich_metadata`, where the Spotify and Apple links and the bio come from) and answers `degraded: deadline_exceeded`. Under that clamp a shed album is still a `match`. If LML skipped `fetch_artwork`, Lane B writes nothing and the album stays in the residual. If it skipped only `enrich_metadata`, the fill-null UPSERT writes artwork with no streaming links or bio and flips the album's rows to `enriched_match`, where no automated path revisits them.
+
+**Measured rate: not measurable.** The job's one run (2026-07-14, BS#1638: 309 matches, 5 no-matches) predates LML's enrichment-tail shed (LML#930, July 2026) and Sentry's 30-day span retention. Under the same clamp, `catalog-popularity-freetext-resolve` shed at least one item in 62% of its bulk requests over the 30 days to 2026-10-13, and `album-metadata-bio-fill` in 27 of its 29 before it dropped the header (BS#2978).
+
+**Decision: send no header.** Lane B writes exactly the fields a 4-second budget skips, and Lane B is small (about 314 albums), so the extra time is cheap. With no header an item's search is bounded by LML's `LML_SEARCH_HARD_TIMEOUT_MS`, 25 seconds, which the bulk timeout assumes (`LML_HARD_CAP_MS`): 55 seconds for a batch of 5, up from 30. LML also drops its empty-results cutoff, so a no-match album searches until the cascade ends or the hard cap. A positive value still sends the header, for anyone who wants the 4-second clamp back on purpose.
+
 ## Run procedure
 
 Runs via `deploy-manual.yml` (target=`flowsheet-linked-reenrichment`, version=`latest`), then SSH to EC2. **Dry-run is the default**; `--execute` writes.
@@ -87,7 +95,7 @@ DROP INDEX CONCURRENTLY IF EXISTS wxyc_schema.flowsheet_linked_reenrichment_idx;
 | ------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LINKED_REENRICH_BULK_BATCH_SIZE`    | `5`      | Items per Lane B bulk-lookup request (LML cap 100).                                                                                                         |
 | `LINKED_REENRICH_BULK_RATE_PER_MIN`  | `1`      | Lane B batches per minute.                                                                                                                                  |
-| `LINKED_REENRICH_BULK_BUDGET_MS`     | `25000`  | Per-item LML `X-Caller-Budget-Ms`.                                                                                                                          |
+| `LINKED_REENRICH_BULK_BUDGET_MS`     | `0`      | Per-item LML `X-Caller-Budget-Ms`; `0` sends no header. LML clamps any value to 4 s. See "No budget header".                                                |
 | `LINKED_REENRICH_FLIP_BATCH_SIZE`    | `5000`   | Rows per flip UPDATE transaction.                                                                                                                           |
 | `LINKED_REENRICH_FLIP_TIMEOUT_MS`    | `300000` | Statement timeout per flip batch.                                                                                                                           |
 | `LINKED_REENRICH_READ_TIMEOUT_MS`    | `300000` | Statement timeout for count/enumerate/resolve SELECTs.                                                                                                      |

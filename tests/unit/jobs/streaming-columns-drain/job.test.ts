@@ -18,6 +18,7 @@ import {
   cohortPredicateSql,
   computeBulkTimeoutMs,
   resolveOptions,
+  BUDGET_MS_DEFAULT,
 } from '../../../../jobs/streaming-columns-drain/job';
 
 const FALLBACKS = { artist: 'Stereolab', album: 'Aluminum Tunes' };
@@ -184,8 +185,34 @@ describe('resolveOptions', () => {
 });
 
 describe('computeBulkTimeoutMs', () => {
-  it('scales with batch size and clears the LML client 30s default at the BS#1197 batch size', () => {
-    expect(computeBulkTimeoutMs(5)).toBe(30_000);
-    expect(computeBulkTimeoutMs(1)).toBe(10_000);
+  it.each([
+    // With a budget header LML stops each item at its (clamped) budget; this
+    // clears the LML client's 30 s default at the BS#1197 batch size.
+    [5, 25_000, 30_000],
+    [1, 25_000, 10_000],
+    // With none an item can run to LML's 25 s hard cap, so one slow album
+    // must not time out the whole batch.
+    [5, null, 55_000],
+    [1, null, 35_000],
+  ])('batch of %i with budget header %p waits %i ms', (batchSize, budgetHeaderMs, expected) => {
+    expect(computeBulkTimeoutMs(batchSize, budgetHeaderMs)).toBe(expected);
+  });
+});
+
+describe('the budget knob (BS#2986)', () => {
+  it('defaults to 0, which sends no header', () => {
+    expect(BUDGET_MS_DEFAULT).toBe(0);
+    expect(resolveOptions({}, []).budgetMs).toBe(0);
+  });
+
+  it.each([
+    ['0', 0],
+    ['4000', 4000],
+  ])('accepts DRAIN_BULK_BUDGET_MS=%s', (raw, expected) => {
+    expect(resolveOptions({ DRAIN_BULK_BUDGET_MS: raw }, []).budgetMs).toBe(expected);
+  });
+
+  it.each(['-1', '1.5', 'none'])('rejects DRAIN_BULK_BUDGET_MS=%s', (raw) => {
+    expect(() => resolveOptions({ DRAIN_BULK_BUDGET_MS: raw }, [])).toThrow();
   });
 });

@@ -51,13 +51,23 @@
  * PER-CLASS EMPTY-STATE DECISION (BS#1914), now that the real contract is
  * known:
  *
- *   - Class 5, **offline drains** (`flowsheet-metadata-backfill`,
- *     `album-level-backfill`, `catalog-popularity-freetext-resolve`,
- *     `flowsheet-linked-reenrichment`, every `*-backfill` job): KEEP sending
- *     the header. The ~4s empty-state fast-degrade is the desired behavior
- *     for a bulk drain — a hard-miss row should give up quickly and free the
- *     shared Discogs ceiling for the next row — so this is now a deliberate
- *     choice rather than an inherited accident.
+ *   - Class 5, **offline drains** (`flowsheet-metadata-backfill`, every
+ *     other `*-backfill` job): KEEP sending the header. The ~4s empty-state
+ *     fast-degrade frees the shared Discogs ceiling when a hard-miss row
+ *     gives up quickly. BS#2986 revisited only the bulk drains below; these
+ *     callers keep the header until their own shed rate is measured.
+ *   - Class 5, **bulk drains that write the enrichment tail**
+ *     (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
+ *     `flowsheet-linked-reenrichment`, `streaming-columns-drain`,
+ *     `album-metadata-bio-fill`): send NO header (`budgetMs: null`) by
+ *     default, and size the bulk fetch timeout for LML's 25s hard cap. These
+ *     jobs once sent 25000, which LML clamps to 4s; past that LML sheds the
+ *     enrichment tail (artwork, streaming links, bio) as
+ *     `deadline_exceeded`, which is the data these jobs exist to write.
+ *     Measured: the freetext resolver shed an item in 62% of its bulk
+ *     requests over 30 days; the bio fill in 27 of 29 before the switch and
+ *     0 of 1,164 after (WXYC/Backend-Service#2978, #2986). Each job's
+ *     `*_BULK_BUDGET_MS` knob still sends a header when set positive.
  *   - Class 5, the live CDC **`enrichment-worker`**: the 4s cutoff is WRONG
  *     for this caller and is actively producing user-visible metadata gaps.
  *     This worker enriches new rotation arrivals — albums in neither

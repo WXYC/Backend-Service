@@ -58,8 +58,10 @@ import {
   BULK_RATE_PER_MIN_DEFAULT,
   BULK_RATE_PER_MIN_ENV,
   BULK_BUDGET_MS_DEFAULT,
+  BULK_BUDGET_MS_ENV,
   BULK_PER_ITEM_TIMEOUT_MS,
   BULK_TIMEOUT_SLACK_MS,
+  LML_HARD_CAP_MS,
   computeBulkTimeoutMs,
   POST_PASS_TIMEOUT_DEFAULT,
   POST_PASS_TIMEOUT_ENV,
@@ -110,7 +112,13 @@ const renderInsertChain = (): {
   };
 };
 
-const RESET_ENV_KEYS = [BULK_BATCH_SIZE_ENV, BULK_RATE_PER_MIN_ENV, POST_PASS_TIMEOUT_ENV, LIVE_ACTIVITY_LOOKBACK_ENV];
+const RESET_ENV_KEYS = [
+  BULK_BATCH_SIZE_ENV,
+  BULK_RATE_PER_MIN_ENV,
+  BULK_BUDGET_MS_ENV,
+  POST_PASS_TIMEOUT_ENV,
+  LIVE_ACTIVITY_LOOKBACK_ENV,
+];
 
 const stripEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   const out = { ...env };
@@ -489,7 +497,32 @@ describe('runBatch', () => {
       { artist: 'Juana Molina', album: 'DOGA', raw_message: 'Juana Molina - DOGA' },
       { artist: 'Jessica Pratt', album: 'OYOLA', raw_message: 'Jessica Pratt - OYOLA' },
     ]);
-    expect(opts).toEqual({ budgetMs: 25000, timeoutMs: computeBulkTimeoutMs(2), caller: 'album-level-backfill' });
+    expect(opts).toEqual({
+      budgetMs: 25000,
+      timeoutMs: computeBulkTimeoutMs(2, 25000),
+      caller: 'album-level-backfill',
+    });
+  });
+
+  // LML clamps any X-Caller-Budget-Ms to its 4 s LML_SEARCH_BUDGET_MS and then
+  // sheds the enrichment tail as deadline_exceeded (BS#2986). `null` is the
+  // client's lever for sending no header; `undefined` would inherit the caller
+  // policy's budget and send one anyway.
+  it('sends no budget header when the budget is 0, and waits out LML hard cap', async () => {
+    mockBulkLookupMetadata.mockResolvedValue({
+      results: [
+        { index: 0, status: 'no_match', lookup: { results: [] } },
+        { index: 1, status: 'no_match', lookup: { results: [] } },
+      ],
+    });
+
+    await runBatch([1, 2], { budgetMs: 0, dryRun: false });
+
+    expect(mockBulkLookupMetadata.mock.calls[0][1]).toEqual({
+      budgetMs: null,
+      timeoutMs: computeBulkTimeoutMs(2, null),
+      caller: 'album-level-backfill',
+    });
   });
 
   it('counts match / no_match / error per response and UPSERTs only matches', async () => {
@@ -737,34 +770,39 @@ describe('runBatch', () => {
 // ---------------------------------------------------------------------------
 
 describe('computeBulkTimeoutMs', () => {
+  it.each([
+    // With a budget header LML stops each item at its (clamped) budget.
+    [5, 25_000, 30_000],
+    [1, 25_000, 10_000],
+    // With none an item can run to LML's 25 s hard cap, so one slow album
+    // must not time out the whole batch.
+    [5, null, 55_000],
+    [1, null, 35_000],
+  ])('batch of %i with budget header %p waits %i ms', (batchSize, budgetHeaderMs, expected) => {
+    expect(computeBulkTimeoutMs(batchSize, budgetHeaderMs)).toBe(expected);
+  });
+
   // Pin the linear relationship so a future bump to BULK_BATCH_SIZE_DEFAULT
   // without a paired slack bump fails loudly here, not in production as
   // `LmlClientError: LML request timed out`.
-  it('is linear in batchSize: timeoutMs === batchSize × per_item + slack', () => {
+  it('is linear in batchSize: timeoutMs === batchSize × per_item + slack (+ hard cap with no header)', () => {
     for (const n of [1, 5, 10, 15, 50, 100]) {
-      expect(computeBulkTimeoutMs(n)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
+      expect(computeBulkTimeoutMs(n, 4_000)).toBe(n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS);
+      expect(computeBulkTimeoutMs(n, null)).toBe(
+        n * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS + LML_HARD_CAP_MS
+      );
     }
-  });
-
-  // Slope-independent invariant: at the default batchSize, the client
-  // timeout should not exceed one full per-item server budget plus slack.
-  // Catches DEFAULT drift back to 10 (would give 55_000 ms at the post-#1198
-  // slope, well over the 30_000 ms ceiling) without re-baking arithmetic
-  // every time the slope or slack moves.
-  it('keeps BULK_BATCH_SIZE_DEFAULT under one per-item budget + slack', () => {
-    expect(computeBulkTimeoutMs(BULK_BATCH_SIZE_DEFAULT)).toBeLessThanOrEqual(
-      BULK_BUDGET_MS_DEFAULT + BULK_TIMEOUT_SLACK_MS
-    );
   });
 
   // Belt-and-suspenders cap on operator-overridden batch sizes (#1198 acceptance).
   // BACKFILL_BULK_BATCH_SIZE up to 20 — chosen to bracket plausible catch-up
-  // overrides — must stay under 120 s of fetch budget. Above that we're outside
-  // the regime LML's per-item cap was sized for and the failure mode shifts
-  // from "slow batch" to "timeouts pile up while LML keeps doing work."
-  it('caps overridden batchSize ≤ 20 at ≤ 120 s of fetch budget', () => {
+  // overrides — must stay under 130 s of fetch budget even with no header
+  // (120 s of per-item slices and slack, plus one item running to the hard
+  // cap). Above that the failure mode shifts from "slow batch" to "timeouts
+  // pile up while LML keeps doing work."
+  it('caps overridden batchSize ≤ 20 at ≤ 130 s of fetch budget', () => {
     for (let n = 1; n <= 20; n++) {
-      expect(computeBulkTimeoutMs(n)).toBeLessThanOrEqual(120_000);
+      expect(computeBulkTimeoutMs(n, null)).toBeLessThanOrEqual(130_000);
     }
   });
 });
@@ -795,6 +833,21 @@ describe('resolveOptions', () => {
     const opts = resolveOptions(env, []);
     expect(opts.batchSize).toBe(25);
     expect(opts.ratePerMin).toBe(2);
+  });
+
+  it('defaults the budget to 0, which sends no header (BS#2986)', () => {
+    expect(BULK_BUDGET_MS_DEFAULT).toBe(0);
+  });
+
+  it.each([
+    ['0', 0],
+    ['4000', 4000],
+  ])('accepts %s for BACKFILL_BULK_BUDGET_MS', (raw, expected) => {
+    expect(resolveOptions({ ...stripEnv(process.env), [BULK_BUDGET_MS_ENV]: raw }, []).budgetMs).toBe(expected);
+  });
+
+  it.each(['-1', '1.5', 'none'])('rejects %s for BACKFILL_BULK_BUDGET_MS', (raw) => {
+    expect(() => resolveOptions({ ...stripEnv(process.env), [BULK_BUDGET_MS_ENV]: raw }, [])).toThrow();
   });
 
   it('throws on invalid env (zero / non-integer / negative)', () => {

@@ -91,9 +91,15 @@ export const BULK_BATCH_SIZE_DEFAULT = 5;
 export const BULK_RATE_PER_MIN_ENV = 'LINKED_REENRICH_BULK_RATE_PER_MIN';
 export const BULK_RATE_PER_MIN_DEFAULT = 1;
 
-/** Per-ITEM budget forwarded to LML as `X-Caller-Budget-Ms` (LML#345). */
+/** Per-ITEM budget forwarded to LML as `X-Caller-Budget-Ms`; `0`, the
+ * default, sends no header (BS#2986). LML clamps any header to its
+ * `LML_SEARCH_BUDGET_MS` (4 s) and, once an item has used that, skips the
+ * rest of its enrichment tail (`fetch_artwork`, `enrich_metadata`) and
+ * answers `degraded: deadline_exceeded`. Lane B's fill-null UPSERT and row
+ * flip read exactly those fields. With no header an item runs to LML's hard
+ * cap instead. Nobody is waiting on this job's answers. */
 export const BULK_BUDGET_MS_ENV = 'LINKED_REENRICH_BULK_BUDGET_MS';
-export const BULK_BUDGET_MS_DEFAULT = 25_000;
+export const BULK_BUDGET_MS_DEFAULT = 0;
 
 /** Rows flipped per Lane A / Lane B UPDATE transaction. Batched per
  * docs/bulk-update-playbook.md so each transaction is short and the CDC
@@ -138,8 +144,16 @@ export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
 // jobs/album-level-backfill/job.ts for the LML#370 / BS#1198 history).
 export const BULK_PER_ITEM_TIMEOUT_MS = 5_000;
 export const BULK_TIMEOUT_SLACK_MS = 5_000;
-export const computeBulkTimeoutMs = (batchSize: number): number =>
-  batchSize * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS;
+/** LML's `LML_SEARCH_HARD_TIMEOUT_MS` default. It bounds an item's search when
+ * no budget header is sent, and LML checks it only between enrichment steps,
+ * so a step that starts just before it can run past it. Keep in step with
+ * LML's setting; it is not overridden in production. */
+export const LML_HARD_CAP_MS = 25_000;
+/** The bulk fetch timeout for a batch. `budgetHeaderMs` is the value sent as
+ * `X-Caller-Budget-Ms`, or `null` for none: then one item can run to LML's
+ * hard cap, so the batch waits that long on top of the per-item slices. */
+export const computeBulkTimeoutMs = (batchSize: number, budgetHeaderMs: number | null): number =>
+  batchSize * BULK_PER_ITEM_TIMEOUT_MS + BULK_TIMEOUT_SLACK_MS + (budgetHeaderMs === null ? LML_HARD_CAP_MS : 0);
 
 // -- Cohort predicate --------------------------------------------------------
 
@@ -479,11 +493,14 @@ export const runBatch = async (
 
   if (items.length === 0) return { ...empty, batchSize: 0 };
 
-  const timeoutMs = computeBulkTimeoutMs(items.length);
+  // `null` is the client's lever for sending no header; `undefined` would
+  // inherit the caller policy's budget.
+  const budgetHeaderMs = options.budgetMs > 0 ? options.budgetMs : null;
+  const timeoutMs = computeBulkTimeoutMs(items.length, budgetHeaderMs);
   let response;
   try {
     response = await bulkLookupMetadata(items, {
-      budgetMs: options.budgetMs,
+      budgetMs: budgetHeaderMs,
       timeoutMs,
       caller: JOB_NAME,
     });
@@ -652,7 +669,7 @@ export const resolveOptions = (
   return {
     bulkBatchSize: requirePositiveInt(env[BULK_BATCH_SIZE_ENV], BULK_BATCH_SIZE_ENV, BULK_BATCH_SIZE_DEFAULT, ctx),
     ratePerMin: requirePositiveInt(env[BULK_RATE_PER_MIN_ENV], BULK_RATE_PER_MIN_ENV, BULK_RATE_PER_MIN_DEFAULT, ctx),
-    budgetMs: requirePositiveInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
+    budgetMs: requireNonNegativeInt(env[BULK_BUDGET_MS_ENV], BULK_BUDGET_MS_ENV, BULK_BUDGET_MS_DEFAULT, ctx),
     flipBatchSize: requirePositiveInt(env[FLIP_BATCH_SIZE_ENV], FLIP_BATCH_SIZE_ENV, FLIP_BATCH_SIZE_DEFAULT, ctx),
     flipTimeoutMs: requirePositiveInt(env[FLIP_TIMEOUT_ENV], FLIP_TIMEOUT_ENV, FLIP_TIMEOUT_DEFAULT, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),

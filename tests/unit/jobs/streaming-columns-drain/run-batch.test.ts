@@ -26,7 +26,7 @@ jest.mock('@wxyc/lml-client', () => ({ bulkLookupMetadata: jest.fn() }));
 
 import { db } from '@wxyc/database';
 import { bulkLookupMetadata as bulkLookupMetadataImport } from '@wxyc/lml-client';
-import { runBatch } from '../../../../jobs/streaming-columns-drain/job';
+import { computeBulkTimeoutMs, runBatch } from '../../../../jobs/streaming-columns-drain/job';
 
 const bulkLookupMetadata = bulkLookupMetadataImport as unknown as jest.Mock;
 
@@ -130,5 +130,31 @@ describe('runBatch — only definitive verdicts are written', () => {
 
     expect(result.filled).toBe(0);
     expect(result.skipped_raced).toBe(1);
+  });
+});
+
+// LML clamps any X-Caller-Budget-Ms to its 4 s LML_SEARCH_BUDGET_MS and then
+// sheds the enrichment tail, where the Spotify and Apple links are found, as
+// deadline_exceeded (BS#2986). `null` is the client's lever for sending no
+// header; `undefined` would inherit the caller policy's budget and send one.
+describe('runBatch — the budget header', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (db.execute as jest.Mock).mockResolvedValue([{ album_id: 42 }] as never);
+  });
+
+  it.each([
+    [0, null],
+    [4_000, 4_000],
+  ])('sends budget %i to LML as header %p, with the matching bulk timeout', async (budgetMs, header) => {
+    bulkLookupMetadata.mockResolvedValue(itemAt0('no_match') as never);
+
+    await runBatch([CANDIDATE], { budgetMs });
+
+    expect(bulkLookupMetadata.mock.calls[0][1]).toEqual({
+      budgetMs: header,
+      timeoutMs: computeBulkTimeoutMs(1, header),
+      caller: 'streaming-columns-drain',
+    });
   });
 });
