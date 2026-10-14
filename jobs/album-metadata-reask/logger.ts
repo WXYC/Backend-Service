@@ -8,9 +8,10 @@
  * @sentry/node SDK silently no-ops in that case), so this module is safe to
  * call from any environment.
  *
- * Mirrors `jobs/flowsheet-metadata-backfill/logger.ts` verbatim — the
- * contract is identical, the duplication is the established pattern for
- * keeping each one-shot job's build graph independent of the others.
+ * Copied from `jobs/album-metadata-bio-fill/logger.ts`. The per-job copies are
+ * tracked debt, not policy: moving one logger into a shared package is
+ * WXYC/Backend-Service#615, and the fleet-wide Sentry `dataCollection` change
+ * is WXYC/Backend-Service#3004.
  */
 
 import * as Sentry from '@sentry/node';
@@ -29,7 +30,7 @@ type BaseTags = { repo: string; tool: string; run_id: string };
 
 let baseTags: BaseTags | null = null;
 
-// `@sentry/node` v10 silently produces zero spans when tracesSampleRate is unset.
+// `@sentry/node` (v10 onward) silently produces zero spans when tracesSampleRate is unset.
 export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
   if (raw === undefined) return 1;
   const parsed = Number(raw);

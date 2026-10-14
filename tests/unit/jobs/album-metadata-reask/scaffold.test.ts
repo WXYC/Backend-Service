@@ -1,17 +1,17 @@
-/**
- * The BS#3140 scaffold ships a buildable image for a job that does not exist
- * yet. `deploy-base.yml` discovers Docker targets from the workspace graph, so
- * from the moment this package merges an operator can `docker run` it. The one
- * behaviour worth pinning in this slice is therefore that running it is loud
- * and non-zero rather than a silent exit 0 that reads as "re-asked, nothing to
- * do".
- *
- * Replaced by the real `job.test.ts` when the options and dry run land.
- *
- * @see WXYC/Backend-Service#3137
- */
+// Pins the scaffold's loud non-zero exit (see job.ts); replaced by job.test.ts when the options land (BS#3137).
 
 import { describe, it, expect, afterEach, jest } from '@jest/globals';
+
+// Keep the real Sentry client (and its global hooks) out of the jest worker,
+// as the other job tests do.
+jest.mock('@sentry/node', () => ({
+  __esModule: true,
+  init: jest.fn(),
+  captureException: jest.fn(),
+  setTag: jest.fn(),
+  close: jest.fn(() => Promise.resolve(true)),
+}));
+
 import { main } from '../../../../jobs/album-metadata-reask/job';
 
 describe('album-metadata-reask scaffold', () => {
@@ -28,7 +28,11 @@ describe('album-metadata-reask scaffold', () => {
     await main();
 
     expect(process.exitCode).toBe(1);
-    const lines = stderr.mock.calls.map(([chunk]) => JSON.parse(String(chunk)) as Record<string, unknown>);
+    // Parse only the job's JSON lines, so an unrelated stderr warning cannot fail the test.
+    const lines = stderr.mock.calls
+      .map(([chunk]) => String(chunk))
+      .filter((chunk) => chunk.trimStart().startsWith('{'))
+      .map((chunk) => JSON.parse(chunk) as Record<string, unknown>);
     expect(lines).toContainEqual(
       expect.objectContaining({ level: 'error', step: 'not_implemented', tool: 'album-metadata-reask' })
     );

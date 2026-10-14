@@ -352,10 +352,8 @@ jobs:
       - name: 'Type check: album-metadata-bio-fill'
         run: npm run typecheck --workspace=jobs/album-metadata-bio-fill
 
-      # BS#3137: the re-ask rebinds the release-scoped columns of the same
-      # `album_metadata` rows the bio fill touches, behind a verdict branch that
-      # decides whether a pin is trusted. Root typecheck skips `jobs/**`
-      # (BS#2009), so it gets its own step from the scaffold (BS#3140) on.
+      # BS#3137: same rationale as the bio-fill step above; its own step from
+      # the scaffold (BS#3140) on.
       - name: 'Type check: album-metadata-reask'
         run: npm run typecheck --workspace=jobs/album-metadata-reask
 
