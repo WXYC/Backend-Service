@@ -651,8 +651,9 @@ describe('restoreDeletedBatch (BS#2585 / F2b)', () => {
     // collected under a promise they would not be shared, and the barrier is
     // that each reader names its columns (the three sites in the
     // `catalog_delete_snapshot` docstring in schema.ts). The restore block is
-    // not one of them, so a restore is not a permitted read site, and re-pointing a surviving submission at a restored
-    // release is its own issue with its own PII review.
+    // not one of them, so a restore is not a permitted read site, and
+    // re-pointing a surviving submission at a restored release is its own
+    // issue with its own PII review.
     it('never names album_review_submissions anywhere in the restore block', () => {
       for (const table of EXCLUDED) {
         expect(restoreBlockSource()).not.toContain(`['${table}',`);
