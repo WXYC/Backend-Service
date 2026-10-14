@@ -850,9 +850,15 @@ describe('applyEnrichment (BS#3126) — a degraded linked match keeps the stored
     const values = frag.values ?? [];
     return frag.sql.map((text, i) => (i < values.length ? text + renderDeep(values[i]) : text)).join('');
   };
-  const keepWhen = (identity: string, column: string) =>
-    `CASE WHEN (excluded."${identity}" IS NULL OR excluded."${identity}" IS NOT DISTINCT FROM album_metadata.${identity}) ` +
-    `THEN COALESCE(excluded."${column}", album_metadata.${column}) ELSE excluded."${column}" END`;
+  const SAME_RELEASE =
+    '(excluded."discogs_url" IS NULL OR excluded."discogs_url" IS NOT DISTINCT FROM album_metadata.discogs_url)';
+  // Both artist ids known and equal; or either unknown and the release unchanged.
+  const SAME_ARTIST =
+    '((excluded."discogs_artist_id" IS NOT NULL AND album_metadata.discogs_artist_id IS NOT NULL ' +
+    'AND excluded."discogs_artist_id" = album_metadata.discogs_artist_id) ' +
+    `OR ((excluded."discogs_artist_id" IS NULL OR album_metadata.discogs_artist_id IS NULL) AND ${SAME_RELEASE}))`;
+  const keepWhen = (guard: string, column: string) =>
+    `CASE WHEN ${guard} THEN COALESCE(excluded."${column}", album_metadata.${column}) ELSE excluded."${column}" END`;
 
   const shed = (degraded: boolean) =>
     ({
@@ -868,10 +874,10 @@ describe('applyEnrichment (BS#3126) — a degraded linked match keeps the stored
 
   it.each([
     { column: 'discogs_url', expected: 'COALESCE(excluded."discogs_url", album_metadata.discogs_url)' },
-    { column: 'artwork_url', expected: keepWhen('discogs_url', 'artwork_url') },
-    { column: 'release_year', expected: keepWhen('discogs_url', 'release_year') },
-    { column: 'artist_bio', expected: keepWhen('discogs_artist_id', 'artist_bio') },
-    { column: 'artist_wikipedia_url', expected: keepWhen('discogs_artist_id', 'artist_wikipedia_url') },
+    { column: 'artwork_url', expected: keepWhen(SAME_RELEASE, 'artwork_url') },
+    { column: 'release_year', expected: keepWhen(SAME_RELEASE, 'release_year') },
+    { column: 'artist_bio', expected: keepWhen(SAME_ARTIST, 'artist_bio') },
+    { column: 'artist_wikipedia_url', expected: keepWhen(SAME_ARTIST, 'artist_wikipedia_url') },
   ])('degraded reply: $column keeps the stored value per its identity guard', async ({ column, expected }) => {
     await WRITE(shed(true));
 
