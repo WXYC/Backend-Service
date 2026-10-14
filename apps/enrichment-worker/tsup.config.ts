@@ -9,8 +9,10 @@ export default defineConfig((options) => ({
   // `jobs/artist-unicode-dedup/tsup.config.ts`'s `merge.ts`. `worker.ts`/
   // `instrument.ts` pick up the extra `.cjs` output too (harmless — the
   // Docker image only ever runs `dist/worker.js`), rather than splitting
-  // this into a second config object for one entry.
-  entry: ['worker.ts', 'instrument.ts', 'streaming-merge-sql.ts'],
+  // this into a second config object for one entry. `degraded-keep-sql.ts`
+  // is a CJS entry for the same reason
+  // (tests/integration/enrichment-worker-degraded-keep.spec.js, BS#3117).
+  entry: ['worker.ts', 'instrument.ts', 'streaming-merge-sql.ts', 'degraded-keep-sql.ts'],
   outDir: 'dist',
   format: ['esm', 'cjs'],
   platform: 'node',
