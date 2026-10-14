@@ -1224,6 +1224,95 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
 });
 
 /**
+ * BS#3117 — a re-ask whose LML reply is `degraded: true` (LML#1420: the
+ * Discogs saturation breaker shed the top-1 enrichment fetch, so the reply is
+ * still a match with artwork but its artist-scoped fields are null) must not
+ * overwrite the artist-scoped columns already stored on `album_metadata`.
+ * The conflict branch wraps exactly those five columns in
+ * `COALESCE(excluded.<col>, <live col>)`; every other column, and every column
+ * on a healthy reply, is written exactly as before. A healthy reply with a
+ * null bio still clears the stored bio: that is LML's real "no profile"
+ * answer. The real-Postgres half is in
+ * tests/integration/album-metadata-upsert.spec.js.
+ */
+describe('finalizeRow (BS#3117) — a degraded re-ask keeps the stored artist-scoped columns', () => {
+  const ARTIST_SCOPED_COLUMNS = [
+    'artist_bio',
+    'artist_wikipedia_url',
+    'bio_tokens',
+    'artist_image_url',
+    'discogs_artist_id',
+  ] as const;
+
+  // The LML#1420 shape: still a direct match with artwork, artist step shed.
+  const shedMatchResponse = {
+    ...extendedMatchResponse,
+    degraded: true,
+    degraded_reason: 'upstream_unavailable',
+    results: [
+      {
+        artwork: {
+          ...(extendedMatchResponse.results[0]!.artwork as object),
+          artist_bio: null,
+          wikipedia_url: null,
+          discogs_artist_id: null,
+          artist_image_url: null,
+          profile_tokens: null,
+        },
+      },
+    ],
+  } as unknown as LookupResponse;
+
+  const healthyNullBioResponse = { ...shedMatchResponse, degraded: false, degraded_reason: undefined };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 42 }]);
+  });
+
+  const conflictSet = () =>
+    (mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> }).set;
+
+  it.each(ARTIST_SCOPED_COLUMNS)(
+    'degraded reply: %s keeps the stored value when the incoming one is null',
+    async (column) => {
+      await finalizeRow(LINKED_ROW, shedMatchResponse);
+
+      const fragment = conflictSet()[column];
+      expect(renderSql(fragment)).toBe('COALESCE(excluded.<col>, <col>)');
+      expect(sqlValues(fragment)).toEqual([{ identifier: column }, album_metadata[column]]);
+    }
+  );
+
+  it.each(ARTIST_SCOPED_COLUMNS)('healthy reply with a null %s still clears it (no COALESCE)', async (column) => {
+    await finalizeRow(LINKED_ROW, healthyNullBioResponse);
+
+    expect(conflictSet()[column]).toBeNull();
+  });
+
+  it('degraded reply: the match, artwork, and re-ask counter are still written', async () => {
+    const outcome = await finalizeRow(LINKED_ROW, shedMatchResponse);
+
+    expect(outcome).toBe('enriched_match');
+    const set = conflictSet();
+    expect(set.artwork_url).toBe('https://i.discogs.com/abc/cover.jpg');
+    expect(set.discogs_url).toBe('https://discogs.com/release/123');
+    expect(set.label).toBe('Sonamos');
+    expect(set.genres).toEqual(['Rock']);
+    expect(renderSql(set.streaming_reask_attempts)).toContain('CASE');
+  });
+
+  it('degraded reply: the INSERT branch is unchanged (a fresh album has nothing stored to keep)', async () => {
+    await finalizeRow(LINKED_ROW, shedMatchResponse);
+
+    const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    for (const column of ARTIST_SCOPED_COLUMNS) {
+      expect(insertPayload[column]).toBeNull();
+    }
+  });
+});
+
+/**
  * BS#1924 — the shared per-album `streaming_reask_attempts` counter must
  * increment only on a GENUINE re-ask of an already-enriched album, never on
  * a BS#1089 no-match shell row's first real match (a shell already has an

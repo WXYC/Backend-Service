@@ -122,6 +122,31 @@ describe('reaskUnresolvedStreaming (BS#1915)', () => {
     expect(result).toEqual({ candidates: 1, succeeded: 1, failed: 0 });
   });
 
+  // BS#3117: the sweep re-asks albums that already carry a match, so it is the
+  // main path where a shed (degraded) reply could null a stored bio. It must
+  // hand the reply's `degraded` flag to the shared upsert.
+  it.each([
+    { degraded: true, expected: true },
+    { degraded: false, expected: false },
+    { degraded: undefined, expected: false },
+  ])(
+    'passes degraded=$expected to the upsert when the reply says degraded=$degraded',
+    async ({ degraded, expected }) => {
+      mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE]));
+      mockEnrichmentBulkLookup.mockResolvedValueOnce({
+        search_type: 'direct',
+        degraded,
+        results: [
+          { artwork: { artwork_url: 'https://i.discogs.com/x.jpg', release_url: 'https://discogs.com/release/1' } },
+        ],
+      });
+
+      await reaskUnresolvedStreaming(100);
+
+      expect(mockUpsertMatchedAlbumMetadata.mock.calls[0]?.[3]).toBe(expected);
+    }
+  );
+
   it('bumps the attempt counter (no album_metadata write) when LML answers with no artwork at all', async () => {
     mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([CANDIDATE]));
     mockEnrichmentBulkLookup.mockResolvedValueOnce({ results: [] });

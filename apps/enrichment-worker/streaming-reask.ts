@@ -197,7 +197,8 @@ async function reaskOne(candidate: StreamingReaskCandidate): Promise<void> {
       track_title: null,
       album_id: candidate.album_id,
     });
-    await upsertMatchedAlbumMetadata(candidate.album_id, artwork, searchUrls);
+    // BS#3117: a shed (degraded) reply keeps the stored bio-family columns.
+    await upsertMatchedAlbumMetadata(candidate.album_id, artwork, searchUrls, response.degraded === true);
     return;
   }
   // LML answered but returned no artwork at all for an album that
