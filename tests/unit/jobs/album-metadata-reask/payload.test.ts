@@ -31,18 +31,6 @@ const lookup = (artwork: Record<string, unknown>) =>
     ],
   }) as never;
 
-const RELEASE_KEYS = [
-  'artwork_url',
-  'discogs_url',
-  'full_release_date',
-  'genres',
-  'label',
-  'release_year',
-  'styles',
-  'tracklist',
-];
-const ARTIST_KEYS = ['artist_bio', 'artist_image_url', 'artist_wikipedia_url', 'bio_tokens', 'discogs_artist_id'];
-
 describe('buildPayload', () => {
   it('maps every release- and artist-group field of a full answer', () => {
     const tracklist = [{ position: 'A1', title: 'la paradoja' }];
@@ -88,23 +76,19 @@ describe('buildPayload', () => {
   });
 
   it.each([
-    // Decision 3: a pinned release with no cover writes artwork_url = NULL.
-    ['no cover at all', {}, { artwork_url: null }],
     ['the spacer GIF', { artwork_url: 'https://st.discogs.com/images/spacer.gif' }, { artwork_url: null }],
     ['release year 0', { release_year: 0 }, { release_year: null }],
-    ['an absent release year', {}, { release_year: null }],
   ])('writes NULL for %s', (_label, artwork, expected) => {
     expect(buildPayload(lookup(artwork), FALLBACKS).release).toMatchObject(expected);
   });
 
   it('writes every release- and artist-group column, nulls included, and nothing else', () => {
-    // The release group moves as a unit: a column the answer lacks is written
-    // NULL, never left holding the old release's value. Streaming columns are
-    // never in the payload: LML resolves them per catalog row, not per release.
+    // The release group moves as a unit: a column the answer lacks (including
+    // the cover, decision 3) is written NULL, never left holding the old
+    // release's value. Streaming columns are never in the payload: LML
+    // resolves them per catalog row, not per release. `toEqual` pins the keys.
     const { release, artist } = buildPayload(lookup({}), FALLBACKS);
 
-    expect(Object.keys(release).sort()).toEqual(RELEASE_KEYS);
-    expect(Object.keys(artist).sort()).toEqual(ARTIST_KEYS);
     expect(release).toEqual({
       discogs_url: 'https://www.discogs.com/release/4101',
       artwork_url: null,
@@ -115,14 +99,28 @@ describe('buildPayload', () => {
       styles: null,
       tracklist: null,
     });
-    expect(Object.values(artist).every((value) => value === null)).toBe(true);
+    expect(artist).toEqual({
+      discogs_artist_id: null,
+      artist_bio: null,
+      artist_wikipedia_url: null,
+      artist_image_url: null,
+      bio_tokens: null,
+    });
   });
 });
 
 describe('CLEAR_RELEASE_GROUP', () => {
   it('is every release-group column, all NULL', () => {
-    expect(Object.keys(CLEAR_RELEASE_GROUP).sort()).toEqual(RELEASE_KEYS);
-    expect(Object.values(CLEAR_RELEASE_GROUP).every((value) => value === null)).toBe(true);
+    expect(CLEAR_RELEASE_GROUP).toEqual({
+      discogs_url: null,
+      artwork_url: null,
+      release_year: null,
+      label: null,
+      full_release_date: null,
+      genres: null,
+      styles: null,
+      tracklist: null,
+    });
   });
 });
 
@@ -168,7 +166,7 @@ describe('mergeArtistGroup (decision 8, with "same release" false: a rebind alwa
   ])('$name (stored kept: $kept)', ({ storedId, answer, kept }) => {
     const merged = mergeArtistGroup(stored(storedId), answer);
 
-    expect(merged).toEqual(kept ? { ...stored(storedId), discogs_artist_id: answer.discogs_artist_id } : answer);
+    expect(merged).toEqual(kept ? stored(storedId) : answer);
   });
 
   it('keeps stored values only where the same-artist answer is null', () => {
