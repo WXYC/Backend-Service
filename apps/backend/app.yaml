@@ -5461,7 +5461,9 @@ paths:
         `social_consent` filter, because the form's consent question asked only
         about outside publication ("shared on social media platforms... AKA blog
         and/or Instagram") and internal station tools were never in its scope.
-        Submissions with no review body are excluded.
+        Submissions with no review body are excluded, and so is a submission
+        the post-cutover import has copied into `reviews` (it is an ordinary
+        review on its release by then).
 
         The consent-gated PUBLIC surface is the `wxycReviews` array attached to
         GET /proxy/metadata/album, which is anonymous-reachable and applies a

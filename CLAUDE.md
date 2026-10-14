@@ -79,6 +79,7 @@ Jobs under `jobs/<name>/` (full text per job in [`docs/jobs.md`](docs/jobs.md)):
 | `@wxyc/concerts-similar-artists-enrichment` | Nightly cron `55 5 * * *`: semantic-index affinity neighbors for concert headliners. |
 | `@wxyc/concerts-poster-enrichment` | Nightly cron `05 6 * * *`: fill missing concert posters from Discogs artist images. |
 | `@wxyc/album-reviews-etl` | Nightly cron `50 4 * * *`: mirror the Album Review Responses sheet into `album_review_submissions`. |
+| `@wxyc/album-reviews-import` | One-shot, dry-run default (`--apply`): copy form-archive rows linked to a release into `reviews`, once (BS#3132). |
 | `@wxyc/album-critic-reviews-etl` | Weekly cron `10 7 * * 0`: ingest research-data critic reviews into `album_critic_reviews`. |
 | `@wxyc/uncovered-release-list` | Weekly cron `40 7 * * 0`: publish releases lacking critic reviews to research-data. |
 | `@wxyc/flowsheet-ghost-row-sweep` | One-shot, dry-run default: delete flowsheet/rotation rows absent from the tubafrenzy keyspace; do not run against prod until BS#1083. |

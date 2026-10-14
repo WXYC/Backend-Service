@@ -394,6 +394,10 @@ jobs:
       - name: 'Type check: comp-letter-backfill'
         run: npm run typecheck --workspace=jobs/comp-letter-backfill
 
+      # BS#2009 gap again: a one-shot that writes production reviews, run by hand with tsx.
+      - name: 'Type check: album-reviews-import'
+        run: npm run typecheck --workspace=jobs/album-reviews-import
+
       - name: Lint
         run: npm run lint
 

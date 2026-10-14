@@ -1,0 +1,199 @@
+/**
+ * The album-reviews import (BS#3132) against a real Postgres: which archive rows are copied into `reviews`, what
+ * each copy carries, that a dry run writes nothing and that a second run is a no-op.
+ *
+ * Runs the REAL shipped `runImport` from `jobs/album-reviews-import/dist/import.cjs` (CI's Build step produces it;
+ * locally, `npm run build --workspace=@wxyc/album-reviews-import` first). It takes this spec's own postgres.js
+ * handle. Rows come from `tests/utils/intake_seed.js`.
+ *
+ * The job reads every archive row in the schema, so counts are asserted as deltas over a dry run taken before this
+ * spec seeds anything, and each row is asserted by id. Whatever the apply wrote is removed in `afterAll`.
+ */
+
+// The unit-tier drizzle-orm double sits under tests/__mocks__ and jest applies it to node modules here too. The import
+// bundle and `@wxyc/database` need the real package.
+jest.unmock('drizzle-orm');
+
+const path = require('path');
+const { AUTHOR_MAX } = require('@wxyc/database');
+const { getTestDb } = require('../utils/db');
+const {
+  seedIntakeItem,
+  removeSeededIntakeItems,
+  seedLibraryRelease,
+  removeSeededLibraryReleases,
+  seedFormSubmission,
+  removeSeededFormSubmissions,
+} = require('../utils/intake_seed');
+
+const { runImport } = require(path.join(__dirname, '..', '..', 'jobs', 'album-reviews-import', 'dist', 'import.cjs'));
+
+const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+describe('album-reviews import (real PG)', () => {
+  let sql;
+  let release;
+  let base;
+  const rows = {};
+  const run = (apply) => runImport(sql, { schema: SCHEMA, apply, log: () => {} });
+  const reviewCount = async () => (await sql`SELECT count(*)::int AS n FROM ${sql(SCHEMA)}.reviews`)[0].n;
+  const importedReview = async (submission) =>
+    (
+      await sql`SELECT *, add_date::text AS add_date_text FROM ${sql(SCHEMA)}.reviews WHERE imported_from_submission_id = ${submission.id}`
+    )[0];
+  const revisionsOf = (reviewId) =>
+    sql`SELECT * FROM ${sql(SCHEMA)}.review_revisions WHERE review_id = ${reviewId} ORDER BY revision`;
+
+  beforeAll(async () => {
+    sql = getTestDb();
+    release = await seedLibraryRelease();
+    base = await run(false);
+
+    const linked = { album_id: release.id, review: 'A form review.' };
+    // 2025-01-01 03:30 UTC is still 31 December in New York, so the add_date proves the zone and not the UTC date.
+    rows.full = await seedFormSubmission({
+      ...linked,
+      artist_blurb: 'A blurb.',
+      recommended_tracks: 'la paradoja (!!!!)',
+      buzzwords: 'hushed, rural',
+      fcc_violations: 'Track 3',
+      reviewer_raw: '  Test Reviewer  ',
+      social_consent: true,
+      submitted_at: '2025-01-01T03:30:00+00:00',
+    });
+    rows.no = await seedFormSubmission({ ...linked, reviewer_raw: '   ', social_consent: false, submitted_at: null });
+    rows.unknown = await seedFormSubmission({ ...linked, social_consent: null });
+    rows.unlinked = await seedFormSubmission({ review: 'A form review.', reviewer_raw: 'Test Reviewer' });
+    rows.blank = await seedFormSubmission({ ...linked, review: '  \n ' });
+    rows.cited = await seedFormSubmission(linked);
+    await seedIntakeItem({ cited_submission_id: rows.cited.id });
+    rows.tooLong = await seedFormSubmission({ ...linked, reviewer_raw: 'x'.repeat(AUTHOR_MAX + 1) });
+    // 128 code points is 256 UTF-16 units, and Postgres counts characters, so this one fits.
+    rows.astral = await seedFormSubmission({ ...linked, reviewer_raw: '𝒜'.repeat(AUTHOR_MAX) });
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM ${sql(SCHEMA)}.reviews WHERE imported_from_submission_id IS NOT NULL`;
+    await removeSeededIntakeItems();
+    await removeSeededFormSubmissions();
+    await removeSeededLibraryReleases();
+  });
+
+  test('a dry run counts each rule and writes nothing', async () => {
+    const before = await reviewCount();
+
+    const dry = await run(false);
+
+    expect(await reviewCount()).toBe(before);
+    expect(dry.status).toBe('dry-run');
+    expect(dry.eligible - base.eligible).toBe(5);
+    expect(dry.imported - base.imported).toBe(4);
+    for (const [reason, added] of [
+      ['no_release', 1],
+      ['blank_review', 1],
+      ['cited_by_intake_item', 1],
+      ['already_imported', 0],
+      ['author_too_long', 1],
+    ]) {
+      expect({ reason, n: dry.skipped[reason] - base.skipped[reason] }).toEqual({ reason, n: added });
+    }
+    expect(dry.tooLongAuthors).toContain(rows.tooLong.id);
+    expect(await importedReview(rows.full)).toBeUndefined();
+  });
+
+  test('--apply copies a linked row with every column mapped, and its revision 1', async () => {
+    const applied = await run(true);
+
+    expect(applied.status).toBe('applied');
+    expect(applied.imported - base.imported).toBe(4);
+    const review = await importedReview(rows.full);
+    expect(review).toMatchObject({
+      album_id: release.id,
+      intake_item_id: null,
+      review: 'A form review.',
+      artist_blurb: 'A blurb.',
+      recommended_tracks: 'la paradoja (!!!!)',
+      buzzwords: 'hushed, rural',
+      fcc: 'Track 3',
+      author: 'Test Reviewer',
+      author_user_id: null,
+      recorded_by_user_id: null,
+      medium: 'typed',
+      status: 'submitted',
+      publish_website: true,
+      publish_apps: true,
+      publish_instagram: true,
+      credit: 'none',
+    });
+    expect(review.submitted_at).toEqual(rows.full.submitted_at);
+    expect(review.add_date_text).toBe('2024-12-31');
+    const revisions = await revisionsOf(review.id);
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]).toMatchObject({
+      revision: 1,
+      edited_by: 'Test Reviewer',
+      edited_by_user_id: null,
+      review: 'A form review.',
+      artist_blurb: 'A blurb.',
+      recommended_tracks: 'la paradoja (!!!!)',
+      buzzwords: 'hushed, rural',
+      fcc: 'Track 3',
+    });
+    expect(revisions[0].edited_at).toEqual(rows.full.submitted_at);
+  });
+
+  test.each([
+    ['yes', 'full', true],
+    ['no', 'no', false],
+    ['unanswered', 'unknown', false],
+  ])('a %s consent gives all three publish flags %s and no credit', async (_name, key, expected) => {
+    const review = await importedReview(rows[key]);
+
+    expect([review.publish_website, review.publish_apps, review.publish_instagram]).toEqual([
+      expected,
+      expected,
+      expected,
+    ]);
+    expect(review.credit).toBe('none');
+  });
+
+  test('a blank reviewer is a null author, and a row with no submitted_at keeps it null', async () => {
+    const review = await importedReview(rows.no);
+
+    expect(review.author).toBeNull();
+    expect(review.submitted_at).toBeNull();
+    const [revision] = await revisionsOf(review.id);
+    expect(revision.edited_by).toBeNull();
+    expect(Math.abs(Date.now() - revision.edited_at.getTime())).toBeLessThan(10 * 60 * 1000);
+  });
+
+  test('an author of exactly AUTHOR_MAX code points is imported whole', async () => {
+    const review = await importedReview(rows.astral);
+
+    expect([...review.author]).toHaveLength(AUTHOR_MAX);
+  });
+
+  test.each(['unlinked', 'blank', 'cited', 'tooLong'])('the %s row is not imported', async (key) => {
+    expect(await importedReview(rows[key])).toBeUndefined();
+  });
+
+  test('a second run inserts nothing and reports every eligible row as already imported', async () => {
+    const before = await reviewCount();
+
+    const again = await run(true);
+
+    expect(await reviewCount()).toBe(before);
+    expect(again.imported).toBe(0);
+    expect(again.skipped.already_imported).toBe(again.eligible - again.skipped.author_too_long);
+    expect(again.eligible - base.eligible).toBe(5);
+  });
+
+  test('deleting the form row clears the provenance and keeps the review', async () => {
+    const review = await importedReview(rows.astral);
+
+    await sql`DELETE FROM ${sql(SCHEMA)}.album_review_submissions WHERE id = ${rows.astral.id}`;
+
+    const [after] = await sql`SELECT * FROM ${sql(SCHEMA)}.reviews WHERE id = ${review.id}`;
+    expect(after.imported_from_submission_id).toBeNull();
+  });
+});
