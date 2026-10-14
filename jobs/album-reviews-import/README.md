@@ -10,9 +10,9 @@ For each archive row, in id order, the job reports the row under the first rule 
 2. **`blank_review`**: `review` is null or only whitespace.
 3. **`cited_by_intake_item`**: an intake item cites it (`intake_items.cited_submission_id`). That is the music director's copy-and-cite path (WXYC/dj-site#2095); the record already has its own review.
 4. **`already_imported`**: a `reviews` row carries `imported_from_submission_id` = the row's id.
-5. **`author_too_long`**: the trimmed `reviewer_raw` is over `AUTHOR_MAX` (128) code points, which `reviews.author varchar(128)` cannot hold. Nothing is truncated. **These rows need a hand decision**: the dry run lists their ids; import them by hand (a shorter author) or leave them archive-only.
+5. **`author_too_long`**: the trimmed `reviewer_raw` is over `AUTHOR_MAX` (128) code points, which `reviews.author varchar(128)` cannot hold. Nothing is truncated. **These rows need a hand decision**: the dry run lists their ids. Either leave them archive-only, or shorten the author in the archive row with SQL and run the job again, which imports the row with its provenance and revision 1 like any other. After the close, Postgres is the archive's system of record ([BS#2812](https://github.com/WXYC/Backend-Service/issues/2812)) and the ETL is retired, so nothing reverts an `UPDATE` of `album_review_submissions.reviewer_raw`. Never `INSERT` into `reviews` by hand: it would carry no provenance, so the archive row would still be listed beside it, and no revision 1.
 
-A row that passes all five is imported. **Eligible** counts the rows that pass rules 1-3, so a re-run reports every eligible row under `already_imported` (or `author_too_long`) and imports none.
+A row that passes all five is imported. The insert re-reads the archive row and requires its `album_id` still to be set, so a release deleted while `--apply` runs writes nothing for that row, which is counted under `no_release`; the run still commits. **Eligible** counts the rows that pass rules 1-3, so a re-run reports every eligible row under `already_imported` (or `author_too_long`) and imports none.
 
 Each imported row becomes one `reviews` row and one `review_revisions` row, in the same transaction:
 
@@ -56,7 +56,7 @@ npx tsx jobs/album-reviews-import/job.ts
 npx tsx jobs/album-reviews-import/job.ts --apply
 ```
 
-The counts line reads `eligible=N imported=N skipped: no_release=N blank_review=N cited_by_intake_item=N already_imported=N author_too_long=N`. In a dry run `imported` is what `--apply` would write. A second `--apply` reports `imported=0`. `WXYC_SCHEMA_NAME` defaults to `wxyc_schema`.
+The counts line reads `eligible=N imported=N skipped: no_release=N blank_review=N cited_by_intake_item=N already_imported=N author_too_long=N`. In a dry run `imported` is what `--apply` would write. A second `--apply` reports `imported=0`. `WXYC_SCHEMA_NAME` defaults to `wxyc_schema`. A failure prints the SQLSTATE and the names of the table, column and constraint, never a row's values: the archive holds real names ([`docs/pii.md`](../../docs/pii.md)).
 
 ## After the apply
 

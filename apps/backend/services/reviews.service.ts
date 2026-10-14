@@ -44,9 +44,10 @@ import type { RecordSubject } from '../utils/record-subject.js';
 
 /**
  * Mirror of the contract's `Review` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x.
- * The last five keys are computed by `reviewSelection`, never stored.
+ * The last five keys are computed by `reviewSelection`, never stored. `imported_from_submission_id`, the import's
+ * internal provenance (BS#3132), is stored but not part of the contract's `Review`, so no response carries it.
  */
-export type ReviewResponse = Review & {
+export type ReviewResponse = Omit<Review, 'imported_from_submission_id'> & {
   in_use: boolean;
   on_cover: boolean;
   printed_revision_id: number | null;
@@ -108,9 +109,15 @@ const ownLatestPrint = (column: 'revision_id' | 'printed_at') =>
 // Through `reviewRef`, never a bare `${reviews.id}`: in a single-table select that renders unqualified and would bind to `rr.id`.
 const revisionCount = sql<number>`(SELECT count(*)::int FROM ${review_revisions} AS rr WHERE rr.review_id = ${reviewRef})`;
 
-/** A review's columns plus the computed `in_use`, `on_cover` (`onCover`, false unless a release list supplies it), `printed_revision_id`, `printed_at`, `revision_count`. */
+/** Every stored `reviews` column an API response carries: all but `imported_from_submission_id`, which stays internal. */
+const responseColumns = () =>
+  Object.fromEntries(
+    Object.entries(getTableColumns(reviews)).filter(([key]) => key !== 'imported_from_submission_id')
+  ) as Omit<typeof reviews._.columns, 'imported_from_submission_id'>;
+
+/** A review's response columns plus the computed `in_use`, `on_cover` (`onCover`, false unless a release list supplies it), `printed_revision_id`, `printed_at`, `revision_count`. */
 const reviewSelection = (onCover: SQL<boolean> = sql`false`) => ({
-  ...getTableColumns(reviews),
+  ...responseColumns(),
   in_use: inUse,
   on_cover: onCover.as('on_cover'),
   printed_revision_id: ownLatestPrint('revision_id').mapWith(Number),

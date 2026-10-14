@@ -7919,14 +7919,17 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
     //      verbatim copy of a row still sitting in the live table.
     //   2. Capturing it BREACHES the ADR-0011 PII barrier. `reviewer_raw`
     //      holds real names collected under a form promise that "your name
-    //      will not be shared", and the barrier is that the enumerated
-    //      `select({...})` in `lookupWxycReviewsByAlbumId` is the only
-    //      reader — "any second reader must carry the same exclusion".
-    //      `captureCatalogDeleteSnapshot` reads with an UNPROJECTED
-    //      `tx.select()`, so listing this table here would copy
-    //      `reviewer_raw` and `social_consent_raw` into a permanently-
-    //      retained jsonb column with no redaction or purge path: exactly
-    //      the second reader schema.ts and ADR 0011 forbid.
+    //      will not be shared", and the barrier is that each reader names its
+    //      columns in an enumerated `select({...})` ("any other reader must
+    //      carry the same exclusion"). `captureCatalogDeleteSnapshot` reads
+    //      with an UNPROJECTED `tx.select()`, so listing this table here
+    //      would copy `reviewer_raw` and `social_consent_raw` into a
+    //      permanently-retained jsonb column with no redaction or purge
+    //      path. This is about the archive TABLE: since BS#3132 an imported
+    //      review's `reviews.author` and revision 1's `edited_by` hold the
+    //      same name (`jobs/album-reviews-import`), and the `reviews` and
+    //      `review_revisions` captures below DO keep it, as a station-only
+    //      name of the class `docs/pii.md` gives any review's typed author.
     //
     // Reason 2 is not answerable by adding a projection here, because reason
     // 1 means there is nothing to restore in the first place.

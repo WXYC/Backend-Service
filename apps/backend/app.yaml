@@ -5463,7 +5463,10 @@ paths:
         and/or Instagram") and internal station tools were never in its scope.
         Submissions with no review body are excluded, and so is a submission
         the post-cutover import has copied into `reviews` (it is an ordinary
-        review on its release by then).
+        review on its release by then), for as long as that imported review
+        exists. If the imported review, or its release, is deleted, the
+        submission is listed again: nothing is lost, and it is then the
+        remaining copy.
 
         The consent-gated PUBLIC surface is the `wxycReviews` array attached to
         GET /proxy/metadata/album, which is anonymous-reachable and applies a

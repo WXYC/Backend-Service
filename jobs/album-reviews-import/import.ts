@@ -58,6 +58,20 @@ export const skipReason = (row: ArchiveRow): SkipReason | null => {
   return null;
 };
 
+/**
+ * One line for the operator's terminal from a caught error. A postgres.js error carries the server's `detail`
+ * (`Failing row contains (...)`) and `where`, and a data exception's `message` (SQLSTATE class 22) quotes the value; any
+ * of them can hold a reviewer's name or a review's text, which docs/pii.md keeps out of logs. So a database error is
+ * reported by its SQLSTATE, the names of what it was raised against and, unless it is a data exception, its message.
+ */
+export const describeError = (err: unknown): string => {
+  if (!(err instanceof Error)) return 'a value that is not an Error was thrown';
+  const pg = err as Partial<Record<'severity' | 'code' | 'table_name' | 'column_name' | 'constraint_name', string>>;
+  if (pg.severity === undefined) return `${err.name}: ${err.message}`;
+  const named = [pg.table_name, pg.column_name, pg.constraint_name].filter(Boolean).join(' ');
+  return `${err.name} ${pg.code}${pg.code?.startsWith('22') ? '' : `: ${err.message}`}${named ? ` (${named})` : ''}`;
+};
+
 export const runImport = async (
   sql: Sql,
   { schema, apply, log = console.log }: { schema: string; apply: boolean; log?: (line: string) => void }
@@ -91,6 +105,8 @@ export const runImport = async (
       }
       if (apply) {
         // The partial unique index is the backstop for a concurrent run: a conflict writes nothing, revision included.
+        // `s.album_id IS NOT NULL` is the backstop for a release deleted since the scan (`ON DELETE SET NULL`): the
+        // insert would fail `reviews_target_ck` and abort the run, so it writes nothing instead.
         const written = await tx`
           WITH imported AS (
             INSERT INTO ${t('reviews')} (album_id, review, artist_blurb, recommended_tracks, buzzwords, fcc, author,
@@ -100,7 +116,7 @@ export const runImport = async (
                    ${authorOf(row)}::text, s.submitted_at,
                    COALESCE((s.submitted_at AT TIME ZONE 'America/New_York')::date, CURRENT_DATE),
                    s.social_consent IS TRUE, s.social_consent IS TRUE, s.social_consent IS TRUE, 'none', s.id
-              FROM ${t('album_review_submissions')} s WHERE s.id = ${row.id}
+              FROM ${t('album_review_submissions')} s WHERE s.id = ${row.id} AND s.album_id IS NOT NULL
             ON CONFLICT (imported_from_submission_id) WHERE imported_from_submission_id IS NOT NULL DO NOTHING
             RETURNING *)
           INSERT INTO ${t('review_revisions')} (review_id, revision, edited_by, edited_by_user_id, edited_at, review,
@@ -110,7 +126,10 @@ export const runImport = async (
             FROM imported
           RETURNING review_id`;
         if (written.length === 0) {
-          result.skipped.already_imported += 1;
+          // Nothing written: a concurrent run took the row, or its release was deleted since the scan.
+          const [{ linked }] = await tx<{ linked: boolean }[]>`
+            SELECT EXISTS (SELECT 1 FROM ${t('album_review_submissions')} WHERE id = ${row.id} AND album_id IS NOT NULL) AS linked`;
+          result.skipped[linked ? 'already_imported' : 'no_release'] += 1;
           continue;
         }
       }
