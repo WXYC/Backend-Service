@@ -83,6 +83,38 @@ async function repairLinked(sql, albumId, payload) {
   return rows.length;
 }
 
+/**
+ * BS#3127: the linked UPSERT on a degraded LML reply (`keepStoredOnDegradedSet`
+ * in `repair.ts`), narrowed to the five columns that rule covers. `discogs_url`
+ * keeps the stored value where the reply is null; `artwork_url` and
+ * `release_year` do the same while the reply's `discogs_url` is null or
+ * unchanged; the bio and Wikipedia URL likewise keyed on `discogs_artist_id`.
+ * The job never writes `discogs_artist_id`, so it inserts NULL there (the
+ * default here); a test passes a value only to exercise the artist guard's SQL.
+ * When that function is hand-edited the SQL here must follow.
+ */
+async function repairLinkedDegraded(sql, albumId, payload) {
+  const am = (col) => sql`${sql(SCHEMA)}.album_metadata.${sql(col)}`;
+  const keepWhen = (identity, col) =>
+    sql`CASE WHEN (EXCLUDED.${sql(identity)} IS NULL OR EXCLUDED.${sql(identity)} IS NOT DISTINCT FROM ${am(identity)})
+             THEN COALESCE(EXCLUDED.${sql(col)}, ${am(col)}) ELSE EXCLUDED.${sql(col)} END`;
+  await sql`
+    INSERT INTO ${sql(SCHEMA)}.album_metadata
+      (album_id, discogs_url, artwork_url, release_year, artist_bio, artist_wikipedia_url, discogs_artist_id, updated_at)
+    VALUES
+      (${albumId}, ${payload.discogs_url}, ${payload.artwork_url}, ${payload.release_year}, ${payload.artist_bio},
+       ${payload.artist_wikipedia_url}, ${payload.discogs_artist_id ?? null}, NOW())
+    ON CONFLICT (album_id) DO UPDATE
+       SET discogs_url          = COALESCE(EXCLUDED.discogs_url, ${am('discogs_url')}),
+           artwork_url          = ${keepWhen('discogs_url', 'artwork_url')},
+           release_year         = ${keepWhen('discogs_url', 'release_year')},
+           artist_bio           = ${keepWhen('discogs_artist_id', 'artist_bio')},
+           artist_wikipedia_url = ${keepWhen('discogs_artist_id', 'artist_wikipedia_url')},
+           updated_at           = NOW()
+     WHERE ${sql(SCHEMA)}.album_metadata.updated_at < NOW()
+  `;
+}
+
 async function insertLibraryAlbum(sql, suffix) {
   const rows = await sql`
     INSERT INTO ${sql(SCHEMA)}.library
@@ -279,5 +311,101 @@ describe('flowsheet-artwork-repair drain (real PG, BS#1209)', () => {
       SELECT artwork_url FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
     `;
     expect(rows[0].artwork_url).toBe('https://i.discogs.com/fresh-enrichment.jpg');
+  });
+
+  // BS#3127: a degraded (shed) reply keeps the stored values it lacks, guarded
+  // by the release identity (discogs_url) and the artist identity
+  // (discogs_artist_id). A reply for a different release or artist is written
+  // as it is. A healthy reply with nulls still clears them (the plain
+  // repairLinked above).
+  test.each([
+    {
+      label: 'no incoming identities, as the job sends',
+      discogsUrl: null,
+      artistId: null,
+      releaseKept: true,
+      bioKept: true,
+    },
+    {
+      label: 'the same release and artist',
+      discogsUrl: 'https://discogs.com/release/3127',
+      artistId: 3127,
+      releaseKept: true,
+      bioKept: true,
+    },
+    {
+      label: 'a different release',
+      discogsUrl: 'https://discogs.com/release/9999',
+      artistId: null,
+      releaseKept: false,
+      bioKept: true,
+    },
+    { label: 'a different artist', discogsUrl: null, artistId: 9999, releaseKept: true, bioKept: false },
+  ])('BS#3127: degraded re-ask with $label', async ({ label, discogsUrl, artistId, releaseKept, bioKept }) => {
+    const albumId = await insertLibraryAlbum(sql, `bs3127-degraded-${label}`);
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        (album_id, discogs_url, artwork_url, release_year, artist_bio, artist_wikipedia_url, discogs_artist_id, updated_at)
+      VALUES
+        (${albumId}, 'https://discogs.com/release/3127', ${REPAIR_PAYLOAD.artwork_url}, ${REPAIR_PAYLOAD.release_year},
+         ${REPAIR_PAYLOAD.artist_bio}, ${REPAIR_PAYLOAD.artist_wikipedia_url}, 3127, NOW() - INTERVAL '1 hour')
+    `;
+
+    await repairLinkedDegraded(sql, albumId, {
+      discogs_url: discogsUrl,
+      artwork_url: null,
+      release_year: null,
+      artist_bio: null,
+      artist_wikipedia_url: null,
+      discogs_artist_id: artistId,
+    });
+
+    const [row] = await sql`
+      SELECT discogs_url, artwork_url, release_year, artist_bio, artist_wikipedia_url
+        FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
+    `;
+    expect(row.discogs_url).toBe(discogsUrl ?? 'https://discogs.com/release/3127');
+    expect(row.artwork_url).toBe(releaseKept ? REPAIR_PAYLOAD.artwork_url : null);
+    expect(row.release_year).toBe(releaseKept ? REPAIR_PAYLOAD.release_year : null);
+    expect(row.artist_bio).toBe(bioKept ? REPAIR_PAYLOAD.artist_bio : null);
+    expect(row.artist_wikipedia_url).toBe(bioKept ? REPAIR_PAYLOAD.artist_wikipedia_url : null);
+  });
+
+  test('BS#3127: a degraded re-ask that does carry a value still overwrites the stored one', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'bs3127-degraded-nonnull');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artist_bio, release_year, updated_at)
+      VALUES (${albumId}, 'An older bio.', 1999, NOW() - INTERVAL '1 hour')
+    `;
+
+    await repairLinkedDegraded(sql, albumId, {
+      discogs_url: null,
+      artwork_url: REPAIR_PAYLOAD.artwork_url,
+      release_year: 2001,
+      artist_bio: 'A newer bio.',
+      artist_wikipedia_url: null,
+    });
+
+    const [row] = await sql`
+      SELECT artist_bio, release_year FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
+    `;
+    expect(row.artist_bio).toBe('A newer bio.');
+    expect(row.release_year).toBe(2001);
+  });
+
+  test('BS#3127: a healthy re-ask with a null bio still clears the stored one', async () => {
+    const albumId = await insertLibraryAlbum(sql, 'bs3127-healthy-null');
+    insertedAlbumIds.push(albumId);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, artist_bio, updated_at)
+      VALUES (${albumId}, 'An older bio.', NOW() - INTERVAL '1 hour')
+    `;
+
+    await repairLinked(sql, albumId, { ...REPAIR_PAYLOAD, artist_bio: null, artist_wikipedia_url: null });
+
+    const [row] = await sql`SELECT artist_bio FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}`;
+    expect(row.artist_bio).toBeNull();
   });
 });
