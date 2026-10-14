@@ -38,13 +38,13 @@ describe('buildArtistKeepSet', () => {
   it.each([
     // "Either id null", answer side: decided in JS. A rebind changes the release, so the answer is written as-is.
     ['the answer has no artist id', null, (col: string, cast: string) => `::${cast}`],
-    // "Both ids set": kept only when the stored id is set and equal; a NULL stored id fails the test, so "either id
-    // null" on the stored side also writes as answered.
+    // "Both ids set": kept only when the stored id is equal; a NULL stored id makes the test NULL, so "either id null"
+    // on the stored side also writes as answered. Each answered value is bound once.
     [
       'the answer has an artist id',
       61002,
       (col: string, cast: string) =>
-        `CASE WHEN p."discogs_artist_id" IS NOT NULL AND p."discogs_artist_id" = 61002::int THEN COALESCE(::${cast}, p."${col}") ELSE ::${cast} END`,
+        `COALESCE(::${cast}, CASE WHEN p."discogs_artist_id" = 61002::int THEN p."${col}" END)`,
     ],
   ])('when %s, each artist-scoped column follows the rule', (_label, id, expected) => {
     const set = buildArtistKeepSet({ ...ANSWER, discogs_artist_id: id, artist_wikipedia_url: null }, stored);
@@ -56,7 +56,7 @@ describe('buildArtistKeepSet', () => {
   it('binds a non-null answer value, which wins over the stored one through COALESCE', () => {
     const set = buildArtistKeepSet(ANSWER, stored);
 
-    expect(flat(set.artist_wikipedia_url)).toContain('COALESCE(https://en.wikipedia.org/wiki/Juana_Molina::text');
+    expect(flat(set.artist_wikipedia_url)).toMatch(/^COALESCE\(https:\/\/en.wikipedia.org\/wiki\/Juana_Molina::text, /);
   });
 
   it('binds bio_tokens as JSON text, and a null as SQL NULL rather than the JSON null', () => {

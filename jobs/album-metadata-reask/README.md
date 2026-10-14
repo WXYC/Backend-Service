@@ -11,7 +11,7 @@ Landed so far:
 - The package scaffold ([#3140](https://github.com/WXYC/Backend-Service/issues/3140)).
 - `cohort.ts` ([#3142](https://github.com/WXYC/Backend-Service/issues/3142)): the read-only cohort counts and enumeration; see its docblock. Built as `dist/cohort.cjs` for `tests/integration/album-metadata-reask.spec.js`.
 - The knobs and the dry run ([#3144](https://github.com/WXYC/Backend-Service/issues/3144)).
-- `write.ts`, `artist-keep-sql.ts` and `run-batch.ts` ([#3145](https://github.com/WXYC/Backend-Service/issues/3145)): the guarded `album_metadata` write and one batch of ask, decide and write. Nothing calls `runBatch` yet; the execute loop is [#3151](https://github.com/WXYC/Backend-Service/issues/3151). `write.ts` and `artist-keep-sql.ts` are built as `dist/*.cjs` for the integration spec.
+- `write.ts`, `artist-keep-sql.ts` and `run-batch.ts` ([#3145](https://github.com/WXYC/Backend-Service/issues/3145)): the guarded `album_metadata` write and one batch of ask, decide and write. Nothing calls `runBatch` yet; the execute loop is [#3151](https://github.com/WXYC/Backend-Service/issues/3151). `write.ts` and `artist-keep-sql.ts` are tsup entries; the integration spec runs `dist/write.cjs`, which bundles the artist rule.
 
 ## The album write
 

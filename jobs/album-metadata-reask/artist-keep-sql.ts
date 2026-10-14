@@ -40,9 +40,10 @@ export function buildArtistKeepSet(answer: ArtistGroup, stored: (key: ArtistKey)
   };
   if (answer.discogs_artist_id === null) return set;
 
-  const sameArtist = sql`${stored('discogs_artist_id')} IS NOT NULL AND ${stored('discogs_artist_id')} = ${answer.discogs_artist_id}::int`;
+  // A NULL stored id makes the test NULL, so "either id null" also writes as answered. Each value is bound once.
   for (const key of KEEPABLE) {
-    set[key] = sql`CASE WHEN ${sameArtist} THEN COALESCE(${set[key]}, ${stored(key)}) ELSE ${set[key]} END`;
+    set[key] =
+      sql`COALESCE(${set[key]}, CASE WHEN ${stored('discogs_artist_id')} = ${answer.discogs_artist_id}::int THEN ${stored(key)} END)`;
   }
   return set;
 }

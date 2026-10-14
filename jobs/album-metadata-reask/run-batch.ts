@@ -51,8 +51,6 @@ export interface BatchOptions {
   timeoutMs: number;
 }
 
-const JOB_NAME = 'album-metadata-reask' as const;
-
 const errorMessage = (err: unknown): string => {
   // Drizzle's own message is the statement and its parameters; what the database said is on `.cause`.
   const reason = (err as { cause?: unknown } | null)?.cause ?? err;
@@ -72,7 +70,7 @@ const ask = async (batch: AdmittedRow[], timeoutMs: number): Promise<BulkLookupR
   }));
   try {
     const response: { results?: unknown } | null = await bulkLookupMetadata(items, {
-      caller: JOB_NAME,
+      caller: 'album-metadata-reask',
       allowReleaseResolutionFallback: true,
       budgetMs: null,
       timeoutMs,
@@ -100,14 +98,30 @@ export const runBatch = async (batch: AdmittedRow[], options: BatchOptions): Pro
 
   for (const [position, admitted] of batch.entries()) {
     const { row, entry } = admitted;
-    const verdict = decideReask(toCandidate(admitted), results?.[position], position);
+    const item = results?.[position];
+    const verdict = decideReask(toCandidate(admitted), item, position);
     count(verdict.kind);
     if (verdict.kind === 'indeterminate') {
-      if (verdict.unexpectedIndex) count('unexpected_index');
       result.carriedAlbumIds.push(row.album_id);
+      // An LML contract break (BS#1088): alerted, as in the bio fill, not only counted.
+      if (verdict.unexpectedIndex) {
+        count('unexpected_index');
+        captureError(new Error('bulk result out of input order'), 'unexpected_index', { album_id: row.album_id });
+      }
     }
-    // Only `rebind`, `rebind_unpinned` and `clear` carry a payload.
-    if (!('payload' in verdict)) continue;
+    // Only `rebind`, `rebind_unpinned` and `clear` carry a payload. Every other verdict names its album, so a
+    // listed verdict (`pin_not_bound`, `matcher_agrees_with_removed`, ...) can be traced without a re-run.
+    if (!('payload' in verdict)) {
+      log('info', 'not_written', `${verdict.kind} for album_id=${row.album_id}`, {
+        album_id: row.album_id,
+        legacy_release_id: row.legacy_release_id,
+        verdict: verdict.kind,
+        status: item?.status ?? null,
+        degraded_reason: item?.lookup?.degraded_reason ?? null,
+        got_index: item?.index ?? null,
+      });
+      continue;
+    }
 
     try {
       const outcome = await writeAlbum({

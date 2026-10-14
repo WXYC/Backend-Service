@@ -89,12 +89,12 @@ describe('writeAlbumSql', () => {
 
   it('writes the backup row in the same statement, and the update only once it exists', () => {
     expect(statement).toMatch(/backup AS \( INSERT INTO "wxyc_schema"\."album_metadata_reask_backup"/);
-    expect(statement).toContain(`SELECT run-1::text, 'album_metadata', p."album_id", p."album_id",`);
+    expect(statement).toContain(`SELECT run-1::text, 'album_metadata', n."album_id", n."album_id", n.before_image,`);
     expect(statement).toContain('AND EXISTS (SELECT 1 FROM backup)');
   });
 
   it('sets the 13 release- and artist-group columns and updated_at, and no other column', () => {
-    const set = statement.slice(statement.indexOf(' SET ') + 5, statement.indexOf(' FROM next n'));
+    const set = statement.slice(statement.indexOf(' SET ') + 5, statement.lastIndexOf(' FROM next n'));
 
     expect(set.split(', ')).toEqual([...COLUMNS.map((c) => `"${c}" = n."${c}"`), '"updated_at" = NOW()']);
   });
@@ -115,7 +115,7 @@ describe('writeAlbumSql', () => {
   });
 
   it('applies the artist rule to the artist group', () => {
-    expect(statement).toContain('CASE WHEN p."discogs_artist_id" IS NOT NULL AND p."discogs_artist_id" = 61002::int');
+    expect(statement).toContain('CASE WHEN p."discogs_artist_id" = 61002::int THEN p."artist_bio" END');
   });
 
   it('on clear, writes the release group NULL and keeps the artist group', () => {
