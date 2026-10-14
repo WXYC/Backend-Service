@@ -611,6 +611,7 @@ export const reviews = {
   publish_apps: 'reviews.publish_apps',
   publish_instagram: 'reviews.publish_instagram',
   credit: 'reviews.credit',
+  imported_from_submission_id: 'reviews.imported_from_submission_id',
 };
 export const album_critic_reviews = {
   id: 'album_critic_reviews.id',

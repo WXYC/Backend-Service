@@ -1,0 +1,65 @@
+# album-reviews-import
+
+One-shot import for [BS#3132](https://github.com/WXYC/Backend-Service/issues/3132) (epic [BS#2791](https://github.com/WXYC/Backend-Service/issues/2791), decided by the station on 2026-10-14). After the form closes, it copies every `album_review_submissions` row that is linked to a library release into `reviews` on that release, once, so that an old review of a record already in the library is an ordinary review: it shows in the release's reviews, **Cite a release in the library** can cite it, and **Use this review** can use it. Rows with no release stay archive-only. [ADR 0011](../../docs/adr/0011-album-review-submissions-separate-archive.md)'s 2026-10-14 amendment records the decision.
+
+## What it does
+
+For each archive row, in id order, the job reports the row under the first rule that applies (the order is the contract, pinned by `tests/unit/jobs/album-reviews-import/skip-reason.test.ts`):
+
+1. **`no_release`**: `album_id` is null.
+2. **`blank_review`**: `review` is null or only whitespace.
+3. **`cited_by_intake_item`**: an intake item cites it (`intake_items.cited_submission_id`). That is the music director's copy-and-cite path (WXYC/dj-site#2095); the record already has its own review.
+4. **`already_imported`**: a `reviews` row carries `imported_from_submission_id` = the row's id.
+5. **`author_too_long`**: the trimmed `reviewer_raw` is over `AUTHOR_MAX` (128) code points, which `reviews.author varchar(128)` cannot hold. Nothing is truncated. **These rows need a hand decision**: the dry run lists their ids; import them by hand (a shorter author) or leave them archive-only.
+
+A row that passes all five is imported. **Eligible** counts the rows that pass rules 1-3, so a re-run reports every eligible row under `already_imported` (or `author_too_long`) and imports none.
+
+Each imported row becomes one `reviews` row and one `review_revisions` row, in the same transaction:
+
+| `reviews` column                                            | value                                                                                                                                                          |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `album_id`                                                  | the row's `album_id` (`intake_item_id` null)                                                                                                                   |
+| `review`, `artist_blurb`, `recommended_tracks`, `buzzwords` | the row's same-named columns                                                                                                                                   |
+| `fcc`                                                       | `fcc_violations`                                                                                                                                               |
+| `author`                                                    | `reviewer_raw`, trimmed; null when blank                                                                                                                       |
+| `author_user_id`, `recorded_by_user_id`                     | null                                                                                                                                                           |
+| `medium`, `status`                                          | `typed`, `submitted`                                                                                                                                           |
+| `submitted_at`                                              | the row's `submitted_at`                                                                                                                                       |
+| `add_date`                                                  | the America/New_York date of `submitted_at`; the current date when it is null                                                                                  |
+| `publish_website`, `publish_apps`, `publish_instagram`      | all three equal `social_consent = true` (a form-era "yes" counts for all three surfaces, ADR 0011's third 2026-10-02 amendment); false for a "no" and for null |
+| `credit`                                                    | `none` (form reviews are always uncredited)                                                                                                                    |
+| `imported_from_submission_id`                               | the row's `id`                                                                                                                                                 |
+
+Revision 1 carries the same five content fields, `edited_by` = the review's `author`, `edited_by_user_id` null, and `edited_at` = the row's `submitted_at` (the column default, now, when that is null). That is what `writeFirstRevisionIfMissing` would write; the job cannot call it, because jobs never import `apps/backend`.
+
+The job only inserts. It never updates or deletes a `reviews` row or an archive row. The insert is `ON CONFLICT (imported_from_submission_id) DO NOTHING`, so two runs at once still write each row once. A dry run reads in a read-only transaction.
+
+## Before the dry run
+
+1. [BS#2812](https://github.com/WXYC/Backend-Service/issues/2812)'s final ingest has run, the album-reviews ETL is retired, and the nightly link pass has finished: it is the only writer of `album_review_submissions.album_id`, and a row linked after the import is not imported.
+2. The **conditional-yes read** of `social_consent_raw` is done and corrected in the sheet (ADR 0011). The job gives a form-era yes all three surfaces and never reads `social_consent_raw`, so a "yes, only blog" left uncorrected would publish to Instagram.
+3. Migration 0193 (`reviews.imported_from_submission_id`) is applied.
+
+## Running it
+
+Production is read-only for the implementer; the station runs this by hand, **dry run first**. Like `comp-letter-backfill`, it runs from a workstation through an SSH tunnel with `tsx`, and has no Dockerfile.
+
+```sh
+npm run build --workspace=@wxyc/database
+export DB_HOST=127.0.0.1 DB_PORT=<tunnel-port> DB_NAME=... DB_USERNAME=...
+read -rs DB_PASSWORD && export DB_PASSWORD
+
+# Dry run: prints the counts and the ids of the too-long authors, writes nothing.
+npx tsx jobs/album-reviews-import/job.ts
+
+# After reading the counts:
+npx tsx jobs/album-reviews-import/job.ts --apply
+```
+
+The counts line reads `eligible=N imported=N skipped: no_release=N blank_review=N cited_by_intake_item=N already_imported=N author_too_long=N`. In a dry run `imported` is what `--apply` would write. A second `--apply` reports `imported=0`. `WXYC_SCHEMA_NAME` defaults to `wxyc_schema`.
+
+## After the apply
+
+**Do not run the job again once the station has edited or deleted imported reviews.** A deleted imported review takes its `imported_from_submission_id` with it, so a later run imports that form review again. Edits are safe to leave, but the job offers nothing to reconcile them, so treat the apply as the end of the job's life. Corrections to an archive row after the run no longer reach the copy.
+
+A release delete copies the cover review a record took from the release without `imported_from_submission_id`, and a catalog restore nulls it when its archive row was deleted meanwhile (both in `docs/adr/0011-...md`'s amendment).

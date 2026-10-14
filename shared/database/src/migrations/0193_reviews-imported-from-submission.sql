@@ -1,0 +1,6 @@
+-- BS#3132: provenance for the one-shot import of linked form-archive reviews into `reviews` (jobs/album-reviews-import). A second run skips a row whose id is already here. SET NULL because a form row can be deleted by hand; unique where not null so one form row is imported once.
+-- DDL-only: a nullable column with no default rewrites nothing, and the index is built over an all-NULL column.
+-- @no-precondition-needed: the column is new and all NULL, so the partial unique index and the foreign key have no rows to violate them.
+ALTER TABLE "wxyc_schema"."reviews" ADD COLUMN "imported_from_submission_id" integer;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."reviews" ADD CONSTRAINT "reviews_imported_from_submission_id_album_review_submissions_id_fk" FOREIGN KEY ("imported_from_submission_id") REFERENCES "wxyc_schema"."album_review_submissions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "reviews_imported_from_submission_id_uq" ON "wxyc_schema"."reviews" USING btree ("imported_from_submission_id") WHERE "wxyc_schema"."reviews"."imported_from_submission_id" IS NOT NULL;

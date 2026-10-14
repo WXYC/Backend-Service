@@ -2863,8 +2863,16 @@ export const reviews = wxyc_schema.table(
     publish_apps: boolean('publish_apps').notNull().default(false),
     publish_instagram: boolean('publish_instagram').notNull().default(false),
     credit: reviewCreditEnum('credit'),
+    // The form-archive row this review was copied from by `jobs/album-reviews-import` (ADR 0011). Form rows can be
+    // deleted by hand, hence SET NULL; unique so the job's re-run imports nothing twice.
+    imported_from_submission_id: integer('imported_from_submission_id').references(() => album_review_submissions.id, {
+      onDelete: 'set null',
+    }),
   },
   (table) => [
+    uniqueIndex('reviews_imported_from_submission_id_uq')
+      .on(table.imported_from_submission_id)
+      .where(sql`${table.imported_from_submission_id} IS NOT NULL`),
     index('reviews_album_id_idx').on(table.album_id),
     index('reviews_intake_item_id_idx').on(table.intake_item_id),
     index('reviews_author_user_id_idx').on(table.author_user_id),
@@ -2882,7 +2890,9 @@ export const reviews = wxyc_schema.table(
  * editable by their author at any time and by music directors, every
  * version of a submitted one kept in `review_revisions`). This archive
  * differs on the axes that matter — immutable submissions and a promise
- * that reviewer names are never shared — so the two never merge (see
+ * that reviewer names are never shared — so it stays a table of its own, and only
+ * the linked rows `jobs/album-reviews-import` copies once, after the form
+ * closes, cross into `reviews` (see
  * docs/adr/0011-album-review-submissions-separate-archive.md).
  *
  * Identity is free-text: `album_id` is a best-effort link written only by

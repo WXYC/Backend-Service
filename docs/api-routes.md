@@ -6,7 +6,7 @@ Route-table detail and routing notes moved verbatim out of `CLAUDE.md`. `CLAUDE.
 
 ### `/album-reviews`
 
-Form-review archive reads (ADR 0011). Role-gated `album_reviews:read` (dj+), NOT anonymous auth — it serves the whole archive with no `social_consent` filter, so the gate is the safety argument. Explicit projection: returns the reviewer's name as `reviewer` (decision 14, `docs/pii.md`); never `social_consent_raw` or the ETL bookkeeping columns. The public `wxycReviews` attach stays nameless.
+Form-review archive reads (ADR 0011). Role-gated `album_reviews:read` (dj+), NOT anonymous auth — it serves the whole archive with no `social_consent` filter, so the gate is the safety argument. Explicit projection: returns the reviewer's name as `reviewer` (decision 14, `docs/pii.md`); never `social_consent_raw` or the ETL bookkeeping columns. The public `wxycReviews` attach stays nameless. A row `jobs/album-reviews-import` has copied into `reviews` (`NOT EXISTS` on `reviews.imported_from_submission_id`, BS#3132) is left out: it is an ordinary review on its release by then. The gate, columns and consent posture are unchanged.
 
 ### `/library/rotation/thresholds`
 

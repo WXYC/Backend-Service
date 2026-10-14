@@ -33,6 +33,8 @@ const {
   seedReview,
   seedReviewRevision,
   seedReviewPrint,
+  seedFormSubmission,
+  removeSeededFormSubmissions,
 } = require('../utils/intake_seed');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -65,8 +67,9 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
    * A review of `releaseId` with every column off its default (the consent columns and `credit`
    * included, and microsecond timestamps), and two revisions with their own editors and times.
    */
-  const seedCoverReview = async (releaseId, label = 'cover') => {
+  const seedCoverReview = async (releaseId, label = 'cover', extra = {}) => {
     const review = await seedReview({
+      ...extra,
       album_id: releaseId,
       review: `${marker} ${label}`,
       author: 'Test Reviewer',
@@ -144,6 +147,7 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
   afterAll(async () => {
     await removeSeededIntakeItems();
     await removeSeededLibraryReleases();
+    await removeSeededFormSubmissions();
     if (releaseIds.length > 0) {
       await sql`DELETE FROM ${sql(SCHEMA)}.catalog_delete_snapshot WHERE entity_kind = 'library' AND entity_id = ANY(${releaseIds})`;
       await sql`DELETE FROM ${sql(SCHEMA)}.library_delete_denylist WHERE library_id = ANY(${releaseIds})`;
@@ -197,6 +201,21 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
     const prints = await sql`SELECT * FROM ${sql(SCHEMA)}.review_prints WHERE intake_item_id = ${item.id}`;
     expect(prints).toHaveLength(1);
     expect(prints[0]).toMatchObject({ review_id: copy.id, revision_id: copiedRevisions[0].id });
+  });
+
+  test('an imported review that is the cover review is copied without its import provenance (BS#3132)', async () => {
+    const cited = await seedRelease();
+    const submission = await seedFormSubmission({ album_id: cited.id });
+    const { review } = await seedCoverReview(cited.id, 'imported', { imported_from_submission_id: submission.id });
+    const item = await seedItem({ cited_album_id: cited.id, accepted_review_id: review.id });
+    expect((await reviewJson(review.id)).imported_from_submission_id).toBe(submission.id);
+
+    // Copying the column would collide with the original on its unique index and fail this delete with a 500.
+    await deleteRelease(cited.id);
+
+    const copy = await reviewJson((await itemRow(item.id)).accepted_review_id);
+    expect(copy).toMatchObject({ intake_item_id: item.id, review: `${marker} imported` });
+    expect(copy.imported_from_submission_id).toBeNull();
   });
 
   test('a record filed as another release is stamped with it, stays filed, and its release-level prints follow the copy', async () => {

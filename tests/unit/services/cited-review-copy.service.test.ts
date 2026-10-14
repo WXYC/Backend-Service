@@ -129,7 +129,7 @@ describe('copyCitedCoverReviews (BS#2875)', () => {
     });
 
     it.each([
-      ['reviews', reviews, ['id', 'intake_item_id', 'album_id']],
+      ['reviews', reviews, ['id', 'intake_item_id', 'album_id', 'imported_from_submission_id']],
       ['review_revisions', review_revisions, ['id', 'review_id']],
     ])('takes the %s copy columns from the table, less its own keys', async (_name, table, omitted) => {
       const statements = await run();
@@ -143,6 +143,13 @@ describe('copyCitedCoverReviews (BS#2875)', () => {
         // once in the INSERT list, once in the SELECT list
         expect(insert.sql.split(column).length - 1).toBeGreaterThanOrEqual(2);
       }
+    });
+
+    it('never copies the import provenance: the copy is the record’s own review, and the column is unique', async () => {
+      const statements = await run();
+      const insert = statements.find((s) => s.sql.toLowerCase().startsWith(`insert into "${SCHEMA}"."reviews"`));
+
+      expect(insert.sql).not.toContain('imported_from_submission_id');
     });
 
     it('stamps the copy with the record and the record’s own album, never the deleted release', async () => {

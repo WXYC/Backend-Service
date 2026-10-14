@@ -1,0 +1,22 @@
+{
+  "name": "@wxyc/album-reviews-import",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot import (BS#3132): copy every album_review_submissions row linked to a library release into reviews on that release, once, with revision 1. Dry-run by default; --apply to write.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@wxyc/database": "^1.0.0",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

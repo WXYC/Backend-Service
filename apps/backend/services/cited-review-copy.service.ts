@@ -61,7 +61,8 @@ export const copyCitedCoverReviews = async (tx: Tx, albumId: number) => {
     .orderBy(asc(reviews.id))
     .for('share');
 
-  const reviewColumns = copiedColumns(reviews, ['id', 'intake_item_id', 'album_id']);
+  // `imported_from_submission_id` is unique and names the import's row; the copy is the record's own review.
+  const reviewColumns = copiedColumns(reviews, ['id', 'intake_item_id', 'album_id', 'imported_from_submission_id']);
   const revisionColumns = copiedColumns(review_revisions, ['id', 'review_id']);
   // A table interpolated into `sql` renders without its alias, so each FROM/JOIN names it explicitly.
   const original = alias(review_revisions, 'original_revision');

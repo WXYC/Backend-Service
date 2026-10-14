@@ -1,5 +1,5 @@
 import { and, desc, eq, isNotNull, sql, type Column, type SQL } from 'drizzle-orm';
-import { album_review_submissions, db, normalizeArtistName } from '@wxyc/database';
+import { album_review_submissions, db, normalizeArtistName, reviews } from '@wxyc/database';
 import type { AlbumReview } from '@wxyc/shared/dtos';
 
 /**
@@ -152,7 +152,12 @@ export const toAlbumReviewDTO = (row: AlbumReviewRow): AlbumReviewDTO => ({
  * ETL upsert.
  */
 const buildWhere = ({ album_id, artist }: AlbumReviewsQueryFilters): SQL | undefined => {
-  const conditions: SQL[] = [isNotNull(album_review_submissions.review)];
+  // A row `jobs/album-reviews-import` copied into `reviews` is an ordinary review on its release now (ADR 0011), so the
+  // list leaves it out; the gate, columns and consent posture are unchanged.
+  const conditions: SQL[] = [
+    isNotNull(album_review_submissions.review),
+    sql`NOT EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.imported_from_submission_id} = ${album_review_submissions.id})`,
+  ];
   if (album_id !== undefined) {
     conditions.push(eq(album_review_submissions.album_id, album_id));
   }
