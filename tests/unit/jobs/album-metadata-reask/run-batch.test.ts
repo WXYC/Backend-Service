@@ -20,6 +20,7 @@ import { db } from '@wxyc/database';
 import { bulkLookupMetadata as bulkLookupMetadataImport } from '@wxyc/lml-client';
 import type { ReaskCandidate as CohortRow } from '../../../../jobs/album-metadata-reask/cohort';
 import type { ManifestEntry } from '../../../../jobs/album-metadata-reask/inputs';
+import * as logger from '../../../../jobs/album-metadata-reask/logger';
 import { runBatch, toCandidate, type AdmittedRow } from '../../../../jobs/album-metadata-reask/run-batch';
 
 const bulkLookupMetadata = bulkLookupMetadataImport as unknown as jest.Mock;
@@ -158,12 +159,20 @@ describe('runBatch — only a writing verdict writes', () => {
     ['unpinned_drifted', removed(EXPECTED), noMatch()],
     ['incomplete', MISMATCH, answer(MISMATCH, PIN, { artwork: { release_url: null } })],
   ])('%s does not touch the database', async (kind, admitted, item) => {
+    const log = jest.spyOn(logger, 'log');
     bulkLookupMetadata.mockResolvedValue({ results: [item] } as never);
 
     const { totals } = await runBatch([admitted], OPTS);
 
     expect(execute).not.toHaveBeenCalled();
     expect(totals).toEqual({ [kind.split(' ')[0]]: 1 });
+    // Each names its album, so a listed verdict can be traced without a re-run.
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'not_written',
+      expect.any(String),
+      expect.objectContaining({ album_id: admitted.row.album_id, verdict: kind.split(' ')[0] })
+    );
   });
 
   it.each([
@@ -177,6 +186,17 @@ describe('runBatch — only a writing verdict writes', () => {
     expect(execute).not.toHaveBeenCalled();
     expect(result.totals.indeterminate).toBe(2);
     expect(result.carriedAlbumIds).toEqual([10, 11]);
+  });
+
+  it('counts and reports a result out of input order, an LML contract break', async () => {
+    const captureError = jest.spyOn(logger, 'captureError');
+    bulkLookupMetadata.mockResolvedValue({ results: [answer(MISMATCH, PIN, {}, 1)] } as never);
+
+    const result = await runBatch([MISMATCH], OPTS);
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result).toEqual({ totals: { indeterminate: 1, unexpected_index: 1 }, carriedAlbumIds: [10] });
+    expect(captureError).toHaveBeenCalledWith(expect.any(Error), 'unexpected_index', { album_id: 10 });
   });
 
   it.each([
