@@ -1420,11 +1420,14 @@ export async function bulkLookupMetadata(
      *
      * LML#920 makes the flag a per-caller query param on `/lookup/bulk`
      * (`?allow_release_resolution_fallback=true`), defaulting to the
-     * pre-existing `false` when omitted. Set this `true` ONLY on the live
+     * pre-existing `false` when omitted. Set this `true` on the live
      * enrichment path (`apps/enrichment-worker/lookup-batcher.ts`), which
-     * wants parity with the single-item default. The offline drains
+     * wants parity with the single-item default, plus one named, paced
+     * offline exception: `album-metadata-reask` (BS#3137, BS#3138). That
+     * job exists to apply LML's release pins, and the bulk path applies
+     * them only under this flag (LML#671). Every other offline drain
      * (`jobs/album-level-backfill`, `jobs/catalog-popularity-freetext-resolve`,
-     * `jobs/flowsheet-linked-reenrichment`) must keep omitting it so the
+     * `jobs/flowsheet-linked-reenrichment`, ...) must keep omitting it so the
      * kill switch's actual purpose — no per-row live Discogs on a 35k-item
      * drain — stays intact.
      */

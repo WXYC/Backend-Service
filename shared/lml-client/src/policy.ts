@@ -59,8 +59,9 @@
  *   - Class 5, **bulk drains that write the enrichment tail**
  *     (`album-level-backfill`, `catalog-popularity-freetext-resolve`,
  *     `flowsheet-linked-reenrichment`, `streaming-columns-drain`,
- *     `album-metadata-bio-fill`): send NO header (`budgetMs: null`) by
- *     default, and size the bulk fetch timeout for LML's 25s hard cap. These
+ *     `album-metadata-bio-fill`, `album-metadata-reask`): send NO header
+ *     (`budgetMs: null`) by default, and size the bulk fetch timeout for
+ *     LML's 25s hard cap. These
  *     jobs once sent 25000, which LML clamps to 4s; past that LML sheds the
  *     enrichment tail (artwork, streaming links, bio) as
  *     `deadline_exceeded`, which is the data these jobs exist to write.
@@ -269,6 +270,14 @@ export const ALL_LML_CALLERS = [
   // a ~13k-album drain has to be attributable on the `lml.caller` span and
   // LML's per-caller metrics rather than hiding under another job's name.
   'album-metadata-bio-fill',
+  // BS#3138: the one-shot re-ask of `album_metadata` rows whose stored
+  // release disagrees with LML's release pin (tracker BS#3137). Class 5 —
+  // same offline bulk shape as its `album-metadata-bio-fill` donor, and its
+  // own label so its LML sheds and `lml.cache.api_calls` (the canary's
+  // Discogs-calls-per-album stop condition) are readable for this job alone.
+  // It is the one paced offline caller that sets
+  // `allowReleaseResolutionFallback` (see that option's doc comment).
+  'album-metadata-reask',
 ] as const;
 
 export type LmlCaller = (typeof ALL_LML_CALLERS)[number];
@@ -309,6 +318,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'va-apple-music-url-remediation': 5,
   'streaming-columns-drain': 5,
   'album-metadata-bio-fill': 5,
+  'album-metadata-reask': 5,
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,

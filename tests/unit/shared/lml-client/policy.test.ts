@@ -91,6 +91,10 @@ describe('lml-client policy', () => {
         // BS#2775: the bio fill. Its own label for the same attribution
         // reason as the streaming-columns drain above.
         'album-metadata-bio-fill': 5,
+        // BS#3138: the album_metadata re-ask (tracker BS#3137). Its own
+        // label so the job's LML sheds and `lml.cache.api_calls` are
+        // readable apart from the bio fill it copies.
+        'album-metadata-reask': 5,
       };
       for (const [caller, expectedClass] of Object.entries(expected) as [LmlCaller, LmlCallerClass][]) {
         expect(resolveLmlPolicy(caller).class).toBe(expectedClass);
