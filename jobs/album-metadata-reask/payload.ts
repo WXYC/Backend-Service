@@ -14,28 +14,24 @@
  *     `mergeArtistGroup` (decision 8). Never written on `clear`.
  */
 
+import type { AlbumMetadata } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
 import { normalizeLookup, type MetadataFallbacks } from '@wxyc/metadata';
 
-export type ReleaseGroup = {
-  discogs_url: string | null;
-  artwork_url: string | null;
-  release_year: number | null;
-  label: string | null;
-  full_release_date: string | null;
-  genres: string[] | null;
-  styles: string[] | null;
-  tracklist: NonNullable<DiscogsMatchResult['tracklist']> | null;
-};
+// Column names and types come from the schema, so a renamed or retyped column
+// fails to compile here. The two jsonb columns are untyped in the schema and
+// take LML's types instead.
+export type ReleaseGroup = Pick<
+  AlbumMetadata,
+  'discogs_url' | 'artwork_url' | 'release_year' | 'label' | 'full_release_date' | 'genres' | 'styles'
+> & { tracklist: NonNullable<DiscogsMatchResult['tracklist']> | null };
 
-export type ArtistGroup = {
-  discogs_artist_id: number | null;
-  artist_bio: string | null;
-  artist_wikipedia_url: string | null;
-  artist_image_url: string | null;
-  bio_tokens: NonNullable<DiscogsMatchResult['profile_tokens']> | null;
-};
+export type ArtistGroup = Pick<
+  AlbumMetadata,
+  'discogs_artist_id' | 'artist_bio' | 'artist_wikipedia_url' | 'artist_image_url'
+> & { bio_tokens: NonNullable<DiscogsMatchResult['profile_tokens']> | null };
 
+/** `artist` is as answered; merge it with the stored group (`mergeArtistGroup`) before it is shown or written. */
 export type RebindPayload = { release: ReleaseGroup; artist: ArtistGroup };
 
 /** The `clear` release group: a confidently wrong release is worse than none (decision 3). */
@@ -81,24 +77,16 @@ export const buildPayload = (lookup: LookupResponse, fallbacks: MetadataFallback
 };
 
 /**
- * Decision 8, the merged BS#3128 artist rule (`apps/enrichment-worker/
- * degraded-keep-sql.ts`): a column keeps its stored value where the answer is
- * null only if both `discogs_artist_id`s are non-null and equal, or if either
- * is null and the release is unchanged. A rebind always changes the release,
- * so here it reduces to "both ids set and equal". Otherwise the answer is
- * written as-is, nulls included. `discogs_artist_id` is always the answer's.
- *
- * Unlike the worker, which keeps stored values only on a degraded reply, this
- * applies to a healthy rebind answer (this job never writes a degraded one): a
- * sibling release of the same Discogs artist does not erase that artist's bio.
- * The write itself evaluates the rule in SQL against the row it locks; this is
- * the same rule over values in hand, for the preview and as its executable spec.
+ * Decision 8, the BS#3128 artist rule (`apps/enrichment-worker/
+ * degraded-keep-sql.ts`) with "same release" false, since a rebind always
+ * changes the release: keep a stored value where the answer is null only when
+ * both `discogs_artist_id`s are set and equal; otherwise write the answer,
+ * nulls included. `discogs_artist_id` is always the answer's. Applied to
+ * healthy answers (BS#3137, "What is rewritten"). The write evaluates the same
+ * rule in SQL against the row it locks; this is it over values in hand.
  */
 export const mergeArtistGroup = (stored: ArtistGroup, answer: ArtistGroup): ArtistGroup => {
-  const sameArtist =
-    stored.discogs_artist_id !== null &&
-    answer.discogs_artist_id !== null &&
-    stored.discogs_artist_id === answer.discogs_artist_id;
+  const sameArtist = stored.discogs_artist_id !== null && stored.discogs_artist_id === answer.discogs_artist_id;
   if (!sameArtist) return answer;
   return {
     discogs_artist_id: answer.discogs_artist_id,

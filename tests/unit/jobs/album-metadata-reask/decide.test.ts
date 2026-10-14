@@ -15,6 +15,7 @@
 
 import { describe, it, expect } from '@jest/globals';
 import { decideReask, type ReaskCandidate } from '../../../../jobs/album-metadata-reask/decide';
+import { CLEAR_RELEASE_GROUP } from '../../../../jobs/album-metadata-reask/payload';
 
 const PIN = 4101;
 const STORED = 4102;
@@ -27,9 +28,7 @@ const MISMATCH: ReaskCandidate = {
   artist_name: 'Juana Molina',
   album_title: 'DOGA',
   reason: 'pin_mismatch',
-  stored_release_id: STORED,
   pin_release_id: PIN,
-  expected_release_id: null,
 };
 
 /** Tier 1: step 2 removed the pin, and its play-corroborated no-pin release is EXPECTED. */
@@ -39,7 +38,6 @@ const REMOVED_TIER_1: ReaskCandidate = {
   album_title: 'On Your Own Love Again',
   reason: 'pin_removed',
   stored_release_id: STORED,
-  pin_release_id: null,
   expected_release_id: EXPECTED,
 };
 
@@ -50,7 +48,6 @@ const REMOVED_TIER_2A: ReaskCandidate = {
   album_title: 'Dots and Loops',
   reason: 'pin_removed',
   stored_release_id: STORED,
-  pin_release_id: null,
   expected_release_id: null,
 };
 
@@ -93,7 +90,7 @@ const degrade = (reason: string, body: Record<string, unknown>) => ({
   degraded_reason: reason,
 });
 
-type Row = [label: string, candidate: ReaskCandidate, item: unknown, kind: string, position?: number];
+type Row = [label: string, candidate: ReaskCandidate, item: unknown, kind: string];
 
 const ROWS: Row[] = [
   // indeterminate: LML did not answer for this album.
@@ -196,6 +193,12 @@ const ROWS: Row[] = [
     match(answer(REMOVED_TIER_1, EXPECTED, { release_url: '' })),
     'incomplete',
   ],
+  [
+    'a release_id 0 that is not the synthetic shape (never a clear)',
+    REMOVED_TIER_2A,
+    match(answer(REMOVED_TIER_2A, 0)),
+    'incomplete',
+  ],
   ['a removed row with no artwork at all', REMOVED_TIER_2A, match(answer(REMOVED_TIER_2A, OTHER, null)), 'incomplete'],
 
   // The three writes.
@@ -211,8 +214,8 @@ const ROWS: Row[] = [
 ];
 
 describe('decideReask', () => {
-  it.each(ROWS)('%s -> %s', (_label, candidate, item, kind, position = 0) => {
-    expect(decideReask(candidate, item as never, position).kind).toBe(kind);
+  it.each(ROWS)('%s -> %s', (_label, candidate, item, kind) => {
+    expect(decideReask(candidate, item as never, 0).kind).toBe(kind);
   });
 
   it.each([
@@ -244,21 +247,11 @@ describe('decideReask', () => {
   });
 
   it('carries the all-NULL release group on a clear, and no artist group', () => {
-    expect(decideReask(REMOVED_TIER_2A, noMatch() as never, 0)).toEqual({
-      kind: 'clear',
-      payload: {
-        release: {
-          discogs_url: null,
-          artwork_url: null,
-          release_year: null,
-          label: null,
-          full_release_date: null,
-          genres: null,
-          styles: null,
-          tracklist: null,
-        },
-        artist: null,
-      },
-    });
+    const verdict = decideReask(REMOVED_TIER_2A, noMatch() as never, 0);
+
+    expect(verdict.kind).toBe('clear');
+    if (verdict.kind !== 'clear') return;
+    expect(verdict.payload.release).toBe(CLEAR_RELEASE_GROUP);
+    expect(verdict.payload.artist).toBeNull();
   });
 });
