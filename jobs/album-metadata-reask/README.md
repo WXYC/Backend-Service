@@ -4,17 +4,18 @@ One-shot job that re-asks LML for `album_metadata` rows whose stored Discogs rel
 
 ## Status
 
-In progress. The entrypoint still logs a `not_implemented` error line and exits 1; it reads and writes nothing. Do not run it.
+In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--execute`, `--preview`, `--restore` and `--catalog-pass` refuse with the issue that builds each one, and exit 1.
 
 Landed so far:
 
 - The package scaffold ([#3140](https://github.com/WXYC/Backend-Service/issues/3140)).
 - `cohort.ts` ([#3142](https://github.com/WXYC/Backend-Service/issues/3142)): the read-only cohort counts and enumeration; see its docblock. Built as `dist/cohort.cjs` for `tests/integration/album-metadata-reask.spec.js`.
+- The knobs and the dry run ([#3144](https://github.com/WXYC/Backend-Service/issues/3144)).
 
 ## Build and deploy
 
 - `"job-type": "one-shot"`: no schedule.
-- `deploy-base.yml` builds and pushes the image on any push to `main` that changes this directory or `Dockerfile.album-metadata-reask`. Until the run loop lands, that image only exits 1.
+- `deploy-base.yml` builds and pushes the image on any push to `main` that changes this directory or `Dockerfile.album-metadata-reask`. Until the run loop lands, that image runs only the dry run.
 - Local build: `npm run build --workspace=jobs/album-metadata-reask`. Typecheck: `npm run typecheck --workspace=jobs/album-metadata-reask` (also a CI step, since the root typecheck skips `jobs/**`).
 
 ## Provenance
@@ -32,3 +33,23 @@ The package layout, `tsup.config.ts`, `tsconfig.json` and the Dockerfile are cop
 | Grading manifest | `library_id,stored_release_id,pin_release_id,pin_source,stored_title_score,pin_title_score,stored_play_rate,pin_play_rate,excluded_other_plays,excluded_inferred_plays,tier,expected_release_id` | Written by the offline grading tooling. Grades are unsigned decimals, empty when the axis cannot grade. The excluded-play counts are required. `tier` is one of `rebind`, `hold_stored_better`, `hold_ungradeable`, `hold_manual`. `expected_release_id` is set only on tier-1 `pin_removed` rows. For a `pin_removed` row, `pin_release_id` is the removed pin. Must have at least one row. |
 
 `admit(row, manifest)` is the admission rule (decision 2 on #3137). A `pin_mismatch` row is asked if its tier is `rebind`, or `hold_ungradeable` with pin source exactly `alex-l-2026`. A `pin_removed` row is asked unless its tier is `hold_manual`. A card missing from the manifest is held as `hold_unmanifested`. A card whose manifest entry graded other releases than the row now has is held as `hold_manifest_stale`.
+
+## Dry run and knobs
+
+The dry run is the default and makes zero LML calls and zero writes. It parses the three input files (and refuses before any database read if one is malformed), logs each file's SHA-256 and row count (`inputs`), counts the whole cohort, enumerates the drainable rows under the cursor, cap and list, applies `admit`, and logs one `dry_run_plan` line: the cohort counts by reason and pin source, the excluded counts by cause (`no_artist_name`, `discogs_unavailable`, `removed_stores_other`), the catalog covers that mirror the stored cover, the admission (asked, the `alex-l-2026` ungradeable exception, held by tier) and the batch count over the asked rows. Compare the cohort count with the plan's Q2 sizing by hand.
+
+Every knob that is set must parse; a value that does not is an error, never a default. The env parsers are copied from `album-metadata-bio-fill` (decision 6).
+
+| Variable                                                    | Default    | Meaning                                                                                                                                           |
+| ----------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REASK_PIN_FILE`, `REASK_REMOVED_FILE`, `REASK_GRADES_FILE` | required   | Paths to the three input files.                                                                                                                   |
+| `REASK_BULK_BATCH_SIZE`                                     | 5          | Items per LML bulk request; at most the client cap (100).                                                                                         |
+| `REASK_BULK_RATE_PER_MIN`                                   | 4          | Batches per minute.                                                                                                                               |
+| `REASK_READ_TIMEOUT_MS`                                     | 300000     | `SET LOCAL statement_timeout` for the cohort reads.                                                                                               |
+| `REASK_MAX_ALBUMS`                                          | 0 (no cap) | Stop after this many albums. Must not be smaller than the `REASK_ALBUM_IDS` list.                                                                 |
+| `REASK_ALBUM_AFTER_ID`                                      | 0          | Resume cursor: only `album_id` above this.                                                                                                        |
+| `REASK_ALBUM_IDS`                                           | none       | Up to 200 comma-separated album ids. With cursor 0, a retry of just those; with a cursor, carried into that run (each id at or below the cursor). |
+| `REASK_SAMPLE_SEED`                                         | none       | Seed for the `--preview` sample.                                                                                                                  |
+| `REASK_MAX_CONSECUTIVE_FAILED_BATCHES`                      | 3          | Abort after this many failed batches in a row.                                                                                                    |
+| `REASK_MAX_CONSECUTIVE_PIN_NOT_BOUND_BATCHES`               | 3          | Abort after this many `pin_not_bound` batches in a row; 0 disables.                                                                               |
+| `LIVE_ACTIVITY_LOOKBACK_SECONDS`                            | 300        | Cooperative-pause lookback. Runs set 0 (DJs are on air around the clock).                                                                         |
