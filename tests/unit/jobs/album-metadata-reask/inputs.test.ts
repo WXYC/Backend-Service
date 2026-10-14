@@ -22,9 +22,11 @@ import { wxycExampleAlbums } from '@wxyc/shared/test-utils';
 import {
   admit,
   InputFileError,
-  parseGradingManifest,
-  parsePinFile,
-  parseRemovalFile,
+  parseGradingManifest as parseGradingManifestBytes,
+  parsePinFile as parsePinFileBytes,
+  parseRemovalFile as parseRemovalFileBytes,
+  TIERS,
+  type AdmissionRow,
   type ManifestEntry,
   type Tier,
 } from '../../../../jobs/album-metadata-reask/inputs';
@@ -34,10 +36,17 @@ const ALUMINUM_TUNES = wxycExampleAlbums.aluminumTunes.id;
 const ON_YOUR_OWN_LOVE_AGAIN = wxycExampleAlbums.onYourOwnLoveAgain.id;
 const HOLD_MANUAL_CARD = 29757;
 
+type Reason = AdmissionRow['reason'];
+
 const PIN_HEADER = 'library_id,discogs_release_id,source,updated_at';
 const REMOVAL_HEADER = 'library_id,discogs_release_id,source';
 const MANIFEST_HEADER =
   'library_id,stored_release_id,pin_release_id,pin_source,stored_title_score,pin_title_score,stored_play_rate,pin_play_rate,excluded_other_plays,excluded_inferred_plays,tier,expected_release_id';
+
+// The parsers take the file's bytes, as the job reads them; fixtures are written as text.
+const parsePinFile = (text: string) => parsePinFileBytes(Buffer.from(text, 'utf8'));
+const parseRemovalFile = (text: string) => parseRemovalFileBytes(Buffer.from(text, 'utf8'));
+const parseGradingManifest = (text: string) => parseGradingManifestBytes(Buffer.from(text, 'utf8'));
 
 const pinFile = (...lines: string[]) => [PIN_HEADER, ...lines].join('\n') + '\n';
 const removalFile = (...lines: string[]) => [REMOVAL_HEADER, ...lines].join('\n') + '\n';
@@ -53,7 +62,7 @@ describe('input file parsing', () => {
 
     const parsed = parsePinFile(text);
 
-    expect(parsed.rowCount).toBe(2);
+    expect(parsed.rows.length).toBe(2);
     expect(parsed.sha256).toBe(createHash('sha256').update(text).digest('hex'));
     expect(parsed.byLibraryId.get(DOGA)).toEqual({
       library_id: DOGA,
@@ -104,16 +113,10 @@ describe('input file parsing', () => {
   ])('tolerates %s', (_label, text) => {
     const parsed = parsePinFile(text);
 
-    expect(parsed.rowCount).toBe(1);
+    expect(parsed.rows.length).toBe(1);
     expect(parsed.rows[0].library_id).toBe(DOGA);
     // The hash covers the bytes as given, so it names the exact file that was read.
     expect(parsed.sha256).toBe(createHash('sha256').update(text).digest('hex'));
-  });
-
-  it('hashes a Buffer the same as its text', () => {
-    const text = pinFile(PIN_LINE);
-
-    expect(parsePinFile(Buffer.from(text, 'utf8')).sha256).toBe(parsePinFile(text).sha256);
   });
 
   type Parser = (raw: string) => unknown;
@@ -146,18 +149,43 @@ describe('input file parsing', () => {
     ['a grade in exponent form', manifest, manifestFile(MANIFEST_LINE.replace('61.5', '6e1')), /stored_title_score/],
     ['a grade with two points', manifest, manifestFile(MANIFEST_LINE.replace('61.5', '6.1.5')), /stored_title_score/],
     ['an empty excluded count', manifest, manifestFile(MANIFEST_LINE.replace(',3,1,', ',,1,')), /excluded_other_plays/],
+    ['a header-only pin file', pins, pinFile(), /no rows/],
+    ['a header-only manifest', manifest, manifestFile(), /no rows/],
+    ['a padded pin source', manifest, manifestFile(MANIFEST_LINE.replace('alex-l-2026', 'alex-l-2026 ')), /pin_source/],
+    ['a negative grade', manifest, manifestFile(MANIFEST_LINE.replace(',0.2,', ',-1,')), /line 2.*stored_play_rate/],
+    ['a quoted value holding a comma', removals, removalFile(`${DOGA},1289570,"alex,l"`), /line 2.*quoted/],
     ['a zero expected release', manifest, manifestFile(MANIFEST_LINE.replace(/,$/, ',0')), /expected_release_id/],
   ])('refuses %s', (_label, parse, text, message) => {
     expect(() => parse(text)).toThrow(InputFileError);
     expect(() => parse(text)).toThrow(message);
   });
+
+  it('refuses bytes that are not UTF-8', () => {
+    const latin1 = Buffer.from(removalFile(`${DOGA},1289570,alex-l-2026-caf\u00e9`), 'latin1');
+
+    expect(() => parseRemovalFileBytes(latin1)).toThrow(/removal file: not valid UTF-8/);
+  });
+
+  it('accepts a header-only removal file: a later run may follow no removals', () => {
+    expect(parseRemovalFile(removalFile()).rows).toEqual([]);
+  });
 });
 
 describe('admit', () => {
-  const entry = (library_id: number, tier: Tier, pin_source: string): ManifestEntry => ({
+  const STORED = 4804816;
+  const PIN = 1289570;
+
+  // A `pin_removed` card has no pin now: the manifest grades the removed pin,
+  // which is the release the row still stores.
+  const row = (legacy_release_id: number, reason: Reason): AdmissionRow =>
+    reason === 'pin_mismatch'
+      ? { legacy_release_id, reason, stored_release_id: STORED, pin_release_id: PIN }
+      : { legacy_release_id, reason, stored_release_id: PIN, pin_release_id: null };
+
+  const entry = (library_id: number, tier: Tier, pin_source: string, reason: Reason): ManifestEntry => ({
     library_id,
-    stored_release_id: 4804816,
-    pin_release_id: 1289570,
+    stored_release_id: reason === 'pin_mismatch' ? STORED : PIN,
+    pin_release_id: PIN,
     pin_source,
     stored_title_score: 70,
     pin_title_score: 90,
@@ -170,11 +198,10 @@ describe('admit', () => {
   });
 
   const SOURCES = ['alex-l-2026', 'alex-l-2026-masters-api', 'manual-correction-2026-10'] as const;
-  const TIERS: Tier[] = ['rebind', 'hold_stored_better', 'hold_ungradeable', 'hold_manual'];
 
   // The decision-2 rule written out longhand, so the table states the policy
   // rather than re-deriving it from the code under test.
-  const expected = (reason: 'pin_mismatch' | 'pin_removed', tier: Tier, source: string) => {
+  const expected = (reason: Reason, tier: Tier, source: string) => {
     if (reason === 'pin_removed') return tier === 'hold_manual' ? { ask: false, hold: 'hold_manual' } : { ask: true };
     if (tier === 'rebind') return { ask: true };
     if (tier === 'hold_ungradeable' && source === 'alex-l-2026') return { ask: true };
@@ -186,43 +213,48 @@ describe('admit', () => {
   );
 
   it.each(cases)('%s with tier %s and pin source %s', (reason, tier, source, outcome) => {
-    const manifestEntry = entry(DOGA, tier, source);
+    const manifestEntry = entry(DOGA, tier, source, reason);
 
-    const result = admit({ legacy_release_id: DOGA, reason }, new Map([[DOGA, manifestEntry]]));
+    const result = admit(row(DOGA, reason), new Map([[DOGA, manifestEntry]]));
 
     expect(result).toEqual(outcome.ask ? { ask: true, entry: manifestEntry } : outcome);
   });
 
-  it.each([
-    ['pin_mismatch', 'hold_ungradeable', 'alex-l-2026', true],
-    ['pin_mismatch', 'hold_ungradeable', 'alex-l-2026-masters-api', false],
-    ['pin_mismatch', 'hold_ungradeable', 'manual-correction-2026-10', false],
-  ] as const)('pins the ungradeable exception: %s %s %s asked=%s', (reason, tier, source, ask) => {
-    expect(admit({ legacy_release_id: DOGA, reason }, new Map([[DOGA, entry(DOGA, tier, source)]])).ask).toBe(ask);
-  });
-
   it.each(['pin_mismatch', 'pin_removed'] as const)('holds card 29757 (hold_manual) as a %s row', (reason) => {
-    const manifestMap = new Map([[HOLD_MANUAL_CARD, entry(HOLD_MANUAL_CARD, 'hold_manual', 'alex-l-2026')]]);
+    const manifestMap = new Map([[HOLD_MANUAL_CARD, entry(HOLD_MANUAL_CARD, 'hold_manual', 'alex-l-2026', reason)]]);
 
-    expect(admit({ legacy_release_id: HOLD_MANUAL_CARD, reason }, manifestMap)).toEqual({
-      ask: false,
-      hold: 'hold_manual',
-    });
+    expect(admit(row(HOLD_MANUAL_CARD, reason), manifestMap)).toEqual({ ask: false, hold: 'hold_manual' });
   });
 
   it.each(['pin_mismatch', 'pin_removed'] as const)('holds a %s card missing from the manifest', (reason) => {
-    const manifestMap = new Map([[DOGA, entry(DOGA, 'rebind', 'alex-l-2026')]]);
+    const manifestMap = new Map([[DOGA, entry(DOGA, 'rebind', 'alex-l-2026', reason)]]);
 
-    expect(admit({ legacy_release_id: ON_YOUR_OWN_LOVE_AGAIN, reason }, manifestMap)).toEqual({
+    expect(admit(row(ON_YOUR_OWN_LOVE_AGAIN, reason), manifestMap)).toEqual({
       ask: false,
       hold: 'hold_unmanifested',
+    });
+  });
+
+  // A manifest graded against another pin export must not admit a card by
+  // inclusion either: its tier describes releases the row no longer has.
+  it.each<[string, Reason, Partial<AdmissionRow>]>([
+    ['a pin changed since grading', 'pin_mismatch', { pin_release_id: 225068 }],
+    ['a stored release changed since grading', 'pin_mismatch', { stored_release_id: 225068 }],
+    ['an unparseable stored release', 'pin_mismatch', { stored_release_id: null }],
+    ['a removed card storing another release', 'pin_removed', { stored_release_id: 225068 }],
+  ])('holds %s as hold_manifest_stale', (_label, reason, change) => {
+    const manifestMap = new Map([[DOGA, entry(DOGA, 'rebind', 'alex-l-2026', reason)]]);
+
+    expect(admit({ ...row(DOGA, reason), ...change }, manifestMap)).toEqual({
+      ask: false,
+      hold: 'hold_manifest_stale',
     });
   });
 
   it('admits from a parsed manifest', () => {
     const parsed = parseGradingManifest(manifestFile(MANIFEST_LINE));
 
-    expect(admit({ legacy_release_id: DOGA, reason: 'pin_mismatch' }, parsed.byLibraryId)).toEqual({
+    expect(admit(row(DOGA, 'pin_mismatch'), parsed.byLibraryId)).toEqual({
       ask: true,
       entry: parsed.byLibraryId.get(DOGA),
     });
