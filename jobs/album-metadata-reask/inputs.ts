@@ -34,9 +34,10 @@ type Columns = Record<string, Cell<unknown>>;
 type RowOf<C extends Columns> = { [K in keyof C]: ReturnType<C[K]> };
 
 const INTEGER = /^\d+$/;
-// Plain decimal digits; `Number` then refuses a malformed one such as `1.2.3`
-// (and this refuses the forms `Number` would accept, such as `1e3` or `0x10`).
-const DECIMAL = /^-?[\d.]+$/;
+// Unsigned decimal digits; `Number` then refuses a malformed one such as
+// `1.2.3` (and this refuses the forms `Number` would accept, such as `1e3`,
+// `0x10` or a negative sentinel). Grades and rates are never negative.
+const DECIMAL = /^[\d.]+$/;
 // `\copy` output for a timestamptz, e.g. `2026-10-14 09:53:12.123456-07`: the
 // date and time, then any fraction and offset.
 const TIMESTAMP = /^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[\d.:+\-Z]*$/;
@@ -54,8 +55,10 @@ const id: Cell<number> = (raw) => {
   return value;
 };
 
+// A padded source (`alex-l-2026 `) would silently miss the exact-match exception in `admit`.
 const text: Cell<string> = (raw) => {
   if (raw === '') throw new Error('empty');
+  if (raw.trim() !== raw) throw new Error(`surrounding whitespace in '${raw}'`);
   return raw;
 };
 
@@ -112,17 +115,29 @@ export type ManifestEntry = RowOf<typeof MANIFEST_COLUMNS>;
 export interface InputFile<T> {
   rows: T[];
   byLibraryId: ReadonlyMap<number, T>;
-  rowCount: number;
   sha256: string;
 }
+
+// `fatal`: a file that is not UTF-8 (a spreadsheet's Latin-1 round trip) refuses
+// rather than decoding to U+FFFD. The decoder also drops a leading BOM.
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+const decode = (file: string, raw: Buffer): string => {
+  try {
+    return UTF8.decode(raw);
+  } catch {
+    throw new InputFileError(file, 'not valid UTF-8');
+  }
+};
 
 const parseFile = <C extends Columns & { library_id: Cell<number> }>(
   file: string,
   columns: C,
-  raw: string | Buffer
+  raw: Buffer,
+  { allowEmpty }: { allowEmpty: boolean }
 ): InputFile<RowOf<C>> => {
   const sha256 = createHash('sha256').update(raw).digest('hex');
-  const lines = (typeof raw === 'string' ? raw : raw.toString('utf8')).replace(/^\uFEFF/, '').split(/\r?\n/);
+  const lines = decode(file, raw).split(/\r?\n/);
   if (lines.at(-1) === '') lines.pop();
 
   const parsers = Object.entries(columns);
@@ -134,11 +149,12 @@ const parseFile = <C extends Columns & { library_id: Cell<number> }>(
   const byLibraryId = new Map<number, RowOf<C>>();
   lines.slice(1).forEach((line, index) => {
     const lineNo = index + 2;
+    // Checked before the split, so a quoted value holding a comma is named as such.
+    if (line.includes('"')) throw new InputFileError(file, 'quoted values are not supported', lineNo);
     const cells = line.split(',');
     if (cells.length !== names.length) {
       throw new InputFileError(file, `expected ${names.length} columns, got ${cells.length}`, lineNo);
     }
-    if (line.includes('"')) throw new InputFileError(file, 'quoted values are not supported', lineNo);
 
     const row = Object.fromEntries(
       parsers.map(([name, cell], i) => {
@@ -157,19 +173,36 @@ const parseFile = <C extends Columns & { library_id: Cell<number> }>(
     rows.push(row);
   });
 
-  return { rows, byLibraryId, rowCount: rows.length, sha256 };
+  if (rows.length === 0 && !allowEmpty) throw new InputFileError(file, 'no rows after the header');
+  return { rows, byLibraryId, sha256 };
 };
 
-export const parsePinFile = (raw: string | Buffer): InputFile<PinRow> => parseFile('pin file', PIN_COLUMNS, raw);
+// A header-only pin export or manifest means the export went wrong (another
+// database, another schema), never "nothing to do", so both refuse it. A
+// removal file may be empty: a later run can follow no removals at all.
+export const parsePinFile = (raw: Buffer): InputFile<PinRow> =>
+  parseFile('pin file', PIN_COLUMNS, raw, { allowEmpty: false });
 
-export const parseRemovalFile = (raw: string | Buffer): InputFile<RemovalRow> =>
-  parseFile('removal file', REMOVAL_COLUMNS, raw);
+export const parseRemovalFile = (raw: Buffer): InputFile<RemovalRow> =>
+  parseFile('removal file', REMOVAL_COLUMNS, raw, { allowEmpty: true });
 
-export const parseGradingManifest = (raw: string | Buffer): InputFile<ManifestEntry> =>
-  parseFile('grading manifest', MANIFEST_COLUMNS, raw);
+export const parseGradingManifest = (raw: Buffer): InputFile<ManifestEntry> =>
+  parseFile('grading manifest', MANIFEST_COLUMNS, raw, { allowEmpty: false });
 
-/** Why a cohort row is not asked. `hold_unmanifested`: its card is not in the manifest. */
-export type HoldReason = Exclude<Tier, 'rebind'> | 'hold_unmanifested';
+/**
+ * Why a cohort row is not asked. `hold_unmanifested`: its card is not in the
+ * manifest. `hold_manifest_stale`: the manifest graded other releases than the
+ * row now has, so its tier does not describe this row.
+ */
+export type HoldReason = Exclude<Tier, 'rebind'> | 'hold_unmanifested' | 'hold_manifest_stale';
+
+/** The cohort row fields admission reads. A `pin_removed` row stores the removed release and has no pin. */
+export interface AdmissionRow {
+  legacy_release_id: number;
+  reason: 'pin_mismatch' | 'pin_removed';
+  stored_release_id: number | null;
+  pin_release_id: number | null;
+}
 
 export type Admission = { ask: true; entry: ManifestEntry } | { ask: false; hold: HoldReason };
 
@@ -183,22 +216,27 @@ const UNGRADEABLE_EXCEPTION_SOURCE = 'alex-l-2026';
  * - `pin_mismatch`: asked if the tier is `rebind`, or `hold_ungradeable` with
  *   pin source exactly `alex-l-2026`; held under its tier otherwise.
  * - `pin_removed`: asked unless the tier is `hold_manual` (card 29757).
- * - A card missing from the manifest is held as `hold_unmanifested`, so a
- *   manifest built from another pin export cannot admit a card by omission.
+ * - A card missing from the manifest is held as `hold_unmanifested`, and a card
+ *   whose manifest entry graded other releases (the stored release, or the
+ *   pin: the current one, or for `pin_removed` the removed one) is held as
+ *   `hold_manifest_stale`. So a manifest built from another pin export can
+ *   admit a card neither by omission nor by inclusion.
  */
-export const admit = (
-  row: { legacy_release_id: number; reason: 'pin_mismatch' | 'pin_removed' },
-  manifest: ReadonlyMap<number, ManifestEntry>
-): Admission => {
+export const admit = (row: AdmissionRow, manifest: ReadonlyMap<number, ManifestEntry>): Admission => {
   const entry = manifest.get(row.legacy_release_id);
   if (!entry) return { ask: false, hold: 'hold_unmanifested' };
 
-  const asked =
-    row.reason === 'pin_removed'
-      ? entry.tier !== 'hold_manual'
-      : entry.tier === 'rebind' ||
-        (entry.tier === 'hold_ungradeable' && entry.pin_source === UNGRADEABLE_EXCEPTION_SOURCE);
-  if (asked) return { ask: true, entry };
-  // A held `pin_removed` row is always `hold_manual`; a held `pin_mismatch` row keeps its tier.
-  return { ask: false, hold: entry.tier as HoldReason };
+  const gradedPin = row.reason === 'pin_removed' ? row.stored_release_id : row.pin_release_id;
+  if (entry.stored_release_id !== row.stored_release_id || entry.pin_release_id !== gradedPin) {
+    return { ask: false, hold: 'hold_manifest_stale' };
+  }
+
+  if (row.reason === 'pin_removed') {
+    return entry.tier === 'hold_manual' ? { ask: false, hold: 'hold_manual' } : { ask: true, entry };
+  }
+  if (entry.tier === 'rebind') return { ask: true, entry };
+  if (entry.tier === 'hold_ungradeable' && entry.pin_source === UNGRADEABLE_EXCEPTION_SOURCE) {
+    return { ask: true, entry };
+  }
+  return { ask: false, hold: entry.tier };
 };
