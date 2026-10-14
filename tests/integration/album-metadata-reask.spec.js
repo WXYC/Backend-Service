@@ -219,3 +219,217 @@ describe('BS#3142 re-ask cohort (REAL statements, real PG)', () => {
     expect(rows.map((r) => r.album_id)).toEqual([id]);
   });
 });
+
+/**
+ * BS#3145: the guarded `album_metadata` write (`dist/write.cjs`; tsup bundles `artist-keep-sql.ts` into it, so
+ * the artist-rule table below runs the real builder). Claims that need a real planner: the backup row and the update commit in one
+ * statement or not at all; the race guard; the decision-8 artist rule against stored rows; `clear`; the casts (a
+ * non-empty `genres`, a NULL `release_year`); and that no streaming column and no catalog watermark moves.
+ */
+describe('BS#3145 re-ask album write (REAL statement, real PG)', () => {
+  const { writeAlbum } = require(path.join(distDir, 'write.cjs'));
+
+  let sql;
+  const albumIds = [];
+
+  const STORED_URL = release(1001);
+  const STORED = {
+    discogs_url: STORED_URL,
+    artwork_url: 'https://i.discogs.com/b3145/stored.jpg',
+    release_year: 2013,
+    label: 'Crammed Discs',
+    full_release_date: '2013-03-12',
+    genres: ['Electronic'],
+    styles: ['Folktronica'],
+    tracklist: [{ position: 'A1', title: 'Wed 21' }],
+    discogs_artist_id: 61002,
+    artist_bio: 'Argentine singer, songwriter and actress.',
+    artist_wikipedia_url: 'https://en.wikipedia.org/wiki/Juana_Molina',
+    artist_image_url: 'https://i.discogs.com/b3145/artist.jpg',
+    bio_tokens: [{ type: 'text', text: 'Argentine singer' }],
+  };
+  const STREAMING = {
+    spotify_url: 'https://open.spotify.com/album/b3145',
+    apple_music_url: 'https://music.apple.com/album/b3145',
+    youtube_music_url: null,
+    bandcamp_url: 'https://juanamolina.bandcamp.com/album/doga',
+    soundcloud_url: null,
+    spotify_status: 'verified',
+    apple_music_status: 'verified',
+    bandcamp_status: 'verified',
+    streaming_reask_attempts: 2,
+  };
+  const RELEASE = {
+    discogs_url: release(3003),
+    artwork_url: 'https://i.discogs.com/b3145/pin.jpg',
+    release_year: null,
+    label: 'Sonamos',
+    full_release_date: null,
+    genres: ['Rock', 'Electronic'],
+    styles: ['Experimental', 'Folk'],
+    tracklist: [{ position: 'A1', title: 'la paradoja' }],
+  };
+  const ARTIST = {
+    discogs_artist_id: 61002,
+    artist_bio: null,
+    artist_wikipedia_url: null,
+    artist_image_url: null,
+    bio_tokens: null,
+  };
+  const COLUMNS = Object.keys(STORED);
+
+  /** A card with a fully enriched `album_metadata` row; returns the cohort row the write takes. */
+  const seed = async (suffix, metadata = {}) => {
+    const [{ id, legacy_release_id }] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+      VALUES (1, 11, 1, ${'b3145-write-' + suffix}, 9999, 'Juana Molina')
+      RETURNING id, legacy_release_id
+    `;
+    albumIds.push(id);
+    const row = { album_id: id, ...STORED, ...STREAMING, ...metadata };
+    const json = (value) => (value === null ? null : sql.json(value));
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        ${sql({ ...row, tracklist: json(row.tracklist), bio_tokens: json(row.bio_tokens) })}
+    `;
+    return {
+      album_id: id,
+      legacy_release_id,
+      discogs_url: row.discogs_url,
+      artwork_url: row.artwork_url,
+      library_artwork_url: null,
+      stored_release_id: 1001,
+      artist_name: 'Juana Molina',
+      album_title: 'b3145-write-' + suffix,
+      reason: 'pin_mismatch',
+      pin_release_id: 3003,
+      pin_source: MASTERS_API,
+    };
+  };
+
+  const rebind = (artist = ARTIST) => ({ kind: 'rebind', release_id: 3003, payload: { release: RELEASE, artist } });
+  const clear = () => ({ kind: 'clear', payload: { release: nulls(Object.keys(RELEASE)), artist: null } });
+  const nulls = (keys) => Object.fromEntries(keys.map((k) => [k, null]));
+  const write = (row, verdict, over = {}) =>
+    writeAlbum({ run_id: 'b3145-run', pin_export_sha256: 'abc123', row, tier: 'rebind', verdict, ...over });
+
+  const stored = async (id) => {
+    const [row] = await sql`SELECT * FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${id}`;
+    return row;
+  };
+  const backups = (id) =>
+    sql`SELECT * FROM ${sql(SCHEMA)}.album_metadata_reask_backup WHERE album_id = ${id} ORDER BY id`;
+  const pick = (row, keys) => Object.fromEntries(keys.map((k) => [k, row[k]]));
+
+  beforeAll(() => {
+    sql = getTestDb();
+  });
+
+  afterAll(async () => {
+    if (albumIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata_reask_backup WHERE album_id = ANY(${albumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${albumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${albumIds})`;
+    }
+  });
+
+  test('a rebind writes the release group and its backup row together, and nothing else', async () => {
+    const row = await seed('rebind');
+    // Seeded after the library insert, whose own trigger bumps it; the trigger writes GREATEST(now(), last).
+    await sql`UPDATE ${sql(SCHEMA)}.library_watermark SET last_modified_at = '2000-01-01T00:00:00Z'`;
+
+    expect(await write(row, rebind())).toEqual({ written: true, artist_cleared: false });
+
+    const after = await stored(row.album_id);
+    // Same artist id: the null bio, links and tokens in the answer keep the stored ones (decision 8).
+    expect(pick(after, COLUMNS)).toEqual({ ...RELEASE, ...pick(STORED, Object.keys(ARTIST)) });
+    expect(pick(after, Object.keys(STREAMING))).toEqual(STREAMING);
+
+    const [backup, ...rest] = await backups(row.album_id);
+    expect(rest).toEqual([]);
+    expect(backup).toMatchObject({
+      run_id: 'b3145-run',
+      target_table: 'album_metadata',
+      row_id: row.album_id,
+      before_image: STORED,
+      after_image: pick(after, COLUMNS),
+      provenance: {
+        reason: 'pin_mismatch',
+        verdict: 'rebind',
+        tier: 'rebind',
+        legacy_release_id: row.legacy_release_id,
+        pin_release_id: 3003,
+        pin_source: MASTERS_API,
+        pin_export_sha256: 'abc123',
+        prior_release_id: 1001,
+        new_release_id: 3003,
+      },
+    });
+    // The restore's "changed since" guard.
+    expect(backup.written_at).toEqual(after.updated_at);
+
+    const [{ last_modified_at }] = await sql`SELECT last_modified_at FROM ${sql(SCHEMA)}.library_watermark`;
+    expect(last_modified_at.toISOString()).toBe('2000-01-01T00:00:00.000Z');
+  });
+
+  test('writes nothing when the stored release moved since enumeration', async () => {
+    const row = await seed('raced', { discogs_url: release(5005) });
+    const before = await stored(row.album_id);
+
+    expect(await write({ ...row, discogs_url: STORED_URL }, rebind())).toEqual({ written: false });
+
+    expect(await stored(row.album_id)).toEqual(before);
+    expect(await backups(row.album_id)).toEqual([]);
+  });
+
+  test('writes nothing when the backup row cannot be written', async () => {
+    const row = await seed('no-backup');
+    const before = await stored(row.album_id);
+
+    // `run_id` is NOT NULL: the backup insert fails, and so does the whole statement.
+    await expect(write(row, rebind(), { run_id: null })).rejects.toThrow();
+
+    expect(await stored(row.album_id)).toEqual(before);
+    expect(await backups(row.album_id)).toEqual([]);
+  });
+
+  test.each([
+    // [label, stored artist id, answered artist id, answered bio, the bio written, artist_cleared]
+    ['both ids set and equal, no bio answered: kept', 61002, 61002, null, STORED.artist_bio, false],
+    ['both ids set and equal, a bio answered: the answer', 61002, 61002, 'Sonamos founder.', 'Sonamos founder.', false],
+    ['both ids set and different: written as answered', 61002, 77, null, null, true],
+    ['stored id null: written as answered', null, 61002, null, null, true],
+    ['answered id null: written as answered', 61002, null, null, null, true],
+    ['both ids null: written as answered', null, null, null, null, true],
+  ])('artist rule: %s', async (_label, storedId, answeredId, answeredBio, bio, cleared) => {
+    const row = await seed('artist-' + albumIds.length, { discogs_artist_id: storedId });
+    const answer = { ...ARTIST, discogs_artist_id: answeredId, artist_bio: answeredBio };
+
+    expect(await write(row, rebind(answer))).toEqual({ written: true, artist_cleared: cleared });
+
+    const after = await stored(row.album_id);
+    expect(after.discogs_artist_id).toBe(answeredId);
+    expect(after.artist_bio).toBe(bio);
+    // The other artist columns, null in every answer here, follow the rule's arm.
+    const kept = storedId !== null && storedId === answeredId;
+    expect(after.artist_wikipedia_url).toBe(kept ? STORED.artist_wikipedia_url : null);
+    expect(after.bio_tokens).toEqual(kept ? STORED.bio_tokens : null);
+  });
+
+  test('clear nulls the release group, keeps the artist group, and images both', async () => {
+    const row = await seed('clear');
+
+    expect(await write({ ...row, reason: 'pin_removed', pin_release_id: null }, clear())).toEqual({
+      written: true,
+      artist_cleared: false,
+    });
+
+    const after = await stored(row.album_id);
+    expect(pick(after, COLUMNS)).toEqual({ ...nulls(Object.keys(RELEASE)), ...pick(STORED, Object.keys(ARTIST)) });
+    expect(pick(after, Object.keys(STREAMING))).toEqual(STREAMING);
+    const [backup] = await backups(row.album_id);
+    expect(backup.before_image).toEqual(STORED);
+    expect(backup.after_image).toEqual(pick(after, COLUMNS));
+    expect(backup.provenance).toMatchObject({ reason: 'pin_removed', verdict: 'clear', new_release_id: null });
+  });
+});
