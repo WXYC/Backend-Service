@@ -352,6 +352,13 @@ jobs:
       - name: 'Type check: album-metadata-bio-fill'
         run: npm run typecheck --workspace=jobs/album-metadata-bio-fill
 
+      # BS#3137: the re-ask rebinds the release-scoped columns of the same
+      # `album_metadata` rows the bio fill touches, behind a verdict branch that
+      # decides whether a pin is trusted. Root typecheck skips `jobs/**`
+      # (BS#2009), so it gets its own step from the scaffold (BS#3140) on.
+      - name: 'Type check: album-metadata-reask'
+        run: npm run typecheck --workspace=jobs/album-metadata-reask
+
       # Same narrow, per-job coverage rationale as the step above. This job
       # writes to the live on-air `flowsheet` table under a PII mandate, so a
       # transpile-only build silently shipping a type error is not an
