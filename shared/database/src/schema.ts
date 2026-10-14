@@ -24,6 +24,7 @@ import {
   check,
   jsonb,
   bigint,
+  bigserial,
   char,
   unique,
   type AnyPgColumn,
@@ -2576,6 +2577,52 @@ export const album_metadata = wxyc_schema.table('album_metadata', {
   streaming_reask_attempts: integer('streaming_reask_attempts').notNull().default(0),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+/**
+ * Backups for the album_metadata re-ask (BS#3137 decision 7, BS#3139). The re-ask job overwrites values in three
+ * tables (`album_metadata`, the catalog cover `library.artwork_url`, and inline columns on linked `flowsheet` plays)
+ * and writes one row here per overwritten row, in the same statement as the write. Its `--restore <run_id>` mode reads
+ * them back and restores only rows nothing has changed since.
+ *
+ * - `target_table`: which table `row_id` belongs to. `restore` is a per-album marker the restore mode writes
+ *   (`row_id` = `album_id`).
+ * - `row_id`: `album_metadata.album_id`, `library.id` or `flowsheet.id`. No foreign key on purpose: a backup must
+ *   outlive a delete of the row it saved.
+ * - `album_id`: the album the write was for.
+ * - `before_image`: the values before the write. For `album_metadata`, all 13 release- and artist-group columns; for
+ *   `library` and `flowsheet`, the overwritten columns only.
+ * - `after_image`: the same columns as written. The restore's "changed since" guard.
+ * - `provenance`: reason, verdict, tier, legacy_release_id, pin_release_id, pin_source, pin_export_sha256,
+ *   prior_release_id, new_release_id.
+ * - `written_at`: `NOW()` of the writing transaction, so an `album_metadata` row's `written_at` equals the row's new
+ *   `updated_at`.
+ *
+ * Permanent until the owner signs off the run report and sets a retention window; dropping it is a later migration.
+ */
+export type NewAlbumMetadataReaskBackup = InferInsertModel<typeof album_metadata_reask_backup>;
+export type AlbumMetadataReaskBackup = InferSelectModel<typeof album_metadata_reask_backup>;
+export const album_metadata_reask_backup = wxyc_schema.table(
+  'album_metadata_reask_backup',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    run_id: text('run_id').notNull(),
+    target_table: text('target_table').notNull(),
+    row_id: integer('row_id').notNull(),
+    album_id: integer('album_id').notNull(),
+    before_image: jsonb('before_image').notNull(),
+    after_image: jsonb('after_image').notNull(),
+    provenance: jsonb('provenance').notNull(),
+    written_at: timestamp('written_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index('album_metadata_reask_backup_run_target_idx').on(table.run_id, table.target_table),
+    index('album_metadata_reask_backup_album_id_idx').on(table.album_id),
+    check(
+      'album_metadata_reask_backup_target_table_ck',
+      sql`${table.target_table} IN ('album_metadata', 'library', 'flowsheet', 'restore')`
+    ),
+  ]
+);
 
 /**
  * Artist-level metadata cache, keyed by external Discogs artist id (BS#1624).

@@ -526,6 +526,17 @@ export const album_metadata = {
   streaming_reask_attempts: 'album_metadata.streaming_reask_attempts',
   updated_at: 'album_metadata.updated_at',
 };
+export const album_metadata_reask_backup = {
+  id: 'album_metadata_reask_backup.id',
+  run_id: 'album_metadata_reask_backup.run_id',
+  target_table: 'album_metadata_reask_backup.target_table',
+  row_id: 'album_metadata_reask_backup.row_id',
+  album_id: 'album_metadata_reask_backup.album_id',
+  before_image: 'album_metadata_reask_backup.before_image',
+  after_image: 'album_metadata_reask_backup.after_image',
+  provenance: 'album_metadata_reask_backup.provenance',
+  written_at: 'album_metadata_reask_backup.written_at',
+};
 export const artist_metadata = {
   discogs_artist_id: 'artist_metadata.discogs_artist_id',
   genres: 'artist_metadata.genres',
