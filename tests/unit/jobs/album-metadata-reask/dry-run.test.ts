@@ -2,7 +2,7 @@
  * The re-ask's dry run (BS#3144): load and validate the three input files,
  * count and enumerate the cohort, admit it, and report. The property that
  * matters is that it reads and reports and does nothing else: no LML call, no
- * write. Every later mode is refused until its slice lands.
+ * write. (The refusal of later modes is in `options.test.ts`.)
  *
  * `cohort` is mocked because its SQL has its own spec; this file is about what
  * `runReask` does with what the cohort returns.
@@ -10,7 +10,7 @@
  * @see WXYC/Backend-Service#3137
  */
 
-import { describe, it, expect, jest, beforeAll, afterAll, beforeEach } from '@jest/globals';
+import { describe, it, expect, jest, beforeAll, afterAll, afterEach, beforeEach } from '@jest/globals';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
@@ -55,7 +55,7 @@ const GRADES = [
   '1001,4001,5001,alex-l-2026-masters-api,40,95,0.1,0.8,0,0,rebind,',
   '1002,4002,5002,alex-l-2026,80,90,,,3,0,hold_ungradeable,',
   '1003,4003,5003,alex-l-2026-masters,95,60,0.9,0.1,0,1,hold_stored_better,',
-  '1004,6004,6004,alex-l-2026-masters-api,70,,,,0,0,rebind,7004',
+  '1004,6004,6004,alex-l-2026,70,,,,0,0,hold_ungradeable,7004',
 ].join('\n');
 
 // Juana Molina, Jessica Pratt, Stereolab, Cat Power and Chuquimamani-Condori
@@ -138,6 +138,7 @@ describe('runReask — dry run', () => {
         held: { hold_stored_better: 1, hold_unmanifested: 1 },
       },
       batches: 1,
+      estimated_minutes: 1,
     });
   });
 
@@ -149,7 +150,7 @@ describe('runReask — dry run', () => {
     const inputs = countCohort.mock.calls[0][0] as cohort.CohortInputs;
     expect(inputs.pins.map((p) => p.library_id)).toEqual([1001, 1002, 1003, 1005]);
     expect(inputs.removed).toEqual([{ library_id: 1004, discogs_release_id: 6004, source: 'alex-l-2026-masters-api' }]);
-    expect(countCohort).toHaveBeenCalledWith(inputs, options.readTimeoutMs);
+    expect(countCohort.mock.calls[0][1]).toBe(options.readTimeoutMs);
     expect(enumerateCohort).toHaveBeenCalledWith(inputs, {
       limit: 25,
       afterAlbumId: 53799,
@@ -180,29 +181,18 @@ describe('runReask — dry run', () => {
     );
     expect(countCohort).not.toHaveBeenCalled();
   });
-
-  it.each([
-    ['--execute', '#3151'],
-    ['--preview', '#3150'],
-    ['--restore', '#3148'],
-    ['--catalog-pass', '#3146'],
-  ])('refuses %s until its slice (%s) lands, and reads nothing', async (flag, issue) => {
-    await expect(runReask(resolveOptions(env, ['node', 'job.js', flag]))).rejects.toThrow(
-      new RegExp(`${flag} is not available yet.*${issue}`)
-    );
-    expect(countCohort).not.toHaveBeenCalled();
-    expect(enumerateCohort).not.toHaveBeenCalled();
-    expect(bulkLookupMetadata).not.toHaveBeenCalled();
-  });
 });
 
 describe('main', () => {
   const originalExitCode = process.exitCode;
   const originalEnv = process.env;
+  const originalArgv = process.argv;
 
-  afterAll(() => {
+  afterEach(() => {
     process.exitCode = originalExitCode;
     process.env = originalEnv;
+    process.argv = originalArgv;
+    jest.restoreAllMocks();
   });
 
   it.each([
@@ -210,6 +200,8 @@ describe('main', () => {
     ['a run with no pin file', () => ({}), 1, 'failed'],
   ])('exits %s with code %i and logs %s', async (_label, makeEnv, exitCode, step) => {
     process.env = { ...originalEnv, ...makeEnv() };
+    // jest's own argv carries flags the job would refuse.
+    process.argv = ['node', 'job.js'];
     const stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
@@ -221,7 +213,5 @@ describe('main', () => {
       .filter((chunk) => chunk.trimStart().startsWith('{'))
       .map((chunk) => JSON.parse(chunk) as Record<string, unknown>);
     expect(lines).toContainEqual(expect.objectContaining({ step, tool: 'album-metadata-reask' }));
-    stderr.mockRestore();
-    stdout.mockRestore();
   });
 });

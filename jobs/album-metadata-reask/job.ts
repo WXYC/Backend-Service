@@ -3,11 +3,8 @@
  * stored Discogs release disagrees with the catalog card's current pin, or
  * still serves a pin that was removed (BS#3137).
  *
- * This slice (BS#3144) is the knobs and the dry run. The dry run is the
- * default and makes zero LML calls and zero writes: it validates the three
- * input files, counts and enumerates the cohort, admits it (decision 2), and
- * logs what a run would ask. Every other mode is refused, loudly and non-zero,
- * until the slice that builds it lands.
+ * So far (BS#3144) the knobs and the dry run, which makes zero LML calls and
+ * zero writes. Every other mode refuses, non-zero, until its slice lands.
  *
  * The env parsers are copied from `jobs/album-metadata-bio-fill/job.ts`
  * (decision 6: copy, extract only when a third job needs them).
@@ -60,27 +57,40 @@ export const MAX_CONSECUTIVE_PIN_NOT_BOUND_BATCHES_ENV = 'REASK_MAX_CONSECUTIVE_
 /** Cooperative-pause lookback, shared with every sibling drain (BS#2147). The run sets 0. */
 export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
 
+/** The modes later slices build, each with the issue that builds it. */
+const PENDING_MODES = new Map([
+  ['--execute', '#3151'],
+  ['--preview', '#3150'],
+  ['--restore', '#3148'],
+  ['--catalog-pass', '#3146'],
+]);
+
 /**
- * The flags for the modes later slices build, each with the issue that builds
- * it. `--restore` and `--catalog-pass` take a run id; this slice only sees
- * that they were asked for.
+ * Refuse a pending mode before anything is read (and before the input files
+ * are required, which `--restore` and `--catalog-pass` will not need), and any
+ * other flag, so a typo cannot fall through to a run. `--dry-run` is the default.
  */
-const PENDING_MODES = {
-  '--execute': '#3151',
-  '--preview': '#3150',
-  '--restore': '#3148',
-  '--catalog-pass': '#3146',
-} as const;
-export type ModeFlag = keyof typeof PENDING_MODES;
+const checkFlags = (args: string[]): void => {
+  for (const arg of args.slice(2)) {
+    if (!arg.startsWith('--') || arg === '--dry-run') continue;
+    const issue = PENDING_MODES.get(arg);
+    throw new Error(
+      issue
+        ? `[${JOB_NAME}] ${arg} is not available yet; it lands with ${issue}. Run with no flags for the dry run.`
+        : `[${JOB_NAME}] Unknown flag ${arg}.`
+    );
+  }
+};
 
 /** `album_id` is a Postgres `integer`. */
 const ALBUM_ID_MAX = 2_147_483_647;
 
+const isBlank = (raw: string | undefined): boolean => !raw?.trim();
+
 const requireFile = (env: NodeJS.ProcessEnv, name: string): string => {
   const raw = env[name];
-  if (raw === undefined || raw.trim() === '')
-    throw new Error(`[${JOB_NAME}] ${name} is required: the path to the file.`);
-  return raw;
+  if (isBlank(raw)) throw new Error(`[${JOB_NAME}] ${name} is required: the path to the file.`);
+  return raw as string;
 };
 
 const resolveBatchSize = (raw: string | undefined): number => {
@@ -125,12 +135,11 @@ export interface ReaskOptions {
   maxConsecutiveFailedBatches: number;
   maxConsecutivePinNotBoundBatches: number;
   liveActivityLookbackSeconds: number;
-  /** The mode flags given, in a fixed order. None is the dry run. */
-  modes: ModeFlag[];
 }
 
-/** Dry-run is the DEFAULT. */
+/** Dry-run is the DEFAULT, and for now the only mode. */
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): ReaskOptions => {
+  checkFlags(args);
   const afterAlbumId = requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, 0, CTX);
   const maxAlbums = requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, 0, CTX);
   const albumIds = resolveAlbumIds(env[ALBUM_IDS_ENV]);
@@ -159,7 +168,7 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
     maxAlbums,
     afterAlbumId,
     albumIds,
-    sampleSeed: seed === undefined || seed.trim() === '' ? null : requireNonNegativeInt(seed, SAMPLE_SEED_ENV, 0, CTX),
+    sampleSeed: isBlank(seed) ? null : requireNonNegativeInt(seed, SAMPLE_SEED_ENV, 0, CTX),
     maxConsecutiveFailedBatches: requirePositiveInt(
       env[MAX_CONSECUTIVE_FAILED_BATCHES_ENV],
       MAX_CONSECUTIVE_FAILED_BATCHES_ENV,
@@ -178,7 +187,6 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
       300,
       CTX
     ),
-    modes: (Object.keys(PENDING_MODES) as ModeFlag[]).filter((flag) => args.includes(flag)),
   };
 };
 
@@ -194,19 +202,14 @@ export interface DryRunSummary {
     ungradeable_exception: number;
     held: Partial<Record<HoldReason, number>>;
   };
-  /** Batches over the asked rows. */
+  /** Batches over the asked rows, and the minutes they take at the configured rate. */
   batches: number;
+  estimated_minutes: number;
 }
 
 const fileSummary = <T>(file: InputFile<T>) => ({ sha256: file.sha256, rows: file.rows.length });
 
 export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> => {
-  const [pending] = options.modes;
-  if (pending) {
-    throw new Error(
-      `[${JOB_NAME}] ${pending} is not available yet; it lands with ${PENDING_MODES[pending]}. Run with no flags for the dry run.`
-    );
-  }
   log('info', 'started', `${JOB_NAME} dry run starting`, {
     batch_size: options.batchSize,
     max_albums: options.maxAlbums,
@@ -229,14 +232,11 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
     albumIds: options.albumIds,
     timeoutMs: options.readTimeoutMs,
   });
-  if (options.albumIds.length > 0) {
-    const enumeratedIds = new Set(candidates.map((c) => c.album_id));
-    const missing = options.albumIds.filter((id) => !enumeratedIds.has(id));
-    if (missing.length > 0) {
-      log('warn', 'listed_ids_not_in_cohort', `${missing.length} listed albums are not in the cohort; not asked`, {
-        album_ids: missing,
-      });
-    }
+  const missing = options.albumIds.filter((id) => !candidates.some((c) => c.album_id === id));
+  if (missing.length > 0) {
+    log('warn', 'listed_ids_not_in_cohort', `${missing.length} listed albums are not in the cohort; not asked`, {
+      album_ids: missing,
+    });
   }
 
   const admission: DryRunSummary['admission'] = { asked: 0, ungradeable_exception: 0, held: {} };
@@ -244,24 +244,28 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
     const verdict = admit(row, grades.byLibraryId);
     if (verdict.ask) {
       admission.asked += 1;
-      if (verdict.entry.tier === 'hold_ungradeable') admission.ungradeable_exception += 1;
+      // A `pin_removed` row is asked at any tier but `hold_manual`; only a `pin_mismatch` row is the exception.
+      if (row.reason === 'pin_mismatch' && verdict.entry.tier === 'hold_ungradeable')
+        admission.ungradeable_exception += 1;
     } else {
       admission.held[verdict.hold] = (admission.held[verdict.hold] ?? 0) + 1;
     }
   }
 
+  const batches = Math.ceil(admission.asked / options.batchSize);
   const summary: DryRunSummary = {
     inputs,
     cohort: counts,
     enumerated: candidates.length,
     admission,
-    batches: Math.ceil(admission.asked / options.batchSize),
+    batches,
+    estimated_minutes: Math.ceil(batches / options.ratePerMin),
   };
   log(
     'info',
     'dry_run_plan',
-    `DRY RUN — no LML calls, no writes. Would ask ${admission.asked} albums in ${summary.batches} batches of up to ${options.batchSize}.`,
-    { ...summary, estimated_minutes: Math.ceil(summary.batches / options.ratePerMin) }
+    `DRY RUN — no LML calls, no writes. Would ask ${admission.asked} albums in ${batches} batches of up to ${options.batchSize}.`,
+    { ...summary }
   );
   return summary;
 };
@@ -269,8 +273,9 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
 export const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   try {
-    const summary = await runReask(resolveOptions());
-    log('info', 'finished', `${JOB_NAME} done`, { ...summary });
+    // The summary is already on the `dry_run_plan` line.
+    await runReask(resolveOptions());
+    log('info', 'finished', `${JOB_NAME} done`);
     process.exitCode = 0;
   } catch (err) {
     captureError(err, 'main');
@@ -283,8 +288,7 @@ export const main = async (): Promise<void> => {
   }
 };
 
-// Guard the auto-invoke so jest's module load doesn't fire a stray run (same
-// rationale as `album-metadata-bio-fill#main`).
+// No auto-run under jest.
 if (process.env.NODE_ENV !== 'test') {
   void main();
 }
