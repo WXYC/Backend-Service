@@ -5465,8 +5465,10 @@ paths:
         the post-cutover import has copied into `reviews` (it is an ordinary
         review on its release by then), for as long as that imported review
         exists. If the imported review, or its release, is deleted, the
-        submission is listed again: nothing is lost, and it is then the
-        remaining copy.
+        submission is listed again: after a release delete, which clears its
+        `album_id`, by `artist` only. Nothing is lost; if an intake item had
+        taken the imported review as its cover review, that item also keeps
+        its own copy.
 
         The consent-gated PUBLIC surface is the `wxycReviews` array attached to
         GET /proxy/metadata/album, which is anonymous-reachable and applies a
