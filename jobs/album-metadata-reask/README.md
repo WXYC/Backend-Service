@@ -11,6 +11,17 @@ Landed so far:
 - The package scaffold ([#3140](https://github.com/WXYC/Backend-Service/issues/3140)).
 - `cohort.ts` ([#3142](https://github.com/WXYC/Backend-Service/issues/3142)): the read-only cohort counts and enumeration; see its docblock. Built as `dist/cohort.cjs` for `tests/integration/album-metadata-reask.spec.js`.
 - The knobs and the dry run ([#3144](https://github.com/WXYC/Backend-Service/issues/3144)).
+- `write.ts`, `artist-keep-sql.ts` and `run-batch.ts` ([#3145](https://github.com/WXYC/Backend-Service/issues/3145)): the guarded `album_metadata` write and one batch of ask, decide and write. Nothing calls `runBatch` yet; the execute loop is [#3151](https://github.com/WXYC/Backend-Service/issues/3151). `write.ts` and `artist-keep-sql.ts` are built as `dist/*.cjs` for the integration spec.
+
+## The album write
+
+One statement per album (decision 7 on #3137). It locks the `album_metadata` row only while its `discogs_url` still equals the value the cohort read (the race guard), inserts one `album_metadata_reask_backup` row with before and after images of the 13 release- and artist-group columns and the provenance, and updates the row with `updated_at = NOW()`. The backup row and the update commit together or not at all, and the backup's `written_at` equals the row's new `updated_at`. Zero rows back is `skipped_raced`.
+
+- **Release group** (`discogs_url`, `artwork_url`, `release_year`, `label`, `full_release_date`, `genres`, `styles`, `tracklist`): written as a unit from the answer, nulls included; all NULL on `clear` (decision 3).
+- **Artist group** (`discogs_artist_id`, `artist_bio`, `artist_wikipedia_url`, `artist_image_url`, `bio_tokens`): `artist-keep-sql.ts`, decision 8. A null in the answer keeps the stored value only when both `discogs_artist_id`s are set and equal; otherwise the answer is written, nulls included. Kept as stored on `clear`, and still imaged, so a restore never meets a missing key. `artist_cleared` counts a stored bio replaced by none.
+- **Never written:** the streaming columns, and `library`. The catalog cover pass is its own slice ([#3146](https://github.com/WXYC/Backend-Service/issues/3146)), so the catalog watermark moves once per run, not once per album.
+
+`runBatch` asks LML with `allowReleaseResolutionFallback: true` and `budgetMs: null`, decides each admitted row with `decideReask`, and writes only `rebind`, `rebind_unpinned` and `clear`. A failed bulk call carries the whole batch; a write that throws carries its album.
 
 ## Build and deploy
 

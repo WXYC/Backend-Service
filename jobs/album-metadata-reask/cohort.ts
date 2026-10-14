@@ -18,7 +18,7 @@ export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
 
 // `WXYC_SCHEMA_NAME`, so the integration tier's per-worker schema is the one read.
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
-const table = (name: string): SQL => sql.raw(`"${SCHEMA}"."${name}"`);
+export const table = (name: string): SQL => sql.raw(`"${SCHEMA}"."${name}"`);
 
 /** One row of the pin export or of step 2's removal file. */
 export interface PinRow {
@@ -57,7 +57,7 @@ export interface ReaskCandidate {
 // Copied from `jobs/album-reviews-etl/link.ts`: a `text[]` literal with each
 // element quoted, backslashes escaped before quotes.
 const quoteArrayElement = (value: string): string => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-const textArrayLiteral = (values: string[]): string => `{${values.map(quoteArrayElement).join(',')}}`;
+export const textArrayLiteral = (values: string[]): string => `{${values.map(quoteArrayElement).join(',')}}`;
 
 /**
  * One `unnest` over three bound array literals: card, release, source. A card
