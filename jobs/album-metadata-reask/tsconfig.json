@@ -1,0 +1,17 @@
+{
+  "extends": ["../../tsconfig.base.json"],
+  "references": [
+    { "path": "../../shared/database" },
+    { "path": "../../shared/lml-client" },
+    { "path": "../../shared/metadata" }
+  ],
+  "include": ["."],
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}

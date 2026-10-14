@@ -1,0 +1,29 @@
+{
+  "name": "@wxyc/album-metadata-reask",
+  "job-type": "one-shot",
+  "version": "1.0.0",
+  "description": "WXYC one-shot re-ask (BS#3137): ask LML again for album_metadata rows whose stored Discogs release disagrees with the card's current pin, or still serves a pin that was removed, and rebind them to the graded answer.",
+  "type": "module",
+  "main": "./dist/job.js",
+  "scripts": {
+    "start": "node dist/job.js",
+    "build": "tsup --minify",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "docker:build": "docker build -t wxyc_album_metadata_reask:ci -f ../../Dockerfile.album-metadata-reask ../../",
+    "dev": "tsup --watch"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "@sentry/node": "^11.4.0",
+    "@wxyc/database": "^1.0.0",
+    "@wxyc/lml-client": "^1.0.0",
+    "@wxyc/metadata": "^1.0.0"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

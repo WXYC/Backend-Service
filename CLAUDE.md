@@ -73,6 +73,7 @@ Jobs under `jobs/<name>/` (full text per job in [`docs/jobs.md`](docs/jobs.md)):
 | `@wxyc/streaming-url-remediation` | One-shot, dry-run default: rewrite non-host-correct stored Spotify/Apple URLs; no LML. |
 | `@wxyc/streaming-columns-drain` | One-shot, dry-run default: heal matched `album_metadata` rows with all five streaming URLs NULL. |
 | `@wxyc/album-metadata-bio-fill` | One-shot, dry-run default: fill `artist_bio` for matched rows lacking one. |
+| `@wxyc/album-metadata-reask` | One-shot (BS#3137): re-ask LML for rows whose stored release disagrees with the pin. **Scaffold only; exits 1.** |
 | `@wxyc/artist-unicode-dedup` | One-shot, dry-run default: merge Unicode-duplicate `artists`; risky groups need `--include-risky`. |
 | `@wxyc/artist-conflation-split` | One-shot, dry-run default: split wrongly merged artists; `--execute` needs `--identity-guard-live`. |
 | `@wxyc/rotation-release-id-pollution-check` | Weekly cron `0 7 * * 1` (Python): read-only wrong-album release-id pollution audit. |
