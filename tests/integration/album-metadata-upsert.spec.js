@@ -25,9 +25,6 @@
  *      genres/styles as `text[]`, tracklist/bio_tokens as `jsonb`,
  *      artist_image_url) round-trip through real PG — arrays come back as JS
  *      arrays, jsonb comes back parsed (the read path spreads/projects them).
- *   6. BS#3117 degraded re-ask: on a degraded LML reply the five
- *      artist-scoped columns keep their stored values where the reply is
- *      null; a healthy reply with nulls still clears them.
  *
  * (Coverage 1-4 above predate BS#1336 and describe the 10-column base
  * payload; the worker's match payload is now 18 columns — see #5.)
@@ -104,39 +101,6 @@ async function upsertMatchExtended(sql, albumId, payload) {
        ${payload.full_release_date}, ${payload.genres}, ${payload.styles},
        ${sql.json(payload.tracklist)}, ${payload.artist_image_url}, ${sql.json(payload.bio_tokens)},
        NOW())
-  `;
-}
-
-/**
- * BS#3117: the worker's match-branch re-ask, narrowed to the artwork column
- * plus the five artist-scoped columns. On a degraded LML reply
- * (`keepStoredArtistFieldsSet` in `apps/enrichment-worker/enrich.ts`) each
- * artist-scoped column is `COALESCE(excluded.<col>, <live col>)`; on a healthy
- * reply it is a plain overwrite. When that function is hand-edited the SQL
- * here must follow. Covers text, varchar, integer and jsonb columns.
- */
-async function reaskArtistScoped(sql, albumId, payload, degraded) {
-  const keep = (col) =>
-    degraded
-      ? sql`COALESCE(EXCLUDED.${sql(col)}, ${sql(SCHEMA)}.album_metadata.${sql(col)})`
-      : sql`EXCLUDED.${sql(col)}`;
-  await sql`
-    INSERT INTO ${sql(SCHEMA)}.album_metadata
-      (album_id, artwork_url, artist_bio, artist_wikipedia_url, bio_tokens, artist_image_url,
-       discogs_artist_id, updated_at)
-    VALUES
-      (${albumId}, ${payload.artwork_url}, ${payload.artist_bio}, ${payload.artist_wikipedia_url},
-       ${payload.bio_tokens === null ? null : sql.json(payload.bio_tokens)}, ${payload.artist_image_url},
-       ${payload.discogs_artist_id}, NOW())
-    ON CONFLICT (album_id) DO UPDATE
-       SET artwork_url          = EXCLUDED.artwork_url,
-           artist_bio           = ${keep('artist_bio')},
-           artist_wikipedia_url = ${keep('artist_wikipedia_url')},
-           bio_tokens           = ${keep('bio_tokens')},
-           artist_image_url     = ${keep('artist_image_url')},
-           discogs_artist_id    = ${keep('discogs_artist_id')},
-           updated_at           = NOW()
-     WHERE ${sql(SCHEMA)}.album_metadata.updated_at < NOW()
   `;
 }
 
@@ -402,73 +366,6 @@ describe('album_metadata UPSERT contract (real PG)', () => {
     expect(rows[0].youtube_music_url).toBe(FULL_PAYLOAD.youtube_music_url);
     expect(rows[0].bandcamp_url).toBe(FULL_PAYLOAD.bandcamp_url);
     expect(rows[0].soundcloud_url).toBe(FULL_PAYLOAD.soundcloud_url);
-  });
-
-  // BS#3117: a re-ask whose LML reply was shed (degraded) keeps the stored
-  // artist-scoped values; a healthy reply with null values still clears them.
-  test.each([
-    { degraded: true, kept: true },
-    { degraded: false, kept: false },
-  ])('BS#3117: re-ask with degraded=$degraded and null artist fields (kept=$kept)', async ({ degraded, kept }) => {
-    const albumId = await insertLibraryAlbum(sql, `bs3117-degraded-${degraded}`);
-    insertedAlbumIds.push(albumId);
-
-    await upsertMatchExtended(sql, albumId, EXTENDED_PAYLOAD);
-    await sql`SELECT pg_sleep(0.05)`;
-
-    const newerArtwork = 'https://i.discogs.com/d3-test/reask.jpg';
-    await reaskArtistScoped(
-      sql,
-      albumId,
-      {
-        artwork_url: newerArtwork,
-        artist_bio: null,
-        artist_wikipedia_url: null,
-        bio_tokens: null,
-        artist_image_url: null,
-        discogs_artist_id: null,
-      },
-      degraded
-    );
-
-    const [row] = await sql`
-      SELECT artwork_url, artist_bio, artist_wikipedia_url, bio_tokens, artist_image_url, discogs_artist_id
-        FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
-    `;
-    expect(row.artwork_url).toBe(newerArtwork);
-    expect(row.artist_bio).toBe(kept ? EXTENDED_PAYLOAD.artist_bio : null);
-    expect(row.artist_wikipedia_url).toBe(kept ? EXTENDED_PAYLOAD.artist_wikipedia_url : null);
-    expect(row.bio_tokens).toEqual(kept ? EXTENDED_PAYLOAD.bio_tokens : null);
-    expect(row.artist_image_url).toBe(kept ? EXTENDED_PAYLOAD.artist_image_url : null);
-    expect(row.discogs_artist_id).toBe(kept ? EXTENDED_PAYLOAD.discogs_artist_id : null);
-  });
-
-  test('BS#3117: a degraded re-ask that does carry a value still overwrites the stored one', async () => {
-    const albumId = await insertLibraryAlbum(sql, 'bs3117-degraded-nonnull');
-    insertedAlbumIds.push(albumId);
-
-    await upsertMatchExtended(sql, albumId, EXTENDED_PAYLOAD);
-    await sql`SELECT pg_sleep(0.05)`;
-
-    await reaskArtistScoped(
-      sql,
-      albumId,
-      {
-        artwork_url: EXTENDED_PAYLOAD.artwork_url,
-        artist_bio: 'A newer bio.',
-        artist_wikipedia_url: null,
-        bio_tokens: null,
-        artist_image_url: null,
-        discogs_artist_id: null,
-      },
-      true
-    );
-
-    const [row] = await sql`
-      SELECT artist_bio, artist_wikipedia_url FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${albumId}
-    `;
-    expect(row.artist_bio).toBe('A newer bio.');
-    expect(row.artist_wikipedia_url).toBe(EXTENDED_PAYLOAD.artist_wikipedia_url);
   });
 
   test('catch-arm INSERT materializes a fresh row when album_metadata is empty', async () => {

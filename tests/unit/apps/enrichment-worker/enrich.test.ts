@@ -1224,46 +1224,67 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
 });
 
 /**
- * BS#3117 — a re-ask whose LML reply is `degraded: true` (LML#1420: the
- * Discogs saturation breaker shed the top-1 enrichment fetch, so the reply is
- * still a match with artwork but its artist-scoped fields are null) must not
- * overwrite the artist-scoped columns already stored on `album_metadata`.
- * The conflict branch wraps exactly those five columns in
- * `COALESCE(excluded.<col>, <live col>)`; every other column, and every column
- * on a healthy reply, is written exactly as before. A healthy reply with a
- * null bio still clears the stored bio: that is LML's real "no profile"
- * answer. The real-Postgres half is in
- * tests/integration/album-metadata-upsert.spec.js.
+ * BS#3117 — a re-ask whose LML reply is `degraded: true` must not overwrite
+ * stored `album_metadata` values with the nulls a shed leaves behind. LML
+ * nulls the release-scoped fields on a release-step shed (and on
+ * `_build_degraded_response`, which skips enrichment entirely) and the
+ * artist-scoped fields on an artist-step shed (LML#1420).
+ *
+ * On a degraded reply the conflict branch keeps a stored value when the reply
+ * carries null for it, but only while the reply still names the same release
+ * (`discogs_url`) or artist (`discogs_artist_id`) as the row, or names none.
+ * If the reply bound a different release or artist, it is written as-is, so a
+ * row never mixes two releases or two artists. The two identity columns are
+ * themselves `COALESCE(excluded, stored)`. A healthy reply is written exactly
+ * as before. The real-Postgres behavior (same, changed and null identity) is
+ * pinned against the real builder in
+ * tests/integration/enrichment-worker-degraded-keep.spec.js.
  */
-describe('finalizeRow (BS#3117) — a degraded re-ask keeps the stored artist-scoped columns', () => {
-  const ARTIST_SCOPED_COLUMNS = [
-    'artist_bio',
-    'artist_wikipedia_url',
-    'bio_tokens',
-    'artist_image_url',
-    'discogs_artist_id',
-  ] as const;
+describe('finalizeRow (BS#3117) — a degraded re-ask keeps stored release and artist columns', () => {
+  const RELEASE_SCOPED = ['artwork_url', 'release_year', 'label', 'full_release_date', 'genres', 'styles', 'tracklist'];
+  const ARTIST_SCOPED = ['artist_bio', 'artist_wikipedia_url', 'bio_tokens', 'artist_image_url'];
+  const IDENTITY = ['discogs_url', 'discogs_artist_id'];
 
-  // The LML#1420 shape: still a direct match with artwork, artist step shed.
-  const shedMatchResponse = {
-    ...extendedMatchResponse,
+  // Renders a (possibly nested) mocked `sql` fragment: `sql.identifier(x)` as
+  // `"x"`, a mocked column as its `table.column` string.
+  const renderDeep = (value: unknown): string => {
+    if (typeof value === 'string') return value;
+    const ident = (value as { identifier?: string } | null)?.identifier;
+    if (ident) return `"${ident}"`;
+    const frag = value as SqlLike;
+    if (!frag?.sql) return JSON.stringify(value);
+    const values = frag.values ?? [];
+    return frag.sql.reduce((out, part, i) => out + part + (i < values.length ? renderDeep(values[i]) : ''), '');
+  };
+  const guard = (identity: string) =>
+    `(excluded."${identity}" IS NULL OR excluded."${identity}" IS NOT DISTINCT FROM album_metadata.${identity})`;
+  const keepWhen = (identity: string, col: string) =>
+    `CASE WHEN ${guard(identity)} THEN COALESCE(excluded."${col}", album_metadata.${col}) ELSE excluded."${col}" END`;
+
+  // A shed reply: still a direct match with artwork and a release URL, every
+  // release- and artist-scoped field null (release step shed).
+  const shedArtwork = {
+    artwork_url: 'https://i.discogs.com/abc/cover.jpg',
+    release_url: 'https://discogs.com/release/123',
+    release_year: null,
+    label: null,
+    full_release_date: null,
+    genres: null,
+    styles: null,
+    tracklist: null,
+    artist_bio: null,
+    wikipedia_url: null,
+    discogs_artist_id: null,
+    artist_image_url: null,
+    profile_tokens: null,
+  };
+  const shedResponse = {
+    search_type: 'direct',
     degraded: true,
     degraded_reason: 'upstream_unavailable',
-    results: [
-      {
-        artwork: {
-          ...(extendedMatchResponse.results[0]!.artwork as object),
-          artist_bio: null,
-          wikipedia_url: null,
-          discogs_artist_id: null,
-          artist_image_url: null,
-          profile_tokens: null,
-        },
-      },
-    ],
+    results: [{ artwork: shedArtwork }],
   } as unknown as LookupResponse;
-
-  const healthyNullBioResponse = { ...shedMatchResponse, degraded: false, degraded_reason: undefined };
+  const healthyNullResponse = { ...shedResponse, degraded: false, degraded_reason: undefined } as LookupResponse;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -1273,41 +1294,42 @@ describe('finalizeRow (BS#3117) — a degraded re-ask keeps the stored artist-sc
   const conflictSet = () =>
     (mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> }).set;
 
-  it.each(ARTIST_SCOPED_COLUMNS)(
-    'degraded reply: %s keeps the stored value when the incoming one is null',
-    async (column) => {
-      await finalizeRow(LINKED_ROW, shedMatchResponse);
+  it.each([
+    ...RELEASE_SCOPED.map((col) => [col, keepWhen('discogs_url', col)]),
+    ...ARTIST_SCOPED.map((col) => [col, keepWhen('discogs_artist_id', col)]),
+    ...IDENTITY.map((col) => [col, `COALESCE(excluded."${col}", album_metadata.${col})`]),
+  ])('degraded reply: %s is written as %s', async (col, expected) => {
+    await finalizeRow(LINKED_ROW, shedResponse);
 
-      const fragment = conflictSet()[column];
-      expect(renderSql(fragment)).toBe('COALESCE(excluded.<col>, <col>)');
-      expect(sqlValues(fragment)).toEqual([{ identifier: column }, album_metadata[column]]);
+    expect(renderDeep(conflictSet()[col])).toBe(expected);
+  });
+
+  it.each([...RELEASE_SCOPED.filter((c) => c !== 'artwork_url'), ...ARTIST_SCOPED, 'discogs_artist_id'])(
+    'healthy reply with a null %s still writes a plain null',
+    async (col) => {
+      await finalizeRow(LINKED_ROW, healthyNullResponse);
+
+      expect(conflictSet()[col]).toBeNull();
     }
   );
 
-  it.each(ARTIST_SCOPED_COLUMNS)('healthy reply with a null %s still clears it (no COALESCE)', async (column) => {
-    await finalizeRow(LINKED_ROW, healthyNullBioResponse);
-
-    expect(conflictSet()[column]).toBeNull();
-  });
-
-  it('degraded reply: the match, artwork, and re-ask counter are still written', async () => {
-    const outcome = await finalizeRow(LINKED_ROW, shedMatchResponse);
+  it('degraded reply: the streaming merges, the re-ask counter and the search URLs are unchanged', async () => {
+    const outcome = await finalizeRow(LINKED_ROW, shedResponse);
 
     expect(outcome).toBe('enriched_match');
     const set = conflictSet();
-    expect(set.artwork_url).toBe('https://i.discogs.com/abc/cover.jpg');
-    expect(set.discogs_url).toBe('https://discogs.com/release/123');
-    expect(set.label).toBe('Sonamos');
-    expect(set.genres).toEqual(['Rock']);
+    expect(renderSql(set.spotify_url)).toContain('CASE');
     expect(renderSql(set.streaming_reask_attempts)).toContain('CASE');
+    expect(set.youtube_music_url).toContain('music.youtube.com/search');
   });
 
   it('degraded reply: the INSERT branch is unchanged (a fresh album has nothing stored to keep)', async () => {
-    await finalizeRow(LINKED_ROW, shedMatchResponse);
+    await finalizeRow(LINKED_ROW, shedResponse);
 
     const insertPayload = mockDb._chain.values.mock.calls[0]?.[0] as Record<string, unknown>;
-    for (const column of ARTIST_SCOPED_COLUMNS) {
-      expect(insertPayload[column]).toBeNull();
+    expect(insertPayload.artwork_url).toBe(shedArtwork.artwork_url);
+    for (const col of [...RELEASE_SCOPED.filter((c) => c !== 'artwork_url'), ...ARTIST_SCOPED, 'discogs_artist_id']) {
+      expect(insertPayload[col]).toBeNull();
     }
   });
 });

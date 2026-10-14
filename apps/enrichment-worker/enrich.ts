@@ -89,11 +89,11 @@
  */
 
 import { and, eq, sql } from 'drizzle-orm';
-import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import { lmlTrackContextTrust, lmlTrackContextVouchedResults } from '@wxyc/lml-client';
 import type { DiscogsMatchResult, LookupResponse, StreamingResolutionStatus } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
+import { buildDegradedConflictSet } from './degraded-keep-sql.js';
 import { buildStreamingFieldConflictSet, NO_FALLBACK } from './streaming-merge-sql.js';
 
 // Re-exported unchanged so `tests/unit/apps/enrichment-worker/enrich.test.ts`
@@ -234,9 +234,10 @@ const FRESH_STREAMING_STATE: StreamingFieldState = { status: null, url: null };
  * operates directly on `album_metadata` for an already-terminal album.
  *
  * `degraded` is the LML reply's `degraded` flag (BS#3117). When it is true,
- * the conflict branch keeps the stored artist-scoped columns wherever the
- * reply carries null for them — see `keepStoredArtistFieldsSet`. Both callers
- * must pass it, so the parameter is required.
+ * the conflict branch keeps stored release- and artist-scoped values wherever
+ * the reply carries null for them and still names the same release or artist
+ * (`buildDegradedConflictSet`, `degraded-keep-sql.ts`). Both callers must pass
+ * it, so the parameter is required.
  */
 export async function upsertMatchedAlbumMetadata(
   albumId: number,
@@ -366,7 +367,7 @@ export async function upsertMatchedAlbumMetadata(
         apple_music_url: appleMusicConflict.url,
         bandcamp_status: bandcampConflict.status,
         bandcamp_url: bandcampConflict.url,
-        ...(degraded ? keepStoredArtistFieldsSet() : {}),
+        ...(degraded ? buildDegradedConflictSet() : {}),
         // BS#1924: bump the shared per-album re-ask counter ONLY when the
         // row already carried a load-bearing match (artwork_url OR
         // discogs_url present) BEFORE this write — a genuine re-ask of an
@@ -386,31 +387,6 @@ export async function upsertMatchedAlbumMetadata(
       },
       setWhere: sql`${album_metadata.updated_at} < NOW()`,
     });
-}
-
-/**
- * Conflict-branch `SET` entries for the artist-scoped columns on a degraded
- * LML reply (BS#3117). All five come from LML's top-1 artist fetch. When the
- * Discogs saturation breaker sheds that fetch, LML still returns the match
- * and artwork, but these fields are null and the reply is marked
- * `degraded: true, degraded_reason: 'upstream_unavailable'` (LML#1420).
- * Writing them as-is would replace a stored bio with null, so each one keeps
- * the stored value unless the reply carries a non-null one.
- *
- * Only for a degraded reply. A healthy reply with a null bio is LML's real
- * "this artist has no Discogs profile" answer and still clears the column.
- * The INSERT branch is untouched: a fresh album has nothing stored to keep.
- * The bio-fill job (BS#2775) remains the path for rows that never had a bio.
- */
-function keepStoredArtistFieldsSet() {
-  const keepStored = (name: string, column: AnyPgColumn) => sql`COALESCE(excluded.${sql.identifier(name)}, ${column})`;
-  return {
-    artist_bio: keepStored('artist_bio', album_metadata.artist_bio),
-    artist_wikipedia_url: keepStored('artist_wikipedia_url', album_metadata.artist_wikipedia_url),
-    bio_tokens: keepStored('bio_tokens', album_metadata.bio_tokens),
-    artist_image_url: keepStored('artist_image_url', album_metadata.artist_image_url),
-    discogs_artist_id: keepStored('discogs_artist_id', album_metadata.discogs_artist_id),
-  };
 }
 
 /**
