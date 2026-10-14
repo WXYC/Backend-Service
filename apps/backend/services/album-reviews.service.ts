@@ -136,8 +136,17 @@ export const toAlbumReviewDTO = (row: AlbumReviewRow): AlbumReviewDTO => ({
  * rows of 1,689, and without this the endpoint would contradict the archive's
  * own "1,687 rows with a body" framing. The public attach carries the same
  * predicate (`album-metadata-lookup.service.ts`), so the two surfaces differ
- * only in consent, not in what counts as a review. Its presence also means
- * this builder never returns `undefined`.
+ * in consent, and in one more way: this list leaves out a row that
+ * `jobs/album-reviews-import` has copied into `reviews` (it is an ordinary review
+ * on its release by then), while the public attach does not. Its presence also
+ * means this builder never returns `undefined`.
+ *
+ * That exclusion keys on the LIVE provenance column, `reviews.imported_from_submission_id`,
+ * so it lasts only while the imported review does. Deleting the imported review,
+ * or its release (the review goes with it, and the archive row's `album_id` becomes
+ * NULL), lists the archive row again: nothing is lost, and the archive row is then
+ * the remaining copy (ADR 0011). A record's own copy of the review (a release delete
+ * copies a cover review without the column) does not hide it.
  *
  * `album_id` is an exact match on the link column; `artist` normalizes
  * TS-side via `normalizeArtistName` (lowercase, leading-"The"-strip — the
@@ -153,7 +162,7 @@ export const toAlbumReviewDTO = (row: AlbumReviewRow): AlbumReviewDTO => ({
  */
 const buildWhere = ({ album_id, artist }: AlbumReviewsQueryFilters): SQL | undefined => {
   // A row `jobs/album-reviews-import` copied into `reviews` is an ordinary review on its release now (ADR 0011), so the
-  // list leaves it out; the gate, columns and consent posture are unchanged.
+  // list leaves it out while that review exists; the gate, columns and consent posture are unchanged.
   const conditions: SQL[] = [
     isNotNull(album_review_submissions.review),
     sql`NOT EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.imported_from_submission_id} = ${album_review_submissions.id})`,

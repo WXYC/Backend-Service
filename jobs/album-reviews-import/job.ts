@@ -8,7 +8,7 @@
  */
 
 import { closeDatabaseConnection, createPostgresClient } from '@wxyc/database';
-import { runImport } from './import.js';
+import { describeError, runImport } from './import.js';
 
 const USAGE = 'usage: job.ts [--apply]';
 
@@ -23,13 +23,15 @@ const main = async () => {
     await runImport(sql, { schema, apply });
   } finally {
     for (const closed of await Promise.allSettled([sql.end(), closeDatabaseConnection()])) {
-      if (closed.status === 'rejected') console.error('[album-reviews-import] pool teardown failed:', closed.reason);
+      if (closed.status === 'rejected')
+        console.error('[album-reviews-import] pool teardown failed:', describeError(closed.reason));
     }
   }
 };
 
 main().catch((err) => {
-  console.error('[album-reviews-import] Fatal error:', err);
+  // Not the error object: a database error's detail can carry a row's reviewer name and review text (docs/pii.md).
+  console.error('[album-reviews-import] Fatal error:', describeError(err));
   // exitCode, not process.exit(), so buffered log output is flushed before the process ends.
   process.exitCode = 1;
 });

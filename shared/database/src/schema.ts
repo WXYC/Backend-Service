@@ -2394,12 +2394,19 @@ export type CatalogDeleteSnapshot = InferSelectModel<typeof catalog_delete_snaps
  *     `tx.select()`, so capturing it would copy `reviewer_raw` and
  *     `social_consent_raw` — real names collected under a form promise that
  *     "your name will not be shared" — into this permanently-retained,
- *     never-pruned `captured` column. ADR 0011 and that table's docstring
- *     limit readers of `reviewer_raw` to the role-gated `GET /album-reviews`
- *     and require any other reader to carry the same exclusion; this
- *     capture would have been one more reader. Do not
- *     "fix" this with a projection — reason (1) means there is nothing to
- *     restore.
+ *     never-pruned `captured` column. Nothing reads `social_consent_raw`;
+ *     `reviewer_raw` has three readers (the role-gated `GET /album-reviews`,
+ *     the ETL's writer, and `jobs/album-reviews-import`, BS#3132), and ADR
+ *     0011 requires any other reader to carry the same exclusion. The
+ *     import copies the name into an imported review's `reviews.author` and
+ *     its revision 1's `review_revisions.edited_by`, and those two columns
+ *     ARE captured with the release like any review's: the snapshot holds a
+ *     form reviewer's name for a release whose reviews were imported, as a
+ *     station-only name of the same class as an in-app review's typed
+ *     author (docs/pii.md). What stays out is this table, whose capture
+ *     would be a second, unprojected copy of the archive row, with
+ *     `social_consent_raw`. Do not "fix" this with a projection — reason (1)
+ *     means there is nothing to restore.
  *   - Excluded because the delete REFUSES outright rather than ever reaching
  *     it: `flowsheet` (the 409 flowsheet-plays guard).
  *   - `digital_asset` + `digital_asset_file` are BOTH, split on status. Its FK
@@ -2890,9 +2897,12 @@ export const reviews = wxyc_schema.table(
  * editable by their author at any time and by music directors, every
  * version of a submitted one kept in `review_revisions`). This archive
  * differs on the axes that matter — immutable submissions and a promise
- * that reviewer names are never shared — so it stays a table of its own, and only
- * the linked rows `jobs/album-reviews-import` copies once, after the form
- * closes, cross into `reviews` (see
+ * that reviewer names are never shared — so it stays a table of its own.
+ * Form reviews cross into `reviews` in two ways only: the linked rows
+ * `jobs/album-reviews-import` copies once, after the form closes, and a
+ * music director's copy of one form review onto an in-flight record
+ * (copy-and-cite, WXYC/dj-site#2095), which also cites it through
+ * `intake_items.cited_submission_id` and which the import then skips (see
  * docs/adr/0011-album-review-submissions-separate-archive.md).
  *
  * Identity is free-text: `album_id` is a best-effort link written only by

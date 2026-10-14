@@ -8,6 +8,10 @@
  *
  * The job reads every archive row in the schema, so counts are asserted as deltas over a dry run taken before this
  * spec seeds anything, and each row is asserted by id. Whatever the apply wrote is removed in `afterAll`.
+ *
+ * The last case stands in for a release deleted while `--apply` runs: it wraps this spec's handle so that, just before
+ * one row's insert, the row's `album_id` is set NULL on another connection, as the `ON DELETE SET NULL` of a release
+ * delete that committed after the scan would.
  */
 
 // The unit-tier drizzle-orm double sits under tests/__mocks__ and jest applies it to node modules here too. The import
@@ -195,5 +199,46 @@ describe('album-reviews import (real PG)', () => {
 
     const [after] = await sql`SELECT * FROM ${sql(SCHEMA)}.reviews WHERE id = ${review.id}`;
     expect(after.imported_from_submission_id).toBeNull();
+  });
+
+  test('a row whose release is deleted after the scan is counted under no_release, and the run still commits', async () => {
+    const raced = await seedFormSubmission({
+      album_id: release.id,
+      review: 'A form review.',
+      reviewer_raw: 'Test Raced',
+    });
+    const pre = await run(false);
+    const before = await reviewCount();
+    const releaseDeletedBeforeInsert = (db) =>
+      new Proxy(db, {
+        get: (target, prop) =>
+          prop === 'begin'
+            ? (mode, fn) =>
+                target.begin(mode, (tx) =>
+                  fn(
+                    new Proxy(tx, {
+                      // Synchronous for everything but the raced row's insert: the job also calls `tx` for identifiers and fragments.
+                      apply: (query, self, args) => {
+                        const isInsert = Array.isArray(args[0]) && args[0].join('').includes('WITH imported AS');
+                        if (!isInsert || !args.includes(raced.id)) return Reflect.apply(query, self, args);
+                        return db`UPDATE ${db(SCHEMA)}.album_review_submissions SET album_id = NULL WHERE id = ${raced.id}`.then(
+                          () => Reflect.apply(query, self, args)
+                        );
+                      },
+                    })
+                  )
+                )
+            : Reflect.get(target, prop),
+      });
+
+    const result = await runImport(releaseDeletedBeforeInsert(sql), { schema: SCHEMA, apply: true, log: () => {} });
+
+    expect(await reviewCount()).toBe(before);
+    expect(await importedReview(raced)).toBeUndefined();
+    expect(pre.imported).toBe(1);
+    expect(result.eligible).toBe(pre.eligible);
+    expect(result.imported).toBe(0);
+    expect(result.skipped.no_release - pre.skipped.no_release).toBe(1);
+    expect(result.skipped.already_imported).toBe(pre.skipped.already_imported);
   });
 });

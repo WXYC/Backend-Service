@@ -183,7 +183,7 @@ Two groups are deliberately absent from that snapshot (see the `catalog_delete_s
   UPDATE wxyc_schema.album_review_submissions SET album_id = <new library.id> WHERE id = <submission id>;
   ```
 
-  It is also not in the snapshot for a second, independent reason: `reviewer_raw` / `social_consent_raw` are PII that ADR 0011 keeps out of every reader but one, so the capture must not copy them into a permanently-retained column.
+  It is also not in the snapshot for a second, independent reason: `reviewer_raw` / `social_consent_raw` are PII that ADR 0011 keeps behind enumerated column lists, and the capture reads unprojected, so it must not copy them into a permanently-retained column. That is about this table only: once `jobs/album-reviews-import` has run, an imported review's `author` and its revision 1's `edited_by` hold the form's `reviewer_raw`, and the snapshot does capture those with the release's reviews, as a station-only name like any review's typed author (`docs/pii.md`).
 
 Verify the restore actually landed — the failure mode is silent:
 
