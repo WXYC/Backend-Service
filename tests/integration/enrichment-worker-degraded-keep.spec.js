@@ -7,9 +7,11 @@
  * shed, or `_build_degraded_response`) or the artist-scoped fields
  * (artist-step shed, LML#1420), with `degraded: true`. On such a reply the
  * conflict branch keeps each stored value the reply leaves null, but only
- * while the reply names the same release (`discogs_url`) or artist
- * (`discogs_artist_id`) as the row, or names none. A reply that bound a
- * different release or artist is written as-is, so the row never mixes two.
+ * while the reply still describes the row's release or artist. Release-scoped
+ * columns: the reply's `discogs_url` is null or equals the stored one.
+ * Artist-scoped columns: both `discogs_artist_id`s are set and equal, or,
+ * when either is null, the release test holds. Otherwise the reply is written
+ * as-is, so the row never mixes two releases or two artists.
  *
  * Runs the REAL `buildDegradedConflictSet` from its compiled
  * `apps/enrichment-worker/dist/degraded-keep-sql.cjs` inside a real
@@ -108,14 +110,14 @@ describe('BS#3117 degraded re-ask keep-stored rule (real PG, real builder)', () 
     await closeDatabaseConnection();
   });
 
-  async function seedStoredAlbum(suffix) {
+  async function seedStoredAlbum(suffix, overrides = {}) {
     const [{ id }] = await pg`
       INSERT INTO ${pg(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
       VALUES (1, 11, 1, ${'bs3117-degraded-keep-' + suffix}, 9999, 'Juana Molina')
       RETURNING id
     `;
     insertedAlbumIds.push(id);
-    await db.insert(album_metadata).values({ album_id: id, ...STORED });
+    await db.insert(album_metadata).values({ album_id: id, ...STORED, ...overrides });
     return id;
   }
 
@@ -138,37 +140,69 @@ describe('BS#3117 degraded re-ask keep-stored rule (real PG, real builder)', () 
     for (const col of Object.keys(fields)) expect(row[col]).toBeNull();
   };
 
+  // The artist-scoped rule: compare artists when both sides carry an id; when
+  // either side lacks one, fall back to "same release" (excluded.discogs_url
+  // null or equal to the stored one).
+  const OTHER_RELEASE = 'https://discogs.com/release/222';
   test.each([
-    ['same artist id', STORED.discogs_artist_id],
-    ['null artist id', null],
-  ])('artist-step shed with the %s keeps the stored artist fields', async (_label, incomingArtistId) => {
-    const albumId = await seedStoredAlbum(`artist-${incomingArtistId}`);
+    {
+      name: 'both ids equal',
+      stored: STORED.discogs_artist_id,
+      incoming: STORED.discogs_artist_id,
+      url: STORED.discogs_url,
+      kept: true,
+    },
+    {
+      name: 'both ids equal, different release',
+      stored: STORED.discogs_artist_id,
+      incoming: STORED.discogs_artist_id,
+      url: OTHER_RELEASE,
+      kept: true,
+    },
+    {
+      name: 'both ids differ',
+      stored: STORED.discogs_artist_id,
+      incoming: 99999,
+      url: STORED.discogs_url,
+      kept: false,
+    },
+    { name: 'stored id null, same release', stored: null, incoming: 99999, url: STORED.discogs_url, kept: true },
+    { name: 'stored id null, different release', stored: null, incoming: 99999, url: OTHER_RELEASE, kept: false },
+    {
+      name: 'incoming id null, same release',
+      stored: STORED.discogs_artist_id,
+      incoming: null,
+      url: STORED.discogs_url,
+      kept: true,
+    },
+    {
+      name: 'incoming id null, null release URL',
+      stored: STORED.discogs_artist_id,
+      incoming: null,
+      url: null,
+      kept: true,
+    },
+    {
+      name: 'incoming id null, different release',
+      stored: STORED.discogs_artist_id,
+      incoming: null,
+      url: OTHER_RELEASE,
+      kept: false,
+    },
+  ])('artist fields on a degraded reply: $name (kept=$kept)', async ({ name, stored, incoming, url, kept }) => {
+    const albumId = await seedStoredAlbum(`artist-${name.replace(/\W+/g, '-')}`, { discogs_artist_id: stored });
 
     await degradedReask(albumId, {
       artwork_url: STORED.artwork_url,
-      discogs_url: STORED.discogs_url,
-      discogs_artist_id: incomingArtistId,
+      discogs_url: url,
+      discogs_artist_id: incoming,
       ...NULL_ARTIST_FIELDS,
     });
 
     const row = await readRow(albumId);
-    expectStoredArtist(row);
-    expect(row.discogs_artist_id).toBe(STORED.discogs_artist_id);
-  });
-
-  test('a degraded reply that bound a different artist is written as-is (no mixed-artist row)', async () => {
-    const albumId = await seedStoredAlbum('artist-changed');
-
-    await degradedReask(albumId, {
-      artwork_url: STORED.artwork_url,
-      discogs_url: STORED.discogs_url,
-      discogs_artist_id: 99999,
-      ...NULL_ARTIST_FIELDS,
-    });
-
-    const row = await readRow(albumId);
-    expect(row.discogs_artist_id).toBe(99999);
-    expectNull(row, NULL_ARTIST_FIELDS);
+    if (kept) expectStoredArtist(row);
+    else expectNull(row, NULL_ARTIST_FIELDS);
+    expect(row.discogs_artist_id).toBe(incoming ?? stored);
   });
 
   test.each([

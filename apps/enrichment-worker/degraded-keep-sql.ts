@@ -16,9 +16,16 @@
  *     `COALESCE(excluded.col, stored.col)`.
  *   - Release-scoped columns: keep the stored value where the reply is null,
  *     but only when `excluded.discogs_url` is null or IS NOT DISTINCT FROM the
- *     stored one. Otherwise the reply bound a different release, and it is
- *     written as-is, so the row never mixes two releases.
- *   - Artist-scoped columns: the same, keyed on `discogs_artist_id`.
+ *     stored one ("same release"). Otherwise the reply bound a different
+ *     release, and it is written as-is, so the row never mixes two releases.
+ *   - Artist-scoped columns: keep the stored value where the reply is null,
+ *     but only when both `discogs_artist_id`s are set and equal, or, when
+ *     either is null, "same release" holds. Compare artists when both sides
+ *     carry an id; otherwise fall back to the release. The fallback matters on
+ *     both sides: most rows enriched before BS#1336 have no stored artist id
+ *     (a bare null-id guard would clear their bios), and a release-step shed
+ *     nulls the incoming id (a bare null-id guard would keep the old bio on a
+ *     different release).
  * A reply that carries a value always wins. This is used only for a degraded
  * reply: a healthy reply's null is LML's real answer (for example "this
  * artist has no Discogs profile") and is written as before. The streaming
@@ -62,19 +69,25 @@ const excluded = (key: AlbumMetadataKey): SQL => sql`excluded.${sql.identifier(k
 
 const coalesceStored = (key: AlbumMetadataKey): SQL => sql`COALESCE(${excluded(key)}, ${album_metadata[key]})`;
 
-/** The reply names the same release/artist as the row, or names none. */
+/** The reply names the same release as the row, or names none. */
 const sameOrUnnamed = (identity: IdentityKey): SQL =>
   sql`(${excluded(identity)} IS NULL OR ${excluded(identity)} IS NOT DISTINCT FROM ${album_metadata[identity]})`;
 
-const keepStoredWhen = (identity: IdentityKey, key: GuardedKey): SQL =>
-  sql`CASE WHEN ${sameOrUnnamed(identity)} THEN ${coalesceStored(key)} ELSE ${excluded(key)} END`;
+const sameArtist = (): SQL => {
+  const incoming = excluded('discogs_artist_id');
+  const stored = album_metadata.discogs_artist_id;
+  return sql`((${incoming} IS NOT NULL AND ${stored} IS NOT NULL AND ${incoming} = ${stored}) OR ((${incoming} IS NULL OR ${stored} IS NULL) AND ${sameOrUnnamed('discogs_url')}))`;
+};
+
+const keepStoredWhen = (condition: SQL, key: GuardedKey): SQL =>
+  sql`CASE WHEN ${condition} THEN ${coalesceStored(key)} ELSE ${excluded(key)} END`;
 
 export function buildDegradedConflictSet(): Record<IdentityKey | GuardedKey, SQL> {
   const set = {
     discogs_url: coalesceStored('discogs_url'),
     discogs_artist_id: coalesceStored('discogs_artist_id'),
   } as Record<IdentityKey | GuardedKey, SQL>;
-  for (const key of RELEASE_SCOPED) set[key] = keepStoredWhen('discogs_url', key);
-  for (const key of ARTIST_SCOPED) set[key] = keepStoredWhen('discogs_artist_id', key);
+  for (const key of RELEASE_SCOPED) set[key] = keepStoredWhen(sameOrUnnamed('discogs_url'), key);
+  for (const key of ARTIST_SCOPED) set[key] = keepStoredWhen(sameArtist(), key);
   return set;
 }

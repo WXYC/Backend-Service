@@ -1231,13 +1231,15 @@ describe('sanitizeLookupStreamingUrls -> finalizeRow (BS#2350 status-clearing in
  * artist-scoped fields on an artist-step shed (LML#1420).
  *
  * On a degraded reply the conflict branch keeps a stored value when the reply
- * carries null for it, but only while the reply still names the same release
- * (`discogs_url`) or artist (`discogs_artist_id`) as the row, or names none.
- * If the reply bound a different release or artist, it is written as-is, so a
- * row never mixes two releases or two artists. The two identity columns are
- * themselves `COALESCE(excluded, stored)`. A healthy reply is written exactly
- * as before. The real-Postgres behavior (same, changed and null identity) is
- * pinned against the real builder in
+ * carries null for it, but only while the reply still describes the same
+ * release or artist as the row. Release-scoped columns: the reply's
+ * `discogs_url` is null or equals the stored one. Artist-scoped columns: both
+ * `discogs_artist_id`s are set and equal, or, when either is null, the release
+ * test above holds. Otherwise the reply is written as-is, so a row never mixes
+ * two releases or two artists. The two identity columns are themselves
+ * `COALESCE(excluded, stored)`. A healthy reply is written exactly as before.
+ * The real-Postgres behavior (every identity combination) is pinned against
+ * the real builder in
  * tests/integration/enrichment-worker-degraded-keep.spec.js.
  */
 describe('finalizeRow (BS#3117) — a degraded re-ask keeps stored release and artist columns', () => {
@@ -1258,8 +1260,13 @@ describe('finalizeRow (BS#3117) — a degraded re-ask keeps stored release and a
   };
   const guard = (identity: string) =>
     `(excluded."${identity}" IS NULL OR excluded."${identity}" IS NOT DISTINCT FROM album_metadata.${identity})`;
-  const keepWhen = (identity: string, col: string) =>
-    `CASE WHEN ${guard(identity)} THEN COALESCE(excluded."${col}", album_metadata.${col}) ELSE excluded."${col}" END`;
+  const artistGuard =
+    '((excluded."discogs_artist_id" IS NOT NULL AND album_metadata.discogs_artist_id IS NOT NULL' +
+    ' AND excluded."discogs_artist_id" = album_metadata.discogs_artist_id)' +
+    ' OR ((excluded."discogs_artist_id" IS NULL OR album_metadata.discogs_artist_id IS NULL)' +
+    ` AND ${guard('discogs_url')}))`;
+  const keepWhen = (condition: string, col: string) =>
+    `CASE WHEN ${condition} THEN COALESCE(excluded."${col}", album_metadata.${col}) ELSE excluded."${col}" END`;
 
   // A shed reply: still a direct match with artwork and a release URL, every
   // release- and artist-scoped field null (release step shed).
@@ -1295,8 +1302,8 @@ describe('finalizeRow (BS#3117) — a degraded re-ask keeps stored release and a
     (mockDb._chain.onConflictDoUpdate.mock.calls[0]?.[0] as { set: Record<string, unknown> }).set;
 
   it.each([
-    ...RELEASE_SCOPED.map((col) => [col, keepWhen('discogs_url', col)]),
-    ...ARTIST_SCOPED.map((col) => [col, keepWhen('discogs_artist_id', col)]),
+    ...RELEASE_SCOPED.map((col) => [col, keepWhen(guard('discogs_url'), col)]),
+    ...ARTIST_SCOPED.map((col) => [col, keepWhen(artistGuard, col)]),
     ...IDENTITY.map((col) => [col, `COALESCE(excluded."${col}", album_metadata.${col})`]),
   ])('degraded reply: %s is written as %s', async (col, expected) => {
     await finalizeRow(LINKED_ROW, shedResponse);
