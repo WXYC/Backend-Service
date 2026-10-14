@@ -291,12 +291,60 @@ export const upsertAlbumMatch = async (albumId: number, lookup: LookupResponse):
     .values({ album_id: albumId, ...payload, updated_at: sql`NOW()` })
     .onConflictDoUpdate({
       target: album_metadata.album_id,
-      set: { ...payload, updated_at: sql`NOW()` },
+      set: {
+        ...payload,
+        // BS#3127: a degraded (shed) reply keeps the stored values it lacks.
+        ...(lookup.degraded === true ? keepStoredOnDegradedSet() : {}),
+        updated_at: sql`NOW()`,
+      },
       // Race guard: never clobber a fresher worker/runtime enrichment.
       setWhere: sql`${album_metadata.updated_at} < NOW()`,
     });
   return true;
 };
+
+/**
+ * Conflict-branch `SET` entries for a degraded LML reply (BS#3127). The same
+ * rule as the enrichment worker's `buildDegradedConflictSet`
+ * (`apps/enrichment-worker/degraded-keep-sql.ts`, BS#3117), narrowed to the
+ * columns this job writes. Jobs do not import from apps, so it is copied here.
+ *
+ * When LML's Discogs saturation breaker sheds part of the enrichment tail, the
+ * reply is still a match, but it carries null for the fields the shed step
+ * would have produced, and it is marked `degraded: true` (LML#1420); on this bulk route the flag is per item, on `lookup.degraded`.
+ * Written as they are, those nulls would replace values already stored for
+ * the album. So, on a degraded reply only:
+ *
+ *   - `discogs_url` (the release identity) keeps the stored value where the
+ *     reply is null.
+ *   - `artwork_url` and `release_year` keep the stored value where the reply
+ *     is null, but only while the reply's `discogs_url` is null or the same as
+ *     the stored one. A reply for a different release is written as it is,
+ *     so the row never mixes two releases.
+ *   - `artist_bio` and `artist_wikipedia_url` do the same, keyed on
+ *     `discogs_artist_id`. This job never writes that column (it does not
+ *     request `extended`), so `excluded.discogs_artist_id` is null and the
+ *     stored artist values stay.
+ *
+ * A value the reply carries always wins. A healthy reply never reaches this:
+ * a null bio there is LML's real "no Discogs profile" answer and still clears
+ * the column. The INSERT branch is untouched.
+ */
+function keepStoredOnDegradedSet() {
+  type Key =
+    'discogs_url' | 'discogs_artist_id' | 'artwork_url' | 'release_year' | 'artist_bio' | 'artist_wikipedia_url';
+  const excluded = (key: Key) => sql`excluded.${sql.identifier(key)}`;
+  const coalesceStored = (key: Key) => sql`COALESCE(${excluded(key)}, ${album_metadata[key]})`;
+  const keepStoredWhen = (identity: 'discogs_url' | 'discogs_artist_id', key: Key) =>
+    sql`CASE WHEN (${excluded(identity)} IS NULL OR ${excluded(identity)} IS NOT DISTINCT FROM ${album_metadata[identity]}) THEN ${coalesceStored(key)} ELSE ${excluded(key)} END`;
+  return {
+    discogs_url: coalesceStored('discogs_url'),
+    artwork_url: keepStoredWhen('discogs_url', 'artwork_url'),
+    release_year: keepStoredWhen('discogs_url', 'release_year'),
+    artist_bio: keepStoredWhen('discogs_artist_id', 'artist_bio'),
+    artist_wikipedia_url: keepStoredWhen('discogs_artist_id', 'artist_wikipedia_url'),
+  };
+}
 
 // -- Cooperative pause -------------------------------------------------------
 

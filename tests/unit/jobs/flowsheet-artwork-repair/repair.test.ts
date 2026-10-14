@@ -371,3 +371,107 @@ describe('repairLinkedAlbum (BS#1209) — linked UPSERT shape', () => {
     expect(mockDb.insert).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * BS#3127 — a degraded LML reply (LML#1420: the Discogs saturation breaker
+ * shed part of the enrichment tail, so the reply is still a match but carries
+ * null for what the shed step would have produced) must not overwrite what
+ * `album_metadata` already stores. Same rule as the enrichment worker's
+ * `buildDegradedConflictSet` (BS#3117), narrowed to this job's columns:
+ * `discogs_url` keeps the stored value where the reply is null;
+ * `artwork_url` / `release_year` do the same while the reply's `discogs_url`
+ * is null or unchanged; `artist_bio` / `artist_wikipedia_url` likewise keyed
+ * on `discogs_artist_id`. A healthy reply is written as before. The free-form `flowsheet`
+ * UPDATE is unchanged.
+ */
+describe('repairLinkedAlbum (BS#3127) — a degraded reply keeps the stored album_metadata values', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockDb._chain.returning.mockResolvedValue([{ album_id: linkedAlbum.album_id }]);
+  });
+
+  const BASE_ARTWORK = matchedResponse.results[0]!.artwork!;
+  const mockConflict = mockDb._chain.onConflictDoUpdate;
+  const mockValues = mockDb._chain.values;
+  const WRITE = (response: LookupResponse) => repairLinkedAlbum(linkedAlbum, response);
+
+  /**
+   * Render a mocked `sql` fragment with its interpolations inline: nested
+   * fragments recurse, `sql.identifier(x)` renders as `"x"`, and the mock's
+   * table-qualified column sentinels (`album_metadata.<col>`) render as-is.
+   */
+  const renderDeep = (value: unknown): string => {
+    if (typeof value === 'string') return value;
+    const frag = value as { sql?: readonly string[]; values?: unknown[]; identifier?: string } | null;
+    if (frag && typeof frag.identifier === 'string') return `"${frag.identifier}"`;
+    if (!frag || !Array.isArray(frag.sql)) return JSON.stringify(value);
+    const values = frag.values ?? [];
+    return frag.sql.map((text, i) => (i < values.length ? text + renderDeep(values[i]) : text)).join('');
+  };
+  const keepWhen = (identity: string, column: string) =>
+    `CASE WHEN (excluded."${identity}" IS NULL OR excluded."${identity}" IS NOT DISTINCT FROM album_metadata.${identity}) ` +
+    `THEN COALESCE(excluded."${column}", album_metadata.${column}) ELSE excluded."${column}" END`;
+
+  const shed = (degraded: boolean) =>
+    ({
+      ...(degraded ? { degraded: true, degraded_reason: 'upstream_unavailable' } : {}),
+      results: [
+        {
+          library_item: { id: 1 },
+          artwork: { ...(BASE_ARTWORK as object), release_year: null, artist_bio: null, wikipedia_url: null },
+        },
+      ],
+    }) as unknown as LookupResponse;
+  const conflictSet = () => (mockConflict.mock.calls[0]?.[0] as { set: Record<string, unknown> }).set;
+
+  it.each([
+    { column: 'discogs_url', expected: 'COALESCE(excluded."discogs_url", album_metadata.discogs_url)' },
+    { column: 'artwork_url', expected: keepWhen('discogs_url', 'artwork_url') },
+    { column: 'release_year', expected: keepWhen('discogs_url', 'release_year') },
+    { column: 'artist_bio', expected: keepWhen('discogs_artist_id', 'artist_bio') },
+    { column: 'artist_wikipedia_url', expected: keepWhen('discogs_artist_id', 'artist_wikipedia_url') },
+  ])('degraded reply: $column keeps the stored value per its identity guard', async ({ column, expected }) => {
+    await WRITE(shed(true));
+
+    expect(renderDeep(conflictSet()[column])).toBe(expected);
+  });
+
+  it.each(['release_year', 'artist_bio', 'artist_wikipedia_url'] as const)(
+    'healthy reply with a null %s still writes a plain null (no COALESCE)',
+    async (column) => {
+      await WRITE(shed(false));
+
+      expect(conflictSet()[column]).toBeNull();
+    }
+  );
+
+  it('healthy reply: artwork_url and discogs_url are written as plain values', async () => {
+    await WRITE(shed(false));
+
+    expect(conflictSet().artwork_url).toBe(BASE_ARTWORK.artwork_url);
+    expect(conflictSet().discogs_url).toBe(BASE_ARTWORK.release_url);
+  });
+
+  it('degraded reply: the other columns are written as before, and the INSERT payload is unchanged', async () => {
+    await WRITE(shed(true));
+
+    const set = conflictSet();
+    expect(set.spotify_url).toBe(BASE_ARTWORK.spotify_url);
+    expect(set).not.toHaveProperty('discogs_artist_id');
+    const insertPayload = mockValues.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(insertPayload.artwork_url).toBe(BASE_ARTWORK.artwork_url);
+    expect(insertPayload.release_year).toBeNull();
+    expect(insertPayload.artist_bio).toBeNull();
+    expect(insertPayload).not.toHaveProperty('discogs_artist_id');
+  });
+
+  it('degraded reply on a free-form row: the inline flowsheet UPDATE is unchanged', async () => {
+    mockDb._chain.returning.mockResolvedValue([{ id: freeFormRow.id }]);
+    await repairFreeFormRow(freeFormRow, shed(true));
+
+    expect(mockDb.insert).not.toHaveBeenCalled();
+    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(setArgs.artist_bio).toBeNull();
+    expect(setArgs.release_year).toBeNull();
+  });
+});
