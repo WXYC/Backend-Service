@@ -4,7 +4,7 @@ One-shot job that re-asks LML for `album_metadata` rows whose stored Discogs rel
 
 ## Status
 
-In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--execute`, `--preview`, `--restore` and `--catalog-pass` refuse with the issue that builds each one, and exit 1.
+In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--execute`, `--preview`, `--restore` and `--catalog-pass` refuse with the issue that builds each one, before any file is read, and exit 1. Any other unknown flag also refuses; `--dry-run` is accepted and changes nothing.
 
 Landed so far:
 

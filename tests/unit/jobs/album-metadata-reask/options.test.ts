@@ -16,7 +16,8 @@ const FILES = {
   REASK_GRADES_FILE: '/data/grades.csv',
 };
 
-const resolve = (env: Record<string, string> = {}, args: string[] = []) => resolveOptions({ ...FILES, ...env }, args);
+const resolve = (env: Record<string, string | undefined> = {}, args: string[] = []) =>
+  resolveOptions({ ...FILES, ...env }, args);
 
 describe('resolveOptions', () => {
   it('defaults to a dry run at the plan pacing, with no cap, cursor, list or seed', () => {
@@ -34,7 +35,6 @@ describe('resolveOptions', () => {
       maxConsecutiveFailedBatches: 3,
       maxConsecutivePinNotBoundBatches: 3,
       liveActivityLookbackSeconds: 300,
-      modes: [],
     });
   });
 
@@ -96,9 +96,7 @@ describe('resolveOptions', () => {
     ['REASK_ALBUM_IDS', '2147483648'],
     ['REASK_ALBUM_IDS', '[101,102]'],
   ])('rejects %s=%j instead of falling back to a default', (name, value) => {
-    const env: Record<string, string | undefined> = { ...FILES, [name]: value };
-
-    expect(() => resolveOptions(env, [])).toThrow(name);
+    expect(() => resolve({ [name]: value })).toThrow(name);
   });
 
   it.each([
@@ -114,40 +112,50 @@ describe('resolveOptions', () => {
     const ids = (n: number) => Array.from({ length: n }, (_, i) => i + 1).join(',');
 
     expect(ALBUM_IDS_CAP).toBe(200);
-    expect(resolve({ REASK_ALBUM_IDS: ids(200) }).albumIds).toHaveLength(200);
-    expect(() => resolve({ REASK_ALBUM_IDS: ids(201) })).toThrow(/at most 200/);
+    expect(resolve({ REASK_ALBUM_IDS: ids(ALBUM_IDS_CAP) }).albumIds).toHaveLength(ALBUM_IDS_CAP);
+    expect(() => resolve({ REASK_ALBUM_IDS: ids(ALBUM_IDS_CAP + 1) })).toThrow(/at most 200/);
   });
 
   it.each([
-    ['carries a list at or below the cursor', { REASK_ALBUM_IDS: '101,102', REASK_ALBUM_AFTER_ID: '102' }, null],
+    ['a list at or below the cursor', { REASK_ALBUM_IDS: '101,102', REASK_ALBUM_AFTER_ID: '102' }],
+    ['a cap equal to the list', { REASK_ALBUM_IDS: '101,102,103', REASK_MAX_ALBUMS: '3' }],
+  ])('accepts %s', (_label, env) => {
+    expect(() => resolve(env)).not.toThrow();
+  });
+
+  it.each([
     [
-      'refuses a listed id above the cursor',
+      'a listed id above the cursor',
       { REASK_ALBUM_IDS: '101,102', REASK_ALBUM_AFTER_ID: '101' },
       '102 is above REASK_ALBUM_AFTER_ID=101',
     ],
     [
-      'refuses a cap smaller than the list',
+      'a cap smaller than the list',
       { REASK_ALBUM_IDS: '101,102,103', REASK_MAX_ALBUMS: '2' },
       'REASK_MAX_ALBUMS=2 is smaller than the 3 listed ids',
     ],
-    ['allows a cap equal to the list', { REASK_ALBUM_IDS: '101,102,103', REASK_MAX_ALBUMS: '3' }, null],
-  ])('%s', (_label, env, error) => {
-    if (error) expect(() => resolve(env)).toThrow(error);
-    else expect(() => resolve(env)).not.toThrow();
+  ])('refuses %s, and names it', (_label, env, error) => {
+    expect(() => resolve(env)).toThrow(error);
   });
 
   it.each([
-    [['node', 'job.js'], []],
+    [[]],
+    [['node', 'job.js']],
     // `album-level-backfill` takes `--dry-run`; that muscle memory must still get a dry run.
-    [['node', 'job.js', '--dry-run'], []],
-    [['node', 'job.js', '--execute'], ['--execute']],
-    [['node', 'job.js', '--preview'], ['--preview']],
-    [
-      ['node', 'job.js', '--restore', 'run-1', '--execute'],
-      ['--execute', '--restore'],
-    ],
-    [['node', 'job.js', '--catalog-pass', 'run-1'], ['--catalog-pass']],
-  ])('reads the mode flags from %j', (args, modes) => {
-    expect(resolve({}, args).modes).toEqual(modes);
+    [['node', 'job.js', '--dry-run']],
+  ])('runs the dry run for argv %j', (args) => {
+    expect(() => resolve({}, args)).not.toThrow();
+  });
+
+  // Refused before the input files are required: `--restore` and `--catalog-pass` will not need them.
+  it.each([
+    [['--execute'], '--execute is not available yet; it lands with #3151'],
+    [['--preview'], '--preview is not available yet; it lands with #3150'],
+    [['--restore', 'run-1', '--execute'], '--restore is not available yet; it lands with #3148'],
+    [['--catalog-pass', 'run-1'], '--catalog-pass is not available yet; it lands with #3146'],
+    // A typo must not fall through to a run.
+    [['--exectue'], 'Unknown flag --exectue'],
+  ])('refuses argv %j', (flags, error) => {
+    expect(() => resolveOptions({}, ['node', 'job.js', ...flags])).toThrow(error);
   });
 });
