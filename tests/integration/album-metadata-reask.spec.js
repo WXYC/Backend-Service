@@ -146,12 +146,25 @@ describe('BS#3142 re-ask cohort (REAL statements, real PG)', () => {
     expect(own.map((c) => c.reason)).toEqual(reasons);
   });
 
-  test('treats a stored URL that does not parse as a mismatch', async () => {
-    const { id, card } = await seed('unparseable', { discogs_url: 'https://www.discogs.com/master/77' });
+  test.each([
+    ['a master URL', 'https://www.discogs.com/master/77'],
+    // Past `int`: would have aborted the whole read as `out of range`; a prefix of it must not be read as an id.
+    ['an id too large for int', 'https://www.discogs.com/release/123456789012345678901-X'],
+  ])('treats %s as an unparseable mismatch, without failing the read', async (label, url) => {
+    const { id, card } = await seed('unparseable-' + albumIds.length, { discogs_url: url });
 
-    const [row] = await enumerateOwn({ pins: [pin(card, 3003)], removed: [] });
+    const [row] = await enumerateOwn({ pins: [pin(card, 123456789)], removed: [] });
 
     expect(row).toMatchObject({ album_id: id, stored_release_id: null, reason: 'pin_mismatch' });
+  });
+
+  test('binds a source holding quotes, a comma and a backslash as one value', async () => {
+    const awkward = 'manual "fix", C:\\pins';
+    const { card } = await seed('awkward-source');
+
+    const [row] = await enumerateOwn({ pins: [pin(card, 3003, awkward)], removed: [] });
+
+    expect(row.pin_source).toBe(awkward);
   });
 
   test('honours the cursor, the carried list and the cap, in album_id order', async () => {
@@ -182,13 +195,12 @@ describe('BS#3142 re-ask cohort (REAL statements, real PG)', () => {
     });
 
     // Exact: the pins name only this test's cards, so no other row in the table can enter the count.
-    expect(counts.by_reason_and_source).toEqual(
-      expect.arrayContaining([
-        { reason: 'pin_mismatch', source: MASTERS_API, n: 1 },
-        { reason: 'pin_mismatch', source: ALEX, n: 2 },
-        { reason: 'pin_removed', source: MASTERS_API, n: 1 },
-      ])
-    );
+    const byKey = (x, y) => `${x.reason}/${x.source}`.localeCompare(`${y.reason}/${y.source}`);
+    expect([...counts.by_reason_and_source].sort(byKey)).toEqual([
+      { reason: 'pin_mismatch', source: ALEX, n: 2 },
+      { reason: 'pin_mismatch', source: MASTERS_API, n: 1 },
+      { reason: 'pin_removed', source: MASTERS_API, n: 1 },
+    ]);
     expect(counts).toMatchObject({
       total: 4,
       eligible: 3,

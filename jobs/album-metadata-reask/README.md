@@ -4,7 +4,12 @@ One-shot job that re-asks LML for `album_metadata` rows whose stored Discogs rel
 
 ## Status
 
-Scaffold only ([#3140](https://github.com/WXYC/Backend-Service/issues/3140)). The entrypoint logs a `not_implemented` error line and exits 1. It reads and writes nothing. Do not run it.
+In progress. The entrypoint still logs a `not_implemented` error line and exits 1; it reads and writes nothing. Do not run it.
+
+Landed so far:
+
+- The package scaffold ([#3140](https://github.com/WXYC/Backend-Service/issues/3140)).
+- `cohort.ts` ([#3142](https://github.com/WXYC/Backend-Service/issues/3142)): the read-only cohort counts and enumeration; see its docblock. Built as `dist/cohort.cjs` for `tests/integration/album-metadata-reask.spec.js`.
 
 ## Build and deploy
 
