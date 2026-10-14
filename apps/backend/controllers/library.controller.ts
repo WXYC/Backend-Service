@@ -3322,7 +3322,9 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
 
     const inGenre = await libraryService.artistExistsInGenre(effectiveArtistId, effectiveGenreId);
     if (!inGenre) {
-      throw new WxycError('Artist is not catalogued in the selected genre', 400);
+      // Clients branch on `code`; the message is kept verbatim for clients that
+      // still match on it.
+      throw new WxycError('Artist is not catalogued in the selected genre', 400, { code: 'artist_not_in_genre' });
     }
 
     // Written as the inline condition (not a boolean extracted to a named

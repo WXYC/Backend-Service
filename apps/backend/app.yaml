@@ -2637,7 +2637,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Album'
         '400':
-          description: Invalid field value or no updatable fields provided
+          description: >-
+            Invalid field value or no updatable fields provided. One refusal
+            carries a code: `artist_not_in_genre` (BS#3124) — the effective
+            `(artist_id, genre_id)` pair (each falling back to the stored
+            value when omitted) has no genre crossreference, so the release
+            cannot be filed there. Its message, "Artist is not catalogued in
+            the selected genre", is unchanged; branch on the code.
         '404':
           description: Album or artist not found
         '409':

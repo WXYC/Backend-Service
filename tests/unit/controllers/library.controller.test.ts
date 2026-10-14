@@ -3630,6 +3630,25 @@ describe('library.controller', () => {
       });
     });
 
+    // Clients branch on the code, not the English message: the classic release
+    // editor shows its own plain-language refusal for this case.
+    describe('artist-not-in-genre refusal code', () => {
+      it.each([
+        ['a genre-only move', { genre_id: 15 }],
+        ['an artist move', { artist_id: 55 }],
+      ])('refuses %s with 400 artist_not_in_genre and the unchanged message', async (_label, body) => {
+        mockArtistExistsInGenre.mockResolvedValue(false);
+        const res = mockResponse();
+
+        await expect(updateAlbum(reqFor(body), res, next)).rejects.toMatchObject({
+          statusCode: 400,
+          code: 'artist_not_in_genre',
+          message: 'Artist is not catalogued in the selected genre',
+        });
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+    });
+
     describe('format_id existence guard (#1550)', () => {
       it('returns 400 when format_id does not reference an existing format', async () => {
         mockGetFormatById.mockResolvedValue(undefined);

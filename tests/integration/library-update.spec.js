@@ -120,6 +120,7 @@ describe('PATCH /library/:id', () => {
   test('rejects moving the album to a genre the artist is not catalogued in', async () => {
     const res = await auth.patch(`/library/${album.id}`).send({ genre_id: 7 }).expect(400);
     expectErrorContains(res, 'not catalogued');
+    expect(res.body.code).toBe('artist_not_in_genre');
   });
 
   test('returns 404 for an unknown artist_id', async () => {
