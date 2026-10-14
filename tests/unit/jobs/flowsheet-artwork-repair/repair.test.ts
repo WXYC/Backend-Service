@@ -408,9 +408,15 @@ describe('repairLinkedAlbum (BS#3127) — a degraded reply keeps the stored albu
     const values = frag.values ?? [];
     return frag.sql.map((text, i) => (i < values.length ? text + renderDeep(values[i]) : text)).join('');
   };
-  const keepWhen = (identity: string, column: string) =>
-    `CASE WHEN (excluded."${identity}" IS NULL OR excluded."${identity}" IS NOT DISTINCT FROM album_metadata.${identity}) ` +
-    `THEN COALESCE(excluded."${column}", album_metadata.${column}) ELSE excluded."${column}" END`;
+  const SAME_RELEASE =
+    '(excluded."discogs_url" IS NULL OR excluded."discogs_url" IS NOT DISTINCT FROM album_metadata.discogs_url)';
+  // Both artist ids known and equal; or either unknown and the release unchanged.
+  const SAME_ARTIST =
+    '((excluded."discogs_artist_id" IS NOT NULL AND album_metadata.discogs_artist_id IS NOT NULL ' +
+    'AND excluded."discogs_artist_id" = album_metadata.discogs_artist_id) ' +
+    `OR ((excluded."discogs_artist_id" IS NULL OR album_metadata.discogs_artist_id IS NULL) AND ${SAME_RELEASE}))`;
+  const keepWhen = (guard: string, column: string) =>
+    `CASE WHEN ${guard} THEN COALESCE(excluded."${column}", album_metadata.${column}) ELSE excluded."${column}" END`;
 
   const shed = (degraded: boolean) =>
     ({
@@ -426,10 +432,10 @@ describe('repairLinkedAlbum (BS#3127) — a degraded reply keeps the stored albu
 
   it.each([
     { column: 'discogs_url', expected: 'COALESCE(excluded."discogs_url", album_metadata.discogs_url)' },
-    { column: 'artwork_url', expected: keepWhen('discogs_url', 'artwork_url') },
-    { column: 'release_year', expected: keepWhen('discogs_url', 'release_year') },
-    { column: 'artist_bio', expected: keepWhen('discogs_artist_id', 'artist_bio') },
-    { column: 'artist_wikipedia_url', expected: keepWhen('discogs_artist_id', 'artist_wikipedia_url') },
+    { column: 'artwork_url', expected: keepWhen(SAME_RELEASE, 'artwork_url') },
+    { column: 'release_year', expected: keepWhen(SAME_RELEASE, 'release_year') },
+    { column: 'artist_bio', expected: keepWhen(SAME_ARTIST, 'artist_bio') },
+    { column: 'artist_wikipedia_url', expected: keepWhen(SAME_ARTIST, 'artist_wikipedia_url') },
   ])('degraded reply: $column keeps the stored value per its identity guard', async ({ column, expected }) => {
     await WRITE(shed(true));
 
@@ -465,13 +471,39 @@ describe('repairLinkedAlbum (BS#3127) — a degraded reply keeps the stored albu
     expect(insertPayload).not.toHaveProperty('discogs_artist_id');
   });
 
-  it('degraded reply on a free-form row: the inline flowsheet UPDATE is unchanged', async () => {
+  // BS#3127 review: the free-form path writes `flowsheet` inline, so a
+  // degraded reply must not null what an `enriched_match` row already stores.
+  // An UPDATE has no `excluded` row: the reply's values are bound parameters.
+  const freeFormSet = async (response: LookupResponse) => {
     mockDb._chain.returning.mockResolvedValue([{ id: freeFormRow.id }]);
-    await repairFreeFormRow(freeFormRow, shed(true));
-
+    await repairFreeFormRow(freeFormRow, response);
     expect(mockDb.insert).not.toHaveBeenCalled();
-    const setArgs = mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(setArgs.artist_bio).toBeNull();
-    expect(setArgs.release_year).toBeNull();
+    return mockDb._chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
+  };
+
+  it.each([
+    { label: 'the same release', url: BASE_ARTWORK.release_url, guard: 'flowsheet.discogs_url IS NOT DISTINCT FROM ' },
+    { label: 'no release url', url: null, guard: 'TRUE' },
+  ])('degraded free-form reply with $label: release_year and the bio keep the stored value', async ({ url, guard }) => {
+    const response = shed(true);
+    (response.results![0]!.artwork as Record<string, unknown>).release_url = url;
+    const set = await freeFormSet(response);
+
+    expect(renderDeep(set.discogs_url)).toBe(`COALESCE(${url ?? 'null'}, flowsheet.discogs_url)`);
+    for (const column of ['release_year', 'artist_bio', 'artist_wikipedia_url']) {
+      const expectedGuard = url === null ? guard : guard + url;
+      expect(renderDeep(set[column])).toBe(
+        `CASE WHEN ${expectedGuard} THEN COALESCE(null, flowsheet.${column}) ELSE null END`
+      );
+    }
+    expect(set.artwork_url).toBe(BASE_ARTWORK.artwork_url);
+  });
+
+  it('healthy free-form reply: the inline UPDATE writes plain values, as before', async () => {
+    const set = await freeFormSet(shed(false));
+
+    expect(set.artist_bio).toBeNull();
+    expect(set.release_year).toBeNull();
+    expect(set.discogs_url).toBe(BASE_ARTWORK.release_url);
   });
 });
