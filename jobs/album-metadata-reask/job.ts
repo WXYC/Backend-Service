@@ -3,8 +3,9 @@
  * stored Discogs release disagrees with the catalog card's current pin, or
  * still serves a pin that was removed (BS#3137).
  *
- * So far (BS#3144) the knobs and the dry run, which makes zero LML calls and
- * zero writes. Every other mode refuses, non-zero, until its slice lands.
+ * So far the knobs and the dry run (BS#3144), which makes zero LML calls and
+ * zero writes, and `--catalog-pass <run_id>` (BS#3146). Every other mode
+ * refuses, non-zero, until its slice lands.
  *
  * The env parsers are copied from `jobs/album-metadata-bio-fill/job.ts`
  * (decision 6: copy, extract only when a third job needs them).
@@ -15,6 +16,7 @@
 import { readFile } from 'fs/promises';
 import { closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { BULK_LOOKUP_INPUT_CAP } from '@wxyc/lml-client';
+import { CATALOG_STATEMENT_TIMEOUT_DEFAULT, runCatalogPass, type CatalogPassResult } from './catalog-pass.js';
 import { READ_TIMEOUT_DEFAULT, countCohort, enumerateCohort, type CohortCounts, type CohortInputs } from './cohort.js';
 import {
   admit,
@@ -41,6 +43,8 @@ export const BATCH_SIZE_ENV = 'REASK_BULK_BATCH_SIZE';
 /** Batches per minute. 4 is the plan's pacing on the prod bulk lane. */
 export const RATE_PER_MIN_ENV = 'REASK_BULK_RATE_PER_MIN';
 export const READ_TIMEOUT_ENV = 'REASK_READ_TIMEOUT_MS';
+/** `SET LOCAL statement_timeout` for the catalog cover pass's probe and write. */
+export const CATALOG_STATEMENT_TIMEOUT_ENV = 'REASK_CATALOG_STATEMENT_TIMEOUT_MS';
 /** Stop after this many albums; `0` is no cap. */
 export const MAX_ALBUMS_ENV = 'REASK_MAX_ALBUMS';
 /** Resume cursor: only albums with `album_id` above this are enumerated. */
@@ -62,13 +66,15 @@ const PENDING_MODES = new Map([
   ['--execute', '#3151'],
   ['--preview', '#3150'],
   ['--restore', '#3148'],
-  ['--catalog-pass', '#3146'],
 ]);
+
+const CATALOG_PASS_FLAG = '--catalog-pass';
 
 /**
  * Refuse a pending mode before anything is read (and before the input files
- * are required, which `--restore` and `--catalog-pass` will not need), and any
- * other flag, so a typo cannot fall through to a run. `--dry-run` is the default.
+ * are required, which `--restore` will not need), and any other flag, so a
+ * typo cannot fall through to a run. `--dry-run` is the default.
+ * `--catalog-pass` is not a dry-run flag: `resolveMode` takes it first.
  */
 const checkFlags = (args: string[]): void => {
   for (const arg of args.slice(2)) {
@@ -190,6 +196,63 @@ export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: strin
   };
 };
 
+export interface CatalogPassOptions {
+  runId: string;
+  statementTimeoutMs: number;
+}
+
+export type ReaskMode =
+  { mode: 'dry-run'; options: ReaskOptions } | { mode: 'catalog-pass'; options: CatalogPassOptions };
+
+/**
+ * The mode argv asks for. `--catalog-pass <run_id>` takes no other flag and
+ * no input file: it reads only that run's backup rows. Anything else is the
+ * dry run's (`resolveOptions`).
+ */
+export const resolveMode = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): ReaskMode => {
+  const flags = args.slice(2);
+  const at = flags.indexOf(CATALOG_PASS_FLAG);
+  if (at === -1) {
+    return { mode: 'dry-run', options: resolveOptions(env, args) };
+  }
+  const runId = flags[at + 1];
+  if (runId === undefined || isBlank(runId) || runId.startsWith('--')) {
+    throw new Error(`[${JOB_NAME}] ${CATALOG_PASS_FLAG} needs the run_id of the run whose covers it rewrites.`);
+  }
+  const rest = flags.filter((_, i) => i !== at && i !== at + 1);
+  if (rest.length > 0) {
+    throw new Error(`[${JOB_NAME}] ${CATALOG_PASS_FLAG} takes only a run_id; also got ${rest.join(' ')}.`);
+  }
+  const statementTimeoutMs = requirePositiveInt(
+    env[CATALOG_STATEMENT_TIMEOUT_ENV],
+    CATALOG_STATEMENT_TIMEOUT_ENV,
+    CATALOG_STATEMENT_TIMEOUT_DEFAULT,
+    CTX
+  );
+  return { mode: 'catalog-pass', options: { runId, statementTimeoutMs } };
+};
+
+/** `--catalog-pass <run_id>`: the pass alone, for a run that died before its end. Idempotent. */
+export const runCatalogPassMode = async ({
+  runId,
+  statementTimeoutMs,
+}: CatalogPassOptions): Promise<CatalogPassResult> => {
+  log('info', 'catalog_pass_started', `${JOB_NAME} catalog cover pass for run ${runId} starting`, {
+    reask_run_id: runId,
+  });
+  const result = await runCatalogPass(runId, statementTimeoutMs);
+  log(
+    'info',
+    'catalog_pass',
+    `Catalog cover pass for run ${runId}: rewrote ${result.rewritten} of ${result.probed} covers found.`,
+    {
+      reask_run_id: runId,
+      ...result,
+    }
+  );
+  return result;
+};
+
 // -- Dry run -----------------------------------------------------------------
 
 export interface DryRunSummary {
@@ -273,8 +336,13 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
 export const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   try {
-    // The summary is already on the `dry_run_plan` line.
-    await runReask(resolveOptions());
+    // The summary is already on the `dry_run_plan` or `catalog_pass` line.
+    const mode = resolveMode();
+    if (mode.mode === 'catalog-pass') {
+      await runCatalogPassMode(mode.options);
+    } else {
+      await runReask(mode.options);
+    }
     log('info', 'finished', `${JOB_NAME} done`);
     process.exitCode = 0;
   } catch (err) {

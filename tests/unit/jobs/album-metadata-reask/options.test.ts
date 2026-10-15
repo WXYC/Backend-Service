@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from '@jest/globals';
 import { BULK_LOOKUP_INPUT_CAP } from '@wxyc/lml-client';
-import { ALBUM_IDS_CAP, resolveOptions } from '../../../../jobs/album-metadata-reask/job';
+import { ALBUM_IDS_CAP, resolveMode, resolveOptions } from '../../../../jobs/album-metadata-reask/job';
 
 const FILES = {
   REASK_PIN_FILE: '/data/pins.csv',
@@ -147,15 +147,53 @@ describe('resolveOptions', () => {
     expect(() => resolve({}, args)).not.toThrow();
   });
 
-  // Refused before the input files are required: `--restore` and `--catalog-pass` will not need them.
+  // Refused before the input files are required: `--restore` will not need them.
   it.each([
     [['--execute'], '--execute is not available yet; it lands with #3151'],
     [['--preview'], '--preview is not available yet; it lands with #3150'],
     [['--restore', 'run-1', '--execute'], '--restore is not available yet; it lands with #3148'],
-    [['--catalog-pass', 'run-1'], '--catalog-pass is not available yet; it lands with #3146'],
+    // `--catalog-pass` is its own mode (`resolveMode`); the dry run never takes it.
+    [['--catalog-pass', 'run-1'], 'Unknown flag --catalog-pass'],
     // A typo must not fall through to a run.
     [['--exectue'], 'Unknown flag --exectue'],
   ])('refuses argv %j', (flags, error) => {
     expect(() => resolveOptions({}, ['node', 'job.js', ...flags])).toThrow(error);
+  });
+});
+
+describe('resolveMode', () => {
+  const mode = (flags: string[], env: Record<string, string | undefined> = {}) =>
+    resolveMode(env, ['node', 'job.js', ...flags]);
+
+  it('is the dry run with no mode flag, with its own options', () => {
+    expect(mode([], FILES)).toEqual({ mode: 'dry-run', options: resolveOptions(FILES, []) });
+  });
+
+  // The pass needs no input file: it reads only the run's backup rows.
+  it.each([
+    ['the 30 s default', {}, 30_000],
+    ['REASK_CATALOG_STATEMENT_TIMEOUT_MS', { REASK_CATALOG_STATEMENT_TIMEOUT_MS: '45000' }, 45_000],
+  ])('takes --catalog-pass <run_id> with %s', (_label, env, statementTimeoutMs) => {
+    expect(mode(['--catalog-pass', 'reask-2026-10-14-a'], env)).toEqual({
+      mode: 'catalog-pass',
+      options: { runId: 'reask-2026-10-14-a', statementTimeoutMs },
+    });
+  });
+
+  it.each([
+    [['--catalog-pass'], '--catalog-pass needs the run_id'],
+    [['--catalog-pass', '  '], '--catalog-pass needs the run_id'],
+    [['--catalog-pass', '--execute'], '--catalog-pass needs the run_id'],
+    [['--catalog-pass', 'run-1', '--execute'], '--catalog-pass takes only a run_id; also got --execute'],
+    [['--dry-run', '--catalog-pass', 'run-1'], '--catalog-pass takes only a run_id; also got --dry-run'],
+    [['--catalog-pass', 'run-1', 'run-2'], '--catalog-pass takes only a run_id; also got run-2'],
+  ])('refuses argv %j', (flags, error) => {
+    expect(() => mode(flags)).toThrow(error);
+  });
+
+  it.each(['0', '-1', 'thirty'])('rejects REASK_CATALOG_STATEMENT_TIMEOUT_MS=%j', (value) => {
+    expect(() => mode(['--catalog-pass', 'run-1'], { REASK_CATALOG_STATEMENT_TIMEOUT_MS: value })).toThrow(
+      'REASK_CATALOG_STATEMENT_TIMEOUT_MS'
+    );
   });
 });
