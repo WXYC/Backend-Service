@@ -118,6 +118,15 @@ describe('array binding', () => {
 });
 
 describe('enumerateCohortSql: drainable subset, cursor and carried list', () => {
+  it('flags an album with a restore marker from any run, so admission can hold it (BS#3148)', () => {
+    const statement = flat(enumerateCohortSql(INPUTS, { limit: 0, afterAlbumId: 0 }));
+
+    expect(statement).toContain(
+      `EXISTS (SELECT 1 FROM "wxyc_schema"."album_metadata_reask_backup" rb WHERE rb.album_id = am."album_id" AND rb.target_table = 'restore') AS restored`
+    );
+    expect(statement).toMatch(/c\.pin_source, c\.restored FROM cohort c/);
+  });
+
   it('drops rows with no artist name and albums marked not on Discogs, and orders by album_id', () => {
     const statement = flat(enumerateCohortSql(INPUTS, { limit: 0, afterAlbumId: 0 }));
 
@@ -260,6 +269,7 @@ describe('the reads', () => {
       reason: 'pin_mismatch',
       pin_release_id: 9002,
       pin_source: 'alex-l-2026',
+      restored: false,
     };
     const ooyla = {
       album_id: 12,
@@ -273,6 +283,7 @@ describe('the reads', () => {
       reason: 'pin_removed',
       pin_release_id: null,
       pin_source: MASTERS_API,
+      restored: true,
     };
     // A URL that did not parse comes back null and must stay null, not 0.
     const dotsAndLoops = {

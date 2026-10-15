@@ -4,7 +4,7 @@ One-shot job that re-asks LML for `album_metadata` rows whose stored Discogs rel
 
 ## Status
 
-In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--catalog-pass <run_id>` runs the catalog cover pass alone (below). `--execute`, `--preview` and `--restore` refuse with the issue that builds each one, before any file is read, and exit 1. Any other unknown flag also refuses; `--dry-run` is accepted and changes nothing.
+In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--catalog-pass <run_id>` runs the catalog cover pass alone, and `--restore <run_id>` restores a run's writes (both below). `--execute` (outside `--restore`) and `--preview` refuse with the issue that builds each one, before any file is read, and exit 1. Any other unknown flag also refuses; `--dry-run` is accepted and changes nothing.
 
 Landed so far:
 
@@ -13,6 +13,7 @@ Landed so far:
 - The knobs and the dry run ([#3144](https://github.com/WXYC/Backend-Service/issues/3144)).
 - `write.ts`, `artist-keep-sql.ts` and `run-batch.ts` ([#3145](https://github.com/WXYC/Backend-Service/issues/3145)): the guarded `album_metadata` write and one batch of ask, decide and write. Nothing calls `runBatch` yet; the execute loop is [#3151](https://github.com/WXYC/Backend-Service/issues/3151). `write.ts` and `artist-keep-sql.ts` are tsup entries; the integration spec runs `dist/write.cjs`, which bundles the artist rule.
 - `catalog-pass.ts` ([#3146](https://github.com/WXYC/Backend-Service/issues/3146)): the catalog cover pass and the `--catalog-pass <run_id>` mode. A tsup entry; the integration spec runs `dist/catalog-pass.cjs` after real album writes.
+- `restore.ts` ([#3148](https://github.com/WXYC/Backend-Service/issues/3148)): the `--restore <run_id>` mode for `album_metadata` and `library`, the `restore` marker rows, and the `hold_restored` admission hold. A tsup entry; the integration spec runs `dist/restore.cjs` after real album writes and a real catalog cover pass.
 
 ## The album write
 
@@ -36,6 +37,16 @@ The pass reads one run's `album_metadata` backup rows. It skips an album whose `
 - **Idempotent.** A second pass for the same run finds nothing: each rewritten album has its `library` backup row.
 - `--catalog-pass <run_id>` runs the pass alone, for a run that died before its end. It reads no input file and takes no other flag. It trims the `run_id` and logs one `catalog_pass` line with `album_writes`, `probed` and `rewritten`. A `run_id` with no album writes (a typo) is an error and exits 1. The execute loop ([#3151](https://github.com/WXYC/Backend-Service/issues/3151)) will call the same function at the end of each run.
 
+## Restore
+
+Decision 7 on #3137: every write can be reversed from the backup table, skipping rows changed since. `--restore <run_id>` counts per target and writes nothing; add `--execute` to write, and `--album-ids <ids>` (up to 200, comma-separated) to restore only those albums. It reads no input file and accepts no other flag. A `run_id` with no album writes in scope (a typo) is an error and exits 1. The counts go on one `restore_plan` line (dry run) or `restore` line (execute): per target, `backed_up` (the run's backup rows in scope), `restorable` (rows the guards still allow) and `restored`.
+
+- **The guard.** An album is restored only while its `album_metadata.updated_at` still equals the `written_at` of its own `album_metadata` backup row for the run. Every writer bumps `updated_at`, so any change since the re-ask's write, by anyone, keeps the album as it is now, and keeps its catalog cover too. A catalog cover is restored only while it still equals the cover the pass wrote (`after_image->>'artwork_url'`), so a cover a librarian set after the pass is kept.
+- **Two statements, one transaction.** The `library` statement first sets each catalog cover back to its `before_image`. Then the `album_metadata` statement sets the 13 imaged columns back with `jsonb_populate_record` over the `before_image` (which always holds all 13, so a `clear` row's artist group comes back exactly) and bumps `updated_at`. `album_metadata` goes last because that bump ends the library statement's guard. Each statement is sent only when a read-only probe in the same transaction finds rows for it, so a run with no catalog cover to restore leaves the catalog watermark alone. The transaction runs under `SET LOCAL statement_timeout` from `REASK_RESTORE_STATEMENT_TIMEOUT_MS` (default 5 minutes). After it, the job runs `ANALYZE` on each table it wrote, in its own transaction; a failure is logged as `analyze_pending` and the counts still reported.
+- **The marker.** The `album_metadata` statement also inserts one backup row per restored album with `target_table = 'restore'`: `before_image` is the job's after-image, `after_image` is the restored image, and `provenance` holds `restored_run_id` and the restored write's provenance. The cohort enumeration flags any album with a marker (from any run) as `restored`, and admission holds it as `hold_restored`, counted in the dry run and listed on a `held_restored` line. `REASK_INCLUDE_RESTORED=1` lifts the hold, for the canary's deliberate re-run of its restored album and for a re-ask the owner chooses after fixing the cause.
+- **Idempotent.** A second restore of the same run restores nothing: each restored album's `updated_at` has moved on.
+- The flowsheet has no restore target: the flowsheet inline-nulls slice (#3149) was closed as superseded by #3168.
+
 ## Build and deploy
 
 - `"job-type": "one-shot"`: no schedule.
@@ -56,7 +67,7 @@ The package layout, `tsup.config.ts`, `tsconfig.json` and the Dockerfile are cop
 | Removal file     | `library_id,discogs_release_id,source`                                                                                                                                                           | Step 2's removed pins whose card has no pin now. May be empty.                                                                                                                                                                                                                                                                                                                               |
 | Grading manifest | `library_id,stored_release_id,pin_release_id,pin_source,stored_title_score,pin_title_score,stored_play_rate,pin_play_rate,excluded_other_plays,excluded_inferred_plays,tier,expected_release_id` | Written by the offline grading tooling. Grades are unsigned decimals, empty when the axis cannot grade. The excluded-play counts are required. `tier` is one of `rebind`, `hold_stored_better`, `hold_ungradeable`, `hold_manual`. `expected_release_id` is set only on tier-1 `pin_removed` rows. For a `pin_removed` row, `pin_release_id` is the removed pin. Must have at least one row. |
 
-`admit(row, manifest)` is the admission rule (decision 2 on #3137). A `pin_mismatch` row is asked if its tier is `rebind`, or `hold_ungradeable` with pin source exactly `alex-l-2026`. A `pin_removed` row is asked unless its tier is `hold_manual`. A card missing from the manifest is held as `hold_unmanifested`. A card whose manifest entry graded other releases than the row now has is held as `hold_manifest_stale`.
+`admit(row, manifest)` is the admission rule (decision 2 on #3137). A `pin_mismatch` row is asked if its tier is `rebind`, or `hold_ungradeable` with pin source exactly `alex-l-2026`. A `pin_removed` row is asked unless its tier is `hold_manual`. A card missing from the manifest is held as `hold_unmanifested`. A card whose manifest entry graded other releases than the row now has is held as `hold_manifest_stale`. Before all of these, an album a restore put back is held as `hold_restored` unless `REASK_INCLUDE_RESTORED=1`.
 
 ## Dry run and knobs
 
@@ -71,6 +82,8 @@ Every knob that is set must parse; a value that does not is an error, never a de
 | `REASK_BULK_RATE_PER_MIN`                                   | 4          | Batches per minute.                                                                                                                               |
 | `REASK_READ_TIMEOUT_MS`                                     | 300000     | `SET LOCAL statement_timeout` for the cohort reads.                                                                                               |
 | `REASK_CATALOG_STATEMENT_TIMEOUT_MS`                        | 30000      | `SET LOCAL statement_timeout` for the catalog cover pass (probe and write).                                                                       |
+| `REASK_RESTORE_STATEMENT_TIMEOUT_MS`                        | 300000     | `SET LOCAL statement_timeout` for `--restore` (probe and writes).                                                                                 |
+| `REASK_INCLUDE_RESTORED`                                    | 0          | `1` asks albums a restore put back, which are otherwise held as `hold_restored`. Only `0` or `1`.                                                 |
 | `REASK_MAX_ALBUMS`                                          | 0 (no cap) | Stop after this many albums. Must not be smaller than the `REASK_ALBUM_IDS` list.                                                                 |
 | `REASK_ALBUM_AFTER_ID`                                      | 0          | Resume cursor: only `album_id` above this.                                                                                                        |
 | `REASK_ALBUM_IDS`                                           | none       | Up to 200 comma-separated album ids. With cursor 0, a retry of just those; with a cursor, carried into that run (each id at or below the cursor). |
