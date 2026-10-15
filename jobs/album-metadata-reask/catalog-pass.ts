@@ -12,8 +12,7 @@
  */
 
 import { sql, type SQL } from 'drizzle-orm';
-import { db } from '@wxyc/database';
-import { table } from './cohort.js';
+import { table, withStatementTimeout } from './cohort.js';
 
 /** `REASK_CATALOG_STATEMENT_TIMEOUT_MS` default; the container's 5 s is too short for the write with its CDC trigger. */
 export const CATALOG_STATEMENT_TIMEOUT_DEFAULT = 30 * 1000;
@@ -85,28 +84,16 @@ export const runCatalogPass = async (
   runId: string,
   timeoutMs: number = CATALOG_STATEMENT_TIMEOUT_DEFAULT
 ): Promise<CatalogPassResult> => {
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
-    throw new Error(
-      `album-metadata-reask: the catalog pass statement timeout must be a positive integer, got ${timeoutMs}`
-    );
-  }
-  const setLocalTimeout = sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
-  const result = await db.transaction(async (tx): Promise<CatalogPassResult> => {
-    await tx.execute(setLocalTimeout);
+  const result = await withStatementTimeout(timeoutMs, async (tx): Promise<CatalogPassResult> => {
     const [probe] = (await tx.execute(catalogProbeSql(runId))) as unknown as Array<{ album_writes: number; n: number }>;
-    const counts = { album_writes: Number(probe.album_writes), probed: Number(probe.n), analyze_error: null };
-    if (counts.probed === 0) {
-      return { ...counts, rewritten: 0 };
-    }
-    const rows = (await tx.execute(catalogPassSql(runId))) as unknown as unknown[];
-    return { ...counts, rewritten: rows.length };
+    const probed = Number(probe.n);
+    // Only when the probe found rows: a zero-row UPDATE still bumps the catalog watermark.
+    const rewritten = probed === 0 ? 0 : ((await tx.execute(catalogPassSql(runId))) as unknown as unknown[]).length;
+    return { album_writes: Number(probe.album_writes), probed, rewritten, analyze_error: null };
   });
   if (result.rewritten > 0) {
     try {
-      await db.transaction(async (tx) => {
-        await tx.execute(setLocalTimeout);
-        await tx.execute(sql`ANALYZE ${table('library')}`);
-      });
+      await withStatementTimeout(timeoutMs, (tx) => tx.execute(sql`ANALYZE ${table('library')}`));
     } catch (err) {
       result.analyze_error = err instanceof Error ? err.message : String(err);
     }
