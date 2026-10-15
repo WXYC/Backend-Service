@@ -24,10 +24,11 @@ const flat = (chunk: unknown): string => renderSql(chunk).replace(/\s+/g, ' ').t
 describe('catalogPassSql', () => {
   const statement = flat(catalogPassSql('run-1'));
 
-  it("reads only this run's album writes whose album is untouched since, and not yet passed", () => {
+  it("reads only this run's album writes whose stored cover is still the one written, and not yet passed", () => {
     expect(statement).toContain(
-      `WHERE b.run_id = run-1::text AND b.target_table = 'album_metadata' AND am."updated_at" = b.written_at`
+      `WHERE b.run_id = run-1::text AND b.target_table = 'album_metadata' AND am."artwork_url" IS NOT DISTINCT FROM b.after_image->>'artwork_url'`
     );
+    expect(statement).not.toContain('updated_at');
     expect(statement).toContain(
       `NOT EXISTS (SELECT 1 FROM "wxyc_schema"."album_metadata_reask_backup" lb WHERE lb.run_id = b.run_id AND lb.target_table = 'library' AND lb.row_id = b.album_id)`
     );
