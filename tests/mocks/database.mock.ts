@@ -1163,6 +1163,10 @@ export {
   deriveUserPublicName,
 } from '../../shared/database/src/dj-name.js';
 
+// The one list of filed intake states (BS#3164): the real module, a plain array with a type-only import of the schema, so the
+// tests that edit it (reviews-read.service.test) edit the list the services read.
+export { FILED_STATES } from '../../shared/database/src/intake-filed-states.js';
+
 // Stubs of shared/database/src/staff-name.ts (BS#3051). Not a source re-export:
 // the real module closes over the REAL `user` table, which would pull the real
 // schema (and the real drizzle-orm it needs) into every suite that loads this
