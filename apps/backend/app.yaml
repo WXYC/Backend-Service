@@ -756,8 +756,16 @@ components:
         - $ref: '#/components/schemas/ReviewFields'
         - type: object
           description: >
-            An in-app review. `author` is a snapshot of the author's staff name (the real name, else
-            `auth_user.name`), cut to its first 128 code points. There is no print lock: the author edits at any time.
+            An in-app review. `author` is null on a row that predates the in-app model (the column has never been
+            NOT NULL), and on a review created by the one-time Backend-Service job that copies form-archive submissions
+            (see `AlbumReview`) when the form's reviewer answer was blank. For a review that job created, it is the
+            form's reviewer answer as typed, trimmed, which may carry a date or other text. For an account holder's own
+            review, a snapshot of their real name as shown inside the station, taken when written, falling back to
+            their account name (on-air handle, else username) when no real name is on file. For a handwritten or
+            on-behalf review it is what the music director typed: free text that may be a real name, so it is not
+            guaranteed PII-free. Shown only inside the station; not for any public or anonymous surface, because it
+            holds a legal name; never the published credit (`credit` decides that) and never for client telemetry
+            (analytics properties, error breadcrumbs, logs). There is no print lock: the author edits at any time.
           properties:
             id: { type: integer }
             album_id: { type: integer, nullable: true }
