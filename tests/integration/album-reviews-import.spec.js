@@ -270,22 +270,22 @@ describe('album-reviews import: the citation skip (real PG)', () => {
   });
 
   test.each([
-    ['an unfiled item', [{ state: 'pool' }], 'skipped'],
-    ['an item checked out and not yet filed', [{ state: 'reviewed' }], 'skipped'],
-    ['an item filed as the row’s own release', [{ state: 'filed', album: 'own' }], 'skipped'],
-    ['an item finalized as the row’s own release', [{ state: 'finalized', album: 'own' }], 'skipped'],
-    ['an item filed as another release', [{ state: 'filed', album: 'other' }], 'imported'],
-    ['an item finalized as another release', [{ state: 'finalized', album: 'other' }], 'imported'],
-    ['one item filed elsewhere and one unfiled', [{ state: 'filed', album: 'other' }, { state: 'pool' }], 'skipped'],
+    ['an unfiled item', 'skipped', [{ state: 'pool' }]],
+    ['an item checked out and not yet filed', 'skipped', [{ state: 'reviewed' }]],
+    ['an item filed as the row’s own release', 'skipped', [{ state: 'filed', album: 'own' }]],
+    ['an item finalized as the row’s own release', 'skipped', [{ state: 'finalized', album: 'own' }]],
+    ['an item filed as another release', 'imported', [{ state: 'filed', album: 'other' }]],
+    ['an item finalized as another release', 'imported', [{ state: 'finalized', album: 'other' }]],
+    ['one item filed elsewhere and one unfiled', 'skipped', [{ state: 'filed', album: 'other' }, { state: 'pool' }]],
     [
       'one item filed elsewhere and one filed as the row’s own release',
+      'skipped',
       [
         { state: 'filed', album: 'other' },
         { state: 'filed', album: 'own' },
       ],
-      'skipped',
     ],
-  ])('a row cited by %s is %s, as a dry run and under --apply', async (_name, items, outcome) => {
+  ])('a row cited by %s is %s, as a dry run and under --apply', async (_name, outcome, items) => {
     const pre = await run(false);
     const row = await seedFormSubmission({
       album_id: release.id,

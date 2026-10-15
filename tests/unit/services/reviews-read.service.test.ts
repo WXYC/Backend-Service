@@ -150,7 +150,7 @@ describe('review reads (BS#2805)', () => {
     expect(params.filter((v) => v === 'filed' || v === 'finalized')).toHaveLength(0);
   });
 
-  test('no filed/finalized literal is spelled in the services outside the FILED_STATES declaration', () => {
+  test('no filed/finalized literal is spelled in the services (the one spelling is shared/database/src/intake-filed-states.ts)', () => {
     const dir = path.join(__dirname, '../../../apps/backend/services');
     const offenders = fs
       .readdirSync(dir)
@@ -159,7 +159,7 @@ describe('review reads (BS#2805)', () => {
         fs
           .readFileSync(path.join(dir, f), 'utf8')
           .split('\n')
-          .filter((line) => /'filed',\s*'finalized'/.test(line) && !line.includes('export const FILED_STATES'))
+          .filter((line) => /'filed',\s*'finalized'/.test(line))
           .map((line) => `${f}: ${line.trim()}`)
       );
     expect(offenders).toEqual([]);
