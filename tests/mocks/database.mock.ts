@@ -1163,8 +1163,9 @@ export {
   deriveUserPublicName,
 } from '../../shared/database/src/dj-name.js';
 
-// The one list of filed intake states (BS#3164): the real module, a plain array with a type-only import of the schema, so the
-// tests that edit it (reviews-read.service.test) edit the list the services read.
+// The one list of filed intake states (BS#3164): the real module, a plain array with a type-only import of the schema. The
+// two readers (intake.service and the album-reviews import) take it from @wxyc/database, and
+// tests/unit/jobs/album-reviews-import/citation-skip.test.ts imports it from there under this double, so the export stays.
 export { FILED_STATES } from '../../shared/database/src/intake-filed-states.js';
 
 // Stubs of shared/database/src/staff-name.ts (BS#3051). Not a source re-export:
