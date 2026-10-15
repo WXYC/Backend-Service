@@ -751,14 +751,14 @@ describe('BS#3148 re-ask restore (REAL statements, real PG)', () => {
     const scope = { runId: RUN, albumIds: [] };
 
     // The dry run counts and writes nothing.
-    expect(await runRestore(scope, { execute: false })).toEqual({
+    expect(await runRestore({ ...scope, execute: false })).toEqual({
       album_metadata: { backed_up: 4, restorable: 3, restored: 0 },
       library: { backed_up: 4, restorable: 2, restored: 0 },
       analyze_error: null,
     });
     expect(await catalogCover(doga.id)).toBe(NEW);
 
-    expect(await runRestore(scope, { execute: true })).toEqual({
+    expect(await runRestore({ ...scope, execute: true })).toEqual({
       album_metadata: { backed_up: 4, restorable: 3, restored: 3 },
       library: { backed_up: 4, restorable: 2, restored: 2 },
       analyze_error: null,
@@ -813,7 +813,7 @@ describe('BS#3148 re-ask restore (REAL statements, real PG)', () => {
 
     // A second restore finds nothing: every restored album has moved on from its write.
     await resetWatermark();
-    expect(await runRestore(scope, { execute: true })).toEqual({
+    expect(await runRestore({ ...scope, execute: true })).toEqual({
       album_metadata: { backed_up: 4, restorable: 0, restored: 0 },
       library: { backed_up: 4, restorable: 0, restored: 0 },
       analyze_error: null,
@@ -840,7 +840,7 @@ describe('BS#3148 re-ask restore (REAL statements, real PG)', () => {
     expect(await runCatalogPass(RUN)).toMatchObject({ album_writes: 2, rewritten: 0 });
     await resetWatermark();
 
-    expect(await runRestore({ runId: RUN, albumIds: [listed.id] }, { execute: true })).toEqual({
+    expect(await runRestore({ runId: RUN, albumIds: [listed.id], execute: true })).toEqual({
       album_metadata: { backed_up: 1, restorable: 1, restored: 1 },
       library: { backed_up: 0, restorable: 0, restored: 0 },
       analyze_error: null,
