@@ -144,7 +144,7 @@ describe('runCatalogPass', () => {
   });
 
   it.each([0, -1, 1.5])('refuses a statement timeout of %p before sending anything', async (timeout) => {
-    await expect(runCatalogPass('run-1', timeout)).rejects.toThrow('statement timeout');
+    await expect(runCatalogPass('run-1', timeout)).rejects.toThrow('timeoutMs must be a positive integer');
     expect(execute).not.toHaveBeenCalled();
   });
 });

@@ -222,14 +222,23 @@ SELECT c.album_id, c.legacy_release_id, c.discogs_url, c.artwork_url, c.library_
  ORDER BY c.album_id${cap > 0 ? sql` LIMIT ${cap}` : sql``}`;
 };
 
-/** Run one read inside a transaction so `SET LOCAL statement_timeout` scopes. 0 would disable it, so it is refused. */
-const read = async <Row>(statement: SQL, timeoutMs: number): Promise<Row[]> => {
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Run `work` inside a transaction under `SET LOCAL statement_timeout`, so the timeout scopes to it. 0 would disable
+ * the timeout, so it is refused before anything is sent. Shared by the cohort reads and the catalog cover pass.
+ */
+export const withStatementTimeout = async <T>(timeoutMs: number, work: (tx: Tx) => Promise<T>): Promise<T> => {
   const timeout = checkedInt(timeoutMs, 'timeoutMs', 1);
   return await db.transaction(async (tx) => {
     await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeout}ms'`));
-    return (await tx.execute(statement)) as unknown as Row[];
+    return await work(tx);
   });
 };
+
+/** Run one read under the timeout. */
+const read = async <Row>(statement: SQL, timeoutMs: number): Promise<Row[]> =>
+  withStatementTimeout(timeoutMs, async (tx) => (await tx.execute(statement)) as unknown as Row[]);
 
 export const countCohort = async (
   inputs: CohortInputs,
