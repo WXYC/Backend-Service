@@ -3,7 +3,7 @@
  * The CI containers run AUTH_BYPASS=true, so the route grant is pinned by tests/unit/routes/library-print.route.test.ts.
  * This tier pins what real rows add: the print-log row with no intake item, the refusals, the review leading
  * `GET /reviews?album_id=` as `on_cover` and `in_use`, a review reached only through a citation, the slip's artist for a
- * compilation filed under a Various Artists bucket, the print-log row coming back when a deleted release is restored, and a
+ * compilation (`V/A ` and its alternate name, BS#3286) and for an ordinary release, the print-log row coming back when a deleted release is restored, and a
  * release with one logged copy (BS#3075), whose print is the copy's.
  */
 
@@ -48,10 +48,23 @@ describe('POST /library/{id}/print (BS#2865)', () => {
         [id]
       )
     )[0];
+  const compilationArtistIds = [];
+  /** An `artists` row of its own with the given call letters; the spec removes it (BS#3286), `seedLibraryRelease` keeps its own. */
+  const seedArtist = async (artistName, codeLetters) => {
+    const [artist] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
+      VALUES (${artistName}, ${artistName}, ${codeLetters}) RETURNING id`;
+    compilationArtistIds.push(artist.id);
+    return artist;
+  };
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".reviews WHERE author LIKE $1`, [`${PREFIX}%`]);
     await removeSeededIntakeItems();
     await removeSeededLibraryReleases();
+    if (compilationArtistIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ANY(${compilationArtistIds})`;
+      compilationArtistIds.length = 0;
+    }
   };
 
   beforeAll(async () => {
@@ -201,20 +214,42 @@ describe('POST /library/{id}/print (BS#2865)', () => {
     expect(await reviewOf(earlier.id, albumId)).toMatchObject({ on_cover: false, in_use: false });
   });
 
-  test('a compilation filed under a Various Artists bucket prints its alternate artist name, not the bucket', async () => {
-    const bucket = await seedLibraryRelease({
+  // BS#3286: only a release whose artist's call letters are V/A (or `Z-`) is a compilation; the artist's name is not read.
+  test('a release filed under an artist merely named Various Artists prints its bare alternate artist name', async () => {
+    const named = await seedLibraryRelease({
       artist_name: `${PREFIX} Various Artists`,
-      album_title: `${PREFIX} compilation`,
+      album_title: `${PREFIX} named bucket`,
       alternate_artist_name: `${PREFIX} Chuquimamani-Condori`,
     });
-    const review = await typedReview(bucket.id);
-    const res = await manager.post(`/library/${bucket.id}/print`).send({ review_id: review.id });
+    const review = await typedReview(named.id);
+    const res = await manager.post(`/library/${named.id}/print`).send({ review_id: review.id });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
       artist_name: `${PREFIX} Chuquimamani-Condori`,
-      album_title: `${PREFIX} compilation`,
+      album_title: `${PREFIX} named bucket`,
     });
   });
+
+  test.each([
+    ['V/A', `  ${PREFIX} Chuquimamani-Condori `, `V/A ${PREFIX} Chuquimamani-Condori`],
+    ['Z-R', `${PREFIX} Chuquimamani-Condori`, `V/A ${PREFIX} Chuquimamani-Condori`],
+    ['V/A', null, `${PREFIX} Various Artists - Rock - N`],
+    ['V/A', '   ', `${PREFIX} Various Artists - Rock - N`],
+  ])(
+    'a compilation (call letters %s) with alternate artist name %j prints %j',
+    async (codeLetters, alternate_artist_name, expected) => {
+      const artist = await seedArtist(`${PREFIX} Various Artists - Rock - N`, codeLetters);
+      const compilation = await seedLibraryRelease({
+        artist_id: artist.id,
+        album_title: `${PREFIX} compilation`,
+        alternate_artist_name,
+      });
+      const review = await typedReview(compilation.id);
+      const res = await manager.post(`/library/${compilation.id}/print`).send({ review_id: review.id });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ artist_name: expected, album_title: `${PREFIX} compilation` });
+    }
+  );
 
   test.each([
     ['a draft', (albumId) => typedReview(albumId, { status: 'draft' })],

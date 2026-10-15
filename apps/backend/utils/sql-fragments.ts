@@ -20,9 +20,17 @@ export const rotationSuccessorSql = (): SQL =>
   sql`(SELECT 1 FROM ${rotation} AS successor WHERE successor.moved_from_rotation_id = ${outerRef(rotation.id)})`;
 
 /**
- * The displayed artist of a release (BS#3284), the one home of the rule: the trimmed `alternate_artist_name` unless it
- * is null, empty or whitespace, else the filed artist's name, so a compilation under a V/A bucket names its own artist.
- * Needs `library` and `artists` in the select's joins. Read by the release print and the review notices
- * (`selectReleaseRecord`) and by FCC notes (`fccNoteSelection`).
+ * `isVariousArtists` (`services/requestLine/types.ts`) over `artists.code_letters`, in SQL: `V/A` ignoring case and
+ * surrounding spaces, or a case-sensitive `Z-` prefix. The two are pinned together over one table of code letters
+ * (`tests/utils/various-artists-code-letters.js`), so change them together.
  */
-export const displayedArtistName: SQL<string> = sql<string>`coalesce(nullif(trim(${library.alternate_artist_name}), ''), ${artists.artist_name})`;
+export const isCompilationArtistSql: SQL<boolean> = sql<boolean>`(upper(trim(${artists.code_letters})) = 'V/A' OR trim(${artists.code_letters}) LIKE 'Z-%')`;
+
+/**
+ * The displayed artist of a release (BS#3284, BS#3286), the one home of the rule: the trimmed `alternate_artist_name`
+ * unless it is null, empty or whitespace, else the filed artist's name, so a compilation under a V/A bucket names its
+ * own artist. On a compilation (`isCompilationArtistSql`) the alternate name reads `V/A <name>`, so it is not mistaken
+ * for a record by that artist. Needs `library` and `artists` in the select's joins. Read by the release print and the
+ * review notices (`selectReleaseRecord`) and by FCC notes (`fccNoteSelection`).
+ */
+export const displayedArtistName: SQL<string> = sql<string>`coalesce(CASE WHEN ${isCompilationArtistSql} THEN 'V/A ' ELSE '' END || nullif(trim(${library.alternate_artist_name}), ''), ${artists.artist_name})`;

@@ -27,6 +27,8 @@ const {
   managerAccessToken,
 } = require('../utils/intake_seed');
 
+const { CODE_LETTERS_TABLE } = require('../utils/various-artists-code-letters');
+
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-FCC';
 const BASE36 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -38,6 +40,16 @@ describe('/fcc-notes (BS#2862)', () => {
   let djA;
   let sql;
   const filedAlbumIds = [];
+  const compilationArtistIds = [];
+
+  /** An `artists` row of its own with the given call letters; the spec removes it (BS#3286), `seedLibraryRelease` keeps its own. */
+  const seedArtist = async (code_letters) => {
+    const [artist] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.artists (artist_name, alphabetical_name, code_letters)
+      VALUES (${`${PREFIX} Filed`}, ${`${PREFIX} Filed`}, ${code_letters}) RETURNING id`;
+    compilationArtistIds.push(artist.id);
+    return artist;
+  };
 
   const note = (extra) => ({ track: 'la paradoja', note: `${PREFIX} note`, ...extra });
   const noteRows = (column, id) =>
@@ -86,6 +98,10 @@ describe('/fcc-notes (BS#2862)', () => {
     }
     filedAlbumIds.length = 0;
     await removeSeededLibraryReleases();
+    if (compilationArtistIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ANY(${compilationArtistIds})`;
+      compilationArtistIds.length = 0;
+    }
     await removeSeededAuthUsers();
   };
 
@@ -160,6 +176,40 @@ describe('/fcc-notes (BS#2862)', () => {
         expect(list.body.map((n) => n.artist_name)).toEqual([expected]);
       }
     );
+
+    // BS#3286: a compilation's alternate name reads `V/A <name>`. The call letters come from the one table the unit tier
+    // runs `isVariousArtists` over, so the SQL form of the test and the TS one cannot disagree.
+    test.each(CODE_LETTERS_TABLE)(
+      'a note on a release by an artist with call letters %j names its alternate artist name with the V/A prefix: %s',
+      async (codeLetters, isCompilation) => {
+        const artist = await seedArtist(codeLetters);
+        const release = await seedLibraryRelease({
+          artist_id: artist.id,
+          alternate_artist_name: `  ${PREFIX} Compiler `,
+          album_title: `${PREFIX} compilation`,
+        });
+        const expected = isCompilation ? `V/A ${PREFIX} Compiler` : `${PREFIX} Compiler`;
+
+        const created = await djA.post('/fcc-notes').send(note({ album_id: release.id }));
+        expect(created.status).toBe(200);
+        expect(created.body.artist_name).toBe(expected);
+        const list = await djA.get(`/fcc-notes?album_id=${release.id}`);
+        expect(list.body.map((n) => n.artist_name)).toEqual([expected]);
+      }
+    );
+
+    test.each([
+      ['unset', null],
+      ['blank', ''],
+      ['whitespace only', '   '],
+    ])('a compilation with alternate artist name %s keeps its filed artist, with no prefix', async (_case, alt) => {
+      const artist = await seedArtist('V/A');
+      const release = await seedLibraryRelease({ artist_id: artist.id, alternate_artist_name: alt });
+
+      const created = await djA.post('/fcc-notes').send(note({ album_id: release.id }));
+      expect(created.status).toBe(200);
+      expect(created.body.artist_name).toBe(`${PREFIX} Filed`);
+    });
 
     test.each([
       ['both subjects', (item, release) => note({ intake_item_id: item, album_id: release })],

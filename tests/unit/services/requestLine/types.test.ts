@@ -10,6 +10,7 @@ import {
   isVariousArtists,
   type LibraryResult,
 } from '../../../../apps/backend/services/requestLine/types';
+import { CODE_LETTERS_TABLE } from '../../../utils/various-artists-code-letters';
 
 function makeResult(overrides: Partial<LibraryResult>): LibraryResult {
   return {
@@ -214,15 +215,8 @@ describe('computeCallNumber', () => {
 });
 
 describe('isVariousArtists (BS#3022 also guards the artist re-file)', () => {
-  it.each([
-    ['V/A', true],
-    ['  v/a ', true],
-    ['Z-R', true],
-    ['Z--', true],
-    ['z-r', false],
-    ['VA', false],
-    ['IS', false],
-  ])('%j -> %s', (codeLetters, expected) => {
+  // The table the integration tier runs the `displayedArtistName` fragment's SQL over (BS#3286).
+  it.each(CODE_LETTERS_TABLE)('%j -> %s', (codeLetters, expected) => {
     expect(isVariousArtists(codeLetters)).toBe(expected);
   });
 });
