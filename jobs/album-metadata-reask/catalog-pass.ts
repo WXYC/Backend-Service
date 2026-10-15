@@ -2,10 +2,11 @@
  * The re-ask's catalog cover pass (BS#3146; BS#3137 decision 4). `library.artwork_url` is rewritten only where it
  * still equals the cover a run's album write replaced (`before_image->>'artwork_url'`): the copy this job can prove
  * came from the wrong release. A catalog cover that differs came from a librarian or another backfill and is left
- * alone, and so is an album whose stored cover changed since its write (`am.artwork_url` no longer equals
- * `after_image->>'artwork_url'`). The guard is the cover, not `updated_at` as in restore (BS#3274): the bio fill, the
- * streaming drains and the enrichment UPSERT bump `updated_at` without touching the cover, and must not cost an album
- * its catalog cover fix when `--catalog-pass` runs later for a run that died.
+ * alone, and so is an album whose stored release or cover changed since its write (`am.discogs_url` or
+ * `am.artwork_url` no longer equals the `after_image`'s) or that a restore of the run put back. The guard is the
+ * release and cover, not `updated_at` as in restore (BS#3274): the bio fill, the streaming drains and the enrichment
+ * UPSERT bump `updated_at` without touching either, and must not cost an album its catalog cover fix when
+ * `--catalog-pass` runs later for a run that died.
  *
  * The catalog watermark trigger (`touch_library_watermark`, migration 0185) is `FOR EACH STATEMENT` and fires even on
  * a zero-row UPDATE, and each bump makes every client re-download the catalog (BS#2052). So a run sends one read-only
@@ -21,8 +22,8 @@ import { table, withStatementTimeout } from './cohort.js';
 export const CATALOG_STATEMENT_TIMEOUT_DEFAULT = 30 * 1000;
 
 /**
- * The covers to rewrite for one run. `cand` is the run's album writes whose stored cover is still the one written,
- * and not yet passed; `hit` is their catalog rows whose cover still mirrors the old one. The write locks both the
+ * The covers to rewrite for one run. `cand` is the run's album writes whose stored release and cover are still the
+ * ones written, and neither passed nor restored; `hit` is their catalog rows whose cover still mirrors the old one. The write locks both the
  * `album_metadata` and the `library` rows, so a row another writer commits meanwhile is re-checked on its latest
  * version; the probe locks nothing.
  */
@@ -32,9 +33,10 @@ const hitCtes = (runId: string, lock: boolean): SQL => sql`WITH cand AS (
     FROM ${table('album_metadata_reask_backup')} b
     JOIN ${table('album_metadata')} am ON am."album_id" = b.row_id
    WHERE b.run_id = ${runId}::text AND b.target_table = 'album_metadata'
+     AND am."discogs_url" IS NOT DISTINCT FROM b.after_image->>'discogs_url'
      AND am."artwork_url" IS NOT DISTINCT FROM b.after_image->>'artwork_url'
      AND NOT EXISTS (SELECT 1 FROM ${table('album_metadata_reask_backup')} lb
-                      WHERE lb.run_id = b.run_id AND lb.target_table = 'library' AND lb.row_id = b.album_id)${sql.raw(
+                      WHERE lb.run_id = b.run_id AND lb.target_table IN ('library', 'restore') AND lb.row_id = b.album_id)${sql.raw(
                         lock ? ' FOR UPDATE OF am' : ''
                       )}
 ), hit AS (
