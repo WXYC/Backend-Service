@@ -288,7 +288,7 @@ describe('printReleaseReview (BS#2865)', () => {
     const { tx } = await runRelease(releasePrint());
     const { artist_name } = tx.select.mock.calls[3][0] as unknown as { artist_name: SQL };
     expect(new PgDialect().sqlToQuery(artist_name).sql).toBe(
-      'coalesce(nullif("wxyc_schema"."library"."alternate_artist_name", \'\'), "wxyc_schema"."artists"."artist_name")'
+      'coalesce(nullif(trim("wxyc_schema"."library"."alternate_artist_name"), \'\'), "wxyc_schema"."artists"."artist_name")'
     );
   });
 

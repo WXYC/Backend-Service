@@ -878,7 +878,7 @@ components:
           {
             type: string,
             maxLength: 128,
-            description: "The release's artist when `album_id` is set, else the intake item's",
+            description: "The release's displayed artist (its alternate artist name unless blank, else the filed artist, as on the printed slip) when `album_id` is set, else the intake item's",
           }
         album_title:
           {

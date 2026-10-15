@@ -13,8 +13,9 @@ jest.mock('@wxyc/database', () => {
 });
 
 import { notExists, sql } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, reviews, review_revisions, rotation } from '@wxyc/database';
-import { outerRef, rotationSuccessorSql } from '../../../apps/backend/utils/sql-fragments';
+import { displayedArtistName, outerRef, rotationSuccessorSql } from '../../../apps/backend/utils/sql-fragments';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const revisionCount = (outer: unknown) =>
@@ -50,6 +51,16 @@ describe('rotationSuccessorSql (BS#3007)', () => {
     expect(rendered).toContain(
       `not exists (SELECT 1 FROM "${SCHEMA}"."rotation" AS successor ` +
         `WHERE successor.moved_from_rotation_id = "${SCHEMA}"."rotation"."id")`
+    );
+  });
+});
+
+describe('displayedArtistName (BS#3284)', () => {
+  it('is the trimmed alternate artist name unless blank, else the filed artist, spelled out literally', () => {
+    const { sql: rendered } = new PgDialect().sqlToQuery(displayedArtistName);
+    // `trim` is what makes a whitespace-only alternate name count as blank: `nullif(x, '')` alone keeps `'  '`.
+    expect(rendered).toBe(
+      `coalesce(nullif(trim("${SCHEMA}"."library"."alternate_artist_name"), ''), "${SCHEMA}"."artists"."artist_name")`
     );
   });
 });
