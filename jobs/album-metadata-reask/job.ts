@@ -215,8 +215,8 @@ export const resolveMode = (env: NodeJS.ProcessEnv = process.env, args: string[]
   if (at === -1) {
     return { mode: 'dry-run', options: resolveOptions(env, args) };
   }
-  const runId = flags[at + 1];
-  if (runId === undefined || isBlank(runId) || runId.startsWith('--')) {
+  const runId = flags[at + 1]?.trim();
+  if (!runId || runId.startsWith('--')) {
     throw new Error(`[${JOB_NAME}] ${CATALOG_PASS_FLAG} needs the run_id of the run whose covers it rewrites.`);
   }
   const rest = flags.filter((_, i) => i !== at && i !== at + 1);
@@ -232,7 +232,10 @@ export const resolveMode = (env: NodeJS.ProcessEnv = process.env, args: string[]
   return { mode: 'catalog-pass', options: { runId, statementTimeoutMs } };
 };
 
-/** `--catalog-pass <run_id>`: the pass alone, for a run that died before its end. Idempotent. */
+/**
+ * `--catalog-pass <run_id>`: the pass alone, for a run that died before its end. Idempotent. A run_id with no
+ * album writes is an error, so a mistyped id cannot pass for a recovery that found nothing to do.
+ */
 export const runCatalogPassMode = async ({
   runId,
   statementTimeoutMs,
@@ -241,6 +244,9 @@ export const runCatalogPassMode = async ({
     reask_run_id: runId,
   });
   const result = await runCatalogPass(runId, statementTimeoutMs);
+  if (result.album_writes === 0) {
+    throw new Error(`[${JOB_NAME}] Run ${runId} has no album writes; check the run_id.`);
+  }
   log(
     'info',
     'catalog_pass',
@@ -250,6 +256,11 @@ export const runCatalogPassMode = async ({
       ...result,
     }
   );
+  if (result.analyze_error !== null) {
+    log('warn', 'analyze_pending', `ANALYZE failed after the pass wrote; run it by hand: ${result.analyze_error}`, {
+      tables: ['library'],
+    });
+  }
   return result;
 };
 

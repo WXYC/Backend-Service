@@ -33,6 +33,10 @@ describe('catalogPassSql', () => {
     );
   });
 
+  it('locks the album_metadata row, so a write that commits meanwhile is re-checked on its latest version', () => {
+    expect(statement).toContain(`lb.target_table = 'library' AND lb.row_id = b.album_id) FOR UPDATE OF am )`);
+  });
+
   it('rewrites only a non-null catalog cover that equals the old cover and differs from the new one', () => {
     expect(statement).toContain(
       `WHERE l."artwork_url" IS NOT NULL AND l."artwork_url" = c.old_cover AND c.new_cover IS DISTINCT FROM l."artwork_url" FOR UPDATE OF l`
@@ -50,53 +54,87 @@ describe('catalogPassSql', () => {
   });
 });
 
+const SET_LOCAL = "SET LOCAL statement_timeout = '45000ms'";
+const ANALYZE = 'ANALYZE "wxyc_schema"."library"';
+
 describe('catalogProbeSql', () => {
   const probe = flat(catalogProbeSql('run-1'));
 
-  it('selects the same rows as the pass, and reads only', () => {
-    expect(probe).toContain(flat(catalogPassSql('run-1')).split(' FOR UPDATE OF l')[0]);
-    expect(probe).toMatch(/SELECT count\(\*\)::int AS n FROM hit$/);
+  it('selects the same rows as the pass without locking them, and reads only', () => {
+    const unlocked = flat(catalogPassSql('run-1')).replace(' FOR UPDATE OF am', '').split(' FOR UPDATE OF l')[0];
+    expect(probe).toContain(unlocked);
     expect(probe).not.toMatch(/FOR UPDATE|INSERT|UPDATE "/);
+  });
+
+  it("counts the run's album writes beside the covers, so a run_id with none is visible", () => {
+    expect(probe).toMatch(
+      /SELECT \(SELECT count\(\*\)::int FROM "wxyc_schema"\."album_metadata_reask_backup" w WHERE w\.run_id = run-1::text AND w\.target_table = 'album_metadata'\) AS album_writes, count\(\*\)::int AS n FROM hit$/
+    );
   });
 });
 
 describe('runCatalogPass', () => {
-  beforeEach(() => execute.mockReset());
+  beforeEach(() => {
+    execute.mockReset();
+    (db.transaction as unknown as jest.Mock).mockClear();
+  });
+
+  const probe = (albumWrites: number, n: number) => [{ album_writes: albumWrites, n }];
+  const ids = (count: number) => Array.from({ length: count }, (_, i) => ({ id: i + 1 }));
+  const result = (album_writes: number, probed: number, rewritten: number, analyze_error: string | null = null) => ({
+    album_writes,
+    probed,
+    rewritten,
+    analyze_error,
+  });
 
   it.each([
-    // [label, probe count, rows the write returns, statements sent after SET LOCAL, outcome]
-    ['an empty probe sends nothing else', 0, null, ['probe'], { probed: 0, rewritten: 0 }],
+    // [label, responses after SET LOCAL, statements sent, outcome]
+    ['a run with no album writes sends nothing else', [probe(0, 0)], [SET_LOCAL, 'probe'], result(0, 0, 0)],
+    ['an empty probe sends nothing else', [probe(3, 0)], [SET_LOCAL, 'probe'], result(3, 0, 0)],
     [
-      'a probe with rows sends the write, then ANALYZE',
-      2,
-      2,
-      ['probe', 'write', 'analyze'],
-      { probed: 2, rewritten: 2 },
+      'a probe with rows sends the write, then ANALYZE in its own transaction',
+      [probe(3, 2), ids(2), [], []],
+      [SET_LOCAL, 'probe', 'write', SET_LOCAL, ANALYZE],
+      result(3, 2, 2),
     ],
     // The rows moved between the probe and the write: nothing was written, so no ANALYZE.
-    ['a write that matched nothing skips ANALYZE', 1, 0, ['probe', 'write'], { probed: 1, rewritten: 0 }],
-  ])('%s', async (_label, probed, written, sent, outcome) => {
+    [
+      'a write that matched nothing skips ANALYZE',
+      [probe(3, 1), ids(0)],
+      [SET_LOCAL, 'probe', 'write'],
+      result(3, 1, 0),
+    ],
+  ])('%s', async (_label, responses, sent, outcome) => {
     execute.mockResolvedValueOnce([]); // SET LOCAL
-    execute.mockResolvedValueOnce([{ n: probed }]);
-    if (written !== null) {
-      execute.mockResolvedValueOnce(Array.from({ length: written }, (_, i) => ({ id: i + 1 })));
+    for (const response of responses) {
+      execute.mockResolvedValueOnce(response);
     }
-    execute.mockResolvedValue([]);
 
     expect(await runCatalogPass('run-1', 45_000)).toEqual(outcome);
 
-    const statements = execute.mock.calls.map(([statement]) => flat(statement));
-    const kinds = { probe: flat(catalogProbeSql('run-1')), write: flat(catalogPassSql('run-1')) };
-    expect(statements).toEqual([
-      "SET LOCAL statement_timeout = '45000ms'",
-      ...sent.map((kind) =>
-        kind === 'analyze' ? 'ANALYZE "wxyc_schema"."library"' : kinds[kind as 'probe' | 'write']
-      ),
-    ]);
+    const kinds: Record<string, string> = {
+      probe: flat(catalogProbeSql('run-1')),
+      write: flat(catalogPassSql('run-1')),
+    };
+    expect(execute.mock.calls.map(([statement]) => flat(statement))).toEqual(sent.map((s) => kinds[s] ?? s));
+  });
+
+  it('reports a failed ANALYZE instead of throwing: the rewrite and its backups have already committed', async () => {
+    execute
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(probe(3, 2))
+      .mockResolvedValueOnce(ids(2))
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
+
+    expect(await runCatalogPass('run-1', 45_000)).toEqual(
+      result(3, 2, 2, 'canceling statement due to statement timeout')
+    );
   });
 
   it('runs the probe and the write in one transaction, under the 30 s default', async () => {
-    execute.mockResolvedValue([{ n: 0 }]);
+    execute.mockResolvedValue(probe(0, 0));
 
     await runCatalogPass('run-1');
 

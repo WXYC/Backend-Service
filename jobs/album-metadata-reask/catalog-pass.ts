@@ -20,7 +20,9 @@ export const CATALOG_STATEMENT_TIMEOUT_DEFAULT = 30 * 1000;
 
 /**
  * The covers to rewrite for one run. `cand` is the run's album writes whose album is untouched since and not yet
- * passed; `hit` is their catalog rows whose cover still mirrors the old one. The write locks `hit`; the probe does not.
+ * passed; `hit` is their catalog rows whose cover still mirrors the old one. The write locks both the `album_metadata`
+ * and the `library` rows, so a row another writer commits meanwhile is re-checked on its latest version; the probe
+ * locks nothing.
  */
 const hitCtes = (runId: string, lock: boolean): SQL => sql`WITH cand AS (
   SELECT b.album_id, b.before_image->>'artwork_url' AS old_cover,
@@ -29,7 +31,9 @@ const hitCtes = (runId: string, lock: boolean): SQL => sql`WITH cand AS (
     JOIN ${table('album_metadata')} am ON am."album_id" = b.row_id
    WHERE b.run_id = ${runId}::text AND b.target_table = 'album_metadata' AND am."updated_at" = b.written_at
      AND NOT EXISTS (SELECT 1 FROM ${table('album_metadata_reask_backup')} lb
-                      WHERE lb.run_id = b.run_id AND lb.target_table = 'library' AND lb.row_id = b.album_id)
+                      WHERE lb.run_id = b.run_id AND lb.target_table = 'library' AND lb.row_id = b.album_id)${sql.raw(
+                        lock ? ' FOR UPDATE OF am' : ''
+                      )}
 ), hit AS (
   SELECT l."id" AS id, l."artwork_url" AS prior_cover, c.new_cover, c.provenance
     FROM ${table('library')} l JOIN cand c ON c.album_id = l."id"
@@ -38,9 +42,11 @@ const hitCtes = (runId: string, lock: boolean): SQL => sql`WITH cand AS (
    )}
 )`;
 
-/** The read-only probe: how many catalog covers the pass would rewrite. */
+/** The read-only probe: the run's album writes (none means a wrong run_id) and the catalog covers it would rewrite. */
 export const catalogProbeSql = (runId: string): SQL => sql`${hitCtes(runId, false)}
-SELECT count(*)::int AS n FROM hit`;
+SELECT (SELECT count(*)::int FROM ${table('album_metadata_reask_backup')} w
+         WHERE w.run_id = ${runId}::text AND w.target_table = 'album_metadata') AS album_writes,
+       count(*)::int AS n FROM hit`;
 
 /** The one guarded statement: the `library` backup rows, then the update of exactly the rows they back up. */
 export const catalogPassSql = (runId: string): SQL => sql`${hitCtes(runId, true)}, backup AS (
@@ -57,15 +63,23 @@ UPDATE ${table('library')} l
 RETURNING l."id"`;
 
 export interface CatalogPassResult {
+  /** The run's `album_metadata` backup rows; 0 means no such run. */
+  album_writes: number;
   /** Covers the probe found; 0 means nothing else was sent. */
   probed: number;
   /** Covers rewritten; fewer than `probed` when a row moved between the probe and the write. */
   rewritten: number;
+  /**
+   * Why `ANALYZE` failed after a pass that wrote, else null. Not thrown: the rewrite and its backup rows have already
+   * committed, and a rerun finds nothing to do, so the counts must still reach the caller.
+   */
+  analyze_error: string | null;
 }
 
 /**
  * One run's catalog cover pass: the probe and, only when it finds rows, the write, in one transaction under
- * `SET LOCAL statement_timeout`; then `ANALYZE` the catalog if anything was written (`docs/bulk-update-playbook.md`).
+ * `SET LOCAL statement_timeout`; then, if anything was written, `ANALYZE` the catalog in its own transaction under the
+ * same timeout (`docs/bulk-update-playbook.md`).
  */
 export const runCatalogPass = async (
   runId: string,
@@ -76,18 +90,26 @@ export const runCatalogPass = async (
       `album-metadata-reask: the catalog pass statement timeout must be a positive integer, got ${timeoutMs}`
     );
   }
+  const setLocalTimeout = sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
   const result = await db.transaction(async (tx): Promise<CatalogPassResult> => {
-    await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${timeoutMs}ms'`));
-    const [{ n }] = (await tx.execute(catalogProbeSql(runId))) as unknown as Array<{ n: number }>;
-    const probed = Number(n);
-    if (probed === 0) {
-      return { probed, rewritten: 0 };
+    await tx.execute(setLocalTimeout);
+    const [probe] = (await tx.execute(catalogProbeSql(runId))) as unknown as Array<{ album_writes: number; n: number }>;
+    const counts = { album_writes: Number(probe.album_writes), probed: Number(probe.n), analyze_error: null };
+    if (counts.probed === 0) {
+      return { ...counts, rewritten: 0 };
     }
     const rows = (await tx.execute(catalogPassSql(runId))) as unknown as unknown[];
-    return { probed, rewritten: rows.length };
+    return { ...counts, rewritten: rows.length };
   });
   if (result.rewritten > 0) {
-    await db.execute(sql`ANALYZE ${table('library')}`);
+    try {
+      await db.transaction(async (tx) => {
+        await tx.execute(setLocalTimeout);
+        await tx.execute(sql`ANALYZE ${table('library')}`);
+      });
+    } catch (err) {
+      result.analyze_error = err instanceof Error ? err.message : String(err);
+    }
   }
   return result;
 };
