@@ -254,7 +254,7 @@ export const createReview = async (subject: RecordSubject, fields: ReviewFields,
 /**
  * A release's own record. The artist is the displayed one (`displayedArtistName`: `alternate_artist_name`, else the
  * artist's name, as filing hands it to enrichment (`library-filing.service.ts`, `library.controller.ts`)), so a
- * compilation under a V/A bucket names its own artist. Used by the release print's slip and by the review notices.
+ * compilation under a V/A bucket names its own artist, read `V/A <name>` (BS#3286). Used by the release print's slip and by the review notices.
  */
 export const selectReleaseRecord = (tx: Pick<typeof db, 'select'>, albumId: number) =>
   tx

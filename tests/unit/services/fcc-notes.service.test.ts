@@ -155,7 +155,7 @@ describe('FccNote reads (BS#2862)', () => {
 
   it('the record is the library release when there is one, else the intake item; the artist is the displayed one', () => {
     expect(dialect.sqlToQuery(fccNoteSelection.artist_name.getSQL()).sql).toBe(
-      'coalesce(coalesce(nullif(trim("wxyc_schema"."library"."alternate_artist_name"), \'\'), "wxyc_schema"."artists"."artist_name"), "wxyc_schema"."intake_items"."artist_name")'
+      `coalesce(coalesce(CASE WHEN (upper(trim("wxyc_schema"."artists"."code_letters")) = 'V/A' OR trim("wxyc_schema"."artists"."code_letters") LIKE 'Z-%') THEN 'V/A ' ELSE '' END || nullif(trim("wxyc_schema"."library"."alternate_artist_name"), ''), "wxyc_schema"."artists"."artist_name"), "wxyc_schema"."intake_items"."artist_name")`
     );
     expect(dialect.sqlToQuery(fccNoteSelection.album_title.getSQL()).sql).toBe(
       'coalesce("wxyc_schema"."library"."album_title", "wxyc_schema"."intake_items"."album_title")'

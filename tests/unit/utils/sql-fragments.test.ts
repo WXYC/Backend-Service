@@ -55,12 +55,13 @@ describe('rotationSuccessorSql (BS#3007)', () => {
   });
 });
 
-describe('displayedArtistName (BS#3284)', () => {
-  it('is the trimmed alternate artist name unless blank, else the filed artist, spelled out literally', () => {
+describe('displayedArtistName (BS#3284, BS#3286)', () => {
+  it('is the trimmed alternate artist name, prefixed `V/A ` on a compilation, unless blank, else the filed artist, spelled out literally', () => {
     const { sql: rendered } = new PgDialect().sqlToQuery(displayedArtistName);
-    // `trim` is what makes a whitespace-only alternate name count as blank: `nullif(x, '')` alone keeps `'  '`.
+    // `trim` is what makes a whitespace-only alternate name count as blank: `nullif(x, '')` alone keeps `'  '`. The
+    // prefix is concatenated onto the nullif, so a blank alternate name stays NULL and falls through to the filed artist.
     expect(rendered).toBe(
-      `coalesce(nullif(trim("${SCHEMA}"."library"."alternate_artist_name"), ''), "${SCHEMA}"."artists"."artist_name")`
+      `coalesce(CASE WHEN (upper(trim("${SCHEMA}"."artists"."code_letters")) = 'V/A' OR trim("${SCHEMA}"."artists"."code_letters") LIKE 'Z-%') THEN 'V/A ' ELSE '' END || nullif(trim("${SCHEMA}"."library"."alternate_artist_name"), ''), "${SCHEMA}"."artists"."artist_name")`
     );
   });
 });

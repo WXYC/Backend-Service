@@ -146,7 +146,7 @@ const lockOnlyCopy = async (tx: Pick<typeof db, 'select'>, albumId: number, revi
  * for a release that may have no intake item, in one transaction. Locks in `DELETE /library/{id}`'s order: the release
  * `FOR KEY SHARE` (the print row's foreign key would take it anyway, so after the review it would deadlock with a delete),
  * then `lockOnlyCopy`'s locks (below), then the review `FOR UPDATE`. The slip's artist is the release's displayed one
- * (`alternate_artist_name`, else the artist's name). `not_found` is a missing release; `bad_review` is every other refusal,
+ * (`alternate_artist_name`, `V/A `-prefixed on a compilation, else the artist's name). `not_found` is a missing release; `bad_review` is every other refusal,
  * one answer for all of them. The membership check reads `intake_items` (the citing items of the release), unlocked.
  *
  * A release with exactly one filed or finalized copy has the print counted for that copy, so a copy has one cover review:

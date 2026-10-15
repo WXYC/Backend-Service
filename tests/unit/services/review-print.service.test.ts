@@ -284,11 +284,11 @@ describe('printReleaseReview (BS#2865)', () => {
     expect(reviewWhere.params).toEqual([3, 12, 12, 'filed', 'finalized']);
   });
 
-  it('names the release’s displayed artist on the slip: its alternate artist name when set, else the artist’s name', async () => {
+  it('names the release’s displayed artist on the slip: its alternate artist name (`V/A ` first on a compilation) when set, else the artist’s name', async () => {
     const { tx } = await runRelease(releasePrint());
     const { artist_name } = tx.select.mock.calls[3][0] as unknown as { artist_name: SQL };
     expect(new PgDialect().sqlToQuery(artist_name).sql).toBe(
-      'coalesce(nullif(trim("wxyc_schema"."library"."alternate_artist_name"), \'\'), "wxyc_schema"."artists"."artist_name")'
+      `coalesce(CASE WHEN (upper(trim("wxyc_schema"."artists"."code_letters")) = 'V/A' OR trim("wxyc_schema"."artists"."code_letters") LIKE 'Z-%') THEN 'V/A ' ELSE '' END || nullif(trim("wxyc_schema"."library"."alternate_artist_name"), ''), "wxyc_schema"."artists"."artist_name")`
     );
   });
 
