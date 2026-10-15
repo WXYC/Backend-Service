@@ -439,7 +439,8 @@ describe('BS#3145 re-ask album write (REAL statement, real PG)', () => {
 /**
  * BS#3146: the catalog cover pass (`dist/catalog-pass.cjs`), after real album writes (`dist/write.cjs`). Claims that
  * need real rows: only a catalog cover that mirrors the old stored cover is rewritten, with its `library` backup row;
- * a librarian's cover and an album touched since its write are left alone; the catalog watermark moves when the pass
+ * a librarian's cover and an album whose stored cover changed since its write are left alone, while an album whose bio
+ * or streaming link was written since still has its catalog cover rewritten (BS#3274); the catalog watermark moves when the pass
  * writes (the positive control for the album write's "unchanged"), and not at all when the probe is empty, so a
  * second pass sends nothing.
  */
@@ -471,7 +472,7 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
   const albumIds = [];
 
   /** A card whose `album_metadata` row stores the wrong release's cover, and its write by this run. */
-  const seedAndWrite = async ({ artist, title, catalogCover, newCover, touched }) => {
+  const seedAndWrite = async ({ artist, title, catalogCover, newCover, touch }) => {
     const [{ id, legacy_release_id }] = await sql`
       INSERT INTO ${sql(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name, artwork_url)
       VALUES (1, 11, 1, ${'b3146-' + title}, 9999, ${artist}, ${catalogCover})
@@ -501,9 +502,12 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
       written: true,
       artist_cleared: false,
     });
-    if (touched) {
+    if (touch) {
       // Another writer after the re-ask: `updated_at` no longer equals the backup's `written_at`.
-      await sql`UPDATE ${sql(SCHEMA)}.album_metadata SET updated_at = updated_at + interval '1 second' WHERE album_id = ${id}`;
+      await sql`
+        UPDATE ${sql(SCHEMA)}.album_metadata SET ${sql(touch)}, updated_at = updated_at + interval '1 second'
+         WHERE album_id = ${id}
+      `;
     }
     return id;
   };
@@ -549,8 +553,36 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
       ],
       ['no catalog cover', { artist: 'Jessica Pratt', title: 'Quiet Signs', catalogCover: null, newCover: NEW }, null],
       [
-        'an album touched since its write',
-        { artist: 'Stereolab', title: 'Emperor Tomato Ketchup', catalogCover: OLD, newCover: NEW, touched: true },
+        'a bio written since its write',
+        {
+          artist: 'Chuquimamani-Condori',
+          title: 'Edits',
+          catalogCover: OLD,
+          newCover: NEW,
+          touch: { artist_bio: 'Producer from Pomona.' },
+        },
+        NEW,
+      ],
+      [
+        'a streaming link written since its write',
+        {
+          artist: 'Cat Power',
+          title: 'Moon Pix',
+          catalogCover: OLD,
+          newCover: NEW,
+          touch: { bandcamp_url: 'https://catpower.bandcamp.com/album/moon-pix' },
+        },
+        NEW,
+      ],
+      [
+        'a stored cover changed since its write',
+        {
+          artist: 'Stereolab',
+          title: 'Emperor Tomato Ketchup',
+          catalogCover: OLD,
+          newCover: NEW,
+          touch: { artwork_url: LIBRARIAN },
+        },
         OLD,
       ],
     ];
@@ -558,7 +590,7 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
     for (const [, seed] of CASES) ids.push(await seedAndWrite(seed));
     await resetWatermark();
 
-    expect(await runCatalogPass(RUN)).toEqual({ album_writes: 5, probed: 2, rewritten: 2, analyze_error: null });
+    expect(await runCatalogPass(RUN)).toEqual({ album_writes: 7, probed: 4, rewritten: 4, analyze_error: null });
 
     for (const [i, [label, seed, expected]] of CASES.entries()) {
       expect([label, await catalogCover(ids[i])]).toEqual([label, expected]);
@@ -581,7 +613,7 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
     expect(await watermark()).toBe(backup.written_at.toISOString());
 
     await resetWatermark();
-    expect(await runCatalogPass(RUN)).toEqual({ album_writes: 5, probed: 0, rewritten: 0, analyze_error: null });
+    expect(await runCatalogPass(RUN)).toEqual({ album_writes: 7, probed: 0, rewritten: 0, analyze_error: null });
     expect(await watermark()).toBe('2000-01-01T00:00:00.000Z');
     expect(await libraryBackups(ids[0])).toHaveLength(1);
   });
