@@ -45,6 +45,8 @@ Three decisions from the canonical cross-repo ADR 0005 ([WXYC/wxyc-dj-ios `docs/
 
 ## Amendment (2026-10-14)
 
+This amendment is the one statement of the album-review import's skip rules and of the `GET /album-reviews` listing rule; other texts name the behaviour and link here instead of restating the conditions.
+
 The station decided, after the cutover (WXYC/Backend-Service#2812), to copy the linked part of the archive into `reviews` once ([WXYC/Backend-Service#3132](https://github.com/WXYC/Backend-Service/issues/3132)). The canonical text is ADR 0005 in WXYC/wxyc-dj-ios (WXYC/wxyc-dj-ios#203). Two of the four reasons above no longer hold since the 2026-10-02 redesign (a release can have many reviews, and a review's author can be a typed name with no account). What still holds is that the form was live until cutover day and that about half the archive matches no library release (908 of 1,711 linked, measured 2026-10-02).
 
 - **After the form closes, linked rows are copied once into `reviews`; unlinked rows stay archive-only.** [`jobs/album-reviews-import/`](../../jobs/album-reviews-import/) is the one writer. For each row with `album_id` set, a non-blank `review`, no intake item citing it and no earlier import, it inserts one `reviews` row on that release, with `reviews.imported_from_submission_id` (FK to the archive row, `ON DELETE SET NULL`, unique where not null) as its provenance and as the re-run key, and the imported text as `review_revisions` revision 1, dated at the form's `submitted_at`. The mapping is in the job's README. A row whose author is over 128 code points is refused and counted, never truncated. The job only inserts; a dry run is the default.

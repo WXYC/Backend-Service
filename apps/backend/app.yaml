@@ -1611,8 +1611,15 @@ components:
         the in-app Review model reserved at /reviews (ADR 0006). The reviewer's
         name is returned as `reviewer` to the role-gated staff this endpoint
         admits (ADR 0011's amendment); social_consent_raw and the ETL
-        bookkeeping columns are never exposed. This block is Swagger display
-        only; the SSOT is wxyc-shared/api.yaml.
+        bookkeeping columns are never exposed.
+
+        Once the form has closed, a one-time Backend-Service job copies
+        submissions that are linked to a library release into the in-app
+        Review model; unlinked submissions stay archive-only. Which linked
+        submissions it skips is set out in Backend-Service ADR 0011
+        (https://github.com/WXYC/Backend-Service/blob/main/docs/adr/0011-album-review-submissions-separate-archive.md).
+
+        This block is Swagger display only; the SSOT is wxyc-shared/api.yaml.
       required:
         - id
         - album_id
@@ -5461,12 +5468,12 @@ paths:
         `social_consent` filter, because the form's consent question asked only
         about outside publication ("shared on social media platforms... AKA blog
         and/or Instagram") and internal station tools were never in its scope.
-        Submissions with no review body are excluded, and so is a submission
-        the post-cutover import has copied into `reviews` (it is an ordinary
-        review on its release by then), for as long as that imported review
-        exists. If the imported review, or its release, is deleted, the
-        submission is listed again: after a release delete, which clears its
-        `album_id`, by `artist` only. Nothing is lost.
+        Submissions with no review body are excluded. A submission whose
+        review is among the in-app reviews (/reviews) is left out while that
+        review exists, and is listed again if that review is deleted;
+        Backend-Service ADR 0011
+        (https://github.com/WXYC/Backend-Service/blob/main/docs/adr/0011-album-review-submissions-separate-archive.md)
+        sets out exactly when. Nothing is lost.
 
         The consent-gated PUBLIC surface is the `wxycReviews` array attached to
         GET /proxy/metadata/album, which is anonymous-reachable and applies a
