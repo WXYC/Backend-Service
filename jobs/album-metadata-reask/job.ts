@@ -261,6 +261,9 @@ export const resolveMode = (env: NodeJS.ProcessEnv = process.env, args: string[]
     );
   }
   const timeout = (envName: string, fallback: number) => requirePositiveInt(env[envName], envName, fallback, CTX);
+  if (name === '--restore' && !isBlank(env[ALBUM_IDS_ENV])) {
+    throw new Error(`[${JOB_NAME}] ${ALBUM_IDS_ENV} does not narrow --restore; pass --album-ids instead.`);
+  }
   if (name === '--catalog-pass') {
     const statementTimeoutMs = timeout(CATALOG_STATEMENT_TIMEOUT_ENV, CATALOG_STATEMENT_TIMEOUT_DEFAULT);
     return { mode: 'catalog-pass', options: { runId, statementTimeoutMs } };
@@ -325,9 +328,7 @@ export const runRestoreMode = async (options: RestoreOptions): Promise<RestoreRe
     : `DRY RUN — no writes. Would restore ${albums.restorable} of ${albums.backed_up} albums and ${library.restorable} of ${library.backed_up} catalog covers.`;
   log('info', execute ? 'restore' : 'restore_plan', message, { reask_run_id: runId, ...result });
   if (result.analyze_error !== null) {
-    log('warn', 'analyze_pending', `ANALYZE failed after the restore wrote; run it by hand: ${result.analyze_error}`, {
-      tables: ['library', 'album_metadata'],
-    });
+    log('warn', 'analyze_pending', `ANALYZE failed after the restore wrote; run it by hand: ${result.analyze_error}`);
   }
   return result;
 };

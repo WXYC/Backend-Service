@@ -165,18 +165,22 @@ describe('runRestore', () => {
     expect(execute.mock.calls.map(([statement]) => flat(statement))).toEqual(sent.map((s) => kinds[s] ?? s));
   });
 
-  it('reports a failed ANALYZE instead of throwing: the restore has already committed', async () => {
+  it('reports a failed ANALYZE by table instead of throwing, and still analyzes the other table', async () => {
     execute
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(probe(1, 1, 0, 0))
+      .mockResolvedValueOnce(probe(1, 1, 1, 1))
+      .mockResolvedValueOnce(ids(1))
       .mockResolvedValueOnce(ids(1))
       .mockResolvedValueOnce([])
-      .mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
+      .mockRejectedValueOnce(new Error('canceling statement due to statement timeout'))
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
 
     expect(await runRestore(RUN, { execute: true, timeoutMs: 45_000 })).toMatchObject({
       album_metadata: target(1, 1, 1),
-      analyze_error: 'canceling statement due to statement timeout',
+      analyze_error: 'library: canceling statement due to statement timeout',
     });
+    expect(flat(execute.mock.calls.at(-1)?.[0])).toBe(ANALYZE_ALBUMS);
   });
 
   it('runs the probe and the writes in one transaction, under the five-minute default', async () => {

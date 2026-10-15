@@ -242,6 +242,13 @@ describe('resolveMode', () => {
     expect(() => mode(flags)).toThrow(error);
   });
 
+  // The dry run's knob must not look like it narrows a restore: the restore would revert the whole run.
+  it('refuses REASK_ALBUM_IDS with --restore, and names --album-ids', () => {
+    expect(() => mode(['--restore', 'run-1', '--execute'], { REASK_ALBUM_IDS: '7' })).toThrow(
+      'REASK_ALBUM_IDS does not narrow --restore; pass --album-ids'
+    );
+  });
+
   it.each(['0', '-1', 'thirty'])('rejects REASK_RESTORE_STATEMENT_TIMEOUT_MS=%j', (value) => {
     expect(() => mode(['--restore', 'run-1'], { REASK_RESTORE_STATEMENT_TIMEOUT_MS: value })).toThrow(
       'REASK_RESTORE_STATEMENT_TIMEOUT_MS'

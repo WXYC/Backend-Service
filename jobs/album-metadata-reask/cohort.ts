@@ -100,8 +100,7 @@ const cohortCtes = (inputs: CohortInputs, range: SQL = sql`TRUE`): SQL => sql`WI
          substring(am."discogs_url" FROM '/release/([1-9][0-9]{0,8})(?![0-9])')::int AS stored_release_id,
          COALESCE(l."artist_name", a."artist_name") AS artist_name,
          l."album_title" AS album_title,
-         l."discogs_unavailable" AS discogs_unavailable,
-         EXISTS (SELECT 1 FROM ${table('album_metadata_reask_backup')} rb WHERE rb.album_id = am."album_id" AND rb.target_table = 'restore') AS restored
+         l."discogs_unavailable" AS discogs_unavailable
     FROM ${table('album_metadata')} am
     JOIN ${table('library')} l ON l."id" = am."album_id"
     LEFT JOIN ${table('artists')} a ON a."id" = l."artist_id"
@@ -219,7 +218,8 @@ export const enumerateCohortSql = (
         : sql`(am."album_id" > ${cursor} OR ${listed})`;
   return sql`${cohortCtes(inputs, range)}
 SELECT c.album_id, c.legacy_release_id, c.discogs_url, c.artwork_url, c.library_artwork_url,
-       c.stored_release_id, c.artist_name, c.album_title, c.reason, c.pin_release_id, c.pin_source, c.restored
+       c.stored_release_id, c.artist_name, c.album_title, c.reason, c.pin_release_id, c.pin_source,
+       EXISTS (SELECT 1 FROM ${table('album_metadata_reask_backup')} rb WHERE rb.album_id = c.album_id AND rb.target_table = 'restore') AS restored
   FROM cohort c
  WHERE c.artist_name IS NOT NULL AND c.discogs_unavailable = false
  ORDER BY c.album_id${cap > 0 ? sql` LIMIT ${cap}` : sql``}`;
