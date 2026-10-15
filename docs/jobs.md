@@ -210,7 +210,7 @@ Nightly cron ETL (ADR 0011 / album-reviews-sheet-sync plan): mirror the ~1,650-r
 
 Path: `jobs/album-reviews-import/`
 
-One-shot, dry-run by default (`--apply`; BS#3132, ADR 0011's 2026-10-14 amendment): after the form closes, copies every `album_review_submissions` row linked to a library release into `reviews` on that release, once, with revision 1 dated at the form's `submitted_at`. Which rows it skips, in precedence order, is set out in [ADR 0011](adr/0011-album-review-submissions-separate-archive.md); rows with an over-long author are listed for a hand decision. Only inserts. Run by hand through an SSH tunnel with tsx after BS#2812's final ingest and the conditional-yes read; no Dockerfile. See its README.
+One-shot, dry-run by default (`--apply`; BS#3132, ADR 0011's 2026-10-14 amendment): after the form closes, copies every `album_review_submissions` row linked to a library release into `reviews` on that release, once, with revision 1 dated at the form's `submitted_at`. [ADR 0011](adr/0011-album-review-submissions-separate-archive.md) sets out which rows it skips and the job's README gives the order; rows with an over-long author are listed for a hand decision. Only inserts. Run by hand through an SSH tunnel with tsx after BS#2812's final ingest and the conditional-yes read; no Dockerfile. See its README.
 
 ### `@wxyc/album-critic-reviews-etl`
 

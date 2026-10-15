@@ -4,6 +4,7 @@ import {
   db,
   extractConstraintName,
   extractSqlState,
+  FILED_STATES,
   format,
   intake_item_passes,
   intake_items,
@@ -48,8 +49,8 @@ export { mayFileItem, lockReleaseRow };
 
 export type IntakeItemState = (typeof intakeItemStateEnum.enumValues)[number];
 
-/** States past which an item is catalogued, so it can no longer be edited or deleted. */
-export const FILED_STATES: IntakeItemState[] = ['filed', 'finalized'];
+/** States past which an item is catalogued, so it can no longer be edited or deleted; declared in `@wxyc/database` so the album-reviews import reads the same list. */
+export { FILED_STATES };
 
 /**
  * "`column` is a filed or finalized state" for a raw `sql` fragment, rendered `column IN ($1, $2)` from `FILED_STATES`

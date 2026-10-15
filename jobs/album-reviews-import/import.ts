@@ -8,10 +8,10 @@
  * `submitted_at`. Only inserts; a dry run reads in a read-only transaction.
  */
 
-import { AUTHOR_MAX } from '@wxyc/database';
+import { AUTHOR_MAX, FILED_STATES } from '@wxyc/database';
 import type { Sql } from 'postgres';
 
-/** Why an archive row is not imported (see ADR 0011). A row is reported under the FIRST reason that applies, in this order. */
+/** Why an archive row is not imported (rules: docs/adr/0011-album-review-submissions-separate-archive.md). A row is reported under the FIRST reason that applies, in this order. */
 export const SKIP_REASONS = [
   'no_release',
   'blank_review',
@@ -23,7 +23,7 @@ export type SkipReason = (typeof SKIP_REASONS)[number];
 
 export interface ImportResult {
   status: 'dry-run' | 'applied';
-  /** Rows that pass the first three skip rules (ADR 0011): everything the job could import. */
+  /** Rows that pass the first three skip rules (the README's counter definitions): everything the job could import. */
   eligible: number;
   /** Rows written; in a dry run, the rows an `--apply` would write. */
   imported: number;
@@ -41,7 +41,7 @@ interface ArchiveRow {
   imported: boolean;
 }
 
-/** The two reasons that still count a row as eligible (ADR 0011). */
+/** The two reasons that still count a row as eligible (the README's counter definitions). */
 const isEligibleReason = (reason: SkipReason) => reason === 'already_imported' || reason === 'author_too_long';
 
 /** The author as it would be stored: `reviewer_raw`, trimmed; null when blank. */
@@ -85,9 +85,11 @@ export const runImport = async (
   };
   await sql.begin(apply ? 'read write' : 'read only', async (tx) => {
     const t = (table: string) => tx`${tx(schema)}.${tx(table)}`;
+    // `cited`: an intake item cites this row and is unfiled or filed as its release (docs/adr/0011-album-review-submissions-separate-archive.md).
     const rows = await tx<ArchiveRow[]>`
       SELECT s.id, s.album_id, s.review, s.reviewer_raw,
-             EXISTS (SELECT 1 FROM ${t('intake_items')} i WHERE i.cited_submission_id = s.id) AS cited,
+             EXISTS (SELECT 1 FROM ${t('intake_items')} i WHERE i.cited_submission_id = s.id
+                        AND (i.state NOT IN ${tx(FILED_STATES)} OR i.album_id = s.album_id)) AS cited,
              EXISTS (SELECT 1 FROM ${t('reviews')} r WHERE r.imported_from_submission_id = s.id) AS imported
         FROM ${t('album_review_submissions')} s
        ORDER BY s.id`;

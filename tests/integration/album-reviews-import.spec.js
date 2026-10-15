@@ -242,3 +242,100 @@ describe('album-reviews import (real PG)', () => {
     expect(result.skipped.already_imported).toBe(pre.skipped.already_imported);
   });
 });
+
+// Which citing intake items keep a form row out of the import (BS#3164; the rule is in ADR 0011): one that is unfiled or
+// filed as the row's own release. Each case seeds its own row and its own citing items, then takes a dry run and an
+// `--apply` against counts read just before the row existed, so the cases do not depend on each other or on the order.
+describe('album-reviews import: the citation skip (real PG)', () => {
+  let sql;
+  let release;
+  let other;
+  const run = (apply) => runImport(sql, { schema: SCHEMA, apply, log: () => {} });
+  const importedCount = async (submission) =>
+    (
+      await sql`SELECT count(*)::int AS n FROM ${sql(SCHEMA)}.reviews WHERE imported_from_submission_id = ${submission.id}`
+    )[0].n;
+
+  beforeAll(async () => {
+    sql = getTestDb();
+    release = await seedLibraryRelease();
+    other = await seedLibraryRelease({ artist_name: 'Jessica Pratt', album_title: 'On Your Own Love Again' });
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM ${sql(SCHEMA)}.reviews WHERE imported_from_submission_id IS NOT NULL`;
+    await removeSeededIntakeItems();
+    await removeSeededFormSubmissions();
+    await removeSeededLibraryReleases();
+  });
+
+  test.each([
+    ['an unfiled item', [{ state: 'pool' }], 'skipped'],
+    ['an item checked out and not yet filed', [{ state: 'reviewed' }], 'skipped'],
+    ['an item filed as the row’s own release', [{ state: 'filed', album: 'own' }], 'skipped'],
+    ['an item finalized as the row’s own release', [{ state: 'finalized', album: 'own' }], 'skipped'],
+    ['an item filed as another release', [{ state: 'filed', album: 'other' }], 'imported'],
+    ['an item finalized as another release', [{ state: 'finalized', album: 'other' }], 'imported'],
+    ['one item filed elsewhere and one unfiled', [{ state: 'filed', album: 'other' }, { state: 'pool' }], 'skipped'],
+    [
+      'one item filed elsewhere and one filed as the row’s own release',
+      [
+        { state: 'filed', album: 'other' },
+        { state: 'filed', album: 'own' },
+      ],
+      'skipped',
+    ],
+  ])('a row cited by %s is %s, as a dry run and under --apply', async (_name, items, outcome) => {
+    const pre = await run(false);
+    const row = await seedFormSubmission({
+      album_id: release.id,
+      review: 'A form review.',
+      reviewer_raw: 'Test Reviewer',
+    });
+    for (const { state, album } of items) {
+      await seedIntakeItem({
+        cited_submission_id: row.id,
+        state,
+        ...(album && { album_id: (album === 'own' ? release : other).id }),
+      });
+    }
+    const delta = (result) => ({
+      cited: result.skipped.cited_by_intake_item - pre.skipped.cited_by_intake_item,
+      eligible: result.eligible - pre.eligible,
+      imported: result.imported - pre.imported,
+    });
+    const expected =
+      outcome === 'imported' ? { cited: 0, eligible: 1, imported: 1 } : { cited: 1, eligible: 0, imported: 0 };
+
+    const dry = await run(false);
+
+    expect(delta(dry)).toEqual(expected);
+    expect(await importedCount(row)).toBe(0);
+
+    const applied = await run(true);
+
+    expect(applied.status).toBe('applied');
+    expect(delta(applied)).toEqual(expected);
+    expect(await importedCount(row)).toBe(outcome === 'imported' ? 1 : 0);
+  });
+
+  test('a row skipped for an unfiled item is imported by a later run once the item is filed as another release', async () => {
+    const row = await seedFormSubmission({
+      album_id: release.id,
+      review: 'A form review.',
+      reviewer_raw: 'Test Reviewer',
+    });
+    const item = await seedIntakeItem({ cited_submission_id: row.id, state: 'pool' });
+
+    await run(true);
+    expect(await importedCount(row)).toBe(0);
+
+    await sql`UPDATE ${sql(SCHEMA)}.intake_items SET state = 'filed', album_id = ${other.id} WHERE id = ${item.id}`;
+    await run(true);
+    expect(await importedCount(row)).toBe(1);
+
+    const again = await run(true);
+    expect(again.imported).toBe(0);
+    expect(await importedCount(row)).toBe(1);
+  });
+});
