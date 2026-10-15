@@ -4,7 +4,7 @@ One-shot job that re-asks LML for `album_metadata` rows whose stored Discogs rel
 
 ## Status
 
-In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--execute`, `--preview`, `--restore` and `--catalog-pass` refuse with the issue that builds each one, before any file is read, and exit 1. Any other unknown flag also refuses; `--dry-run` is accepted and changes nothing.
+In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--catalog-pass <run_id>` runs the catalog cover pass alone (below). `--execute`, `--preview` and `--restore` refuse with the issue that builds each one, before any file is read, and exit 1. Any other unknown flag also refuses; `--dry-run` is accepted and changes nothing.
 
 Landed so far:
 
@@ -12,6 +12,7 @@ Landed so far:
 - `cohort.ts` ([#3142](https://github.com/WXYC/Backend-Service/issues/3142)): the read-only cohort counts and enumeration; see its docblock. Built as `dist/cohort.cjs` for `tests/integration/album-metadata-reask.spec.js`.
 - The knobs and the dry run ([#3144](https://github.com/WXYC/Backend-Service/issues/3144)).
 - `write.ts`, `artist-keep-sql.ts` and `run-batch.ts` ([#3145](https://github.com/WXYC/Backend-Service/issues/3145)): the guarded `album_metadata` write and one batch of ask, decide and write. Nothing calls `runBatch` yet; the execute loop is [#3151](https://github.com/WXYC/Backend-Service/issues/3151). `write.ts` and `artist-keep-sql.ts` are tsup entries; the integration spec runs `dist/write.cjs`, which bundles the artist rule.
+- `catalog-pass.ts` ([#3146](https://github.com/WXYC/Backend-Service/issues/3146)): the catalog cover pass and the `--catalog-pass <run_id>` mode. A tsup entry; the integration spec runs `dist/catalog-pass.cjs` after real album writes.
 
 ## The album write
 
@@ -19,9 +20,21 @@ One statement per album (decision 7 on #3137). It locks the `album_metadata` row
 
 - **Release group** (`discogs_url`, `artwork_url`, `release_year`, `label`, `full_release_date`, `genres`, `styles`, `tracklist`): written as a unit from the answer, nulls included; all NULL on `clear` (decision 3).
 - **Artist group** (`discogs_artist_id`, `artist_bio`, `artist_wikipedia_url`, `artist_image_url`, `bio_tokens`): `artist-keep-sql.ts`, decision 8. A null in the answer keeps the stored value only when both `discogs_artist_id`s are set and equal; otherwise the answer is written, nulls included. Kept as stored on `clear`, and still imaged, so a restore never meets a missing key. `artist_cleared` counts a stored bio replaced by none.
-- **Never written:** the streaming columns, and `library`. The catalog cover pass is its own slice ([#3146](https://github.com/WXYC/Backend-Service/issues/3146)), so the catalog watermark moves once per run, not once per album.
+- **Never written:** the streaming columns, and `library`. The catalog cover is the catalog cover pass's (below), so the catalog watermark moves once per run, not once per album.
 
 `runBatch` asks LML with `allowReleaseResolutionFallback: true` and `budgetMs: null`, decides each admitted row with `decideReask`, and writes only `rebind`, `rebind_unpinned` and `clear`. A failed bulk call carries the whole batch; a write that throws carries its album.
+
+## The catalog cover pass
+
+`library.artwork_url` is served by catalog search and copied into `library.db`, and every other writer to it is fill-null, so a wrong-release catalog cover never heals on its own (BS#2258). Decision 4 on #3137: the pass rewrites it only where it still equals the cover the album write replaced. A catalog cover that differs came from a librarian or another backfill and is never touched.
+
+The pass reads one run's `album_metadata` backup rows. It skips an album whose `album_metadata` row was touched since the write (`updated_at <> written_at`) or that already has a `library` backup row for the run. For the rest it sets `library.artwork_url` to the backup's `after_image->>'artwork_url'` (NULL for a `clear` or a coverless release) where the catalog cover is non-null, equals `before_image->>'artwork_url'`, and differs from the new cover. One statement writes every `library` backup row (`target_table = 'library'`, the album write's provenance) and updates only the rows it backed up.
+
+- **One statement per run.** The catalog watermark trigger `touch_library_watermark` (migration 0185) is `FOR EACH STATEMENT` and fires even on a zero-row UPDATE, and each bump makes every client re-download the catalog (BS#2052). So the pass first sends a read-only probe of the same rows and sends the write only when the probe finds some. An empty probe sends nothing and leaves the watermark alone.
+- Probe and write run in one transaction under `SET LOCAL statement_timeout` from `REASK_CATALOG_STATEMENT_TIMEOUT_MS` (default 30 s). After a pass that wrote, the job runs `ANALYZE wxyc_schema.library`.
+- **Side effects, accepted:** one watermark bump per pass that writes, and one row-level `cdc_library` `pg_notify` per rewritten row (migration 0046).
+- **Idempotent.** A second pass for the same run finds nothing: each rewritten album has its `library` backup row.
+- `--catalog-pass <run_id>` runs the pass alone, for a run that died before its end. It reads no input file and takes no other flag. It logs one `catalog_pass` line with `probed` and `rewritten`; a `run_id` with no album writes (a typo) logs `probed: 0`. The execute loop ([#3151](https://github.com/WXYC/Backend-Service/issues/3151)) will call the same function at the end of each run.
 
 ## Build and deploy
 
@@ -57,6 +70,7 @@ Every knob that is set must parse; a value that does not is an error, never a de
 | `REASK_BULK_BATCH_SIZE`                                     | 5          | Items per LML bulk request; at most the client cap (100).                                                                                         |
 | `REASK_BULK_RATE_PER_MIN`                                   | 4          | Batches per minute.                                                                                                                               |
 | `REASK_READ_TIMEOUT_MS`                                     | 300000     | `SET LOCAL statement_timeout` for the cohort reads.                                                                                               |
+| `REASK_CATALOG_STATEMENT_TIMEOUT_MS`                        | 30000      | `SET LOCAL statement_timeout` for the catalog cover pass (probe and write).                                                                       |
 | `REASK_MAX_ALBUMS`                                          | 0 (no cap) | Stop after this many albums. Must not be smaller than the `REASK_ALBUM_IDS` list.                                                                 |
 | `REASK_ALBUM_AFTER_ID`                                      | 0          | Resume cursor: only `album_id` above this.                                                                                                        |
 | `REASK_ALBUM_IDS`                                           | none       | Up to 200 comma-separated album ids. With cursor 0, a retry of just those; with a cursor, carried into that run (each id at or below the cursor). |
