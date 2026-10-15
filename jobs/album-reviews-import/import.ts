@@ -1,6 +1,6 @@
 /**
- * Importable core of the one-shot album-reviews import (BS#3132, ADR 0011): copies every form-archive row that is
- * linked to a library release into `reviews` on that release, once, with the imported text as revision 1.
+ * Importable core of the one-shot album-reviews import (BS#3132): copies linked form-archive rows into `reviews` on
+ * their release, once, with the imported text as revision 1. Which rows it skips is set out in ADR 0011 (docs/adr/0011-album-review-submissions-separate-archive.md).
  *
  * Takes the postgres.js handle from its caller so the integration spec can run this exact module (`dist/import.cjs`)
  * against a real Postgres. It cannot call `apps/backend`'s `writeFirstRevisionIfMissing`, so it writes revision 1 with
@@ -11,7 +11,7 @@
 import { AUTHOR_MAX } from '@wxyc/database';
 import type { Sql } from 'postgres';
 
-/** Why an archive row is not imported. A row is reported under the FIRST reason that applies, in this order. */
+/** Why an archive row is not imported (see ADR 0011). A row is reported under the FIRST reason that applies, in this order. */
 export const SKIP_REASONS = [
   'no_release',
   'blank_review',
@@ -23,12 +23,12 @@ export type SkipReason = (typeof SKIP_REASONS)[number];
 
 export interface ImportResult {
   status: 'dry-run' | 'applied';
-  /** Rows with a release, a non-blank review and no intake-item citation: everything the job could import. */
+  /** Rows that pass the first three skip rules (ADR 0011): everything the job could import. */
   eligible: number;
   /** Rows written; in a dry run, the rows an `--apply` would write. */
   imported: number;
   skipped: Record<SkipReason, number>;
-  /** Eligible rows refused for an author over `AUTHOR_MAX` code points: the README sends these to a hand decision. */
+  /** Eligible rows refused for an over-long author: the README sends these to a hand decision. */
   tooLongAuthors: number[];
 }
 
@@ -41,7 +41,7 @@ interface ArchiveRow {
   imported: boolean;
 }
 
-/** The two reasons that still count a row as eligible: it was importable but for a prior import or its author. */
+/** The two reasons that still count a row as eligible (ADR 0011). */
 const isEligibleReason = (reason: SkipReason) => reason === 'already_imported' || reason === 'author_too_long';
 
 /** The author as it would be stored: `reviewer_raw`, trimmed; null when blank. */

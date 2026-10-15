@@ -1,10 +1,7 @@
 /**
  * `GET /album-reviews` leaves out an archive row once `jobs/album-reviews-import` has copied it into `reviews`
- * (BS#3132): the review is then an ordinary review on its release, and listing the archive row too would show it twice.
- * A row the job skipped still lists. The exclusion keys on the live provenance column, so it lasts only while the
- * imported review does: once that review is deleted, the archive row lists again. Nothing is lost. After a release
- * delete, an intake item that had taken the imported review as its cover review also keeps its own copy; deleting the
- * imported review itself takes it off such an item and makes no copy. Rows come from `tests/utils/intake_seed.js`.
+ * (BS#3132), and lists it again when that review is deleted; the rule is set out in ADR 0011
+ * (docs/adr/0011-album-review-submissions-separate-archive.md). Rows come from `tests/utils/intake_seed.js`.
  *
  * The role gate is not asserted here: CI runs with AUTH_BYPASS=true. It is pinned in
  * `tests/unit/routes/album-reviews-permissions.route.test.ts`.
