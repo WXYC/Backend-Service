@@ -910,3 +910,81 @@ describe('BS#3148 re-ask restore (REAL statements, real PG)', () => {
     expect(await watermark()).toBe('2000-01-01T00:00:00.000Z');
   });
 });
+
+/**
+ * BS#3150: the preview's stored read (`dist/preview.cjs`). Its `cover_sibling` is the `/playlists/recentEntries?v=2`
+ * gap: `enrichPlaycuts` shows the lowest-`album_id` album with a cover among those sharing a play's lookup key, so a
+ * NULL new cover can still show another album's. The lookup key needs a real planner and real flowsheet rows.
+ */
+describe('BS#3150 preview stored read (REAL statement, real PG)', () => {
+  const { readStored } = require(path.join(distDir, 'preview.cjs'));
+  let sql;
+  const albumIds = [];
+  const flowsheetIds = [];
+
+  const album = async (suffix, artworkUrl) => {
+    const [{ id }] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+      VALUES (1, 11, 1, ${'b3150-preview-' + suffix}, 9999, 'Stereolab')
+      RETURNING id
+    `;
+    albumIds.push(id);
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata (album_id, discogs_url, artwork_url, artist_bio)
+      VALUES (${id}, ${release(1001)}, ${artworkUrl}, 'French-English band.')
+    `;
+    return id;
+  };
+
+  const play = async (albumId, artist, title) => {
+    const [{ id }] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.flowsheet
+        (play_order, entry_type, artist_name, album_title, track_title, request_flag, segue, album_id, add_time)
+      VALUES (98765, 'track', ${artist}, ${title}, 'Miss Modular', false, false, ${albumId}, now())
+      RETURNING id
+    `;
+    flowsheetIds.push(id);
+  };
+
+  beforeAll(() => {
+    sql = getTestDb();
+  });
+
+  afterAll(async () => {
+    if (flowsheetIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.flowsheet WHERE id = ANY(${flowsheetIds})`;
+    }
+    if (albumIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${albumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${albumIds})`;
+    }
+  });
+
+  test('reads the stored row, and finds a lookup-key sibling only when it has a cover', async () => {
+    // A play of the LP and a play of the CD share a lookup key, up to case and surrounding spaces.
+    const lp = await album('lp', null);
+    const cd = await album('cd', 'https://i.discogs.com/b3150/cd.jpg');
+    await play(lp, 'Stereolab', 'Dots and Loops b3150');
+    await play(cd, ' stereolab', 'DOTS AND LOOPS b3150 ');
+    // A sibling with no cover is not a gap.
+    const bare = await album('bare', null);
+    const bareSibling = await album('bare-sibling', null);
+    await play(bare, 'Stereolab', 'Emperor Tomato Ketchup b3150');
+    await play(bareSibling, 'Stereolab', 'Emperor Tomato Ketchup b3150');
+    // The album's own plays are not a sibling, and an album with no plays has none.
+    const alone = await album('alone', 'https://i.discogs.com/b3150/alone.jpg');
+    await play(alone, 'Stereolab', 'Aluminum Tunes b3150');
+    const unplayed = await album('unplayed', null);
+
+    const stored = await readStored([lp, bare, alone, unplayed], 60_000);
+
+    expect([lp, bare, alone, unplayed].map((id) => stored.get(id)?.cover_sibling)).toEqual([true, false, false, false]);
+    expect(stored.get(alone)).toMatchObject({
+      album_id: alone,
+      discogs_url: release(1001),
+      artwork_url: 'https://i.discogs.com/b3150/alone.jpg',
+      artist_bio: 'French-English band.',
+    });
+    expect(stored.has(cd)).toBe(false);
+  });
+});

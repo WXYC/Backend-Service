@@ -29,7 +29,7 @@ const execute = db.execute as unknown as jest.Mock;
 const PIN = 4101;
 const STORED = 4102;
 const EXPECTED = 4103;
-const OPTS = { runId: 'run-1', pinExportSha256: 'abc123', timeoutMs: 60_000 };
+const OPTS = { write: { runId: 'run-1', pinExportSha256: 'abc123' }, timeoutMs: 60_000 };
 
 const cohortRow = (over: Partial<CohortRow>): CohortRow => ({
   album_id: 10,
@@ -195,7 +195,11 @@ describe('runBatch — only a writing verdict writes', () => {
     const result = await runBatch([MISMATCH], OPTS);
 
     expect(execute).not.toHaveBeenCalled();
-    expect(result).toEqual({ totals: { indeterminate: 1, unexpected_index: 1 }, carriedAlbumIds: [10] });
+    expect(result).toEqual({
+      totals: { indeterminate: 1, unexpected_index: 1 },
+      carriedAlbumIds: [10],
+      decided: [expect.objectContaining({ verdict: { kind: 'indeterminate', unexpectedIndex: true } })],
+    });
     expect(captureError).toHaveBeenCalledWith(expect.any(Error), 'unexpected_index', { album_id: 10 });
   });
 
@@ -213,6 +217,22 @@ describe('runBatch — only a writing verdict writes', () => {
     const values = JSON.stringify(execute.mock.calls[0]);
     expect(values).toContain('abc123');
     expect(values).toContain(`\\"verdict\\":\\"${kind}\\"`);
+  });
+
+  // `--preview` (BS#3150): the same ask and verdict, returned for the sign-off line, and never a statement.
+  it.each([
+    ['rebind', MISMATCH, answer(MISMATCH, PIN)],
+    ['rebind_unpinned', removed(EXPECTED), answer(removed(EXPECTED), EXPECTED)],
+    ['clear', removed(null), noMatch()],
+    ['pin_not_bound', MISMATCH, answer(MISMATCH, STORED)],
+  ])('with write: null, %s is decided and returned but never written', async (kind, admitted, item) => {
+    bulkLookupMetadata.mockResolvedValue({ results: [item] } as never);
+
+    const { totals, decided } = await runBatch([admitted], { ...OPTS, write: null });
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(totals).toEqual({ [kind]: 1 });
+    expect(decided).toEqual([{ admitted, item, verdict: expect.objectContaining({ kind }) }]);
   });
 
   it('counts a failed guard as skipped_raced, a cleared bio as artist_cleared, and a throw as write_failed', async () => {
