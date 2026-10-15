@@ -13,7 +13,7 @@ const CODE_LETTERS_TABLE = [
   ['Z--', true],
   ['z-r', false],
   ['VA', false],
-  ['SEED', false],
+  ['JPRA', false],
   ['MOLI', false],
 ];
 
