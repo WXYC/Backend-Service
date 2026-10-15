@@ -24,18 +24,20 @@ const flat = (chunk: unknown): string => renderSql(chunk).replace(/\s+/g, ' ').t
 describe('catalogPassSql', () => {
   const statement = flat(catalogPassSql('run-1'));
 
-  it("reads only this run's album writes whose stored cover is still the one written, and not yet passed", () => {
+  it("reads only this run's album writes whose stored release and cover are still the ones written, neither passed nor restored", () => {
     expect(statement).toContain(
-      `WHERE b.run_id = run-1::text AND b.target_table = 'album_metadata' AND am."artwork_url" IS NOT DISTINCT FROM b.after_image->>'artwork_url'`
+      `WHERE b.run_id = run-1::text AND b.target_table = 'album_metadata' AND am."discogs_url" IS NOT DISTINCT FROM b.after_image->>'discogs_url' AND am."artwork_url" IS NOT DISTINCT FROM b.after_image->>'artwork_url'`
     );
     expect(statement).not.toContain('updated_at');
     expect(statement).toContain(
-      `NOT EXISTS (SELECT 1 FROM "wxyc_schema"."album_metadata_reask_backup" lb WHERE lb.run_id = b.run_id AND lb.target_table = 'library' AND lb.row_id = b.album_id)`
+      `NOT EXISTS (SELECT 1 FROM "wxyc_schema"."album_metadata_reask_backup" lb WHERE lb.run_id = b.run_id AND lb.target_table IN ('library', 'restore') AND lb.row_id = b.album_id)`
     );
   });
 
   it('locks the album_metadata row, so a write that commits meanwhile is re-checked on its latest version', () => {
-    expect(statement).toContain(`lb.target_table = 'library' AND lb.row_id = b.album_id) FOR UPDATE OF am )`);
+    expect(statement).toContain(
+      `lb.target_table IN ('library', 'restore') AND lb.row_id = b.album_id) FOR UPDATE OF am )`
+    );
   });
 
   it('rewrites only a non-null catalog cover that equals the old cover and differs from the new one', () => {
