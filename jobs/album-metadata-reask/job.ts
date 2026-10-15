@@ -409,7 +409,7 @@ const admitCohort = async (options: ReaskOptions, limit: number) => {
     const message = `${heldRestored.length} restored albums held; ${INCLUDE_RESTORED_ENV}=1 asks them`;
     log('info', 'held_restored', message, { album_ids: heldRestored });
   }
-  return { plan: { inputs, cohort: counts, enumerated: candidates.length, admission }, admitted };
+  return { inputs, cohort: counts, enumerated: candidates.length, admission, admitted };
 };
 
 export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> => {
@@ -419,13 +419,14 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
     after_album_id: options.afterAlbumId,
     album_ids: options.albumIds,
   });
-  const { plan } = await admitCohort(options, options.maxAlbums);
-  const batches = Math.ceil(plan.admission.asked / options.batchSize);
-  const summary: DryRunSummary = { ...plan, batches, estimated_minutes: Math.ceil(batches / options.ratePerMin) };
+  const { inputs, cohort, enumerated, admission } = await admitCohort(options, options.maxAlbums);
+  const batches = Math.ceil(admission.asked / options.batchSize);
+  const estimated_minutes = Math.ceil(batches / options.ratePerMin);
+  const summary: DryRunSummary = { inputs, cohort, enumerated, admission, batches, estimated_minutes };
   log(
     'info',
     'dry_run_plan',
-    `DRY RUN — no LML calls, no writes. Would ask ${plan.admission.asked} albums in ${batches} batches of up to ${options.batchSize}.`,
+    `DRY RUN — no LML calls, no writes. Would ask ${admission.asked} albums in ${batches} batches of up to ${options.batchSize}.`,
     { ...summary }
   );
   return summary;
@@ -466,10 +467,8 @@ export const runPreview = async (options: ReaskOptions): Promise<PreviewSummary>
     }
     const batch = sample.slice(start, start + options.batchSize);
     const result = await runBatch(batch, { write: null, timeoutMs: bulkTimeoutMs(batch.length) });
-    for (const [key, n] of Object.entries(result.totals) as [keyof BatchTotals, number][]) {
-      totals[key] = (totals[key] ?? 0) + n;
-    }
     for (const decided of result.decided) {
+      totals[decided.verdict.kind] = (totals[decided.verdict.kind] ?? 0) + 1;
       const line = previewLine(decided, stored.get(decided.admitted.row.album_id));
       log('info', 'preview', `${line.verdict} for album_id=${line.album_id}`, line);
     }
@@ -477,6 +476,11 @@ export const runPreview = async (options: ReaskOptions): Promise<PreviewSummary>
   const summary: PreviewSummary = { population: admitted.length, sampled: sample.length, totals };
   const message = `PREVIEW — no writes. Asked LML for ${sample.length} of ${admitted.length} admitted albums.`;
   log('info', 'preview_done', message, { ...summary });
+  if (sample.length > 0 && totals.indeterminate === sample.length) {
+    throw new Error(
+      `[${JOB_NAME}] LML answered none of the ${sample.length} sampled albums; the preview is not a sign-off sample.`
+    );
+  }
   return summary;
 };
 

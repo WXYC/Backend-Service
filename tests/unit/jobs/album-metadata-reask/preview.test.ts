@@ -254,6 +254,18 @@ describe('previewLine', () => {
     expect(previewLine(row, STORED)).toEqual(expected);
   });
 
+  // Code review on #3278: a vanished row must not read as "nothing changes", and a long list must not split the line.
+  it.each<[string, StoredRow | undefined, Record<string, unknown>]>([
+    ['a row gone before the stored read says so', undefined, { verdict: 'rebind', changes: null }],
+    [
+      'a tracklist is shown by its length',
+      { ...STORED, tracklist: [{ position: 'A1', title: 'la paradoja' }] },
+      { changes: expect.objectContaining({ tracklist: { old: '1 items', new: null } }) },
+    ],
+  ])('%s', (_label, stored, expected) => {
+    expect(previewLine(decided('rebind'), stored)).toMatchObject(expected);
+  });
+
   it('leaves the catalog cover alone when it does not mirror the stored cover', () => {
     const own = {
       ...decided('rebind'),
