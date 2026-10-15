@@ -17,7 +17,7 @@ import { readFile } from 'fs/promises';
 import { closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { BULK_LOOKUP_INPUT_CAP } from '@wxyc/lml-client';
 import { CATALOG_STATEMENT_TIMEOUT_DEFAULT, runCatalogPass, type CatalogPassResult } from './catalog-pass.js';
-import { RESTORE_STATEMENT_TIMEOUT_DEFAULT, runRestore, type RestoreResult, type RestoreScope } from './restore.js';
+import { RESTORE_STATEMENT_TIMEOUT_DEFAULT, runRestore, type RestoreOptions, type RestoreResult } from './restore.js';
 import { READ_TIMEOUT_DEFAULT, countCohort, enumerateCohort, type CohortCounts, type CohortInputs } from './cohort.js';
 import {
   admit,
@@ -222,15 +222,12 @@ export interface CatalogPassOptions {
   statementTimeoutMs: number;
 }
 
-/** The run and albums to restore (`albumIds` empty is the whole run); without `execute` the restore only counts. */
-export type RestoreOptions = RestoreScope & { execute: boolean; statementTimeoutMs: number };
-
 export type ReaskMode =
   | { mode: 'dry-run'; options: ReaskOptions }
   | { mode: 'catalog-pass'; options: CatalogPassOptions }
   | { mode: 'restore'; options: RestoreOptions };
 
-const isFlag = (arg: string | undefined): boolean => arg === undefined || arg.trim() === '' || arg.startsWith('--');
+const isFlag = (arg: string | undefined): boolean => isBlank(arg) || (arg as string).startsWith('--');
 
 /**
  * The mode argv asks for. The first run_id mode in argv (`MODE_FLAGS`) takes
@@ -318,7 +315,7 @@ export const runCatalogPassMode = async ({
  */
 export const runRestoreMode = async (options: RestoreOptions): Promise<RestoreResult> => {
   const { runId, execute } = options;
-  const result = await runRestore(options, { execute, timeoutMs: options.statementTimeoutMs });
+  const result = await runRestore(options);
   if (result.album_metadata.backed_up === 0) {
     throw new Error(`[${JOB_NAME}] Run ${runId} has no album writes in scope; check the run_id and --album-ids.`);
   }

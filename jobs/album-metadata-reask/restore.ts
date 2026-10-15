@@ -21,6 +21,9 @@ export interface RestoreScope {
   albumIds: readonly number[];
 }
 
+/** A restore: its scope, and whether to write (`execute`) or only count. */
+export type RestoreOptions = RestoreScope & { execute: boolean; statementTimeoutMs?: number };
+
 const BACKUP = table('album_metadata_reask_backup');
 
 const inScope = (alias: 'b' | 'lb', { runId, albumIds }: RestoreScope): SQL => {
@@ -114,10 +117,8 @@ const TARGETS = [
  * (a zero-row `library` UPDATE still bumps the catalog watermark), in one transaction under `SET LOCAL
  * statement_timeout`. Then `ANALYZE` each table written, in its own transaction (`docs/bulk-update-playbook.md`).
  */
-export const runRestore = async (
-  scope: RestoreScope,
-  { execute, timeoutMs = RESTORE_STATEMENT_TIMEOUT_DEFAULT }: { execute: boolean; timeoutMs?: number }
-): Promise<RestoreResult> => {
+export const runRestore = async (scope: RestoreOptions): Promise<RestoreResult> => {
+  const { execute, statementTimeoutMs: timeoutMs = RESTORE_STATEMENT_TIMEOUT_DEFAULT } = scope;
   const result = await withStatementTimeout(timeoutMs, async (tx): Promise<RestoreResult> => {
     const [probe] = (await tx.execute(restoreProbeSql(scope))) as unknown as Array<Record<string, number>>;
     const counts = (name: string): RestoreTargetCounts => ({

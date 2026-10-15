@@ -151,7 +151,7 @@ describe('runRestore', () => {
       execute.mockResolvedValueOnce(response);
     }
 
-    expect(await runRestore(RUN, { execute: executeRestore, timeoutMs: 45_000 })).toEqual({
+    expect(await runRestore({ ...RUN, execute: executeRestore, statementTimeoutMs: 45_000 })).toEqual({
       album_metadata,
       library,
       analyze_error: null,
@@ -176,7 +176,7 @@ describe('runRestore', () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
 
-    expect(await runRestore(RUN, { execute: true, timeoutMs: 45_000 })).toMatchObject({
+    expect(await runRestore({ ...RUN, execute: true, statementTimeoutMs: 45_000 })).toMatchObject({
       album_metadata: target(1, 1, 1),
       analyze_error: 'library: canceling statement due to statement timeout',
     });
@@ -186,7 +186,7 @@ describe('runRestore', () => {
   it('runs the probe and the writes in one transaction, under the five-minute default', async () => {
     execute.mockResolvedValue(probe(0, 0, 0, 0));
 
-    await runRestore(RUN, { execute: true });
+    await runRestore({ ...RUN, execute: true });
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(RESTORE_STATEMENT_TIMEOUT_DEFAULT).toBe(300_000);
