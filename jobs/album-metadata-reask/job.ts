@@ -349,14 +349,8 @@ export interface DryRunSummary {
 
 const fileSummary = <T>(file: InputFile<T>) => ({ sha256: file.sha256, rows: file.rows.length });
 
-export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> => {
-  log('info', 'started', `${JOB_NAME} dry run starting`, {
-    batch_size: options.batchSize,
-    max_albums: options.maxAlbums,
-    after_album_id: options.afterAlbumId,
-    album_ids: options.albumIds,
-  });
-
+/** The dry run's work: parse the inputs, count and enumerate the cohort (up to `limit`), and admit it. */
+const admitCohort = async (options: ReaskOptions, limit: number) => {
   // All three parse before any read, so a malformed file costs no cohort query.
   const pins = parsePinFile(await readFile(options.pinFile));
   const removed = parseRemovalFile(await readFile(options.removedFile));
@@ -367,7 +361,7 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
   const cohortInputs: CohortInputs = { pins: pins.rows, removed: removed.rows };
   const counts = await countCohort(cohortInputs, options.readTimeoutMs);
   const candidates = await enumerateCohort(cohortInputs, {
-    limit: options.maxAlbums,
+    limit,
     afterAlbumId: options.afterAlbumId,
     albumIds: options.albumIds,
     timeoutMs: options.readTimeoutMs,
@@ -386,8 +380,9 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
     if (verdict.ask) {
       admission.asked += 1;
       // A `pin_removed` row is asked at any tier but `hold_manual`; only a `pin_mismatch` row is the exception.
-      if (row.reason === 'pin_mismatch' && verdict.entry.tier === 'hold_ungradeable')
+      if (row.reason === 'pin_mismatch' && verdict.entry.tier === 'hold_ungradeable') {
         admission.ungradeable_exception += 1;
+      }
     } else {
       admission.held[verdict.hold] = (admission.held[verdict.hold] ?? 0) + 1;
       if (verdict.hold === 'hold_restored') {
@@ -399,16 +394,20 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
     const message = `${heldRestored.length} restored albums held; ${INCLUDE_RESTORED_ENV}=1 asks them`;
     log('info', 'held_restored', message, { album_ids: heldRestored });
   }
+  return { inputs, cohort: counts, enumerated: candidates.length, admission };
+};
 
+export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> => {
+  log('info', 'started', `${JOB_NAME} dry run starting`, {
+    batch_size: options.batchSize,
+    max_albums: options.maxAlbums,
+    after_album_id: options.afterAlbumId,
+    album_ids: options.albumIds,
+  });
+  const { inputs, cohort, enumerated, admission } = await admitCohort(options, options.maxAlbums);
   const batches = Math.ceil(admission.asked / options.batchSize);
-  const summary: DryRunSummary = {
-    inputs,
-    cohort: counts,
-    enumerated: candidates.length,
-    admission,
-    batches,
-    estimated_minutes: Math.ceil(batches / options.ratePerMin),
-  };
+  const estimated_minutes = Math.ceil(batches / options.ratePerMin);
+  const summary: DryRunSummary = { inputs, cohort, enumerated, admission, batches, estimated_minutes };
   log(
     'info',
     'dry_run_plan',
