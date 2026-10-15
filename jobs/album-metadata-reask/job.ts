@@ -4,8 +4,9 @@
  * still serves a pin that was removed (BS#3137).
  *
  * So far the knobs and the dry run (BS#3144), which makes zero LML calls and
- * zero writes, `--catalog-pass <run_id>` (BS#3146) and `--restore <run_id>`
- * (BS#3148). Every other mode refuses, non-zero, until its slice lands.
+ * zero writes, `--catalog-pass <run_id>` (BS#3146), `--restore <run_id>`
+ * (BS#3148) and `--preview` (BS#3150), which asks LML for a sample and writes
+ * nothing. `--execute` refuses, non-zero, until its slice lands.
  *
  * The env parsers are copied from `jobs/album-metadata-bio-fill/job.ts`
  * (decision 6: copy, extract only when a third job needs them).
@@ -14,6 +15,7 @@
  */
 
 import { readFile } from 'fs/promises';
+import { setTimeout as sleep } from 'timers/promises';
 import { closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { BULK_LOOKUP_INPUT_CAP } from '@wxyc/lml-client';
 import { CATALOG_STATEMENT_TIMEOUT_DEFAULT, runCatalogPass, type CatalogPassResult } from './catalog-pass.js';
@@ -28,6 +30,8 @@ import {
   type InputFile,
 } from './inputs.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
+import { previewLine, readStored, sampleStratified } from './preview.js';
+import { runBatch, type AdmittedRow, type BatchTotals } from './run-batch.js';
 
 const JOB_NAME = 'album-metadata-reask' as const;
 const CTX = { context: JOB_NAME };
@@ -69,12 +73,13 @@ export const LIVE_ACTIVITY_LOOKBACK_ENV = 'LIVE_ACTIVITY_LOOKBACK_SECONDS';
 /**
  * Every mode flag. A pending one names the issue that builds it. A run_id
  * mode takes the run_id that follows it and only the flags it lists, and no
- * input file: it reads only that run's backup rows (`resolveMode`).
+ * input file: it reads only that run's backup rows (`resolveMode`). An
+ * inputs mode takes the dry run's options.
  */
-type ModeFlag = { pending: string } | { runIdOf: string; accepts: readonly string[] };
+type ModeFlag = { pending: string } | { runIdOf: string; accepts: readonly string[] } | { inputs: true };
 const MODE_FLAGS: ReadonlyMap<string, ModeFlag> = new Map<string, ModeFlag>([
   ['--execute', { pending: '#3151' }],
-  ['--preview', { pending: '#3150' }],
+  ['--preview', { inputs: true }],
   ['--catalog-pass', { runIdOf: 'the run whose covers it rewrites', accepts: [] }],
   ['--restore', { runIdOf: 'the run it restores', accepts: ['--execute', '--album-ids'] }],
 ]);
@@ -86,10 +91,10 @@ const MODE_FLAGS: ReadonlyMap<string, ModeFlag> = new Map<string, ModeFlag>([
  */
 const checkFlags = (args: string[]): void => {
   for (const arg of args.slice(2)) {
-    if (!arg.startsWith('--') || arg === '--dry-run') {
+    const flag = MODE_FLAGS.get(arg);
+    if (!arg.startsWith('--') || arg === '--dry-run' || (flag && 'inputs' in flag)) {
       continue;
     }
-    const flag = MODE_FLAGS.get(arg);
     throw new Error(
       flag && 'pending' in flag
         ? `[${JOB_NAME}] ${arg} is not available yet; it lands with ${flag.pending}. Run with no flags for the dry run.`
@@ -163,7 +168,7 @@ const resolveIncludeRestored = (raw: string | undefined): boolean => {
   return value === '1';
 };
 
-/** Dry-run is the DEFAULT, and for now the only mode. */
+/** The dry run's options, which `--preview` also takes (`resolveMode`). Dry-run is the DEFAULT. */
 export const resolveOptions = (env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv): ReaskOptions => {
   checkFlags(args);
   const afterAlbumId = requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, 0, CTX);
@@ -223,7 +228,7 @@ export interface CatalogPassOptions {
 }
 
 export type ReaskMode =
-  | { mode: 'dry-run'; options: ReaskOptions }
+  | { mode: 'dry-run' | 'preview'; options: ReaskOptions }
   | { mode: 'catalog-pass'; options: CatalogPassOptions }
   | { mode: 'restore'; options: RestoreOptions };
 
@@ -238,7 +243,15 @@ export const resolveMode = (env: NodeJS.ProcessEnv = process.env, args: string[]
   const flags = args.slice(2);
   const at = flags.findIndex((arg) => 'runIdOf' in (MODE_FLAGS.get(arg) ?? {}));
   if (at === -1) {
-    return { mode: 'dry-run', options: resolveOptions(env, args) };
+    const options = resolveOptions(env, args);
+    if (!flags.includes('--preview')) {
+      return { mode: 'dry-run', options };
+    }
+    if (options.sampleSeed === null || options.maxAlbums === 0) {
+      const missing = options.sampleSeed === null ? SAMPLE_SEED_ENV : `${MAX_ALBUMS_ENV}, the sample size`;
+      throw new Error(`[${JOB_NAME}] --preview needs ${missing}.`);
+    }
+    return { mode: 'preview', options };
   }
   const name = flags[at];
   const { runIdOf, accepts } = MODE_FLAGS.get(name) as Extract<ModeFlag, { runIdOf: string }>;
@@ -349,7 +362,7 @@ export interface DryRunSummary {
 
 const fileSummary = <T>(file: InputFile<T>) => ({ sha256: file.sha256, rows: file.rows.length });
 
-/** The dry run's work: parse the inputs, count and enumerate the cohort (up to `limit`), and admit it. */
+/** The dry run's work, shared with `--preview`: parse the inputs, count and enumerate the cohort (up to `limit`), and admit it. */
 const admitCohort = async (options: ReaskOptions, limit: number) => {
   // All three parse before any read, so a malformed file costs no cohort query.
   const pins = parsePinFile(await readFile(options.pinFile));
@@ -374,11 +387,13 @@ const admitCohort = async (options: ReaskOptions, limit: number) => {
   }
 
   const admission: DryRunSummary['admission'] = { asked: 0, ungradeable_exception: 0, held: {} };
+  const admitted: AdmittedRow[] = [];
   const heldRestored: number[] = [];
   for (const row of candidates) {
     const verdict = admit(row, grades.byLibraryId, options.includeRestored);
     if (verdict.ask) {
       admission.asked += 1;
+      admitted.push({ row, entry: verdict.entry });
       // A `pin_removed` row is asked at any tier but `hold_manual`; only a `pin_mismatch` row is the exception.
       if (row.reason === 'pin_mismatch' && verdict.entry.tier === 'hold_ungradeable') {
         admission.ungradeable_exception += 1;
@@ -394,7 +409,7 @@ const admitCohort = async (options: ReaskOptions, limit: number) => {
     const message = `${heldRestored.length} restored albums held; ${INCLUDE_RESTORED_ENV}=1 asks them`;
     log('info', 'held_restored', message, { album_ids: heldRestored });
   }
-  return { inputs, cohort: counts, enumerated: candidates.length, admission };
+  return { plan: { inputs, cohort: counts, enumerated: candidates.length, admission }, admitted };
 };
 
 export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> => {
@@ -404,28 +419,78 @@ export const runReask = async (options: ReaskOptions): Promise<DryRunSummary> =>
     after_album_id: options.afterAlbumId,
     album_ids: options.albumIds,
   });
-  const { inputs, cohort, enumerated, admission } = await admitCohort(options, options.maxAlbums);
-  const batches = Math.ceil(admission.asked / options.batchSize);
-  const estimated_minutes = Math.ceil(batches / options.ratePerMin);
-  const summary: DryRunSummary = { inputs, cohort, enumerated, admission, batches, estimated_minutes };
+  const { plan } = await admitCohort(options, options.maxAlbums);
+  const batches = Math.ceil(plan.admission.asked / options.batchSize);
+  const summary: DryRunSummary = { ...plan, batches, estimated_minutes: Math.ceil(batches / options.ratePerMin) };
   log(
     'info',
     'dry_run_plan',
-    `DRY RUN — no LML calls, no writes. Would ask ${admission.asked} albums in ${batches} batches of up to ${options.batchSize}.`,
+    `DRY RUN — no LML calls, no writes. Would ask ${plan.admission.asked} albums in ${batches} batches of up to ${options.batchSize}.`,
     { ...summary }
   );
+  return summary;
+};
+
+// -- Preview -----------------------------------------------------------------
+
+export interface PreviewSummary {
+  /** Admitted albums the sample was drawn from. */
+  population: number;
+  sampled: number;
+  totals: BatchTotals;
+}
+
+/** The bio fill's `computeBulkTimeoutMs` with no budget header: 5 s an item, 5 s slack and LML's 25 s cap. */
+const bulkTimeoutMs = (items: number): number => items * 5_000 + 30_000;
+
+/**
+ * `--preview`: ask LML for a seeded sample of admitted albums (`sampleStratified`, `REASK_MAX_ALBUMS` of them) at the
+ * run's pacing, and log one `preview` line per album (`previewLine`). This JSONL is the sign-off artifact. Writes
+ * nothing: `runBatch` gets `write: null`.
+ */
+export const runPreview = async (options: ReaskOptions): Promise<PreviewSummary> => {
+  log('info', 'started', `${JOB_NAME} preview starting`, {
+    sample_size: options.maxAlbums,
+    sample_seed: options.sampleSeed,
+  });
+  const { admitted } = await admitCohort(options, 0);
+  const sample = sampleStratified(admitted, options.maxAlbums, options.sampleSeed ?? 0);
+  const stored = await readStored(
+    sample.map(({ row }) => row.album_id),
+    options.readTimeoutMs
+  );
+  const totals: BatchTotals = {};
+  for (let start = 0; start < sample.length; start += options.batchSize) {
+    if (start > 0) {
+      await sleep(60_000 / options.ratePerMin);
+    }
+    const batch = sample.slice(start, start + options.batchSize);
+    const result = await runBatch(batch, { write: null, timeoutMs: bulkTimeoutMs(batch.length) });
+    for (const [key, n] of Object.entries(result.totals) as [keyof BatchTotals, number][]) {
+      totals[key] = (totals[key] ?? 0) + n;
+    }
+    for (const decided of result.decided) {
+      const line = previewLine(decided, stored.get(decided.admitted.row.album_id));
+      log('info', 'preview', `${line.verdict} for album_id=${line.album_id}`, line);
+    }
+  }
+  const summary: PreviewSummary = { population: admitted.length, sampled: sample.length, totals };
+  const message = `PREVIEW — no writes. Asked LML for ${sample.length} of ${admitted.length} admitted albums.`;
+  log('info', 'preview_done', message, { ...summary });
   return summary;
 };
 
 export const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   try {
-    // The summary is already on the `dry_run_plan`, `catalog_pass`, `restore_plan` or `restore` line.
+    // The summary is already on the `dry_run_plan`, `preview_done`, `catalog_pass`, `restore_plan` or `restore` line.
     const mode = resolveMode();
     if (mode.mode === 'catalog-pass') {
       await runCatalogPassMode(mode.options);
     } else if (mode.mode === 'restore') {
       await runRestoreMode(mode.options);
+    } else if (mode.mode === 'preview') {
+      await runPreview(mode.options);
     } else {
       await runReask(mode.options);
     }

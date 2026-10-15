@@ -4,15 +4,16 @@ One-shot job that re-asks LML for `album_metadata` rows whose stored Discogs rel
 
 ## Status
 
-In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--catalog-pass <run_id>` runs the catalog cover pass alone, and `--restore <run_id>` restores a run's writes (both below). `--execute` (outside `--restore`) and `--preview` refuse with the issue that builds each one, before any file is read, and exit 1. Any other unknown flag also refuses; `--dry-run` is accepted and changes nothing.
+In progress. With no flags the job runs the dry run (below): it reads, and it never calls LML or writes. `--preview` asks LML for a sample and writes nothing. `--catalog-pass <run_id>` runs the catalog cover pass alone, and `--restore <run_id>` restores a run's writes (all below). `--execute` (outside `--restore`) refuses with the issue that builds it, before any file is read, and exits 1. Any other unknown flag also refuses; `--dry-run` is accepted and changes nothing.
 
 Landed so far:
 
 - The package scaffold ([#3140](https://github.com/WXYC/Backend-Service/issues/3140)).
 - `cohort.ts` ([#3142](https://github.com/WXYC/Backend-Service/issues/3142)): the read-only cohort counts and enumeration; see its docblock. Built as `dist/cohort.cjs` for `tests/integration/album-metadata-reask.spec.js`.
 - The knobs and the dry run ([#3144](https://github.com/WXYC/Backend-Service/issues/3144)).
-- `write.ts`, `artist-keep-sql.ts` and `run-batch.ts` ([#3145](https://github.com/WXYC/Backend-Service/issues/3145)): the guarded `album_metadata` write and one batch of ask, decide and write. Nothing calls `runBatch` yet; the execute loop is [#3151](https://github.com/WXYC/Backend-Service/issues/3151). `write.ts` and `artist-keep-sql.ts` are tsup entries; the integration spec runs `dist/write.cjs`, which bundles the artist rule.
+- `write.ts`, `artist-keep-sql.ts` and `run-batch.ts` ([#3145](https://github.com/WXYC/Backend-Service/issues/3145)): the guarded `album_metadata` write and one batch of ask, decide and write. Only `--preview` calls `runBatch` so far, with no writes; the execute loop is [#3151](https://github.com/WXYC/Backend-Service/issues/3151). `write.ts` and `artist-keep-sql.ts` are tsup entries; the integration spec runs `dist/write.cjs`, which bundles the artist rule.
 - `catalog-pass.ts` ([#3146](https://github.com/WXYC/Backend-Service/issues/3146)): the catalog cover pass and the `--catalog-pass <run_id>` mode. A tsup entry; the integration spec runs `dist/catalog-pass.cjs` after real album writes.
+- `preview.ts` ([#3150](https://github.com/WXYC/Backend-Service/issues/3150)): the `--preview` sign-off sample, and `runBatch`'s no-write mode (`write: null`). A tsup entry; the integration spec runs `dist/preview.cjs`'s stored read.
 - `restore.ts` ([#3148](https://github.com/WXYC/Backend-Service/issues/3148)): the `--restore <run_id>` mode for `album_metadata` and `library`, the `restore` marker rows, and the `hold_restored` admission hold. A tsup entry; the integration spec runs `dist/restore.cjs` after real album writes and a real catalog cover pass.
 
 ## The album write
@@ -48,10 +49,25 @@ Decision 7 on #3137: every write can be reversed from the backup table, skipping
 - **Idempotent.** A second restore of the same run restores nothing: each restored album's `updated_at` has moved on.
 - The flowsheet has no restore target: the flowsheet inline-nulls slice (#3149) was closed as superseded by #3168.
 
+## Preview (the sign-off sample)
+
+`--preview` is the sign-off artifact the owner (and the music director, if he wants) reads before any `--execute` (#3137, "Dry run, preview, and sign-off"). It needs `REASK_SAMPLE_SEED` and `REASK_MAX_ALBUMS` (the sample size; 200 is the plan's size), and takes the dry run's other knobs. It writes nothing: `runBatch` runs with `write: null`, and the only statements are the cohort reads and one read of the sampled rows, each under `REASK_READ_TIMEOUT_MS`. A unit test renders every statement and refuses any write.
+
+- **The sample.** Every admitted album under the cursor and list (no cap) is the population; the admission rule is the dry run's, so a `hold_restored` album is held unless `REASK_INCLUDE_RESTORED=1`. Strata are `reason` and pin source. The strata are taken round robin, in an order the seed shuffles, each stratum shuffled by the seed, so a small stratum is in the sample whole before a large one takes more than an equal share. The same seed and population give the same sample.
+- **The ask.** Batches of `REASK_BULK_BATCH_SIZE` at `REASK_BULK_RATE_PER_MIN`, through `runBatch` and `decideReask`, as `--execute` will ask: the fallback flag on and no budget header. No streak aborts; an album LML did not answer is listed as `indeterminate`.
+- **The output.** One `preview` log line per album, then a `preview_done` line with the verdict totals. Keep the lines with `jq -c 'select(.step == "preview")'`. Each line has `album_id`, `card` (the catalog card id), `artist`, `title`, `reason`, `tier`, `stored_release` (id and URL; Backend does not store a release title), `pin` (release id, source and, for `pin_removed`, the expected release), `lml_release` (id and title, null when LML matched nothing) and `verdict`. A would-be write (`rebind`, `rebind_unpinned`, `clear`) also has:
+  - `changes`: each of the 13 written columns whose value would change, `{ old, new }`. The artist group follows the write's rule (decision 8), and `clear` keeps it.
+  - `catalog_cover`: the catalog cover pass's rewrite, `{ old, new }`, or null when the catalog cover does not mirror the stored one.
+  - `streaming_links_equal`: whether the answer's five streaming links, as the enrichment would store them, equal the stored ones. The job never writes them; a false here goes to the owner before the canary. Null for `clear`.
+  - `artist_cleared`: a stored bio the write would replace with none.
+  - `null_cover_sibling`: for a NULL new cover, whether another album with a cover shares a lookup key with one of this album's plays. `/playlists/recentEntries?v=2` (`enrichPlaycuts`) would show that album's cover. Null when the new cover is not NULL.
+
+There is no flowsheet pass (#3149 was superseded by #3168), so the lines carry no per-column play counts.
+
 ## Build and deploy
 
 - `"job-type": "one-shot"`: no schedule.
-- `deploy-base.yml` builds and pushes the image on any push to `main` that changes this directory or `Dockerfile.album-metadata-reask`. Until the run loop lands, that image runs only the dry run.
+- `deploy-base.yml` builds and pushes the image on any push to `main` that changes this directory or `Dockerfile.album-metadata-reask`. Until the run loop lands, that image writes only through `--catalog-pass` and `--restore --execute`.
 - Local build: `npm run build --workspace=jobs/album-metadata-reask`. Typecheck: `npm run typecheck --workspace=jobs/album-metadata-reask` (also a CI step, since the root typecheck skips `jobs/**`).
 
 ## Provenance
@@ -85,10 +101,10 @@ Every knob that is set must parse; a value that does not is an error, never a de
 | `REASK_CATALOG_STATEMENT_TIMEOUT_MS`                        | 30000      | `SET LOCAL statement_timeout` for the catalog cover pass (probe and write).                                                                       |
 | `REASK_RESTORE_STATEMENT_TIMEOUT_MS`                        | 300000     | `SET LOCAL statement_timeout` for `--restore` (probe and writes).                                                                                 |
 | `REASK_INCLUDE_RESTORED`                                    | 0          | `1` asks albums a restore put back, which are otherwise held as `hold_restored`. Only `0` or `1`.                                                 |
-| `REASK_MAX_ALBUMS`                                          | 0 (no cap) | Stop after this many albums. Must not be smaller than the `REASK_ALBUM_IDS` list.                                                                 |
+| `REASK_MAX_ALBUMS`                                          | 0 (no cap) | Stop after this many albums. Must not be smaller than the `REASK_ALBUM_IDS` list. With `--preview`, the sample size (required).                   |
 | `REASK_ALBUM_AFTER_ID`                                      | 0          | Resume cursor: only `album_id` above this.                                                                                                        |
 | `REASK_ALBUM_IDS`                                           | none       | Up to 200 comma-separated album ids. With cursor 0, a retry of just those; with a cursor, carried into that run (each id at or below the cursor). |
-| `REASK_SAMPLE_SEED`                                         | none       | Seed for the `--preview` sample.                                                                                                                  |
+| `REASK_SAMPLE_SEED`                                         | none       | Seed for the `--preview` sample (required there).                                                                                                 |
 | `REASK_MAX_CONSECUTIVE_FAILED_BATCHES`                      | 3          | Abort after this many failed batches in a row.                                                                                                    |
 | `REASK_MAX_CONSECUTIVE_PIN_NOT_BOUND_BATCHES`               | 3          | Abort after this many `pin_not_bound` batches in a row; 0 disables.                                                                               |
 | `LIVE_ACTIVITY_LOOKBACK_SECONDS`                            | 300        | Cooperative-pause lookback. Runs set 0 (DJs are on air around the clock).                                                                         |

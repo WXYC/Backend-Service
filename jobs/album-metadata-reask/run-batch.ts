@@ -2,7 +2,7 @@
  * One batch of the re-ask (BS#3145): one bulk LML call for admitted rows, one verdict each, and the guarded write for
  * each writing verdict. Its own module because `job.ts` belongs to the options slice (BS#3144). A failed bulk call
  * leaves every album `indeterminate` and carried; a write that throws is `write_failed` and carried, and the batch
- * goes on.
+ * goes on. With `write: null` (`--preview`, BS#3150) it asks and decides the same way and writes nothing.
  */
 
 import { bulkLookupMetadata, type BulkLookupItem, type BulkLookupResultItem } from '@wxyc/lml-client';
@@ -39,15 +39,23 @@ export type BatchTotals = Partial<
   Record<Verdict['kind'] | 'written' | 'skipped_raced' | 'write_failed' | 'artist_cleared' | 'unexpected_index', number>
 >;
 
+/** One album's answer and verdict, in batch order. `item` is undefined when LML gave no slot for it. */
+export interface DecidedRow {
+  admitted: AdmittedRow;
+  item: BulkLookupResultItem | undefined;
+  verdict: Verdict;
+}
+
 export interface BatchResult {
   totals: BatchTotals;
   /** Asked again next run: LML gave no usable answer, or the write threw. */
   carriedAlbumIds: number[];
+  decided: DecidedRow[];
 }
 
 export interface BatchOptions {
-  runId: string;
-  pinExportSha256: string;
+  /** What every write is stamped with; null writes nothing (`--preview`). */
+  write: { runId: string; pinExportSha256: string } | null;
   timeoutMs: number;
 }
 
@@ -89,7 +97,7 @@ const ask = async (batch: AdmittedRow[], timeoutMs: number): Promise<BulkLookupR
 };
 
 export const runBatch = async (batch: AdmittedRow[], options: BatchOptions): Promise<BatchResult> => {
-  const result: BatchResult = { totals: {}, carriedAlbumIds: [] };
+  const result: BatchResult = { totals: {}, carriedAlbumIds: [], decided: [] };
   if (batch.length === 0) return result;
   const count = (key: keyof BatchTotals): void => {
     result.totals[key] = (result.totals[key] ?? 0) + 1;
@@ -100,6 +108,7 @@ export const runBatch = async (batch: AdmittedRow[], options: BatchOptions): Pro
     const { row, entry } = admitted;
     const item = results?.[position];
     const verdict = decideReask(toCandidate(admitted), item, position);
+    result.decided.push({ admitted, item, verdict });
     count(verdict.kind);
     if (verdict.kind === 'indeterminate') {
       result.carriedAlbumIds.push(row.album_id);
@@ -122,11 +131,14 @@ export const runBatch = async (batch: AdmittedRow[], options: BatchOptions): Pro
       });
       continue;
     }
+    if (options.write === null) {
+      continue;
+    }
 
     try {
       const outcome = await writeAlbum({
-        run_id: options.runId,
-        pin_export_sha256: options.pinExportSha256,
+        run_id: options.write.runId,
+        pin_export_sha256: options.write.pinExportSha256,
         row,
         tier: entry.tier,
         verdict,

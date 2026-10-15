@@ -156,7 +156,6 @@ describe('resolveOptions', () => {
   // Refused before the input files are required.
   it.each([
     [['--execute'], '--execute is not available yet; it lands with #3151'],
-    [['--preview'], '--preview is not available yet; it lands with #3150'],
     // `--catalog-pass` and `--restore` are their own modes (`resolveMode`); the dry run never takes them.
     [['--catalog-pass', 'run-1'], 'Unknown flag --catalog-pass'],
     [['--restore', 'run-1'], 'Unknown flag --restore'],
@@ -173,6 +172,21 @@ describe('resolveMode', () => {
 
   it('is the dry run with no mode flag, with its own options', () => {
     expect(mode([], FILES)).toEqual({ mode: 'dry-run', options: resolveOptions(FILES, []) });
+  });
+
+  // BS#3150: the sign-off sample. It reads the input files like the dry run, and needs a seed and a size.
+  const PREVIEW = { ...FILES, REASK_SAMPLE_SEED: '20261014', REASK_MAX_ALBUMS: '200' };
+
+  it('takes --preview with the dry run options', () => {
+    expect(mode(['--preview'], PREVIEW)).toEqual({ mode: 'preview', options: resolveOptions(PREVIEW, []) });
+  });
+
+  it.each<[string, string[], Record<string, string | undefined>, string]>([
+    ['no seed', ['--preview'], { REASK_SAMPLE_SEED: undefined }, '--preview needs REASK_SAMPLE_SEED'],
+    ['no sample size', ['--preview'], { REASK_MAX_ALBUMS: '0' }, '--preview needs REASK_MAX_ALBUMS'],
+    ['--execute with it', ['--preview', '--execute'], {}, '--execute is not available yet'],
+  ])('refuses --preview with %s', (_label, flags, env, error) => {
+    expect(() => mode(flags, { ...PREVIEW, ...env })).toThrow(error);
   });
 
   // The pass needs no input file: it reads only the run's backup rows.
