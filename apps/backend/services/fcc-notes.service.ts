@@ -2,6 +2,7 @@ import { and, asc, eq, or, sql, type InferSelectModel } from 'drizzle-orm';
 import { artists, db, fcc_notes, intake_items, library, readStaffName } from '@wxyc/database';
 import type { RecordSubject } from '../utils/record-subject.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
+import { displayedArtistName } from '../utils/sql-fragments.js';
 import { withLockedRecordSubject } from './intake.service.js';
 
 /**
@@ -19,7 +20,8 @@ export type FccNoteResponse = InferSelectModel<typeof fcc_notes> & { artist_name
 
 /**
  * The columns of every `FccNote` response (the create, the lists here, and BS#2863's confirm and waiting list). The
- * record's artist and title come from the library release when the note has an `album_id`, else from the intake item.
+ * record's artist and title come from the library release when the note has an `album_id`, else from the intake item;
+ * the release's artist is its displayed one (`displayedArtistName`, BS#3284), as on the printed slip.
  */
 export const fccNoteSelection = {
   id: fcc_notes.id,
@@ -33,7 +35,7 @@ export const fccNoteSelection = {
   reported_at: fcc_notes.reported_at,
   confirmed_by: fcc_notes.confirmed_by,
   confirmed_at: fcc_notes.confirmed_at,
-  artist_name: sql<string>`coalesce(${artists.artist_name}, ${intake_items.artist_name})`,
+  artist_name: sql<string>`coalesce(${displayedArtistName}, ${intake_items.artist_name})`,
   album_title: sql<string>`coalesce(${library.album_title}, ${intake_items.album_title})`,
 };
 

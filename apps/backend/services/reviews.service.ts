@@ -19,7 +19,7 @@ import {
 } from '@wxyc/database';
 import { isBanInForce } from '@wxyc/authentication';
 import { canBeAskedToReview, type ReviewsActor } from '../utils/review-grants.js';
-import { outerRef } from '../utils/sql-fragments.js';
+import { displayedArtistName, outerRef } from '../utils/sql-fragments.js';
 import {
   FILED_STATES,
   filedStateSql,
@@ -252,14 +252,14 @@ export const createReview = async (subject: RecordSubject, fields: ReviewFields,
   });
 
 /**
- * A release's own record: the one home of the displayed-artist rule. The artist is `alternate_artist_name`, else the
- * artist's name, as filing hands it to enrichment (`library-filing.service.ts`, `library.controller.ts`), so a
+ * A release's own record. The artist is the displayed one (`displayedArtistName`: `alternate_artist_name`, else the
+ * artist's name, as filing hands it to enrichment (`library-filing.service.ts`, `library.controller.ts`)), so a
  * compilation under a V/A bucket names its own artist. Used by the release print's slip and by the review notices.
  */
 export const selectReleaseRecord = (tx: Pick<typeof db, 'select'>, albumId: number) =>
   tx
     .select({
-      artist_name: sql<string>`coalesce(nullif(${library.alternate_artist_name}, ''), ${artists.artist_name})`,
+      artist_name: displayedArtistName,
       album_title: library.album_title,
       record_label: library.label,
     })

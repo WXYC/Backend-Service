@@ -137,6 +137,30 @@ describe('/fcc-notes (BS#2862)', () => {
       });
     });
 
+    // BS#3284: the displayed-artist rule the printed slip follows (`displayedArtistName`), on a release's note.
+    test.each([
+      ['set', `${PREFIX} Compiler`, `${PREFIX} Compiler`],
+      ['set with surrounding spaces', `  ${PREFIX} Compiler  `, `${PREFIX} Compiler`],
+      ['unset', null, `${PREFIX} Filed`],
+      ['blank', '', `${PREFIX} Filed`],
+      ['whitespace only', '   ', `${PREFIX} Filed`],
+    ])(
+      'a note on a release names its displayed artist: alternate artist name %s',
+      async (_case, alternate_artist_name, expected) => {
+        const release = await seedLibraryRelease({
+          artist_name: `${PREFIX} Filed`,
+          alternate_artist_name,
+          album_title: `${PREFIX} compilation`,
+        });
+        const created = await djA.post('/fcc-notes').send(note({ album_id: release.id }));
+        expect(created.status).toBe(200);
+        expect(created.body.artist_name).toBe(expected);
+
+        const list = await djA.get(`/fcc-notes?album_id=${release.id}`);
+        expect(list.body.map((n) => n.artist_name)).toEqual([expected]);
+      }
+    );
+
     test.each([
       ['both subjects', (item, release) => note({ intake_item_id: item, album_id: release })],
       ['neither subject', () => note()],

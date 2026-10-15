@@ -1,4 +1,4 @@
-import { rotation } from '@wxyc/database';
+import { artists, library, rotation } from '@wxyc/database';
 import { sql, type Column, type SQL } from 'drizzle-orm';
 
 /**
@@ -18,3 +18,11 @@ export const outerRef = (column: Column): SQL => sql`${column}`;
  */
 export const rotationSuccessorSql = (): SQL =>
   sql`(SELECT 1 FROM ${rotation} AS successor WHERE successor.moved_from_rotation_id = ${outerRef(rotation.id)})`;
+
+/**
+ * The displayed artist of a release (BS#3284), the one home of the rule: the trimmed `alternate_artist_name` unless it
+ * is null, empty or whitespace, else the filed artist's name, so a compilation under a V/A bucket names its own artist.
+ * Needs `library` and `artists` in the select's joins. Read by the release print and the review notices
+ * (`selectReleaseRecord`) and by FCC notes (`fccNoteSelection`).
+ */
+export const displayedArtistName: SQL<string> = sql<string>`coalesce(nullif(trim(${library.alternate_artist_name}), ''), ${artists.artist_name})`;
