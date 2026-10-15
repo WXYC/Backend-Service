@@ -44,7 +44,9 @@ export const sampleStratified = (rows: readonly AdmittedRow[], size: number, see
   const strata = new Map<string, AdmittedRow[]>();
   for (const admitted of [...rows].sort((a, b) => a.row.album_id - b.row.album_id)) {
     const key = `${admitted.row.reason}\t${admitted.row.pin_source}`;
-    strata.set(key, [...(strata.get(key) ?? []), admitted]);
+    const stratum = strata.get(key) ?? [];
+    stratum.push(admitted);
+    strata.set(key, stratum);
   }
   const queues = shuffle([...strata.keys()].sort(), random).map((key) => shuffle(strata.get(key) ?? [], random));
   const picked: AdmittedRow[] = [];
@@ -75,11 +77,10 @@ const lookupKey = (alias: string): SQL =>
 
 /** The sampled albums' stored rows. A read: the preview's only statement outside the cohort reads. */
 export const previewStoredSql = (albumIds: readonly number[]): SQL => sql`SELECT am.*, EXISTS (
-  SELECT 1 FROM ${table('flowsheet')} f
-    JOIN ${table('flowsheet')} f2 ON ${lookupKey('f2')} = ${lookupKey('f')} AND f2."album_id" IS NOT NULL
+  SELECT 1 FROM (SELECT DISTINCT ${lookupKey('f')} AS key FROM ${table('flowsheet')} f WHERE f."album_id" = am."album_id") k
+    JOIN ${table('flowsheet')} f2 ON ${lookupKey('f2')} = k.key AND f2."album_id" IS NOT NULL
      AND f2."album_id" <> am."album_id"
     JOIN ${table('album_metadata')} s ON s."album_id" = f2."album_id" AND s."artwork_url" IS NOT NULL
-   WHERE f."album_id" = am."album_id"
 ) AS cover_sibling
   FROM ${table('album_metadata')} am
  WHERE am."album_id" = ANY(${intArrayLiteral([...albumIds])}::int[])`;
@@ -91,6 +92,10 @@ export const readStored = async (albumIds: readonly number[], timeoutMs: number)
   );
   return new Map(rows.map((row) => [Number(row.album_id), row]));
 };
+
+/** The two jsonb lists are shown by length, so one line stays under Docker's 16 KB log-line split. */
+const shown = (key: string, value: unknown): unknown =>
+  (key === 'tracklist' || key === 'bio_tokens') && Array.isArray(value) ? `${value.length} items` : value;
 
 const pick = <K extends string>(from: Record<K, unknown>, keys: readonly K[]) =>
   Object.fromEntries(keys.map((key) => [key, from[key] ?? null])) as Record<K, unknown>;
@@ -116,20 +121,25 @@ export const previewLine = ({ admitted, item, verdict }: DecidedRow, stored: Sto
     lml_release: artwork ? { id: artwork.release_id, title: artwork.album ?? null } : null,
     verdict: verdict.kind,
   };
-  if (!('payload' in verdict) || !stored) {
+  if (!('payload' in verdict)) {
     return line;
+  }
+  if (!stored) {
+    // The row left `album_metadata` after enumeration: nothing to compare, and a reader must see that.
+    return { ...line, changes: null };
   }
   const { release, artist } = verdict.payload;
   const next = { ...release, ...(artist ? mergeArtistGroup(stored, artist) : pick(stored, ARTIST_KEYS)) };
   const old = pick(stored, COLUMNS);
   const changed = COLUMNS.filter((key) => !isDeepStrictEqual(old[key], next[key]));
   const mirrors = row.library_artwork_url !== null && row.library_artwork_url === stored.artwork_url;
-  const answered = lookup
-    ? pick(normalizeLookup(lookup, { artist: row.artist_name, album: row.album_title }), STREAMING)
-    : null;
+  const answered =
+    lookup && verdict.kind !== 'clear'
+      ? pick(normalizeLookup(lookup, { artist: row.artist_name, album: row.album_title }), STREAMING)
+      : null;
   return {
     ...line,
-    changes: Object.fromEntries(changed.map((key) => [key, { old: old[key], new: next[key] }])),
+    changes: Object.fromEntries(changed.map((key) => [key, { old: shown(key, old[key]), new: shown(key, next[key]) }])),
     catalog_cover:
       mirrors && next.artwork_url !== row.library_artwork_url
         ? { old: row.library_artwork_url, new: next.artwork_url }

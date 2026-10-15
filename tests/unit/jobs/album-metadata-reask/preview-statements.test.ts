@@ -123,11 +123,14 @@ beforeEach(() => {
 
 const preview = async (extra: Record<string, string> = {}) => {
   const log = jest.spyOn(logger, 'log');
-  const mode = resolveMode({ ...env, ...extra }, ['node', 'job.js', '--preview']);
-  const summary = await runPreview(mode.options as ReaskOptions);
-  const lines = log.mock.calls.filter(([, step]) => step === 'preview').map(([, , , fields]) => fields);
-  log.mockRestore();
-  return { summary, lines };
+  try {
+    const mode = resolveMode({ ...env, ...extra }, ['node', 'job.js', '--preview']);
+    const summary = await runPreview(mode.options as ReaskOptions);
+    const lines = log.mock.calls.filter(([, step]) => step === 'preview').map(([, , , fields]) => fields);
+    return { summary, lines };
+  } finally {
+    log.mockRestore();
+  }
 };
 
 describe('runPreview, real statements', () => {
@@ -147,6 +150,12 @@ describe('runPreview, real statements', () => {
       expect(text).toMatch(/^(SET LOCAL statement_timeout = '\d+ms'|WITH pin AS \(|SELECT am\.\*)/);
       expect(text).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|CREATE)\b/i);
     }
+  });
+
+  it('exits non-zero after the lines when LML answered none of the sample', async () => {
+    bulkLookupMetadata.mockRejectedValue(new Error('LML down') as never);
+
+    await expect(preview({ REASK_MAX_ALBUMS: '3' })).rejects.toThrow('LML answered none of the 3 sampled albums');
   });
 
   it.each([
