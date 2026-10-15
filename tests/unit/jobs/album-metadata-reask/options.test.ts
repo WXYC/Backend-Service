@@ -174,7 +174,8 @@ describe('resolveMode', () => {
     ['the 30 s default', {}, 30_000],
     ['REASK_CATALOG_STATEMENT_TIMEOUT_MS', { REASK_CATALOG_STATEMENT_TIMEOUT_MS: '45000' }, 45_000],
   ])('takes --catalog-pass <run_id> with %s', (_label, env, statementTimeoutMs) => {
-    expect(mode(['--catalog-pass', 'reask-2026-10-14-a'], env)).toEqual({
+    // Surrounding whitespace from a copied id is trimmed.
+    expect(mode(['--catalog-pass', ' reask-2026-10-14-a '], env)).toEqual({
       mode: 'catalog-pass',
       options: { runId: 'reask-2026-10-14-a', statementTimeoutMs },
     });

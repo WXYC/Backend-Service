@@ -556,7 +556,7 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
     for (const [, seed] of CASES) ids.push(await seedAndWrite(seed));
     await resetWatermark();
 
-    expect(await runCatalogPass(RUN)).toEqual({ probed: 2, rewritten: 2 });
+    expect(await runCatalogPass(RUN)).toEqual({ album_writes: 5, probed: 2, rewritten: 2, analyze_error: null });
 
     for (const [i, [label, seed, expected]] of CASES.entries()) {
       expect([label, await catalogCover(ids[i])]).toEqual([label, expected]);
@@ -579,7 +579,7 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
     expect(await watermark()).toBe(backup.written_at.toISOString());
 
     await resetWatermark();
-    expect(await runCatalogPass(RUN)).toEqual({ probed: 0, rewritten: 0 });
+    expect(await runCatalogPass(RUN)).toEqual({ album_writes: 5, probed: 0, rewritten: 0, analyze_error: null });
     expect(await watermark()).toBe('2000-01-01T00:00:00.000Z');
     expect(await libraryBackups(ids[0])).toHaveLength(1);
   });
@@ -587,7 +587,12 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
   test('sends nothing for a run with no album writes, so the catalog watermark stays put', async () => {
     await resetWatermark();
 
-    expect(await runCatalogPass('b3146-no-such-run')).toEqual({ probed: 0, rewritten: 0 });
+    expect(await runCatalogPass('b3146-no-such-run')).toEqual({
+      album_writes: 0,
+      probed: 0,
+      rewritten: 0,
+      analyze_error: null,
+    });
 
     expect(await watermark()).toBe('2000-01-01T00:00:00.000Z');
   });

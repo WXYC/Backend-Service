@@ -195,17 +195,19 @@ describe('main', () => {
     jest.restoreAllMocks();
   });
 
-  it.each([
-    ['a dry run that finishes', () => env, [], 0, 'finished'],
-    ['a run with no pin file', () => ({}), [], 1, 'failed'],
+  it.each<[string, () => NodeJS.ProcessEnv, string[], number, number, string]>([
+    ['a dry run that finishes', () => env, [], 0, 0, 'finished'],
+    ['a run with no pin file', () => ({}), [], 0, 1, 'failed'],
     // The pass needs no input file. The probe (mocked empty) is its only read.
-    ['a catalog pass with no input files', () => ({}), ['--catalog-pass', 'run-1'], 0, 'catalog_pass'],
-    ['a catalog pass with no run_id', () => ({}), ['--catalog-pass'], 1, 'failed'],
-  ])('exits %s with code %i and logs %s', async (_label, makeEnv, flags, exitCode, step) => {
+    ['a catalog pass with no input files', () => ({}), ['--catalog-pass', 'run-1'], 3, 0, 'catalog_pass'],
+    // A mistyped run_id must not look like a recovery that found nothing to do.
+    ['a catalog pass for a run with no album writes', () => ({}), ['--catalog-pass', 'run-1'], 0, 1, 'failed'],
+    ['a catalog pass with no run_id', () => ({}), ['--catalog-pass'], 0, 1, 'failed'],
+  ])('exits %s', async (_label, makeEnv, flags, albumWrites, exitCode, step) => {
     process.env = { ...originalEnv, ...makeEnv() };
     // jest's own argv carries flags the job would refuse.
     process.argv = ['node', 'job.js', ...flags];
-    (db.execute as unknown as jest.Mock).mockResolvedValue([{ n: 0 }] as never);
+    (db.execute as unknown as jest.Mock).mockResolvedValue([{ album_writes: albumWrites, n: 0 }] as never);
     const stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
