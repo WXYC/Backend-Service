@@ -122,9 +122,12 @@ describe('enumerateCohortSql: drainable subset, cursor and carried list', () => 
     const statement = flat(enumerateCohortSql(INPUTS, { limit: 0, afterAlbumId: 0 }));
 
     expect(statement).toContain(
-      `EXISTS (SELECT 1 FROM "wxyc_schema"."album_metadata_reask_backup" rb WHERE rb.album_id = am."album_id" AND rb.target_table = 'restore') AS restored`
+      `c.pin_source, EXISTS (SELECT 1 FROM "wxyc_schema"."album_metadata_reask_backup" rb WHERE rb.album_id = c.album_id AND rb.target_table = 'restore') AS restored FROM cohort c`
     );
-    expect(statement).toMatch(/c\.pin_source, c\.restored FROM cohort c/);
+  });
+
+  it('leaves the restore marker out of the counts, which never read it', () => {
+    expect(flat(countCohortSql(INPUTS))).not.toContain("'restore'");
   });
 
   it('drops rows with no artist name and albums marked not on Discogs, and orders by album_id', () => {

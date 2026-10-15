@@ -99,7 +99,7 @@ export interface RestoreTargetCounts {
 export interface RestoreResult {
   album_metadata: RestoreTargetCounts;
   library: RestoreTargetCounts;
-  /** Why an `ANALYZE` failed after the restore committed, else null. Not thrown, so the counts still reach the caller. */
+  /** `<table>: <error>` for each `ANALYZE` that failed after the restore committed, else null. Not thrown. */
   analyze_error: string | null;
 }
 
@@ -138,13 +138,14 @@ export const runRestore = async (
     return out;
   });
   for (const { name } of TARGETS) {
-    if (result[name].restored === 0 || result.analyze_error !== null) {
+    if (result[name].restored === 0) {
       continue;
     }
     try {
       await withStatementTimeout(timeoutMs, (tx) => tx.execute(sql`ANALYZE ${table(name)}`));
     } catch (err) {
-      result.analyze_error = err instanceof Error ? err.message : String(err);
+      const failed = `${name}: ${err instanceof Error ? err.message : String(err)}`;
+      result.analyze_error = result.analyze_error === null ? failed : `${result.analyze_error}; ${failed}`;
     }
   }
   return result;
