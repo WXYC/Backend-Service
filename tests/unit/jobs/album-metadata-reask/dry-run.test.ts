@@ -80,6 +80,7 @@ const candidate = (
   reason: pin_release_id === null ? 'pin_removed' : 'pin_mismatch',
   pin_release_id,
   pin_source,
+  restored: false,
 });
 const CANDIDATES = [
   candidate(1, 1001, 4001, 5001, 'alex-l-2026-masters-api', 'Juana Molina', 'DOGA'),
@@ -140,6 +141,26 @@ describe('runReask — dry run', () => {
       batches: 1,
       estimated_minutes: 1,
     });
+  });
+
+  // BS#3148: a restored album is held, counted and listed, until REASK_INCLUDE_RESTORED=1 lifts the hold.
+  it.each([
+    [
+      'holds a restored album',
+      {},
+      { asked: 2, ungradeable_exception: 1, held: { hold_restored: 1, hold_stored_better: 1, hold_unmanifested: 1 } },
+    ],
+    [
+      'asks it with REASK_INCLUDE_RESTORED=1',
+      { REASK_INCLUDE_RESTORED: '1' },
+      { asked: 3, ungradeable_exception: 1, held: { hold_stored_better: 1, hold_unmanifested: 1 } },
+    ],
+  ])('%s', async (_label, extra, admission) => {
+    enumerateCohort.mockResolvedValue(CANDIDATES.map((c) => ({ ...c, restored: c.album_id === 1 })) as never);
+
+    const summary = await runReask(resolveOptions({ ...env, ...extra }, []));
+
+    expect(summary.admission).toEqual(admission);
   });
 
   it('binds the parsed pin and removal rows into the cohort reads, under the cursor and the cap', async () => {
@@ -203,11 +224,24 @@ describe('main', () => {
     // A mistyped run_id must not look like a recovery that found nothing to do.
     ['a catalog pass for a run with no album writes', () => ({}), ['--catalog-pass', 'run-1'], 0, 1, 'failed'],
     ['a catalog pass with no run_id', () => ({}), ['--catalog-pass'], 0, 1, 'failed'],
+    // The restore needs no input file either; without --execute it only counts.
+    ['a restore dry run with no input files', () => ({}), ['--restore', 'run-1'], 3, 0, 'restore_plan'],
+    ['a restore for a run with no album writes', () => ({}), ['--restore', 'run-1', '--execute'], 0, 1, 'failed'],
   ])('exits %s', async (_label, makeEnv, flags, albumWrites, exitCode, step) => {
     process.env = { ...originalEnv, ...makeEnv() };
     // jest's own argv carries flags the job would refuse.
     process.argv = ['node', 'job.js', ...flags];
-    (db.execute as unknown as jest.Mock).mockResolvedValue([{ album_writes: albumWrites, n: 0 }] as never);
+    // One row that answers both probes: the catalog pass's and the restore's.
+    (db.execute as unknown as jest.Mock).mockResolvedValue([
+      {
+        album_writes: albumWrites,
+        n: 0,
+        album_metadata_backups: albumWrites,
+        album_metadata_restorable: 0,
+        library_backups: 0,
+        library_restorable: 0,
+      },
+    ] as never);
     const stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
 

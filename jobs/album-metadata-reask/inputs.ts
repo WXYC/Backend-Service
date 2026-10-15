@@ -192,9 +192,10 @@ export const parseGradingManifest = (raw: Buffer): InputFile<ManifestEntry> =>
 /**
  * Why a cohort row is not asked. `hold_unmanifested`: its card is not in the
  * manifest. `hold_manifest_stale`: the manifest graded other releases than the
- * row now has, so its tier does not describe this row.
+ * row now has, so its tier does not describe this row. `hold_restored`: a
+ * restore put the album back (BS#3148).
  */
-export type HoldReason = Exclude<Tier, 'rebind'> | 'hold_unmanifested' | 'hold_manifest_stale';
+export type HoldReason = Exclude<Tier, 'rebind'> | 'hold_unmanifested' | 'hold_manifest_stale' | 'hold_restored';
 
 /** The cohort row fields admission reads. A `pin_removed` row stores the removed release and has no pin. */
 export interface AdmissionRow {
@@ -202,6 +203,8 @@ export interface AdmissionRow {
   reason: 'pin_mismatch' | 'pin_removed';
   stored_release_id: number | null;
   pin_release_id: number | null;
+  /** A restore put this album back. */
+  restored: boolean;
 }
 
 export type Admission = { ask: true; entry: ManifestEntry } | { ask: false; hold: HoldReason };
@@ -221,8 +224,17 @@ const UNGRADEABLE_EXCEPTION_SOURCE = 'alex-l-2026';
  *   pin: the current one, or for `pin_removed` the removed one) is held as
  *   `hold_manifest_stale`. So a manifest built from another pin export can
  *   admit a card neither by omission nor by inclusion.
+ * - A restored album is held as `hold_restored` before anything else, unless
+ *   `includeRestored` (`REASK_INCLUDE_RESTORED=1`) lifts the hold.
  */
-export const admit = (row: AdmissionRow, manifest: ReadonlyMap<number, ManifestEntry>): Admission => {
+export const admit = (
+  row: AdmissionRow,
+  manifest: ReadonlyMap<number, ManifestEntry>,
+  includeRestored = false
+): Admission => {
+  if (row.restored && !includeRestored) {
+    return { ask: false, hold: 'hold_restored' };
+  }
   const entry = manifest.get(row.legacy_release_id);
   if (!entry) return { ask: false, hold: 'hold_unmanifested' };
 

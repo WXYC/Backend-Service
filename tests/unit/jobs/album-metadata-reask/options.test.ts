@@ -35,6 +35,7 @@ describe('resolveOptions', () => {
       maxConsecutiveFailedBatches: 3,
       maxConsecutivePinNotBoundBatches: 3,
       liveActivityLookbackSeconds: 300,
+      includeRestored: false,
     });
   });
 
@@ -49,6 +50,7 @@ describe('resolveOptions', () => {
       REASK_MAX_CONSECUTIVE_FAILED_BATCHES: '5',
       REASK_MAX_CONSECUTIVE_PIN_NOT_BOUND_BATCHES: '0',
       LIVE_ACTIVITY_LOOKBACK_SECONDS: '0',
+      REASK_INCLUDE_RESTORED: '1',
     });
 
     expect(options).toMatchObject({
@@ -61,6 +63,7 @@ describe('resolveOptions', () => {
       maxConsecutiveFailedBatches: 5,
       maxConsecutivePinNotBoundBatches: 0,
       liveActivityLookbackSeconds: 0,
+      includeRestored: true,
     });
   });
 
@@ -76,6 +79,9 @@ describe('resolveOptions', () => {
     ['REASK_BULK_RATE_PER_MIN', '0'],
     ['REASK_BULK_RATE_PER_MIN', '-1'],
     ['REASK_READ_TIMEOUT_MS', '0'],
+    // Only `1` lifts the hold: a typo read as "no" would hide the mistake, read as "yes" would re-ask a restore.
+    ['REASK_INCLUDE_RESTORED', 'yes'],
+    ['REASK_INCLUDE_RESTORED', '2'],
     ['REASK_MAX_ALBUMS', '-25'],
     ['REASK_ALBUM_AFTER_ID', '1.5'],
     ['REASK_SAMPLE_SEED', 'random'],
@@ -147,13 +153,13 @@ describe('resolveOptions', () => {
     expect(() => resolve({}, args)).not.toThrow();
   });
 
-  // Refused before the input files are required: `--restore` will not need them.
+  // Refused before the input files are required.
   it.each([
     [['--execute'], '--execute is not available yet; it lands with #3151'],
     [['--preview'], '--preview is not available yet; it lands with #3150'],
-    [['--restore', 'run-1', '--execute'], '--restore is not available yet; it lands with #3148'],
-    // `--catalog-pass` is its own mode (`resolveMode`); the dry run never takes it.
+    // `--catalog-pass` and `--restore` are their own modes (`resolveMode`); the dry run never takes them.
     [['--catalog-pass', 'run-1'], 'Unknown flag --catalog-pass'],
+    [['--restore', 'run-1'], 'Unknown flag --restore'],
     // A typo must not fall through to a run.
     [['--exectue'], 'Unknown flag --exectue'],
   ])('refuses argv %j', (flags, error) => {
@@ -190,6 +196,56 @@ describe('resolveMode', () => {
     [['--catalog-pass', 'run-1', 'run-2'], '--catalog-pass takes only a run_id; also got run-2'],
   ])('refuses argv %j', (flags, error) => {
     expect(() => mode(flags)).toThrow(error);
+  });
+
+  // The restore needs no input file either: it reads only the run's backup rows. Dry run unless `--execute`.
+  it.each([
+    [
+      'a dry run under the five-minute default',
+      ['--restore', ' run-1 '],
+      {},
+      { execute: false, albumIds: [] },
+      300_000,
+    ],
+    ['--execute', ['--restore', 'run-1', '--execute'], {}, { execute: true, albumIds: [] }, 300_000],
+    [
+      '--album-ids, sorted and deduplicated, before or after --execute',
+      ['--execute', '--restore', 'run-1', '--album-ids', '9, 7,9'],
+      {},
+      { execute: true, albumIds: [7, 9] },
+      300_000,
+    ],
+    [
+      'REASK_RESTORE_STATEMENT_TIMEOUT_MS',
+      ['--restore', 'run-1'],
+      { REASK_RESTORE_STATEMENT_TIMEOUT_MS: '60000' },
+      { execute: false, albumIds: [] },
+      60_000,
+    ],
+  ])('takes --restore <run_id> with %s', (_label, flags, env, rest, statementTimeoutMs) => {
+    expect(mode(flags, env)).toEqual({
+      mode: 'restore',
+      options: { runId: 'run-1', ...rest, statementTimeoutMs },
+    });
+  });
+
+  it.each([
+    [['--restore'], '--restore needs the run_id'],
+    [['--restore', '--execute'], '--restore needs the run_id'],
+    [['--restore', 'run-1', '--preview'], '--restore takes only a run_id, --execute, --album-ids; also got --preview'],
+    [['--restore', 'run-1', '--catalog-pass', 'run-2'], 'also got --catalog-pass run-2'],
+    [['--catalog-pass', 'run-1', '--restore', 'run-2'], '--catalog-pass takes only a run_id; also got --restore run-2'],
+    [['--restore', 'run-1', '--album-ids'], '--album-ids needs a value'],
+    [['--restore', 'run-1', '--album-ids', '--execute'], '--album-ids needs a value'],
+    [['--restore', 'run-1', '--album-ids', '7,x'], 'Invalid --album-ids="7,x"'],
+  ])('refuses argv %j', (flags, error) => {
+    expect(() => mode(flags)).toThrow(error);
+  });
+
+  it.each(['0', '-1', 'thirty'])('rejects REASK_RESTORE_STATEMENT_TIMEOUT_MS=%j', (value) => {
+    expect(() => mode(['--restore', 'run-1'], { REASK_RESTORE_STATEMENT_TIMEOUT_MS: value })).toThrow(
+      'REASK_RESTORE_STATEMENT_TIMEOUT_MS'
+    );
   });
 
   it.each(['0', '-1', 'thirty'])('rejects REASK_CATALOG_STATEMENT_TIMEOUT_MS=%j', (value) => {

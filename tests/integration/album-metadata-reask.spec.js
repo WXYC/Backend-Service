@@ -103,6 +103,7 @@ describe('BS#3142 re-ask cohort (REAL statements, real PG)', () => {
         reason: 'pin_mismatch',
         pin_release_id: 3003,
         pin_source: MASTERS_API,
+        restored: false,
       },
       {
         album_id: removed.id,
@@ -116,6 +117,7 @@ describe('BS#3142 re-ask cohort (REAL statements, real PG)', () => {
         reason: 'pin_removed',
         pin_release_id: null,
         pin_source: ALEX,
+        restored: false,
       },
     ]);
   });
@@ -594,6 +596,258 @@ describe('BS#3146 re-ask catalog cover pass (REAL statements, real PG)', () => {
       analyze_error: null,
     });
 
+    expect(await watermark()).toBe('2000-01-01T00:00:00.000Z');
+  });
+});
+
+/**
+ * BS#3148: restore mode (`dist/restore.cjs`), after real album writes (`dist/write.cjs`) and a real catalog cover pass
+ * (`dist/catalog-pass.cjs`). Claims that need real rows: `jsonb_populate_record` over the before-image puts every
+ * imaged column back byte for byte (a `clear` row's artist group too); the restore leaves alone an album another
+ * writer touched since, and then its catalog cover too; a catalog cover someone else changed since the pass is not
+ * reverted; each restored album gets its `restore` marker, which the next enumeration flags; a second restore is a
+ * no-op; and a restore with no catalog cover to put back leaves the catalog watermark where it was.
+ */
+describe('BS#3148 re-ask restore (REAL statements, real PG)', () => {
+  const { writeAlbum } = require(path.join(distDir, 'write.cjs'));
+  const { runCatalogPass } = require(path.join(distDir, 'catalog-pass.cjs'));
+  const { runRestore } = require(path.join(distDir, 'restore.cjs'));
+
+  const OLD = 'https://i.discogs.com/b3148/wrong-release.jpg';
+  const NEW = 'https://i.discogs.com/b3148/pinned-release.jpg';
+  const LIBRARIAN = 'https://i.discogs.com/b3148/librarian.jpg';
+  const STORED = {
+    discogs_url: release(1001),
+    artwork_url: OLD,
+    release_year: 2013,
+    label: 'Crammed Discs',
+    full_release_date: '2013-03-12',
+    genres: ['Electronic'],
+    styles: ['Folktronica', 'Experimental'],
+    tracklist: [{ position: 'A1', title: 'Wed 21', duration: '4:12' }],
+    discogs_artist_id: 61002,
+    artist_bio: 'Argentine singer, songwriter and "actress".',
+    artist_wikipedia_url: 'https://en.wikipedia.org/wiki/Juana_Molina',
+    artist_image_url: 'https://i.discogs.com/b3148/artist.jpg',
+    bio_tokens: [{ type: 'text', text: 'Argentine singer' }],
+  };
+  const COLUMNS = Object.keys(STORED);
+  const RELEASE = {
+    discogs_url: release(3003),
+    artwork_url: NEW,
+    release_year: null,
+    label: 'Sonamos',
+    full_release_date: null,
+    genres: ['Rock'],
+    styles: ['Folk'],
+    tracklist: [{ position: 'A1', title: 'la paradoja' }],
+  };
+  // A different artist id: the answer's artist group is written as answered, nulls included (decision 8).
+  const ARTIST = {
+    discogs_artist_id: 77,
+    artist_bio: null,
+    artist_wikipedia_url: null,
+    artist_image_url: null,
+    bio_tokens: null,
+  };
+  const nulls = (keys) => Object.fromEntries(keys.map((k) => [k, null]));
+  const VERDICTS = {
+    rebind: { kind: 'rebind', release_id: 3003, payload: { release: RELEASE, artist: ARTIST } },
+    clear: { kind: 'clear', payload: { release: nulls(Object.keys(RELEASE)), artist: null } },
+  };
+
+  let sql;
+  const albumIds = [];
+
+  /** A card whose catalog cover mirrors its stored wrong-release cover, written by `run`. */
+  const seedAndWrite = async (run, { artist, title, verdict, catalogCover = OLD }) => {
+    const [{ id, legacy_release_id }] = await sql`
+      INSERT INTO ${sql(SCHEMA)}.library (artist_id, genre_id, format_id, album_title, code_number, artist_name, artwork_url)
+      VALUES (1, 11, 1, ${'b3148-' + title}, 9999, ${artist}, ${catalogCover})
+      RETURNING id, legacy_release_id
+    `;
+    albumIds.push(id);
+    const json = (value) => (value === null ? null : sql.json(value));
+    await sql`
+      INSERT INTO ${sql(SCHEMA)}.album_metadata
+        ${sql({ album_id: id, ...STORED, tracklist: json(STORED.tracklist), bio_tokens: json(STORED.bio_tokens), spotify_url: 'https://open.spotify.com/album/b3148' })}
+    `;
+    const row = {
+      album_id: id,
+      legacy_release_id,
+      discogs_url: STORED.discogs_url,
+      artwork_url: OLD,
+      library_artwork_url: catalogCover,
+      stored_release_id: 1001,
+      artist_name: artist,
+      album_title: title,
+      reason: 'pin_mismatch',
+      pin_release_id: 3003,
+      pin_source: MASTERS_API,
+      restored: false,
+    };
+    const original = await albumRow(id);
+    const outcome = await writeAlbum({
+      run_id: run,
+      pin_export_sha256: 'abc123',
+      row,
+      tier: 'rebind',
+      verdict: VERDICTS[verdict],
+    });
+    expect(outcome.written).toBe(true);
+    return { id, card: legacy_release_id, original };
+  };
+
+  const albumRow = async (id) => {
+    const [{ updated_at, ...row }] = await sql`SELECT * FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ${id}`;
+    return row;
+  };
+  const catalogCover = async (id) => {
+    const [{ artwork_url }] = await sql`SELECT artwork_url FROM ${sql(SCHEMA)}.library WHERE id = ${id}`;
+    return artwork_url;
+  };
+  const markers = (id) =>
+    sql`SELECT * FROM ${sql(SCHEMA)}.album_metadata_reask_backup WHERE album_id = ${id} AND target_table = 'restore'`;
+  const resetWatermark = () =>
+    sql`UPDATE ${sql(SCHEMA)}.library_watermark SET last_modified_at = '2000-01-01T00:00:00Z'`;
+  const watermark = async () => {
+    const [{ last_modified_at }] = await sql`SELECT last_modified_at FROM ${sql(SCHEMA)}.library_watermark`;
+    return last_modified_at.toISOString();
+  };
+
+  beforeAll(() => {
+    sql = getTestDb();
+  });
+
+  afterAll(async () => {
+    if (albumIds.length > 0) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata_reask_backup WHERE album_id = ANY(${albumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${albumIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${albumIds})`;
+    }
+  });
+
+  test('write then restore reproduces the original rows, skips what changed since, and a second restore is a no-op', async () => {
+    const RUN = 'b3148-run';
+    const doga = await seedAndWrite(RUN, { artist: 'Juana Molina', title: 'DOGA', verdict: 'rebind' });
+    // `clear` keeps the artist group, non-null bio included; the restore must put it back untouched.
+    const dots = await seedAndWrite(RUN, { artist: 'Stereolab', title: 'Dots and Loops', verdict: 'clear' });
+    const touched = await seedAndWrite(RUN, {
+      artist: 'Jessica Pratt',
+      title: 'On Your Own Love Again',
+      verdict: 'rebind',
+    });
+    const relabelled = await seedAndWrite(RUN, {
+      artist: 'Stereolab',
+      title: 'Emperor Tomato Ketchup',
+      verdict: 'rebind',
+    });
+    expect(await runCatalogPass(RUN)).toMatchObject({ album_writes: 4, rewritten: 4 });
+
+    // After the pass: another writer touches one album, and a librarian replaces another's catalog cover.
+    await sql`UPDATE ${sql(SCHEMA)}.album_metadata SET label = 'Drag City', updated_at = NOW() WHERE album_id = ${touched.id}`;
+    await sql`UPDATE ${sql(SCHEMA)}.library SET artwork_url = ${LIBRARIAN} WHERE id = ${relabelled.id}`;
+    const touchedNow = await albumRow(touched.id);
+    const scope = { runId: RUN, albumIds: [] };
+
+    // The dry run counts and writes nothing.
+    expect(await runRestore(scope, { execute: false })).toEqual({
+      album_metadata: { backed_up: 4, restorable: 3, restored: 0 },
+      library: { backed_up: 4, restorable: 2, restored: 0 },
+      analyze_error: null,
+    });
+    expect(await catalogCover(doga.id)).toBe(NEW);
+
+    expect(await runRestore(scope, { execute: true })).toEqual({
+      album_metadata: { backed_up: 4, restorable: 3, restored: 3 },
+      library: { backed_up: 4, restorable: 2, restored: 2 },
+      analyze_error: null,
+    });
+
+    const CASES = [
+      // [label, album, the album row after, the catalog cover after, restore markers]
+      ['a rebind', doga, doga.original, OLD, 1],
+      ['a clear with a bio', dots, dots.original, OLD, 1],
+      ['an album touched since its write', touched, touchedNow, NEW, 0],
+      ['a catalog cover changed since the pass', relabelled, relabelled.original, LIBRARIAN, 1],
+    ];
+    for (const [label, album, row, cover, markerCount] of CASES) {
+      expect([label, await albumRow(album.id)]).toEqual([label, row]);
+      expect([label, await catalogCover(album.id)]).toEqual([label, cover]);
+      expect([label, (await markers(album.id)).length]).toEqual([label, markerCount]);
+    }
+    const [marker] = await markers(doga.id);
+    const [write] = await sql`
+      SELECT after_image, provenance FROM ${sql(SCHEMA)}.album_metadata_reask_backup
+       WHERE album_id = ${doga.id} AND target_table = 'album_metadata'
+    `;
+    const pick = (row, keys) => Object.fromEntries(keys.map((k) => [k, row[k]]));
+    expect(marker).toMatchObject({
+      run_id: RUN,
+      row_id: doga.id,
+      before_image: write.after_image,
+      after_image: pick(doga.original, COLUMNS),
+      provenance: { restored_run_id: RUN, restored_write: write.provenance },
+    });
+
+    // The next enumeration flags every restored album, and only those, so admission holds them (`hold_restored`).
+    const restoredFlags = (
+      await enumerateCohort(
+        {
+          // The touched album still stores 3003; a pin of 5005 keeps it in the cohort as the unrestored control.
+          pins: [
+            [doga, 3003],
+            [touched, 5005],
+            [relabelled, 3003],
+          ].map(([a, pinned]) => ({ library_id: a.card, discogs_release_id: pinned, source: MASTERS_API })),
+          removed: [],
+        },
+        { limit: 0, afterAlbumId: 0, albumIds: [doga.id, touched.id, relabelled.id] }
+      )
+    ).map((c) => [c.album_id, c.restored]);
+    expect(restoredFlags).toEqual([
+      [doga.id, true],
+      [touched.id, false],
+      [relabelled.id, true],
+    ]);
+
+    // A second restore finds nothing: every restored album has moved on from its write.
+    await resetWatermark();
+    expect(await runRestore(scope, { execute: true })).toEqual({
+      album_metadata: { backed_up: 4, restorable: 0, restored: 0 },
+      library: { backed_up: 4, restorable: 0, restored: 0 },
+      analyze_error: null,
+    });
+    expect(await watermark()).toBe('2000-01-01T00:00:00.000Z');
+    expect((await markers(doga.id)).length).toBe(1);
+  });
+
+  test('restores only the listed albums, and leaves the catalog watermark alone when there is no cover to restore', async () => {
+    const RUN = 'b3148-run-nocover';
+    // No catalog cover, so the pass writes no library backup row.
+    const listed = await seedAndWrite(RUN, {
+      artist: 'Jessica Pratt',
+      title: 'Quiet Signs',
+      verdict: 'rebind',
+      catalogCover: null,
+    });
+    const other = await seedAndWrite(RUN, {
+      artist: 'Juana Molina',
+      title: 'Halo',
+      verdict: 'rebind',
+      catalogCover: null,
+    });
+    expect(await runCatalogPass(RUN)).toMatchObject({ album_writes: 2, rewritten: 0 });
+    await resetWatermark();
+
+    expect(await runRestore({ runId: RUN, albumIds: [listed.id] }, { execute: true })).toEqual({
+      album_metadata: { backed_up: 1, restorable: 1, restored: 1 },
+      library: { backed_up: 0, restorable: 0, restored: 0 },
+      analyze_error: null,
+    });
+
+    expect(await albumRow(listed.id)).toEqual(listed.original);
+    expect((await albumRow(other.id)).discogs_url).toBe(release(3003));
     expect(await watermark()).toBe('2000-01-01T00:00:00.000Z');
   });
 });

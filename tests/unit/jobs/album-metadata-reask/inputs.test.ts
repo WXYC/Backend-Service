@@ -179,8 +179,8 @@ describe('admit', () => {
   // which is the release the row still stores.
   const row = (legacy_release_id: number, reason: Reason): AdmissionRow =>
     reason === 'pin_mismatch'
-      ? { legacy_release_id, reason, stored_release_id: STORED, pin_release_id: PIN }
-      : { legacy_release_id, reason, stored_release_id: PIN, pin_release_id: null };
+      ? { legacy_release_id, reason, stored_release_id: STORED, pin_release_id: PIN, restored: false }
+      : { legacy_release_id, reason, stored_release_id: PIN, pin_release_id: null, restored: false };
 
   const entry = (library_id: number, tier: Tier, pin_source: string, reason: Reason): ManifestEntry => ({
     library_id,
@@ -249,6 +249,18 @@ describe('admit', () => {
       ask: false,
       hold: 'hold_manifest_stale',
     });
+  });
+
+  // A restored album stays restored (BS#3148): held at every tier, before the manifest is even read, unless the
+  // owner lifts the hold with REASK_INCLUDE_RESTORED=1, which then applies the ordinary rule.
+  it.each(['pin_mismatch', 'pin_removed'] as const)('holds a restored %s row as hold_restored', (reason) => {
+    const manifestEntry = entry(DOGA, 'rebind', 'alex-l-2026', reason);
+    const restored = { ...row(DOGA, reason), restored: true };
+
+    expect(admit(restored, new Map([[DOGA, manifestEntry]]))).toEqual({ ask: false, hold: 'hold_restored' });
+    expect(admit(restored, new Map())).toEqual({ ask: false, hold: 'hold_restored' });
+    expect(admit(restored, new Map([[DOGA, manifestEntry]]), true)).toEqual({ ask: true, entry: manifestEntry });
+    expect(admit(restored, new Map(), true)).toEqual({ ask: false, hold: 'hold_unmanifested' });
   });
 
   it('admits from a parsed manifest', () => {

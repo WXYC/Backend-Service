@@ -43,7 +43,8 @@ export type WriteOutcome = { written: false } | { written: true; artist_cleared:
 
 type Column = keyof ReleaseGroup | ArtistKey;
 
-const COLUMNS = [...(Object.keys(CLEAR_RELEASE_GROUP) as (keyof ReleaseGroup)[]), ...ARTIST_KEYS];
+/** The 13 columns every `album_metadata` backup row images, before and after; the restore puts back exactly these. */
+export const COLUMNS = [...(Object.keys(CLEAR_RELEASE_GROUP) as (keyof ReleaseGroup)[]), ...ARTIST_KEYS];
 
 const col = (alias: 'p' | 'n', key: Column): SQL => sql`${sql.raw(alias)}.${sql.identifier(key)}`;
 const prior = (key: Column): SQL => col('p', key);
