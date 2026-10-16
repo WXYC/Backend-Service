@@ -31,20 +31,28 @@
  * the default would leave a stale timestamp on the one row whose purpose is
  * recording when the flip happened.
  *
- * Raw `db.execute` throughout, not the query builder — a plain `.where()`
+ * ONE TRANSACTION (BS#2334). The state-row write and the watermark touch run
+ * in a single `db.transaction`, so a failed touch rolls the row back: the
+ * next boot still sees the change and retries the touch. Every statement
+ * therefore goes through the transaction handle (`tx.execute`), never the
+ * top-level `db` — a statement on `db` would commit on its own and bring the
+ * defect back. `tests/integration/catalog-export-flag-reconcile.spec.js`
+ * pins the rollback and retry against real Postgres.
+ *
+ * Raw `tx.execute` throughout, not the query builder — a plain `.where()`
  * read is not itself awaitable against this repo's unit-test `db` mock
  * (only `.execute()`/`.returning()` are), and this module's own unit tests
  * exercise it that way.
  */
 
 import { sql } from 'drizzle-orm';
-import { db, catalog_export_flag_state } from '@wxyc/database';
+import { db, catalog_export_flag_state, type DbTransaction } from '@wxyc/database';
 
 /** `RETURNS void` wrapper around 0104's watermark UPDATE (migration 0159) —
  * `touch_library_watermark()` itself is `RETURNS trigger` and cannot be
  * `SELECT`ed from application code. */
-const touchLibraryWatermarkNow = (): Promise<unknown> =>
-  db.execute(sql`SELECT wxyc_schema.touch_library_watermark_now()`);
+const touchLibraryWatermarkNow = (tx: DbTransaction): Promise<unknown> =>
+  tx.execute(sql`SELECT wxyc_schema.touch_library_watermark_now()`);
 
 /**
  * Reconciles one flag by name against its last-observed value, writing
@@ -53,10 +61,16 @@ const touchLibraryWatermarkNow = (): Promise<unknown> =>
  * sequence.
  */
 export async function reconcileCatalogExportFlag(envVarName: string): Promise<void> {
+  // One transaction, so a failed watermark touch rolls back the state-row
+  // write and the next boot sees the same change and retries the touch.
+  await db.transaction((tx) => reconcileInTransaction(tx, envVarName));
+}
+
+async function reconcileInTransaction(tx: DbTransaction, envVarName: string): Promise<void> {
   const current = process.env[envVarName] === 'true';
   const currentValue = current ? 'true' : 'false';
 
-  const rows = await db.execute(sql`
+  const rows = await tx.execute(sql`
     SELECT ${catalog_export_flag_state.value} AS value
     FROM ${catalog_export_flag_state}
     WHERE ${catalog_export_flag_state.name} = ${envVarName}
@@ -68,11 +82,11 @@ export async function reconcileCatalogExportFlag(envVarName: string): Promise<vo
     // doc comment). Write unconditionally so the next boot has a real
     // last-observed value; touch only if this boot's value is a change from
     // that assumed `false`.
-    await db.execute(sql`
+    await tx.execute(sql`
       INSERT INTO ${catalog_export_flag_state} (name, value) VALUES (${envVarName}, ${currentValue})
     `);
     if (current) {
-      await touchLibraryWatermarkNow();
+      await touchLibraryWatermarkNow(tx);
     }
     return;
   }
@@ -82,10 +96,10 @@ export async function reconcileCatalogExportFlag(envVarName: string): Promise<vo
     return;
   }
 
-  await db.execute(sql`
+  await tx.execute(sql`
     UPDATE ${catalog_export_flag_state}
     SET value = ${currentValue}, changed_at = now()
     WHERE ${catalog_export_flag_state.name} = ${envVarName}
   `);
-  await touchLibraryWatermarkNow();
+  await touchLibraryWatermarkNow(tx);
 }
