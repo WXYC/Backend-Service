@@ -217,13 +217,8 @@ if (!isTestEnv) {
   // of the DJ population shares that edge bucket.
   //
   // Same `rateLimitKeyFromRequest` generator as nine other limiters in this
-  // file (BS#2604 added three more sharing it), so it inherits the OPEN
-  // ASSUMPTION (BS#2193) documented on the get-session ceiling below: keying
-  // is on the full `X-Real-IP`, not a /56 prefix, so an IPv6 client on a /64
-  // could mint effectively unlimited buckets if nginx ever hands this
-  // service an IPv6 `X-Real-IP`. Not rekeyed here — that would silently
-  // rekey those nine sibling limiters too, which is its own follow-up, not
-  // a drive-by.
+  // file (BS#2604 added three more sharing it), so it inherits the /56 IPv6
+  // normalization settled on the get-session ceiling below (BS#2193).
   //
   // Decision 2 (recorded 2026-09-18): sized at 100/15min, not the tighter
   // 10/15min brute-force tier. The limiter runs ahead of authentication, so
@@ -1093,15 +1088,9 @@ if (!isTestEnv) {
   // one of them, raise the number rather than treating this comment as
   // settled — a 429 during legitimate use is worse than a loose bound.
   //
-  // IPv6 caveat (BS#2193): keying on the full `X-Real-IP` rather than a /56
-  // prefix is now load-bearing for fifteen paths across parent epic #2534 —
-  // `adminPrefixRateLimit`'s one plus these three limiters' fourteen — not
-  // just the two get-session limiters it was first flagged against. A
-  // single IPv6 client could still mint effectively unlimited buckets
-  // across all of them if nginx ever hands this service an IPv6
-  // `X-Real-IP`. Not rekeyed here, same reason as the get-session ceiling's
-  // own comment: rekeying would silently rekey every sibling limiter
-  // sharing the generator, which is a follow-up, not a drive-by.
+  // IPv6 (BS#2193): these limiters share `rateLimitKeyFromRequest`, which
+  // keys an IPv6 `X-Real-IP` on its /56, so one client cannot mint buckets
+  // by rotating through its own prefix.
   //
   // No 429 observability on these three, unlike the `/auth/get-session`
   // pair above (`makeRateLimitMetricsHandler`): a throttled request here

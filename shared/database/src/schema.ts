@@ -4001,7 +4001,7 @@ export const station_signup_attempt = pgTable(
     //
     // Deliberately NOT the apps/auth/rate-limit-key.ts hashing recipe, despite
     // sharing that file's IP source: `rateLimitKeyFromRequest` returns a RAW
-    // IP by design, and the 16-hex truncation there lives in `hashCredential`,
+    // IP (the /56 prefix for IPv6) by design, and the 16-hex truncation there lives in `hashCredential`,
     // which is module-private and hashes session tokens and bearer credentials
     // — high-entropy secrets, where an unkeyed digest is sound and this whole
     // invertibility problem does not arise. Only the truncation width is
