@@ -42,6 +42,8 @@ export const initLogger = (config: LoggerConfig): string => {
     // Sentry 11 turned this on by default, which titles captureMessage events
     // with a minified function name (BS#3002).
     attachStacktrace: false,
+    // Sentry 11 installs Dedupe by default, which drops repeated identical events (BS#3005).
+    integrations: (defaults) => defaults.filter((i) => i.name !== 'Dedupe'),
     dsn: process.env.SENTRY_DSN,
     release: process.env.SENTRY_RELEASE,
     environment: process.env.NODE_ENV || 'production',
