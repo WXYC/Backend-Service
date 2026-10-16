@@ -130,7 +130,7 @@ export interface StationSignupStatus {
      * NOT read off `recent` (BS#2362 review): the display list is capped, so
      * scanning it for the clear row returned null again the moment
      * STATUS_ATTEMPT_ROW_LIMIT attempts landed after a clear — during a
-     * `cooldown_refused` storm that is a couple of minutes, and it is exactly
+     * burst of attempts that is a couple of minutes, and it is exactly
      * when a manager is polling to confirm their clear took.
      */
     lastClearedAt: Date | null;

@@ -498,6 +498,100 @@ describe('station-passcode lifecycle (BS#2359, real Postgres)', () => {
       expect(latest[0].passcode_id).toBeNull();
     });
 
+    it('writes at most one cooldown_refused row per cooldown window (BS#2377)', async () => {
+      await rotateStationPasscode();
+      const now = new Date();
+      await seedNoMatchFailures(25, now);
+
+      // The first refusal fixes the row; a burst arriving after it sheds.
+      await verifyStationPasscode('ZZZZZZZZ', { now });
+      const results = await Promise.all(Array.from({ length: 10 }, () => verifyStationPasscode('ZZZZZZZZ', { now })));
+      results.forEach((result) => expect(result.cooldown).toBe(true));
+
+      const refused =
+        await sql`SELECT COUNT(*)::int AS c FROM station_signup_attempt WHERE outcome = 'cooldown_refused'`;
+      expect(refused[0].c).toBe(1);
+    });
+
+    it('cooldown_refused rows are inert in the production cooldown evaluation, so deduplicating them cannot move the window (BS#2377)', async () => {
+      await rotateStationPasscode();
+      const now = new Date();
+      await seedNoMatchFailures(25, now);
+
+      const before = await evaluateSignupCooldown(now);
+      expect(before.inCooldown).toBe(true);
+
+      // Many refusal rows, as if written one per request: the pre-fix shape.
+      for (let i = 0; i < 20; i++) {
+        await sql`
+          INSERT INTO station_signup_attempt (id, attempted_at, outcome)
+          VALUES (${`test-refused-${i}`}, ${new Date(now.getTime() + 1000 + i)}, 'cooldown_refused')
+        `;
+      }
+
+      const after = await evaluateSignupCooldown(now);
+      expect(after).toEqual(before);
+    });
+
+    it('falls back to an unconditional write when the conditional insert errors, and still refuses (BS#2365 availability)', async () => {
+      await rotateStationPasscode();
+      const now = new Date();
+      await seedNoMatchFailures(25, now);
+
+      const { db } = require('@wxyc/database');
+      const realExecute = db.execute.bind(db);
+      const queryText = (query) =>
+        (query?.queryChunks ?? []).map((chunk) => (Array.isArray(chunk?.value) ? chunk.value.join('') : '')).join('');
+      let failedOnce = false;
+      const executeSpy = jest.spyOn(db, 'execute').mockImplementation((query) => {
+        if (!failedOnce && queryText(query).includes('INSERT INTO station_signup_attempt')) {
+          failedOnce = true;
+          return Promise.reject(new Error('simulated conditional insert failure'));
+        }
+        return realExecute(query);
+      });
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+      try {
+        const result = await verifyStationPasscode('ZZZZZZZZ', { now: new Date(now.getTime() + 1000) });
+        expect(failedOnce).toBe(true);
+        expect(result.ok).toBe(false);
+        expect(result.cooldown).toBe(true);
+      } finally {
+        executeSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+
+      const refused =
+        await sql`SELECT COUNT(*)::int AS c FROM station_signup_attempt WHERE outcome = 'cooldown_refused'`;
+      expect(refused[0].c).toBe(1);
+    });
+
+    it('a sequential run of refusals yields exactly one cooldown_refused row, and a new window writes a new one', async () => {
+      await rotateStationPasscode();
+      const now = new Date();
+      await seedNoMatchFailures(25, now);
+
+      for (let i = 0; i < 5; i++) {
+        await verifyStationPasscode('ZZZZZZZZ', { now: new Date(now.getTime() + 1000 + i) });
+      }
+      const countRefused = async () =>
+        (await sql`SELECT COUNT(*)::int AS c FROM station_signup_attempt WHERE outcome = 'cooldown_refused'`)[0].c;
+      expect(await countRefused()).toBe(1);
+
+      // A manager clears, then a fresh burst of failures opens a second
+      // cooldown window: its first refusal is recorded again.
+      const TEST_STATION_MANAGER_ID = 'test-sm-id-0000000000000000001';
+      const cleared = new Date(now.getTime() + 10_000);
+      await clearSignupCooldown(TEST_STATION_MANAGER_ID, cleared);
+      // 25 failures at 1s spacing, all after the clear (it floors the count).
+      const second = new Date(cleared.getTime() + 30_000);
+      await seedNoMatchFailures(25, second);
+      await verifyStationPasscode('ZZZZZZZZ', { now: new Date(second.getTime() + 1000) });
+      await verifyStationPasscode('ZZZZZZZZ', { now: new Date(second.getTime() + 2000) });
+      expect(await countRefused()).toBe(2);
+    });
+
     it('clearSignupCooldown deletes no rows and acts as a floor on the window', async () => {
       const now = new Date();
       await seedNoMatchFailures(25, now);

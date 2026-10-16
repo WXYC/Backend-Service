@@ -198,6 +198,12 @@ const ALERT_OUTCOMES: ReadonlySet<StationSignupOutcome> = new Set([
 // join this set.
 const REFUSAL_OUTCOME: StationSignupOutcome = 'passcode_fail';
 
+// The outcome recordCooldownRefusal writes. Typed through StationSignupOutcome
+// so the raw-SQL conditional insert gets the same compile-time check as every
+// other writer: the column has no CHECK constraint (see schema.ts), the union
+// is the only enforcement.
+const COOLDOWN_REFUSED_OUTCOME: StationSignupOutcome = 'cooldown_refused';
+
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
@@ -787,6 +793,46 @@ async function insertSignupAttempt(params: InsertSignupAttemptParams): Promise<v
 }
 
 /**
+ * Write a `cooldown_refused` row unless one already marks the current
+ * cooldown window (BS#2377): the control sheds load under attack, so it must
+ * not write a row per refused request.
+ *
+ * The window is "since the newest `passcode_fail`" — no failure is written
+ * while the cooldown is armed (refusals are `cooldown_refused`, which is
+ * inert in the trigger math), so every refusal of one cooldown postdates the
+ * failure that armed it, and a re-armed cooldown has a newer failure and so
+ * records its own row. A manager's clear needs no term here: re-arming after
+ * it takes new failures. One conditional INSERT, not read-then-write; two
+ * concurrent first refusals may both write, which is benign.
+ *
+ * Fails toward writing: if the conditional insert errors, fall back to the
+ * unconditional write rather than dropping the audit row.
+ */
+async function recordCooldownRefusal(params: { ipHash: string | null; attemptedAt: Date }): Promise<void> {
+  try {
+    await db.execute(sql`
+      INSERT INTO station_signup_attempt (id, attempted_at, outcome, ip_hash)
+      SELECT ${randomUUID()}::text, ${params.attemptedAt.toISOString()}::timestamptz, ${COOLDOWN_REFUSED_OUTCOME}::text, ${params.ipHash}::text
+      WHERE NOT EXISTS (
+        SELECT 1 FROM station_signup_attempt
+        WHERE outcome = ${COOLDOWN_REFUSED_OUTCOME}::text
+          AND attempted_at >= COALESCE(
+            (SELECT max(attempted_at) FROM station_signup_attempt WHERE outcome = ${REFUSAL_OUTCOME}::text),
+            '-infinity'::timestamptz
+          )
+      )
+    `);
+  } catch (error) {
+    console.error('[station-passcode] conditional cooldown_refused insert failed; writing unconditionally', error);
+    await insertSignupAttempt({
+      outcome: COOLDOWN_REFUSED_OUTCOME,
+      ipHash: params.ipHash,
+      attemptedAt: params.attemptedAt,
+    });
+  }
+}
+
+/**
  * Record a `passcode_unverifiable` row for an ACTIVE-row decrypt failure and
  * swallow any error doing so (BS#2359 review).
  *
@@ -1023,7 +1069,7 @@ export const SIGNUP_COOLDOWN_TRIGGER_ROW_LIMIT = 500;
  * ask the same question directly (BS#2362 review). It previously answered it
  * by scanning readRecentSignupAttempts' capped display list for a
  * `cooldown_cleared` row, which reverts to null as soon as 100 attempts land
- * after the clear — minutes, during the `cooldown_refused` storm that is
+ * after the clear — minutes, during the burst of attempts that is
  * exactly when a manager is polling to confirm their clear took.
  *
  * NOT scoped to any window. The clear is a floor on all subsequent evaluation
@@ -1360,10 +1406,16 @@ export interface MatchStationPasscodeResult extends VerifyStationPasscodeResult 
  * Fusing match and claim forces a choice between the two; splitting them
  * satisfies both. See apps/auth/station-signup.ts's docblock.
  *
- * ATTEMPT-LOG INVARIANT. The match/claim pair writes EXACTLY ONE
- * `station_signup_attempt` row per verification, on every path:
+ * ATTEMPT-LOG INVARIANT. The match/claim pair never writes more than one
+ * `station_signup_attempt` row per verification, and each path below writes
+ * exactly the row it lists, with one exception: a cooldown refusal that
+ * recordCooldownRefusal deduplicates writes NO row. A count of
+ * `cooldown_refused` rows therefore counts cooldown windows, not refused
+ * requests.
  *
- *   - cooldown armed        -> `cooldown_refused` here, no claim follows
+ *
+ *   - cooldown armed        -> `cooldown_refused` here (once per window,
+ *                              recordCooldownRefusal), no claim follows
  *   - active row won't decrypt -> `passcode_unverifiable` here, then throws
  *   - no match              -> the classification token here (`passcode_fail`
  *                              / `_expired` / `_revoked` / `_unverifiable`),
@@ -1399,7 +1451,7 @@ export async function matchStationPasscode(
 
   const cooldown = await evaluateSignupCooldown(now);
   if (cooldown.inCooldown) {
-    await insertSignupAttempt({ outcome: 'cooldown_refused', ipHash, attemptedAt: now });
+    await recordCooldownRefusal({ ipHash, attemptedAt: now });
     return { ok: false, cooldown: true, passcodeId: null };
   }
 
