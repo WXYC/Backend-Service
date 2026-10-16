@@ -405,7 +405,7 @@ describe('POST /library/filings', () => {
     const suffix = uniqueSuffix();
     const labelName = `Filing ReleaseFail Label ${suffix}`;
 
-    await auth
+    const res = await auth
       .post('/library/filings')
       .send({
         artist: {
@@ -415,10 +415,8 @@ describe('POST /library/filings', () => {
           genre_id: 11,
           code_number: 1,
         },
-        // A dangling format_id trips the FK constraint on the release insert,
-        // never validated ahead of time (matches POST /library's own
-        // addAlbum, which doesn't pre-check format_id either) — the write
-        // fails deep inside the same transaction the artist insert ran in.
+        // A dangling format_id is rejected by the existence read before the
+        // composite transaction opens, so nothing is written.
         release: {
           album_title: `Filing ReleaseFail Album ${suffix}`,
           label: labelName,
@@ -426,7 +424,8 @@ describe('POST /library/filings', () => {
           format_id: 999999999,
         },
       })
-      .expect(500);
+      .expect(400);
+    expectErrorContains(res, 'release.format_id does not reference an existing format');
 
     const byCode = await auth
       .get('/library/artists/by-code')
