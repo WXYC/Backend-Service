@@ -119,10 +119,10 @@ describe('shouldCaptureExpressError', () => {
   });
 });
 
-// instrument.ts bundles this filter and `utils/error.ts` into `dist/instrument.js`
-// (tsup `splitting: false`), so the filter holds a different `WxycError` class
-// than app.js's. An `instanceof` check would be false for every error app code
-// throws; the Symbol.for brand must be what identifies it (BS#2949).
+// The backend build shares one copy of `utils/error.ts` between instrument.js and
+// app.js (tsup `splitting: true`, BS#2975), but the filter identifies a
+// `WxycError` by its Symbol.for brand so it does not depend on that (BS#2949).
+// This test loads a second copy on purpose and pins that the brand still works.
 describe('shouldCaptureExpressError across duplicated module copies', () => {
   it('recognizes a WxycError from a different module copy', () => {
     let OtherWxycError!: typeof WxycError;

@@ -50,10 +50,8 @@ describe('Sentry instrumentation loading', () => {
     }
   );
 
-  // `splitting: false` gives instrument.js and app.js each their own copy of
-  // every bundled module, so the preload's `instanceof LmlClientError` only
-  // matches errors thrown from app.js while lml-client stays external and both
-  // bundles import the one installed copy.
+  // Keeping lml-client external guarantees the preload's
+  // `instanceof LmlClientError` sees the one installed copy of the class.
   it.each([
     ['backend', '../../../apps/backend/tsup.config.ts'],
     ['enrichment-worker', '../../../apps/enrichment-worker/tsup.config.ts'],
