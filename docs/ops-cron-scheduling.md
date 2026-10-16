@@ -81,6 +81,12 @@ Promoting them to full ≥60 min compliance later is a trivial one-line follow-u
 4. DB-only: no constraint from this policy.
 5. If the job needs an ops-tunable cadence override, do **not** add it to the shared `BACKFILL_CRON_SCHEDULE` allowlist in `scripts/resolve-cron-schedule.sh` unless its cadence story is genuinely the same as `flowsheet-metadata-backfill`'s — see the BS#1665 postmortem for why a shared override var is a latent re-collision route.
 
+## Cron memory caps
+
+The crontab line the deploy builds has no memory cap by default, and the single t3.small host has wedged on memory before (BS#937). A job can opt into a cap with `"cron-memory"` in its `package.json` (see [`jobs.md`](jobs.md#optional-cron-memory-cap)), which the deploy turns into `docker run --memory=<value>`.
+
+Set the cap from a measured peak, not a guess: run the job against realistic data, record the peak `MemUsage` from `docker stats`, and set the cap to that peak plus 50% headroom. Do this before enabling the job's work, and record the measurement on the job's issue. A job the kernel kills for memory reports nothing to Sentry and shows only as a missed check-in, so an undersized cap is a silent failure.
+
 ## Cron liveness (BS#2064)
 
 Scheduling is not the only thing a cron can get wrong. A job whose healthy run is a no-op — anti-joined on an empty cohort, nothing to write, `candidates: 0` in the log — is byte-identical to a job that **stopped running**. A `try`/`catch` + `captureError` covers "the job ran and threw"; it cannot see the crontab entry dropped by a deploy or a hand edit, the image failing to pull, docker wedged, or the host rebooting. That gap is what BS#2064 closed for `legacy-linkage-resolve`, the first cron in the fleet to carry a liveness signal.
