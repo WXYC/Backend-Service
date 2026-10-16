@@ -204,100 +204,67 @@ const mockDeleteArtistFromDB =
     ) => Promise<DeleteArtistOutcomeMock>
   >();
 
-jest.mock('../../../apps/backend/services/library.service', () => ({
-  getAlbumFromDB: mockGetAlbumFromDB,
-  getAlbumByLegacyId: mockGetAlbumByLegacyId,
-  markAlbumMissing: mockMarkAlbumMissing,
-  markAlbumFound: mockMarkAlbumFound,
-  fuzzySearchLibrary: mockFuzzySearchLibrary,
-  enrichWithArtwork: mockEnrichWithArtwork,
-  // Identity-preserving wire-shape transform: tests stub it as a pass-through
-  // so the assertions below see the same objects produced by enrichWithArtwork.
-  serializeLibraryArtistViewEntry: (row: unknown) => row,
-  serializeArtist: (row: unknown) => row,
-  // Stub out other exports that may be referenced at import time
-  getFormatsFromDB: jest.fn(),
-  getRotationFromDB: mockGetRotationFromDB,
-  addToRotation: mockAddToRotation,
-  // BS#2491 release-scoped definitive links: the rotation-add and filings arms
-  // reconcile after the write, and `PUT /library/:id/urls` writes + re-reads.
-  reconcileLibraryUrlsToLml: mockReconcileLibraryUrlsToLml,
-  setLibraryUrls: mockSetLibraryUrls,
-  libraryRowExists: mockLibraryRowExists,
-  killRotationInDB: mockKillRotationInDB,
-  // Real projection and real field lists, not stubs: the controller routes
-  // its 200 through `toRotationRowSummary`, reads both field lists for its
-  // validation loop and 409 message, and destructures
-  // `UNCATALOGUED_ROTATION_MAX_LIMIT` at module load for its bound check
-  // (omitting it makes the ceiling `undefined`, so `limit > undefined` is
-  // false and every over-limit request silently 200s). All four come from one
-  // shared declaration rather than a per-suite copy — value and helper exports
-  // drifting out of these hand-maintained mocks is
-  // WXYC/Backend-Service#2209.
-  ...jest
-    .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
-      '../../mocks/library-service-rotation.mock'
-    )
-    .createLibraryServiceRotationMock(),
-  getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
-  getRotationRowFromDB: mockGetRotationRowFromDB,
-  linkRotationToAlbum: mockLinkRotationToAlbum,
-  insertAlbum: mockInsertAlbum,
-  updateArtworkUrl: mockUpdateArtworkUrl,
-  updateOnStreaming: mockUpdateOnStreaming,
-  updateCanonicalEntity: mockUpdateCanonicalEntity,
-  mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
-  artistIdFromName: mockArtistIdFromName,
-  conflictingArtistIdForRename: mockConflictingArtistIdForRename,
-  getArtistNameById: mockGetArtistNameById,
-  insertArtistWithGenreCrossreference: mockInsertArtistWithGenreCrossreference,
-  getArtistByCode: mockGetArtistByCode,
-  getArtistsByCode: mockGetArtistsByCode,
-  browseArtistsInCodeBucket: mockBrowseArtistsInCodeBucket,
-  ARTIST_CODE_BUCKET_MAX_LIMIT: 500,
-  genreExists: mockGenreExists,
-  getArtistById: mockGetArtistById,
-  generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
-  peekArtistShelf: mockPeekArtistShelf,
-  generateArtistNumber: mockGenerateArtistNumber,
-  getGenresFromDB: jest.fn(),
-  insertGenre: jest.fn(),
-  insertFormat: jest.fn(),
-  getFormatById: mockGetFormatById,
-  isISODate: mockIsISODate,
-  resolveRotationPickerSource: mockResolveRotationPickerSource,
-  getRotationTracksFromRelease: mockGetRotationTracksFromRelease,
-  getLibraryRowById: mockGetLibraryRowById,
-  updateAlbumInDB: mockUpdateAlbumInDB,
-  artistExistsInGenre: mockArtistExistsInGenre,
-  albumCodeNumberTaken: mockAlbumCodeNumberTaken,
-  findLibrarySlotOccupant: mockFindLibrarySlotOccupant,
-  recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
-  deleteAlbumFromDB: mockDeleteAlbumFromDB,
-  deleteArtistFromDB: mockDeleteArtistFromDB,
-  getArtistCardById: mockGetArtistCardById,
-  getArtistCardByIdInGenre: mockGetArtistCardByIdInGenre,
-  getArtistDependentCounts: mockGetArtistDependentCounts,
-  updateArtistInDB: mockUpdateArtistInDB,
-  getReleasesForArtist: mockGetReleasesForArtist,
-  countReleasesForArtist: mockCountReleasesForArtist,
-  updateRotation: mockUpdateRotation,
-  listRotationCardsFromDB: mockListRotationCardsFromDB,
-  addRotationCard: mockAddRotationCard,
-  renameRotationCard: mockRenameRotationCard,
-  deleteRotationCardFromDB: mockDeleteRotationCardFromDB,
-  // Stand-in with the real constructor shape, so `addRotation`'s
-  // `err instanceof libraryService.RotationCardBinMismatchError` arm (the
-  // named 409) is exercisable against the mocked module.
-  RotationCardBinMismatchError: class RotationCardBinMismatchError extends Error {
-    constructor(cardId: number, cardBin: string, rotationBin: string) {
-      super(
-        `Rotation card ${cardId} is filed in bin '${cardBin}', but the rotation row is bound for bin '${rotationBin}'`
-      );
-      this.name = 'RotationCardBinMismatchError';
-    }
-  },
-}));
+jest.mock('../../../apps/backend/services/library.service', () =>
+  jest
+    .requireActual<typeof import('../../mocks/library-service.mock')>('../../mocks/library-service.mock')
+    .createLibraryServiceMock({
+      getAlbumFromDB: mockGetAlbumFromDB,
+      getAlbumByLegacyId: mockGetAlbumByLegacyId,
+      markAlbumMissing: mockMarkAlbumMissing,
+      markAlbumFound: mockMarkAlbumFound,
+      fuzzySearchLibrary: mockFuzzySearchLibrary,
+      enrichWithArtwork: mockEnrichWithArtwork,
+      getRotationFromDB: mockGetRotationFromDB,
+      addToRotation: mockAddToRotation,
+      reconcileLibraryUrlsToLml: mockReconcileLibraryUrlsToLml,
+      setLibraryUrls: mockSetLibraryUrls,
+      libraryRowExists: mockLibraryRowExists,
+      killRotationInDB: mockKillRotationInDB,
+      getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
+      getRotationRowFromDB: mockGetRotationRowFromDB,
+      linkRotationToAlbum: mockLinkRotationToAlbum,
+      insertAlbum: mockInsertAlbum,
+      updateArtworkUrl: mockUpdateArtworkUrl,
+      updateOnStreaming: mockUpdateOnStreaming,
+      updateCanonicalEntity: mockUpdateCanonicalEntity,
+      mapLookupToCanonicalEntity: mockMapLookupToCanonicalEntity,
+      artistIdFromName: mockArtistIdFromName,
+      conflictingArtistIdForRename: mockConflictingArtistIdForRename,
+      getArtistNameById: mockGetArtistNameById,
+      insertArtistWithGenreCrossreference: mockInsertArtistWithGenreCrossreference,
+      getArtistByCode: mockGetArtistByCode,
+      getArtistsByCode: mockGetArtistsByCode,
+      browseArtistsInCodeBucket: mockBrowseArtistsInCodeBucket,
+      genreExists: mockGenreExists,
+      getArtistById: mockGetArtistById,
+      generateAlbumCodeNumber: mockGenerateAlbumCodeNumber,
+      peekArtistShelf: mockPeekArtistShelf,
+      generateArtistNumber: mockGenerateArtistNumber,
+      getFormatById: mockGetFormatById,
+      isISODate: mockIsISODate,
+      resolveRotationPickerSource: mockResolveRotationPickerSource,
+      getRotationTracksFromRelease: mockGetRotationTracksFromRelease,
+      getLibraryRowById: mockGetLibraryRowById,
+      updateAlbumInDB: mockUpdateAlbumInDB,
+      artistExistsInGenre: mockArtistExistsInGenre,
+      albumCodeNumberTaken: mockAlbumCodeNumberTaken,
+      findLibrarySlotOccupant: mockFindLibrarySlotOccupant,
+      recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
+      deleteAlbumFromDB: mockDeleteAlbumFromDB,
+      deleteArtistFromDB: mockDeleteArtistFromDB,
+      getArtistCardById: mockGetArtistCardById,
+      getArtistCardByIdInGenre: mockGetArtistCardByIdInGenre,
+      getArtistDependentCounts: mockGetArtistDependentCounts,
+      updateArtistInDB: mockUpdateArtistInDB,
+      getReleasesForArtist: mockGetReleasesForArtist,
+      countReleasesForArtist: mockCountReleasesForArtist,
+      updateRotation: mockUpdateRotation,
+      listRotationCardsFromDB: mockListRotationCardsFromDB,
+      addRotationCard: mockAddRotationCard,
+      renameRotationCard: mockRenameRotationCard,
+      deleteRotationCardFromDB: mockDeleteRotationCardFromDB,
+    })
+);
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
   createLabel: mockCreateLabel,
