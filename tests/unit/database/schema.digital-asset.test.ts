@@ -202,3 +202,20 @@ describe('schema: digital_asset watermark trigger + wrapper (migration 0159, BS#
     expect(watermarkDdl).toMatch(/UPDATE\s+wxyc_schema\.library_watermark[\s\S]*?WHERE\s+id\s*=\s*true/i);
   });
 });
+
+describe('schema: digital_asset closed vocabularies (migration 0197, BS#2439)', () => {
+  const checksEntry = journal.entries.find((e) => e.tag.startsWith('0197_'));
+  const checksDdl = stripComments(
+    fs.readFileSync(path.join(migrationsDir, `${checksEntry?.tag ?? 'missing'}.sql`), 'utf-8')
+  );
+
+  it.each([
+    ['digital_asset_provenance_ck', 'provenance', "'rotation_upload', 'cd_rip'"],
+    ['digital_asset_status_ck', 'status', "'needs_review', 'bound', 'rejected'"],
+  ])('%s is in the migration and mirrored in schema.ts with the same value set', (name, column, values) => {
+    expect(checksDdl).toContain(
+      `ADD CONSTRAINT "${name}" CHECK ("wxyc_schema"."digital_asset"."${column}" IN (${values}))`
+    );
+    expect(extractTableDef('digital_asset')).toContain(`check('${name}', sql\`\${table.${column}} IN (${values})\`)`);
+  });
+});

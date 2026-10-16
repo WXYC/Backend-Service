@@ -4671,12 +4671,13 @@ export const digital_asset = wxyc_schema.table(
     library_id: integer('library_id')
       .notNull()
       .references(() => library.id),
-    // 'rotation_upload' | 'cd_rip' today; open text vocabulary so a future
-    // provenance doesn't cost its own migration (the 0109 lesson).
+    // Closed vocabulary, enforced by `digital_asset_provenance_ck` (0197):
+    // 'rotation_upload' | 'cd_rip'. A new provenance costs a migration.
     provenance: text('provenance').notNull(),
     disc_number: smallint('disc_number').default(1).notNull(),
-    // 'needs_review' | 'bound' | 'rejected' today; rip statuses
-    // ('pulled' | 'ripped' | 'exception') arrive with the CD-rip phase.
+    // Closed vocabulary, enforced by `digital_asset_status_ck` (0197):
+    // 'needs_review' | 'bound' | 'rejected'. The CD-rip phase's statuses
+    // ('pulled' | 'ripped' | 'exception') arrive with a migration widening it.
     status: text('status').default('needs_review').notNull(),
     // Reviewer's reason for a bind/reject decision, or the matcher's evidence.
     bind_note: text('bind_note'),
@@ -4702,6 +4703,8 @@ export const digital_asset = wxyc_schema.table(
   (table) => [
     uniqueIndex('digital_asset_library_provenance_disc_idx').on(table.library_id, table.provenance, table.disc_number),
     index('digital_asset_library_status_idx').on(table.library_id, table.status),
+    check('digital_asset_provenance_ck', sql`${table.provenance} IN ('rotation_upload', 'cd_rip')`),
+    check('digital_asset_status_ck', sql`${table.status} IN ('needs_review', 'bound', 'rejected')`),
   ]
 );
 

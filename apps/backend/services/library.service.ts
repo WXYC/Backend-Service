@@ -7459,10 +7459,11 @@ export const getFlowsheetPlayImpact = async (album_id: number): Promise<Flowshee
  * re-bind those objects are owed stays findable.
  *
  * Written as "everything except this value" rather than an allowlist of
- * blockers, because `status` is an open vocabulary (`schema.ts`:
- * `'needs_review' | 'bound' | 'rejected'` today, with `'pulled'` /
- * `'ripped'` / `'exception'` planned for the CD-rip phase) — so a status
- * added later blocks by default instead of silently becoming
+ * blockers. `status` is a closed vocabulary today — `'needs_review' |
+ * 'bound' | 'rejected'`, enforced by `digital_asset_status_ck` in migration
+ * 0197 — but the CD-rip phase plans to widen it with `'pulled'` /
+ * `'ripped'` / `'exception'`, so a status added by a later widening
+ * migration blocks by default instead of silently becoming
  * deletable-through.
  */
 export const NON_BLOCKING_DIGITAL_ASSET_STATUS = 'rejected';
