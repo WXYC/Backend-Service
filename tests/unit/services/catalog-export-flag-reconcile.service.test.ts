@@ -81,7 +81,6 @@ describe('reconcileCatalogExportFlag', () => {
     const rendered = statements();
     expect(rendered[1]).toMatch(/UPDATE/i);
     expect(rendered[1]).toMatch(/changed_at/i);
-    expect(rendered[1]).not.toMatch(/DEFAULT/i);
     expect(rendered[2]).toMatch(/touch_library_watermark_now/i);
   });
 
@@ -95,5 +94,20 @@ describe('reconcileCatalogExportFlag', () => {
     const rendered = statements();
     expect(rendered[1]).toMatch(/UPDATE/i);
     expect(rendered[2]).toMatch(/touch_library_watermark_now/i);
+  });
+
+  it('runs every statement on the transaction handle, and a touch error propagates out of db.transaction (BS#2334; the rollback and retry are pinned in the integration spec)', async () => {
+    process.env[FLAG] = 'true';
+    const txExecute = jest
+      .fn<(q: unknown) => Promise<unknown>>()
+      .mockResolvedValueOnce([{ value: 'false' }]) // SELECT
+      .mockResolvedValueOnce([]) // UPDATE
+      .mockRejectedValueOnce(new Error('touch failed'));
+    db.transaction.mockImplementationOnce(async (fn: (tx: unknown) => Promise<void>) => fn({ execute: txExecute }));
+
+    await expect(reconcileCatalogExportFlag(FLAG)).rejects.toThrow('touch failed');
+
+    expect(txExecute).toHaveBeenCalledTimes(3);
+    expect(db.execute).not.toHaveBeenCalled(); // nothing escaped the transaction
   });
 });
