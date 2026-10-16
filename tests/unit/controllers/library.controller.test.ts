@@ -1536,32 +1536,53 @@ describe('library.controller', () => {
         expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
       });
 
-      it('keys the assignment bucket on the NFC form of code_letters -- the form insertArtistWithGenreCrossreference stores', async () => {
-        const nfdCodeLetters = 'NU\u0308'; // decomposed: U + combining diaeresis
-        const nfcCodeLetters = 'N\u00DC'; // precomposed U-umlaut
-        mockGenerateArtistNumber.mockResolvedValue(41);
-        mockInsertArtistWithGenreCrossreference.mockResolvedValue({
-          id: 56,
-          artist_name: 'Nilüfer Yanya',
-          alphabetical_name: 'Nilüfer Yanya',
-          code_letters: nfcCodeLetters,
-        });
+      it.each([
+        ['lowercase', 'ch', 'CH'],
+        ['padded', '  ch ', 'CH'],
+        ['mixed-case V/A', 'v/A', 'V/A'],
+      ])(
+        'stores and keys every code read on the canonical form of %s code_letters (BS#2199)',
+        async (_label, raw, canonical) => {
+          mockGenerateArtistNumber.mockResolvedValue(41);
+          mockInsertArtistWithGenreCrossreference.mockResolvedValue({
+            id: 56,
+            artist_name: 'Nilüfer Yanya',
+            alphabetical_name: 'Nilüfer Yanya',
+            code_letters: canonical,
+          });
+
+          const res = mockResponse();
+          await addArtist(req({ artist_name: 'Nilüfer Yanya', code_letters: raw, code_number: undefined }), res, next);
+
+          expect(mockGenerateArtistNumber).toHaveBeenCalledWith(canonical, 15);
+          expect(mockGetArtistByCode).toHaveBeenCalledWith(canonical, 15, 41);
+          expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
+            expect.objectContaining({ code_letters: canonical }),
+            15,
+            41
+          );
+          expect(res.status).toHaveBeenCalledWith(201);
+        }
+      );
+
+      it('refuses a duplicate in any case with a 409, because the pre-check keys on the canonical form (BS#2199)', async () => {
+        mockGetArtistByCode.mockImplementation((letters: string) =>
+          Promise.resolve(letters === 'KZ' ? { artist_id: 3, artist_name: 'Jockstrap', code_letters: 'KZ' } : null)
+        );
 
         const res = mockResponse();
-        await addArtist(
-          req({ artist_name: 'Nilüfer Yanya', code_letters: nfdCodeLetters, code_number: undefined }),
-          res,
-          next
-        );
+        await addArtist(req({ code_letters: ' kz', code_number: 7 }), res, next);
 
-        expect(mockGenerateArtistNumber).toHaveBeenCalledWith(nfcCodeLetters, 15);
-        expect(mockGetArtistByCode).toHaveBeenCalledWith(nfcCodeLetters, 15, 41);
-        expect(mockInsertArtistWithGenreCrossreference).toHaveBeenCalledWith(
-          expect.objectContaining({ code_letters: nfcCodeLetters }),
-          15,
-          41
-        );
-        expect(res.status).toHaveBeenCalledWith(201);
+        expect(mockGetArtistByCode).toHaveBeenCalledWith('KZ', 15, 7);
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
+      });
+
+      it.each(['N\u00DC', 'ABCDE', '  ', 'A-B'])('rejects out-of-domain code_letters %j with a 400', async (bad) => {
+        await expect(addArtist(req({ code_letters: bad }), mockResponse(), next)).rejects.toMatchObject({
+          statusCode: 400,
+        });
+        expect(mockInsertArtistWithGenreCrossreference).not.toHaveBeenCalled();
       });
     });
 
@@ -2204,6 +2225,19 @@ describe('library.controller', () => {
       expect(mockGenerateArtistNumber.mock.calls[0]).toEqual(['BU', 11]);
       expect(res.json).toHaveBeenCalledWith({ next_code_number: 61 });
     });
+
+    it.each([
+      ['lowercase', 'ch', 'CH'],
+      ['padded', ' ch ', 'CH'],
+    ])(
+      'previews the canonical bucket for %s code_letters, the one addArtist assigns in (BS#2199)',
+      async (_label, raw, canonical) => {
+        const res = mockResponse();
+        await peekArtistNumber({ query: { code_letters: raw, genre_id: '15' } } as unknown as Request, res, next);
+
+        expect(mockGenerateArtistNumber.mock.calls[0]).toEqual([canonical, 15]);
+      }
+    );
 
     it('ignores a code_number the by-code sibling would consume — same service call, same response', async () => {
       const res = mockResponse();

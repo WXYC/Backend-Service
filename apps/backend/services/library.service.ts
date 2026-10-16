@@ -4717,7 +4717,7 @@ export const assertRefileLettersAllowed = (code_letters?: string): void => {
  * **Watermark cost:** a real re-file advances the catalog watermark once (the statement-level trigger from migration
  * 0105), a full catalog re-download for every poller, the cost a rename pays. The trigger fires even for a zero-row
  * UPDATE, so the no-op path issues no UPDATE at all. The occupancy check matches exact stored letters (prod holds no
- * non-canonical `code_letters`, measured 2026-10-07; WXYC/Backend-Service#2199 tracks the create-path inflow).
+ * non-canonical `code_letters`, measured 2026-10-07, and the artist-create paths now store the canonical form, BS#2199).
  *
  * **Residual race, accepted:** `addArtist` inserts into a bucket without taking these locks, so a create landing the
  * same triple at the same instant as a re-file is not prevented. That is the check-then-act window BS#2106 records for
