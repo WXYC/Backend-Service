@@ -4792,7 +4792,7 @@ export const listener_requests = wxyc_schema.table(
     anonymized_at: timestamp('anonymized_at', { withTimezone: true }),
   },
   (table) => [
-    index('listener_requests_channel_created_idx').on(table.slack_channel_id, table.created_at.desc()),
+    index('listener_requests_channel_created_idx').on(table.slack_channel_id, table.created_at.desc().nullsFirst()),
     index('listener_requests_fingerprint_idx')
       .on(table.fingerprint)
       .where(sql`${table.fingerprint} IS NOT NULL`),
