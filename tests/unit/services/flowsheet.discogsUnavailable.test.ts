@@ -27,8 +27,7 @@
  * jest.unit.config.ts), so layer 1 pins the query SHAPE without PostgreSQL.
  */
 
-import { jest } from '@jest/globals';
-import { db, library, rotation, album_metadata, labels } from '@wxyc/database';
+import { library, rotation, album_metadata, labels } from '@wxyc/database';
 import {
   getEntriesByPage,
   getEntriesByRange,
@@ -38,59 +37,14 @@ import {
   type FSEntryRaw,
 } from '../../../apps/backend/services/flowsheet.service';
 import { IFSEntry, IFSEntryMetadata } from '../../../apps/backend/controllers/flowsheet.controller';
+import {
+  installRecursiveSelectMock,
+  type RecursiveSelectMockCapture as MockCapture,
+} from '../../utils/recursive-select-mock';
 
 // ---------------------------------------------------------------------------
 // Layer 1: SQL projection shape (no N+1)
 // ---------------------------------------------------------------------------
-
-type LeftJoinCall = { table: unknown; on: unknown };
-
-interface MockCapture {
-  fieldsArg: unknown;
-  leftJoinCalls: LeftJoinCall[];
-  selectCallCount: number;
-}
-
-// Mirrors flowsheet.albumMetadataProjection.test.ts's installRecursiveSelectMock.
-function installRecursiveSelectMock(): MockCapture {
-  const capture: MockCapture = { fieldsArg: undefined, leftJoinCalls: [], selectCallCount: 0 };
-
-  const makeChain = () => {
-    const c: Record<string, jest.Mock> = {};
-    c.leftJoin = jest.fn().mockImplementation((table: unknown, on: unknown) => {
-      capture.leftJoinCalls.push({ table, on });
-      return c;
-    });
-    // BS#1960: getEntriesByPage's deferred-join rewrite adds an innerJoin
-    // (bounded id-page -> flowsheet) ahead of the pre-existing leftJoins.
-    // Not tracked in capture.leftJoinCalls — the "still exactly 3 leftJoins"
-    // assertion below is specifically about rotation/library/album_metadata.
-    c.innerJoin = jest.fn().mockReturnValue(c);
-    c.where = jest.fn().mockReturnValue(c);
-    c.orderBy = jest.fn().mockReturnValue(c);
-    c.offset = jest.fn().mockReturnValue(c);
-    // Chain-returning, not terminal: getEntriesByPage's inner id-subquery
-    // chains .limit(m).as('page') — .as needs a chain to call onto.
-    c.limit = jest.fn().mockReturnValue(c);
-    // Terminal for the id-subquery: returns a stand-in Subquery whose `.id`
-    // is what the outer query's innerJoin predicate references.
-    c.as = jest.fn().mockReturnValue({ id: 'mock-page-id' });
-    c.then = jest.fn().mockImplementation((onFulfilled: (v: unknown) => unknown) => {
-      return Promise.resolve([]).then(onFulfilled);
-    });
-    return c;
-  };
-
-  (db as unknown as { select: jest.Mock }).select = jest.fn().mockImplementation((fields: unknown) => {
-    capture.fieldsArg = fields;
-    capture.selectCallCount += 1;
-    const chain = makeChain();
-    const from = jest.fn().mockReturnValue(chain);
-    return { from };
-  });
-
-  return capture;
-}
 
 describe('flowsheet.service — discogs-unavailable SQL projection (BS#1908)', () => {
   let capture: MockCapture;

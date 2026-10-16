@@ -18,13 +18,11 @@
  *   3. `transformToV2` — the track wire carries it, and `record_label` is
  *      untouched beside it.
  *
- * The harness mirrors `flowsheet.discogsUnavailable.test.ts`'s
- * `installRecursiveSelectMock`, which is itself modelled on
- * `flowsheet.albumMetadataProjection.test.ts`.
+ * The harness is the shared `installRecursiveSelectMock` in
+ * `tests/utils/recursive-select-mock.ts`.
  */
 
-import { jest } from '@jest/globals';
-import { db, rotation, labels } from '@wxyc/database';
+import { rotation, labels } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
 import {
   getEntriesByPage,
@@ -36,43 +34,10 @@ import {
   type FSEntryRaw,
 } from '../../../apps/backend/services/flowsheet.service';
 import { IFSEntry, IFSEntryMetadata } from '../../../apps/backend/controllers/flowsheet.controller';
-
-type LeftJoinCall = { table: unknown; on: unknown };
-
-interface MockCapture {
-  fieldsArg: unknown;
-  leftJoinCalls: LeftJoinCall[];
-}
-
-function installRecursiveSelectMock(): MockCapture {
-  const capture: MockCapture = { fieldsArg: undefined, leftJoinCalls: [] };
-
-  const makeChain = () => {
-    const c: Record<string, jest.Mock> = {};
-    c.leftJoin = jest.fn().mockImplementation((table: unknown, on: unknown) => {
-      capture.leftJoinCalls.push({ table, on });
-      return c;
-    });
-    c.innerJoin = jest.fn().mockReturnValue(c);
-    c.where = jest.fn().mockReturnValue(c);
-    c.orderBy = jest.fn().mockReturnValue(c);
-    c.offset = jest.fn().mockReturnValue(c);
-    c.limit = jest.fn().mockReturnValue(c);
-    c.as = jest.fn().mockReturnValue({ id: 'mock-page-id' });
-    c.then = jest.fn().mockImplementation((onFulfilled: (v: unknown) => unknown) => {
-      return Promise.resolve([]).then(onFulfilled);
-    });
-    return c;
-  };
-
-  (db as unknown as { select: jest.Mock }).select = jest.fn().mockImplementation((fields: unknown) => {
-    capture.fieldsArg = fields;
-    const chain = makeChain();
-    return { from: jest.fn().mockReturnValue(chain) };
-  });
-
-  return capture;
-}
+import {
+  installRecursiveSelectMock,
+  type RecursiveSelectMockCapture as MockCapture,
+} from '../../utils/recursive-select-mock';
 
 describe('rotation_label — SQL projection (BS#2505)', () => {
   let capture: MockCapture;

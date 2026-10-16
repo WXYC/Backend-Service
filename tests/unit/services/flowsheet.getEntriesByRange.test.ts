@@ -1,47 +1,26 @@
 // Regression guard for #714: post-#693 play_order is per-show, so an id-range fetch must order by flowsheet.id.
 
-import { jest } from '@jest/globals';
-import { db, flowsheet } from '@wxyc/database';
+import { flowsheet } from '@wxyc/database';
 import { desc } from 'drizzle-orm';
 import { getEntriesByRange } from '../../../apps/backend/services/flowsheet.service';
+import {
+  installRecursiveSelectMock,
+  type RecursiveSelectMockCapture as MockCapture,
+} from '../../utils/recursive-select-mock';
 
 describe('flowsheet.service', () => {
   describe('getEntriesByRange ordering (#714)', () => {
-    // Chain: select → from → leftJoin(rotation) → leftJoin(library) →
-    // leftJoin(album_metadata) → leftJoin(labels) → where → orderBy. The 3rd
-    // leftJoin was added in BS#897 (album_metadata projection), the 4th in
-    // BS#2505 (rotation_label).
-    const orderByMock = jest.fn().mockResolvedValue([]);
-    const whereMock = jest.fn().mockReturnValue({ orderBy: orderByMock });
-    const leftJoinMock4 = jest.fn().mockReturnValue({ where: whereMock });
-    const leftJoinMock3 = jest.fn().mockReturnValue({ leftJoin: leftJoinMock4 });
-    const leftJoinMock2 = jest.fn().mockReturnValue({ leftJoin: leftJoinMock3 });
-    const leftJoinMock1 = jest.fn().mockReturnValue({ leftJoin: leftJoinMock2 });
-    const fromMock = jest.fn().mockReturnValue({ leftJoin: leftJoinMock1 });
+    let capture: MockCapture;
 
     beforeEach(() => {
-      orderByMock.mockReset();
-      orderByMock.mockResolvedValue([]);
-      whereMock.mockReset();
-      whereMock.mockReturnValue({ orderBy: orderByMock });
-      leftJoinMock1.mockReset();
-      leftJoinMock1.mockReturnValue({ leftJoin: leftJoinMock2 });
-      leftJoinMock2.mockReset();
-      leftJoinMock2.mockReturnValue({ leftJoin: leftJoinMock3 });
-      leftJoinMock3.mockReset();
-      leftJoinMock3.mockReturnValue({ leftJoin: leftJoinMock4 });
-      leftJoinMock4.mockReset();
-      leftJoinMock4.mockReturnValue({ where: whereMock });
-      fromMock.mockReset();
-      fromMock.mockReturnValue({ leftJoin: leftJoinMock1 });
-      (db as unknown as { select: jest.Mock }).select = jest.fn().mockReturnValue({ from: fromMock });
+      capture = installRecursiveSelectMock();
     });
 
     it('passes desc(flowsheet.id) to orderBy, not desc(flowsheet.play_order)', async () => {
       await getEntriesByRange(1, 10);
 
-      expect(orderByMock).toHaveBeenCalledTimes(1);
-      const orderByArg = orderByMock.mock.calls[0][0];
+      expect(capture.orderByCalls).toHaveLength(1);
+      const orderByArg = capture.orderByCalls[0][0];
       expect(orderByArg).toEqual(desc(flowsheet.id));
       expect(orderByArg).not.toEqual(desc(flowsheet.play_order));
     });
