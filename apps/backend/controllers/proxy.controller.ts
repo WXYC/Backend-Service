@@ -619,12 +619,15 @@ function albumMetadataCacheKey(artistName: string, releaseTitle?: string, trackT
  * `label`, streaming URLs, ...) is "enriched": optional, upstream-dependent,
  * and present only when known. The distinction is implicit in which fields
  * are unconditional vs. conditionally assigned — there's no separate `base`
- * / `enriched` wrapper in the wire shape, and these three new response
- * fields aren't yet in `wxyc-shared/api.yaml` (tracked for the iOS consumer,
- * iOS#685, which also formalizes the `metadata_status`/`isTerminal`
- * contract this sets up — `metadataStatus` here is a faithful echo of the
- * row's column, including any replay staleness; iOS#685 owns that terminal-
- * semantics question, not this handler). The result: an LML timeout can
+ * / `enriched` wrapper in the wire shape. `recordLabel`, `labelId`, and
+ * `metadataStatus` are declared in `wxyc-shared/api.yaml`
+ * (`AlbumMetadataResponse`, wxyc-shared#318); `artistName`, `releaseTitle`,
+ * and `trackTitle` are not declared, and whether to declare them is open in
+ * wxyc-shared#324. The iOS consumer adoption of the first three
+ * (wxyc-ios-64#813) is closed. `metadataStatus` here is a faithful echo of
+ * the row's column, including any replay staleness; the
+ * `metadata_status`/`isTerminal` terminal semantics are a client-side
+ * question, not this handler's. The result: an LML timeout can
  * blank `artworkUrl` etc., but it can never blank artist/track/album/label
  * — see the "local-first base fields" test suite for the exact contract.
  */
