@@ -73,6 +73,7 @@ import {
   claimStationPasscode,
   formatUsernameError,
   matchStationPasscode,
+  recordSignupIdentityTaken,
   validateUsername,
   sendVerificationEmailMessage,
   SIGNUP_COOLDOWN_HOLD_MS,
@@ -336,7 +337,23 @@ export async function stationSignupFromRequest(
   }
 
   // ---- (3) Existence checks. Behind the gate, ahead of the claim. ----
-  await assertEmailAndUsernameAvailable(email, username);
+  try {
+    await assertEmailAndUsernameAvailable(email, username);
+  } catch (error) {
+    // The match is quiet on success and the claim is never reached, so
+    // without this the verification would leave no attempt row (BS#2378).
+    // Best-effort, like logUnverifiableAttempt: the 409 below is the answer
+    // the caller needs, and a failed audit INSERT must not replace it with a
+    // 500 or change what the response says.
+    if (error instanceof StationSignupError) {
+      try {
+        await recordSignupIdentityTaken(matched.passcodeId, { rawClientIp });
+      } catch (auditError) {
+        console.error('[STATION SIGNUP] failed to record a signup_identity_taken attempt row:', auditError);
+      }
+    }
+    throw error;
+  }
 
   // Last check before anything is consumed: the org row the provision step
   // will resolve. See assertOrganizationExists for why this cannot wait

@@ -312,6 +312,23 @@ describe('POST /auth/wxyc/station-signup (BS#2361, real Postgres + live auth ser
       expect((await passcodeRow(id)).use_count).toBe(1);
     });
 
+    it('logs exactly one signup_identity_taken attempt row for a matched code with a taken email (BS#2378)', async () => {
+      const { id, code } = await rotateStationPasscode();
+      const first = validBody();
+      const okRes = await postSignup(authBaseUrl, code, first);
+      expect(okRes.res.status).toBe(201);
+      createdUserIds.push(okRes.json.userId);
+      await sql`DELETE FROM station_signup_attempt`;
+
+      const { res } = await postSignup(authBaseUrl, code, validBody({ email: first.email }));
+      expect(res.status).toBe(409);
+
+      const attempts = await sql`SELECT outcome, passcode_id FROM station_signup_attempt`;
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0].outcome).toBe('signup_identity_taken');
+      expect(attempts[0].passcode_id).toBe(id);
+    });
+
     it('rejects a duplicate username without claiming a use', async () => {
       const { id, code } = await rotateStationPasscode();
       const first = validBody();
