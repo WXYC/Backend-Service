@@ -1,9 +1,4 @@
 import { defineConfig } from 'tsup';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 export default defineConfig((options) => ({
   // `job.ts` is the ESM CLI entrypoint the Docker image runs (dist/job.js).
@@ -18,10 +13,4 @@ export default defineConfig((options) => ({
   clean: true,
   onSuccess: options.watch ? 'node ./dist/job.js' : undefined,
   minify: !options.watch,
-
-  esbuildOptions(options) {
-    options.alias = {
-      '@': resolve(__dirname),
-    };
-  },
 }));
