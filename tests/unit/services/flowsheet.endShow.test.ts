@@ -270,4 +270,65 @@ describe('endShow', () => {
     expect(flowsheetInsert.values).not.toHaveBeenCalled();
     expect(db.select).not.toHaveBeenCalled();
   });
+
+  /**
+   * BS#2236. `endShow` used to fan the co-hosts' `dj_leave` writes out under
+   * `Promise.all`; each one read `nextPlayOrder` before any of them inserted,
+   * so every co-host got the same value (show 1951164: two rows at 144). This
+   * models `flowsheet.play_order` as a store that `nextPlayOrder` reads and an
+   * insert appends to, which is the only thing that distinguishes concurrent
+   * writes from sequential ones — queued `mockReturnValueOnce` values cannot.
+   */
+  describe('with several active co-hosts', () => {
+    // Earlier tests leave unconsumed mockReturnValueOnce entries behind, which
+    // would take precedence over the implementations below.
+    beforeEach(() => {
+      db.select.mockReset();
+      db.insert.mockReset();
+      db.update.mockReset();
+    });
+
+    it('writes distinct, increasing play_order values, with show_end after all of them', async () => {
+      const playOrders: number[] = [4];
+      const inserted: Array<Record<string, unknown>> = [];
+
+      const activeDjs = ['host-1', 'guest-1', 'guest-2', 'guest-3'].map((dj_id) => ({
+        show_id: 42,
+        dj_id,
+        active: true,
+      }));
+      let plainSelects = 0;
+      db.select.mockImplementation((fields?: Record<string, unknown>) => {
+        if (fields && 'max' in fields) {
+          // nextPlayOrder: reads the store at await time, as the real query reads the table
+          const chain = { from: () => chain, where: () => chain } as Record<string, unknown>;
+          chain.then = (resolve: (v: unknown) => void) => resolve([{ max: Math.max(...playOrders) }]);
+          return chain;
+        }
+        // The first argument-less select is the remaining co-host list; every other read is a user lookup.
+        const rows = !fields && plainSelects++ === 0 ? activeDjs : [{ djName: 'DJ Co-Host' }];
+        const lookup = Promise.resolve(rows) as Promise<unknown[]> & { limit?: () => Promise<unknown[]> };
+        lookup.limit = () => Promise.resolve(rows);
+        const chain = { from: () => chain, where: () => lookup };
+        return chain;
+      });
+      db.insert.mockImplementation(() => ({
+        values: (row: Record<string, unknown>) => {
+          inserted.push(row);
+          playOrders.push(row.play_order as number);
+          return { returning: () => Promise.resolve([row]) };
+        },
+      }));
+      // The show_djs deactivations take the default; the end_time claim comes first.
+      db.update.mockReturnValue(createMockQueryChain());
+      db.update.mockReturnValueOnce(createMockQueryChain([{ id: 42, end_time: new Date() }]));
+
+      await endShow({ id: 42, primary_dj_id: 'host-1' } as unknown as Parameters<typeof endShow>[0]);
+
+      const leaves = inserted.filter((row) => row.entry_type === 'dj_leave').map((row) => row.play_order);
+      const end = inserted.find((row) => row.entry_type === 'show_end');
+      expect(leaves).toEqual([5, 6, 7]);
+      expect(end?.play_order).toBe(8);
+    });
+  });
 });

@@ -1525,16 +1525,21 @@ export const endShow = async (currentShow: Show, endedAt: Date = new Date()): Pr
     .from(show_djs)
     .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.active, true)));
 
-  await Promise.all(
-    remaining_djs.map(async (dj: ShowDJ) => {
-      await db
-        .update(show_djs)
-        .set({ active: false })
-        .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.dj_id, dj.dj_id)));
-      if (dj.dj_id === primary_dj_id) return;
-      await createLeaveNotification(dj.dj_id, currentShow.id, endedAt);
-    })
-  );
+  // Sequential, not `Promise.all`: each leave marker reads `nextPlayOrder`
+  // before inserting, so a fan-out gave every co-host the same value
+  // (BS#2236). end_time is already committed, so an add whose active-show
+  // check runs after this point is refused; one that passed the check just
+  // before can still race (the insert itself does not re-check end_time).
+  for (const dj of remaining_djs as ShowDJ[]) {
+    await db
+      .update(show_djs)
+      .set({ active: false })
+      .where(and(eq(show_djs.show_id, currentShow.id), eq(show_djs.dj_id, dj.dj_id)));
+    if (dj.dj_id === primary_dj_id) {
+      continue;
+    }
+    await createLeaveNotification(dj.dj_id, currentShow.id, endedAt);
+  }
 
   // Resolved through the SHARED chain (`dj_name_override` -> the linked
   // account's handle -> `legacy_dj_name`), not the bare `auth_user.dj_name`
