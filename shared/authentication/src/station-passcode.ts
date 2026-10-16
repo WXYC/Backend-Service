@@ -121,7 +121,7 @@ import {
   timingSafeEqual,
 } from 'crypto';
 import { and, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, lte, or, sql } from 'drizzle-orm';
-import { db, station_passcode, station_signup_attempt } from '@wxyc/database';
+import { ADVISORY_LOCK_KEYS, db, station_passcode, station_signup_attempt } from '@wxyc/database';
 import { deriveStationSignupIpHash } from './signup-ip-hash.js';
 
 // ---------------------------------------------------------------------------
@@ -218,26 +218,9 @@ export const STATION_PASSCODE_DEFAULT_MAX_USES = 25;
  * issue body's "Rotation and the two-row cap" section for the full argument
  * against `SELECT ... FOR UPDATE` as a substitute.
  *
- * MUST stay distinct from every other advisory lock in this codebase. This
- * comment is the census — a new key is allocated by adding it here, so keep the
- * list complete or the next author reads a short one and picks a live number:
- *
- *   - `17071707` — `ADVISORY_LOCK_KEY`, formerly `jobs/legacy-mirror-reconcile/job.ts`
- *     (removed in BS#2403; key deliberately not reused)
- *   - `20260808` — `SLACK_MODERATORS_ADVISORY_LOCK_KEY`,
- *     `apps/backend/routes/internal-slack-moderators.route.ts`
- *   - `20260905` — this key
- *   - `20260919` — `RESTORE_BATCH_ADVISORY_LOCK_KEY`,
- *     `apps/backend/services/library.service.ts`, fencing the catalog restore's
- *     next-free-code read-then-insert
- *
- * `pg_try_advisory_lock` and `pg_advisory_xact_lock` share one lock space
- * database-wide, so reusing any of these numbers would serialize unrelated
- * writers behind one another — each then standing down at its own
- * `lock_timeout` and answering 503. Values are allocation dates, which makes a
- * nearby date the likeliest accidental collision.
+ * The key is allocated in the `ADVISORY_LOCK_KEYS` registry, which documents the shared lock space.
  */
-export const STATION_PASSCODE_ROTATE_ADVISORY_LOCK_KEY = 20260905;
+export const STATION_PASSCODE_ROTATE_ADVISORY_LOCK_KEY = ADVISORY_LOCK_KEYS.stationPasscodeRotate;
 
 /** Cooldown detection window: "more than 20 in 10 minutes" (issue body). */
 export const SIGNUP_COOLDOWN_WINDOW_MS = 10 * 60 * 1000;

@@ -15,25 +15,12 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { asc, notInArray, sql } from 'drizzle-orm';
-import { db, slack_ban_moderators } from '@wxyc/database';
+import { ADVISORY_LOCK_KEYS, db, slack_ban_moderators } from '@wxyc/database';
 
 const ROM_INTERNAL_KEY = process.env.ROM_INTERNAL_KEY ?? '';
 
-/**
- * Advisory-lock key serializing concurrent `PUT`s (see the transaction below).
- *
- * MUST stay distinct from the advisory-lock key formerly held by
- * `jobs/legacy-mirror-reconcile/job.ts` (removed in BS#2403) —
- * `ADVISORY_LOCK_KEY = 17071707`, the only other advisory lock in this
- * codebase. Single-bigint `pg_try_advisory_lock` and `pg_advisory_xact_lock`
- * share one lock space database-wide, so reusing that number would make a
- * roster save block behind the mirror-reconcile cron and fail at
- * `statement_timeout` with SQLSTATE 57014 instead of saving.
- *
- * The value is the date this key was allocated (2026-08-08); arbitrary but
- * stable, and self-documenting about which of the two came second.
- */
-export const SLACK_MODERATORS_ADVISORY_LOCK_KEY = 20260808;
+/** Advisory-lock key serializing concurrent `PUT`s (see the transaction below); allocated in the `ADVISORY_LOCK_KEYS` registry. */
+export const SLACK_MODERATORS_ADVISORY_LOCK_KEY = ADVISORY_LOCK_KEYS.slackBanModerators;
 
 // Slack user IDs are canonically uppercase alphanumeric (`U…` / `W…`).
 const SLACK_USER_ID_REGEX = /^[A-Z0-9]+$/i;

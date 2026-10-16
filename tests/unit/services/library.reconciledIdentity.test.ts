@@ -28,6 +28,8 @@ jest.mock('@wxyc/database', () => ({
   // Invoked at module top level (LIBRARY_VIEW_JOINS_RAW), so the import
   // chain needs a callable even though no test here renders SQL.
   rotationActiveSql: () => ({}),
+  // Read at module top level by RESTORE_BATCH_ADVISORY_LOCK_KEY.
+  ADVISORY_LOCK_KEYS: { restoreBatch: 20260919 },
 }));
 
 jest.mock('@wxyc/lml-client', () => ({
