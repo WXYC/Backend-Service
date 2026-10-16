@@ -471,37 +471,36 @@ const MAX_ARTIST_CODE_LETTERS_LENGTH = 4;
 
 /**
  * Validate `code_letters` for the artist-create paths (`POST /library/artists`
- * and `POST /library/filings`' create arm) and return the NFC form every read
- * and write in the create path must key on (see the normalization comment in `addArtist`, in the library controller).
+ * and `POST /library/filings`' create arm) and return the canonical form (NFC,
+ * trimmed, upper-case) that every read and write in the create path must key
+ * on (see the comment in `addArtist`, in the library controller).
  *
- * The bound counts code points of the NFC form — the composition that is
- * actually stored — not UTF-16 units of the raw input, per
- * `validateCodeVolumeLetters`'s rationale for the sibling `varchar(4)`
- * column. No trim and no case fold, deliberately: the artist card paths
- * only ever NFC-normalize (`insertArtistWithGenreCrossreference`), and
- * validation must not admit-by-rewriting a value the write path would then
- * store differently. Non-string input is caught here too — `.normalize` on
- * a non-string is a TypeError -> 500 otherwise.
+ * The invariant (BS#2199): `artists.code_letters` is stored in that form by
+ * both artist-create paths, and the by-code reader (`validateCanonicalCodeLetters`) folds its query the same
+ * way, so "same code" means one thing on both sides. The length bound counts code points of the NFC form -- the
+ * composition actually stored -- not UTF-16 units of the raw input, per `validateCodeVolumeLetters`'s rationale for
+ * the sibling `varchar(4)` column. The charset check runs on the trimmed form before the upper-case fold, so the
+ * fold stays length- and charset-preserving. Non-string input is caught here too -- `.normalize` on a non-string is a
+ * TypeError -> 500 otherwise.
  */
 export const validateArtistCodeLetters = (code_letters: unknown): string => {
   if (typeof code_letters !== 'string') {
     throw new WxycError('code_letters must be a string', 400);
   }
-  const normalized = code_letters.normalize('NFC');
+  const normalized = code_letters.normalize('NFC').trim();
   if (codePointLength(normalized) > MAX_ARTIST_CODE_LETTERS_LENGTH) {
     throw new WxycError(`code_letters must be ${MAX_ARTIST_CODE_LETTERS_LENGTH} characters or fewer`, 400);
   }
-  return normalized;
+  return validateCanonicalCodeLetters(normalized);
 };
 
 /**
  * `artists.code_letters` is a Postgres `varchar(4)` column (`shared/database/
  * src/schema.ts:439`) storing a trimmed, upper-case, ASCII value -- every one
  * of the 24,078 rows in the production clone matches that shape, with `/` the
- * only non-alphanumeric character in use (the `V/A` filing). Neither writer
- * enforces that shape, though: `insertArtistWithGenreCrossreference` (`library.service.ts`) only
- * NFC-normalizes -- no trim, no upper-case -- and the tubafrenzy `library-etl`
- * job writes `codeLetters ?? '??'` verbatim (`jobs/library-etl/job.ts:441`),
+ * only non-alphanumeric character in use (the `V/A` filing). The artist-create paths fold through
+ * `validateArtistCodeLetters` (BS#2199), but the tubafrenzy `library-etl`
+ * job (being deleted, BS#3291) writes `codeLetters ?? '??'` verbatim (`jobs/library-etl/job.ts:441`),
  * so a row filed non-canonically can already be sitting in the table.
  *
  * `.trim().toUpperCase()` is not a safe repair for that gap: it is neither

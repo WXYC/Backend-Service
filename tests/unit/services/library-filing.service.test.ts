@@ -401,6 +401,46 @@ describe('planLibraryFiling', () => {
     expect(plan).toMatchObject({ kind: 'ok', input: { filingPlan: { kind: 'create', code_number: 7 } } });
   });
 
+  it.each([
+    ['lowercase', 'ju'],
+    ['padded', '  ju '],
+    ['mixed-case', 'jU'],
+  ])(
+    'keys every read and the plan on the canonical form of %s create-arm code_letters (BS#2199)',
+    async (_label, raw) => {
+      mockGenerateArtistNumber.mockResolvedValue(6);
+      mockGetArtistByCode.mockResolvedValue(undefined);
+      mockArtistIdFromName.mockResolvedValue(null);
+
+      const plan = await planLibraryFiling({ artist: { ...createArtist, code_letters: raw }, release });
+
+      expect(mockGenerateArtistNumber).toHaveBeenCalledWith('JU', 3);
+      expect(mockGetArtistByCode).toHaveBeenCalledWith('JU', 3, 6);
+      expect(plan).toMatchObject({ kind: 'ok', input: { filingPlan: { kind: 'create', code_letters: 'JU' } } });
+    }
+  );
+
+  it('refuses a create-arm duplicate in any case, because the pre-check keys on the canonical form (BS#2199)', async () => {
+    mockGetArtistByCode.mockResolvedValueOnce({ artist_id: 9, artist_name: 'Jessica Pratt', code_letters: 'JU' });
+
+    const plan = await planLibraryFiling({
+      artist: { ...createArtist, code_letters: ' ju', code_number: 2 },
+      release,
+    });
+
+    expect(mockGetArtistByCode).toHaveBeenCalledWith('JU', 3, 2);
+    expect(plan).toMatchObject({ kind: 'conflict', body: { reason: 'artist_code_conflict' } });
+  });
+
+  it.each(['N\u00DC', 'A-B', '  ', 'A?'])(
+    'rejects out-of-domain create-arm code_letters %j with a 400',
+    async (bad) => {
+      await expect(
+        planLibraryFiling({ artist: { ...createArtist, code_letters: bad }, release })
+      ).rejects.toMatchObject({ statusCode: 400 });
+    }
+  );
+
   it('hands on the validated call-code values, not the raw release values it spreads', async () => {
     mockGenerateArtistNumber.mockResolvedValue(6);
     mockGetArtistByCode.mockResolvedValue(undefined);

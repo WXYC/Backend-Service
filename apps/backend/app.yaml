@@ -3565,6 +3565,11 @@ paths:
                   type: string
                 code_letters:
                   type: string
+                  description: >-
+                    1-4 characters from A-Z, 0-9, or `/` (the `artists.code_letters` column domain).
+                    Stored trimmed and upper-cased (BS#2199): `ch` and ` CH ` file as `CH`, and the
+                    409 conflict pre-check and `code_number` assignment key on that same form.
+                    Anything outside the domain (non-ASCII, `-`, blank) is a 400.
                 genre_id:
                   type: integer
                 code_number:
@@ -3672,6 +3677,9 @@ paths:
   /library/artists/peek-code:
     get:
       summary: Peek next artist code number for a given genre and code letters
+      description: >-
+        `code_letters` is folded and validated exactly as `POST /library/artists` does (BS#2199), so
+        the preview is the number a create under the same letters would be assigned.
       security:
         - BearerAuth: ['station-management']
       parameters:
@@ -3832,16 +3840,12 @@ paths:
             stale and the code was never evaluated. `code_not_assigned` — the genre exists and
             no artist is filed under that exact code.
 
-            `code_not_assigned` is NOT a guarantee that creating an artist under the code is
-            safe. This lookup upper-cases `code_letters` before matching, but `artists.code_letters`
-            is a plain `varchar(4)` with byte-exact equality and neither writer canonicalizes:
-            `insertArtistWithGenreCrossreference` only NFC-normalizes, and the tubafrenzy
-            `library-etl` job writes its source value verbatim. So a lower-case row filed under
-            the same shelf code is invisible here — and `POST /library/artists`, whose own
-            conflict pre-check NFC-normalizes but does not case-fold, will happily create one.
-            Every row in the production catalog is
-            canonical today, so this is an open path rather than existing data; canonicalizing
-            on write (plus a backfill) is the real fix and is tracked separately.
+            `code_not_assigned` means no artist is filed under that code in the canonical form
+            (trimmed, upper-case). `POST /library/artists` and the `POST /library/filings` create
+            arm store `code_letters` in that same form (BS#2199), so creating an artist under the
+            code is consistent with this lookup. The one remaining source of a non-canonical row is
+            the tubafrenzy `library-etl` job, which writes its source value verbatim and is being
+            retired; every row in the production catalog is canonical today.
           content:
             application/json:
               schema:

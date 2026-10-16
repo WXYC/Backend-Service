@@ -313,14 +313,12 @@ export const addArtist: RequestHandler = async (req: Request<object, object, New
     throw new WxycError('Missing Request Parameters: artist_name, code_letters, or genre_id', 400);
   }
 
-  // NFC once, up front, and every read below keys on it: the generator and
-  // both code pre-checks match `artists.code_letters` byte-for-byte, but
-  // `insertArtistWithGenreCrossreference` stores the NFC form (BS#1897). An
-  // NFD-composed `code_letters` would otherwise read an empty bucket, assign
-  // 1 into a shelf that already holds rows, and file the row — stored NFC —
-  // into exactly the collision the pre-check exists to prevent. The
-  // validator (BS#2474) folds the normalize in, adding the varchar(4) length
-  // bound as a named 400.
+  // Canonical form (NFC, trimmed, upper-case; BS#2199) once, up front, and every read below keys on it: the
+  // generator and both code pre-checks match `artists.code_letters` byte-for-byte, and the row is stored in
+  // exactly this form, which is also what `GET /library/artists/by-code` looks up. Left raw, a lowercase, padded,
+  // or NFD-composed `code_letters` would read an empty bucket, assign 1 into a shelf that already holds rows, and
+  // file the row into exactly the collision the pre-check exists to prevent (BS#1897, BS#2199). The validator
+  // (BS#2474) also adds the varchar(4) length bound and the ASCII charset check as named 400s.
   const code_letters = validateArtistCodeLetters(body.code_letters);
 
   // Omitted or JSON-`null` `code_number` (BS#2475): server-assigns it below.
@@ -487,7 +485,8 @@ export const peekArtistNumber: RequestHandler = async (
     throw new WxycError('Invalid genre_id', 400);
   }
 
-  const nextCode = await libraryService.generateArtistNumber(query.code_letters, genreId);
+  // The same canonical bucket `addArtist` assigns in (BS#2199), so the preview is the number a create would get.
+  const nextCode = await libraryService.generateArtistNumber(validateArtistCodeLetters(query.code_letters), genreId);
   res.status(200).json({ next_code_number: nextCode });
 };
 
@@ -696,10 +695,8 @@ export const resolveArtistByCode: RequestHandler = async (
 
   // Validate against the column's real domain, then trim + upper-case -- see
   // `validateCanonicalCodeLetters` in `library-filing.service.ts` for why a bare `.trim().toUpperCase()`
-  // is not a safe normalization on its own. (The sibling write path,
-  // `addArtist`, only NFC-normalizes -- no trim, no upper-case; widening its
-  // pre-check to this fold is a separate change, deliberately not made here
-  // because it alters an existing route's 409 behavior.)
+  // is not a safe normalization on its own. The write paths (`addArtist`, the filings create arm) store the same
+  // folded form (BS#2199), so this lookup finds what they file.
   const codeLetters = validateCanonicalCodeLetters(query.code_letters);
 
   // Parsed for both arms — see `parseArtistCodePageWindow`. Placed after the
