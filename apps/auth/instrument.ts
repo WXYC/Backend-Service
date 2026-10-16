@@ -51,7 +51,13 @@ Sentry.init({
   // `shouldHandleError` outranks the deprecated `setupExpressErrorHandler`'s
   // options, so the filter has to be passed here (BS#2949). This is a default
   // integration; passing it overrides the default instance with ours.
-  integrations: [Sentry.expressIntegration({ shouldHandleError: shouldCaptureAuthExpressError })],
+  // Sentry 11 also installs Dedupe by default, which drops repeated identical events (BS#3005).
+  // An integrations array can only add to or replace defaults by name, never remove one, so the
+  // function form is used: it receives the defaults, drops Dedupe, and appends our Express integration.
+  integrations: (defaults) => [
+    ...defaults.filter((i) => i.name !== 'Dedupe'),
+    Sentry.expressIntegration({ shouldHandleError: shouldCaptureAuthExpressError }),
+  ],
   // Sentry 10's data-collection posture: no end-user IPs, IP-bearing headers
   // or request bodies (BS#3004).
   dataCollection: SENTRY_DATA_COLLECTION,

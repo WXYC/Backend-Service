@@ -31,9 +31,11 @@ function registeredFilter(relPath: string): { shouldHandleError: ShouldHandleErr
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     LmlClientError = require('@wxyc/lml-client').LmlClientError;
   });
-  const initOptions = mockInit.mock.calls[0][0] as { integrations: Array<{ name: string }> };
-  expect(initOptions.integrations).toHaveLength(1);
-  expect(initOptions.integrations[0].name).toBe('Express');
+  const initOptions = mockInit.mock.calls[0][0] as {
+    integrations: (defaults: Array<{ name: string }>) => Array<{ name: string }>;
+  };
+  const integrations = initOptions.integrations([{ name: 'Dedupe' }, { name: 'Http' }]);
+  expect(integrations.map((i) => i.name)).toEqual(['Http', 'Express']);
   const expressOptions = mockExpressIntegration.mock.calls[0][0] as { shouldHandleError: ShouldHandleError };
   return { shouldHandleError: expressOptions.shouldHandleError, LmlClientError };
 }
