@@ -19,11 +19,13 @@ import type { ApiErrorResponse } from '@wxyc/shared';
 export type WxycErrorOptions = Pick<ApiErrorResponse, 'code' | 'details'>;
 
 /**
- * Cross-copy identity for `WxycError`. tsup bundles this module into both
- * `dist/app.js` and `dist/instrument.js` (`splitting: false`), so the Sentry
- * filter running from the preload holds a different class than the one app code
- * throws, and `instanceof` is false across them. A `Symbol.for` key is shared
- * through the global registry, so the brand survives the duplication (BS#2949).
+ * Cross-copy identity for `WxycError`. A `Symbol.for` key is shared through the
+ * global registry, so the brand identifies a `WxycError` from any copy of this
+ * module (BS#2949). The backend build emits this module once, in a chunk that
+ * `dist/app.js` and `dist/instrument.js` both import (tsup `splitting: true`,
+ * BS#2975), so `instanceof` also holds across them now. The Sentry filter keeps
+ * the brand as defense in depth: it stays correct if a build or a test
+ * (`jest.isolateModules` in sentryErrorFilter.test.ts) loads a second copy.
  */
 const WXYC_ERROR_BRAND = Symbol.for('wxyc.WxycError');
 

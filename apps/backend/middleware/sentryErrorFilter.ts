@@ -27,8 +27,10 @@ export function shouldCaptureExpressError(error: Error): boolean {
   if (!(error instanceof Error)) return true;
   if (error instanceof LmlClientError) return false;
   // Application errors keep their own rule: errorHandler echoes a WxycError
-  // at any status, and only the 5xx band is Sentry-worthy. Branded, not
-  // `instanceof`: this filter runs from the separately bundled instrument.js.
+  // at any status, and only the 5xx band is Sentry-worthy. Checked by brand,
+  // not `instanceof`, so the answer does not depend on how many copies of
+  // utils/error.ts are loaded. The backend build loads one copy (BS#2975); the
+  // brand is kept as defense in depth for any build or test that loads two.
   if (isWxycError(error)) return error.statusCode >= 500;
   // Foreign errors: suppress exactly the trusted 4xx band that errorHandler
   // echoes as a client error — via the SAME `carriedClientStatus` helper
