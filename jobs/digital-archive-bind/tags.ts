@@ -16,6 +16,7 @@
 
 import type { Id3Tags } from './id3.js';
 import { parseId3v2 } from './id3.js';
+import { bitrateKbpsForCodec } from './mpeg.js';
 import { RANGE_BYTES, rangedGet } from './store.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 
@@ -60,17 +61,23 @@ export const fetchAzuraCastTags = async (baseUrl: string, apiKey: string): Promi
 /**
  * Resolve one file's tags: an AzuraCast hit wins outright; otherwise fall
  * back to the ranged-GET ID3v2 parse. `azuraCastTags === null` means the API
- * key is unset -- every file goes through the fallback.
+ * key is unset -- every file goes through the fallback. The bitrate comes
+ * from that same ranged GET, so an AzuraCast hit (which fetches no bytes)
+ * leaves it `null` rather than costing a second pass. Only an `mp3` codec
+ * is parsed for a bitrate; every other codec gets `null`.
  */
 export const resolveTagsForFile = async (
   client: S3Client,
   bucket: string,
   objectKey: string,
+  codec: string,
   azuraCastTags: ReadonlyMap<string, Id3Tags> | null
-): Promise<Id3Tags> => {
+): Promise<{ tags: Id3Tags; bitrateKbps: number | null }> => {
   const fromApi = azuraCastTags?.get(objectKey);
-  if (fromApi) return fromApi;
+  if (fromApi) {
+    return { tags: fromApi, bitrateKbps: null };
+  }
 
   const buf = await rangedGet(client, bucket, objectKey, RANGE_BYTES);
-  return parseId3v2(buf);
+  return { tags: parseId3v2(buf), bitrateKbps: bitrateKbpsForCodec(codec, buf) };
 };

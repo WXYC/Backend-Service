@@ -51,7 +51,7 @@ const NUMERIC_FIELDS = new Set<keyof Id3Tags>(['track', 'disc', 'durationMs']);
 
 const FRAME_ID_PATTERN = /^[A-Z0-9]{4}$/;
 
-const readSynchsafe = (buf: Buffer, offset: number): number =>
+export const readSynchsafe = (buf: Buffer, offset: number): number =>
   ((buf[offset] & 0x7f) << 21) |
   ((buf[offset + 1] & 0x7f) << 14) |
   ((buf[offset + 2] & 0x7f) << 7) |

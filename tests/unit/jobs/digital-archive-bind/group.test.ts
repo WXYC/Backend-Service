@@ -16,6 +16,7 @@ const file = (overrides: Partial<InventoryFile> & { objectKey: string }): Invent
   codec: 'mp3',
   bytes: 1000,
   md5: null,
+  bitrateKbps: null,
   tags: { ...emptyTags },
   ...overrides,
 });
