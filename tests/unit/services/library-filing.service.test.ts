@@ -39,6 +39,8 @@ jest.mock('../../../apps/backend/services/lml/index', () => ({
 }));
 
 const mockReconcileLibraryUrlsToLml = jest.fn<(urls: string[]) => Promise<void>>();
+const mockGenreExists = jest.fn<(id: number) => Promise<boolean>>();
+const mockGetFormatById = jest.fn<(id: number) => Promise<unknown>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   RotationCardBinMismatchError: class RotationCardBinMismatchError extends Error {},
@@ -52,10 +54,13 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   insertAlbum: mockInsertAlbum,
   addToRotation: mockAddToRotation,
   reconcileLibraryUrlsToLml: mockReconcileLibraryUrlsToLml,
+  genreExists: mockGenreExists,
+  getFormatById: mockGetFormatById,
 }));
 
 import { db } from '@wxyc/database';
 import * as libraryService from '../../../apps/backend/services/library.service';
+import { INT4_MAX } from '../../../apps/backend/utils/constants';
 import WxycError from '../../../apps/backend/utils/error';
 import { ReviewRequiredError } from '../../../apps/backend/utils/review-gate-basis';
 import {
@@ -344,6 +349,57 @@ describe('planLibraryFiling', () => {
   const release = { album_title: 'DOGA', label: 'Sonamos', genre_id: 3, format_id: 1 };
   const createArtist = { kind: 'create' as const, artist_name: 'Juana Molina', code_letters: 'JU', genre_id: 3 };
 
+  beforeEach(() => {
+    mockGenreExists.mockReset().mockResolvedValue(true);
+    mockGetFormatById.mockReset().mockResolvedValue({ id: 1 });
+  });
+
+  it.each([
+    ['a non-numeric genre_id', { ...release, genre_id: 'abc' }, 'release.genre_id must be a positive integer'],
+    ['a non-numeric format_id', { ...release, format_id: 'abc' }, 'release.format_id must be a positive integer'],
+    ['a null genre_id', { ...release, genre_id: null }, 'release.genre_id must be a positive integer'],
+    ['a zero format_id', { ...release, format_id: 0 }, 'release.format_id must be a positive integer'],
+    ['a fractional genre_id', { ...release, genre_id: 1.5 }, 'release.genre_id must be a positive integer'],
+    ['a genre_id past INT4_MAX', { ...release, genre_id: INT4_MAX + 1 }, 'release.genre_id must be a positive integer'],
+    [
+      'a format_id past INT4_MAX',
+      { ...release, format_id: INT4_MAX + 1 },
+      'release.format_id must be a positive integer',
+    ],
+    ['a dangling genre_id', { ...release, genre_id: 999 }, 'release.genre_id does not reference an existing genre'],
+    ['a dangling format_id', { ...release, format_id: 999 }, 'release.format_id does not reference an existing format'],
+  ])('rejects %s with a 400 naming the field', async (_name, badRelease, message) => {
+    mockGenreExists.mockImplementation((id) => Promise.resolve(id !== 999));
+    mockGetFormatById.mockImplementation((id) => Promise.resolve(id === 999 ? undefined : { id }));
+    const existing = { kind: 'existing' as const, artist_id: 9 };
+    const rejection = expect(planLibraryFiling({ artist: existing, release: badRelease } as never)).rejects;
+    await rejection.toMatchObject({ statusCode: 400 });
+    await rejection.toThrow(message);
+    // The shape check refuses before any existence read can hit Postgres.
+    if (message.endsWith('a positive integer')) {
+      expect(mockGenreExists).not.toHaveBeenCalled();
+      expect(mockGetFormatById).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['genre_id', 'format_id'])('accepts a %s of INT4_MAX and checks its existence', async (field) => {
+    mockGetArtistCardByIdInGenre.mockResolvedValue({
+      artist_id: 9,
+      artist_name: 'Juana Molina',
+      alphabetical_name: 'Molina, Juana',
+      genre_id: INT4_MAX,
+      code_letters: 'JU',
+      code_artist_number: 6,
+      code_comp_letter: null,
+    });
+    const plan = await planLibraryFiling({
+      artist: { kind: 'existing', artist_id: 9 },
+      release: { ...release, [field]: INT4_MAX },
+    });
+    expect(plan).toMatchObject({ kind: 'ok' });
+    expect(field === 'genre_id' ? mockGenreExists : mockGetFormatById).toHaveBeenCalledWith(INT4_MAX);
+  });
+
   it.each([
     ['missing artist', {}, 'Missing Parameters: artist'],
     ['bad artist kind', { artist: { kind: 'x' } }, "Invalid Parameter: artist.kind must be 'create' or 'existing'"],
@@ -558,6 +614,8 @@ describe('create text bounds on POST /library/filings', () => {
   });
 
   beforeEach(() => {
+    mockGenreExists.mockReset().mockResolvedValue(true);
+    mockGetFormatById.mockReset().mockResolvedValue({ id: 1 });
     mockGenerateArtistNumber.mockResolvedValue(6);
     mockGetArtistByCode.mockResolvedValue(undefined);
     mockArtistIdFromName.mockResolvedValue(null);

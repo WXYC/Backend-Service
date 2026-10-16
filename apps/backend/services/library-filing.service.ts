@@ -3,6 +3,7 @@ import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { Album, db, parseRotationBin, RotationBin, RotationRelease, ROTATION_BINS } from '@wxyc/database';
 import { INT2_MAX, INT4_MAX } from '../utils/constants.js';
 import WxycError from '../utils/error.js';
+import { parseInt4BodyId } from '../utils/query-params.js';
 import {
   codePointLength,
   isNonBlankString,
@@ -160,8 +161,9 @@ export type LibraryFilingPlan =
 /**
  * The request's release fields as `planLibraryFiling` hands them on: the
  * three required fields are typed as present (`album_title` is checked to be
- * a non-blank string; `genre_id` and `format_id` are only checked to be
- * defined), `code_volume_letters` and `supplied_code_number` (the operator's
+ * a non-blank string; `genre_id` and `format_id` are checked to be integers
+ * from 1 to INT4_MAX that reference an existing genre / format),
+ * `code_volume_letters` and `supplied_code_number` (the operator's
  * `code_number`) have been through `validateCodeVolumeLetters` /
  * `validateCodeNumber`, and every other `FilingReleaseBody` field is the
  * request's value, unchecked. The object is built by spreading the raw
@@ -776,6 +778,19 @@ export async function planLibraryFiling(
       'artist.genre_id must equal release.genre_id: the release is shelved under the artist code the create arm files in that genre',
       400
     );
+  }
+  // A mistyped id would reach Postgres as 22P02 and a dangling one as 23503,
+  // both a 500 for routine operator input, so reject them here, before the
+  // transaction opens.
+  // `parseInt4BodyId` also bounds the id at INT4_MAX: past it the existence
+  // read below would raise 22003 and answer 500.
+  const checked_genre_id = parseInt4BodyId(release.genre_id, 'release.genre_id') as number;
+  const checked_format_id = parseInt4BodyId(release.format_id, 'release.format_id') as number;
+  if (!(await libraryService.genreExists(checked_genre_id))) {
+    throw new WxycError('release.genre_id does not reference an existing genre', 400);
+  }
+  if (!(await libraryService.getFormatById(checked_format_id))) {
+    throw new WxycError('release.format_id does not reference an existing format', 400);
   }
   const release_genre_id = release.genre_id;
   const release_format_id = release.format_id;
