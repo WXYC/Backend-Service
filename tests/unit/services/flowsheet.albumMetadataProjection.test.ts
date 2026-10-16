@@ -6,15 +6,16 @@
 // album_metadata over flowsheet. D1 only ships the schema + read-path
 // projection — the inline columns stay populated until D4.
 
-import { jest } from '@jest/globals';
-import { db, flowsheet, album_metadata } from '@wxyc/database';
+import { flowsheet, album_metadata } from '@wxyc/database';
 import {
   getEntriesByPage,
   getEntriesByRange,
   getEntriesByShow,
 } from '../../../apps/backend/services/flowsheet.service';
-
-type LeftJoinCall = { table: unknown; on: unknown };
+import {
+  installRecursiveSelectMock,
+  type RecursiveSelectMockCapture as MockCapture,
+} from '../../utils/recursive-select-mock';
 
 const METADATA_COLUMNS = [
   'artwork_url',
@@ -28,51 +29,6 @@ const METADATA_COLUMNS = [
   'artist_bio',
   'artist_wikipedia_url',
 ] as const;
-
-interface MockCapture {
-  fieldsArg: unknown;
-  leftJoinCalls: LeftJoinCall[];
-}
-
-function installRecursiveSelectMock(): MockCapture {
-  const capture: MockCapture = { fieldsArg: undefined, leftJoinCalls: [] };
-
-  const makeChain = () => {
-    const c: Record<string, jest.Mock> = {};
-    c.leftJoin = jest.fn().mockImplementation((table: unknown, on: unknown) => {
-      capture.leftJoinCalls.push({ table, on });
-      return c;
-    });
-    // BS#1960: getEntriesByPage's deferred-join rewrite adds an innerJoin
-    // (bounded id-page -> flowsheet) ahead of the pre-existing leftJoins.
-    // Not tracked in capture.leftJoinCalls — the leftJoin-count assertions
-    // below are specifically about the 3 LEFT JOINs, unaffected by it.
-    c.innerJoin = jest.fn().mockReturnValue(c);
-    c.where = jest.fn().mockReturnValue(c);
-    c.orderBy = jest.fn().mockReturnValue(c);
-    c.offset = jest.fn().mockReturnValue(c);
-    // Chain-returning, not terminal: getEntriesByPage's inner id-subquery
-    // chains .limit(m).as('page') — .as needs a chain to call onto.
-    c.limit = jest.fn().mockReturnValue(c);
-    // Terminal for the id-subquery: returns a stand-in Subquery whose `.id`
-    // is what the outer query's innerJoin predicate references.
-    c.as = jest.fn().mockReturnValue({ id: 'mock-page-id' });
-    // Drizzle terminal methods that may be awaited directly
-    c.then = jest.fn().mockImplementation((onFulfilled: (v: unknown) => unknown) => {
-      return Promise.resolve([]).then(onFulfilled);
-    });
-    return c;
-  };
-
-  (db as unknown as { select: jest.Mock }).select = jest.fn().mockImplementation((fields: unknown) => {
-    capture.fieldsArg = fields;
-    const chain = makeChain();
-    const from = jest.fn().mockReturnValue(chain);
-    return { from };
-  });
-
-  return capture;
-}
 
 function expectMetadataColumnsAreCoalesceExpressions(fields: unknown): void {
   expect(fields).toBeDefined();
