@@ -1,7 +1,8 @@
 #!/bin/bash
 # Resolves the CI_PORT / CI_AUTH_PORT / CI_DB_PORT / CI_BETTER_AUTH_URL
 # family into the PORT / AUTH_PORT / DB_PORT / BETTER_AUTH_URL exports the
-# local test runners hand to jest, from the SAME .env file
+# local test runners hand to jest, and MOCK_API_PORT (compose's un-prefixed
+# key) into a shell variable, from the SAME .env file
 # dev_env/docker-compose.yml's `--env-file .env` (see scripts/ci-env.sh)
 # reads. Without this, a `.env` carrying non-default ports (e.g.
 # CI_PORT=28081 to dodge another worktree's CI stack) brings compose up on
@@ -25,7 +26,8 @@
 #   3. the hard-coded default below (byte-identical to pre-BS#2348 behavior
 #      when neither of the above is set -- GHA's case: test.yml exports
 #      CI_PORT / CI_DB_PORT / CI_BETTER_AUTH_URL itself, so precedence 1
-#      wins there and .env -- which GHA leaves empty -- is never consulted)
+#      wins there and .env -- which GHA leaves empty -- is never consulted;
+#      MOCK_API_PORT is not pinned there, so it takes the default)
 #
 # Intended to be sourced (`source "$SCRIPT_DIR/ci-env-vars.sh"`), not
 # executed, by scripts/ci-test.sh and scripts/ci-test-parallel.sh. Callers
@@ -70,5 +72,12 @@ export AUTH_PORT="${_CI_AUTH_PORT_RESOLVED:-8083}"
 _CI_BETTER_AUTH_URL_RESOLVED="${CI_BETTER_AUTH_URL:-$(_ci_env_var CI_BETTER_AUTH_URL "$_CI_ENV_FILE")}"
 export BETTER_AUTH_URL="${_CI_BETTER_AUTH_URL_RESOLVED:-http://localhost:${AUTH_PORT}/auth}"
 
+# MOCK_API_PORT is the one port compose reads under its own name (no CI_
+# prefix), so the key is looked up as-is (BS#2441). Deliberately not
+# exported: only ci-test.sh uses it, to build MOCK_API_URL, and no jest
+# suite reads MOCK_API_PORT itself.
+_CI_MOCK_API_PORT_RESOLVED="${MOCK_API_PORT:-$(_ci_env_var MOCK_API_PORT "$_CI_ENV_FILE")}"
+MOCK_API_PORT="${_CI_MOCK_API_PORT_RESOLVED:-9090}"
+
 unset -f _ci_env_var
-unset _CI_ENV_FILE _CI_DB_PORT_RESOLVED _CI_PORT_RESOLVED _CI_AUTH_PORT_RESOLVED _CI_BETTER_AUTH_URL_RESOLVED
+unset _CI_MOCK_API_PORT_RESOLVED _CI_ENV_FILE _CI_DB_PORT_RESOLVED _CI_PORT_RESOLVED _CI_AUTH_PORT_RESOLVED _CI_BETTER_AUTH_URL_RESOLVED

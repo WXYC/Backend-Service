@@ -7,10 +7,11 @@
 #
 # Any other arguments (e.g. -t <pattern>) are forwarded to jest verbatim.
 #
-# CI_PORT / CI_AUTH_PORT / CI_DB_PORT / CI_BETTER_AUTH_URL resolve from the
-# same .env dev_env/docker-compose.yml reads via --env-file, with a
-# non-empty explicit shell export still able to override deliberately
-# (BS#2348). See scripts/ci-env-vars.sh for the full precedence chain.
+# CI_PORT / CI_AUTH_PORT / CI_DB_PORT / CI_BETTER_AUTH_URL / MOCK_API_PORT
+# resolve from the same .env dev_env/docker-compose.yml reads via
+# --env-file, with a non-empty explicit shell export still able to override
+# deliberately (BS#2348, BS#2441). See scripts/ci-env-vars.sh for the full
+# precedence chain.
 
 set -e
 
@@ -30,8 +31,8 @@ done
 
 # Base environment variables
 export DB_HOST=localhost
-source "$SCRIPT_DIR/ci-env-vars.sh" # sets DB_PORT / PORT / BETTER_AUTH_URL
-export MOCK_API_URL=http://localhost:${MOCK_API_PORT:-9090}
+source "$SCRIPT_DIR/ci-env-vars.sh" # sets DB_PORT / PORT / BETTER_AUTH_URL / MOCK_API_PORT
+export MOCK_API_URL=http://localhost:${MOCK_API_PORT}
 
 if [ "$FULL_MODE" = true ]; then
   echo "Running full test suite..."
