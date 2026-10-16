@@ -1416,6 +1416,10 @@ components:
           maxLength: 4
           description: >-
             BS#2917. The per-release volume letter, `library.code_volume_letters` (varchar(4)). Stored raw, as on `GET /library`. Null when the release has no volume letters.
+        genre_id:
+          type: integer
+          description: >-
+            BS#2641. `library.genre_id`, the genre whose shelf scopes `code_artist_number` (the crossreference join already keys on it).
         format_name:
           type: string
         genre_id:
