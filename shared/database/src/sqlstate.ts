@@ -7,9 +7,9 @@
  * whose own `message` is the generic `Failed query: …`, whose own `code` is
  * `undefined`, and whose `.cause` is the driver error — for postgres-js a
  * `PostgresError` carrying the 5-char SQLSTATE on `.code`, parsed straight off
- * the wire `ErrorResponse`'s `C` field. The wrap is unconditional
- * (`drizzle-orm/errors.js`, applied in `pg-core/session.js`'s
- * `queryWithCache`), so a classifier that reads only `error.code` sees
+ * the wire `ErrorResponse`'s `C` field. The wrap is unconditional, and
+ * `tests/integration/drizzle-error-shape.spec.js` verifies this shape against
+ * a real drizzle instance, so a classifier that reads only `error.code` sees
  * `undefined` for every real SQLSTATE.
  *
  * That failure mode survives review because it is invisible to tests: a unit
