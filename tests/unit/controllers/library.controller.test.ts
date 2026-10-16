@@ -2261,6 +2261,16 @@ describe('library.controller', () => {
       await expect(getRotationTracks(req, res, next)).rejects.toThrow('positive integer');
     });
 
+    it.each(['42abc', '4.5', '2147483648'])(
+      'returns 400 for the malformed or out-of-int4 rotation_id %s',
+      async (rotation_id) => {
+        const req = { params: { rotation_id } } as unknown as Request;
+
+        await expect(getRotationTracks(req, mockResponse(), next)).rejects.toThrow('positive integer');
+        expect(mockResolveRotationPickerSource).not.toHaveBeenCalled();
+      }
+    );
+
     it('returns 200 + empty array when no identity resolves (rotation missing, no album_id, or no library_identity row)', async () => {
       mockResolveRotationPickerSource.mockResolvedValue(null);
       const req = { params: { rotation_id: '42' } } as unknown as Request;
@@ -3407,6 +3417,13 @@ describe('library.controller', () => {
       await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('positive integer');
     });
 
+    it('returns 400 for a rotation_id past int4 rather than reaching Postgres', async () => {
+      const req = { params: { rotation_id: '2147483648' }, body: { album_id: 5 } } as unknown as Request;
+
+      await expect(linkRotationToAlbum(req, mockResponse(), next)).rejects.toThrow('positive integer');
+      expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
+    });
+
     // `parseInt('42abc', 10)` is 42, so the pre-fix parse let
     // `/library/rotation/42abc/link` mutate rotation 42.
     it.each(['42abc', ' 42', '4.5', '+42', '0x2a', '1e3'])(
@@ -3425,6 +3442,15 @@ describe('library.controller', () => {
       const res = mockResponse();
 
       await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('Missing Parameters');
+      expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for an album_id past int4 rather than reaching Postgres', async () => {
+      const req = { params: { rotation_id: '42' }, body: { album_id: 2147483648 } } as unknown as Request;
+
+      await expect(linkRotationToAlbum(req, mockResponse(), next)).rejects.toThrow(
+        expect.objectContaining({ message: 'album_id must be a positive integer', statusCode: 400 })
+      );
       expect(mockLinkRotationToAlbum).not.toHaveBeenCalled();
     });
 

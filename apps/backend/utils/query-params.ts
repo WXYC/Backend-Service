@@ -105,6 +105,20 @@ export function parseNonNegativeInt(raw: unknown): number | null | undefined {
 }
 
 /**
+ * Parse the `:rotation_id` path segment: a strict (all-digits) positive integer no larger than `INT4_MAX`, else the
+ * 400 that keeps a malformed URL from reaching Postgres. Strict, not `parseInt`: `parseInt('42abc', 10)` is 42, which
+ * would let `/library/rotation/42abc/link` mutate rotation 42. Shared by every rotation_id route so a hardening
+ * lands once.
+ */
+export const parseRotationIdParam = (raw: unknown): number => {
+  const rotationId = parseNonNegativeInt(raw);
+  if (rotationId == null || rotationId <= 0 || rotationId > INT4_MAX) {
+    throw new WxycError('rotation_id must be a positive integer', 400);
+  }
+  return rotationId;
+};
+
+/**
  * Parse an optional `limit` (1…`maxLimit`) and `offset` (>= 0) pair, throwing the 400 for a malformed or
  * out-of-range value. Absent values come back `undefined` — the default is the query's, not the caller's.
  */
@@ -124,4 +138,73 @@ export const parseLimitOffset = (
   }
 
   return { limit, offset };
+};
+
+/**
+ * Parses one required integer query parameter, bounded on both ends. The
+ * upper bound is the int4 guard described at `INT4_MAX`; the lower bound
+ * differs per parameter, so it is passed in.
+ *
+ * Callers are not listed here: they include the controller's optional wrapper
+ * (`parseOptionalCodeQueryInt`), which passes `undefined` through before
+ * delegating here, so the absent-vs-blank contract (BS#2637) is shared by every
+ * caller. Grep for the name before changing the `undefined` or blank handling.
+ *
+ * `Number('')` is 0 and `Number(' ')` is 0, so a present-but-empty parameter
+ * (`?code_number=`) would sail through `Number.isInteger` as a legitimate
+ * zero — which matters now that 0 is a valid `code_number`. Blank is therefore
+ * coerced to NaN so it folds into the single range check below.
+ */
+export const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): number => {
+  // Both `resolveArtistByCode` call sites reached this with a value already,
+  // so the branch was historically unreachable for `undefined` -- but by two
+  // different mechanisms, and only one is that handler's "Missing query
+  // parameters" 400. `code_number` is deliberately excluded from that 400
+  // (BS#2489: absent, it selects the browse), so what kept THAT call site
+  // from passing `undefined` is the browse early return, not a required-
+  // parameter check. Do not "align" the browse branch to throw. `peekArtistReleaseNumber`
+  // has no such pre-check, so an omitted `genre_id` reaches this function
+  // directly -- distinguish that from the repeated-key case below, or an
+  // absent parameter misdiagnoses as a repeated one.
+  if (raw === undefined) {
+    throw new WxycError(`Missing query parameter: ${name}`, 400);
+  }
+  // Express's `simple` query parser yields string[] for repeated keys
+  // (`?genre_id=1&genre_id=2`), which `Number()` would collapse to NaN with a
+  // misleading message; name the real problem instead.
+  if (typeof raw !== 'string') {
+    throw new WxycError(`Invalid ${name}: must be a single value`, 400);
+  }
+  // Blank folds into the range check rather than throwing the identical
+  // message from its own branch: `Number('')` and `Number(' ')` are both 0,
+  // which would sail through `Number.isInteger` as a legitimate zero now that
+  // 0 is a valid `code_number`. Coercing blank to NaN first makes one
+  // comparison cover both cases.
+  const value = raw.trim() === '' ? NaN : Number(raw);
+  if (!Number.isInteger(value) || value < min || value > INT4_MAX) {
+    throw new WxycError(`Invalid ${name}: must be an integer between ${min} and ${INT4_MAX}`, 400);
+  }
+  return value;
+};
+
+/**
+ * Parse a bounded positive-integer query parameter.
+ *
+ * Rejects anything that isn't a bare integer rather than letting `parseInt`'s
+ * prefix parsing turn `"24h"` into `24` — an operator who mistypes the unit
+ * should learn that, not silently get a different window than they asked for.
+ * Out-of-range is a 400 too, never a silent clamp, for the same reason.
+ */
+export const parseBoundedInt = (raw: string | undefined, name: string, fallback: number, max: number): number => {
+  if (raw === undefined) {
+    return fallback;
+  }
+  if (!/^\d+$/.test(raw)) {
+    throw new WxycError(`Bad Request: ${name} must be a positive integer`, 400);
+  }
+  const value = Number.parseInt(raw, 10);
+  if (value < 1 || value > max) {
+    throw new WxycError(`Bad Request: ${name} must be between 1 and ${max}`, 400);
+  }
+  return value;
 };
