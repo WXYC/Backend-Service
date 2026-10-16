@@ -3728,57 +3728,10 @@ export const library_artist_view = wxyc_schema.view('library_artist_view').as((q
       .leftJoin(rotation_cards, eq(rotation_cards.id, rotation.card_id))
   );
 });
-export type LibraryArtistViewEntry = {
-  id: number;
-  code_letters: string;
-  code_artist_number: number;
-  /** BS#2835: nullable -- only the 52 lettered compilation sections carry one. */
-  code_comp_letter: string | null;
-  code_number: number;
-  /** BS#2827: nullable, unlike `code_number` -- most releases are not a volume of a set. */
-  code_volume_letters: string | null;
-  artist_name: string;
-  alphabetical_name: string;
-  album_title: string;
-  format_name: string;
-  genre_name: string;
-  /**
-   * BS#2639: the shelf this row is filed on, not decoration alongside
-   * `genre_name`. `genre_artist_crossreference` is unique on
-   * `(artist_id, genre_id)`, so this is half of what identifies the artist
-   * card -- and it is the same `library.genre_id` the crossreference join
-   * above keys on to produce `code_artist_number`, which is why the two
-   * cannot disagree. Non-nullable: the row reached this projection through
-   * an INNER JOIN to `genres` on that column.
-   */
-  genre_id: number;
-  rotation_bin: string | null;
-  add_date: Date;
-  label: string | null;
-  label_id: number | null;
-  on_streaming: boolean | null;
-  album_artist: string | null;
-  plays: number;
-  artwork_url: string | null;
-  discogs_artist_id: number | null;
-  musicbrainz_artist_id: string | null;
-  wikidata_qid: string | null;
-  spotify_artist_id: string | null;
-  apple_music_artist_id: string | null;
-  bandcamp_id: string | null;
-  artist_id: number;
-  // Optional (not on `library_artist_view` until #2129 adds the column to
-  // the view itself); every base-table projection that populates this type
-  // today (BS#2128) always supplies it, since each inner-joins `library`.
-  legacy_release_id?: number | null;
-  discogs_unavailable: boolean;
-  discogs_unavailable_note: string | null;
-  last_discogs_recheck_at: Date | null;
-  card_id: number | null;
-  card_bin: string | null;
-  card_number: number | null;
-  card_name: string | null;
-};
+// Derived from the view so a column added to its `.select({...})` appears here with no second edit.
+// `legacy_release_id` is optional: it is not on `library_artist_view` until #2129 adds it, and every
+// base-table projection that populates this type today (BS#2128) supplies it.
+export type LibraryArtistViewEntry = typeof library_artist_view.$inferSelect & { legacy_release_id?: number | null };
 
 // Per-album play count, aggregated from `flowsheet` track entries. The MV is
 // created and indexed by migration 0059, refreshed periodically by
