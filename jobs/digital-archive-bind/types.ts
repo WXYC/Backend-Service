@@ -16,6 +16,8 @@ export interface InventoryFile {
   bytes: number;
   /** From the ETag, single-part uploads only (never set for a `-N` multipart ETag). */
   md5: string | null;
+  /** From the MPEG frame/Xing/VBRI headers (`mpeg.ts`); `null` when not provably right (a headerless VBR file whose whole prefix holds one non-minimum rate still reads as CBR), for any non-mp3 codec, or when tags came from AzuraCast (no bytes fetched). */
+  bitrateKbps: number | null;
   tags: Id3Tags;
 }
 

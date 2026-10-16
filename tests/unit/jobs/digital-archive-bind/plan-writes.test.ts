@@ -1,4 +1,4 @@
-import { planWrites, type ExistingSlot } from '../../../../jobs/digital-archive-bind/write';
+import { fileRowOf, planWrites, type ExistingSlot } from '../../../../jobs/digital-archive-bind/write';
 import type { MatchedAlbum } from '../../../../jobs/digital-archive-bind/types';
 
 const matchedOf = (
@@ -20,6 +20,7 @@ const matchedOf = (
       codec: 'mp3',
       bytes: 1000,
       md5: null,
+      bitrateKbps: null,
       tags: { title: null, artist: null, album: null, albumArtist: null, track: null, disc: null, durationMs: null },
     })),
   },
@@ -140,5 +141,19 @@ describe('digital-archive-bind planWrites', () => {
     expect(plan.rejectedReopened).toHaveLength(1);
     expect(plan.rejectedReopened[0].matched.candidate.files[0].objectKey).toBe('named.mp3');
     expect(plan.sameRunCollision).toHaveLength(0);
+  });
+});
+
+describe('digital-archive-bind fileRowOf', () => {
+  const file = matchedOf(1, 1, ['a.mp3']).candidate.files[0];
+
+  it.each([192, null])('writes the parsed bitrate (%s) into bitrate_kbps', (bitrateKbps) => {
+    // Catches: reverting to a hard-coded `bitrate_kbps: null`.
+    expect(fileRowOf(1, 1, { ...file, bitrateKbps }).bitrate_kbps).toBe(bitrateKbps);
+  });
+
+  it('still supplies exactly 15 columns', () => {
+    // Catches: adding or dropping a column without revisiting INSERT_CHUNK_ROWS's parameter math.
+    expect(Object.keys(fileRowOf(1, 1, file))).toHaveLength(15);
   });
 });

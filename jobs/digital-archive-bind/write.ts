@@ -243,12 +243,12 @@ export interface WriteCounts {
   filesWritten: number;
 }
 
-const fileRowOf = (assetId: number, storeId: number, file: MatchedAlbum['candidate']['files'][number]) => ({
+export const fileRowOf = (assetId: number, storeId: number, file: MatchedAlbum['candidate']['files'][number]) => ({
   asset_id: assetId,
   store_id: storeId,
   object_key: file.objectKey,
   codec: file.codec,
-  bitrate_kbps: null,
+  bitrate_kbps: file.bitrateKbps,
   track_number: file.tags.track,
   title: file.tags.title ?? file.objectKey,
   duration_secs: file.tags.durationMs !== null ? file.tags.durationMs / 1000 : null,

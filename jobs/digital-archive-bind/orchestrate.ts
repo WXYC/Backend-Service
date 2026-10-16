@@ -47,13 +47,20 @@ const buildInventory = async (): Promise<{ files: InventoryFile[]; skippedByReas
       continue;
     }
 
-    const tags = await resolveTagsForFile(client, storeConfig.bucket, object.key, azuraCastTags);
+    const { tags, bitrateKbps } = await resolveTagsForFile(
+      client,
+      storeConfig.bucket,
+      object.key,
+      classified.codec,
+      azuraCastTags
+    );
     files.push({
       objectKey: object.key,
       contentKind: classified.contentKind,
       codec: classified.codec,
       bytes: object.bytes,
       md5: md5FromETag(object.etag),
+      bitrateKbps,
       tags,
     });
   }
