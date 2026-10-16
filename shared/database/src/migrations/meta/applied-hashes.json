@@ -190,5 +190,6 @@
   "0191_flowsheet-text-match-key": "ed0a72af8ec652feb1f2f2b1c41bd72a66157010a1def95b0e72b163069f02d7",
   "0192_intake-digital": "032a97a8f5a83311186c25104d6f5827f3328f741f72c7deebf97d9014714a65",
   "0193_reviews-imported-from-submission": "0ed235fb4a7fcada0e7ae9c6e1b8d653c0bff54690bd048d41a379c9a7ce554e",
-  "0194_album-metadata-reask-backup": "2a14c5c2dc366cff8a9feea5874799201d0300bd79c4c361eb06772875d244a0"
+  "0194_album-metadata-reask-backup": "2a14c5c2dc366cff8a9feea5874799201d0300bd79c4c361eb06772875d244a0",
+  "0195_artists-fold-name-prefix-idx": "915e4a8e8d3a36b7fd807a49e5d92048280c04c814c045294c6cca54ebbc5385"
 }

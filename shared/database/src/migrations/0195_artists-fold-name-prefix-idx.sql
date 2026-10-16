@@ -1,0 +1,20 @@
+-- @no-precondition-needed: no constraint is added. This is a plain (non-unique) btree on the output of the IMMUTABLE `fold_artist_name(text)` (migration 0134), which is total over text, so no data invariant can make the build fail.
+--
+-- 0195 -- prefix-serving expression index on `fold_artist_name(artist_name)` (BS#2023).
+--
+-- `GET /library/artists/search` and `GET /flowsheet/suggest/artists` match artist records by prefix. They now compare `fold_artist_name(artist_name) LIKE '<folded q>%'` (the query is LIKE-escaped and folded in SQL by the same `fold_artist_name`) so `Nilufer` finds `Nilüfer Yanya` (the write boundary already folds this way, BS#1897). The existing `artists_fold_name_idx` (0134) is a default-opclass btree and the database collation is `en_US.utf8`, a combination that serves `=` but cannot serve `LIKE 'prefix%'`; with it alone, the per-keystroke autocomplete would seq-scan the artists table. `text_pattern_ops` makes the btree usable for prefix LIKE under any collation. The `text_pattern_ops` btree also serves `=` (equality is part of that operator class and does not depend on the collation), so the older `artists_fold_name_idx` is now redundant for `artistIdFromName` and the other `fold_artist_name(col) = fold_artist_name(x)` lookups. It is left in place here and dropped in a follow-up, once the equality plans in production are confirmed to use the new index.
+--
+-- Not modeled in `schema.ts`, like `artists_fold_name_idx` (0134): the Drizzle index builder has no first-class expression-with-opclass form beyond the raw `sql` escape hatch, and the snapshot (`meta/0195_snapshot.json`) carries the same schema as its predecessor's (`0194`), differing only in `id`/`prevId` and JSON key order.
+--
+-- Lock and duration: the in-migration non-concurrent `CREATE INDEX` takes a SHARE lock on `artists`, blocking artist writes for the build. At roughly 24k rows the build is sub-second to a few seconds. Backend-Service auto-applies migrations on push to `main`, so the out-of-band runbook below only helps if ops runs it BEFORE merge; otherwise the in-band build is the one that runs, and `IF NOT EXISTS` makes a pre-built index a no-op.
+--
+-- Concurrency: per docs/migrations.md `if-not-exists-index`, the prod runbook is to build the index out-of-band with CREATE INDEX CONCURRENTLY first so this migration is a no-op against the running DB. The in-migration form is NOT CONCURRENTLY because the migration runs inside a transaction (`CONCURRENTLY cannot run inside a transaction block`).
+--
+-- Production runbook (run outside any transaction):
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS "artists_fold_name_prefix_idx"
+--     ON "wxyc_schema"."artists" (wxyc_schema.fold_artist_name("artist_name") text_pattern_ops);
+--
+-- Like 0134, the index freezes the cluster's lc_ctype at build time through `lower()`; REINDEX it together with `artists_fold_name_idx` if that ever changes.
+-- @no-analyze-needed: no UPDATE in this migration.
+CREATE INDEX IF NOT EXISTS "artists_fold_name_prefix_idx" ON "wxyc_schema"."artists" USING btree (wxyc_schema.fold_artist_name("artist_name") text_pattern_ops);

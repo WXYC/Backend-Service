@@ -118,7 +118,7 @@ describe('searchArtistsInGenre (BS#2410)', () => {
     // equality would silently return nothing.
     const predicate = wherePredicate(chain);
     expect(predicate).not.toHaveProperty('and');
-    expect(predicate.values).toEqual([artists.artist_name, 'bu%']);
+    expect(predicate.values).toEqual([expect.anything(), artists.artist_name, expect.anything(), 'bu']);
   });
 
   it.each(MODES)('escapes ILIKE metacharacters in %s mode', async (_mode, genreId) => {
@@ -130,8 +130,37 @@ describe('searchArtistsInGenre (BS#2410)', () => {
     // the second conjunct of the `and`.
     const predicate = wherePredicate(chain);
     const ilike = (genreId === null ? predicate : predicate.and?.[1]) as { values: unknown[] };
-    expect(ilike.values).toEqual([artists.artist_name, '\\%u%']);
+    expect(ilike.values).toEqual([expect.anything(), artists.artist_name, expect.anything(), '\\%u']);
   });
+
+  it.each(MODES)(
+    'hands the query to the SQL fold unfolded, so the column and the pattern share one fold, in %s mode (BS#2023)',
+    async (_mode, genreId) => {
+      const chain = stubSelect();
+
+      await searchArtistsInGenre(genreId, 'Nilüfer', 10);
+
+      const predicate = wherePredicate(chain);
+      const fold = (genreId === null ? predicate : predicate.and?.[1]) as { values: unknown[] };
+      expect(fold.values).toEqual([expect.anything(), artists.artist_name, expect.anything(), 'Nilüfer']);
+    }
+  );
+
+  // The 2-character floor applies after the fold (BS#2023): these pass the raw
+  // `length >= 2` check but fold to '' / 'e', and '' would become the
+  // match-everything pattern `%`.
+  it.each(MODES)(
+    'returns [] without querying when the folded query is under 2 characters in %s mode',
+    async (_mode, genreId) => {
+      stubSelect();
+
+      for (const q of ['\u0301\u0301', 'e\u0301']) {
+        expect(await searchArtistsInGenre(genreId, q, 10)).toEqual([]);
+      }
+
+      expect(db.select).not.toHaveBeenCalled();
+    }
+  );
 
   it.each([
     [0, 1],

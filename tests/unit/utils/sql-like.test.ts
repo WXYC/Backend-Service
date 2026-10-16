@@ -6,7 +6,12 @@ jest.unmock('drizzle-orm');
 
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { escapeLikePattern, ilikeEscaped } from '../../../apps/backend/utils/sql-like';
+import {
+  escapeLikePattern,
+  foldedPrefixLike,
+  foldedQueryLength,
+  ilikeEscaped,
+} from '../../../apps/backend/utils/sql-like';
 
 const dialect = new PgDialect();
 
@@ -61,5 +66,41 @@ describe('ilikeEscaped', () => {
   it('exact wrap adds no wildcards but still escapes user metacharacters', () => {
     const { params } = dialect.sqlToQuery(ilikeEscaped(sql`x`, 'AC_DC', 'exact'));
     expect(params).toContain('AC\\_DC');
+  });
+});
+
+describe('foldedPrefixLike', () => {
+  it('compares the folded column to the SQL-folded, wildcard-terminated pattern with an ESCAPE clause', () => {
+    const { sql: text, params } = dialect.sqlToQuery(foldedPrefixLike(sql`x`, 'Nil\u00fcfer'));
+    expect(text).toMatch(
+      /^"[^"]+"\."fold_artist_name"\(x\) LIKE \("[^"]+"\."fold_artist_name"\(\$1::text\) \|\| '%'\) ESCAPE '\\'$/
+    );
+    expect(params).toEqual(['Nil\u00fcfer']);
+  });
+
+  // The pattern is folded by the SQL function that folds the column, never by the TypeScript twin, whose
+  // toLowerCase applies the Greek final-sigma rule (capital alpha-sigma -> lower-case alpha-final-sigma) that PG lower() does not (alpha-sigma).
+  it.each([
+    ['a Greek query ending in a capital sigma', '\u0391\u03a3'],
+    ['an NFD query', 'Nilu\u0308fer'],
+  ])('passes %s to the SQL fold unchanged', (_label, value) => {
+    expect(dialect.sqlToQuery(foldedPrefixLike(sql`x`, value)).params).toEqual([value]);
+  });
+
+  it('keeps %, _ and backslash literal: escaped before the SQL fold', () => {
+    expect(dialect.sqlToQuery(foldedPrefixLike(sql`x`, '%A_b\\')).params).toEqual(['\\%A\\_b\\\\']);
+  });
+});
+
+describe('foldedQueryLength', () => {
+  it.each([
+    ['a lone combining acute accent', '\u0301', 0],
+    ['two combining marks', '\u0301\u0301', 0],
+    ['e + combining acute accent', 'e\u0301', 1],
+    ['a precomposed accented letter', '\u00e9', 1],
+    ['a normal two-letter prefix', 'Bu', 2],
+    ['a diacritic-bearing prefix', 'Nil\u00fcfer', 7],
+  ])('measures %s after the fold', (_label, value, expected) => {
+    expect(foldedQueryLength(value)).toBe(expected);
   });
 });
