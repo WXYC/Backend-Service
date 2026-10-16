@@ -31,12 +31,29 @@ const postgres = require('postgres');
 const request = require('supertest')(`${process.env.TEST_HOST}:${process.env.PORT}`);
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
-const ART = 7000; // fixture artist (code_letters 'XA')
+// Fixture id rule (BS#2584): every primary key this spec WRITES is hardcoded
+// in the reserved band 900560-900599, shared across artists, library,
+// rotation and album_metadata (album_id). That band sits above every id the
+// dev prod-clone fixture (dev_env/seed-clone.sql, loaded when
+// LOAD_CLONE_FIXTURE=true; BS#1728) can hold: its max ids are artists 27050,
+// library 70351 and rotation 21589 (sequences 27050 / 70351 / 21590), and
+// the small CI seed (dev_env/seed_db.sql) is lower still. A low literal
+// eventually collides with an API-minted or cloned row, and an
+// `ON CONFLICT (id)` insert then silently operates on that foreign row; the
+// 9xxx band the issue originally suggested is NOT safe, because the clone
+// fills it. It follows library-catalog-producer-export.spec.js (900170-900180)
+// and bs-replacement-char-phase4.spec.js (900001-900002); no other spec,
+// tests/utils file or seed file uses 900560-900599. Do not add ids below
+// 900000. Flowsheet rows take serial ids (RETURNING id), and this spec
+// writes no shows.
+// ART is the exception: a seeded artist this spec only references (never
+// inserts), so it cannot hijack anything and must keep its seeded id.
+const ART = 7000; // seeded fixture artist (code_letters 'XA')
 const GEN = 11; // 'Rock'
 const FMT = 1; // 'cd'
 
-const PRESS_CD = 7160; // lower album_id -> must win the artwork tie-break
-const PRESS_LP = 7161; // higher album_id, same artist+album, distinct artwork
+const PRESS_CD = 900560; // lower album_id -> must win the artwork tie-break
+const PRESS_LP = 900561; // higher album_id, same artist+album, distinct artwork
 
 const ARTIST_NAME = 'BS88 Phase3 Probe Artist';
 const ALBUM_TITLE = 'BS88 Phase3 Probe Album';
@@ -52,16 +69,16 @@ const ROTATION_ALBUM_TITLE = 'BS88 Phase3 Rotation Album';
 // to this change — see docs/dev-db-fixture.md), so a bare INSERT can collide
 // with an existing high-id row. Reserved-range style, same rationale as
 // PRESS_CD/PRESS_LP above.
-const ROTATION_ID = 7170;
+const ROTATION_ID = 900570;
 
 // Branch (a) probe (BS#1862): a rotation linked purely by album_id, matched by
 // a hand-typed play whose artist/album text does NOT match any rotation — so
 // only `flowsheet.album_id = rotation.album_id` can classify it as rotation.
-const ROTATION_ID_BRANCH_A = 7171;
+const ROTATION_ID_BRANCH_A = 900571;
 // Dedicated album for the branch-(a) probe — distinct from PRESS_CD/PRESS_LP so
 // the split-format probes (which link PRESS_CD) don't accidentally match this
 // rotation via album_id and flip their expected rotation='false'.
-const BRANCHA_LIB_ID = 7162;
+const BRANCHA_LIB_ID = 900562;
 const BRANCHA_ARTIST = 'BS88 BranchA Artist';
 const BRANCHA_ALBUM = 'BS88 BranchA Album';
 
@@ -70,18 +87,20 @@ const BRANCHA_ALBUM = 'BS88 BranchA Album';
 // whose album_id is NULL (so branch a can't fire) and whose text matches the
 // rotation row's OWN columns not at all (they're NULL, so branch b can't
 // fire), leaving only rotation -> library -> artists text as the match path.
-const ROTATION_ID_BRANCH_C = 7172;
-// Out of the `artists_id_seq` band on purpose (9xxx, matching the hardcoded
-// artist ids in library-search-alias / library-legacy-release-id-exposure).
-// The seed leaves that sequence in the 7xxx range, so a low literal here is in
-// the path of every API-minted artist the suite creates — and this fixture is
-// the destructive combination: `ON CONFLICT (id) DO UPDATE` silently HIJACKS
-// (and renames) whichever artist landed on the id first, then afterAll DELETEs
-// it, which fails on the crossreference FK any API-minted artist carries. It
-// showed up when BS#2564 added three artist POSTs to library-update.spec.js
-// and the third landed on 7300.
-const BRANCHC_ARTIST_ID = 9300;
-const BRANCHC_LIB_ID = 7301;
+const ROTATION_ID_BRANCH_C = 900572;
+// Out of the `artists_id_seq` band on purpose (900560-900599 reserved above).
+// The seed and the prod clone leave that sequence far below it, so a low
+// literal here would sit in the path of every API-minted artist the suite
+// creates — and this fixture is the destructive combination: `ON CONFLICT
+// (id) DO UPDATE` silently HIJACKS (and renames) whichever artist landed on
+// the id first, then afterAll DELETEs it, which fails on the crossreference FK
+// any API-minted artist carries. It showed up when BS#2564 added three artist
+// POSTs to library-update.spec.js and the third landed on 7300. (9560 and
+// 9570 appear in library-update.spec.js only as artist code numbers, and
+// library-search-alias.spec.js uses ids 9301-9306; neither is a primary key
+// in the new band.)
+const BRANCHC_ARTIST_ID = 900580;
+const BRANCHC_LIB_ID = 900581;
 const BRANCHC_ARTIST = 'BS88 BranchC Artist';
 const BRANCHC_ALBUM = 'BS88 BranchC Album';
 
@@ -95,7 +114,7 @@ const BRANCHC_ALBUM = 'BS88 BranchC Album';
 //     (LML#401/#487 — the projection NULLIFs it, BS#1628).
 // The wire keys are camelCase here, unlike /flowsheet's snake_case: iOS 3.2's
 // `Playcut` CodingKeys are the SSOT (wxyc-ios-64 @ v3.2-AppStoreSubmission4).
-const ENRICHED_LIB_ID = 7163;
+const ENRICHED_LIB_ID = 900563;
 const ENRICHED_ARTIST = 'Nilüfer Yanya';
 const ENRICHED_ALBUM = 'PAINLESS';
 const ENRICHED_ARTWORK = 'https://i.discogs.com/bs2103-painless.jpg';
@@ -420,18 +439,25 @@ describe('GET /playlists/recentEntries (Phase 3 — Postgres-backed, WXYC/wiki#8
   });
 
   afterAll(async () => {
-    if (!sql) return;
-    if (flowsheetIds.length > 0) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.flowsheet WHERE id = ANY(${flowsheetIds})`;
+    if (!sql) {
+      return;
     }
-    if (rotationIds.length > 0) {
-      await sql`DELETE FROM ${sql(SCHEMA)}.rotation WHERE id = ANY(${rotationIds})`;
+    // sql.end() must run even when any teardown statement throws, so the try
+    // starts at the first DELETE (BS#2584).
+    try {
+      if (flowsheetIds.length > 0) {
+        await sql`DELETE FROM ${sql(SCHEMA)}.flowsheet WHERE id = ANY(${flowsheetIds})`;
+      }
+      if (rotationIds.length > 0) {
+        await sql`DELETE FROM ${sql(SCHEMA)}.rotation WHERE id = ANY(${rotationIds})`;
+      }
+      await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${libraryIds})`;
+      await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
+      // Delete the branch-(c) artist AFTER its library row (library.artist_id FK).
+      await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${BRANCHC_ARTIST_ID}`;
+    } finally {
+      await sql.end();
     }
-    await sql`DELETE FROM ${sql(SCHEMA)}.album_metadata WHERE album_id = ANY(${libraryIds})`;
-    await sql`DELETE FROM ${sql(SCHEMA)}.library WHERE id = ANY(${libraryIds})`;
-    // Delete the branch-(c) artist AFTER its library row (library.artist_id FK).
-    await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id = ${BRANCHC_ARTIST_ID}`;
-    await sql.end();
   });
 
   test('groups playcuts/talksets/breakpoints and omits show_start/show_end', async () => {
