@@ -146,6 +146,28 @@ let danglingShowId;
 let danglingFlowsheetId;
 const seededFlowsheetIds = [];
 
+/**
+ * Keyset cursor that starts the candidate reads just below the suite's own
+ * rows. Reading from 0 with a fixed LIMIT would push those rows out of the
+ * window once the table holds more than the limit's worth of older in-scope
+ * rows (BS#2449). Starting at the lowest seeded id removes the older rows, but
+ * the window is still LIMIT rows wide: it only reaches every seeded row if
+ * fewer than about (LIMIT - seeded count) foreign in-scope rows were inserted
+ * between this suite's first and last seed INSERT. That holds for a serial
+ * run; a concurrent writer inserting a thousand such rows would break it,
+ * which is why a negative assertion must also check `windowReachedSeededRows`.
+ */
+const seededAfterId = () => Math.min(...seededFlowsheetIds) - 1;
+
+/**
+ * True when a read of `limit` rows ordered by id covered every seeded row:
+ * either it came back short (the table was exhausted) or its last id is at
+ * least the highest seeded id. Without this, "row X is absent" can pass
+ * because X sat beyond the window rather than because the query excludes it.
+ */
+const windowReachedSeededRows = (rows, limit) =>
+  rows.length < limit || rows[rows.length - 1].id >= Math.max(...seededFlowsheetIds);
+
 describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
   const sql = getTestDb();
 
@@ -285,7 +307,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
 
   describe('candidate selection', () => {
     it('never surfaces an excluded entry type to the main pass', async () => {
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const seeded = rows.filter((r) => seededFlowsheetIds.includes(r.id));
       expect(seeded.length).toBeGreaterThan(0);
       for (const row of seeded) {
@@ -294,7 +316,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
 
     it('never surfaces an excluded entry type to the orphan pass', async () => {
-      const rows = await loadOrphanPage(sql, 0, 1000);
+      const rows = await loadOrphanPage(sql, seededAfterId(), 1000);
       const seeded = rows.filter((r) => seededFlowsheetIds.includes(r.id));
       // Two track rows are in — the NULL-show_id orphan AND the dangling-
       // show_id orphan (BS#2281 review finding 4) — but the orphan talkset
@@ -305,7 +327,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
 
     it('scopes the orphan pass to show_id IS NULL (or dangling) with a non-null dj_name', async () => {
-      const rows = await loadOrphanPage(sql, 0, 1000);
+      const rows = await loadOrphanPage(sql, seededAfterId(), 1000);
       for (const row of rows) {
         expect(row.dj_name).not.toBeNull();
       }
@@ -317,12 +339,13 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
 
     it('the main pass cannot see a dangling show_id row — its INNER JOIN excludes it', async () => {
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
+      expect(windowReachedSeededRows(rows, 1000)).toBe(true);
       expect(rows.find((r) => r.id === danglingFlowsheetId)).toBeUndefined();
     });
 
     it('the orphan pass catches a dangling show_id row via the NOT EXISTS anti-join, not only NULL show_id', async () => {
-      const rows = await loadOrphanPage(sql, 0, 1000);
+      const rows = await loadOrphanPage(sql, seededAfterId(), 1000);
       const found = rows.find((r) => r.id === danglingFlowsheetId);
       expect(found).toBeDefined();
       // The stored value is genuinely non-null — this is the "dangling",
@@ -332,8 +355,11 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
 
     it('scopes the message pass to the four marker types', async () => {
-      const rows = await loadMessagePage(sql, 0, 1000);
+      const rows = await loadMessagePage(sql, seededAfterId(), 1000);
       const seeded = rows.filter((r) => seededFlowsheetIds.includes(r.id));
+      // Positive anchor: the seeded dj_join row carries a message, so the
+      // pass must return it. Without this the test passes on an empty read.
+      expect(seeded.map((r) => r.entry_type)).toContain('dj_join');
       for (const row of seeded) {
         expect(MESSAGE_ENTRY_TYPES).toContain(row.entry_type);
         expect(row.message).not.toBeNull();
@@ -348,7 +374,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
       // This distinction is not cosmetic: resolveShowDjName returns
       // legacy_dj_name UNTRIMMED when there is no user row, and TRIMMED when
       // there is one whose handle is unusable.
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const legacy = rows.find((r) => r.show_id === showLegacyId);
       const live = rows.find((r) => r.show_id === showLiveId);
 
@@ -359,13 +385,13 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
 
     it('returns the legacy handle byte-for-byte, padding included', async () => {
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const legacy = rows.find((r) => r.show_id === showLegacyId);
       expect(legacy.legacy_dj_name).toBe('  untrimmed legacy  ');
     });
 
     it('surfaces the per-show override', async () => {
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const overridden = rows.find((r) => r.show_id === showOverrideId);
       expect(overridden.dj_name_override).toBe('Override Name');
     });
@@ -373,7 +399,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
 
   describe('the write path', () => {
     it('applies a different value per row in one statement', async () => {
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const trackLive = rows.find((r) => r.show_id === showLiveId && r.entry_type === 'track');
       const trackOverride = rows.find((r) => r.show_id === showOverrideId && r.entry_type === 'track');
 
@@ -393,7 +419,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
 
     it('writes NULL where the chain resolves to nothing', async () => {
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const guestJoin = rows.find((r) => r.show_id === showLiveId && r.entry_type === 'dj_join');
 
       const written = await applyDjNameBatch(sql, [{ id: guestJoin.id, djName: null, oldDjName: guestJoin.dj_name }]);
@@ -408,7 +434,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
       // (jobs/flowsheet-etl/job.ts:121, apps/backend/routes/internal.route.ts:195)
       // and a page can sit unwritten for a long time under cooperative pause.
       // Without the CAS this job would clobber their value.
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const target = rows.find((r) => r.show_id === showLegacyId && r.entry_type === 'track');
 
       await sql`UPDATE ${sql(SCHEMA)}.flowsheet SET "dj_name" = 'written by someone else' WHERE "id" = ${target.id}`;
@@ -426,7 +452,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
       // search_doc is STORED GENERATED over an expression containing dj_name
       // (schema.ts:1295), which is the entire basis for this job having no
       // reindex step. Migration 0054 relies on the same property.
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const target = rows.find((r) => r.show_id === showLegacyId && r.entry_type === 'show_start');
 
       await applyDjNameBatch(sql, [{ id: target.id, djName: 'searchableafterscrub', oldDjName: target.dj_name }]);
@@ -446,7 +472,7 @@ describe('flowsheet-dj-name-scrub SQL contract (BS#2281)', () => {
     });
 
     it('advances updated_at via the migration-0084 trigger, not the job', async () => {
-      const rows = await loadMainPage(sql, 0, 1000);
+      const rows = await loadMainPage(sql, seededAfterId(), 1000);
       const target = rows.find((r) => r.show_id === showLiveId && r.entry_type === 'show_end');
 
       const before = await sql`SELECT "updated_at" FROM ${sql(SCHEMA)}.flowsheet WHERE "id" = ${target.id}`;
