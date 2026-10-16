@@ -105,3 +105,7 @@ GitHub Actions workflow (`.github/workflows/test.yml`) runs on PRs to `main`:
 Moved verbatim out of `CLAUDE.md`'s Database section.
 
 **Mock drift**: the unit suite resolves `@wxyc/database` to `tests/mocks/database.mock.ts`, a hand-maintained double. A column in `schema.ts` but not in its double reads as `undefined`, and `toHaveBeenCalledWith({ col: undefined })` **matches a call that omitted the key** — so the assertion passes whether or not the code writes it (BS#2409 shipped exactly that). `npm run check:db-mock-sync` (hard-fail in pre-push and CI, BS#2448) is what notices. Its doubles map each column to a **table-qualified** sentinel — `rotation.format_id === 'rotation.format_id'` — so a same-named column on another table is a different value; `tests/utils/db-mock-allowlist.ts` records the pre-existing backlog and is enforced shrink-only.
+
+## Lint cache
+
+`npm run lint` (pre-push hook and CI) is uncached, so its error attribution is sound. `npm run lint:fast` keeps a content-keyed ESLint cache in `.cache/eslint`, which is unsound for type-aware rules: a file's verdict can depend on other files' types, so a stale entry can report an error against a file you never touched (BS#2555). Treat `lint:fast` attributions as unreliable, and when a typed-lint error points at an untouched file, run `rm -rf .cache/eslint` before diagnosing anything else.
