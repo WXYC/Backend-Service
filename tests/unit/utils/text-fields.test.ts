@@ -1,14 +1,20 @@
 import {
+  MAX_ALBUM_TEXT_LENGTH,
   codePointLength,
   isNonBlankString,
   validateTextField,
   normalizeOptionalText,
 } from '../../../apps/backend/utils/text-fields';
+import { ROTATION_SNAPSHOT_MAX_LENGTH } from '../../../shared/database/src/rotation-snapshot';
 import WxycError from '../../../apps/backend/utils/error';
 
 const astral128 = '😀'.repeat(128);
 
 describe('text-fields', () => {
+  it('MAX_ALBUM_TEXT_LENGTH matches the rotation snapshot column width', () => {
+    expect(MAX_ALBUM_TEXT_LENGTH).toBe(ROTATION_SNAPSHOT_MAX_LENGTH);
+  });
+
   it.each([
     ['', 0],
     ['abc', 3],

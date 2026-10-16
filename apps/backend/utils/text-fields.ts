@@ -1,6 +1,10 @@
 import WxycError from './error.js';
 
-/** Width of the `varchar(128)` library text columns (`album_title`, `label`, `alternate_artist_name`, `album_artist`) and `labels.label_name`. */
+/**
+ * Width of the `varchar(128)` library text columns (`album_title`, `label`, `alternate_artist_name`, `album_artist`) and `labels.label_name`.
+ * Also the validator limit for the three `rotation` snapshot columns (`artist_name`, `album_title`, `record_label`), whose column width is
+ * `ROTATION_SNAPSHOT_MAX_LENGTH` in `shared/database/src/rotation-snapshot.ts`; a unit test pins the two equal, so widen them together.
+ */
 export const MAX_ALBUM_TEXT_LENGTH = 128;
 
 /** Unicode-code-point length, matching OpenAPI `maxLength` semantics (a UTF-16 `.length` over-counts astral characters). */

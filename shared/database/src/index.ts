@@ -8,6 +8,7 @@ export * from './library-tiebreak.js';
 export * from './live-activity.js';
 export * from './env-parsers.js';
 export * from './rotation-bin.js';
+export * from './rotation-snapshot.js';
 export * from './normalize-artist-name.js';
 export * from './fold-artist-name.js';
 export * from './normalize-album-title.js';
