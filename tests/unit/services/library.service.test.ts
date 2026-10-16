@@ -142,6 +142,7 @@ import {
   getRotationTracksFromRelease,
   __resetReleaseTracklistCacheForTests,
 } from '../../../apps/backend/services/library.service';
+import { renderSql } from '../../utils/render-sql';
 import { resetConfig as resetCatalogTrackSearchConfig } from '../../../apps/backend/config/catalogTrackSearch';
 
 /**
@@ -164,6 +165,40 @@ function flattenSqlValues(node: unknown): unknown[] {
     }
   }
   return out;
+}
+
+/**
+ * True when any object node reachable from `root` (through objects and arrays,
+ * including the mock `sql` tag's `values`) deep-equals `target`, or satisfies
+ * it when `target` is a predicate. Unlike a substring check on
+ * `JSON.stringify`, this distinguishes a mocked operator node such as
+ * `{ eq: ['library.on_streaming', true] }` from a bare column sentinel that
+ * merely appears in a projection.
+ */
+function containsNode(root: unknown, target: object | ((node: Record<string, unknown>) => boolean)): boolean {
+  const seen = new WeakSet<object>();
+  const matches = (node: Record<string, unknown>): boolean => {
+    if (typeof target === 'function') {
+      return target(node);
+    }
+    try {
+      expect(node).toEqual(target);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const walk = (node: unknown): boolean => {
+    if (!node || typeof node !== 'object' || seen.has(node)) {
+      return false;
+    }
+    seen.add(node);
+    if (!Array.isArray(node) && matches(node as Record<string, unknown>)) {
+      return true;
+    }
+    return Object.values(node).some(walk);
+  };
+  return walk(root);
 }
 
 describe('library.service', () => {
@@ -194,25 +229,67 @@ describe('library.service', () => {
     });
 
     it('returns results with code_artist_number mapped from the view', async () => {
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+      db.execute.mockResolvedValue([{ ...mockViewRow, album_rank: 1 }]);
 
       const results = await fuzzySearchLibrary('Autechre', undefined, 5);
 
       expect(results).toHaveLength(1);
       expect(results[0]).toHaveProperty('code_artist_number', 3);
+      expect(results[0]).not.toHaveProperty('album_rank');
     });
 
-    it('applies on_streaming filter when provided', async () => {
-      const chain = createMockQueryChain([mockViewRow]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([mockViewRow]);
+    // The WHERE predicate, not the projection: `LIBRARY_VIEW_PROJECTION_RAW`
+    // always interpolates the `library.on_streaming` sentinel, so a substring
+    // check on the serialized call passes even when the filter is dropped.
+    // `eq`/`and` are mocked to `{ eq: [col, val] }` / `{ and: [...] }`; the
+    // node only appears in the query tree if `streamingPredicate` reached the
+    // WHERE clause of `fuzzyAlbumScopedSearch`.
+    it.each<[string, string | undefined, string | undefined]>([
+      ['artist + album', 'Juana Molina', 'DOGA'],
+      ['artist only', 'Juana Molina', undefined],
+      ['album only', undefined, 'DOGA'],
+    ])('applies the on_streaming predicate to the WHERE clause for %s', async (_label, artist, album) => {
+      db.execute.mockResolvedValue([]);
 
-      const results = await fuzzySearchLibrary('Autechre', undefined, 5, true);
+      for (const onStreaming of [true, false]) {
+        db.execute.mockClear();
+        await fuzzySearchLibrary(artist, album, 5, onStreaming);
+        const call = db.execute.mock.calls[db.execute.mock.calls.length - 1][0];
+        expect(containsNode(call, { eq: ['library.on_streaming', onStreaming] })).toBe(true);
+      }
+    });
 
-      expect(results).toHaveLength(1);
-      expect(results[0]).toHaveProperty('on_streaming', true);
+    it('omits the on_streaming predicate when on_streaming is undefined', async () => {
+      db.execute.mockResolvedValue([]);
+
+      await fuzzySearchLibrary('Juana Molina', 'DOGA', 5, undefined);
+
+      const call = db.execute.mock.calls[db.execute.mock.calls.length - 1][0];
+      expect(containsNode(call, (node) => 'eq' in node && (node.eq as unknown[])[0] === 'library.on_streaming')).toBe(
+        false
+      );
+    });
+
+    // BS#1162: `n` must count albums (DENSE_RANK + album_rank <= n), not rotation fan-out rows.
+    it.each<[string, string | undefined, string | undefined]>([
+      ['artist + album', 'Juana Molina', 'DOGA'],
+      ['artist only', 'Juana Molina', undefined],
+      ['album only', undefined, 'DOGA'],
+    ])('caps at n albums for %s', async (_label, artist, album) => {
+      db.execute.mockResolvedValue([]);
+
+      await fuzzySearchLibrary(artist, album, 7);
+
+      const call = db.execute.mock.calls[db.execute.mock.calls.length - 1][0];
+      const rendered = renderSql(call);
+      expect(rendered).toContain('DENSE_RANK() OVER');
+      expect(rendered).toContain('album_rank <=');
+      expect(flattenSqlValues(call)).toContain(7);
+      // The `library.id` tiebreak is load-bearing: ties in trigram distance are
+      // the norm on the artist-only path (every album by one artist shares
+      // `artist_name <-> value`), and without it they all take dense rank 1 and
+      // `album_rank <= n` admits every one of them.
+      expect(rendered).toMatch(/DENSE_RANK\(\) OVER \(ORDER BY [\s\S]*? ASC,\s*library\.id ASC\)\s*AS album_rank/);
     });
   });
 
@@ -246,23 +323,19 @@ describe('library.service', () => {
     });
 
     it('does NOT short-circuit for legitimate artist names', async () => {
-      const chain = createMockQueryChain([]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([]);
+      db.execute.mockResolvedValue([]);
 
       await fuzzySearchLibrary('Stereolab', 'Dots and Loops', 5);
 
-      expect(db.select).toHaveBeenCalled();
+      expect(db.execute).toHaveBeenCalled();
     });
 
     it('does NOT short-circuit album-only queries (predicate checks artist field)', async () => {
-      const chain = createMockQueryChain([]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([]);
+      db.execute.mockResolvedValue([]);
 
       await fuzzySearchLibrary(undefined, 'Various Artists Compilation Vol 5', 5);
 
-      expect(db.select).toHaveBeenCalled();
+      expect(db.execute).toHaveBeenCalled();
     });
   });
 
@@ -945,16 +1018,14 @@ describe('library.service', () => {
 
     it('split-field query (artist !== title) does NOT trigger cascade', async () => {
       process.env.CATALOG_TRACK_SEARCH_CTA_ENABLED = 'true';
-      const chain = createMockQueryChain([]);
-      db.select.mockReturnValue(chain);
-      chain.limit = jest.fn().mockResolvedValue([]);
+      db.execute.mockResolvedValue([]);
 
       const results = await fuzzySearchLibrary('xyznoartist', 'xyznoalbum', 5);
 
       expect(results).toEqual([]);
-      // Split-field path stays on the legacy fuzzy trigram path — no
-      // db.execute (CTA SQL) and no LML lookup.
-      expect(db.execute).not.toHaveBeenCalled();
+      // Split-field path stays on the fuzzy trigram path — no CTA SQL and no
+      // LML lookup.
+      expect(catalogTierCallLog(db.execute)).not.toContain('cta');
       expect(mockLookupBySong).not.toHaveBeenCalled();
     });
   });

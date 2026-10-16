@@ -3931,21 +3931,52 @@ export const fuzzySearchLibrary = async (
   // index via BitmapOr instead of materializing the full view first.
   if (artist_name && album_title) {
     const trigramPredicate = sql`(${library.artist_name} % ${artist_name} OR ${library.album_title} % ${album_title})`;
-    return libraryViewQuery()
-      .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
-      .orderBy(asc(sql`${library.artist_name} <-> ${artist_name}`), asc(sql`${library.album_title} <-> ${album_title}`))
-      .limit(n) as unknown as LibraryArtistViewEntry[];
+    return fuzzyAlbumScopedSearch(
+      streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate,
+      sql`ROW(${library.artist_name} <-> ${artist_name}, ${library.album_title} <-> ${album_title})`,
+      n
+    );
   }
 
   // Single-column trigram path (Artists or Albums mode).
   const column = artist_name ? library.artist_name : library.album_title;
   const value = artist_name ?? album_title ?? null;
   const trigramPredicate = sql`${column} % ${value}`;
-  return libraryViewQuery()
-    .where(streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate)
-    .orderBy(asc(sql`${column} <-> ${value}`))
-    .limit(n) as unknown as LibraryArtistViewEntry[];
+  return fuzzyAlbumScopedSearch(
+    streamingPredicate ? and(trigramPredicate, streamingPredicate) : trigramPredicate,
+    sql`${column} <-> ${value}`,
+    n
+  );
 };
+
+/**
+ * Run a trigram predicate over `library` so `n` counts ALBUMS, not rotation
+ * fan-out rows (BS#1162). `distance` is ranked ascending; `ROW(...)` compares
+ * lexicographically, so the both-field path keeps its artist-then-album order.
+ * It rides in `album_score`, which `toLibraryViewRow` strips from the result.
+ */
+async function fuzzyAlbumScopedSearch(
+  where: SQL | undefined,
+  distance: SQL,
+  n: number
+): Promise<TaggedLibraryViewEntry[]> {
+  const rows = (await db.execute(
+    albumScopedQuery({
+      inner: sql`
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW},
+               ${distance} AS album_score,
+               DENSE_RANK() OVER (ORDER BY ${distance} ASC, ${library.id} ASC) AS album_rank
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        WHERE ${where}
+      `,
+      limit: n,
+      outerOrderBy: sql`album_score ASC, id ASC`,
+    })
+  )) as unknown as Array<TaggedLibraryViewEntry & AlbumRankHelperColumns>;
+
+  return rows.map(toLibraryViewRow) as TaggedLibraryViewEntry[];
+}
 
 /**
  * Public wire-format for a library_artist_view row: the six flat external-ID
