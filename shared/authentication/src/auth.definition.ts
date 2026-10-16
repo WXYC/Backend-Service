@@ -145,13 +145,15 @@ export const auth = betterAuth({
   }),
 
   // better-auth's default session.expiresIn is 7 days and updateAge is 1 day.
-  // Combined with the bearer plugin's per-renewal token rotation, the 1-day
-  // updateAge cadence surfaced as DJs being silently signed out roughly once
-  // a day on iOS (the client kept using the pre-rotation bearer). The iOS
-  // app now captures the rotated set-auth-token; pinning expiresIn here makes
-  // sessions effectively permanent for daily users (rolling 1-year window on
-  // every renewal), and turning cookieCache off keeps every /auth/token call
-  // routed through the database so the renewal/rotation actually happens.
+  // Sessions stay alive because the roll-forward extends expiresAt under the
+  // same session token (the token value never changes) whenever the client
+  // touches a session endpoint such as /auth/token after updateAge has
+  // elapsed. Under the 7-day default, a session left untouched for a week
+  // fails the expiresAt check and is deleted (BS#966 pinned this window).
+  // Pinning expiresIn here sets a rolling 1-year window that ordinary DJ usage
+  // cadence keeps extending. Turning cookieCache off makes every /auth/token
+  // call read the session row, so the extension happens on that call and a
+  // revoked session is rejected immediately.
   session: {
     expiresIn: 60 * 60 * 24 * 365,
     updateAge: 60 * 60 * 24,
@@ -609,9 +611,9 @@ export const auth = betterAuth({
         // ADR 0008 — enforce the device-flow 12h cap against better-auth's
         // rolling refresh. `getSession` past `updateAge` (default 1d) calls
         // `internalAdapter.updateSession(token, {expiresAt: now + expiresIn})`
-        // and, because our global session.expiresIn defaults to 7d and the
-        // refresh math triggers on the very first read of a 12h session,
-        // that would silently walk the row back out to 7 days.
+        // and, because our global session.expiresIn is pinned to 1 year and
+        // the refresh math triggers on the very first read of a 12h session,
+        // that would silently walk the row back out to a year.
         //
         // We look up the row's `device_flow_expires_at` via the token in
         // the endpoint context (set by `getSession` before its updateSession
