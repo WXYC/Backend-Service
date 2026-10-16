@@ -724,12 +724,18 @@ export const auth = betterAuth({
       // Why selfSignupReviewedBy is `returned: false`: it holds ANOTHER
       // person's `auth_user.id` — the manager who cleared the review. Without
       // the flag that id rides /get-session back to the very DJ who was
-      // reviewed, and `buildJwtPayload` / `buildOidcUserInfoClaim`
-      // (jwt-payload.ts:47,55) spread the whole user object, so it also lands
-      // in the signed JWT and the OIDC `additional_user_info` claim handed to
-      // every relying party (wxyc-crm, wxyc-canary). A reviewer's internal id
-      // is not part of any contract those consumers have; this is the one
-      // field here that discloses a third party.
+      // reviewed, and `buildJwtPayload` spreads the whole user object, so it
+      // also lands in the signed JWT; /admin/list-users maps rows through the
+      // same parseUserOutput. A reviewer's internal id is not part of any
+      // contract those consumers have; this is the one field here that
+      // discloses a third party.
+      //
+      // The OIDC `additional_user_info` claim handed to every relying party
+      // (wxyc-crm, wxyc-canary) is NOT covered by this flag: better-auth gives
+      // `getAdditionalUserInfoClaim` the raw `findUserById` row, never a
+      // parseUserOutput result. It is protected by `buildOidcUserInfoClaim`
+      // returning exactly `{ role, capabilities }` (jwt-payload.ts), pinned by
+      // a payload test in tests/unit/authentication/jwt-payload.test.ts.
       //
       // Why selfSignupAt and selfSignupReviewedAt are NOT `returned: false`,
       // deliberately — verified against better-auth, not assumed. `returned`

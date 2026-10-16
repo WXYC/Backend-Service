@@ -61,6 +61,11 @@ export async function buildJwtPayload<TUser extends { id?: string } & WithCapabi
  * Degrades to `'member'` — the least-privileged station role — on both an
  * absent membership and a thrown lookup, so a transient DB failure cannot
  * mint a token claiming more authority than the user holds.
+ *
+ * The explicit `{ role, capabilities }` return is load-bearing: better-auth
+ * passes the raw user row here, so `returned: false` on an additionalField
+ * does not apply. Do not spread `userRecord` (unlike `buildJwtPayload`) or
+ * every column reaches every relying party.
  */
 export async function buildOidcUserInfoClaim(
   userRecord: { id: string } & WithCapabilities,

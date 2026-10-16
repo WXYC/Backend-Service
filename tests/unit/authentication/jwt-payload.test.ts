@@ -112,6 +112,28 @@ describe('buildOidcUserInfoClaim', () => {
     expect(claim.capabilities).toEqual(['flowsheet:write']);
   });
 
+  // `returned: false` does not reach this path: better-auth passes the raw
+  // adapter row, so the explicit allowlist in buildOidcUserInfoClaim is the
+  // only thing keeping the rest of the record (e.g. selfSignupReviewedBy, the
+  // reviewing manager's auth_user.id) off the claim every relying party gets.
+  // Harmonising it with buildJwtPayload into `{ ...userRecord, ... }` must
+  // turn this red.
+  it('emits only role and capabilities, never the rest of the user record', async () => {
+    const userRecord = {
+      id: 'u1',
+      capabilities: ['editor'],
+      email: 'dj@example.org',
+      realName: 'Jessica Pratt',
+      selfSignupReviewedBy: 'manager-user-id',
+    };
+    const claim = await buildOidcUserInfoClaim(
+      userRecord,
+      jest.fn(() => Promise.resolve({ role: 'dj' }))
+    );
+    expect(Object.keys(claim).sort()).toEqual(['capabilities', 'role']);
+    expect(claim).toEqual({ role: 'dj', capabilities: ['editor'] });
+  });
+
   it('degrades to the least-privileged role when there is no membership row', async () => {
     const claim = await buildOidcUserInfoClaim(
       { id: 'u1' },
