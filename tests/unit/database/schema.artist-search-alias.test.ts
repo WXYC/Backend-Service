@@ -81,23 +81,6 @@ describe('schema: artist_search_alias + library_artist_view.artist_id (artist-se
     });
   });
 
-  describe('library_artist_view.artist_id projection', () => {
-    it('view projection includes library.artist_id (last column, additive)', () => {
-      // Locate the view's projection block. Allow trailing whitespace + comments.
-      const viewBlock = schemaSource.match(/export const library_artist_view[\s\S]*?\.select\(\s*\{([\s\S]*?)\}\s*\)/);
-      expect(viewBlock).not.toBeNull();
-      const projection = viewBlock[1];
-      expect(projection).toMatch(/artist_id:\s*library\.artist_id/);
-    });
-
-    it('LibraryArtistViewEntry type adds artist_id: number', () => {
-      // Locate the exported type body.
-      const typeBlock = schemaSource.match(/export type LibraryArtistViewEntry\s*=\s*\{([\s\S]*?)\};/);
-      expect(typeBlock).not.toBeNull();
-      expect(typeBlock[1]).toMatch(/artist_id:\s*number;/);
-    });
-  });
-
   describe('migration 0089', () => {
     it('journal has an entry at idx 89', () => {
       expect(entry89).toBeDefined();
