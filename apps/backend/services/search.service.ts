@@ -244,10 +244,9 @@ async function runTierQuery(
     limit: number;
     offset: number;
     parsedCursor: Cursor | null;
-    cursorEligible: boolean;
   }
 ): Promise<TierAttempt> {
-  const { sort, order, limit, offset, parsedCursor, cursorEligible } = ctx;
+  const { sort, order, limit, offset, parsedCursor } = ctx;
   const whereClause = buildWhereClause(conditions, tier, typingTermIndex);
   const orderDirection = order === 'asc' ? sql`ASC` : sql`DESC`;
   const sortExpr = SORT_MAP[sort];
@@ -284,13 +283,12 @@ async function runTierQuery(
   const countWhere = composeWhere(baseFrom);
   const dataWhere = composeWhere(dataFrom);
 
-  // Add id as a tiebreaker whenever a cursor could be involved — received OR
-  // handed out — so the ORDER BY matches the cursor predicate's compound key.
-  // See docs/playlist-search/README.md ("Where the chain starts", BS#2344)
-  // for why this is not gated on an inbound cursor.
-  const orderByClause = cursorEligible
-    ? sql`${sortExpr} ${orderDirection}, ${flowsheet.id} ${orderDirection}`
-    : sql`${sortExpr} ${orderDirection}`;
+  // Always append id as a tiebreaker, in the sort's own direction. Under sort=date it makes the ORDER BY
+  // match the cursor predicate's compound key, and it applies whether a cursor was received or handed out
+  // (docs/playlist-search/README.md, "Where the chain starts", BS#2344). The non-date sorts emit no cursor
+  // but are walked by offset (dj-site#1415): every page is its own query, so a non-total ORDER BY could
+  // serve a row twice or skip it where a tie group straddles a page boundary (BS#2420).
+  const orderByClause = sql`${sortExpr} ${orderDirection}, ${flowsheet.id} ${orderDirection}`;
 
   // Run data and count in parallel. A combined `COUNT(*) OVER()` window query
   // forces Postgres to materialize the full match set before LIMIT can apply,
@@ -397,7 +395,6 @@ export async function searchFlowsheet(
       limit,
       offset,
       parsedCursor,
-      cursorEligible,
     });
 
     if (attempt.dataSettled.status === 'rejected') {
