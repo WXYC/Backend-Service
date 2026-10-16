@@ -3567,6 +3567,13 @@ paths:
               properties:
                 artist_name:
                   type: string
+                alphabetical_name:
+                  type: string
+                  description: >-
+                    The filing name. Optional: absent, the server stores `artist_name` instead
+                    (`body.alphabetical_name ?? body.artist_name`), so a caller re-creating an
+                    artist whose filing name differed from its display name (an article or a
+                    personal name) must send it or the card is shelved by `artist_name`.
                 code_letters:
                   type: string
                   description: >-
@@ -3590,7 +3597,7 @@ paths:
                     filed at `artist_genre_code = 0` and the by-code read resolves them, so the
                     published contract's floor is the side awaiting amendment.
       responses:
-        '200':
+        '201':
           description: Successfully added artist
         '409':
           description: >-
