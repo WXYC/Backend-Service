@@ -79,9 +79,9 @@ describe('sessionRateLimitKeyFromRequest', () => {
     expect(key).toBe('ip:10.0.0.1');
   });
 
-  it('falls back to ip:unknown when neither x-real-ip nor a socket address is available', () => {
+  it('falls back to ip:no-ip:<hash> (BS#2190), not the shared ip:unknown, when neither x-real-ip nor a socket address is available', () => {
     const key = sessionRateLimitKeyFromRequest(makeReq({ headers: {}, remoteAddress: undefined }));
-    expect(key).toBe('ip:unknown');
+    expect(key).toMatch(/^ip:no-ip:[0-9a-f]{16}$/);
   });
 
   it('never leaks the raw cookie value into the key', () => {

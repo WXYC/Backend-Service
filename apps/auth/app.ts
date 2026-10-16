@@ -997,19 +997,15 @@ if (!isTestEnv) {
   // Separate express-rate-limit stores, so no poisoning between them — but
   // the two `ip`-shaped key spaces are NOT the same one.
   //
-  // OPEN ASSUMPTION (BS#2193, sibling of BS#2190 on the same generator):
-  // this keys on the FULL X-Real-IP, not on the /56 prefix
-  // express-rate-limit's own `ipKeyGenerator` would use. A single IPv6 client
-  // typically holds a /64, so if nginx can ever hand us an IPv6 X-Real-IP,
-  // one client can mint effectively unlimited ceiling buckets and this
-  // "SECURITY REQUIREMENT" is weaker than it reads. Whether that is reachable
-  // depends on the host's nginx `listen`/`real_ip` configuration, which lives
-  // at /etc/nginx/nginx.conf on the EC2 box and NOT in this repo — so it was
-  // not settled here. It is unchanged from the pre-BS#2169 behavior of the two
-  // older auth limiters that share this generator, but it is newly
-  // load-bearing now that this ceiling is the only IP-based bound on
-  // /get-session. Rekeying it also silently rekeys those two brute-force
-  // limiters, which is why it is a follow-up and not a drive-by here.
+  // SETTLED (BS#2193): `rateLimitKeyFromRequest` normalizes an IPv6
+  // X-Real-IP to its /56 via express-rate-limit's `ipKeyGenerator`, so one
+  // client rotating through its delegated prefix cannot mint unlimited
+  // ceiling buckets; IPv4 keys are unchanged. Whether nginx can hand us an
+  // IPv6 X-Real-IP (/etc/nginx/nginx.conf on the EC2 host, not in this repo)
+  // was NOT confirmed — DNS publishes no AAAA for api.wxyc.org, but the
+  // `listen [::]` and Cloudflare real_ip config were unread — so the /56 key
+  // is applied unconditionally. It rekeys every limiter sharing the
+  // generator, deliberately: they all want a per-client bucket.
   const getSessionIpRateLimit = rateLimit({
     ...getSessionSharedOpts,
     limit: 600,
