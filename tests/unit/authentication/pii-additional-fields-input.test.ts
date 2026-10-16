@@ -152,6 +152,52 @@ function parseFieldEntries(block: string): { name: string; body: string }[] {
   return entries;
 }
 
+/**
+ * The properties declared directly on a field's body, as `key -> value text`.
+ *
+ * `input` is what better-auth's `parseInputData` reads (`fields[key].input`),
+ * so the lock has to be asserted against the field's OWN `input` property.
+ * Matching `input: false` as a substring of the whole body is satisfied by
+ * `validator: { input: false }`, `transform: { input: false }`,
+ * `label: 'input: false'` and a regex literal `/input: false/` -- none of which
+ * lock anything. Splitting on depth-0 commas (outside strings) leaves only the
+ * field's own keys; nested objects, arrays and strings stay inside one value.
+ * A later duplicate key wins, as it does in the object literal itself.
+ */
+function topLevelProperties(body: string): Map<string, string> {
+  const segments: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i++;
+      while (i < body.length && body[i] !== ch) {
+        i += body[i] === '\\' ? 2 : 1;
+      }
+    } else if (ch === '{' || ch === '[' || ch === '(') {
+      depth++;
+    } else if (ch === '}' || ch === ']' || ch === ')') {
+      depth--;
+    } else if (ch === ',' && depth === 0) {
+      segments.push(body.slice(start, i));
+      start = i + 1;
+    }
+  }
+  segments.push(body.slice(start));
+
+  const props = new Map<string, string>();
+  for (const segment of segments) {
+    const m = /^\s*(['"]?)([A-Za-z_$][A-Za-z0-9_$]*)\1\s*:\s*([\s\S]*?)\s*$/.exec(segment);
+    if (m !== null) {
+      props.set(m[2], m[3]);
+    }
+  }
+  return props;
+}
+
+const hasOwnFlag = (body: string, key: 'input' | 'returned'): boolean => topLevelProperties(body).get(key) === 'false';
+
 const fields = parseFieldEntries(extractAdditionalFieldsBlock(source));
 const fieldNames = fields.map((f) => f.name);
 
@@ -159,8 +205,10 @@ describe('auth.definition.ts user.additionalFields input locks', () => {
   // Guards against the parser silently returning nothing and every assertion
   // below passing vacuously — the exact failure mode a source-scanning test
   // must never have.
-  it('finds the additionalFields block and parses a plausible number of fields', () => {
-    expect(fields.length).toBeGreaterThanOrEqual(8);
+  it('finds the additionalFields block and parses every declared field', () => {
+    // Exact, not a floor: a `>=` count leaves slack, so one silently dropped
+    // field would not trip it. Adding a field means bumping this on purpose.
+    expect(fields).toHaveLength(10);
     // Spot-check both ends of the block so a truncated match is caught.
     expect(fieldNames).toContain('realName');
     expect(fieldNames).toContain('capabilities');
@@ -173,10 +221,10 @@ describe('auth.definition.ts user.additionalFields input locks', () => {
       if (WRITABLE_FIELDS.has(name)) {
         // Documented as user-writable. Assert the opposite so the two halves of
         // this file can't drift into agreeing by accident.
-        expect(body).not.toMatch(/input:\s*false/);
+        expect(hasOwnFlag(body, 'input')).toBe(false);
         return;
       }
-      expect(body).toMatch(/input:\s*false/);
+      expect(hasOwnFlag(body, 'input')).toBe(true);
     }
   );
 
@@ -200,7 +248,7 @@ describe('additionalFields scanner', () => {
     );
     const parsed = parseFieldEntries(block);
     expect(parsed.map((f) => f.name)).toEqual(['realName', 'brandNewPrivilege']);
-    const unlocked = parsed.filter((f) => !WRITABLE_FIELDS.has(f.name) && !/input:\s*false/.test(f.body));
+    const unlocked = parsed.filter((f) => !WRITABLE_FIELDS.has(f.name) && !hasOwnFlag(f.body, 'input'));
     expect(unlocked.map((f) => f.name)).toEqual(['brandNewPrivilege']);
   });
 
@@ -230,7 +278,7 @@ describe('additionalFields scanner', () => {
     );
     const parsed = parseFieldEntries(block);
     expect(parsed.map((f) => f.name)).toEqual(['realName', 'capabilities']);
-    const unlocked = parsed.filter((f) => !WRITABLE_FIELDS.has(f.name) && !/input:\s*false/.test(f.body));
+    const unlocked = parsed.filter((f) => !WRITABLE_FIELDS.has(f.name) && !hasOwnFlag(f.body, 'input'));
     expect(unlocked.map((f) => f.name)).toEqual(['capabilities']);
   });
 
@@ -249,7 +297,7 @@ describe('additionalFields scanner', () => {
     );
     const parsed = parseFieldEntries(block);
     expect(parsed).toHaveLength(1);
-    expect(parsed[0].body).not.toMatch(/input:\s*false/);
+    expect(hasOwnFlag(parsed[0].body, 'input')).toBe(false);
   });
 
   it('treats comment markers inside string literals as data, not comments', () => {
@@ -260,16 +308,46 @@ describe('additionalFields scanner', () => {
     );
     const parsed = parseFieldEntries(block);
     expect(parsed.map((f) => f.name)).toEqual(['homepage', 'djName']);
-    for (const field of parsed) expect(field.body).toMatch(/input:\s*false/);
+    for (const field of parsed) expect(hasOwnFlag(field.body, 'input')).toBe(true);
+  });
+
+  // `input: false` must be the field's own literal property. Each body below
+  // renders the substring somewhere else; for all but the spread case,
+  // parseInputData -- which reads only `fields[key].input` -- would still
+  // accept writes. The spread does lock the field at runtime, but the scanner
+  // cannot see through it, so it fails closed on that case too.
+  it.each([
+    ['a nested validator object', `{ type: 'string[]', validator: { input: false } }`],
+    ['a nested transform object', `{ type: 'string', transform: { input: false } }`],
+    ['a string label', `{ type: 'string', label: 'input: false' }`],
+    ['a regex literal', `{ type: 'string', pattern: /input: false/ }`],
+    ['a template literal', "{ type: 'string', label: `input: false` }"],
+    ['a later duplicate key', `{ type: 'string', input: false, input: true }`],
+    ['a spread', `{ type: 'string', ...{ input: false } }`],
+  ])('does not count %s as a lock', (_label, fieldSource) => {
+    const [field] = parseFieldEntries(extractAdditionalFieldsBlock(wrap(`      sneaky: ${fieldSource},`)));
+    expect(field.name).toBe('sneaky');
+    expect(hasOwnFlag(field.body, 'input')).toBe(false);
+  });
+
+  it.each([
+    [`{ type: 'string', input: false }`],
+    [`{ type: 'string', 'input': false }`],
+    [`{ type: 'string[]', defaultValue: [], validator: { input: true }, input: false }`],
+  ])('counts a field whose own input is false as locked: %s', (fieldSource) => {
+    const [field] = parseFieldEntries(extractAdditionalFieldsBlock(wrap(`      locked: ${fieldSource},`)));
+    expect(hasOwnFlag(field.body, 'input')).toBe(true);
   });
 });
 
 // The output side. `input` and `returned` are independent attributes on the
 // same declaration — `parseUserInput` filters on the first, `parseUserOutput`
 // (better-auth/dist/db/schema.mjs) on the second — so a field can be
-// unwritable and still ride every /get-session body, JWT payload, and OIDC
-// claim. This is a single-field pin rather than a second deny-by-default
-// sweep: most additionalFields are *supposed* to be returned (dj-site's roster
+// unwritable and still ride every /get-session body and JWT payload. The OIDC
+// claim is a separate surface: buildOidcUserInfoClaim emits only an explicit
+// allowlist ({ role, capabilities }) from the raw user row, whatever a
+// field's flags say. This is a single-field pin rather than a second
+// deny-by-default sweep: most additionalFields are *supposed* to be returned (dj-site's roster
 // and the JWT `capabilities` claim both depend on it), so a blanket rule here
 // would be wrong in the common case. Only the field naming a third party gets
 // the flag.
@@ -280,12 +358,15 @@ describe('auth.definition.ts user.additionalFields output locks', () => {
     return field.body;
   };
 
-  it('keeps selfSignupReviewedBy off every response body, JWT, and OIDC claim', () => {
+  it('keeps selfSignupReviewedBy off /get-session, the JWT, and /admin/list-users', () => {
     // It holds the reviewing manager's auth_user.id — another person's
-    // identifier on the reviewed DJ's own row. buildJwtPayload and
-    // buildOidcUserInfoClaim spread the whole user object, so without this it
-    // reaches the reviewed DJ and every OIDC relying party.
-    expect(bodyOf('selfSignupReviewedBy')).toMatch(/returned:\s*false/);
+    // identifier on the reviewed DJ's own row. buildJwtPayload spreads the
+    // whole user object, so these surfaces rely on `returned: false` having
+    // stripped the field first. The OIDC claim is NOT covered by this flag:
+    // better-auth hands getAdditionalUserInfoClaim the raw adapter row, so it
+    // is protected by buildOidcUserInfoClaim's explicit allowlist, pinned in
+    // jwt-payload.test.ts.
+    expect(hasOwnFlag(bodyOf('selfSignupReviewedBy'), 'returned')).toBe(true);
   });
 
   it.each(['selfSignupAt', 'selfSignupReviewedAt', 'selfSignupDowngradedAt'])(
@@ -303,7 +384,7 @@ describe('auth.definition.ts user.additionalFields output locks', () => {
       // cannot preserve it as history. All three are timestamps on the account
       // holder's own row and name no third party -- the downgrade's actor is a
       // cron job, not a person.
-      expect(bodyOf(name)).not.toMatch(/returned:\s*false/);
+      expect(hasOwnFlag(bodyOf(name), 'returned')).toBe(false);
     }
   );
 });
