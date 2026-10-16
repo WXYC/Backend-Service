@@ -167,7 +167,7 @@ describe('BS#2344: nextCursor on the first page (no cursor passed in)', () => {
   );
 });
 
-describe('BS#2344: deterministic ordering wherever a cursor can be emitted', () => {
+describe('deterministic ordering under every sort (BS#2344, BS#2420)', () => {
   it.each([['desc' as const], ['asc' as const]])(
     'adds the id tiebreaker to a cursorless date sort (%s)',
     async (order) => {
@@ -206,13 +206,19 @@ describe('BS#2344: deterministic ordering wherever a cursor can be emitted', () 
     ['artist' as const, 'flowsheet.artist_name'],
     ['song' as const, 'flowsheet.track_title'],
     ['dj' as const, 'flowsheet.dj_name'],
-  ])('leaves sort=%s without an id tiebreaker — no cursor is ever emitted for it', async (sort, column) => {
-    mockDataAndCount([], 0);
+  ])(
+    'tiebreaks sort=%s by id — offset walks need a total order though no cursor is emitted (BS#2420)',
+    async (sort, column) => {
+      mockDataAndCount([], 0);
 
-    await searchFlowsheet({ q: '', page: 0, limit: 50, sort, order: 'asc' });
+      await searchFlowsheet({ q: '', page: 0, limit: 50, sort, order: 'asc' });
 
-    expect(orderByOf()).toEqual([{ column, direction: 'asc' }]);
-  });
+      expect(orderByOf()).toEqual([
+        { column, direction: 'asc' },
+        { column: 'flowsheet.id', direction: 'asc' },
+      ]);
+    }
+  );
 });
 
 describe('BS#2344: the compiled cursor predicate', () => {
