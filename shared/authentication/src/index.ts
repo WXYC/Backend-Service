@@ -44,6 +44,7 @@ export {
   // splitting the phases is what lets apps/auth/station-signup.ts do both.
   matchStationPasscode,
   claimStationPasscode,
+  recordSignupIdentityTaken,
   revealStationPasscode,
   rotateStationPasscode,
   // The read-only, never-decrypting view of station_passcode behind BS#2362's

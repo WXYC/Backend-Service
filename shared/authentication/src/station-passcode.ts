@@ -176,14 +176,26 @@ export const STATION_SIGNUP_OUTCOMES = [
   'cooldown_refused',
   'cooldown_cleared',
   'passcode_revealed',
+  // The tenth token (BS#2378). A caller matched a live code and then failed
+  // the email/username existence check, so the claim never ran. Written by
+  // the CALLER via recordSignupIdentityTaken, so that path logs its row like
+  // the others (the ATTEMPT-LOG INVARIANT on matchStationPasscode). Carries
+  // the matched `passcode_id`. In NEITHER ALERT_OUTCOMES nor refusal: the
+  // caller holds a live code, so counting ordinary duplicate-email retries
+  // toward the station-global cooldown would be the availability regression
+  // BS#2365 forbids. It is visible in the status endpoint's unfiltered
+  // per-outcome counts.
+  //
+  // 21 characters — fits `outcome varchar(24)` with no migration.
+  'signup_identity_taken',
 ] as const;
 
 export type StationSignupOutcome = (typeof STATION_SIGNUP_OUTCOMES)[number];
 
 // Feeds the digest alert (BS#2364). All five "a code was involved and it
 // didn't work" outcomes — deliberately excludes cooldown_refused/cleared
-// (not failures against a code) and passcode_ok/passcode_revealed (not
-// failures at all).
+// (not failures against a code) and passcode_ok/passcode_revealed/
+// signup_identity_taken (the code worked, so not failures against it).
 const ALERT_OUTCOMES: ReadonlySet<StationSignupOutcome> = new Set([
   'passcode_fail',
   'passcode_expired',
@@ -1051,7 +1063,8 @@ export function resolveCooldownCountStart(now: Date, clearedAt: Date | null): Da
  * correctness argument: the fetch is already restricted to `passcode_fail`,
  * which is bounded by construction because it is the only outcome that feeds
  * refusal — past SIGNUP_COOLDOWN_THRESHOLD of them in the window the cooldown
- * engages and further attempts log `cooldown_refused` instead.
+ * engages and further attempts are refused as `cooldown_refused` instead
+ * (one row per cooldown window, see recordCooldownRefusal).
  *
  * It cannot cause a false negative. The rows are the newest in the lookback,
  * so if any qualifying row's trailing window holds more than
@@ -1406,13 +1419,12 @@ export interface MatchStationPasscodeResult extends VerifyStationPasscodeResult 
  * Fusing match and claim forces a choice between the two; splitting them
  * satisfies both. See apps/auth/station-signup.ts's docblock.
  *
- * ATTEMPT-LOG INVARIANT. The match/claim pair never writes more than one
- * `station_signup_attempt` row per verification, and each path below writes
- * exactly the row it lists, with one exception: a cooldown refusal that
- * recordCooldownRefusal deduplicates writes NO row. A count of
- * `cooldown_refused` rows therefore counts cooldown windows, not refused
- * requests.
- *
+ * ATTEMPT-LOG INVARIANT. A verification never writes more than one
+ * `station_signup_attempt` row, and each path below writes exactly the row
+ * it lists. Two cases write NO row: a cooldown refusal that
+ * recordCooldownRefusal deduplicates (so a count of `cooldown_refused` rows
+ * counts cooldown windows, not refused requests), and a server-fault
+ * abandonment after a match (see below).
  *
  *   - cooldown armed        -> `cooldown_refused` here (once per window,
  *                              recordCooldownRefusal), no claim follows
@@ -1420,7 +1432,10 @@ export interface MatchStationPasscodeResult extends VerifyStationPasscodeResult 
  *   - no match              -> the classification token here (`passcode_fail`
  *                              / `_expired` / `_revoked` / `_unverifiable`),
  *                              mark-and-exclude untouched
- *   - match                 -> NOTHING here; the row is the claim's to write
+ *   - match                 -> NOTHING here; the claim writes `passcode_ok`
+ *                              or `passcode_exhausted`, or a caller that
+ *                              abandons on a taken email/username writes
+ *                              `signup_identity_taken` instead
  *
  * That last line is the whole reason this function is quiet on success: a
  * match row written here plus the claim's own row would double-count every
@@ -1428,12 +1443,19 @@ export interface MatchStationPasscodeResult extends VerifyStationPasscodeResult 
  * would put a second row in front of the integration suite's
  * `['passcode_ok']` assertion.
  *
- * The ONE gap, and it is the caller's: a caller that matches and then
- * abandons without claiming (station-signup's duplicate-email 409) leaves no
- * row. That caller already held a live passcode, so the signal it gets is
- * the enumeration oracle the issue body accepts by name, not an
- * unauthenticated leak — and it is unchanged from the shipped behaviour,
- * where the same rejection happened even earlier.
+ * The one CLIENT-CAUSED path the pair cannot cover is the caller's: a caller
+ * that matches and then abandons without claiming (station-signup's
+ * duplicate-email or duplicate-username 409) must write the row itself, via
+ * `recordSignupIdentityTaken` (BS#2378). The signal that caller gets is the
+ * enumeration oracle the issue body accepts by name, not an unauthenticated
+ * leak; the row makes it visible to the status endpoint.
+ *
+ * Server-fault abandonment after a match is NOT covered and writes no row,
+ * by design: station-signup's missing-organization throw
+ * (`assertOrganizationExists`) and any non-`StationSignupError` from the
+ * email/username existence lookups (a database error, say). Neither says
+ * anything about whether an identity exists, so logging them as
+ * `signup_identity_taken` would misreport outages as probing.
  *
  * Ordering, per the issue body: the cooldown check runs BEFORE verification
  * — a refusal must never decrypt anything or touch a passcode row.
@@ -1556,12 +1578,32 @@ export async function claimStationPasscode(
 }
 
 /**
+ * Write the attempt row for a matched code whose caller then abandoned on a
+ * taken email/username (BS#2378), so that path logs its one row like the
+ * others (the ATTEMPT-LOG INVARIANT on matchStationPasscode). Claims nothing
+ * and never feeds refusal — see the `signup_identity_taken` note in
+ * STATION_SIGNUP_OUTCOMES.
+ */
+export async function recordSignupIdentityTaken(
+  passcodeId: string,
+  options: VerifyStationPasscodeOptions = {}
+): Promise<void> {
+  await insertSignupAttempt({
+    outcome: 'signup_identity_taken',
+    passcodeId,
+    ipHash: deriveStationSignupIpHash(options.rawClientIp),
+    attemptedAt: options.now ?? new Date(),
+  });
+}
+
+/**
  * Verify a submitted code and, on a genuine match, claim one use — the
  * fused match-then-claim, kept as the module's original entry point.
  *
  * Signature and semantics are unchanged from before the split (same result
- * shape, same single attempt row, same generic return), so every existing
- * caller and test keeps binding the shared logic rather than a copy of it.
+ * shape, same attempt row — at most one, per the ATTEMPT-LOG INVARIANT on
+ * matchStationPasscode — same generic return), so every existing caller and
+ * test keeps binding the shared logic rather than a copy of it.
  * Callers that must interleave their own work between the two phases —
  * BS#2361's endpoint, which runs its existence checks there — call
  * `matchStationPasscode` and `claimStationPasscode` directly instead.

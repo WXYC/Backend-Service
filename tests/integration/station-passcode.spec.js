@@ -55,6 +55,7 @@ const {
   evaluateSignupCooldown,
   computeSignupCooldownState,
   clearSignupCooldown,
+  recordSignupIdentityTaken,
   encryptStationPasscodeValue,
   stationPasscodeKeyId,
   StationPasscodeDecryptionError,
@@ -614,6 +615,22 @@ describe('station-passcode lifecycle (BS#2359, real Postgres)', () => {
       const evaluationAfterClear = await evaluateSignupCooldown(new Date(now.getTime() + 2000));
       expect(evaluationAfterClear.noMatchFailureCount).toBe(0);
       expect(evaluationAfterClear.inCooldown).toBe(false);
+    });
+  });
+
+  describe('recordSignupIdentityTaken (BS#2378)', () => {
+    it('writes one signup_identity_taken row carrying the passcode_id and the hashed client IP', async () => {
+      const { id } = await rotateStationPasscode();
+
+      await recordSignupIdentityTaken(id, { rawClientIp: '203.0.113.9' });
+
+      const rows = await sql`SELECT outcome, passcode_id, ip_hash FROM station_signup_attempt`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].outcome).toBe('signup_identity_taken');
+      expect(rows[0].passcode_id).toBe(id);
+      // The truncated HMAC (16 hex chars), never the raw address.
+      expect(rows[0].ip_hash).toMatch(/^[0-9a-f]{16}$/);
+      expect(rows[0].ip_hash).not.toContain('203.0.113.9');
     });
   });
 

@@ -3985,7 +3985,7 @@ export const station_signup_attempt = pgTable(
     // previously OPEN, on the grounds that `passcode_fail` was the only
     // failure token and therefore had to cover both "matched nothing" and
     // "matched a row that was expired, revoked, or at its use cap". It no
-    // longer does: the vocabulary split into nine tokens, of which
+    // longer does: the vocabulary grew to ten tokens, of which
     // `passcode_expired`, `passcode_revoked` and `passcode_exhausted` each
     // matched a real row and carry its id here.
     //
@@ -3993,16 +3993,19 @@ export const station_signup_attempt = pgTable(
     // does `passcode_unverifiable` (an undecryptable row makes the submitted
     // code's status unknowable, so attributing it to a row would be a guess).
     // Set for `passcode_ok`, `passcode_revealed`, `passcode_expired`,
-    // `passcode_revoked` and `passcode_exhausted`; NULL for `passcode_fail`,
-    // `passcode_unverifiable`, `cooldown_refused` and `cooldown_cleared`.
+    // `passcode_revoked`, `passcode_exhausted` and `signup_identity_taken`
+    // (BS#2378: a matched code that then met a taken email or username);
+    // NULL for `passcode_fail`, `passcode_unverifiable`, `cooldown_refused`
+    // and `cooldown_cleared`.
     //
     // Still no CHECK constraint, deliberately, and that part did not change:
     // the table has exactly one writer, which enforces the vocabulary as a
     // TypeScript union, so a CHECK would cost a migration now and another on
     // every future token to catch the same misspelling class the compiler
-    // already catches. `passcode_unverifiable` (21 chars) is the longest
-    // token and fits `varchar(24)` — a tenth token longer than that is the
-    // one change here that would need a migration.
+    // already catches. `passcode_unverifiable` and
+    // `signup_identity_taken` (21 chars each) are the longest tokens and fit
+    // `varchar(24)` — an eleventh token longer than that is the one change
+    // here that would need a migration.
     passcodeId: varchar('passcode_id', { length: 255 }).references(() => station_passcode.id, {
       onDelete: 'set null',
     }),

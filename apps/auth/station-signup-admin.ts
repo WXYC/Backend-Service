@@ -141,7 +141,10 @@ export interface StationSignupStatus {
     /**
      * WINDOW-WIDE census: every outcome present at or after `since`, counted
      * in SQL across every matching row. NOT derived from `recent`, which is
-     * capped. Absent outcomes are absent, not zero.
+     * capped. Absent outcomes are absent, not zero. `cooldown_refused` counts
+     * cooldown windows, not refused requests: normally one row per window,
+     * occasionally more when first refusals race or the insert falls back
+     * (BS#2377).
      */
     countsByOutcome: Record<string, number>;
     /**

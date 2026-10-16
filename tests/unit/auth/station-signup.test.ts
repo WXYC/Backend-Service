@@ -17,6 +17,7 @@ const mockMatchStationPasscode =
   >();
 const mockClaimStationPasscode =
   jest.fn<(passcodeId: string, options?: unknown) => Promise<{ ok: boolean; cooldown: boolean }>>();
+const mockRecordSignupIdentityTaken = jest.fn<(passcodeId: string, options?: unknown) => Promise<void>>();
 const mockSendVerificationEmailMessage = jest.fn<(args: { to: string; verificationUrl: string }) => Promise<void>>();
 
 jest.mock('@wxyc/authentication', () => {
@@ -28,6 +29,7 @@ jest.mock('@wxyc/authentication', () => {
     auth: { $context: Promise.resolve(mockAuthContext) },
     matchStationPasscode: (...args: unknown[]) => mockMatchStationPasscode(...(args as [string, unknown])),
     claimStationPasscode: (...args: unknown[]) => mockClaimStationPasscode(...(args as [string, unknown])),
+    recordSignupIdentityTaken: (...args: unknown[]) => mockRecordSignupIdentityTaken(...(args as [string, unknown])),
     sendVerificationEmailMessage: (...args: unknown[]) =>
       mockSendVerificationEmailMessage(...(args as [{ to: string; verificationUrl: string }])),
     // The real value — the cooldown-refusal message does arithmetic against
@@ -96,6 +98,7 @@ describe('station-signup', () => {
     );
     mockMatchStationPasscode.mockResolvedValue({ ok: true, cooldown: false, passcodeId: 'passcode-id-001' });
     mockClaimStationPasscode.mockResolvedValue({ ok: true, cooldown: false });
+    mockRecordSignupIdentityTaken.mockResolvedValue(undefined);
     mockSendVerificationEmailMessage.mockResolvedValue(undefined);
     mockProvisionUser.mockResolvedValue({
       user: { id: 'user-id-001', email: VALID_BODY.email, username: VALID_BODY.username },
@@ -225,6 +228,55 @@ describe('station-signup', () => {
       await expect(stationSignupFromRequest(VALID_BODY, undefined)).rejects.toMatchObject({ statusCode: 409 });
       expect(mockMatchStationPasscode).toHaveBeenCalledTimes(1);
       expect(mockClaimStationPasscode).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['email', () => mockFindUserByEmail.mockResolvedValue({ id: 'existing-user' }), 'EMAIL_TAKEN'],
+      ['username', () => mockAdapterFindOne.mockResolvedValue({ id: 'existing-user' }), 'USERNAME_TAKEN'],
+    ])('logs the matched-then-taken %s once, against the matched passcode (BS#2378)', async (_kind, arrange, code) => {
+      arrange();
+
+      await expect(stationSignupFromRequest(VALID_BODY, '203.0.113.9')).rejects.toMatchObject({ code });
+      expect(mockRecordSignupIdentityTaken).toHaveBeenCalledTimes(1);
+      expect(mockRecordSignupIdentityTaken).toHaveBeenCalledWith('passcode-id-001', { rawClientIp: '203.0.113.9' });
+    });
+
+    it.each([
+      ['email', () => mockFindUserByEmail.mockResolvedValue({ id: 'existing-user' }), 409, 'EMAIL_TAKEN'],
+      ['username', () => mockAdapterFindOne.mockResolvedValue({ id: 'existing-user' }), 409, 'USERNAME_TAKEN'],
+    ])(
+      'still answers the %s 409 when the signup_identity_taken audit insert rejects (BS#2378)',
+      async (_kind, arrange, status, code) => {
+        arrange();
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        mockRecordSignupIdentityTaken.mockRejectedValue(new Error('db down'));
+
+        try {
+          await expect(stationSignupFromRequest(VALID_BODY, '203.0.113.9')).rejects.toMatchObject({
+            statusCode: status,
+            code,
+          });
+          expect(mockRecordSignupIdentityTaken).toHaveBeenCalledTimes(1);
+          expect(errorSpy).toHaveBeenCalled();
+        } finally {
+          errorSpy.mockRestore();
+        }
+      }
+    );
+
+    it('does not log signup_identity_taken when an existence lookup fails with a non-StationSignupError', async () => {
+      const dbError = new Error('db down');
+      mockFindUserByEmail.mockRejectedValue(dbError);
+
+      await expect(stationSignupFromRequest(VALID_BODY, '203.0.113.9')).rejects.toBe(dbError);
+      expect(mockRecordSignupIdentityTaken).not.toHaveBeenCalled();
+      expect(mockClaimStationPasscode).not.toHaveBeenCalled();
+    });
+
+    it('does not log signup_identity_taken when the identity is free', async () => {
+      await stationSignupFromRequest(VALID_BODY, undefined);
+
+      expect(mockRecordSignupIdentityTaken).not.toHaveBeenCalled();
     });
   });
 
