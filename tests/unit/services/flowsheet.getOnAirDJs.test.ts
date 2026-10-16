@@ -66,6 +66,18 @@ describe('getOnAirDJs', () => {
     ]);
   });
 
+  it.each([
+    ['user lookup returns primary last', ['user-1', 'user-2', 'user-3'], 'user-3', ['user-3', 'user-1', 'user-2']],
+    ['user lookup returns ids in reverse', ['user-3', 'user-2', 'user-1'], 'user-1', ['user-1', 'user-2', 'user-3']],
+    ['primary is not a member: dj_id order only', ['user-2', 'user-1'], 'user-9', ['user-1', 'user-2']],
+  ])('orders DJs primary first, then by id (%s)', async (_label, returnedIds, primary, expectedIds) => {
+    queueLimit([{ id: 3, end_time: null, primary_dj_id: primary, dj_name_override: null, legacy_dj_name: null }]);
+    queueWhere(returnedIds.map((dj_id) => ({ dj_id, active: true })));
+    queueWhere(returnedIds.map((id) => ({ id, djName: `name-${id}` })));
+
+    expect((await getOnAirDJs()).map((dj) => dj.id)).toEqual(expectedIds);
+  });
+
   it('prefers active account DJs over legacy_dj_name when a show carries both', async () => {
     // Precedence guard: the account branch (show_djs rows present) must win, so
     // legacy_dj_name is ignored — never merged in or preferred.
