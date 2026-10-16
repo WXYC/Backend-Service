@@ -1354,8 +1354,15 @@ export const startShow = async (
   // still want a marker row so consumers know the show began. The wording
   // degrades from "Start of Show: <name> joined the set at ${time}" to a
   // bare "Start of show: ${time}".
+  // BS#2846: flowsheet.message is varchar(250) but the override may be up to
+  // 255 code points, so cut the name (by code point) until the whole marker
+  // fits. The suffix stays intact; the full name lives on dj_name and
+  // shows.dj_name_override.
+  const marker_prefix = 'Start of Show: ';
+  const marker_suffix = ` joined the set at ${now}`;
+  const marker_name_budget = 250 - marker_prefix.length - marker_suffix.length;
   const message = display_dj_name
-    ? `Start of Show: ${display_dj_name} joined the set at ${now}`
+    ? `${marker_prefix}${Array.from(display_dj_name).slice(0, marker_name_budget).join('')}${marker_suffix}`
     : `Start of show: ${now}`;
 
   await db.insert(flowsheet).values({
