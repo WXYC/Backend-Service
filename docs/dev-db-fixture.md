@@ -2,7 +2,7 @@
 
 `npm run db:start` seeds the dev DB from two files, in order:
 
-1. `dev_env/seed_db.sql` — auth fixtures, test users, genres/formats with fixed IDs — identical to CI.
+1. `dev_env/seed_db.sql` — auth fixtures, test users, genres/formats with fixed IDs — identical to CI. It also seeds one deterministic `auth_session` per dj-site E2E user (fixed `e2e-session-token-*` tokens, expiry 2099) so dj-site can cache Playwright storage states across CI runs (BS#1690); the seed never reaches production (`Dockerfile.migrate` sets `SKIP_SEED=true`). The `e2e-auth` compose service runs with `NODE_ENV=test` so repeated E2E sign-ins are not rate limited. That switch also mounts the unauthenticated `/auth/test/*` helpers, stores email OTPs in plain text, drops the Secure cookie attribute, and returns raw error messages in 500 responses; it is the same posture as the ci-profile `auth` service and dj-site's CI, and the e2e profile is local/CI only, never deployed.
 2. `dev_env/seed-clone.sql` — a ~14 MB `pg_dump` snapshot of prod's `artists / library / rotation / format / genre_artist_crossreference`, taken via the staging postgres clone. TRUNCATEs the small fixtures from the first file in the same transaction before loading.
 
 The clone gives realistic data for UI/feature work; CI keeps running against the small seed and the fixed IDs they assume. The dev/CI distinction is gated explicitly via `LOAD_CLONE_FIXTURE=true` set on the dev-profile `db-init` service in `docker-compose.yml` (BS#951): CI's bare `node dev_env/init-db.mjs` invocation skips the clone regardless of whether the .sql file exists in the checkout.

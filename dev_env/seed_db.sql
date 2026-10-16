@@ -102,6 +102,24 @@ VALUES
   ('test-membership-adminres01', 'test-org-id-0000000000000000001', 'test-adminreset1-id-00000000001', 'dj', NOW())
 ON CONFLICT (id) DO NOTHING;
 
+-- Deterministic sessions (BS#1690): one per dj-site E2E user, with a fixed
+-- literal token and a fixed expiry, so dj-site can cache Playwright storage
+-- states across CI runs -- each shard reseeds an ephemeral database, and a
+-- randomly minted session would never match a cached cookie. This seed never
+-- reaches production: Dockerfile.migrate sets SKIP_SEED=true and does not copy
+-- this file.
+INSERT INTO auth_session (id, user_id, token, expires_at, created_at, updated_at, active_organization_id)
+VALUES
+  ('test-session-member-0000000001', 'test-member-id-000000000000000001', 'e2e-session-token-member', TIMESTAMPTZ '2099-01-01 00:00:00+00', NOW(), NOW(), 'test-org-id-0000000000000000001'),
+  ('test-session-dj1-00000000001', 'test-dj1-id-00000000000000000001', 'e2e-session-token-dj1', TIMESTAMPTZ '2099-01-01 00:00:00+00', NOW(), NOW(), 'test-org-id-0000000000000000001'),
+  ('test-session-dj2-00000000001', 'test-dj2-id-00000000000000000002', 'e2e-session-token-dj2', TIMESTAMPTZ '2099-01-01 00:00:00+00', NOW(), NOW(), 'test-org-id-0000000000000000001'),
+  ('test-session-md-000000000001', 'test-md-id-0000000000000000001', 'e2e-session-token-md', TIMESTAMPTZ '2099-01-01 00:00:00+00', NOW(), NOW(), 'test-org-id-0000000000000000001'),
+  ('test-session-sm-000000000001', 'test-sm-id-0000000000000000001', 'e2e-session-token-sm', TIMESTAMPTZ '2099-01-01 00:00:00+00', NOW(), NOW(), 'test-org-id-0000000000000000001')
+ON CONFLICT (id) DO UPDATE SET
+  token = EXCLUDED.token,
+  expires_at = EXCLUDED.expires_at,
+  updated_at = NOW();
+
 -- Genres and media formats matching the legacy tubafrenzy database.
 -- The library ETL job looks up genres/formats by name and skips releases
 -- where the genre or format is missing, so all legacy values must be seeded.
