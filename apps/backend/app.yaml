@@ -2757,22 +2757,20 @@ paths:
                         provenance:
                           type: string
                           description: >-
-                            Open vocabulary, NOT a closed enum — `schema.ts`
-                            documents `provenance` as free text so a new
-                            provenance costs no migration (the 0109 lesson).
-                            `rotation_upload` and `cd_rip` are the values in
-                            use today.
+                            Closed vocabulary, enforced by the
+                            `digital_asset_provenance_ck` CHECK (0197):
+                            `rotation_upload` or `cd_rip`.
                           example: rotation_upload
                         disc_number:
                           type: integer
                         status:
                           type: string
                           description: >-
-                            Open vocabulary, NOT a closed enum, for the same
-                            reason as `provenance`. `needs_review`, `bound`
-                            and `rejected` are in use today; the CD-rip phase
-                            adds `pulled`, `ripped` and `exception`. A
-                            `rejected` row never appears in this array.
+                            Closed vocabulary, enforced by the
+                            `digital_asset_status_ck` CHECK (0197):
+                            `needs_review`, `bound` or `rejected`. The CD-rip
+                            phase widens it with a migration. A `rejected`
+                            row never appears in this array.
                           example: needs_review
         '503':
           description: >-

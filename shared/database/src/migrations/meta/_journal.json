@@ -1359,6 +1359,13 @@
       "when": 1792184479141,
       "tag": "0196_listener-requests-channel-created-idx-nulls-first",
       "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1792184479142,
+      "tag": "0197_digital-asset-provenance-status-checks",
+      "breakpoints": true
     }
   ]
 }
