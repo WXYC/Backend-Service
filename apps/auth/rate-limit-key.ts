@@ -1,5 +1,6 @@
 import type { Request } from 'express';
 import { createHash } from 'crypto';
+import { ipKeyGenerator } from 'express-rate-limit';
 import { parseBearerToken } from '@wxyc/authentication';
 
 // Key on the nginx-set `X-Real-IP` (the same header better-auth's getIp
@@ -18,10 +19,36 @@ export const realIpFromRequest = (req: Pick<Request, 'headers'>): string | undef
   return Array.isArray(raw) ? raw[0] : raw;
 };
 
+// BS#2190: once-per-process latch, mirroring better-auth's `ipWarningLogged`.
+// nginx always sets X-Real-IP, so the IP-less branch is unreachable today;
+// this makes it visible the day it isn't without flooding logs.
+let ipLessWarningLogged = false;
+
+// Coarse but discriminating key for a request with no resolvable IP, so
+// IP-less callers stop sharing one literal bucket. Credentials are hashed,
+// never embedded raw (keys surface in logs and error paths).
+function ipLessKey(req: Pick<Request, 'headers'>): string {
+  if (!ipLessWarningLogged) {
+    ipLessWarningLogged = true;
+    console.warn('[rate-limit] request has no X-Real-IP or socket address; bucketing on hashed request signals');
+  }
+  const cookieHeader = req.headers['cookie'];
+  const signals = [
+    req.headers['user-agent'],
+    req.headers['host'],
+    extractBearerToken(req.headers['authorization']),
+    extractSessionCookieValue(typeof cookieHeader === 'string' ? cookieHeader : undefined),
+  ];
+  return `no-ip:${hashCredential(signals.map((signal) => signal ?? '').join('\n'))}`;
+}
+
+// BS#2193: IPv6 keys on its /56 (express-rate-limit's own default) so one
+// client rotating through its delegated prefix cannot mint unlimited buckets.
+// IPv4 passes through byte-identical; IPv4-mapped IPv6 collapses to IPv4.
 export const rateLimitKeyFromRequest = (req: Pick<Request, 'headers' | 'socket'>): string => {
   const realIp = realIpFromRequest(req);
-  if (typeof realIp === 'string' && realIp.length > 0) return realIp;
-  return req.socket.remoteAddress ?? 'unknown';
+  const ip = typeof realIp === 'string' && realIp.length > 0 ? realIp : req.socket.remoteAddress;
+  return ip ? ipKeyGenerator(ip) : ipLessKey(req);
 };
 
 // BS#2169. Both cookie name variants are needed: auth.definition.ts sets
