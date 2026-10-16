@@ -124,7 +124,7 @@ services:
     depends_on:
       ci-db:
         condition: service_healthy
-    image: wxyc_auth_service:ci
+    image: wxyc_auth_service:${CI_IMAGE_TAG:-ci}
     build:
       context: '../'
       dockerfile: Dockerfile.auth
@@ -193,7 +193,7 @@ services:
     build:
       context: mock-api-server
       dockerfile: Dockerfile
-    image: wxyc-mock-api:ci
+    image: wxyc-mock-api:${CI_IMAGE_TAG:-ci}
     ports:
       - '${MOCK_API_PORT:-9090}:9090'
     healthcheck:
@@ -207,7 +207,7 @@ services:
       - ci-db
       - auth
       - mock-api
-    image: wxyc_backend_service:ci
+    image: wxyc_backend_service:${CI_IMAGE_TAG:-ci}
     build:
       context: '../'
       dockerfile: Dockerfile.backend
@@ -392,7 +392,7 @@ services:
     depends_on:
       e2e-db:
         condition: service_healthy
-    image: wxyc_auth_service:e2e
+    image: wxyc_auth_service:${E2E_IMAGE_TAG:-e2e}
     build:
       context: '../'
       dockerfile: Dockerfile.auth
@@ -440,7 +440,7 @@ services:
         condition: service_healthy
       e2e-auth:
         condition: service_healthy
-    image: wxyc_backend_service:e2e
+    image: wxyc_backend_service:${E2E_IMAGE_TAG:-e2e}
     build:
       context: '../'
       dockerfile: Dockerfile.backend

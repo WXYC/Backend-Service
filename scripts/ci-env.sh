@@ -21,6 +21,11 @@ for arg in "$@"; do
   esac
 done
 
+# Resolve CI_IMAGE_TAG from the same .env compose's --env-file reads (an explicit
+# shell export wins), so the tag docker:build mints is the tag compose runs and
+# a worktree's own tag cannot be overwritten by a peer's build (BS#2442).
+export CI_IMAGE_TAG="${CI_IMAGE_TAG:-$(env -u CI_IMAGE_TAG dotenvx get CI_IMAGE_TAG -f "$PROJECT_ROOT/.env" 2>/dev/null || true)}"
+
 # Build the Docker images
 npm run ci:build
 
