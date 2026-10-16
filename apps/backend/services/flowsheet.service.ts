@@ -41,7 +41,7 @@ import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
-import { PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
+import { PgSelect, PgSelectKind, PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
 
 /**
  * The PII-safe DJ-name chain now lives in `@wxyc/database` (`dj-name.ts`), so
@@ -119,6 +119,49 @@ export const getLastModifiedAt = async (now: Date = new Date()): Promise<Date> =
   return watermark.getTime() >= startOfEtDay.getTime() ? watermark : startOfEtDay;
 };
 
+// Any select builder, dynamic or not: drizzle's `_` metadata minus the two flags that differ between them.
+type SelectLike = { _: Omit<PgSelect['_'], 'dynamic' | 'excludedMethods'> };
+
+// Drizzle offers `.leftJoin` only on a builder typed as dynamic (`$dynamic()`), and its types for the plain
+// builders the call sites hold do not satisfy a generic constraint once a join has been applied. Dynamic mode
+// is a type-level flag (no runtime object differs), so this alias reads a builder's type as its dynamic twin.
+type AsDynamicSelect<T extends SelectLike> = PgSelectKind<
+  T['_']['hkt'],
+  T['_']['tableName'],
+  T['_']['selection'],
+  T['_']['selectMode'],
+  T['_']['nullabilityMap'],
+  true,
+  never,
+  T['_']['result'],
+  T['_']['selectedFields']
+>;
+
+// The join set FSEntryFieldsRaw requires, in order (BS#2510). The return type of this chain is what
+// `withFlowsheetEntryJoins` hands back, so the joined columns keep drizzle's `| null` row types.
+function joinFlowsheetEntryTables<D extends PgSelect>(qb: D) {
+  return (
+    qb
+      // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
+      // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
+      .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
+      .leftJoin(library, eq(library.id, flowsheet.album_id))
+      .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
+      // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
+      // rotation.label_id (BS#2505).
+      .leftJoin(labels, eq(labels.id, rotation.label_id))
+  );
+}
+
+type FlowsheetEntryJoined<T extends SelectLike> =
+  AsDynamicSelect<T> extends infer D extends PgSelect ? ReturnType<typeof joinFlowsheetEntryTables<D>> : never;
+
+// Apply to a builder already `from`ed on `flowsheet` (or on a page subquery inner-joined to it) so the
+// projection and its joins change together. The builder is returned as-is at runtime.
+export function withFlowsheetEntryJoins<T extends SelectLike>(qb: T): FlowsheetEntryJoined<T> {
+  return joinFlowsheetEntryTables(qb as unknown as PgSelect) as FlowsheetEntryJoined<T>;
+}
+
 // SQL query fields (flat structure from database)
 //
 // Adding a client-facing column here (or emitting it in transformToV2)? Also
@@ -150,7 +193,7 @@ const FSEntryFieldsRaw = {
   // a `labels` row. The consumer falls back to `record_label`.
   //
   // The `labels` join keys on `rotation.label_id`, so it must follow the
-  // `rotation` join at every site below. Like that join it is deliberately
+  // `rotation` join in `withFlowsheetEntryJoins` above. Like that join it is deliberately
   // UNWINDOWED: a killed release with plays in the window still resolves its
   // label, matching the primary FK lane's "the writer's assertion outranks date
   // arithmetic" rule (BS#2183).
@@ -161,10 +204,10 @@ const FSEntryFieldsRaw = {
   // fifth — `playlist-proxy.service.ts`'s batched form — is deliberately NOT
   // this fragment) live on `rotationBinExpr`'s header in
   // `../utils/sql-rotation-bin.js`. Requires the `leftJoin(rotation,
-  // rotation.id = flowsheet.rotation_id)` at every call site below.
+  // rotation.id = flowsheet.rotation_id)` that `withFlowsheetEntryJoins` (above) applies.
   rotation_bin: rotationBinExpr(),
   // Resolved catalog artist for the played release, via the flowsheet ->
-  // library FK join already present on every read path below
+  // library FK join `withFlowsheetEntryJoins` (above) applies on every read path
   // (`leftJoin(library, library.id = flowsheet.album_id)`). NULL for
   // free-form entries (no album_id) and for library rows with no artist link.
   // Two roles: (1) the batch key the V2 feed uses to attach the per-playcut
@@ -200,7 +243,7 @@ const FSEntryFieldsRaw = {
   // BS#1908 (Not-on-Discogs epic #1280): the MD-set discogs-unavailable flag,
   // mirroring BS#1895's other read surfaces onto the V2 flowsheet album embed.
   // Sourced directly off the already-joined `library` row below (see
-  // leftJoin(library, ...) in getEntriesByPage/getEntriesByRange/getEntriesByShow)
+  // leftJoin(library, ...) in `withFlowsheetEntryJoins`, above)
   // rather than a per-row call to `getDiscogsUnavailableFlagsById` — that
   // single-id helper is BS#1895's proxy-path lookup and would reintroduce the
   // N+1 the flowsheet read path forbids. A library-linked row picks the flag up
@@ -545,19 +588,9 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
     .limit(limit)
     .as('page');
 
-  const raw = await db
-    .select(FSEntryFieldsRaw)
-    .from(page)
-    .innerJoin(flowsheet, eq(flowsheet.id, page.id))
-    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
-    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .leftJoin(library, eq(library.id, flowsheet.album_id))
-    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
-    // rotation.label_id (BS#2505).
-    .leftJoin(labels, eq(labels.id, rotation.label_id))
-    .orderBy(desc(flowsheet.add_time), desc(flowsheet.id));
+  const raw = await withFlowsheetEntryJoins(
+    db.select(FSEntryFieldsRaw).from(page).innerJoin(flowsheet, eq(flowsheet.id, page.id))
+  ).orderBy(desc(flowsheet.add_time), desc(flowsheet.id));
 
   return raw.map(transformToIFSEntry);
 };
@@ -590,17 +623,7 @@ export const getEntriesByPage = async (offset: number, limit: number): Promise<I
 export const getEntriesByRange = async (startId: number, endId: number): Promise<IFSEntry[]> => {
   // play_order is per-show after #693; id is globally monotonic across shows
   // in INSERTION order (see the header — not airtime order).
-  const raw = await db
-    .select(FSEntryFieldsRaw)
-    .from(flowsheet)
-    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
-    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .leftJoin(library, eq(library.id, flowsheet.album_id))
-    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
-    // rotation.label_id (BS#2505).
-    .leftJoin(labels, eq(labels.id, rotation.label_id))
+  const raw = await withFlowsheetEntryJoins(db.select(FSEntryFieldsRaw).from(flowsheet))
     .where(and(gte(flowsheet.id, startId), lte(flowsheet.id, endId)))
     .orderBy(desc(flowsheet.id));
 
@@ -635,17 +658,7 @@ export type FlowsheetRangeShow = {
  * after the 2026-05-01 reordering incident.
  */
 export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IFSEntry[]> => {
-  const raw = await db
-    .select(FSEntryFieldsRaw)
-    .from(flowsheet)
-    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
-    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .leftJoin(library, eq(library.id, flowsheet.album_id))
-    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
-    // rotation.label_id (BS#2505).
-    .leftJoin(labels, eq(labels.id, rotation.label_id))
+  const raw = await withFlowsheetEntryJoins(db.select(FSEntryFieldsRaw).from(flowsheet))
     .where(and(gte(flowsheet.add_time, start), lt(flowsheet.add_time, end)))
     .orderBy(asc(flowsheet.add_time), asc(flowsheet.id));
 
@@ -749,17 +762,7 @@ export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<Flow
 export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[]> => {
   if (show_ids.length === 0) return [];
 
-  const raw = await db
-    .select(FSEntryFieldsRaw)
-    .from(flowsheet)
-    // Deliberately unwindowed (BS#2183) — rotation_id is the writer's assertion and
-    // outranks date arithmetic; see rotationBinExpr's header in ../utils/sql-rotation-bin.js.
-    .leftJoin(rotation, eq(rotation.id, flowsheet.rotation_id))
-    .leftJoin(library, eq(library.id, flowsheet.album_id))
-    .leftJoin(album_metadata, eq(album_metadata.album_id, flowsheet.album_id))
-    // Must follow the `rotation` join: FSEntryFieldsRaw.rotation_label keys on
-    // rotation.label_id (BS#2505).
-    .leftJoin(labels, eq(labels.id, rotation.label_id))
+  const raw = await withFlowsheetEntryJoins(db.select(FSEntryFieldsRaw).from(flowsheet))
     .where(inArray(flowsheet.show_id, show_ids))
     // play_order can collide within a show: the tubafrenzy webhook and the
     // dj-site live-insert path assign it independently and the schema
