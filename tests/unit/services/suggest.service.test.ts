@@ -57,9 +57,40 @@ describe('suggest.service', () => {
       await suggestArtists('A%');
 
       const { sql: text, params } = compiledExecuteCall();
-      // Prefix "A%" -> escaped "A\%" -> pattern "A\%%" (only the trailing % is a wildcard).
-      expect(params).toContain('A\\%%');
+      // Prefix "A%" -> escaped "A\%", folded in SQL; the only wildcard is the literal trailing '%' in the statement.
+      expect(params).toContain('A\\%');
       expect(text).toContain("ESCAPE '\\'");
+    });
+
+    it('prefix-matches the folded name against the folded query (BS#2023)', async () => {
+      (db.execute as jest.Mock).mockResolvedValue([]);
+
+      await suggestArtists('Nilüfer');
+
+      const { sql: text, params } = compiledExecuteCall();
+      expect(text).toMatch(
+        /"fold_artist_name"\(.*\) LIKE \(.*"fold_artist_name"\(\$\d+::text\) \|\| '%'\) ESCAPE '\\'/s
+      );
+      expect(text).not.toMatch(/artist_name"? ILIKE/i);
+      expect(params).toContain('Nilüfer');
+    });
+
+    // A query of only combining marks folds to '' and would become the
+    // match-everything pattern `%` (BS#2023).
+    it.each([
+      ['a lone combining acute accent', '\u0301'],
+      ['two combining marks', '\u0301\u0301'],
+    ])('returns [] without querying for %s', async (_label, q) => {
+      expect(await suggestArtists(q)).toEqual([]);
+      expect(db.execute).not.toHaveBeenCalled();
+    });
+
+    it('still queries for e + combining accent, which folds to a one-character prefix', async () => {
+      (db.execute as jest.Mock).mockResolvedValue([]);
+
+      await suggestArtists('e\u0301');
+
+      expect(compiledExecuteCall().params).toContain('e\u0301');
     });
 
     it('treats a _ in the prefix literally', async () => {
@@ -68,7 +99,7 @@ describe('suggest.service', () => {
       await suggestArtists('Hot_');
 
       const { params } = compiledExecuteCall();
-      expect(params).toContain('Hot\\_%');
+      expect(params).toContain('Hot\\_');
     });
 
     it('excludes the V/A compilation-shelf bucket and its two named residue rows, without joining or reordering', async () => {

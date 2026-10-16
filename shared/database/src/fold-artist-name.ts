@@ -37,7 +37,9 @@
  * non-ASCII letters with no combining-mark decomposition (e.g. dotless `ı`
  * U+0131, `ß`) could diverge between the twin and the SQL function — the
  * authoritative grouping key is always the SQL function; this twin is used for
- * in-memory dedup previews and unit tests over the canonical Latin names. The
+ * in-memory dedup previews, unit tests over the canonical Latin names, and the
+ * folded-length floor of the artist prefix searches (`foldedQueryLength`,
+ * BS#2023; the pattern itself is folded in SQL). The
  * unit test at `tests/unit/database/fold-artist-name.test.ts` pins the
  * contract; the SQL function must change with this file.
  */

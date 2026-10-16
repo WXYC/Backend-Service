@@ -1148,7 +1148,7 @@ function withLabel<T extends PgSelectQueryBuilder>(qb: T, label: string | null |
 }
 
 // Schema-qualified `text_match_key(text)` (migration 0191, BS#3064), derived from `WXYC_SCHEMA_NAME` the same
-// way `FOLD_ARTIST_NAME_FN` in library.service.ts is so the per-worker test schema resolves.
+// way `FOLD_ARTIST_NAME_FN` in utils/sql-like.ts is so the per-worker test schema resolves.
 const TEXT_MATCH_SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 export const TEXT_MATCH_KEY_FN = sql.raw(`"${TEXT_MATCH_SCHEMA}"."text_match_key"`);
 const TEXT_MATCH_CANDIDATE_LIMIT = 10;

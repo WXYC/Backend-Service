@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db, artists, library, flowsheet, library_artist_view, compilation_track_artist } from '@wxyc/database';
-import { ilikeEscaped } from '../utils/sql-like.js';
+import { foldedPrefixLike, foldedQueryLength, ilikeEscaped } from '../utils/sql-like.js';
 
 export type SuggestTrackResult = {
   track_title: string;
@@ -16,7 +16,9 @@ export type TrackDetailsResult = {
 /**
  * Suggest artist names matching a prefix, ordered by total plays descending.
  *
- * Queries the library `artists` table (canonical catalog) using prefix ILIKE.
+ * Queries the library `artists` table (canonical catalog) with a prefix match
+ * on `fold_artist_name(artist_name)`, so it is case- and diacritic-insensitive
+ * (BS#2023).
  *
  * The compilation-shelf exclusion below must stay a bare `WHERE` on `artists`,
  * never a join. `artist_genre_code` lives on `genre_artist_crossreference`,
@@ -26,11 +28,17 @@ export type TrackDetailsResult = {
  * measurement behind the specific values excluded.
  */
 export async function suggestArtists(prefix: string, limit = 5): Promise<string[]> {
+  // A query that folds to '' (only combining marks) would become the pattern
+  // `%` and match every artist (BS#2023).
+  if (foldedQueryLength(prefix) < 1) {
+    return [];
+  }
+
   const query = sql`
     SELECT ${artists.artist_name} AS artist_name, SUM(COALESCE(${library.plays}, 0)) AS total_plays
     FROM ${artists}
     JOIN ${library} ON ${library.artist_id} = ${artists.id}
-    WHERE ${ilikeEscaped(artists.artist_name, prefix, 'prefix')}
+    WHERE ${foldedPrefixLike(artists.artist_name, prefix)}
       -- 'V/A' is the pure compilation-shelf code_letters bucket: 26
       -- Soundtracks - A..Z, 26 Various Artists - Rock - A..Z, and plain
       -- Various Artists, for 53 rows and zero real performers. Rock is the

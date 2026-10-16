@@ -100,7 +100,7 @@ import { copyCitedCoverReviews } from './cited-review-copy.service.js';
 import { getConfig as getCatalogTrackSearchConfig } from '../config/catalogTrackSearch.js';
 import { getConfig as getCatalogSearchAliasConfig } from '../config/catalogSearchAlias.js';
 import { isCompilationArtist } from './requestLine/matching/index.js';
-import { ilikeEscaped } from '../utils/sql-like.js';
+import { FOLD_ARTIST_NAME_FN, foldedPrefixLike, foldedQueryLength, ilikeEscaped } from '../utils/sql-like.js';
 import { buildPrefixTsquery } from '../utils/tsquery.js';
 import {
   buildAliasHitsCte,
@@ -127,14 +127,6 @@ import { hasAlphanumeric } from '../utils/text-query.js';
 import { rotationSuccessorSql } from '../utils/sql-fragments.js';
 import { withRotationCard, type RotationCardSource, type RotationCardWire } from '../utils/rotation-card.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from './observability/cache-stats.js';
-
-// Schema-qualified reference to the `fold_artist_name(text)` SQL function
-// (migration 0134 / BS#1897). Derived from `WXYC_SCHEMA_NAME` the same way the
-// `@wxyc/database` `pgSchema` object and the job SQL builders are, so the
-// per-worker test-isolation schema resolves correctly. `""`-escaped for the
-// (theoretical) quoted-identifier case, mirroring `worklist.ts`.
-const FOLD_SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
-const FOLD_ARTIST_NAME_FN = sql.raw(`"${FOLD_SCHEMA}"."fold_artist_name"`);
 
 /**
  * Catalog freshness watermark for the conditional-GET path (BS#1467 / Epic F
@@ -4046,15 +4038,19 @@ export const searchArtistsInGenre = async (
   limit: number
 ): Promise<ArtistInGenreSearchRow[]> => {
   const prefix = q.trim();
-  if (prefix.length < 2) {
+  // The 2-character floor applies to the FOLDED query (BS#2023): a lone
+  // combining mark folds to '' (pattern `%`, every artist) and `e` + U+0301
+  // folds to `e`, below the floor the controller enforced on the raw string.
+  if (prefix.length < 2 || foldedQueryLength(prefix) < 2) {
     return [];
   }
 
   const cappedLimit = Math.min(20, Math.max(1, limit));
 
-  // Escape %/_ so e.g. q='%a' can't short the prefix-search contract into a
+  // Fold both sides (BS#2023) so `Nilufer` finds `Nilüfer Yanya`; %/_ stay
+  // literal so e.g. q='%a' can't short the prefix-search contract into a
   // contains-anything scan (review issue 14).
-  const namePrefix = ilikeEscaped(artists.artist_name, prefix, 'prefix');
+  const namePrefix = foldedPrefixLike(artists.artist_name, prefix);
 
   return (
     db
