@@ -3559,8 +3559,10 @@ export const shows = wxyc_schema.table(
      *
      * Capped at 255 to match the `auth_user.dj_name` width and the
      * `dj_name_override` request parameter cap. The dj-site joinShow
-     * controller and the service-layer `startShow` both length-check
-     * defensively before INSERT.
+     * controller enforces the cap before INSERT; `startShow` does not
+     * length-check, but truncates the name inside the `show_start` marker so
+     * the marker fits `flowsheet.message` (varchar 250). The full value stays
+     * here and on `flowsheet.dj_name`.
      */
     dj_name_override: varchar('dj_name_override', { length: 255 }),
     show_name: varchar('show_name', { length: 128 }),

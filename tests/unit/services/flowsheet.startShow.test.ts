@@ -215,4 +215,90 @@ describe('startShow dj_name_override (BS#1295 → BS#1321)', () => {
     expect(showsValues.specialty_id).toBe(7);
     expect(showsValues.dj_name_override).toBe('Aubrey Hearst');
   });
+
+  // BS#2846: the marker must fit flowsheet.message varchar(250). The suffix holds a
+  // locale-formatted timestamp whose length varies, so the clock is pinned and the
+  // name budget is derived from the same timestamp the service formats.
+  describe('show_start marker length (BS#2846)', () => {
+    const MARKER_PREFIX = 'Start of Show: ';
+    const MESSAGE_LIMIT = 250;
+
+    beforeEach(() => {
+      // Fake only Date so the mocked promise chains are unaffected.
+      jest.useFakeTimers({
+        now: new Date('2026-10-16T21:50:07Z'),
+        doNotFake: [
+          'hrtime',
+          'nextTick',
+          'performance',
+          'queueMicrotask',
+          'requestAnimationFrame',
+          'cancelAnimationFrame',
+          'requestIdleCallback',
+          'cancelIdleCallback',
+          'setImmediate',
+          'clearImmediate',
+          'setInterval',
+          'clearInterval',
+          'setTimeout',
+          'clearTimeout',
+        ],
+      });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    const expectedSuffix = () =>
+      ` joined the set at ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`;
+    const nameBudget = () => MESSAGE_LIMIT - MARKER_PREFIX.length - Array.from(expectedSuffix()).length;
+
+    const runWithOverride = async (override: string) => {
+      const userSelect = createMockQueryChain();
+      userSelect.limit.mockResolvedValue([{ djName: 'DJ Stardust', name: null }]);
+      db.select.mockReturnValueOnce(userSelect);
+      db.insert.mockReturnValueOnce(createMockQueryChain([{ id: 42 }]));
+      db.insert.mockReturnValueOnce(createMockQueryChain([{ show_id: 42, dj_id: 'user-1' }]));
+      db.select.mockReturnValueOnce(makeAwaitablePlayOrderChain(0));
+      const flowsheetInsert = createMockQueryChain([{ id: 999 }]);
+      db.insert.mockReturnValueOnce(flowsheetInsert);
+
+      await startShow('user-1', undefined, undefined, override);
+
+      return flowsheetInsert.values.mock.calls[0]?.[0] as { message: string; dj_name: string };
+    };
+
+    // Distinct code points per position, so a wrong cut shows up in the comparison.
+    const buildOverride = (base: number, length: number) =>
+      Array.from({ length }, (_, i) => String.fromCodePoint(base + (i % 26))).join('');
+
+    it.each([
+      ['ASCII', 'exact fit', 0x61, 0],
+      ['ASCII', 'one code point over', 0x61, 1],
+      ['ASCII', 'far over the 255 cap', 0x61, 255],
+      ['astral', 'exact fit', 0x1d11e, 0],
+      ['astral', 'one code point over', 0x1d11e, 1],
+      ['astral', 'far over the 255 cap', 0x1d11e, 255],
+    ])(
+      '%s override, %s: keeps the first code points that fit and the suffix intact',
+      async (_script, _case, base, over) => {
+        // `over` of 255 means a 255 code point override; otherwise budget + over.
+        const length = over === 255 ? 255 : nameBudget() + over;
+        const override = buildOverride(base, length);
+        const kept = Array.from(override).slice(0, nameBudget()).join('');
+
+        const values = await runWithOverride(override);
+
+        expect(values.message).toBe(`${MARKER_PREFIX}${kept}${expectedSuffix()}`);
+        expect(Array.from(values.message).length).toBe(MESSAGE_LIMIT);
+        expect(values.dj_name).toBe(override);
+      }
+    );
+
+    it('leaves a short override untouched', async () => {
+      const values = await runWithOverride('Aubrey Hearst');
+      expect(values.message).toMatch(/^Start of Show: Aubrey Hearst joined the set at /);
+    });
+  });
 });
