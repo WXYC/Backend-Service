@@ -54,7 +54,14 @@ import {
   MAX_ALBUM_TEXT_LENGTH,
 } from '../utils/text-fields.js';
 import { INT4_MAX } from '../utils/constants.js';
-import { parseInt4BodyId, parseInt4PathId, parseLimitOffset, parseNonNegativeInt } from '../utils/query-params.js';
+import {
+  parseCodeQueryInt,
+  parseInt4BodyId,
+  parseInt4PathId,
+  parseLimitOffset,
+  parseNonNegativeInt,
+  parseRotationIdParam,
+} from '../utils/query-params.js';
 import { reviewsActor } from '../utils/review-grants.js';
 import { printReleaseReview } from '../services/review-print.service.js';
 
@@ -496,51 +503,6 @@ type ArtistByCodeQuery = {
   code_number?: string;
   limit?: string;
   offset?: string;
-};
-
-/**
- * Parses one required integer query parameter, bounded on both ends. The
- * upper bound is the int4 guard described at `INT4_MAX`; the lower bound
- * differs per parameter, so it is passed in.
- *
- * Two callers: `resolveArtistByCode` (both `genre_id` and `code_number`) and
- * `peekArtistReleaseNumber` (`genre_id`, required by BS#2587).
- *
- * `Number('')` is 0 and `Number(' ')` is 0, so a present-but-empty parameter
- * (`?code_number=`) would sail through `Number.isInteger` as a legitimate
- * zero — which matters now that 0 is a valid `code_number`. Hence the explicit
- * blank check before the numeric one.
- */
-const parseCodeQueryInt = (raw: string | undefined, name: string, min: number): number => {
-  // Both `resolveArtistByCode` call sites reached this with a value already,
-  // so the branch was historically unreachable for `undefined` -- but by two
-  // different mechanisms, and only one is that handler's "Missing query
-  // parameters" 400. `code_number` is deliberately excluded from that 400
-  // (BS#2489: absent, it selects the browse), so what kept THAT call site
-  // from passing `undefined` is the browse early return, not a required-
-  // parameter check. Do not "align" the browse branch to throw. `peekArtistReleaseNumber`
-  // has no such pre-check, so an omitted `genre_id` reaches this function
-  // directly -- distinguish that from the repeated-key case below, or an
-  // absent parameter misdiagnoses as a repeated one.
-  if (raw === undefined) {
-    throw new WxycError(`Missing query parameter: ${name}`, 400);
-  }
-  // Express's `simple` query parser yields string[] for repeated keys
-  // (`?genre_id=1&genre_id=2`), which `Number()` would collapse to NaN with a
-  // misleading message; name the real problem instead.
-  if (typeof raw !== 'string') {
-    throw new WxycError(`Invalid ${name}: must be a single value`, 400);
-  }
-  // Blank folds into the range check rather than throwing the identical
-  // message from its own branch: `Number('')` and `Number(' ')` are both 0,
-  // which would sail through `Number.isInteger` as a legitimate zero now that
-  // 0 is a valid `code_number`. Coercing blank to NaN first makes one
-  // comparison cover both cases.
-  const value = raw.trim() === '' ? NaN : Number(raw);
-  if (!Number.isInteger(value) || value < min || value > INT4_MAX) {
-    throw new WxycError(`Invalid ${name}: must be an integer between ${min} and ${INT4_MAX}`, 400);
-  }
-  return value;
 };
 
 /**
@@ -2406,20 +2368,17 @@ export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknow
   req,
   res
 ) => {
-  // Strict, not `parseInt`: `parseInt('42abc', 10)` is 42, which would let
-  // `/library/rotation/42abc/link` mutate rotation 42.
-  const rotationId = parseNonNegativeInt(req.params.rotation_id);
-  if (rotationId == null || rotationId <= 0) {
-    throw new WxycError('rotation_id must be a positive integer', 400);
-  }
+  const rotationId = parseRotationIdParam(req.params.rotation_id);
 
   const { album_id } = req.body;
   // `Number.isInteger` already rejects every non-number, so no `typeof` guard.
   if (!Number.isInteger(album_id) || album_id <= 0) {
     throw new WxycError('Missing Parameters: album_id', 400);
   }
+  // Past int4 the `eq(library.id, albumId)` lookup would be a 22003 -> 500.
+  const albumId = parseInt4BodyId(album_id, 'album_id');
 
-  const result = await libraryService.linkRotationToAlbum(rotationId, album_id);
+  const result = await libraryService.linkRotationToAlbum(rotationId, albumId as number);
 
   switch (result.outcome) {
     case 'rotation_not_found':
@@ -2828,10 +2787,7 @@ export type { RotationTrack };
  * the service layer (keyed by `rotation_id`).
  */
 export const getRotationTracks: RequestHandler<{ rotation_id: string }> = async (req, res) => {
-  const rotationId = parseInt(req.params.rotation_id, 10);
-  if (!Number.isInteger(rotationId) || rotationId <= 0) {
-    throw new WxycError('rotation_id must be a positive integer', 400);
-  }
+  const rotationId = parseRotationIdParam(req.params.rotation_id);
 
   const source = await libraryService.resolveRotationPickerSource(rotationId);
   if (source === null) {

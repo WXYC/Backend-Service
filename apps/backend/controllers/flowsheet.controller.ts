@@ -14,6 +14,7 @@ import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
+import { parseBoundedInt } from '../utils/query-params.js';
 import { codePointLength } from '../utils/text-fields.js';
 import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
 import { FsEvents, Topics, serverEventsMgr } from '../utils/serverEvents.js';
@@ -1466,26 +1467,6 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
     broadcastFlowsheetRefetch('show-transition');
     res.status(200).json(showDJ);
   }
-};
-
-/**
- * Parse a bounded positive-integer query parameter.
- *
- * Rejects anything that isn't a bare integer rather than letting `parseInt`'s
- * prefix parsing turn `"24h"` into `24` — an operator who mistypes the unit
- * should learn that, not silently get a different window than they asked for.
- * Out-of-range is a 400 too, never a silent clamp, for the same reason.
- */
-const parseBoundedInt = (raw: string | undefined, name: string, fallback: number, max: number): number => {
-  if (raw === undefined) return fallback;
-  if (!/^\d+$/.test(raw)) {
-    throw new WxycError(`Bad Request: ${name} must be a positive integer`, 400);
-  }
-  const value = Number.parseInt(raw, 10);
-  if (value < 1 || value > max) {
-    throw new WxycError(`Bad Request: ${name} must be between 1 and ${max}`, 400);
-  }
-  return value;
 };
 
 /**
