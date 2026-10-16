@@ -1322,18 +1322,16 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     // `join()` throws on a body with no show id, so a 400 here would crash
     // that daemon at activation. See config/flowsheetTakeover.ts.
     if (!flowsheetTakeoverConfig.getConfig().enabled) {
-      // `addDJToShow` writes a `dj_join` marker on a first join or a
-      // reactivation and nothing on a retried press, and its bare `ShowDJ`
-      // return doesn't say which happened — so this is the one emit site that
-      // can't prove a row committed (BS#2621). It breaks the tie the way
-      // `leaveShow` breaks the identical one: one spurious idempotent fetch on
-      // a retried press is cheaper than leaving every genuine co-host join
-      // invisible until the poll, and a join whose marker never broadcasts
-      // while the matching `dj_leave` does is precisely the asymmetry this is
-      // meant to remove. BS#2633 widens the return so it can be exact.
-      const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
-      broadcastFlowsheetRefetch('show-transition');
-      res.status(200).json(show_dj_instance);
+      // Emit only when `addDJToShow` inserted or reactivated the membership
+      // row (`joined`). A retried press by an already-active co-host commits
+      // nothing and pushes nothing (BS#2633). `joined` tracks the membership
+      // change rather than the `dj_join` marker, so a nameless DJ (no marker)
+      // still broadcasts: the refetch also refreshes who-is-live.
+      const { show_dj, joined } = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      if (joined) {
+        broadcastFlowsheetRefetch('show-transition');
+      }
+      res.status(200).json(show_dj);
       return;
     }
 
@@ -1357,14 +1355,16 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     if (intent === 'join') {
       // Override is only consumed on the new-show path. Co-host join uses the
       // auth_user.dj_name resolution unchanged.
-      const show_dj_instance: ShowDJ = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
-      // Same `dj_join` push, and same tie-break, as the flag-OFF branch above.
-      broadcastFlowsheetRefetch('show-transition');
+      const { show_dj, joined } = await flowsheet_service.addDJToShow(req.body.dj_id, current_show);
+      // Same `joined`-gated push as the flag-OFF branch above.
+      if (joined) {
+        broadcastFlowsheetRefetch('show-transition');
+      }
       // Only under the flag: this is a DJ's deliberate choice. The flag-OFF
       // branch above reaches the same call by silently co-hosting every
       // collision, which is the bug, not an outcome anyone chose.
       recordGoLiveHandoff('join', { open_show_id: current_show.id, dj_id: req.body.dj_id });
-      res.status(200).json(show_dj_instance);
+      res.status(200).json(show_dj);
       return;
     }
 
@@ -1452,9 +1452,11 @@ export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = asy
   // Both branches commit marker rows the CDC bridges never carry (BS#2621):
   // endShow writes a show_end (+ a dj_leave per remaining co-host), the guest
   // path a dj_leave. The guest marker is suppressed only in the nameless-DJ
-  // degraded state (already Sentry-warned in createLeaveNotification); the
-  // spurious refetch there is one harmless idempotent fetch, cheaper than
-  // leaving every normal leave invisible until the poll.
+  // degraded state (already Sentry-warned in createLeaveNotification). The
+  // refetch is still sent there: the DJ's membership change is real, and the
+  // refetch also refreshes who-is-live, which that change affects. Matches
+  // joinShow, which emits on the membership change rather than on the marker
+  // row (BS#2633).
   if (req.body.dj_id === currentShow.primary_dj_id) {
     const finalizedShow: Show = await flowsheet_service.endShow(currentShow);
     broadcastFlowsheetRefetch('show-transition');

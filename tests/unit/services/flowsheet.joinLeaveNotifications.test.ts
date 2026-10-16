@@ -24,6 +24,37 @@ const resetMockDbQueues = () => {
   db.update.mockReset();
 };
 
+describe('addDJToShow joined flag (BS#2633)', () => {
+  const show = { id: 42 } as unknown as Parameters<typeof addDJToShow>[1];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetMockDbQueues();
+  });
+
+  it.each<[string, Array<Record<string, unknown>>, boolean]>([
+    ['an already-active row (retried press) writes nothing', [{ show_id: 42, dj_id: 'user-2', active: true }], false],
+    ['an inactive row is reactivated', [{ show_id: 42, dj_id: 'user-2', active: false }], true],
+    ['no row inserts one', [], true],
+  ])('%s', async (_name, existing, expectedJoined) => {
+    const showDjsSelect = createMockQueryChain();
+    showDjsSelect.limit.mockResolvedValue(existing);
+    db.select.mockReturnValueOnce(showDjsSelect);
+    const membership = { show_id: 42, dj_id: 'user-2', active: true };
+    db.insert.mockReturnValueOnce(createMockQueryChain([membership]));
+    db.update.mockReturnValueOnce(createMockQueryChain([membership]));
+    // createJoinNotification: a nameless DJ suppresses the marker but still joins.
+    const userSelect = createMockQueryChain();
+    userSelect.limit.mockResolvedValue([{ djName: null, name: null }]);
+    db.select.mockReturnValueOnce(userSelect);
+
+    const result = await addDJToShow('user-2', show);
+
+    expect(result.joined).toBe(expectedJoined);
+    expect(result.show_dj).toEqual(membership);
+  });
+});
+
 describe('createJoinNotification (via addDJToShow)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

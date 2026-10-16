@@ -1369,7 +1369,16 @@ export const startShow = async (
   return new_show[0];
 };
 
-export const addDJToShow = async (dj_id: string, current_show: Show): Promise<ShowDJ> => {
+/**
+ * Adds a DJ to a show as a co-host. `joined` is true when a `show_djs` row was
+ * inserted or reactivated (the membership change) and false for an
+ * already-active retried press, which writes nothing. It deliberately tracks
+ * the membership change, not whether a `dj_join` marker landed: a nameless DJ
+ * gets no marker but is still newly live, and callers use `joined` to decide
+ * whether to push a refetch.
+ */
+export const addDJToShow = async (dj_id: string, current_show: Show): Promise<{ show_dj: ShowDJ; joined: boolean }> => {
+  let joined = false;
   let show_dj_instance = await db
     .select()
     .from(show_djs)
@@ -1386,6 +1395,7 @@ export const addDJToShow = async (dj_id: string, current_show: Show): Promise<Sh
       .returning();
 
     show_dj_instance = new_instance;
+    joined = true;
 
     // -- Add DJ Joined to Flowsheet --
     await createJoinNotification(dj_id, current_show.id);
@@ -1398,13 +1408,14 @@ export const addDJToShow = async (dj_id: string, current_show: Show): Promise<Sh
       .returning();
 
     show_dj_instance = new_instance;
+    joined = true;
 
     // -- Add DJ Joined to Flowsheet --
     await createJoinNotification(dj_id, current_show.id);
     // --------------------------------
   }
 
-  return show_dj_instance[0];
+  return { show_dj: show_dj_instance[0], joined };
 };
 
 const createJoinNotification = async (id: string, show_id: number): Promise<FSEntry | null> => {
