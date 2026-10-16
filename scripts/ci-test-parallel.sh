@@ -11,14 +11,16 @@
 # instead of the --runInBand integration config. CI_PORT / CI_AUTH_PORT /
 # CI_DB_PORT / CI_BETTER_AUTH_URL resolve identically to ci-test.sh -- see
 # scripts/ci-env-vars.sh for the precedence chain (non-empty explicit
-# shell export > .env > script default; BS#2348).
+# shell export > .env > script default; BS#2348). The resolver also sets
+# MOCK_API_PORT, which this script does not use: it never derives
+# MOCK_API_URL, so the mock-LML suites skip here (BS#2441).
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-source "$SCRIPT_DIR/ci-env-vars.sh" # sets DB_PORT / PORT / BETTER_AUTH_URL
+source "$SCRIPT_DIR/ci-env-vars.sh" # sets DB_PORT / PORT / AUTH_PORT / BETTER_AUTH_URL (and an unused MOCK_API_PORT)
 
 cd "$PROJECT_ROOT"
 dotenvx run -f .env -- jest --config jest.parallel.config.json --coverage "$@"

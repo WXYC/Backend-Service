@@ -53,46 +53,58 @@ interface Resolved {
   BETTER_AUTH_URL: string;
 }
 
-function resolve(opts: { envFileContents?: string; shellEnv?: Record<string, string> }): Resolved {
+type ResolveOpts = { envFileContents?: string; shellEnv?: Record<string, string> };
+
+/**
+ * Sources the resolver against a temp PROJECT_ROOT and returns the value of
+ * each named variable, in order. Shared by every describe block below so they
+ * all run under the same spawn conditions.
+ */
+function resolveVars(opts: ResolveOpts, vars: string[]): string[] {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-env-vars-'));
   try {
     if (opts.envFileContents !== undefined) {
       fs.writeFileSync(path.join(tmpRoot, '.env'), opts.envFileContents);
     }
 
-    // Strip any CI_* values inherited from the parent test process so a
+    // Strip any port values inherited from the parent test process so a
     // scenario that doesn't set them isn't accidentally polluted.
     const baseEnv = { ...process.env };
+    delete baseEnv.MOCK_API_PORT;
     delete baseEnv.CI_PORT;
     delete baseEnv.CI_DB_PORT;
     delete baseEnv.CI_AUTH_PORT;
     delete baseEnv.CI_BETTER_AUTH_URL;
 
-    const result = spawnSync(
-      'bash',
-      [
-        '-c',
-        `source "${scriptPath}" && printf '%s\\n%s\\n%s\\n%s\\n' "$PORT" "$DB_PORT" "$AUTH_PORT" "$BETTER_AUTH_URL"`,
-      ],
-      {
-        env: {
-          ...baseEnv,
-          ...opts.shellEnv,
-          PROJECT_ROOT: tmpRoot,
-          PATH: `${localBinPath}:${baseEnv.PATH ?? ''}`,
-        },
-      }
-    );
+    const format = vars.map(() => '%s\\n').join('');
+    const args = vars.map((v) => `"$${v}"`).join(' ');
+    const result = spawnSync('bash', ['-c', `source "${scriptPath}" && printf '${format}' ${args}`], {
+      env: {
+        ...baseEnv,
+        ...opts.shellEnv,
+        PROJECT_ROOT: tmpRoot,
+        PATH: `${localBinPath}:${baseEnv.PATH ?? ''}`,
+      },
+    });
 
     if (result.status !== 0) {
       throw new Error(`ci-env-vars.sh failed: ${result.stderr?.toString()}`);
     }
 
-    const [PORT, DB_PORT, AUTH_PORT, BETTER_AUTH_URL] = result.stdout.toString().trim().split('\n');
-    return { PORT, DB_PORT, AUTH_PORT, BETTER_AUTH_URL };
+    return result.stdout.toString().trim().split('\n');
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
+}
+
+function resolve(opts: ResolveOpts): Resolved {
+  const [PORT, DB_PORT, AUTH_PORT, BETTER_AUTH_URL] = resolveVars(opts, [
+    'PORT',
+    'DB_PORT',
+    'AUTH_PORT',
+    'BETTER_AUTH_URL',
+  ]);
+  return { PORT, DB_PORT, AUTH_PORT, BETTER_AUTH_URL };
 }
 
 describe('scripts/ci-env-vars.sh CI port resolution (BS#2348)', () => {
@@ -190,6 +202,29 @@ describe('scripts/ci-env-vars.sh CI port resolution (BS#2348)', () => {
       AUTH_PORT: '8083',
       BETTER_AUTH_URL: 'http://localhost:8083/auth',
     });
+  });
+});
+
+describe('scripts/ci-env-vars.sh MOCK_API_PORT resolution (BS#2441)', () => {
+  // Unlike the CI_* family, compose reads MOCK_API_PORT under its own name,
+  // so the resolver keys on MOCK_API_PORT itself.
+  const mockApiPort = (opts: ResolveOpts) => resolveVars(opts, ['MOCK_API_PORT'])[0];
+
+  test.each<[label: string, opts: ResolveOpts, expected: string]>([
+    ['defaults to 9090 when neither .env nor the shell set it', {}, '9090'],
+    ['resolves from .env alone', { envFileContents: 'MOCK_API_PORT=29090\n' }, '29090'],
+    [
+      'prefers a non-empty shell export over .env',
+      { envFileContents: 'MOCK_API_PORT=29090\n', shellEnv: { MOCK_API_PORT: '39090' } },
+      '39090',
+    ],
+    [
+      'falls through to .env on an empty shell export',
+      { envFileContents: 'MOCK_API_PORT=29090\n', shellEnv: { MOCK_API_PORT: '' } },
+      '29090',
+    ],
+  ])('%s', (_label, opts, expected) => {
+    expect(mockApiPort(opts)).toBe(expected);
   });
 });
 
