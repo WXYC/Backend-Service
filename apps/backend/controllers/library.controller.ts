@@ -2101,27 +2101,6 @@ export function pickAddRotationFields(
 }
 
 /**
- * The three free-text snapshot columns are `varchar(128)`. The only other
- * writer (`internal.route.ts`) `truncate(_, 128)`s them because tubafrenzy
- * free text routinely overruns and a webhook has nobody to report a 400 to.
- * This endpoint has a human on the other end, so it **rejects rather than
- * truncates**: silently amputating a long compilation or classical title
- * would leave the librarian a corrupted record with no signal, whereas
- * without a guard PostgreSQL raises 22001 and the request becomes an opaque
- * 500 + Sentry event that names no field.
- *
- * The length check below counts `[...value].length` (Unicode code points),
- * not `value.length` (UTF-16 code units) — `varchar(128)` is a
- * **character** limit; PostgreSQL counts code points, and `value.length`
- * over-counts every character outside the BMP (astral emoji, CJK
- * Extension B, …) as 2. Review round 3 finding 6: a bare `.length` never
- * *under*-rejects (so no 22001 could ever slip through), but it does
- * over-reject values PostgreSQL would happily store — undercutting the
- * very reason this endpoint chose reject-over-truncate.
- */
-const ROTATION_SNAPSHOT_MAX_LENGTH = 128;
-
-/**
  * The denormalized display snapshot. A rotation row carries these three ONLY
  * when it has no `album_id`; on a library-linked row they must stay NULL. See
  * `updateRotation` (BS#2113) for why writing them on a catalogued row is
@@ -2288,11 +2267,28 @@ export const addRotation: RequestHandler<object, unknown, AddRotationRequestBody
       if (typeof value !== 'string') {
         throw new WxycError(`Invalid Parameter: ${field} must be a string`, 400);
       }
-      if (codePointLength(value) > ROTATION_SNAPSHOT_MAX_LENGTH) {
-        throw new WxycError(
-          `Invalid Parameter: ${field} exceeds the ${ROTATION_SNAPSHOT_MAX_LENGTH}-character limit`,
-          400
-        );
+      // The three free-text snapshot columns are `varchar(ROTATION_SNAPSHOT_MAX_LENGTH)`
+      // (128 code points); `MAX_ALBUM_TEXT_LENGTH` is the validator's copy of
+      // that width, pinned equal to it by a unit test. The only other writer
+      // (`jobs/rotation-etl/job.ts`) `truncate(_, 128)`s them because
+      // tubafrenzy free text routinely overruns and a batch job has nobody to
+      // report a 400 to. This endpoint has a human on the other end, so it
+      // **rejects rather than truncates**: silently amputating a long
+      // compilation or classical title would leave the librarian a corrupted
+      // record with no signal, whereas without a guard PostgreSQL raises 22001
+      // and the request becomes an opaque 500 + Sentry event that names no
+      // field.
+      //
+      // The check counts `codePointLength(value)` (Unicode code points), not
+      // `value.length` (UTF-16 code units): `varchar(128)` is a **character**
+      // limit; PostgreSQL counts code points, and `value.length` over-counts
+      // every character outside the BMP (astral emoji, CJK Extension B, ...)
+      // as 2. A bare `.length` never *under*-rejects (so no 22001 could slip
+      // through), but it would over-reject values PostgreSQL would happily
+      // store, undercutting the very reason this endpoint chose
+      // reject-over-truncate.
+      if (codePointLength(value) > MAX_ALBUM_TEXT_LENGTH) {
+        throw new WxycError(`Invalid Parameter: ${field} exceeds the ${MAX_ALBUM_TEXT_LENGTH}-character limit`, 400);
       }
     }
 
@@ -2713,7 +2709,7 @@ export const updateRotation: RequestHandler<{ id: string }, unknown, RotationUpd
 
   for (const field of libraryService.ROTATION_SNAPSHOT_COLUMNS) {
     if (body[field] !== undefined) {
-      updates[field] = validateTextField(body[field], field, ROTATION_SNAPSHOT_MAX_LENGTH);
+      updates[field] = validateTextField(body[field], field, MAX_ALBUM_TEXT_LENGTH);
     }
   }
 

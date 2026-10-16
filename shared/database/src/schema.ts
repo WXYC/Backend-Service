@@ -1,4 +1,5 @@
 import { ROTATION_BINS } from './rotation-bin.js';
+import { ROTATION_SNAPSHOT_MAX_LENGTH } from './rotation-snapshot.js';
 import { InferInsertModel, InferSelectModel } from 'drizzle-orm';
 import { sql, eq, and, type SQL } from 'drizzle-orm';
 import {
@@ -1108,9 +1109,9 @@ export const rotation = wxyc_schema.table(
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_date: date('add_date').defaultNow().notNull(),
     kill_date: date('kill_date'),
-    artist_name: varchar('artist_name', { length: 128 }),
-    album_title: varchar('album_title', { length: 128 }),
-    record_label: varchar('record_label', { length: 128 }),
+    artist_name: varchar('artist_name', { length: ROTATION_SNAPSHOT_MAX_LENGTH }),
+    album_title: varchar('album_title', { length: ROTATION_SNAPSHOT_MAX_LENGTH }),
+    record_label: varchar('record_label', { length: ROTATION_SNAPSHOT_MAX_LENGTH }),
     // BS#2409: pre-catalog format, restoring what tubafrenzy's
     // ROTATION_RELEASE.FORMAT_ID always carried. Written only while
     // `album_id IS NULL` (the same rule as the free-text trio above); once
