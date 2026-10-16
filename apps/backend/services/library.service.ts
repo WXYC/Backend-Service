@@ -3715,11 +3715,15 @@ async function searchLibraryByTrigramBoth(
   // Alias-enabled path: ALT1 UNION ALL (BS#1318). The CTE runs the trigram
   // bitmap scan once over `artist_search_alias`; branch (a) is the
   // byte-identical alias-OFF trigram predicate against `library`, branch (b)
-  // joins the CTE on `artist_id` and dedupes against branch (a) via NOT-of
-  // the same trigram predicate.
+  // joins the CTE on `artist_id` and dedupes against branch (a) via
+  // `(trigramPredicate) IS NOT TRUE`. The NULL-safe form is load-bearing:
+  // `library.artist_name` is nullable, so the predicate is NULL (not FALSE)
+  // for a row with a NULL `artist_name` and a non-matching title, and plain
+  // `NOT` would drop that row from both branches. `IS NOT TRUE` sends it to
+  // (b), where the alias hit surfaces it (BS#2031; same class as BS#1557).
   //
   // The trigram OR-predicate is evaluated twice — once positively in (a),
-  // once negated in (b) — but each is bitmap-indexable on its own, so the
+  // once as `IS NOT TRUE` in (b) — but each is bitmap-indexable on its own, so the
   // total cost is dominated by the substrate scan + LIMIT pushdown on the
   // outer LAV scan rather than the correlated LATERAL's per-row scan.
   //
@@ -3743,8 +3747,10 @@ async function searchLibraryByTrigramBoth(
   // `GREATEST` deliberately keeps all three terms rather than collapsing to
   // `alias_max_sim` for branch (b). It is tempting to argue the branch-(b)
   // similarity is sub-threshold by construction (the rows are selected under
-  // `NOT (trigramPredicate)`), but that predicate reads `library.artist_name`
-  // while the projection below emits `artists.artist_name` — a denormalized
+  // `(trigramPredicate) IS NOT TRUE`, which also admits NULL-`artist_name`
+  // rows, whose artist-name similarity the predicate never constrained), but
+  // that predicate reads `library.artist_name` while the projection below
+  // emits `artists.artist_name` — a denormalized
   // pair that BS#1092's drift check exists precisely because it can diverge.
   // `GREATEST` stays correct either way; a hand-collapsed form would not.
   //
@@ -3792,7 +3798,7 @@ async function searchLibraryByTrigramBoth(
             FROM ${library}
             ${LIBRARY_VIEW_JOINS_RAW}
             INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
-            WHERE NOT ${trigramPredicate}
+            WHERE ${trigramPredicate} IS NOT TRUE
             ${streamingClause}
           )
         ) alias_search

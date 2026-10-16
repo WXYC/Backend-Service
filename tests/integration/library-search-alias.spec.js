@@ -809,3 +809,105 @@ async function cleanupSeededRows(sql, wxycSchema) {
   await sql.unsafe(`DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id = $1`, [TEST_ARTIST_ID]);
   await sql.unsafe(`DELETE FROM ${wxycSchema}.artists WHERE id = $1`, [TEST_ARTIST_ID]);
 }
+
+const BS2031 = {
+  ARTIST_ID: 9401,
+  DIRECT_ARTIST_ID: 9402,
+  NULL_NAME_LIBRARY_ID: 9401,
+  DIRECT_LIBRARY_ID: 9402,
+  QUERY: 'Quillfeather Oswin',
+  VARIANT: 'Quillfeather Oswin',
+  // Trigram-close to QUERY but not a tsvector hit, which would short-circuit Both-mode before the trigram tier.
+  DIRECT_ARTIST_NAME: 'Quillfeather Oswen',
+};
+
+describe('alias branch (b) keeps NULL-artist_name rows (BS#2031)', () => {
+  let auth;
+  let sql;
+  const wxycSchema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+    await cleanupBs2031Rows(sql, wxycSchema);
+
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artists (id, artist_name, alphabetical_name, code_letters)
+       VALUES ($1, 'Halcyon Pell', 'Pell, Halcyon', 'HP'),
+              ($2, $3, $3, 'QO')
+       ON CONFLICT (id) DO NOTHING`,
+      [BS2031.ARTIST_ID, BS2031.DIRECT_ARTIST_ID, BS2031.DIRECT_ARTIST_NAME]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+       VALUES ($1, $3, 9401), ($2, $3, 9402)
+       ON CONFLICT (artist_id, genre_id) DO NOTHING`,
+      [BS2031.ARTIST_ID, BS2031.DIRECT_ARTIST_ID, TEST_GENRE_ID]
+    );
+    // The first row has a NULL denormalized artist_name and a non-matching
+    // title, so only the alias can surface it. The second matches directly AND
+    // carries an alias hit, so it must land on branch (a) only.
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, label, label_id, legacy_release_id)
+       VALUES
+         ($1, $3, $5, $6, 'Marlpit Hours', 1, NULL, 'Ferrous Tapes', NULL, 65940),
+         ($2, $4, $5, $6, 'Tidewrack', 1, $7, 'Ferrous Tapes', NULL, 65941)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        BS2031.NULL_NAME_LIBRARY_ID,
+        BS2031.DIRECT_LIBRARY_ID,
+        BS2031.ARTIST_ID,
+        BS2031.DIRECT_ARTIST_ID,
+        TEST_GENRE_ID,
+        TEST_FORMAT_ID,
+        BS2031.DIRECT_ARTIST_NAME,
+      ]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artist_search_alias
+         (artist_id, source, variant, related_artist_id, external_subject_id,
+          external_object_id, active, method, confidence, last_verified_at)
+       VALUES ($1, 'discogs_name_variation', $3, NULL, NULL, NULL, NULL, 'name_variation', 0.95, NOW()),
+              ($2, 'discogs_name_variation', $3, NULL, NULL, NULL, NULL, 'name_variation', 0.95, NOW())
+       ON CONFLICT (artist_id, source, variant) DO NOTHING`,
+      [BS2031.ARTIST_ID, BS2031.DIRECT_ARTIST_ID, BS2031.VARIANT]
+    );
+  });
+
+  afterAll(async () => {
+    await cleanupBs2031Rows(sql, wxycSchema);
+  });
+
+  test('a NULL-artist_name row with an alias hit comes back once, labelled; a direct match stays unlabelled', async () => {
+    const res = await auth
+      .get('/library/')
+      .query({ artist_name: BS2031.QUERY, album_title: BS2031.QUERY, n: 50 })
+      .expect(200);
+
+    const nullNameRows = res.body.filter((r) => r.id === BS2031.NULL_NAME_LIBRARY_ID);
+    expect(nullNameRows).toHaveLength(1);
+    expect(nullNameRows[0].matched_via_alias).toEqual([
+      { matched_variant: BS2031.VARIANT, source: 'discogs_name_variation' },
+    ]);
+    // The direct match must stay on branch (a). The outer DISTINCT ON (id)
+    // collapses any duplicate, so a length check cannot catch a leak; a leaked
+    // branch-(b) copy would instead surface here as a spurious alias label. The
+    // unit pin on the rendered `IS NOT TRUE` form is the deterministic guard.
+    const directRows = res.body.filter((r) => r.id === BS2031.DIRECT_LIBRARY_ID);
+    expect(directRows).toHaveLength(1);
+    expect(directRows[0].matched_via_alias).toBeUndefined();
+  });
+});
+
+async function cleanupBs2031Rows(sql, wxycSchema) {
+  const artistIds = [BS2031.ARTIST_ID, BS2031.DIRECT_ARTIST_ID];
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = ANY($1::int[])`, [artistIds]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.library WHERE id = ANY($1::int[])`, [
+    [BS2031.NULL_NAME_LIBRARY_ID, BS2031.DIRECT_LIBRARY_ID],
+  ]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id = ANY($1::int[])`, [
+    artistIds,
+  ]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artists WHERE id = ANY($1::int[])`, [artistIds]);
+}

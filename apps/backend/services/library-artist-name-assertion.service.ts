@@ -15,7 +15,8 @@ import { db, library, artists } from '@wxyc/database';
  *      503 — DJs locked out of the flowsheet for the lifetime of the box. The
  *      precondition was downgraded to a soft warning; trigram and tsvector
  *      predicates can't match a NULL with `%` or `@@`, so degraded rows fall
- *      out of search organically.
+ *      out of direct-match search organically (they stay reachable through an
+ *      artist-alias hit, BS#2031).
  *
  *   2. Drift check (`checkLibraryArtistNameDrift`, BS#1092) — detects value
  *      drift between `library.artist_name` (denorm, what trigram search reads)
@@ -58,7 +59,7 @@ async function runNullCheck(): Promise<void> {
       extra: { count: n },
     });
     console.warn(
-      `[library] library.artist_name has ${n} NULL row(s); search results omit those rows. ` +
+      `[library] library.artist_name has ${n} NULL row(s); direct-match search omits those rows. ` +
         `Run jobs/library-artist-name-backfill/ to repair.`
     );
   }

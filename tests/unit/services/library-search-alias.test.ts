@@ -1134,6 +1134,23 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(rendered).toContain(`) DESC, ${DIRECT_MATCH_TIE_BREAK}, id ASC`);
     });
 
+    it('Both-mode: branch (b) dedupes with IS NOT TRUE so NULL-artist_name rows survive (BS#2031)', async () => {
+      // `library.artist_name` is nullable: for a NULL artist_name and a
+      // non-matching title the trigram predicate is NULL, and `WHERE NOT <NULL>`
+      // drops the row from both branches. Only the NULL-safe form keeps the
+      // alias-only row. The mocked DB cannot exercise three-valued logic, so
+      // pin the rendered form (mirrors the BS#1557 pin for /library/query).
+      const rendered = await renderBothModeSql();
+
+      // Branch (b) is the only place `alias_hits` is joined.
+      const joinAt = rendered.indexOf('INNER JOIN alias_hits ON');
+      expect(joinAt).toBeGreaterThanOrEqual(0);
+      const branchB = rendered.slice(joinAt);
+
+      expect(branchB).toContain('% monolake) IS NOT TRUE');
+      expect(branchB).not.toMatch(/WHERE NOT\b/);
+    });
+
     it('request-line: the tier leads the ORDER BY (single-column relevance)', async () => {
       const rendered = await renderByArtistSql();
 
