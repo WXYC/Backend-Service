@@ -103,9 +103,7 @@ jest.mock('../../../apps/backend/services/library.service', () => ({
   // rather than a per-suite copy — value and helper exports drifting out of
   // these hand-maintained mocks is WXYC/Backend-Service#2209.
   ...jest
-    .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
-      '../../mocks/library-service-rotation.mock'
-    )
+    .requireActual<typeof import('../../mocks/library-service.mock')>('../../mocks/library-service.mock')
     .createLibraryServiceRotationMock(),
   getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
   getRotationRowFromDB: mockGetRotationRowFromDB,

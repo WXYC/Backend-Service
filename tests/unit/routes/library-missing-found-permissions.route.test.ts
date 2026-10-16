@@ -49,43 +49,15 @@ const mockMarkAlbumMissing = jestGlobals.fn<() => Promise<{ id: number } | undef
 const mockMarkAlbumFound = jestGlobals.fn<() => Promise<{ id: number } | undefined>>();
 const mockGetAlbumFromDB = jestGlobals.fn<() => Promise<Record<string, unknown> | undefined>>();
 
-jest.mock('../../../apps/backend/services/library.service', () => ({
-  markAlbumMissing: mockMarkAlbumMissing,
-  markAlbumFound: mockMarkAlbumFound,
-  getAlbumFromDB: mockGetAlbumFromDB,
-  getCatalogLastModifiedAt: jest.fn(),
-  // Stub out other exports referenced at import time by library.controller.
-  serializeLibraryArtistViewEntry: (row: unknown) => row,
-  serializeArtist: (row: unknown) => row,
-  fuzzySearchLibrary: jest.fn(),
-  enrichWithArtwork: jest.fn(),
-  getFormatsFromDB: jest.fn(),
-  getRotationFromDB: jest.fn(),
-  addToRotation: jest.fn(),
-  killRotationInDB: jest.fn(),
-  insertAlbum: jest.fn(),
-  updateArtworkUrl: jest.fn(),
-  updateOnStreaming: jest.fn(),
-  updateCanonicalEntity: jest.fn(),
-  mapLookupToCanonicalEntity: jest.fn(),
-  artistIdFromName: jest.fn(),
-  getArtistNameById: jest.fn(),
-  insertArtistWithGenreCrossreference: jest.fn(),
-  getArtistByCode: jest.fn(),
-  generateAlbumCodeNumber: jest.fn(),
-  generateArtistNumber: jest.fn(),
-  getGenresFromDB: jest.fn(),
-  insertGenre: jest.fn(),
-  insertFormat: jest.fn(),
-  getFormatById: jest.fn(),
-  isISODate: jest.fn(),
-  resolveRotationPickerSource: jest.fn(),
-  getRotationTracksFromRelease: jest.fn(),
-  getLibraryRowById: jest.fn(),
-  updateAlbumInDB: jest.fn(),
-  artistExistsInGenre: jest.fn(),
-  albumCodeNumberTaken: jest.fn(),
-}));
+jest.mock('../../../apps/backend/services/library.service', () =>
+  jest
+    .requireActual<typeof import('../../mocks/library-service.mock')>('../../mocks/library-service.mock')
+    .createLibraryServiceMock({
+      markAlbumMissing: mockMarkAlbumMissing,
+      markAlbumFound: mockMarkAlbumFound,
+      getAlbumFromDB: mockGetAlbumFromDB,
+    })
+);
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
   createLabel: jest.fn(),

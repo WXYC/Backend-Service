@@ -42,9 +42,7 @@ jest.mock('../../../apps/backend/services/rotation-thresholds.service', () => ({
 
 jest.mock('../../../apps/backend/services/library.service', () =>
   jest
-    .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
-      '../../mocks/library-service-rotation.mock'
-    )
+    .requireActual<typeof import('../../mocks/library-service.mock')>('../../mocks/library-service.mock')
     .createLibraryServiceRotationMock()
 );
 

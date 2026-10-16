@@ -43,43 +43,14 @@ const mockRecheckDiscogsAvailability = jestGlobals.fn<() => Promise<Record<strin
 // Collaborator mocks below mirror the missing/found route-permission test —
 // only enough is stubbed here to let library.route's import chain resolve
 // without touching a real DB, LML, or lru-cache.
-jest.mock('../../../apps/backend/services/library.service', () => ({
-  markAlbumMissing: jest.fn(),
-  markAlbumFound: jest.fn(),
-  getAlbumFromDB: jest.fn(),
-  getCatalogLastModifiedAt: jest.fn(),
-  serializeLibraryArtistViewEntry: (row: unknown) => row,
-  serializeArtist: (row: unknown) => row,
-  fuzzySearchLibrary: jest.fn(),
-  enrichWithArtwork: jest.fn(),
-  getFormatsFromDB: jest.fn(),
-  getRotationFromDB: jest.fn(),
-  addToRotation: jest.fn(),
-  killRotationInDB: jest.fn(),
-  insertAlbum: jest.fn(),
-  updateArtworkUrl: jest.fn(),
-  updateOnStreaming: jest.fn(),
-  updateCanonicalEntity: jest.fn(),
-  mapLookupToCanonicalEntity: jest.fn(),
-  artistIdFromName: jest.fn(),
-  getArtistNameById: jest.fn(),
-  insertArtistWithGenreCrossreference: jest.fn(),
-  getArtistByCode: jest.fn(),
-  generateAlbumCodeNumber: jest.fn(),
-  generateArtistNumber: jest.fn(),
-  getGenresFromDB: jest.fn(),
-  insertGenre: jest.fn(),
-  insertFormat: jest.fn(),
-  getFormatById: jest.fn(),
-  isISODate: jest.fn(),
-  resolveRotationPickerSource: jest.fn(),
-  getRotationTracksFromRelease: jest.fn(),
-  getLibraryRowById: mockGetLibraryRowById,
-  updateAlbumInDB: jest.fn(),
-  artistExistsInGenre: jest.fn(),
-  albumCodeNumberTaken: jest.fn(),
-  recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
-}));
+jest.mock('../../../apps/backend/services/library.service', () =>
+  jest
+    .requireActual<typeof import('../../mocks/library-service.mock')>('../../mocks/library-service.mock')
+    .createLibraryServiceMock({
+      getLibraryRowById: mockGetLibraryRowById,
+      recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
+    })
+);
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
   createLabel: jest.fn(),

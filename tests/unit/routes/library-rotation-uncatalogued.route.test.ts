@@ -42,58 +42,14 @@ import request from 'supertest';
 const mockGetUncataloguedRotationFromDB = jest.fn<() => Promise<unknown[]>>();
 const mockGetRotationRowFromDB = jest.fn<() => Promise<unknown>>();
 
-jest.mock('../../../apps/backend/services/library.service', () => ({
-  // The projection, the two field lists, and the queue ceiling come from the
-  // shared rotation double (WXYC/Backend-Service#2209) rather than being
-  // restated here. This suite mounts the whole `library.route`, so it loads a
-  // controller that destructures `UNCATALOGUED_ROTATION_MAX_LIMIT` at module
-  // load — omitting it left the ceiling `undefined`, which is the drift its
-  // two sibling suites already guarded against by hand. (`GET /rotation/:id`
-  // itself does NOT route through `toRotationRowSummary`: its service query
-  // already projects the published column set — see `getRotationRowFromDB`.)
-  ...jest
-    .requireActual<typeof import('../../mocks/library-service-rotation.mock')>(
-      '../../mocks/library-service-rotation.mock'
-    )
-    .createLibraryServiceRotationMock(),
-  markAlbumMissing: jest.fn(),
-  markAlbumFound: jest.fn(),
-  getAlbumFromDB: jest.fn(),
-  getCatalogLastModifiedAt: jest.fn(),
-  serializeLibraryArtistViewEntry: (row: unknown) => row,
-  serializeArtist: (row: unknown) => row,
-  fuzzySearchLibrary: jest.fn(),
-  enrichWithArtwork: jest.fn(),
-  getFormatsFromDB: jest.fn(),
-  getRotationFromDB: jest.fn(),
-  addToRotation: jest.fn(),
-  killRotationInDB: jest.fn(),
-  getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
-  getRotationRowFromDB: mockGetRotationRowFromDB,
-  linkRotationToAlbum: jest.fn(),
-  insertAlbum: jest.fn(),
-  updateArtworkUrl: jest.fn(),
-  updateOnStreaming: jest.fn(),
-  updateCanonicalEntity: jest.fn(),
-  mapLookupToCanonicalEntity: jest.fn(),
-  artistIdFromName: jest.fn(),
-  getArtistNameById: jest.fn(),
-  insertArtistWithGenreCrossreference: jest.fn(),
-  getArtistByCode: jest.fn(),
-  generateAlbumCodeNumber: jest.fn(),
-  generateArtistNumber: jest.fn(),
-  getGenresFromDB: jest.fn(),
-  insertGenre: jest.fn(),
-  insertFormat: jest.fn(),
-  getFormatById: jest.fn(),
-  isISODate: jest.fn(),
-  resolveRotationPickerSource: jest.fn(),
-  getRotationTracksFromRelease: jest.fn(),
-  getLibraryRowById: jest.fn(),
-  updateAlbumInDB: jest.fn(),
-  artistExistsInGenre: jest.fn(),
-  albumCodeNumberTaken: jest.fn(),
-}));
+jest.mock('../../../apps/backend/services/library.service', () =>
+  jest
+    .requireActual<typeof import('../../mocks/library-service.mock')>('../../mocks/library-service.mock')
+    .createLibraryServiceMock({
+      getUncataloguedRotationFromDB: mockGetUncataloguedRotationFromDB,
+      getRotationRowFromDB: mockGetRotationRowFromDB,
+    })
+);
 
 jest.mock('../../../apps/backend/services/labels.service', () => ({
   createLabel: jest.fn(),

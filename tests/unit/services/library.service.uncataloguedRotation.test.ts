@@ -51,7 +51,7 @@ import {
   UNCATALOGUED_ROTATION_MAX_LIMIT,
 } from '../../../apps/backend/services/library.service';
 import { rotationSuccessorSql } from '../../../apps/backend/utils/sql-fragments';
-import { ROTATION_ROW_SUMMARY_KEYS } from '../../mocks/library-service-rotation.mock';
+import { ROTATION_ROW_SUMMARY_KEYS } from '../../mocks/library-service.mock';
 
 /**
  * The published rotation column set, sorted — what
@@ -61,7 +61,7 @@ import { ROTATION_ROW_SUMMARY_KEYS } from '../../mocks/library-service-rotation.
  * This is the pin that should go red FIRST when the projection is widened:
  * it reads the projection object itself out of `db.select`'s call args, so it
  * fails before any integration assertion can, and before the shared test
- * double in `tests/mocks/library-service-rotation.mock.ts` has a chance to
+ * double in `tests/mocks/library-service.mock.ts` has a chance to
  * mask the change.
  */
 const PUBLISHED_ROTATION_COLUMNS = [
@@ -77,7 +77,7 @@ const PUBLISHED_ROTATION_COLUMNS = [
   'rotation_bin',
 ];
 
-// The shared service double in `tests/mocks/library-service-rotation.mock.ts`
+// The shared service double in `tests/mocks/library-service.mock.ts`
 // hands three controller/route suites a fake `toRotationRowSummary` built from
 // its own hand-written key list. Nothing about that double is derived from the
 // real projection, so without this it could fall behind and those three suites
