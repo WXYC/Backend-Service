@@ -1941,7 +1941,7 @@ describe('flowsheet.controller', () => {
 
     it('adds the caller to the active show as a co-host', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
-      mockAddDJToShow.mockResolvedValue({ id: 99, dj_id: 'caller-dj' });
+      mockAddDJToShow.mockResolvedValue({ show_dj: { id: 99, dj_id: 'caller-dj' }, joined: true });
 
       const req = {
         auth: { id: 'caller-dj' },
@@ -1953,6 +1953,8 @@ describe('flowsheet.controller', () => {
 
       expect(mockAddDJToShow).toHaveBeenCalledWith('caller-dj', expect.objectContaining({ id: 1 }));
       expect(res.status).toHaveBeenCalledWith(200);
+      // The bare ShowDJ, not the `{ show_dj, joined }` wrapper `addDJToShow` returns.
+      expect(res.json).toHaveBeenCalledWith({ id: 99, dj_id: 'caller-dj' });
     });
 
     it('rejects when req.auth.id is missing entirely', async () => {
@@ -2016,7 +2018,10 @@ describe('flowsheet.controller', () => {
 
     it('(BS#2065) does NOT backfill when the show is open and its latest entry is not a show_end marker', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 8, end_time: null, primary_dj_id: 'someone-else' });
-      mockAddDJToShow.mockResolvedValue({ show_id: 8, dj_id: 'caller-dj', active: true });
+      mockAddDJToShow.mockResolvedValue({
+        show_dj: { show_id: 8, dj_id: 'caller-dj', active: true },
+        joined: true,
+      });
 
       const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
       const res = createMockRes();
@@ -2167,7 +2172,7 @@ describe('flowsheet.controller', () => {
 
     it('does not forward dj_name_override when joining an existing show (co-host path)', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
-      mockAddDJToShow.mockResolvedValue({ id: 99, dj_id: 'caller-dj' });
+      mockAddDJToShow.mockResolvedValue({ show_dj: { id: 99, dj_id: 'caller-dj' }, joined: true });
 
       // Even if a client sends dj_name_override on a co-host /join, the
       // service contract treats it as ignored — there's no per-co-host
@@ -2547,14 +2552,16 @@ describe('flowsheet.controller', () => {
       }
     );
 
-    // A co-host join commits a `dj_join` marker on a first join or a
-    // reactivation and nothing on a retried press, and `addDJToShow` doesn't
-    // report which (BS#2633). Same tie-break `leaveShow` takes: one spurious
-    // idempotent fetch beats leaving every genuine join invisible while the
-    // matching `dj_leave` broadcasts.
-    it('joinShow broadcasts one refetch on the co-host path', async () => {
+    // A co-host join pushes a refetch when `addDJToShow` inserted or
+    // reactivated the membership row (`joined`), and nothing on a retried
+    // press by an already-active co-host (BS#2633). `joined` tracks the
+    // membership change, so a nameless DJ (no marker) still broadcasts.
+    it('joinShow broadcasts one refetch on the co-host path when the DJ joined', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 8, end_time: null, primary_dj_id: 'someone-else' });
-      mockAddDJToShow.mockResolvedValue({ show_id: 8, dj_id: 'caller-dj', active: true });
+      mockAddDJToShow.mockResolvedValue({
+        show_dj: { show_id: 8, dj_id: 'caller-dj', active: true },
+        joined: true,
+      });
 
       const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
 
@@ -2689,6 +2696,18 @@ describe('flowsheet.controller', () => {
           await expect(addEntry(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
             statusCode: 400,
           });
+        },
+      ],
+      [
+        'joinShow co-host retried press (addDJToShow joined=false, nothing committed)',
+        async () => {
+          mockGetLatestShow.mockResolvedValue({ id: 8, end_time: null, primary_dj_id: 'someone-else' });
+          mockAddDJToShow.mockResolvedValue({
+            show_dj: { show_id: 8, dj_id: 'caller-dj', active: true },
+            joined: false,
+          });
+          const req = { auth: { id: 'caller-dj' }, body: { dj_id: 'caller-dj' } } as unknown as Request;
+          await joinShow(req, createMockRes() as Response, mockNext);
         },
       ],
       [

@@ -131,7 +131,10 @@ beforeEach(() => {
   mockResolveShowEndInstant.mockResolvedValue(LAST_LOGGED);
   mockResolveDjNameForShow.mockResolvedValue('dj sue');
   mockStartShow.mockResolvedValue({ id: 1951225, primary_dj_id: 'dj-eureka' });
-  mockAddDJToShow.mockResolvedValue({ show_id: OPEN_SHOW.id, dj_id: 'dj-eureka', active: true });
+  mockAddDJToShow.mockResolvedValue({
+    show_dj: { show_id: OPEN_SHOW.id, dj_id: 'dj-eureka', active: true },
+    joined: true,
+  });
   mockEndShow.mockResolvedValue({ ...OPEN_SHOW, end_time: LAST_LOGGED });
   enableTakeover(true);
 });
@@ -197,15 +200,13 @@ describe('joinShow — an open show the caller does not belong to', () => {
     expect(mockAddDJToShow).toHaveBeenCalledWith('dj-eureka', expect.objectContaining({ id: OPEN_SHOW.id }));
     expect(mockEndShow).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(200);
+    // The bare ShowDJ, not the `{ show_dj, joined }` wrapper `addDJToShow` returns.
+    expect(res.json).toHaveBeenCalledWith({ show_id: OPEN_SHOW.id, dj_id: 'dj-eureka', active: true });
   });
 
-  // `addDJToShow` writes a dj_join marker on a first join or a reactivation
-  // and nothing on a retried press, and its bare `ShowDJ` return doesn't say
-  // which happened (BS#2633). The tie breaks the same way `leaveShow` breaks
-  // it: one spurious idempotent fetch on a retry is cheaper than leaving every
-  // genuine co-host join invisible until the poll — and a join whose marker
-  // never broadcasts while the matching `dj_leave` does is the asymmetry
-  // BS#2621 exists to remove.
+  // Emits only when `addDJToShow` reports `joined` (row inserted or
+  // reactivated); a retried press by an already-active co-host broadcasts
+  // nothing (BS#2633).
   it('broadcasts one live-fs refetch on intent="join"', async () => {
     const res = createMockRes();
 
@@ -216,6 +217,19 @@ describe('joinShow — an open show the caller does not belong to', () => {
       type: 'refetch',
       payload: { source: 'show-transition' },
     });
+  });
+
+  it('broadcasts nothing on intent="join" when addDJToShow reports no membership change (retried press)', async () => {
+    mockAddDJToShow.mockResolvedValue({
+      show_dj: { show_id: OPEN_SHOW.id, dj_id: 'dj-eureka', active: true },
+      joined: false,
+    });
+    const res = createMockRes();
+
+    await joinShow(makeReq({ intent: 'join' }), res, next);
+
+    expect(mockBroadcast).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(200);
   });
 
   // A JSON `null` is what an unset optional serializes to from several of this
@@ -467,7 +481,10 @@ describe('joinShow — ownership is the only thing branch (c) reads (BS#2405)', 
   beforeEach(() => {
     mockGetLatestShow.mockResolvedValue(NATIVE_SHOW);
     mockResolveDjNameForShow.mockResolvedValue('DJ Houndstooth');
-    mockAddDJToShow.mockResolvedValue({ show_id: NATIVE_SHOW.id, dj_id: 'dj-eureka', active: true });
+    mockAddDJToShow.mockResolvedValue({
+      show_dj: { show_id: NATIVE_SHOW.id, dj_id: 'dj-eureka', active: true },
+      joined: true,
+    });
   });
 
   // The details payload is the half that settles the paired client change: the
