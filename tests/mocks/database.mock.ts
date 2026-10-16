@@ -1126,6 +1126,10 @@ export { ROTATION_BINS, parseRotationBin } from '../../shared/database/src/rotat
 export type { RotationBin, RotationBinParse } from '../../shared/database/src/rotation-bin.js';
 export type { IntParserOptions } from '../../shared/database/src/env-parsers.js';
 
+// Same pure-module-path rationale: `advisory-lock-keys` (BS#2059) is a bare const map, so the
+// mock forwards the real registry and a hand-copied one cannot drift.
+export { ADVISORY_LOCK_KEYS, RETIRED_ADVISORY_LOCK_KEYS } from '../../shared/database/src/advisory-lock-keys.js';
+
 // Same pure-module-path rationale as the env parsers above: `fold-artist-name`
 // has no runtime deps, so re-exporting it directly (never via the `@wxyc/database`
 // barrel) keeps `client.js` out of the mock. BS#2000's V/A arbiter layers the

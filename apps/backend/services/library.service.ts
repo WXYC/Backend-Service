@@ -69,6 +69,7 @@ import {
   NewRotationCard,
   RotationCard,
   LibraryArtistViewEntry,
+  ADVISORY_LOCK_KEYS,
 } from '@wxyc/database';
 import {
   LibraryResult,
@@ -5841,15 +5842,9 @@ export const countDeletedArchiveBatches = async (search?: string): Promise<numbe
  * Restores are rare and hand-driven, so serializing all of them behind one
  * key costs nothing.
  *
- * MUST stay distinct from the other advisory-lock keys in this codebase —
- * `pg_advisory_xact_lock` and `pg_try_advisory_lock` share one lock space
- * database-wide, so a reused number would serialize a restore behind an
- * unrelated cron. The census is on
- * `STATION_PASSCODE_ROTATE_ADVISORY_LOCK_KEY` in
- * `shared/authentication/src/station-passcode.ts`. Value is this key's
- * allocation date.
+ * The key is allocated in the `ADVISORY_LOCK_KEYS` registry, which documents the shared lock space.
  */
-export const RESTORE_BATCH_ADVISORY_LOCK_KEY = 20260919;
+export const RESTORE_BATCH_ADVISORY_LOCK_KEY = ADVISORY_LOCK_KEYS.restoreBatch;
 
 /**
  * Same sub-`deadlock_timeout` bound, for the same reason, as
