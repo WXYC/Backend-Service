@@ -85,3 +85,43 @@ export const parseBooleanQueryParam = (raw: unknown, field: string): boolean => 
   if (raw === 'true') return true;
   throw new WxycError(`${field} must be true or false`, 400);
 };
+
+/**
+ * Parse an optional non-negative-integer query parameter or path segment.
+ * Returns `undefined` when absent, `null` when present but not a well-formed
+ * non-negative integer (the caller turns that into a 400). Strict — unlike
+ * `parseInt`, `'42abc'` and `'4.5'` are rejected rather than silently
+ * truncated to `42` and `4`.
+ */
+export function parseNonNegativeInt(raw: unknown): number | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    return null;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/**
+ * Parse an optional `limit` (1…`maxLimit`) and `offset` (>= 0) pair, throwing the 400 for a malformed or
+ * out-of-range value. Absent values come back `undefined` — the default is the query's, not the caller's.
+ */
+export const parseLimitOffset = (
+  rawLimit: unknown,
+  rawOffset: unknown,
+  maxLimit: number
+): { limit: number | undefined; offset: number | undefined } => {
+  const limit = parseNonNegativeInt(rawLimit);
+  if (limit === null || (limit !== undefined && (limit < 1 || limit > maxLimit))) {
+    throw new WxycError(`Invalid Parameter: limit must be an integer between 1 and ${maxLimit}`, 400);
+  }
+
+  const offset = parseNonNegativeInt(rawOffset);
+  if (offset === null) {
+    throw new WxycError('Invalid Parameter: offset must be a non-negative integer', 400);
+  }
+
+  return { limit, offset };
+};

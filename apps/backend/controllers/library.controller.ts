@@ -54,7 +54,7 @@ import {
   MAX_ALBUM_TEXT_LENGTH,
 } from '../utils/text-fields.js';
 import { INT4_MAX } from '../utils/constants.js';
-import { parseInt4BodyId, parseInt4PathId } from '../utils/query-params.js';
+import { parseInt4BodyId, parseInt4PathId, parseLimitOffset, parseNonNegativeInt } from '../utils/query-params.js';
 import { reviewsActor } from '../utils/review-grants.js';
 import { printReleaseReview } from '../services/review-print.service.js';
 
@@ -564,22 +564,8 @@ type ArtistCodePageWindow = { limit?: number; offset?: number };
  * trade: `?limit=abc` is a 400 either way, rather than a 400 when browsing and
  * a silent 200 when not.
  */
-const parseArtistCodePageWindow = (query: ArtistByCodeQuery): ArtistCodePageWindow => {
-  const limit = parseNonNegativeInt(query.limit);
-  if (limit === null || (limit !== undefined && (limit < 1 || limit > ARTIST_CODE_BUCKET_MAX_LIMIT))) {
-    throw new WxycError(
-      `Invalid Parameter: limit must be an integer between 1 and ${ARTIST_CODE_BUCKET_MAX_LIMIT}`,
-      400
-    );
-  }
-
-  const offset = parseNonNegativeInt(query.offset);
-  if (offset === null) {
-    throw new WxycError('Invalid Parameter: offset must be a non-negative integer', 400);
-  }
-
-  return { limit, offset };
-};
+const parseArtistCodePageWindow = (query: ArtistByCodeQuery): ArtistCodePageWindow =>
+  parseLimitOffset(query.limit, query.offset, ARTIST_CODE_BUCKET_MAX_LIMIT);
 
 /**
  * The number-less arm of `GET /library/artists/by-code` (BS#2489): browse the
@@ -1797,20 +1783,6 @@ export const getRotation: RequestHandler = async (req, res) => {
 const { UNCATALOGUED_ROTATION_MAX_LIMIT } = libraryService;
 
 /**
- * Parse an optional non-negative-integer query parameter or path segment.
- * Returns `undefined` when absent, `null` when present but not a well-formed
- * non-negative integer (the caller turns that into a 400). Strict — unlike
- * `parseInt`, `'42abc'` and `'4.5'` are rejected rather than silently
- * truncated to `42` and `4`.
- */
-function parseNonNegativeInt(raw: unknown): number | null | undefined {
-  if (raw === undefined) return undefined;
-  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return null;
-  const parsed = Number(raw);
-  return Number.isSafeInteger(parsed) ? parsed : null;
-}
-
-/**
  * `GET /library/rotation/uncatalogued` (BS#2109).
  *
  * The cataloging-backlog queue: rotation rows with no linked library
@@ -1848,18 +1820,7 @@ function parseNonNegativeInt(raw: unknown): number | null | undefined {
  * `tests/unit/routes/library-rotation-uncatalogued.route.test.ts`.
  */
 export const getUncataloguedRotation: RequestHandler = async (req, res) => {
-  const limit = parseNonNegativeInt(req.query.limit);
-  if (limit === null || (limit !== undefined && (limit < 1 || limit > UNCATALOGUED_ROTATION_MAX_LIMIT))) {
-    throw new WxycError(
-      `Invalid Parameter: limit must be an integer between 1 and ${UNCATALOGUED_ROTATION_MAX_LIMIT}`,
-      400
-    );
-  }
-
-  const offset = parseNonNegativeInt(req.query.offset);
-  if (offset === null) {
-    throw new WxycError('Invalid Parameter: offset must be a non-negative integer', 400);
-  }
+  const { limit, offset } = parseLimitOffset(req.query.limit, req.query.offset, UNCATALOGUED_ROTATION_MAX_LIMIT);
 
   // Same guard and same message as `getRotation` above. A repeated key arrives
   // as string[], which `.includes` rejects — a 400 rather than an unhandled
