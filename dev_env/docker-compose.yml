@@ -400,6 +400,19 @@ services:
         NPM_TOKEN: ${NPM_TOKEN:-}
     profiles: [e2e]
     environment:
+      # Override the Dockerfile's `ENV NODE_ENV=production` pin (BS#1097) so the
+      # rate limiters (every Express limiter in apps/auth/app.ts, sign-in
+      # included, and better-auth's built-in one) are not mounted: dj-site's
+      # Playwright setup signs in 5+ users per run, and a few back-to-back runs
+      # inside the window would otherwise 429 every user (BS#1690). The same
+      # switch also (a) mounts the four unauthenticated /auth/test/* helpers
+      # (verification-token, expire-session, confirm-user, reset-incomplete-user)
+      # on the published port, (b) stores email OTPs in plain text, (c) drops
+      # the Secure cookie attribute, and (d) returns raw error messages in 500
+      # bodies. That is the same posture as the ci-profile `auth` service above
+      # and dj-site's CI. The e2e profile is local/CI only and is never
+      # deployed; the production image keeps its pin.
+      - NODE_ENV=test
       - AUTH_PORT=8080
       - DB_HOST=e2e-db
       - DB_PORT=5432
