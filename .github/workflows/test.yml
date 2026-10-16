@@ -317,91 +317,43 @@ jobs:
           DB_USERNAME: dummy
           DB_PASSWORD: dummy
 
-      # BS#2009: `npm run typecheck` above covers apps/**, shared/**, and
-      # @wxyc/database only — jobs/** is out of scope (repo convention; ~20
-      # other jobs would surface an unknown pile of errors if typecheck's
-      # coverage were widened wholesale, see the CLAUDE.md testing-scope
-      # note). This job shipped with two TS2554s neither `npm run
-      # typecheck` nor its `tsup --minify` build (esbuild, transpile-only)
-      # ever caught, so CI stayed green on a non-compiling job. Narrow,
-      # per-job coverage instead of a fleet-wide typecheck expansion; the
-      # `@wxyc/database` + `@wxyc/lml-client` deps this job needs are
-      # already built by the `Type check` step above (its `lint:prebuild`
-      # dependency).
-      - name: 'Type check: va-apple-music-url-remediation (BS#2009)'
-        run: npm run typecheck --workspace=jobs/va-apple-music-url-remediation
-
-      # Same BS#2009 gap as above: this job carries the Track 2d
-      # precondition gate that stands between a rerun and an unrecoverable
-      # legal-name loss (DJ real-name PII safeguards plan) — the one job in
-      # jobs/** where shipping uncompiled-but-green is the worst possible
-      # place for that gap.
-      - name: 'Type check: auth-user-name-backfill'
-        run: npm run typecheck --workspace=jobs/auth-user-name-backfill
-
-      # Same BS#2009 gap again (BS#2295): this drain writes to `album_metadata`
-      # rows the live enrichment path also writes to, and its indeterminate-
-      # verdict branch is the difference between a retryable row and a
-      # permanently-nulled one — not a job to ship uncompiled-but-green.
-      - name: 'Type check: streaming-columns-drain'
-        run: npm run typecheck --workspace=jobs/streaming-columns-drain
-
-      # BS#2775: the bio fill writes to the same `album_metadata` rows as the
-      # drain above, behind the same kind of verdict branch. Root typecheck
-      # skips `jobs/**` (BS#2009), so it gets its own step from the scaffold on.
-      - name: 'Type check: album-metadata-bio-fill'
-        run: npm run typecheck --workspace=jobs/album-metadata-bio-fill
-
-      # BS#3137: same rationale as the bio-fill step above; its own step from
-      # the scaffold (BS#3140) on.
-      - name: 'Type check: album-metadata-reask'
-        run: npm run typecheck --workspace=jobs/album-metadata-reask
-
-      # Same narrow, per-job coverage rationale as the step above. This job
-      # writes to the live on-air `flowsheet` table under a PII mandate, so a
-      # transpile-only build silently shipping a type error is not an
-      # acceptable failure mode here.
-      - name: 'Type check: flowsheet-dj-name-scrub (BS#2281)'
-        run: npm run typecheck --workspace=jobs/flowsheet-dj-name-scrub
-
-      # Same BS#2009 gap again: this repair re-points `flowsheet.show_id` and
-      # `shows.primary_dj_id` for a whole evening of entries in one
-      # transaction, and it is explicitly NOT re-runnable — a second pass sees
-      # its own promoted `show_start` markers where the `dj_join` boundaries
-      # were and splits nothing. A transpile-only green build on a job whose
-      # failure mode is "one DJ's set filed under another DJ's name" is the
-      # gap this step exists to close.
-      - name: 'Type check: flowsheet-show-split'
-        run: npm run typecheck --workspace=jobs/flowsheet-show-split
-
-      # Same BS#2009 gap again: this job writes auth_member.role directly
-      # (dj -> member) outside better-auth's own hooks. A transpile-only
-      # green build silently shipping a type error is not an acceptable
-      # failure mode for a job that changes a DJ's station privileges.
-      - name: 'Type check: station-signup-review'
-        run: npm run typecheck --workspace=jobs/station-signup-review
-
-      # Same BS#2009 gap again: this job deletes rows from the station-signup
-      # audit trail. A transpile-only green build silently shipping a type
-      # error is not an acceptable failure mode for a job whose only output
-      # is a DELETE.
-      - name: 'Type check: auth-log-prune'
-        run: npm run typecheck --workspace=jobs/auth-log-prune
-
-      # BS#2009 gap again. Opted in while BS#2518 changed this job's SES
-      # credential resolution: root typecheck skips jobs/** and `tsup` is
-      # transpile-only, so the edited sender was verified by nothing in CI.
-      - name: 'Type check: metadata-no-match-digest'
-        run: npm run typecheck --workspace=jobs/metadata-no-match-digest
-
-      # BS#2009 gap again: this one-shot writes production catalog data
-      # (BS#2834) and is run by hand with tsx, so nothing else compiles it.
-      - name: 'Type check: comp-letter-backfill'
-        run: npm run typecheck --workspace=jobs/comp-letter-backfill
-
-      # BS#2009 gap again: a one-shot that writes production reviews, run by hand with tsx.
-      - name: 'Type check: album-reviews-import'
-        run: npm run typecheck --workspace=jobs/album-reviews-import
+      # BS#2009 / BS#3157: root `npm run typecheck` skips jobs/**, and `tsup`
+      # is transpile-only, so a job type error ships green. Every job that
+      # defines a `typecheck` script is covered here; a new job opts in by
+      # adding the script, with no workflow edit. The `@wxyc/database` and
+      # `@wxyc/lml-client` deps are built by the `Type check` step above.
+      #
+      # The step names every job it typechecks and every job it skips, so a
+      # job that loses or renames its `typecheck` script shows up in the log
+      # as a change in the first list rather than dropping out unnoticed.
+      # A job without the script is skipped, never failed: most jobs have not
+      # opted in. Workspaces are passed explicitly because npm matches a
+      # `--workspace` filter against `<filter>/*`, so `jobs/*` matches nothing.
+      - name: 'Type check: jobs'
+        run: |
+          checked=()
+          skipped=()
+          for pkg in jobs/*/package.json; do
+            dir=$(dirname "$pkg")
+            if node -e "process.exit(require('./$pkg').scripts?.typecheck ? 0 : 1)"; then
+              checked+=("$dir")
+            else
+              skipped+=("$dir")
+            fi
+          done
+          echo "Typechecking ${#checked[@]} job(s):"
+          printf '  %s\n' "${checked[@]}"
+          echo "Skipping ${#skipped[@]} job(s) with no typecheck script:"
+          printf '  %s\n' "${skipped[@]}"
+          if [ "${#checked[@]}" -eq 0 ]; then
+            echo "::error::No job defines a typecheck script; the jobs typecheck step has nothing to run."
+            exit 1
+          fi
+          args=()
+          for dir in "${checked[@]}"; do
+            args+=("--workspace=$dir")
+          done
+          npm run typecheck "${args[@]}"
 
       - name: Lint
         run: npm run lint

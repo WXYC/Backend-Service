@@ -97,4 +97,4 @@ The two mitigations for "hand-rolled is fragile":
 npx jest --config jest.unit.config.ts tests/unit/jobs/library-label-backfill
 ```
 
-`dump.ts` and `resolve.ts` are covered there and are type-checked in CI as a side effect (ts-jest compiles them through `tests/tsconfig.json`). `job.ts` — argument parsing, the census pass and file writing — is not imported by any test; the repo's root `typecheck` skips `jobs/**` by convention, so run `npm run typecheck --workspace=jobs/library-label-backfill` after editing it.
+`dump.ts` and `resolve.ts` are covered there and are type-checked in CI as a side effect (ts-jest compiles them through `tests/tsconfig.json`). `job.ts` — argument parsing, the census pass and file writing — is not imported by any test; the repo's root `typecheck` skips `jobs/**` by convention, but CI's `Type check: jobs` step covers it. To check locally after editing it, run `npm run typecheck --workspace=jobs/library-label-backfill`.
