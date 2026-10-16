@@ -2264,8 +2264,17 @@ export const composeShowDJList = (
  *
  * When the open show has active `show_djs` rows (DJs with Backend-Service
  * accounts, including co-hosts), returns each with their `auth_user.id` string
- * and Anonymous-filtered `dj_name` — the pre-existing behavior, preserved
- * byte-for-byte (a filtered-away name yields `dj_name: null`, as it always has).
+ * and Anonymous-filtered `dj_name` (a filtered-away name yields `dj_name: null`,
+ * as it always has).
+ *
+ * Order is part of the contract (BS#2237): the show's `primary_dj_id` DJ comes
+ * first, then the rest ascending by `auth_user.id`. The underlying query has no
+ * ORDER BY, so without this the row order is plan-dependent and the list could
+ * reshuffle between polls. The id tiebreak is the same plain relational
+ * (code-unit, NOT `localeCompare`) comparator `activeMemberOnAirName` uses, so
+ * when the show has no primary DJ the first entry here is the DJ whose name the
+ * `getOnAirDJName` banner shows (apart from members with no resolvable name,
+ * which the banner skips and this list keeps).
  *
  * When the open show has NO account rows, it is a legacy/tubafrenzy-mirrored
  * show whose DJ identity lives in `shows.legacy_dj_name`. Those shows previously
@@ -2290,8 +2299,14 @@ export const getOnAirDJs = async (): Promise<ShowDJHandle[]> => {
   const accountDJs = await getDJsInShow(current_show.id, true);
   // Legacy/tubafrenzy-mirrored show: no account rows; identity is legacy_dj_name.
   const showLevelName = accountDJs.length > 0 ? null : await resolveDjNameForShow(current_show);
+  // getDJsInShow's user query has no ORDER BY, so the row order is plan-dependent
+  // and the banner could reshuffle between polls (BS#2237): primary first, then id.
+  const primaryId = current_show.primary_dj_id ?? null;
+  const ordered = [...accountDJs].sort(
+    (a, b) => Number(b.id === primaryId) - Number(a.id === primaryId) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
   return composeShowDJList(
-    accountDJs.map((dj) => ({ id: dj.id as string, djName: (dj.djName as string | null | undefined) ?? null })),
+    ordered.map((dj) => ({ id: dj.id as string, djName: (dj.djName as string | null | undefined) ?? null })),
     showLevelName
   );
 };
