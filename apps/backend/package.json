@@ -9,7 +9,7 @@
     "start": "node --import @sentry/node/import --import ./dist/instrument.js dist/app.js",
     "build": "tsup --minify",
     "clean": "rm -rf dist",
-    "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_backend_service:ci -f ../../Dockerfile.backend ../../",
+    "docker:build": "docker build --build-arg NPM_TOKEN=$NPM_TOKEN -t wxyc_backend_service:${CI_IMAGE_TAG:-ci} -f ../../Dockerfile.backend ../../",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit"
   },
