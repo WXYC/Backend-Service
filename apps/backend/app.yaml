@@ -20,6 +20,13 @@ components:
       description: JWT token from AWS Cognito
 
   schemas:
+    # The one rotation-bin definition; tests/unit/apps/backend/app-yaml-rotation-bin.test.ts pins it to ROTATION_BINS.
+    # The two bare `type: string` rotation_bin fields (AlbumView and CatalogExportRow) stay unreferenced: they are
+    # nullable passthroughs of the stored freq_enum value (so already limited to these bins), and wxyc-shared's
+    # AlbumSearchResult models the nullable form as allOf RotationBin + nullable.
+    RotationBin:
+      type: string
+      enum: ['S', 'L', 'M', 'H']
     FlowsheetEntry:
       type: object
       properties:
@@ -1092,8 +1099,7 @@ components:
           type: string
           format: date
         rotation_bin:
-          type: string
-          enum: ['S', 'L', 'M', 'H']
+          $ref: '#/components/schemas/RotationBin'
         kill_date:
           type: string
           format: date
@@ -1257,8 +1263,7 @@ components:
             release. `0` 400s — there is no `0` sentinel on this column;
             `library.id` is a serial starting at 1.
         rotation_bin:
-          type: string
-          enum: ['S', 'L', 'M', 'H']
+          $ref: '#/components/schemas/RotationBin'
         kill_date:
           type: string
           format: date
@@ -1348,8 +1353,7 @@ components:
           type: integer
           nullable: true
         rotation_bin:
-          type: string
-          enum: ['S', 'L', 'M', 'H']
+          $ref: '#/components/schemas/RotationBin'
         add_date:
           type: string
           format: date
