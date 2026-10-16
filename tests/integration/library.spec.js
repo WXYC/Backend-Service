@@ -89,10 +89,10 @@ describe('Library Catalog', () => {
       expect(res.body.length).toBe(0);
     });
 
-    test('code lookup returns 501 (not implemented)', async () => {
-      const res = await auth.get('/library').query({ code_letters: 'BUI', code_artist_number: '1' }).expect(501);
+    test('code pair alone is not a query shape and returns 400', async () => {
+      const res = await auth.get('/library').query({ code_letters: 'BUI', code_artist_number: '1' }).expect(400);
 
-      expectErrorContains(res, 'TODO');
+      expectErrorContains(res, 'Missing query parameter');
     });
 
     test('returns nested reconciled_identity (no flat external-ID columns)', async () => {

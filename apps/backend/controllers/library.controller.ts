@@ -237,8 +237,6 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
 type AlbumQueryParams = {
   artist_name?: string;
   album_title?: string;
-  code_letters?: string;
-  code_artist_number?: string;
   code_number?: number;
   n?: number;
   page?: number;
@@ -255,9 +253,8 @@ type AlbumQueryParams = {
  * text query — see #872). Still live alongside `GET /library/query`; the
  * modern experience's query-builder panel (`experiences/modern/catalog/`)
  * uses `/query` instead, so the two coexist by UI generation rather than one
- * superseding the other. `code_letters`/`code_artist_number` lookup is
- * accepted as a query shape but not implemented (throws 501 — see
- * `TODO: Library Code Lookup` below).
+ * superseding the other. A call-letters browse is not a query shape here;
+ * it lives on `GET /library/artists/by-code`.
  *
  * Auth: `requirePermissions({ catalog: ['read'] })` — DJ role or above.
  *
@@ -289,21 +286,8 @@ export const searchForAlbum: RequestHandler = async (req: Request<object, object
   // `on_streaming` is sufficient on its own to scope the result set (used by
   // dj-site Classic's "Browse Exclusive Albums" view, which surfaces all
   // non-streaming releases without a text query). See #872.
-  if (
-    query.artist_name === undefined &&
-    query.album_title === undefined &&
-    query.on_streaming === undefined &&
-    (query.code_letters === undefined || query.code_artist_number === undefined)
-  ) {
-    throw new WxycError(
-      'Missing query parameter. Query must include: artist_name, album_title, on_streaming, or code_letters and code_artist_number',
-      400
-    );
-  }
-
-  if (query.code_letters !== undefined && query.code_artist_number !== undefined) {
-    //quickly look up albums by that artist
-    throw new WxycError('TODO: Library Code Lookup', 501);
+  if (query.artist_name === undefined && query.album_title === undefined && query.on_streaming === undefined) {
+    throw new WxycError('Missing query parameter. Query must include: artist_name, album_title, or on_streaming', 400);
   }
 
   const onStreaming = query.on_streaming === 'true' ? true : query.on_streaming === 'false' ? false : undefined;
