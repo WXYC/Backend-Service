@@ -2,6 +2,8 @@
 
 Per-job detail moved verbatim out of `CLAUDE.md`'s Monorepo Layout table. `CLAUDE.md` keeps a one-line summary per job; this file holds the full text. See also [`packages.md`](packages.md) for the long package rows.
 
+## Jobs
+
 ### `@wxyc/flowsheet-etl`
 
 Path: `jobs/flowsheet-etl/`
@@ -277,3 +279,7 @@ Daily EC2-cron (BS#2363; renamed from `station-signup-attempt-prune` by WXYC/Bac
 Path: `jobs/comp-letter-backfill/`
 
 One-shot, dry-run by default (BS#2834): sets `genre_artist_crossreference.code_comp_letter` on the 52 Rock/Soundtracks compilation slots from the trailing ` - <letter>` of each slot's name, behind a gate requiring exactly A–Z per genre, the genre's own name form, every candidate NULL and no other row lettered. `--apply` reads, gates and writes in one locked transaction. Run by hand with tsx through an SSH tunnel; no Dockerfile. See its README.
+
+## Optional `cron-memory` cap
+
+A cron job (`job-type` `cron`) may set `"cron-memory"` in its `package.json`, for example `"192m"` or `"1g"`: a positive whole number followed by `m` or `g`, and at least `6m` because Docker rejects memory limits below 6MB. The deploy resolves it with `scripts/resolve-cron-memory.sh` and adds `--memory=<value>` to the job's `docker run` on the crontab line; a job without the field gets the same line as before. Any other value (`0m`, `5m`, `192`, `192mb`, `1.5g`, a number) fails the `Get Deploy Vars` step. Only `--memory` is set, matching the API container; there is no `--memory-swap`. Choose the value from a measured peak, per [`ops-cron-scheduling.md`](ops-cron-scheduling.md#cron-memory-caps).
