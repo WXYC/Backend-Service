@@ -115,6 +115,50 @@ describe('rotation_bin at each FSEntryFieldsRaw call site — rendered statement
     expect(await statementOf(run)).toContain(ROTATION_JOIN);
   });
 
+  // The whole `from ... order by` tail of each statement, pinned verbatim: the page subquery's inner join
+  // (getEntriesByPage), the four `withFlowsheetEntryJoins` left joins with their ON predicates in order, and
+  // each site's own where/order by. A join type or predicate swap (BS#2510), e.g. left -> inner or
+  // album_metadata keyed on the wrong flowsheet column, fails here. Rendered from the same chain written out inline.
+  const q = (table: string, column?: string) =>
+    column ? `"${SCHEMA}"."${table}"."${column}"` : `"${SCHEMA}"."${table}"`;
+  const ENTRY_JOINS =
+    ` left join ${q('rotation')} on ${q('rotation', 'id')} = ${q('flowsheet', 'rotation_id')}` +
+    ` left join ${q('library')} on ${q('library', 'id')} = ${q('flowsheet', 'album_id')}` +
+    ` left join ${q('album_metadata')} on ${q('album_metadata', 'album_id')} = ${q('flowsheet', 'album_id')}` +
+    ` left join ${q('labels')} on ${q('labels', 'id')} = ${q('rotation', 'label_id')}`;
+  const FROM_FLOWSHEET = ` from ${q('flowsheet')}`;
+  const FROM_PAGE =
+    ` from (select "id" from ${q('flowsheet')} order by ${q('flowsheet', 'add_time')} desc, ${q('flowsheet', 'id')} desc limit $1) "page"` +
+    ` inner join ${q('flowsheet')} on ${q('flowsheet', 'id')} = "page"."id"`;
+
+  const pinnedTails: Array<[string, () => Promise<unknown>, string]> = [
+    [
+      'getEntriesByPage',
+      () => getEntriesByPage(0, 50),
+      `${FROM_PAGE}${ENTRY_JOINS} order by ${q('flowsheet', 'add_time')} desc, ${q('flowsheet', 'id')} desc`,
+    ],
+    [
+      'getEntriesByRange',
+      () => getEntriesByRange(1000, 1050),
+      `${FROM_FLOWSHEET}${ENTRY_JOINS} where (${q('flowsheet', 'id')} >= $1 and ${q('flowsheet', 'id')} <= $2) order by ${q('flowsheet', 'id')} desc`,
+    ],
+    [
+      'getEntriesInTimeWindow',
+      () => getEntriesInTimeWindow(new Date('2026-08-14T04:00:00.000Z'), new Date('2026-08-15T04:00:00.000Z')),
+      `${FROM_FLOWSHEET}${ENTRY_JOINS} where (${q('flowsheet', 'add_time')} >= $1 and ${q('flowsheet', 'add_time')} < $2) order by ${q('flowsheet', 'add_time')} asc, ${q('flowsheet', 'id')} asc`,
+    ],
+    [
+      'getEntriesByShow',
+      () => getEntriesByShow(10, 11),
+      `${FROM_FLOWSHEET}${ENTRY_JOINS} where ${q('flowsheet', 'show_id')} in ($1, $2) order by ${q('flowsheet', 'play_order')} desc, ${q('flowsheet', 'id')} desc`,
+    ],
+  ];
+
+  it.each(pinnedTails)('%s renders the full pinned join chain and clauses', async (_name, run, tail) => {
+    const statement = await statementOf(run);
+    expect(statement.slice(-tail.length)).toBe(tail);
+  });
+
   // search.service.ts's first import of the fragment (BS#2699). Its own
   // describe block below: unlike the four call sites above, `searchFlowsheet`
   // issues two statements per call (the joined data query and the unjoined
