@@ -27,7 +27,12 @@ jest.mock('../../../apps/backend/utils/review-grants', () => ({
 }));
 
 import type { Request, Response } from 'express';
-import { acceptIntake, checkoutIntake, requestIntake } from '../../../apps/backend/controllers/intake.controller';
+import {
+  acceptIntake,
+  checkoutIntake,
+  passIntake,
+  requestIntake,
+} from '../../../apps/backend/controllers/intake.controller';
 
 const item = (digital: boolean) => ({ artist_name: 'Juana Molina', album_title: 'DOGA', digital });
 const respond = () => ({ json: jest.fn(), status: jest.fn(() => ({ json: jest.fn() })) }) as unknown as Response;
@@ -72,6 +77,20 @@ describe.each([
     mockNotifyDigital.mockReturnValue(new Promise<void>(() => {}));
     const res = await call(handler, { outcome: 'updated', item: item(true) });
     expect(res.json).toHaveBeenCalledWith(item(true));
+  });
+});
+
+describe('POST /intake/{id}/pass', () => {
+  test.each([
+    ['a request was answered', true, 1],
+    ['a held record was given back', false, 0],
+  ])('%s: the music directors are told %i time(s)', async (_name, answeredRequest, notices) => {
+    const res = await call(passIntake, { outcome: 'updated', item: item(false), answeredRequest });
+    expect(mockNotifyPass).toHaveBeenCalledTimes(notices);
+    if (answeredRequest) {
+      expect(mockNotifyPass).toHaveBeenCalledWith({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-1');
+    }
+    expect(res.json).toHaveBeenCalledWith(item(false));
   });
 });
 

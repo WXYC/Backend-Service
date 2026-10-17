@@ -200,8 +200,10 @@ const transition =
       return void conflict(res, 'state_changed');
     }
     // After the commit and not awaited, so SES never holds the response; the notice never rejects.
-    if (action === 'pass' && result.outcome === 'updated')
+    // A pass notifies only when it answered a request; a holder giving back a record they have leaves no one waiting.
+    if (action === 'pass' && result.outcome === 'updated' && result.answeredRequest) {
       void notifyPass({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);
+    }
     // The asked DJ is told, unless the review screens are not yet open to everyone (the notice checks `REVIEWS_AUDIENCE`).
     if (djId !== undefined && result.outcome === 'updated') {
       void notifyAsked({ id, artist: result.item.artist_name, album: result.item.album_title }, djId, actor.id);

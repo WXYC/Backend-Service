@@ -6110,9 +6110,9 @@ paths:
         schema:
           type: integer
     post:
-      summary: Pass on a request (BS#2798)
+      summary: Pass on an item (BS#2798, BS#3388)
       description: >-
-        Grant `reviews: write`; only the requested DJ. From effective `requested` (not expired) to `pool`, clearing the request fields and recording a row in `intake_item_passes`. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+        Returns the item to the review shelf and records a pass in `intake_item_passes`. Accepts two cases: a request (an item in effective state `requested`, called by the requested DJ) and a held item (an item in state `checked_out` whose holder is the caller and which has no submitted review; the holder's checkout, `checked_out_by` and `checked_out_at`, is cleared). The music directors are emailed only when the pass answers a request. Grant: `reviews: write`. Precedence: a caller without the `reviews` grant the route requires gets a 403 in any state; otherwise an item not in effective state `requested` or `checked_out`, or a `checked_out` item with a submitted review, answers 409 `state_changed` (a holder of an item whose review is submitted marks the disc returned with `POST /intake/{id}/release` instead); otherwise a caller who is neither the requested DJ nor the holder gets a 403. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
       responses:
         '200':
           description: 'The updated item'
@@ -6125,11 +6125,11 @@ paths:
         '401':
           description: 'Authentication required'
         '403':
-          description: 'Caller lacks `reviews: write`, or is not the requested DJ'
+          description: 'Caller lacks `reviews: write`, in any state; or the item is in effective state `requested`, or `checked_out` with no submitted review, and the caller is neither the requested DJ nor the holder'
         '404':
           description: 'No such intake item'
         '409':
-          description: '`state_changed`: the item is not in the state this action needs (an already-filed item included), or another caller got there first'
+          description: '`state_changed`: the item is not in effective state `requested` or `checked_out` (an already-filed item included), or it is `checked_out` with a submitted review, or another caller got there first'
           content:
             application/json:
               schema:

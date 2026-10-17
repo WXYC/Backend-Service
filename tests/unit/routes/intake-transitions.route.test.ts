@@ -82,7 +82,7 @@ const refused = (allowed: readonly string[]) =>
 
 beforeEach(() => {
   mockedJwtVerify.mockReset();
-  mockTransition.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM });
+  mockTransition.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM, answeredRequest: true });
   mockMemberAccount.mockReset().mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
   mockNotifyPass.mockReset();
   mockNotifyAsked.mockReset();
@@ -128,7 +128,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
     test('a notice that never settles does not hold the response', async () => {
       mockRole('dj');
       const item = { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA' };
-      mockTransition.mockResolvedValueOnce({ outcome: 'updated', item });
+      mockTransition.mockResolvedValueOnce({ outcome: 'updated', item, answeredRequest: true });
       mockNotifyPass.mockReturnValueOnce(new Promise<void>(() => {}));
       const res = await post(path, body);
       expect([res.status, res.body]).toEqual([200, item]);
@@ -158,7 +158,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
   test(`${takes ? 'starts' : 'never starts'} the digital notice for an updated digital item`, async () => {
     mockRole('stationManager');
     const item = { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA', digital: true };
-    mockTransition.mockResolvedValueOnce({ outcome: 'updated', item });
+    mockTransition.mockResolvedValueOnce({ outcome: 'updated', item, answeredRequest: true });
     const res = await post(path, body);
     expect([res.status, res.body]).toEqual([200, item]);
     expect(mockNotifyDigital).toHaveBeenCalledTimes(takes ? 1 : 0);
@@ -182,7 +182,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
     test('a digital notice that never settles does not hold the response', async () => {
       mockRole('dj');
       const item = { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA', digital: true };
-      mockTransition.mockResolvedValueOnce({ outcome: 'updated', item });
+      mockTransition.mockResolvedValueOnce({ outcome: 'updated', item, answeredRequest: true });
       mockNotifyDigital.mockReturnValueOnce(new Promise<void>(() => {}));
       const res = await post(path, body);
       expect([res.status, res.body]).toEqual([200, item]);

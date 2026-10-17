@@ -267,4 +267,75 @@ describe('/intake transitions (BS#2798)', () => {
       expect([res.status, res.body.reason]).toEqual([409, 'state_changed']);
     });
   });
+
+  /**
+   * BS#3388: `pass` takes a request from its DJ and a held item from its holder, and a held item with a submitted
+   * review from no one (its holder marks the disc returned with `release`). Who is emailed is not visible here
+   * (`EMAIL_ENABLED=false`): the controller's decision is pinned in tests/unit/controllers/intake.notices.controller.test.ts.
+   */
+  describe.each([false, true])('pass (digital: %s)', (digital) => {
+    const requestedOf = (dj, at = daysAgo(1)) => ({ state: 'requested', requested_dj_id: dj, requested_at: at });
+    const heldBy = (dj) => ({ checkout: { by: dj, at: daysAgo(2) } });
+    const draft = { status: 'draft' };
+    const submitted = { status: 'submitted' };
+    const callers = () => ({ djA, djB, manager });
+    // djA holds, djB is asked. Each seed is a function because the DJ ids exist only once the suite's setup has run.
+    const asked = () => requestedOf(global.secondary_dj_id);
+    const holding = () => heldBy(global.primary_dj_id);
+    const CASES = [
+      // [name, seed, reviews on the item, caller, status]
+      ['a request, passed by its DJ', asked, [], 'djB', 200],
+      ['a held item, passed by its holder', holding, [], 'djA', 200],
+      ["a held item with the holder's draft", holding, [draft], 'djA', 200],
+      ['a held item with a submitted review, by its holder', holding, [submitted], 'djA', 409],
+      ['a held item with a submitted review, by another DJ', holding, [submitted], 'djB', 409],
+      ['a held item with a submitted review, by a manager', holding, [submitted], 'manager', 409],
+      ["another DJ's request", asked, [], 'djA', 403],
+      ["a manager passing someone else's request", asked, [], 'manager', 403],
+      ["another DJ's held item", holding, [], 'djB', 403],
+      ["a manager passing someone else's held item", holding, [], 'manager', 403],
+      ['a pool item', () => ({}), [], 'djA', 409],
+      ['a reviewed item with a checkout', () => ({ state: 'reviewed', ...holding() }), [], 'djA', 409],
+      ['a reviewed item with no checkout', () => ({ state: 'reviewed' }), [], 'djA', 409],
+      ['a filed item', () => ({ state: 'filed', album_id: libraryId, filed_at: daysAgo(1) }), [], 'djA', 409],
+      ['a request older than 7 days', () => requestedOf(global.secondary_dj_id, daysAgo(8)), [], 'djB', 409],
+    ];
+
+    test.each(CASES)('%s: %i', async (name, overrides, reviews, caller, status) => {
+      const id = await seed(`pass-${digital}-${name}`, { digital, ...overrides() });
+      const seededReviews = [];
+      for (const review of reviews) {
+        const author = review.status === 'draft' ? { author_user_id: global.primary_dj_id } : {};
+        seededReviews.push(await seedReview({ intake_item_id: id, ...review, ...author }));
+      }
+      const before = await row(id);
+
+      const res = await post(callers()[caller], id, 'pass');
+      expect(res.status).toBe(status);
+      const after = await row(id);
+
+      if (status === 200) {
+        expect([
+          after.state,
+          after.requested_dj_id,
+          after.requested_at,
+          after.checked_out_by,
+          after.checked_out_at,
+        ]).toEqual(['pool', null, null, null, null]);
+        expect(await passes(id)).toEqual([{ dj_id: caller === 'djA' ? global.primary_dj_id : global.secondary_dj_id }]);
+        for (const { id: reviewId, status: reviewStatus } of seededReviews) {
+          const kept = (await sql`SELECT status FROM ${sql(SCHEMA)}.reviews WHERE id = ${reviewId}`)[0];
+          expect(kept.status).toBe(reviewStatus);
+          const edit = await djA.patch(`/reviews/${reviewId}`).send({ review: 'Finished after passing.' });
+          expect(edit.status).toBe(200);
+        }
+      } else {
+        if (status === 409) {
+          expect(res.body.reason).toBe('state_changed');
+        }
+        expect(after).toEqual(before);
+        expect(await passes(id)).toHaveLength(0);
+      }
+    });
+  });
 });
