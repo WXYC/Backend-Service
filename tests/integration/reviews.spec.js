@@ -146,6 +146,30 @@ describe('/reviews create and edit (BS#2802)', () => {
       ]);
     });
 
+    test.each([
+      ['the author', () => djA, { review: 'Same.', credit: 'dj_name' }],
+      ['a music director', () => manager, { review: 'Same.', fcc: null }],
+    ])(
+      'a patch equal to the stored review from %s leaves last_modified and the history alone',
+      async (_who, who, patch) => {
+        const seeded = await seedReview({
+          album_id: libraryId,
+          author_user_id: global.primary_dj_id,
+          review: 'Same.',
+          credit: 'dj_name',
+        });
+        const stamp = () => sql.unsafe(`SELECT last_modified FROM "${SCHEMA}".reviews WHERE id = $1`, [seeded.id]);
+        const [before] = await stamp();
+        const res = await who().patch(`/reviews/${seeded.id}`).send(patch);
+        expect([res.status, res.body.review]).toEqual([200, 'Same.']);
+        expect((await stamp())[0].last_modified).toEqual(before.last_modified);
+        expect(await revisions(seeded.id)).toEqual([]);
+        const changed = await djA.patch(`/reviews/${seeded.id}`).send({ review: 'Different.' });
+        expect(changed.status).toBe(200);
+        expect((await stamp())[0].last_modified.getTime()).toBeGreaterThan(before.last_modified.getTime());
+      }
+    );
+
     test("only the author's account sets consent: a music director's credit patch is 403 with its own message and nothing changes", async () => {
       const mine = await seedReview({ album_id: libraryId, author_user_id: global.primary_dj_id });
       const res = await manager.patch(`/reviews/${mine.id}`).send({ credit: 'real_name' });
