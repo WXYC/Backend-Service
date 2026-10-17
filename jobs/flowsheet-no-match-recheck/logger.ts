@@ -94,6 +94,16 @@ export const captureError = (error: unknown, step: string, extra: Record<string,
   Sentry.captureException(error, { tags: { step }, extra });
 };
 
+/** Capture a warning message to Sentry, fingerprinted per step so repeats group into one issue. */
+export const captureWarning = (message: string, step: string, extra: Record<string, unknown> = {}): void => {
+  Sentry.captureMessage(message, {
+    level: 'warning',
+    fingerprint: ['flowsheet-no-match-recheck', step],
+    tags: { step },
+    extra,
+  });
+};
+
 /** Flush pending Sentry events. Call from the entrypoint's `finally`. */
 export const closeLogger = async (): Promise<void> => {
   await Sentry.close(2000);

@@ -83,9 +83,11 @@
  *   FLOWSHEET_NO_MATCH_RECHECK_LML_PER_CALL_TIMEOUT_MS=N   default 35000
  *   LIVE_ACTIVITY_LOOKBACK_SECONDS=N                 default 60; 0 disables cooperative pause
  *   LIVE_ACTIVITY_PAUSE_MS=N                         default 30000
+ *   FLOWSHEET_NO_MATCH_RECHECK_MAX_GAP_HOURS=N       default 24 (gap-check warning threshold)
  */
 
-import { closeDatabaseConnection, db, requirePositiveInt } from '@wxyc/database';
+import * as Sentry from '@sentry/node';
+import { closeDatabaseConnection, db, getLastRunTimestamp, requirePositiveInt, updateLastRun } from '@wxyc/database';
 
 import {
   runNoMatchRecheck,
@@ -121,7 +123,7 @@ import {
   setCursorPosition,
   wrapCursor,
 } from './watermark.js';
-import { initLogger, log, captureError, closeLogger } from './logger.js';
+import { initLogger, log, captureError, captureWarning, closeLogger } from './logger.js';
 
 const requireLmlConfigured = (): void => {
   if (!process.env.LIBRARY_METADATA_URL) {
@@ -292,10 +294,99 @@ export const runRecheckPasses = async (plan: RecheckPassPlan, deps: RecheckPassD
   };
 };
 
-const main = async (): Promise<void> => {
-  initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
-  const dryRun = resolveDryRun();
-  try {
+// ---- Liveness (BS#2187, the BS#2064 recipe from `legacy-linkage-resolve`) ----
+
+/**
+ * Must stay byte-identical to `package.json`'s `cron-schedule`, which is what
+ * `deploy-base.yml` installs in the EC2 crontab. Sentry upserts the monitor
+ * from this value on the first check-in; pinned by a unit test because tsup
+ * does not bundle `package.json` into `dist/`.
+ */
+export const CRON_SCHEDULE = '47 */6 * * *';
+
+/** Minutes past the scheduled slot before Sentry counts a check-in as missed. */
+export const CHECKIN_MARGIN_MINUTES = 15;
+
+/** Minutes a run may stay `in_progress` before Sentry marks it timed out; under the 6h cadence, since the next slot's `docker rm -f` SIGKILLs a survivor. */
+export const MAX_RUNTIME_MINUTES = 5 * 60;
+
+type MonitorConfig = NonNullable<Parameters<typeof Sentry.withMonitor>[2]>;
+
+export const MONITOR_CONFIG: MonitorConfig = {
+  schedule: { type: 'crontab', value: CRON_SCHEDULE },
+  checkinMargin: CHECKIN_MARGIN_MINUTES,
+  maxRuntime: MAX_RUNTIME_MINUTES,
+  // `47 */6` is a wall-clock expression, so the zone is load-bearing; the host
+  // crontab runs in UTC (`deploy-base.yml` installs it with no TZ line).
+  timezone: 'Etc/UTC',
+  // Silence is the failure signal for this job: one missed slot should raise
+  // an issue, and one good check-in should resolve it.
+  failureIssueThreshold: 1,
+  recoveryThreshold: 1,
+};
+
+/**
+ * Own `cronjob_runs` row, apart from the cursor rows: written on every
+ * completed non-dry run, including one with an empty candidate batch, so a
+ * quiet run is never mistaken for a gap.
+ */
+export const LIVENESS_JOB_NAME = `${JOB_NAME}:liveness`;
+
+/**
+ * Hours before the gap is worth a warning. The gap runs from the start of the
+ * last completed non-dry run (the time the heartbeat stores) to the start of
+ * this run, and the warning fires only when it is greater than this value. At
+ * the 6h cadence, k missed or failed slots give a gap of 6 × (k + 1) hours:
+ * three give about 24h, which warns or not depending on a few seconds of
+ * start-time jitter, and four (30h) always warn. A backstop to the Sentry
+ * monitor, not a replacement: it can fire only once the job runs again,
+ * whereas a missed check-in fires while the job is still down.
+ */
+export const MAX_RUN_GAP_HOURS_DEFAULT = 24;
+
+export const MAX_RUN_GAP_HOURS_ENV = 'FLOWSHEET_NO_MATCH_RECHECK_MAX_GAP_HOURS';
+
+export const resolveMaxRunGapHours = (raw: string | undefined = process.env[MAX_RUN_GAP_HOURS_ENV]): number =>
+  requirePositiveInt(raw, MAX_RUN_GAP_HOURS_ENV, MAX_RUN_GAP_HOURS_DEFAULT, { unit: 'hours' });
+
+/** Elapsed hours (fractional) between the last completed run and this one. */
+export const gapHours = (lastRunMs: number, startedAtMs: number): number =>
+  (startedAtMs - lastRunMs) / (60 * 60 * 1000);
+
+/** Warn (never fail) when the previous completed run is further back than the threshold. */
+const reportRunGap = async (startedAt: Date): Promise<void> => {
+  const lastRunMs = await getLastRunTimestamp(LIVENESS_JOB_NAME);
+  if (lastRunMs === null) {
+    log('info', 'gap-check', 'No prior heartbeat; first run since liveness landed.', { last_run: null });
+    return;
+  }
+  const gap = gapHours(lastRunMs, startedAt.getTime());
+  const maxGap = resolveMaxRunGapHours();
+  const fields = {
+    last_run: new Date(lastRunMs).toISOString(),
+    gap_hours: Number(gap.toFixed(2)),
+    max_gap_hours: maxGap,
+  };
+  log('info', 'gap-check', 'Elapsed since the last completed run.', fields);
+  if (gap > maxGap) {
+    log('warn', 'gap-check', 'Previous completed run is past the gap threshold.', fields);
+    captureWarning(`${JOB_NAME}.run_gap_exceeded`, 'gap-check', { ...fields, cron_schedule: CRON_SCHEDULE });
+  }
+};
+
+/**
+ * One execution with its liveness signals attached, in the shape of
+ * `legacy-linkage-resolve`'s `runOnce`.
+ *
+ * A dry run skips all of them. It must not send a check-in that Sentry would
+ * read as a scheduled execution: with `recoveryThreshold: 1`, one dry-run `ok`
+ * would resolve an open missed-check-in issue while the crontab entry is still
+ * missing. It must also not advance the heartbeat.
+ */
+export const runOnce = async (dryRun: boolean): Promise<void> => {
+  // The recheck itself: both candidate reads, both passes, and the cursor
+  // advance. The rest of `runOnce` is the liveness signals around it.
+  const recheck = async (): Promise<void> => {
     requireLmlConfigured();
     // Parsed inside the try so a misconfigured value routes through the
     // catch's Sentry capture + non-zero exit + the finally's cleanup,
@@ -445,8 +536,8 @@ const main = async (): Promise<void> => {
     // exits non-zero and captures to Sentry.
     if (!dryRun) {
       // Both advances come from `planCursorAdvance` as data — which row, which
-      // modulus, which totals — rather than being spelled out here. `main` is
-      // unexported and so untestable, and the BS#2222 review's mutation probe
+      // modulus, which totals — rather than being spelled out here. This body
+      // sat in the unexported `main` when the BS#2222 review's mutation probe
       // showed that both defects the earlier iterations fixed could be
       // reintroduced at exactly this spot with a fully green suite. Nothing in
       // this block may name a `cronjob_runs` row or a modulus of its own.
@@ -485,6 +576,46 @@ const main = async (): Promise<void> => {
       tail_resolved: tailTotals.resolved,
       tail_resolved_dry: tailTotals.resolved_dry,
     });
+  };
+
+  if (dryRun) {
+    await recheck();
+    return;
+  }
+
+  const startedAt = new Date();
+  // Fail-open: the recheck is the job, the gap report is telemetry about it. A
+  // malformed max-gap value or an unreadable `cronjob_runs` row must not stop
+  // the run, and must not send an `error` check-in for a fault in telemetry.
+  try {
+    await reportRunGap(startedAt);
+  } catch (error) {
+    log('warn', 'gap-check', 'Gap check failed; continuing with the recheck.', {
+      error_message: (error as Error).message,
+    });
+    captureError(error, 'gap-check');
+  }
+
+  // The heartbeat is inside the monitored callback, after the whole run, so a
+  // run that throws neither checks in `ok` nor stamps liveness. It does not
+  // depend on the run's totals: an empty candidate batch is a healthy run.
+  // `withMonitor` re-throws, so `main`'s catch is unchanged.
+  await Sentry.withMonitor(
+    JOB_NAME,
+    async () => {
+      await recheck();
+      await updateLastRun(LIVENESS_JOB_NAME, startedAt);
+    },
+    MONITOR_CONFIG
+  );
+  log('info', 'heartbeat', 'Recorded cronjob_runs heartbeat.', { last_run: startedAt.toISOString() });
+};
+
+const main = async (): Promise<void> => {
+  initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
+  const dryRun = resolveDryRun();
+  try {
+    await runOnce(dryRun);
   } catch (error) {
     log('error', 'failed', `${JOB_NAME} failed`, { error_message: (error as Error).message });
     captureError(error, 'failed');
