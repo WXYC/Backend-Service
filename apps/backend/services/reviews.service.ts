@@ -539,6 +539,12 @@ export const updateReview = async (id: number, patch: ReviewFields, actor: Revie
     if (current.status === 'submitted' && current.medium === 'typed' && text === null) {
       return { outcome: 'text_required' as const };
     }
+    // A patch that changes nothing writes nothing: no UPDATE, so `last_modified` stays, and no revision or notice.
+    if (
+      [...CONTENT_FIELDS, ...CONSENT_FIELDS].every((key) => patch[key] === undefined || patch[key] === current[key])
+    ) {
+      return { outcome: 'updated' as const, review: current, authorNotice: undefined, fccNotice: undefined };
+    }
     const revises =
       current.status === 'submitted' &&
       CONTENT_FIELDS.some((key) => patch[key] !== undefined && patch[key] !== current[key]);

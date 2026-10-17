@@ -921,6 +921,43 @@ describe('updateReview', () => {
     expect(mockWrites.updated).toMatchObject({ fcc: 'x' });
   });
 
+  describe('a patch that matches the stored review', () => {
+    const consented = { publish_apps: true, credit: 'dj_name' };
+    test.each([
+      ['a draft', { status: 'draft', fcc: 'same' }, { fcc: 'same' }, DJ],
+      ['a submitted review', { fcc: 'same' }, { review: 'kept', fcc: 'same' }, DJ],
+      ['a consent-only patch from the author', consented, { publish_apps: true, credit: 'dj_name' }, DJ],
+      ['a content-only patch from a music director', { fcc: 'same' }, { fcc: 'same' }, MD],
+      ['null against a stored null', { credit: null }, { artist_blurb: null, credit: null }, DJ],
+      ['undefined keys alongside equal ones', {}, { review: 'kept', fcc: undefined }, DJ],
+      ['an empty patch', {}, {}, DJ],
+    ])('%s writes nothing and answers the stored review', async (_name, current, patch, actor) => {
+      const row = stored(current);
+      script(current, [row]);
+      expect(await updateReview(3, patch, actor)).toEqual({ outcome: 'updated', review: row });
+      expect(mockStatements).toEqual(['select#0', 'select#1', 'select#2']);
+      expect(mockWrites.updated).toBeUndefined();
+      expect(mockInserts).toEqual([]);
+    });
+
+    test.each([
+      ['one changed field', { fcc: 'new' }],
+      ['a blank against a stored null', { artist_blurb: '' }],
+      ['equal and changed keys together', { review: 'kept', fcc: 'new' }],
+      ['a changed consent key', { credit: 'none' }],
+    ])('%s still updates', async (_name, patch) => {
+      script({}, [{ name: 'Test Reviewer' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      mockUpdatedRow = stored(patch);
+      expect((await updateReview(3, patch, DJ)).outcome).toBe('updated');
+      expect(mockWrites.updated).toMatchObject({ ...patch, last_modified: expect.anything() });
+    });
+
+    test('the edit rules still run first', async () => {
+      script({ fcc: 'same' });
+      expect(await updateReview(3, { fcc: 'same' }, { id: 'dj-2', manage: false })).toEqual({ outcome: 'forbidden' });
+    });
+  });
+
   describe('revisions', () => {
     const editor = [{ name: 'Test Reviewer' }];
 
