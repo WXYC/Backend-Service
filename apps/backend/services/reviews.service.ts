@@ -525,7 +525,9 @@ export const writeFirstRevisionIfMissing = async (
  * consent-only patch included, so it is a bound on the content's age rather than its exact time;
  * it is NOT NULL and earlier than this edit, so the history never shows the author's text stamped
  * at the moment of someone else's edit. The response is read back through `selectReview` after
- * all writes.
+ * all writes. A patch whose supplied content and consent keys (`undefined` ones ignored) all equal the locked row's
+ * values writes nothing, after the edit and text rules have run: no UPDATE, so `last_modified` stays (BS#3381), no
+ * revision, no first revision and no notice; the answer is the review as stored.
  */
 export const updateReview = async (id: number, patch: ReviewFields, actor: ReviewsActor) =>
   db.transaction(async (tx) => {

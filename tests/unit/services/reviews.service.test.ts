@@ -941,15 +941,18 @@ describe('updateReview', () => {
     });
 
     test.each([
-      ['one changed field', { fcc: 'new' }],
-      ['a blank against a stored null', { artist_blurb: '' }],
-      ['equal and changed keys together', { review: 'kept', fcc: 'new' }],
-      ['a changed consent key', { credit: 'none' }],
-    ])('%s still updates', async (_name, patch) => {
-      script({}, [{ name: 'Test Reviewer' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }], [stored({})]);
+      ['one changed field', { fcc: 'new' }, ['review_revisions']],
+      ['a blank against a stored null', { artist_blurb: '' }, ['review_revisions']],
+      ['equal and changed keys together', { review: 'kept', fcc: 'new' }, ['review_revisions']],
+      ['a changed consent key, which writes no revision', { credit: 'none' }, []],
+      ['equal content and a changed consent key, which writes no revision', { fcc: null, publish_apps: true }, []],
+    ])('%s still updates and bumps last_modified', async (_name, patch, revisionTables) => {
+      const revises = revisionTables.length > 0;
+      script({}, ...(revises ? [[{ name: 'Test Reviewer' }], [{ n: 1 }], [{ id: 3 }], [{ n: 1 }]] : []), [stored({})]);
       mockUpdatedRow = stored(patch);
       expect((await updateReview(3, patch, DJ)).outcome).toBe('updated');
       expect(mockWrites.updated).toMatchObject({ ...patch, last_modified: expect.anything() });
+      expect(mockInserts.map((i) => i.table)).toEqual(revisionTables);
     });
 
     test('the edit rules still run first', async () => {
