@@ -136,10 +136,11 @@ export const toAlbumReviewDTO = (row: AlbumReviewRow): AlbumReviewDTO => ({
  * rows of 1,689, and without this the endpoint would contradict the archive's
  * own "1,687 rows with a body" framing. The public attach carries the same
  * predicate (`album-metadata-lookup.service.ts`), so the two surfaces differ
- * in consent, and in one more way: this list leaves out a row that
- * `jobs/album-reviews-import` has copied into `reviews`, while the public attach
- * does not. Its presence also means this builder never returns `undefined`.
- * When that row is left out and when it is listed again is set out in ADR 0011
+ * in consent, and in two more ways the public attach does not share: this list
+ * leaves out a row that `jobs/album-reviews-import` has copied into `reviews`,
+ * and a row while a submitted review copied from it is on its own release. Its
+ * presence also means this builder never returns `undefined`. When such a row
+ * is left out and when it is listed again is set out in ADR 0011
  * (docs/adr/0011-album-review-submissions-separate-archive.md).
  *
  * `album_id` is an exact match on the link column; `artist` normalizes
