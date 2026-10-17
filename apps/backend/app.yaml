@@ -600,7 +600,10 @@ components:
         Any subset of the `IntakeItemFields`, plus setting or clearing the citation. `digital` is not a patch field, and a `format_id` is refused with a 400 on an item whose `digital` is true. `cited_album_id` and
         `cited_submission_id` are mutually exclusive as non-null values: a patch may not carry both non-null, but
         may set one while clearing the other. Setting one citation clears the other, so the single-key form
-        `{cited_submission_id: 12}` is the canonical switch.
+        `{cited_submission_id: 12}` is the canonical switch. Setting either citation to a non-null value also withdraws a
+        pending request in the same step: a `requested` item becomes `pool` and its requested DJ and request time are
+        cleared (a lapsed request included), with no notice sent; a `checked_out` item keeps its holder, and clearing a
+        citation leaves a request alone.
       allOf:
         - $ref: '#/components/schemas/IntakeItemFields'
         - type: object

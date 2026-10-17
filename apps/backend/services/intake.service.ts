@@ -42,9 +42,9 @@ export { mayFileItem, lockReleaseRow };
  * whose request is more than 7 days old, or whose `requested_dj_id` is NULL
  * because that DJ's account was deleted (or whose `requested_at` is NULL, so
  * there is no age to measure), reads as `pool`. An item whose checkout
- * (`checked_out_at`) is past 14 days is `overdue`, `checked_out` or `reviewed` alike. Reads never write, and neither does PATCH:
- * the stale request fields are cleared by the next transition that writes them —
- * checkout, request, cancel-request, accept or pass — never by a GET or an edit.
+ * (`checked_out_at`) is past 14 days is `overdue`, `checked_out` or `reviewed` alike. Reads never write, and a PATCH writes the
+ * request fields only to withdraw a pending request when it sets a citation (BS#3383): every other stale request field is
+ * cleared by the next transition that writes them — checkout, request, cancel-request, accept or pass — never by a GET or an edit.
  */
 
 export type IntakeItemState = (typeof intakeItemStateEnum.enumValues)[number];
@@ -292,6 +292,7 @@ const setsCitation = (patch: IntakeCitations) => patch.cited_album_id != null ||
  * A patch that changes the stored `cited_album_id` (a different release, null, or a submission cited instead) also takes off a review
  * accepted through that citation (`RELEASE_ACCEPTED_REVIEW`, decision 34): one that is not the item's own, found by reading the review row
  * unlocked (a review's `intake_item_id` never changes). Decided on the value the patch leaves, not on the key it carries.
+ * Setting a citation also withdraws a pending request in the same UPDATE (BS#3383): `requested` becomes `pool` and the request fields are nulled, a lapsed request included; a `checked_out` item keeps its holder.
  */
 export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
   if (patch.cited_album_id != null && patch.cited_submission_id != null) {
@@ -308,6 +309,9 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
     ? sql`${citationChanged} AND EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.id} = ${intake_items.accepted_review_id} AND ${reviews.intake_item_id} IS DISTINCT FROM ${intake_items.id})`
     : undefined;
   const unlessKept = (column: SQL, cleared: SQL) => sql`CASE WHEN ${takesOffReview} THEN ${cleared} ELSE ${column} END`;
+  // Citing withdraws a pending request (a lapsed one is stored `requested` too); a `checked_out` holder and every other state stay.
+  const withdrawsRequest = setsCitation(patch) ? sql`${intake_items.state} = 'requested'` : undefined;
+  const unlessWithdrawn = (column: SQL) => sql`CASE WHEN ${withdrawsRequest} THEN NULL ELSE ${column} END`;
   return db
     .update(intake_items)
     .set({
@@ -316,7 +320,14 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
         accepted_review_id: unlessKept(sql`${intake_items.accepted_review_id}`, sql`NULL`),
         accepted_by: unlessKept(sql`${intake_items.accepted_by}`, sql`NULL`),
         accepted_at: unlessKept(sql`${intake_items.accepted_at}`, sql`NULL`),
-        state: unlessKept(sql`${intake_items.state}`, RELEASED_STATE),
+      }),
+      // One `state` key: `set` cannot carry two. `takesOffReview` acts on `reviewed`, the withdrawal on `requested`, so the arms never overlap.
+      ...((takesOffReview || withdrawsRequest) && {
+        state: sql`CASE${takesOffReview ? sql` WHEN ${takesOffReview} THEN ${RELEASED_STATE}` : sql``}${withdrawsRequest ? sql` WHEN ${withdrawsRequest} THEN 'pool'` : sql``} ELSE ${intake_items.state} END`,
+      }),
+      ...(withdrawsRequest && {
+        requested_dj_id: unlessWithdrawn(sql`${intake_items.requested_dj_id}`),
+        requested_at: unlessWithdrawn(sql`${intake_items.requested_at}`),
       }),
       // Setting one citation clears the other, in the same UPDATE.
       ...(patch.cited_album_id != null && { cited_submission_id: null }),
