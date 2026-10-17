@@ -5784,7 +5784,7 @@ paths:
     post:
       summary: Check an item off the review shelf (BS#2798)
       description: >-
-        Grant `reviews: write`. From effective `pool` (an expired request included) to `checked_out`, stamping `checked_out_by` and `checked_out_at` and clearing any stale request fields. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
+        Grant `reviews: write`. From effective `pool` (an expired request included) to `checked_out`, stamping `checked_out_by` and `checked_out_at` and clearing any stale request fields. An item with a submitted review waiting for a music director (`submitted_review_count` above 0, `accepted_review_id` null) is not on the review shelf and answers 409 `state_changed`, as an item someone else took first does. Each transition is one UPDATE whose WHERE carries the effective-state precondition, so racing callers get exactly one 200.
       responses:
         '200':
           description: 'The updated item'
