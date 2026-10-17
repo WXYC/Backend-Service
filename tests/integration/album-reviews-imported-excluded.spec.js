@@ -13,6 +13,7 @@ const { getTestDb } = require('../utils/db');
 const {
   seedLibraryRelease,
   seedIntakeItem,
+  removeSeededIntakeItems,
   removeSeededLibraryReleases,
   seedReview,
   seedFormSubmission,
@@ -78,6 +79,7 @@ describe('GET /album-reviews leaves out a row while a submitted copy of it is on
   });
 
   afterAll(async () => {
+    await removeSeededIntakeItems();
     await removeSeededFormSubmissions();
     await removeSeededLibraryReleases();
   });
@@ -89,7 +91,15 @@ describe('GET /album-reviews leaves out a row while a submitted copy of it is on
     ['a copy on another release', false, async () => ({ album_id: (await seedLibraryRelease()).id })],
     ['a copy on an unfiled record', false, async () => ({ intake_item_id: (await seedIntakeItem()).id })],
     ['a copy that was deleted', false, (form) => ({ album_id: form.album_id, remove: true })],
-    ['a citation with no copy', false, () => null],
+    // An unfiled item citing the row is what the citation-keyed rule this replaced left the row out for.
+    [
+      'a citation with no copy',
+      false,
+      async (form) => {
+        await seedIntakeItem({ cited_submission_id: form.id });
+        return null;
+      },
+    ],
   ])('with %s, the row is left out: %s', async (_name, excluded, copy) => {
     const artist = `Copy Probe ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const release = await seedLibraryRelease({ artist_name: artist });
