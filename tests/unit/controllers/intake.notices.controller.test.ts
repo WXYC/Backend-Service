@@ -84,7 +84,7 @@ describe('POST /intake/{id}/pass', () => {
   test.each([
     ['a request was answered', true, 1],
     ['a held record was given back', false, 0],
-  ])('%s: the music directors are told %i time(s)', async (_name, answeredRequest, notices) => {
+  ])('%s (answeredRequest %s): the music directors are told %i time(s)', async (_name, answeredRequest, notices) => {
     const res = await call(passIntake, { outcome: 'updated', item: item(false), answeredRequest });
     expect(mockNotifyPass).toHaveBeenCalledTimes(notices);
     if (answeredRequest) {
