@@ -510,7 +510,9 @@ export const transitionIntakeItem = async (action: IntakeAction, id: number, act
             .where(eq(intake_items.id, id))
             .for('update');
           const rows = await buildTransition(action, id, actor, djId, tx);
-          if (rows.length > 0) await tx.insert(intake_item_passes).values({ intake_item_id: id, dj_id: actor.id });
+          if (rows.length > 0) {
+            await tx.insert(intake_item_passes).values({ intake_item_id: id, dj_id: actor.id });
+          }
           return { updated: rows, answeredRequest: locked?.state === 'requested' };
         })
       : { updated: await buildTransition(action, id, actor, djId), answeredRequest: false };

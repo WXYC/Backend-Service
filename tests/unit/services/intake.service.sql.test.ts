@@ -451,6 +451,12 @@ describe('refusalOutcome — 409 state_changed ranks before the identity 403', (
       'forbidden',
     ],
     [
+      'a release of a held item that carries a submitted review, by someone else: forbidden, as only a transition marked blockedBySubmittedReview is blocked by the review',
+      { effective_state: 'checked_out', submitted_review_count: 1 },
+      { from: ['checked_out', 'reviewed'], identityGuarded: true },
+      'forbidden',
+    ],
+    [
       'an unguarded release of a reviewed item with no checkout',
       { effective_state: 'reviewed', checked_out_at: null },
       { from: ['checked_out', 'reviewed'], identityGuarded: false },
