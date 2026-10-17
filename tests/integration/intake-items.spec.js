@@ -89,6 +89,8 @@ describe('/intake (BS#2796)', () => {
     // BS#3052: the names are the staff name, so `real_name` is what shows when it has a value, and `name` when it is null or only whitespace.
     for (const [suffix, name, realName] of [
       ['requested', 'Requested DJ Name', 'Requested Real Name'],
+      ['asker', 'Asker DJ Name', 'Asker Real Name'],
+      ['asker-plain', 'Asker Plain Name', null],
       ['holder', 'Holder DJ Name', 'Holder Real Name'],
       ['passer', 'Passing DJ Name', 'Passing Real Name'],
       ['null-holder', 'Null Holder DJ Name', null],
@@ -106,12 +108,14 @@ describe('/intake (BS#2796)', () => {
     await seed('fresh-request', {
       state: 'requested',
       requested_dj_id: `${USER_PREFIX}requested`,
+      requested_by: `${USER_PREFIX}asker`,
       requested_at: daysAgo(1),
       logged_at: daysAgo(4),
     });
     await seed('stale-request', {
       state: 'requested',
       requested_dj_id: `${USER_PREFIX}requested`,
+      requested_by: `${USER_PREFIX}asker-plain`,
       requested_at: daysAgo(8),
       logged_at: daysAgo(9),
     });
@@ -251,6 +255,21 @@ describe('/intake (BS#2796)', () => {
     ])('a holder whose real_name is %s is named by auth_user.name (BS#3052)', async (_case, key, expected) => {
       const res = await auth.get('/intake');
       expect(mine(res.body).find((i) => i.id === ids[key]).checked_out_by_name).toBe(expected);
+    });
+
+    test.each([
+      ['the real name when the asker has one', 'fresh-request', `${USER_PREFIX}asker`, 'Asker Real Name'],
+      [
+        'the account name when the asker has no real name',
+        'stale-request',
+        `${USER_PREFIX}asker-plain`,
+        'Asker Plain Name',
+      ],
+      ['null when no account asked', 'deleted-dj-request', null, null],
+    ])('requested_by_name is %s', async (_case, key, askerId, expected) => {
+      const res = await auth.get(`/intake/${ids[key]}`);
+      expect(res.body.requested_by).toBe(askerId);
+      expect(res.body.requested_by_name).toBe(expected);
     });
 
     test('a request whose DJ account is gone still has a null requested_dj_name (BS#3052)', async () => {
@@ -629,7 +648,7 @@ describe('/intake (BS#2796)', () => {
       const requestFieldsOf = async (id) =>
         (
           await sql.unsafe(
-            `SELECT state, requested_dj_id, requested_at, checked_out_by, cited_album_id, cited_submission_id FROM "${SCHEMA}".intake_items WHERE id = $1`,
+            `SELECT state, requested_dj_id, requested_at, requested_by, checked_out_by, cited_album_id, cited_submission_id FROM "${SCHEMA}".intake_items WHERE id = $1`,
             [id]
           )
         )[0];
@@ -645,11 +664,19 @@ describe('/intake (BS#2796)', () => {
         },
         clear: { patch: { cited_album_id: null }, after: { cited_album_id: null, cited_submission_id: null } },
       });
-      const pending = { state: 'requested', requested_dj_id: requester, requested_at: daysAgo(1) };
-      const withdrawn = { state: 'pool', requested_dj_id: null, requested_at: null, checked_out_by: null };
+      const asker = `${USER_PREFIX}asker`;
+      const pending = { state: 'requested', requested_dj_id: requester, requested_by: asker, requested_at: daysAgo(1) };
+      const withdrawn = {
+        state: 'pool',
+        requested_dj_id: null,
+        requested_at: null,
+        requested_by: null,
+        checked_out_by: null,
+      };
       const kept = {
         state: 'requested',
         requested_dj_id: requester,
+        requested_by: asker,
         requested_at: expect.any(Date),
         checked_out_by: null,
       };
@@ -671,10 +698,17 @@ describe('/intake (BS#2796)', () => {
             checked_out_by: holder,
             checked_out_at: daysAgo(1),
             requested_dj_id: requester,
+            requested_by: asker,
             requested_at: daysAgo(10),
           },
           'album',
-          { state: 'checked_out', requested_dj_id: requester, requested_at: expect.any(Date), checked_out_by: holder },
+          {
+            state: 'checked_out',
+            requested_dj_id: requester,
+            requested_by: asker,
+            requested_at: expect.any(Date),
+            checked_out_by: holder,
+          },
         ],
         ['citing on a pool item changes only the citation', { state: 'pool' }, 'album', withdrawn],
         ['clearing a citation keeps the request', pending, 'clear', kept],

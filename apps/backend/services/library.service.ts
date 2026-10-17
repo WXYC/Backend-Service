@@ -6030,6 +6030,7 @@ export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
   intake_items: {
     logged_by: auth_user.id,
     requested_dj_id: auth_user.id,
+    requested_by: auth_user.id,
     checked_out_by: auth_user.id,
     cited_album_id: library.id,
     cited_submission_id: album_review_submissions.id,

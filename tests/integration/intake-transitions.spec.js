@@ -23,6 +23,7 @@ const {
   seedReview,
   removeSeededLibraryReleases,
   managerAccessToken,
+  managerUserId,
   seedAuthUser,
   seedMember,
   removeSeededAuthUsers,
@@ -108,6 +109,17 @@ describe('/intake transitions (BS#2798)', () => {
       expect(res.status).toBe(200);
       const after = await row(id);
       expect([after.state, after.requested_dj_id, after.requested_at]).toEqual(['checked_out', null, null]);
+    });
+
+    test('checkout clears the asking account of a lapsed request', async () => {
+      const id = await seed('expired-asker', {
+        state: 'requested',
+        requested_dj_id: MEMBER_ID,
+        requested_by: global.secondary_dj_id,
+        requested_at: daysAgo(8),
+      });
+      expect((await post(djA, id, 'checkout')).status).toBe(200);
+      expect((await row(id)).requested_by).toBeNull();
     });
 
     test('a live request is not pool: checkout is 409', async () => {
@@ -201,11 +213,13 @@ describe('/intake transitions (BS#2798)', () => {
       const after = await row(id);
       expect([after.state, after.requested_dj_id]).toEqual(['requested', global.secondary_dj_id]);
       expect(after.requested_at).not.toBeNull();
+      expect(after.requested_by).toBe(await managerUserId());
 
       expect((await post(manager, id, 'request', { dj_id: global.secondary_dj_id })).status).toBe(409);
       expect((await post(manager, id, 'cancel-request')).status).toBe(200);
       const cancelled = await row(id);
       expect([cancelled.state, cancelled.requested_dj_id, cancelled.requested_at]).toEqual(['pool', null, null]);
+      expect(cancelled.requested_by).toBeNull();
       expect((await post(manager, id, 'cancel-request')).status).toBe(409);
     });
 
@@ -219,19 +233,25 @@ describe('/intake transitions (BS#2798)', () => {
 
   describe('accept / pass', () => {
     const requested = (key, at = daysAgo(1)) =>
-      seed(key, { state: 'requested', requested_dj_id: global.secondary_dj_id, requested_at: at });
+      seed(key, {
+        state: 'requested',
+        requested_dj_id: global.secondary_dj_id,
+        requested_by: AUTO_DJ_ID,
+        requested_at: at,
+      });
 
     test('the requested DJ accepts: checked out, request fields cleared', async () => {
       const id = await requested('accept');
       const res = await post(djB, id, 'accept');
       expect(res.status).toBe(200);
       const after = await row(id);
-      expect([after.state, after.checked_out_by, after.requested_dj_id, after.requested_at]).toEqual([
-        'checked_out',
-        global.secondary_dj_id,
-        null,
-        null,
-      ]);
+      expect([
+        after.state,
+        after.checked_out_by,
+        after.requested_dj_id,
+        after.requested_at,
+        after.requested_by,
+      ]).toEqual(['checked_out', global.secondary_dj_id, null, null, null]);
     });
 
     test.each(['accept', 'pass'])(
@@ -249,7 +269,12 @@ describe('/intake transitions (BS#2798)', () => {
       const id = await requested('pass');
       expect((await post(djB, id, 'pass')).status).toBe(200);
       const after = await row(id);
-      expect([after.state, after.requested_dj_id, after.requested_at]).toEqual(['pool', null, null]);
+      expect([after.state, after.requested_dj_id, after.requested_at, after.requested_by]).toEqual([
+        'pool',
+        null,
+        null,
+        null,
+      ]);
       expect(await passes(id)).toEqual([{ dj_id: global.secondary_dj_id }]);
     });
 
