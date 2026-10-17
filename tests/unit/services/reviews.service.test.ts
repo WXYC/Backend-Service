@@ -211,7 +211,7 @@ describe('the stamped names are staff names (BS#3051)', () => {
     expect(nameLookups()).toEqual([staffNameText()]);
   });
 
-  test('the recorder named in the "recorded in your name" notice', async () => {
+  test('the recorder named in the "is in the DJ site" notice', async () => {
     mockQueue.push(
       [{ album_id: null, state: 'pool' }],
       [{ album_id: null, state: 'pool' }],
