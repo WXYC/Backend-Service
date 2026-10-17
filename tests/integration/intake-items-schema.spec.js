@@ -130,7 +130,15 @@ describe('intake_items schema (real PG)', () => {
   });
 
   describe('auth_user foreign keys', () => {
-    const ATTRIBUTIONS = ['logged_by', 'requested_dj_id', 'checked_out_by', 'filed_by', 'printed_by', 'finalized_by'];
+    const ATTRIBUTIONS = [
+      'logged_by',
+      'requested_dj_id',
+      'requested_by',
+      'checked_out_by',
+      'filed_by',
+      'printed_by',
+      'finalized_by',
+    ];
 
     it.each(ATTRIBUTIONS.map((c) => [c]))('nulls %s when the account is deleted', async (column) => {
       const userId = await seedUser();
@@ -141,6 +149,23 @@ describe('intake_items schema (real PG)', () => {
       const after = await getItem(item.id);
       expect(after).toBeDefined();
       expect(after[column]).toBeNull();
+    });
+
+    it('keeps the item and its request when the asker account is deleted', async () => {
+      const userId = await seedUser();
+      const dj = await seedUser();
+      const item = await insertItem({
+        state: 'requested',
+        requested_dj_id: dj,
+        requested_by: userId,
+        requested_at: new Date().toISOString(),
+      });
+
+      await sql`DELETE FROM auth_user WHERE id = ${userId}`;
+
+      const after = await getItem(item.id);
+      expect([after.state, after.requested_dj_id, after.requested_by]).toEqual(['requested', dj, null]);
+      expect(after.requested_at).not.toBeNull();
     });
 
     it('lets one deleted account clear every attribution on an item at once', async () => {

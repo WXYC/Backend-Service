@@ -3086,6 +3086,7 @@ export const intake_items = wxyc_schema.table(
     logged_by: varchar('logged_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     logged_at: timestamp('logged_at', { withTimezone: true }).defaultNow().notNull(),
     requested_dj_id: varchar('requested_dj_id', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
+    requested_by: varchar('requested_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     requested_at: timestamp('requested_at', { withTimezone: true }),
     checked_out_by: varchar('checked_out_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     checked_out_at: timestamp('checked_out_at', { withTimezone: true }),
