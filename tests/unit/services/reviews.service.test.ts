@@ -668,17 +668,11 @@ describe('recordReview (BS#2866: a music director records a review on behalf of 
       expect(mockInserts).toEqual([]);
     });
 
+    // Postgres truncates identifiers to 63 characters, so the name a real 23503 carries is the cut one, not the 64-character name the migration spells out.
+    const TRUNCATED_FK_NAME = 'reviews_copied_from_submission_id_album_review_submissions_id_f';
     test.each([
-      [
-        'a bare driver error',
-        { code: '23503', constraint_name: 'reviews_copied_from_submission_id_album_review_submissions_id_fk' },
-      ],
-      [
-        "drizzle's wrapper",
-        {
-          cause: { code: '23503', constraint_name: 'reviews_copied_from_submission_id_album_review_submissions_id_fk' },
-        },
-      ],
+      ['a bare driver error', { code: '23503', constraint_name: TRUNCATED_FK_NAME }],
+      ["drizzle's wrapper", { cause: { code: '23503', constraint_name: TRUNCATED_FK_NAME } }],
     ])(
       'a form row deleted between the check and the insert (%s, 23503 on copied_from_submission_id) is unknown_submission, not a 500',
       async (_label, error) => {

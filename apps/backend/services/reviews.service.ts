@@ -398,7 +398,9 @@ export const recordReview = async (
     });
   } catch (error) {
     // The account or the form row was deleted between its check above and this insert: the same answer as the check gives, not a 500.
-    if (isMissingReference(error, 'author_user_id')) return { outcome: 'unknown_author' as const };
+    if (isMissingReference(error, 'author_user_id')) {
+      return { outcome: 'unknown_author' as const };
+    }
     if (isMissingReference(error, 'copied_from_submission_id')) {
       return { outcome: 'unknown_submission' as const };
     }
