@@ -243,14 +243,13 @@ describe('notices', () => {
 
   // The station's copy of 2026-10-06 (BS#2806), pinned whole: subject, plain text (the sentences on separate
   // lines, then the full URL) and HTML (the same sentences, then the link). `{artist} – {album}` is an en dash.
-  // Copy round 5 (2026-10-11, BS#3103): a digital album is taken, not checked out, so each case carries a disc and a digital second sentence. Every (case, kind) pair reports as its own row.
-  const SUBMIT_CASES: [string, string | null, ReviewNotice['line'], string, string, string][] = [
+  // Copy round 10 (2026-10-16, BS#3392): one wording for a disc and a digital album, so every case runs for both kinds.
+  const SUBMIT_CASES: [string, string | null, ReviewNotice['line'], string, string][] = [
     [
       'from the holder',
       NOTICE.author,
       { kind: 'holder' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
-      'This review is from the DJ who has the record.',
       'This review is from the DJ who has the record.',
     ],
     [
@@ -259,45 +258,40 @@ describe('notices', () => {
       { kind: 'other_dj', holderName: 'Test Holder' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
       'This review is from another DJ; the record is with Test Holder.',
-      'This review is from another DJ; Test Holder has taken the record.',
     ],
     [
       "from another DJ, while the holder's name is null",
       NOTICE.author,
       { kind: 'other_dj', holderName: null },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
-      'This review is from another DJ; the record is checked out to a different DJ.',
-      'This review is from another DJ; a different DJ has taken the record.',
+      'This review is from another DJ; the record is with a different DJ.',
     ],
     [
       'from another DJ, while the holder was removed',
       NOTICE.author,
       { kind: 'removed_holder' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
-      "This review is from another DJ; the record is checked out and its holder's account was removed.",
-      'This review is from another DJ; the record was taken by an account that has since been removed.',
+      'This review is from another DJ; the record is with an account that was removed.',
     ],
     [
       'from another DJ, while nobody has the record',
       NOTICE.author,
       { kind: 'pool' },
       'A review of Juana Molina – DOGA by Test Reviewer is waiting to be accepted.',
-      'This review is from another DJ; nobody has the record checked out.',
-      'This review is from another DJ; nobody has taken the record.',
+      'This review is from another DJ; nobody has the record.',
     ],
     [
       'with a null author snapshot',
       null,
       { kind: 'pool' },
       'A review of Juana Molina – DOGA by a DJ is waiting to be accepted.',
-      'This review is from another DJ; nobody has the record checked out.',
-      'This review is from another DJ; nobody has taken the record.',
+      'This review is from another DJ; nobody has the record.',
     ],
   ];
   test.each(
-    SUBMIT_CASES.flatMap(([name, author, line, first, disc, digital]) => [
-      [`${name}, for a disc`, false, author, line, first, disc] as const,
-      [`${name}, for a digital album`, true, author, line, first, digital] as const,
+    SUBMIT_CASES.flatMap(([name, author, line, first, second]) => [
+      [`${name}, for a disc`, false, author, line, first, second] as const,
+      [`${name}, for a digital album`, true, author, line, first, second] as const,
     ])
   )('the submit email, %s, is the decided copy', async (_name, isDigital, author, line, first, second) => {
     mockQueue.push(DIRECTORS);
@@ -335,7 +329,7 @@ describe('notices', () => {
     test('goes to every music director but the taker, in the decided copy, from one lookup of the taker', async () => {
       mockQueue.push([TAKER], DIRECTORS);
       await notifyDigitalTaken(ITEM_4, 'md-1');
-      const body = 'Test Taker took Juana Molina – DOGA to review. Send the files to taker@example.org.';
+      const body = 'Test Taker is reviewing Juana Molina – DOGA. Send the files to taker@example.org.';
       expect(Object.keys(mockSelected[0])).toEqual(['name', 'email']);
       expect(mockSelected[0].email).toBe(user.email);
       // The fragment's values are Postgres's; staff-name.test.ts pins them. Here the lookup must select the fragment, not `user.name` or `user.realName`.
@@ -395,10 +389,10 @@ describe('notices', () => {
     ])('notice 2 with %s is the decided copy', async (_n, name, shown) => {
       mockQueue.push(ACCOUNT);
       await notifyReviewRecorded({ ...AUTHOR, name });
-      const first = `${shown} recorded a review of Juana Molina – DOGA in your name.`;
+      const first = `${shown} put your review of Juana Molina – DOGA into the DJ site.`;
       expect(sent()).toEqual({
         to: ['dj@example.org'],
-        subject: 'A review was recorded in your name: Juana Molina – DOGA',
+        subject: 'Your review of Juana Molina – DOGA is in the DJ site',
         text: `${first}\n${SECOND}\n${REVIEW_URL}`,
         html: `<p>${first}</p><p>${SECOND.replace(/'/g, '&#39;')}</p>${OPEN}`,
       });
