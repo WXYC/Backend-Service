@@ -414,7 +414,7 @@ const TRANSITIONS: Record<
     also?: SQL;
   }
 > = {
-  checkout: { from: ['pool'], set: TAKEN },
+  checkout: { from: ['pool'], set: TAKEN, also: sql`${submittedReviewCount} = 0` },
   release: {
     from: ['checked_out', 'reviewed'],
     set: () => ({

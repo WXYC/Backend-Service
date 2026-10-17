@@ -20,6 +20,7 @@ const {
   seedIntakeItem,
   removeSeededIntakeItems,
   seedLibraryRelease,
+  seedReview,
   removeSeededLibraryReleases,
   managerAccessToken,
   seedAuthUser,
@@ -43,7 +44,12 @@ describe('/intake transitions (BS#2798)', () => {
   let libraryId;
 
   const seed = async (key, overrides = {}) => {
-    const row = { artist_name: `${PREFIX} ${key}`, album_title: `Album ${key}`, format_id: formatId, ...overrides };
+    const row = {
+      artist_name: `${PREFIX} ${key}`,
+      album_title: `Album ${key}`,
+      ...(!overrides.digital && { format_id: formatId }),
+      ...overrides,
+    };
     return (await seedIntakeItem(row)).id;
   };
   const row = async (id) => (await sql`SELECT * FROM ${sql(SCHEMA)}.intake_items WHERE id = ${id}`)[0];
@@ -111,6 +117,29 @@ describe('/intake transitions (BS#2798)', () => {
         requested_at: daysAgo(1),
       });
       expect((await post(djA, id, 'checkout')).status).toBe(409);
+    });
+
+    describe.each([false, true])('a pool item with reviews (digital: %s)', (digital) => {
+      test.each([
+        ['no review', [], 200],
+        ['a draft only', [{ status: 'draft' }], 200],
+        ['a submitted review', [{ status: 'submitted' }], 409],
+        ['a submitted review that was then deleted', [{ status: 'submitted', deleted: true }], 200],
+      ])('%s', async (name, reviews, status) => {
+        const id = await seed(`reviews-${digital}-${name}`, { digital });
+        for (const { deleted, ...review } of reviews) {
+          const { id: reviewId } = await seedReview({ intake_item_id: id, ...review });
+          if (deleted) {
+            await sql`DELETE FROM ${sql(SCHEMA)}.reviews WHERE id = ${reviewId}`;
+          }
+        }
+        const res = await post(djA, id, 'checkout');
+        expect(res.status).toBe(status);
+        if (status === 409) {
+          expect(res.body.reason).toBe('state_changed');
+          expect((await row(id)).state).toBe('pool');
+        }
+      });
     });
 
     test('a filed item is 409 state_changed, a missing one 404', async () => {
