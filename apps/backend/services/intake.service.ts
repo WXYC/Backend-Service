@@ -75,7 +75,7 @@ export const submittedReviewCount = sql<number>`(SELECT count(*)::int FROM ${rev
 /** The passes on an item as a JSON array, correlated on the outer `intake_items.id` through `outerRef` so it stays correct in a single-table select. */
 export const passesSql = sql<
   IntakeItemResponse['passes']
->`(SELECT coalesce(json_agg(json_build_object('dj_name', ${staffNameSql(user)}, 'passed_at', ${intake_item_passes.passed_at}) ORDER BY ${intake_item_passes.passed_at}, ${intake_item_passes.id}), '[]'::json) FROM ${intake_item_passes} JOIN ${user} ON ${user.id} = ${intake_item_passes.dj_id} WHERE ${intake_item_passes.intake_item_id} = ${outerRef(intake_items.id)})`;
+>`(SELECT coalesce(json_agg(json_build_object('dj_name', ${staffNameSql(user)}, 'passed_at', ${intake_item_passes.passed_at}, 'dj_id', ${intake_item_passes.dj_id}) ORDER BY ${intake_item_passes.passed_at}, ${intake_item_passes.id}), '[]'::json) FROM ${intake_item_passes} JOIN ${user} ON ${user.id} = ${intake_item_passes.dj_id} WHERE ${intake_item_passes.intake_item_id} = ${outerRef(intake_items.id)})`;
 
 /**
  * The `author` of each review on the item, as a JSON array correlated on `intake_items.id`: oldest first by
@@ -99,7 +99,7 @@ export type IntakeItemResponse = Omit<
   draft_authors?: string[];
   requested_dj_name: string | null;
   checked_out_by_name: string | null;
-  passes?: { dj_name: string; passed_at: string }[];
+  passes?: { dj_name: string; passed_at: string; dj_id: string }[];
 };
 
 export type IntakeFields = Pick<

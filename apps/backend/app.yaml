@@ -565,6 +565,10 @@ components:
                 description: >-
                   The passing DJ's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
               passed_at: { type: string, format: date-time }
+              dj_id:
+                type: string
+                description: >-
+                  The passing account's `auth_user.id`, so a client can match a pass to an account without comparing names. Station-only: not for any public or anonymous surface; never for client telemetry (analytics properties, error breadcrumbs, logs).
         draft_authors:
           type: array
           items: { type: string }
@@ -829,6 +833,22 @@ components:
         name:
           type: string
           description: 'The real name, else the account name (on-air handle, else username) when none is on file. Never `dj_name`.'
+        on_air_name:
+          type: string
+          nullable: true
+          description: >-
+            The account's on-air name as the public playlist shows it (`auth_user.dj_name`, except that a literal "Anonymous" counts as none); `null` when there is none. Station-only: not for any public surface, because this is an activity fact about a person; never for client telemetry (analytics properties, error breadcrumbs, logs).
+        records_out:
+          type: integer
+          minimum: 0
+          description: >-
+            How many unfiled records the account has checked out or taken now (items in state `checked_out` or `reviewed` that it holds). Station-only: not for any public surface, because this is an activity fact about a person; never for client telemetry (analytics properties, error breadcrumbs, logs).
+        last_submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the account last submitted a review; `null` if never. Station-only: not for any public surface, because this is an activity fact about a person; never for client telemetry (analytics properties, error breadcrumbs, logs).
 
     ReviewRevision:
       type: object
@@ -6205,7 +6225,7 @@ paths:
     get:
       summary: The accounts that can be asked to review (BS#3058)
       description: >-
-        Grant `reviews: manage`. The accounts whose membership role grants `reviews: write` (the test `/intake`'s `dj_id` applies), banned accounts left out, and service accounts, such as the auto-DJ account, left out (a `dj_id` naming one is the same 400). `name` is the account's real name, else its account name when no real name is on file (never `dj_name`); sorted by `name`, case-insensitively. Staff-only: `name` can be a legal name, so it is never logged or sent to analytics.
+        Grant `reviews: manage`. The accounts whose membership role grants `reviews: write` (the test `/intake`'s `dj_id` applies), banned accounts left out, and service accounts, such as the auto-DJ account, left out (a `dj_id` naming one is the same 400). `name` is the account's real name, else its account name when no real name is on file (never `dj_name`); sorted by `name`, case-insensitively. Each reviewer also carries `on_air_name`, `records_out` and `last_submitted_at` (BS#3384). Staff-only: `name` can be a legal name and the other three are activity facts about a person, so none is logged or sent to analytics.
       responses:
         '200':
           description: 'The reviewers'

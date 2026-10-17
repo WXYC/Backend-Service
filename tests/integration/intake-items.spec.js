@@ -258,10 +258,12 @@ describe('/intake (BS#2796)', () => {
       expect(res.body.requested_dj_name).toBeNull();
     });
 
-    test("a caller holding reviews:manage sees passes on list items (the passing DJ's real name)", async () => {
+    test("a caller holding reviews:manage sees passes on list items (the passing DJ's real name, and their account id)", async () => {
       const res = await auth.get('/intake');
       const pooled = mine(res.body).find((i) => i.id === ids.pool);
-      expect(pooled.passes).toEqual([{ dj_name: 'Passing Real Name', passed_at: expect.any(String) }]);
+      expect(pooled.passes).toEqual([
+        { dj_name: 'Passing Real Name', passed_at: expect.any(String), dj_id: `${USER_PREFIX}passer` },
+      ]);
       const unpassed = mine(res.body).find((i) => i.id === ids['tie-first']);
       expect(unpassed.passes).toEqual([]);
     });

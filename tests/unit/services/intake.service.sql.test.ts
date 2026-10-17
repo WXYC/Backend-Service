@@ -245,6 +245,13 @@ describe('correlated select fields in a single-table select', () => {
   });
 });
 
+describe('passesSql (BS#3384)', () => {
+  it('carries the passing account id beside the name and the date', () => {
+    const { sql: rendered } = db.select({ field: passesSql }).from(intake_items).toSQL();
+    expect(rendered).toContain(`'dj_id', "dj_id")`);
+  });
+});
+
 describe('reviewAuthorsSql (BS#2860) — the one list behind draft_authors and deleted_review_authors', () => {
   const render = (draftsOnly?: boolean) =>
     new PgDialect().sqlToQuery(sql`SELECT ${reviewAuthorsSql(draftsOnly)} FROM ${intake_items}`).sql;
