@@ -4,6 +4,7 @@ import {
   db,
   extractConstraintName,
   extractSqlState,
+  album_review_submissions,
   artists,
   intake_items,
   library,
@@ -42,12 +43,17 @@ import type { RecordSubject } from '../utils/record-subject.js';
  * draft is created, edited, submitted and deleted here (submit and delete are BS#2854).
  */
 
+/** The stored `reviews` columns that are internal provenance: no response carries them (BS#3132, BS#3428). */
+const PROVENANCE_COLUMNS = ['imported_from_submission_id', 'copied_from_submission_id'] as const;
+type ProvenanceColumn = (typeof PROVENANCE_COLUMNS)[number];
+
 /**
  * Mirror of the contract's `Review` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x.
  * The last five keys are computed by `reviewSelection`, never stored. `imported_from_submission_id`, the import's
- * internal provenance (BS#3132), is stored but not part of the contract's `Review`, so no response carries it.
+ * internal provenance (BS#3132), and `copied_from_submission_id`, the form review a copy came from (BS#3428), are
+ * stored but not part of the contract's `Review`, so no response carries them.
  */
-export type ReviewResponse = Omit<Review, 'imported_from_submission_id'> & {
+export type ReviewResponse = Omit<Review, ProvenanceColumn> & {
   in_use: boolean;
   on_cover: boolean;
   printed_revision_id: number | null;
@@ -109,11 +115,11 @@ const ownLatestPrint = (column: 'revision_id' | 'printed_at') =>
 // Through `reviewRef`, never a bare `${reviews.id}`: in a single-table select that renders unqualified and would bind to `rr.id`.
 const revisionCount = sql<number>`(SELECT count(*)::int FROM ${review_revisions} AS rr WHERE rr.review_id = ${reviewRef})`;
 
-/** Every stored `reviews` column an API response carries: all but `imported_from_submission_id`, which stays internal. */
+/** Every stored `reviews` column an API response carries: all but the `PROVENANCE_COLUMNS`, which stay internal. */
 const responseColumns = () =>
   Object.fromEntries(
-    Object.entries(getTableColumns(reviews)).filter(([key]) => key !== 'imported_from_submission_id')
-  ) as Omit<typeof reviews._.columns, 'imported_from_submission_id'>;
+    Object.entries(getTableColumns(reviews)).filter(([key]) => !PROVENANCE_COLUMNS.includes(key as ProvenanceColumn))
+  ) as Omit<typeof reviews._.columns, ProvenanceColumn>;
 
 /** A review's response columns plus the computed `in_use`, `on_cover` (`onCover`, false unless a release list supplies it), `printed_revision_id`, `printed_at`, `revision_count`. */
 const reviewSelection = (onCover: SQL<boolean> = sql`false`) => ({
@@ -310,17 +316,24 @@ const printedCopies = async (tx: Pick<typeof db, 'select'>, reviewId: number, ne
     .map(({ item, album }): PrintedCopy => (item !== null ? { intake_item_id: item } : { album_id: album! }));
 };
 
-/** The on-behalf keys of `POST /reviews` (slice 13e): the free-text `author`, an optional linked account, the medium, and whether the review is accepted at once. */
-export type OnBehalf = { author: string; author_user_id?: string; medium: 'typed' | 'handwritten'; accept: boolean };
+/** The on-behalf keys of `POST /reviews` (slice 13e): the free-text `author`, an optional linked account, the medium, whether the review is accepted at once, and the form review a copy came from (BS#3428). */
+export type OnBehalf = {
+  author: string;
+  author_user_id?: string;
+  medium: 'typed' | 'handwritten';
+  accept: boolean;
+  copied_from_submission_id?: number;
+};
 
-/** A foreign-key miss on `reviews.author_user_id` (23503): the linked account no longer exists. Any other 23503 stays a 500. */
-const isUnknownAuthor = (error: unknown) =>
-  extractSqlState(error) === '23503' && extractConstraintName(error)?.includes('author_user_id') === true;
+/** A foreign-key miss (23503) on the `reviews` column `column`: the account or form row it names no longer exists. Any other 23503 stays a 500. */
+const isMissingReference = (error: unknown, column: string) =>
+  extractSqlState(error) === '23503' && extractConstraintName(error)?.includes(column) === true;
 
 /**
  * `POST /reviews` for a caller with `reviews: manage` who sends the on-behalf keys (slice 13e). Recorded by
  * the caller (`recorded_by_user_id`) for the typed `author`, whom `author_user_id` may link to an account (an
- * unknown one is `unknown_author`); nothing is ticked for publishing and `credit` stays null, because the author
+ * unknown one is `unknown_author`) and `copied_from_submission_id` may name the form review the copy came from
+ * (one naming no row is `unknown_submission`); nothing is ticked for publishing and `credit` stays null, because the author
  * never saw the question (the controller refuses fields that say otherwise). The subject is exempt from the
  * hold rule (`lockRecordSubject`). A typed review accepted at once needs text (`text_required`, before any
  * lock). With `accept` the draft is submitted and accepted for the item in the same transaction, through the
@@ -332,7 +345,7 @@ export const recordReview = async (
   onBehalf: OnBehalf,
   actor: ReviewsActor
 ) => {
-  const { accept, author_user_id, ...recorded } = onBehalf;
+  const { accept, author_user_id, copied_from_submission_id, ...recorded } = onBehalf;
   if (accept && recorded.medium === 'typed' && fields.review == null) return { outcome: 'text_required' as const };
   try {
     return await db.transaction(async (tx) => {
@@ -342,6 +355,15 @@ export const recordReview = async (
         const linked = await tx.select({ id: user.id }).from(user).where(eq(user.id, author_user_id));
         if (linked.length === 0) return { outcome: 'unknown_author' as const };
       }
+      if (copied_from_submission_id !== undefined) {
+        const source = await tx
+          .select({ id: album_review_submissions.id })
+          .from(album_review_submissions)
+          .where(eq(album_review_submissions.id, copied_from_submission_id));
+        if (source.length === 0) {
+          return { outcome: 'unknown_submission' as const };
+        }
+      }
       const [row] = await tx
         .insert(reviews)
         .values({
@@ -349,6 +371,7 @@ export const recordReview = async (
           ...target,
           ...recorded,
           author_user_id: author_user_id ?? null,
+          copied_from_submission_id: copied_from_submission_id ?? null,
           recorded_by_user_id: actor.id,
           status: 'draft',
         })
@@ -374,8 +397,11 @@ export const recordReview = async (
       return { outcome: 'created' as const, review, notice };
     });
   } catch (error) {
-    // The account was deleted between the check above and this insert: the same answer as the check gives, not a 500.
-    if (isUnknownAuthor(error)) return { outcome: 'unknown_author' as const };
+    // The account or the form row was deleted between its check above and this insert: the same answer as the check gives, not a 500.
+    if (isMissingReference(error, 'author_user_id')) return { outcome: 'unknown_author' as const };
+    if (isMissingReference(error, 'copied_from_submission_id')) {
+      return { outcome: 'unknown_submission' as const };
+    }
     throw error;
   }
 };

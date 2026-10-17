@@ -755,9 +755,16 @@ components:
                 type: boolean,
                 description: 'On-behalf (`reviews: manage`), `intake_item_id` subjects only (a 400 with `album_id`). True or omitted creates the review already `submitted` (revision 1 written) and accepted for the item in one transaction; a typed review then needs `review` text. False leaves a draft.',
               }
+            copied_from_submission_id:
+              {
+                type: integer,
+                minimum: 1,
+                description: 'On-behalf (`reviews: manage`), `intake_item_id` subjects only (a 400 with `album_id`). The form-archive review this review is a copy of. An id naming no form review is a 400. Stored, never returned.',
+              }
       description: >
-        Exactly one of `intake_item_id` and `album_id`. `author`, `author_user_id`, `medium` and `accept` (the on-behalf
-        shape, BS#2866) need `reviews: manage`; without one of them the create is the caller's own draft. An on-behalf
+        Exactly one of `intake_item_id` and `album_id`. `author`, `author_user_id`, `medium`, `accept` and
+        `copied_from_submission_id` (the on-behalf shape, BS#2866, BS#3428) need `reviews: manage`; without one of them
+        the create is the caller's own draft. An on-behalf
         review names its subject in any state (the hold rule does not apply), starts with no publishing surface ticked
         and `credit` null (sending either is a 400), and one of a `filed` or `finalized` item carries the item's `album_id`.
 

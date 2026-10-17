@@ -9,7 +9,12 @@ import {
   notifyReviewRecorded,
   notifyReviewSubmitted,
 } from '../services/review-notices.service.js';
-import { parseBooleanQueryParam, parseInt4PathId, parseInt4QueryParam } from '../utils/query-params.js';
+import {
+  parseBooleanQueryParam,
+  parseInt4BodyId,
+  parseInt4PathId,
+  parseInt4QueryParam,
+} from '../utils/query-params.js';
 import { parseRecordSubject } from '../utils/record-subject.js';
 import { reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
@@ -24,7 +29,7 @@ const TEXT_FIELDS = ['buzzwords', 'artist_blurb', 'review', 'recommended_tracks'
 const FLAG_FIELDS = ['publish_website', 'publish_apps', 'publish_instagram'] as const;
 
 /** The on-behalf keys (slice 13e). Without `reviews: manage` any of them is a 403. */
-const ON_BEHALF_KEYS = ['author', 'author_user_id', 'medium', 'accept'];
+const ON_BEHALF_KEYS = ['author', 'author_user_id', 'medium', 'accept', 'copied_from_submission_id'];
 
 /** The `ReviewFields` in a body. The text columns are unbounded `text`, so only the request size limits them. */
 const parseFields = (body: Record<string, unknown>): ReviewFields => {
@@ -51,8 +56,9 @@ const conflict = (
 /**
  * The on-behalf keys of a body: `author` is required and kept whole (a long one is a 400, never cut, because the
  * music director typed it), `medium` is `typed` (the default) or `handwritten`, and `accept` defaults to true
- * for an intake item and may not be sent for a release. Nothing may be ticked for publishing and `credit` stays null:
- * the author never saw the question.
+ * for an intake item and may not be sent for a release. `copied_from_submission_id` (BS#3428), the form review a
+ * copy came from, is a positive int4 and, like `accept`, belongs to an intake item. Nothing may be ticked for
+ * publishing and `credit` stays null: the author never saw the question.
  */
 const parseOnBehalf = (body: Record<string, unknown>, hasItem: boolean): OnBehalf => {
   const author = validateTextField(body.author, 'author', AUTHOR_MAX);
@@ -63,18 +69,26 @@ const parseOnBehalf = (body: Record<string, unknown>, hasItem: boolean): OnBehal
   if (medium !== 'typed' && medium !== 'handwritten') throw new WxycError('medium must be typed or handwritten', 400);
   if (accept !== undefined && typeof accept !== 'boolean') throw new WxycError('accept must be a boolean', 400);
   if (accept !== undefined && !hasItem) throw new WxycError('accept applies only to an intake_item_id subject', 400);
+  const copied_from_submission_id = parseInt4BodyId(body.copied_from_submission_id, 'copied_from_submission_id');
+  if (copied_from_submission_id !== undefined && !hasItem) {
+    throw new WxycError('copied_from_submission_id applies only to an intake_item_id subject', 400);
+  }
   if (FLAG_FIELDS.some((key) => body[key] === true) || (body.credit !== undefined && body.credit !== null)) {
     throw new WxycError('An on-behalf review starts with no publishing choice set', 400);
   }
-  return { author, author_user_id, medium, accept: hasItem && accept !== false };
+  return { author, author_user_id, medium, accept: hasItem && accept !== false, copied_from_submission_id };
 };
 
 export const createReview: RequestHandler = async (req, res) => {
   const body = req.body ?? {};
   const actor = reviewsActor(req);
   const onBehalf = ON_BEHALF_KEYS.some((key) => key in body);
-  if (onBehalf && !actor.manage)
-    throw new WxycError('author, author_user_id, medium and accept require reviews: manage', 403);
+  if (onBehalf && !actor.manage) {
+    throw new WxycError(
+      'author, author_user_id, medium, accept and copied_from_submission_id require reviews: manage',
+      403
+    );
+  }
   const subject = parseRecordSubject(body);
   const fields = parseFields(body);
   const recorded = onBehalf
@@ -91,6 +105,9 @@ export const createReview: RequestHandler = async (req, res) => {
   }
   if (result.outcome === 'text_required') throw new WxycError('A typed review needs text to be accepted', 400);
   if (result.outcome === 'unknown_author') throw new WxycError('author_user_id names no account', 400);
+  if (result.outcome === 'unknown_submission') {
+    throw new WxycError('copied_from_submission_id names no form review', 400);
+  }
   // After the commit and not awaited, like the submit notice: a failed send never fails the request.
   if (recorded?.outcome === 'created' && recorded.notice) void notifyReviewRecorded(recorded.notice);
   res.json(result.review);

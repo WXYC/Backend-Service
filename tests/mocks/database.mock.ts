@@ -623,6 +623,7 @@ export const reviews = {
   publish_instagram: 'reviews.publish_instagram',
   credit: 'reviews.credit',
   imported_from_submission_id: 'reviews.imported_from_submission_id',
+  copied_from_submission_id: 'reviews.copied_from_submission_id',
 };
 export const album_critic_reviews = {
   id: 'album_critic_reviews.id',

@@ -218,6 +218,20 @@ describe('DELETE /library/:id copies the cover review a record took from the rel
     expect(copy.imported_from_submission_id).toBeNull();
   });
 
+  test('a review copied from a form review keeps that provenance in the cover-review copy (BS#3428)', async () => {
+    const cited = await seedRelease();
+    const submission = await seedFormSubmission({ album_id: cited.id });
+    const { review } = await seedCoverReview(cited.id, 'copied', { copied_from_submission_id: submission.id });
+    const item = await seedItem({ cited_album_id: cited.id, accepted_review_id: review.id });
+
+    // The column is not unique, so unlike the import's it needs no omitting: the copy is still a copy of that form review.
+    await deleteRelease(cited.id);
+
+    const copy = await reviewJson((await itemRow(item.id)).accepted_review_id);
+    expect(copy).toMatchObject({ intake_item_id: item.id, review: `${marker} copied` });
+    expect(copy.copied_from_submission_id).toBe(submission.id);
+  });
+
   test('a record filed as another release is stamped with it, stays filed, and its release-level prints follow the copy', async () => {
     const cited = await seedRelease();
     const filedAs = await seedRelease({ album_title: 'Edits', artist_name: 'Chuquimamani-Condori' });

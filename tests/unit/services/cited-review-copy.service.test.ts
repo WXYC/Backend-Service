@@ -152,6 +152,14 @@ describe('copyCitedCoverReviews (BS#2875)', () => {
       expect(insert.sql).not.toContain('imported_from_submission_id');
     });
 
+    it('copies the form review a review was copied from: the copy is still a copy of that form review, and the column is not unique (BS#3428)', async () => {
+      const statements = await run();
+      const insert = statements.find((s) => s.sql.toLowerCase().startsWith(`insert into "${SCHEMA}"."reviews"`));
+
+      // once in the INSERT list, once in the SELECT list
+      expect(insert.sql.split('"copied_from_submission_id"').length - 1).toBe(2);
+    });
+
     it('stamps the copy with the record and the record’s own album, never the deleted release', async () => {
       const statements = await run({ id: 31, album_id: 77, accepted_review_id: 500 });
       const insert = statements.find((s) => s.sql.toLowerCase().startsWith(`insert into "${SCHEMA}"."reviews"`));

@@ -650,6 +650,76 @@ describe('recordReview (BS#2866: a music director records a review on behalf of 
     });
   });
 
+  describe('the form review a copy came from (BS#3428)', () => {
+    const copy = { ...ONBEHALF, accept: false, copied_from_submission_id: 5 };
+    const submissionReads = () => mockReads.filter((r) => r.table === 'album_review_submissions');
+
+    test('an existing form row is stored as copied_from_submission_id', async () => {
+      mockQueue.push(item(), item(), [{ id: 5 }], [created]);
+      expect((await recordReview({ intake_item_id: 4 }, {}, copy, MD)).outcome).toBe('created');
+      expect(mockInserts[0].values).toMatchObject({ copied_from_submission_id: 5 });
+      expect(submissionReads()).toHaveLength(1);
+      expect(submissionReads()[0].handle).toBe('tx');
+    });
+
+    test('a key naming no form row is unknown_submission and writes nothing', async () => {
+      mockQueue.push(item(), item(), []);
+      expect(await recordReview({ intake_item_id: 4 }, {}, copy, MD)).toEqual({ outcome: 'unknown_submission' });
+      expect(mockInserts).toEqual([]);
+    });
+
+    test.each([
+      [
+        'a bare driver error',
+        { code: '23503', constraint_name: 'reviews_copied_from_submission_id_album_review_submissions_id_fk' },
+      ],
+      [
+        "drizzle's wrapper",
+        {
+          cause: { code: '23503', constraint_name: 'reviews_copied_from_submission_id_album_review_submissions_id_fk' },
+        },
+      ],
+    ])(
+      'a form row deleted between the check and the insert (%s, 23503 on copied_from_submission_id) is unknown_submission, not a 500',
+      async (_label, error) => {
+        mockQueue.push(item(), item(), [{ id: 5 }]);
+        mockInsertError = Object.assign(new Error('insert or update violates foreign key constraint'), error);
+        expect(await recordReview({ intake_item_id: 4 }, {}, copy, MD)).toEqual({ outcome: 'unknown_submission' });
+      }
+    );
+
+    test('a 23503 on another constraint still propagates', async () => {
+      mockQueue.push(item(), item(), [{ id: 5 }]);
+      const thrown = Object.assign(new Error('boom'), {
+        code: '23503',
+        constraint_name: 'reviews_recorded_by_user_id_auth_user_id_fk',
+      });
+      mockInsertError = thrown;
+      await expect(recordReview({ intake_item_id: 4 }, {}, copy, MD)).rejects.toBe(thrown);
+    });
+
+    test('an unknown author is still answered first, before the form row is looked up', async () => {
+      mockQueue.push(item(), item(), []);
+      expect(await recordReview({ intake_item_id: 4 }, {}, { ...copy, author_user_id: 'nobody' }, MD)).toEqual({
+        outcome: 'unknown_author',
+      });
+      expect(submissionReads()).toEqual([]);
+    });
+
+    test('sending none is no lookup and a null column', async () => {
+      mockQueue.push(item(), item(), [created]);
+      await recordReview({ intake_item_id: 4 }, {}, { ...ONBEHALF, accept: false }, MD);
+      expect(submissionReads()).toEqual([]);
+      expect(mockInserts[0].values).toMatchObject({ copied_from_submission_id: null });
+    });
+
+    test('it is checked inside the transaction, before the accepted create writes anything', async () => {
+      mockQueue.push(item(), item(), []);
+      await recordReview({ intake_item_id: 4 }, {}, { ...copy, accept: true }, MD);
+      expect(mockStatements.filter((s) => s.startsWith('insert') || s === 'update')).toEqual([]);
+    });
+  });
+
   describe('the linked author of an on-behalf review', () => {
     const recorded = { status: 'draft' as const, author_user_id: 'dj-1', recorded_by_user_id: 'md-1' };
 
