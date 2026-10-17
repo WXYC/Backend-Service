@@ -232,12 +232,19 @@ describe('the stamped names are staff names (BS#3051)', () => {
   });
 });
 
-describe('listReviewers (BS#3058)', () => {
+describe('listReviewers (BS#3058, BS#3384)', () => {
   const render = (query: unknown) => new (jest.requireActual('drizzle-orm/pg-core').PgDialect)().sqlToQuery(query).sql;
   const HOUR = 3_600_000;
+  const open = { banned: null, banExpires: null, djName: null, recordsOut: 0, lastSubmittedAt: null };
+  const reviewer = (id: string, name: string) => ({
+    id,
+    name,
+    on_air_name: null,
+    records_out: 0,
+    last_submitted_at: null,
+  });
 
   test('keeps accounts whose roles grant reviews: write, once each, in the order the query returned', async () => {
-    const open = { banned: null, banExpires: null };
     mockQueue.push([
       { id: 'a', name: 'Test Reviewer A', role: 'member', ...open },
       { id: 'a', name: 'Test Reviewer A', role: 'dj', ...open },
@@ -247,20 +254,19 @@ describe('listReviewers (BS#3058)', () => {
       { id: 'a', name: 'Test Reviewer A', role: 'musicDirector', ...open },
     ]);
     expect(await listReviewers()).toEqual([
-      { id: 'a', name: 'Test Reviewer A' },
-      { id: 'b', name: 'Test Reviewer B' },
-      { id: 'c', name: 'Test Reviewer C' },
+      reviewer('a', 'Test Reviewer A'),
+      reviewer('b', 'Test Reviewer B'),
+      reviewer('c', 'Test Reviewer C'),
     ]);
   });
 
   test('leaves out the service accounts (the auto-DJ and the uptime canary), whatever their role', async () => {
-    const open = { banned: null, banExpires: null };
     mockQueue.push([
       { id: 'a', name: 'Test Reviewer A', role: 'dj', username: 'test.a', email: 'test.a@example.org', ...open },
       { id: 'auto', name: 'Auto DJ', role: 'dj', username: 'autodj', email: 'autodj@example.org', ...open },
       { id: 'canary', name: 'Canary', role: 'dj', username: 'test.canary', email: 'canary@wxyc.org', ...open },
     ]);
-    expect(await listReviewers()).toEqual([{ id: 'a', name: 'Test Reviewer A' }]);
+    expect(await listReviewers()).toEqual([reviewer('a', 'Test Reviewer A')]);
   });
 
   // The ban rule is `isBanInForce`: an expired ban counts as lifted though better-auth clears `banned` only at the next sign-in.
@@ -271,28 +277,53 @@ describe('listReviewers (BS#3058)', () => {
     ['a ban expiring in the future', { banned: true, banExpires: new Date(Date.now() + HOUR) }, false],
     ['a lapsed ban', { banned: true, banExpires: new Date(Date.now() - HOUR) }, true],
   ])('%s: listed is %s', async (_label, ban, listed) => {
-    mockQueue.push([{ id: 'a', name: 'Test Reviewer A', role: 'dj', ...ban }]);
-    expect(await listReviewers()).toEqual(listed ? [{ id: 'a', name: 'Test Reviewer A' }] : []);
+    mockQueue.push([{ id: 'a', name: 'Test Reviewer A', role: 'dj', ...open, ...ban }]);
+    expect(await listReviewers()).toEqual(listed ? [reviewer('a', 'Test Reviewer A')] : []);
   });
 
-  test('names by the staff name, reads the ban columns rather than filtering in SQL, sorts case-insensitively, and reads no dj_name', async () => {
+  // The on-air name is the public playlist's rule (`resolveDjDisplayName`): trimmed, and a literal "Anonymous" is none.
+  test.each([
+    ['a stage name', 'Test Stage', 'Test Stage'],
+    ['a padded stage name', '  Test Stage  ', 'Test Stage'],
+    ['the literal Anonymous', ' Anonymous ', null],
+    ['a blank name', '   ', null],
+    ['no name', null, null],
+  ])('on_air_name from %s', async (_label, djName, expected) => {
+    mockQueue.push([{ id: 'a', name: 'Test Reviewer A', role: 'dj', ...open, djName }]);
+    expect((await listReviewers())[0].on_air_name).toBe(expected);
+  });
+
+  test('passes the records out and the newest submission through', async () => {
+    const lastSubmittedAt = new Date('2026-10-01T12:00:00Z');
+    mockQueue.push([{ id: 'a', name: 'Test Reviewer A', role: 'dj', ...open, recordsOut: 2, lastSubmittedAt }]);
+    expect(await listReviewers()).toEqual([
+      { ...reviewer('a', 'Test Reviewer A'), records_out: 2, last_submitted_at: lastSubmittedAt },
+    ]);
+  });
+
+  test('names by the staff name, reads the ban columns rather than filtering in SQL, sorts case-insensitively, and gets the counts from two grouped joins in the one read', async () => {
     mockQueue.push([]);
     await listReviewers();
+    expect(mockReads).toHaveLength(1);
     const [read] = mockReads;
     const db = jest.requireMock('@wxyc/database');
     expect(read.table).toBe('auth_member');
     expect(Object.keys(read.columns).sort()).toEqual([
       'banExpires',
       'banned',
+      'djName',
       'email',
       'id',
+      'lastSubmittedAt',
       'name',
+      'recordsOut',
       'role',
       'username',
     ]);
     expect(render(read.columns.name)).toBe(render(db.staffNameSql(db.user)));
     expect(read.where).toBe('');
     expect(read.orderBy).toMatch(/^lower\(/);
+    expect(read.joins?.map((j) => j.kind)).toEqual(['inner', 'left', 'left']);
   });
 });
 

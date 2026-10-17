@@ -1,5 +1,5 @@
-import { and, desc, eq, getTableColumns, inArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
-import { alias } from 'drizzle-orm/pg-core';
+import { and, desc, eq, getTableColumns, inArray, isNotNull, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
+import { alias, QueryBuilder } from 'drizzle-orm/pg-core';
 import {
   db,
   extractConstraintName,
@@ -10,6 +10,7 @@ import {
   library,
   member,
   readStaffName,
+  resolveDjDisplayName,
   staffNameSql,
   review_prints,
   review_revisions,
@@ -692,17 +693,38 @@ export const deleteReview = async (id: number, actor: ReviewsActor) =>
     return { outcome: 'deleted' as const };
   });
 
-/** Mirror of the contract's `Reviewer` (`wxyc-shared/api.yaml`): an account a music director can ask to review. `name` is a real name (the staff name). */
-export type ReviewerResponse = { id: string; name: string };
+/** Mirror of the contract's `Reviewer` (`wxyc-shared/api.yaml`): an account a music director can ask to review. `name` is a real name (the staff name). The three activity fields are station-only; `last_submitted_at` serializes to an ISO string. */
+export type ReviewerResponse = {
+  id: string;
+  name: string;
+  on_air_name: string | null;
+  records_out: number;
+  last_submitted_at: Date | null;
+};
 
 /**
  * `GET /reviews/reviewers` (BS#3058): accounts whose membership roles grant `reviews: write` (`canBeAskedToReview`, the rule
  * `/intake` applies to `dj_id`, which leaves out service accounts such as the auto-DJ and the uptime canary), less any account whose ban is in force (`isBanInForce`: a lapsed ban counts as lifted, though
  * better-auth clears `auth_user.banned` only at the next sign-in), named by the staff name and sorted by it case-insensitively.
- * `name` is a real name: it goes in the response only.
+ * `name` is a real name: it goes in the response only. BS#3384 adds `on_air_name` (the public playlist's rule, `resolveDjDisplayName`),
+ * `records_out` (unfiled records the account holds: `checked_out` or `reviewed` with `checked_out_at` set) and `last_submitted_at`
+ * (its newest submitted review), the last two from grouped subqueries joined on the account, so the list stays one query. All three are station-only.
  */
 export const listReviewers = async (): Promise<ReviewerResponse[]> => {
   const name = staffNameSql(user);
+  const qb = new QueryBuilder();
+  const held = qb
+    .select({ holder: intake_items.checked_out_by, records: sql<number>`count(*)::int`.as('records') })
+    .from(intake_items)
+    .where(and(isNotNull(intake_items.checked_out_at), inArray(intake_items.state, ['checked_out', 'reviewed'])))
+    .groupBy(intake_items.checked_out_by)
+    .as('held');
+  const submitted = qb
+    .select({ author: reviews.author_user_id, newest: sql`max(${reviews.submitted_at})`.as('newest') })
+    .from(reviews)
+    .where(eq(reviews.status, 'submitted'))
+    .groupBy(reviews.author_user_id)
+    .as('submitted');
   const rows = await db
     .select({
       id: user.id,
@@ -712,14 +734,37 @@ export const listReviewers = async (): Promise<ReviewerResponse[]> => {
       email: user.email,
       banned: user.banned,
       banExpires: user.banExpires,
+      djName: user.djName,
+      recordsOut: sql<number>`coalesce(${held.records}, 0)`,
+      lastSubmittedAt: sql<Date | null>`${submitted.newest}`.mapWith(reviews.submitted_at),
     })
     .from(member)
     .innerJoin(user, eq(member.userId, user.id))
+    .leftJoin(held, eq(held.holder, user.id))
+    .leftJoin(submitted, eq(submitted.author, user.id))
     .orderBy(sql`lower(${name})`, user.id);
   const reviewers = new Map<string, ReviewerResponse>();
-  for (const { id, name: staffName, role, username, email, banned, banExpires } of rows) {
-    if (canBeAskedToReview({ roles: [role], username, email }) && !isBanInForce({ banned, banExpires }))
-      reviewers.set(id, { id, name: staffName });
+  for (const {
+    id,
+    name: staffName,
+    role,
+    username,
+    email,
+    banned,
+    banExpires,
+    djName,
+    recordsOut,
+    lastSubmittedAt,
+  } of rows) {
+    if (canBeAskedToReview({ roles: [role], username, email }) && !isBanInForce({ banned, banExpires })) {
+      reviewers.set(id, {
+        id,
+        name: staffName,
+        on_air_name: resolveDjDisplayName(djName),
+        records_out: recordsOut,
+        last_submitted_at: lastSubmittedAt,
+      });
+    }
   }
   return [...reviewers.values()];
 };
