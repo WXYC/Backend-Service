@@ -2,6 +2,7 @@ import * as Sentry from '@sentry/node';
 import { eq, sql, type SQL } from 'drizzle-orm';
 import { db, intake_items, member, readStaffName, snapshotAuthor, staffNameSql, user } from '@wxyc/database';
 import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
+import { getConfig as reviewsAudience } from '../config/reviewsAudience.js';
 import type { FccNoteResponse } from './fcc-notes.service.js';
 import { effectiveState, type IntakeItemState } from './intake.service.js';
 
@@ -212,6 +213,34 @@ export const notifyReviewSubmitted = (n: ReviewNotice) =>
       lineText(n.line),
     ],
   });
+
+/**
+ * A music director asked a DJ to review a record (BS#3385): the asked account is told, with a link to their reviews and not
+ * the record's page, which only music directors can open. Sent only when the review screens are open to everyone
+ * (`REVIEWS_AUDIENCE`): until then the DJ would get a link to a page they cannot open. The requester is named by staff
+ * name, and a failed lookup sends the notice without it.
+ */
+export const notifyAsked = async (
+  item: { id: number; artist: string; album: string },
+  askedUserId: string,
+  requesterUserId: string
+) => {
+  if (reviewsAudience().audience !== 'everyone') {
+    return;
+  }
+  const requester = await Promise.resolve()
+    .then(() => readStaffName(db, requesterUserId))
+    .catch(() => null);
+  const what = record(item.artist, item.album);
+  return notifyAccount(askedUserId, {
+    subject: `You've been asked to review ${what}`,
+    lines: [
+      `${requester ?? 'A music director'} asked you to review ${what}. Take it from your reviews page; the request lapses after 7 days if nobody takes it.`,
+    ],
+    links: [{ path: '/dashboard/reviews/mine', label: 'Open your reviews' }],
+    context: { item_id: item.id },
+  });
+};
 
 /** A DJ passed on a request; named by their staff name (`readStaffName`: the real name, else `auth_user.name`). The notice goes to music directors only. */
 export const notifyPass = async (item: { id: number; artist: string; album: string }, djUserId: string) => {
