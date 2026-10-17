@@ -422,8 +422,6 @@ const TAKEN = (actor: ReviewsActor) => ({
   checked_out_at: sql`now()`,
 });
 const TO_POOL = { state: 'pool' as const, ...CLEAR_REQUEST };
-/** The row as it stood before the UPDATE; `RETURNING` alone would show the new values. */
-const before = alias(intake_items, 'before');
 
 /**
  * `from` lists the EFFECTIVE states the action works from. `only` is the identity condition, which goes
@@ -481,7 +479,6 @@ export const buildTransition = (
   return executor
     .update(intake_items)
     .set(t.set(actor, djId))
-    .from(before)
     .where(
       and(
         eq(intake_items.id, id),
@@ -490,33 +487,35 @@ export const buildTransition = (
           sql`, `
         )})`,
         t.only?.(actor),
-        t.also,
-        eq(before.id, intake_items.id)
+        t.also
       )
     )
-    .returning({ id: intake_items.id, before_state: before.state });
+    .returning({ id: intake_items.id });
 };
 
 /**
  * One `UPDATE … WHERE <effective-state precondition> [AND identity] RETURNING`; a pass records its row in the same transaction.
- * `answeredRequest` is whether the item was `requested` when the UPDATE ran (read in that statement, not before it): the only pass
- * that emails the music directors is one that answers a request, because only then is one of them waiting.
+ * `answeredRequest` is whether a pass answered a request (`false` for every other action): the only pass that emails the music
+ * directors, because only then is one of them waiting. A pass reads the item's state `FOR UPDATE` as its transaction's first statement, and
+ * the UPDATE then runs on a fresh snapshot of the row version that lock holds, so what it changed is what was read. A prior state read
+ * inside the UPDATE (a self-join) is the statement's snapshot instead, which a concurrent write committing before the row lock is granted makes stale.
  */
 export const transitionIntakeItem = async (action: IntakeAction, id: number, actor: ReviewsActor, djId?: string) => {
-  const rows =
+  const { updated, answeredRequest } =
     action === 'pass'
       ? await db.transaction(async (tx) => {
-          const updated = await buildTransition(action, id, actor, djId, tx);
-          if (updated.length > 0) await tx.insert(intake_item_passes).values({ intake_item_id: id, dj_id: actor.id });
-          return updated;
+          const [locked] = await tx
+            .select({ state: intake_items.state })
+            .from(intake_items)
+            .where(eq(intake_items.id, id))
+            .for('update');
+          const rows = await buildTransition(action, id, actor, djId, tx);
+          if (rows.length > 0) await tx.insert(intake_item_passes).values({ intake_item_id: id, dj_id: actor.id });
+          return { updated: rows, answeredRequest: locked?.state === 'requested' };
         })
-      : await buildTransition(action, id, actor, djId);
-  if (rows.length > 0) {
-    return {
-      outcome: 'updated' as const,
-      item: (await getIntakeItem(id, actor.manage))!,
-      answeredRequest: rows[0].before_state === 'requested',
-    };
+      : { updated: await buildTransition(action, id, actor, djId), answeredRequest: false };
+  if (updated.length > 0) {
+    return { outcome: 'updated' as const, item: (await getIntakeItem(id, actor.manage))!, answeredRequest };
   }
   const { from, only, blockedBySubmittedReview } = TRANSITIONS[action];
   return { outcome: await refusalFor(id, { from, identityGuarded: !!only?.(actor), blockedBySubmittedReview }) };
