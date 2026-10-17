@@ -352,13 +352,14 @@ describe('buildTransition (BS#2798)', () => {
     );
   });
 
+  // The state before a pass is read under the row lock in `transitionIntakeItem`; a self-join in the UPDATE would read the
+  // statement's snapshot, which can differ from the row version the UPDATE changes after waiting on a concurrent write.
   it.each(['checkout', 'release', 'request', 'cancel_request', 'accept', 'pass'] as const)(
-    '%s returns the state the row held before the update, read through a self-join',
+    '%s joins no second copy of the table and returns no prior state',
     (action) => {
       const { text } = render(action, 7, md, 'dj-2');
-      expect(text).toContain(`from ${t} "before"`);
-      expect(text).toContain(`"before"."id" = ${t}."id"`);
-      expect(text).toMatch(/returning .*"before"."state"/);
+      expect(text).not.toContain('"before"');
+      expect(text).not.toMatch(/returning .*"state"/);
     }
   );
 
@@ -440,6 +441,12 @@ describe('refusalOutcome — 409 state_changed ranks before the identity 403', (
     [
       'a pass of a held item with no submitted review, by someone else',
       { effective_state: 'checked_out', submitted_review_count: 0 },
+      { from: ['requested', 'checked_out'], identityGuarded: true, blockedBySubmittedReview: true },
+      'forbidden',
+    ],
+    [
+      'a pass of a request that carries a submitted review, by someone else: forbidden, as the review blocks only a held item',
+      { effective_state: 'requested', submitted_review_count: 1 },
       { from: ['requested', 'checked_out'], identityGuarded: true, blockedBySubmittedReview: true },
       'forbidden',
     ],

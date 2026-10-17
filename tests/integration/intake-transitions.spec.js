@@ -283,25 +283,29 @@ describe('/intake transitions (BS#2798)', () => {
     const asked = () => requestedOf(global.secondary_dj_id);
     const holding = () => heldBy(global.primary_dj_id);
     const CASES = [
-      // [name, seed, reviews on the item, caller, status]
-      ['a request, passed by its DJ', asked, [], 'djB', 200],
-      ['a held item, passed by its holder', holding, [], 'djA', 200],
-      ["a held item with the holder's draft", holding, [draft], 'djA', 200],
-      ['a held item with a submitted review, by its holder', holding, [submitted], 'djA', 409],
-      ['a held item with a submitted review, by another DJ', holding, [submitted], 'djB', 409],
-      ['a held item with a submitted review, by a manager', holding, [submitted], 'manager', 409],
-      ["another DJ's request", asked, [], 'djA', 403],
-      ["a manager passing someone else's request", asked, [], 'manager', 403],
-      ["another DJ's held item", holding, [], 'djB', 403],
-      ["a manager passing someone else's held item", holding, [], 'manager', 403],
-      ['a pool item', () => ({}), [], 'djA', 409],
-      ['a reviewed item with a checkout', () => ({ state: 'reviewed', ...holding() }), [], 'djA', 409],
-      ['a reviewed item with no checkout', () => ({ state: 'reviewed' }), [], 'djA', 409],
-      ['a filed item', () => ({ state: 'filed', album_id: libraryId, filed_at: daysAgo(1) }), [], 'djA', 409],
-      ['a request older than 7 days', () => requestedOf(global.secondary_dj_id, daysAgo(8)), [], 'djB', 409],
+      // [name, status, seed, reviews on the item, caller]
+      ['a request, passed by its DJ', 200, asked, [], 'djB'],
+      // A request can carry a submitted review (`request` has no such guard), and the review blocks only a held item: the
+      // requested DJ may pass, and anyone else is refused as for any request.
+      ['a request with a submitted review, passed by its DJ', 200, asked, [submitted], 'djB'],
+      ['a request with a submitted review, by another DJ', 403, asked, [submitted], 'djA'],
+      ['a held item, passed by its holder', 200, holding, [], 'djA'],
+      ["a held item with the holder's draft", 200, holding, [draft], 'djA'],
+      ['a held item with a submitted review, by its holder', 409, holding, [submitted], 'djA'],
+      ['a held item with a submitted review, by another DJ', 409, holding, [submitted], 'djB'],
+      ['a held item with a submitted review, by a manager', 409, holding, [submitted], 'manager'],
+      ["another DJ's request", 403, asked, [], 'djA'],
+      ["a manager passing someone else's request", 403, asked, [], 'manager'],
+      ["another DJ's held item", 403, holding, [], 'djB'],
+      ["a manager passing someone else's held item", 403, holding, [], 'manager'],
+      ['a pool item', 409, () => ({}), [], 'djA'],
+      ['a reviewed item with a checkout', 409, () => ({ state: 'reviewed', ...holding() }), [], 'djA'],
+      ['a reviewed item with no checkout', 409, () => ({ state: 'reviewed' }), [], 'djA'],
+      ['a filed item', 409, () => ({ state: 'filed', album_id: libraryId, filed_at: daysAgo(1) }), [], 'djA'],
+      ['a request older than 7 days', 409, () => requestedOf(global.secondary_dj_id, daysAgo(8)), [], 'djB'],
     ];
 
-    test.each(CASES)('%s: %i', async (name, overrides, reviews, caller, status) => {
+    test.each(CASES)('%s: %i', async (name, status, overrides, reviews, caller) => {
       const id = await seed(`pass-${digital}-${name}`, { digital, ...overrides() });
       const seededReviews = [];
       for (const review of reviews) {
@@ -326,8 +330,11 @@ describe('/intake transitions (BS#2798)', () => {
         for (const { id: reviewId, status: reviewStatus } of seededReviews) {
           const kept = (await sql`SELECT status FROM ${sql(SCHEMA)}.reviews WHERE id = ${reviewId}`)[0];
           expect(kept.status).toBe(reviewStatus);
-          const edit = await djA.patch(`/reviews/${reviewId}`).send({ review: 'Finished after passing.' });
-          expect(edit.status).toBe(200);
+          // Only a draft is the passer's to finish; a submitted review waits for a music director and has no author here.
+          if (reviewStatus === 'draft') {
+            const edit = await djA.patch(`/reviews/${reviewId}`).send({ review: 'Finished after passing.' });
+            expect(edit.status).toBe(200);
+          }
         }
       } else {
         if (status === 409) {
