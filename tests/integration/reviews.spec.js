@@ -148,6 +148,7 @@ describe('/reviews create and edit (BS#2802)', () => {
 
     test.each([
       ['the author', () => djA, { review: 'Same.', credit: 'dj_name' }],
+      ['the author, consent keys only', () => djA, { credit: 'dj_name', publish_apps: false }],
       ['a music director', () => manager, { review: 'Same.', fcc: null }],
     ])(
       'a patch equal to the stored review from %s leaves last_modified and the history alone',
