@@ -522,6 +522,45 @@ describe('buildIntakePatch — a citation change takes off a review chosen throu
   });
 });
 
+describe('buildIntakePatch — setting a citation withdraws a pending request (BS#3383)', () => {
+  const T = `"${SCHEMA}"."intake_items"`;
+  const render = (patch: Parameters<typeof buildIntakePatch>[1]) => {
+    delete process.env.REVIEW_GATE_CUTOVER_DATE;
+    return buildIntakePatch(7, patch).toSQL().sql.toLowerCase();
+  };
+  const WITHDRAWS = `${T}."state" = 'requested'`;
+
+  it.each([
+    ['a release', { cited_album_id: 5 }],
+    ['a submission', { cited_submission_id: 12 }],
+  ])('citing %s decides on the stored state in the same UPDATE and nulls the request fields', (_name, patch) => {
+    const text = render(patch);
+    expect(text).toContain(`when ${WITHDRAWS} then 'pool' else ${T}."state" end`);
+    for (const column of ['requested_dj_id', 'requested_at']) {
+      expect(text).toContain(`"${column}" = case when ${WITHDRAWS} then null else ${T}."${column}" end`);
+    }
+  });
+
+  it('carries one state key, so the release of a taken-off review and the withdrawal share one CASE', () => {
+    const text = render({ cited_album_id: 5 });
+    expect(text.match(/(?<!\.)"state" = /g)).toHaveLength(1);
+    expect(text).toMatch(
+      /"state" = case when .* then case when .*'reviewed' .* when .* = 'requested' then 'pool' else/s
+    );
+  });
+
+  it.each([
+    ['a title-only patch', { album_title: 'DOGA' }],
+    ['a clear of the release', { cited_album_id: null }],
+    ['a clear of the submission', { cited_submission_id: null }],
+  ])('%s leaves the request alone', (_name, patch) => {
+    const text = render(patch);
+    expect(text).not.toContain(WITHDRAWS);
+    expect(text).not.toContain('"requested_dj_id" =');
+    expect(text).not.toContain('"requested_at" =');
+  });
+});
+
 describe('the service refuses both citations non-null (BS#2797)', () => {
   it('buildIntakePatch throws a 400 and writes nothing', () => {
     expect(() => buildIntakePatch(7, { cited_album_id: 5, cited_submission_id: 12 })).toThrow(

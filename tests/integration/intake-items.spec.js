@@ -621,6 +621,72 @@ describe('/intake (BS#2796)', () => {
         }
       );
 
+      // Setting a citation withdraws a pending request in the same UPDATE (BS#3383, decision 10 of the 2026-10-16 review-screen UX review); clearing one, or citing on any other state, leaves the request fields alone.
+      const requester = `${USER_PREFIX}requested`;
+      const holder = `${USER_PREFIX}holder`;
+      const requestFieldsOf = async (id) =>
+        (
+          await sql.unsafe(
+            `SELECT state, requested_dj_id, requested_at, checked_out_by, cited_album_id, cited_submission_id FROM "${SCHEMA}".intake_items WHERE id = $1`,
+            [id]
+          )
+        )[0];
+      // Resolved at test time: the cited ids are seeded in beforeAll.
+      const citing = () => ({
+        album: {
+          patch: { cited_album_id: citedAlbumId },
+          after: { cited_album_id: citedAlbumId, cited_submission_id: null },
+        },
+        submission: {
+          patch: { cited_submission_id: submissionId },
+          after: { cited_album_id: null, cited_submission_id: submissionId },
+        },
+        clear: { patch: { cited_album_id: null }, after: { cited_album_id: null, cited_submission_id: null } },
+      });
+      const pending = { state: 'requested', requested_dj_id: requester, requested_at: daysAgo(1) };
+      const withdrawn = { state: 'pool', requested_dj_id: null, requested_at: null, checked_out_by: null };
+      const kept = {
+        state: 'requested',
+        requested_dj_id: requester,
+        requested_at: expect.any(Date),
+        checked_out_by: null,
+      };
+
+      test.each([
+        ['citing a release withdraws a request', pending, 'album', withdrawn],
+        ['citing a form review withdraws a request', pending, 'submission', withdrawn],
+        ['citing withdraws a lapsed request', { ...pending, requested_at: daysAgo(8) }, 'album', withdrawn],
+        [
+          'citing withdraws a request whose DJ account is gone',
+          { ...pending, requested_dj_id: null },
+          'album',
+          withdrawn,
+        ],
+        [
+          'citing keeps the holder of a checked_out item and its leftover request',
+          {
+            state: 'checked_out',
+            checked_out_by: holder,
+            checked_out_at: daysAgo(1),
+            requested_dj_id: requester,
+            requested_at: daysAgo(10),
+          },
+          'album',
+          { state: 'checked_out', requested_dj_id: requester, requested_at: expect.any(Date), checked_out_by: holder },
+        ],
+        ['citing on a pool item changes only the citation', { state: 'pool' }, 'album', withdrawn],
+        ['clearing a citation keeps the request', pending, 'clear', kept],
+      ])('%s', async (name, overrides, how, expected) => {
+        const { patch, after } = citing()[how];
+        const id = await seed(
+          `cite-withdraw ${name}`,
+          how === 'clear' ? { ...overrides, cited_album_id: citedAlbumId } : overrides
+        );
+        const res = await auth.patch(`/intake/${id}`).send(patch);
+        expect(res.status).toBe(200);
+        expect(await requestFieldsOf(id)).toMatchObject({ ...expected, ...after });
+      });
+
       test('citing on a missing item is a 404', async () => {
         expect((await auth.patch('/intake/2147483000').send({ cited_album_id: citedAlbumId })).status).toBe(404);
       });
