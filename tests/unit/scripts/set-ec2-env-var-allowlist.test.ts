@@ -42,7 +42,7 @@ const caseArmKeys = [...caseBlockMatch[1].matchAll(/^\s*([A-Z0-9_]+)\)/gm)].map(
 
 // Keys added individually, kept as targeted regressions alongside the
 // full-set check below.
-const ALLOWLISTED_KEYS = ['REVIEW_GATE_CUTOVER_DATE', 'CORS_PREVIEW_ORIGINS'] as const;
+const ALLOWLISTED_KEYS = ['REVIEW_GATE_CUTOVER_DATE', 'CORS_PREVIEW_ORIGINS', 'REVIEWS_AUDIENCE'] as const;
 
 describe('set-ec2-env-var.yml allowlist', () => {
   it.each(ALLOWLISTED_KEYS)('reads %s from secrets in the resolve env block', (key) => {

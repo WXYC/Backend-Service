@@ -14,7 +14,7 @@ import {
   planLibraryFiling,
   type LibraryFilingRequestBody,
 } from '../services/library-filing.service.js';
-import { notifyDigitalTaken, notifyPass } from '../services/review-notices.service.js';
+import { notifyAsked, notifyDigitalTaken, notifyPass } from '../services/review-notices.service.js';
 import { printIntakeItem } from '../services/review-print.service.js';
 import WxycError from '../utils/error.js';
 import {
@@ -202,6 +202,10 @@ const transition =
     // After the commit and not awaited, so SES never holds the response; the notice never rejects.
     if (action === 'pass' && result.outcome === 'updated')
       void notifyPass({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);
+    // The asked DJ is told, unless the review screens are not yet open to everyone (the notice checks `REVIEWS_AUDIENCE`).
+    if (djId !== undefined && result.outcome === 'updated') {
+      void notifyAsked({ id, artist: result.item.artist_name, album: result.item.album_title }, djId, actor.id);
+    }
     // A digital album's files travel by email, so taking one (checkout, or a DJ accepting a request) tells the music directors.
     if ((action === 'checkout' || action === 'accept') && result.outcome === 'updated' && result.item.digital)
       void notifyDigitalTaken({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);

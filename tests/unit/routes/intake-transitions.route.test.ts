@@ -36,9 +36,11 @@ jest.mock('@wxyc/database', () => ({
   intakeItemStateEnum: jest.requireActual('../../../shared/database/src/schema').intakeItemStateEnum,
 }));
 const mockNotifyPass = jestGlobals.fn<(...args: any[]) => Promise<void>>();
+const mockNotifyAsked = jestGlobals.fn<(...args: any[]) => Promise<void>>();
 const mockNotifyDigital = jestGlobals.fn<(...args: any[]) => Promise<void>>();
 jest.mock('../../../apps/backend/services/review-notices.service', () => ({
   notifyPass: mockNotifyPass,
+  notifyAsked: mockNotifyAsked,
   notifyDigitalTaken: mockNotifyDigital,
 }));
 jest.mock('../../../apps/backend/services/intake.service', () => ({
@@ -83,6 +85,7 @@ beforeEach(() => {
   mockTransition.mockReset().mockResolvedValue({ outcome: 'updated', item: ITEM });
   mockMemberAccount.mockReset().mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
   mockNotifyPass.mockReset();
+  mockNotifyAsked.mockReset();
   mockNotifyDigital.mockReset();
 });
 
@@ -95,6 +98,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual(ITEM);
     expect(mockNotifyPass).toHaveBeenCalledTimes(action === 'pass' ? 1 : 0);
+    expect(mockNotifyAsked).toHaveBeenCalledTimes(action === 'request' ? 1 : 0);
     expect(mockNotifyDigital).not.toHaveBeenCalled();
     expect(mockTransition).toHaveBeenCalledWith(
       action,
@@ -129,6 +133,23 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
       const res = await post(path, body);
       expect([res.status, res.body]).toEqual([200, item]);
       expect(mockNotifyPass).toHaveBeenCalledWith({ id: 7, artist: 'Juana Molina', album: 'DOGA' }, 'caller-id');
+    }, 2000);
+  }
+
+  if (action === 'request') {
+    // A hung SES must not hold a request that already committed (BS#3385).
+    test('an asked notice that never settles does not hold the response', async () => {
+      mockRole('musicDirector');
+      const item = { ...ITEM, artist_name: 'Juana Molina', album_title: 'DOGA' };
+      mockTransition.mockResolvedValueOnce({ outcome: 'updated', item });
+      mockNotifyAsked.mockReturnValueOnce(new Promise<void>(() => {}));
+      const res = await post(path, body);
+      expect([res.status, res.body]).toEqual([200, item]);
+      expect(mockNotifyAsked).toHaveBeenCalledWith(
+        { id: 7, artist: 'Juana Molina', album: 'DOGA' },
+        'dj-2',
+        'caller-id'
+      );
     }, 2000);
   }
 

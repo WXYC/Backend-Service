@@ -50,10 +50,12 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, intake_items, staffNameSql, user } from '@wxyc/database';
+import { resetConfig as resetReviewsAudience } from '../../../apps/backend/config/reviewsAudience';
 import {
   assignedLine,
   musicDirectorEmails,
   notifyAccount,
+  notifyAsked,
   notifyDigitalTaken,
   notifyFccChanged,
   notifyFccNoteReported,
@@ -774,5 +776,88 @@ describe('notices', () => {
         expect(mockCapture).not.toHaveBeenCalled();
       }
     );
+  });
+});
+
+// BS#3385: the asked DJ is told, only once the review screens are open to everyone (REVIEWS_AUDIENCE).
+describe('notifyAsked', () => {
+  const ASKED = { id: 4, artist: 'Juana Molina', album: 'DOGA' };
+  const ACCOUNT = [{ email: 'dj@example.org', banned: false, banExpires: null }];
+  const savedAudience = process.env.REVIEWS_AUDIENCE;
+  const savedFrontend = process.env.FRONTEND_SOURCE;
+  const audience = (value: string | undefined) => {
+    if (value === undefined) {
+      delete process.env.REVIEWS_AUDIENCE;
+    } else {
+      process.env.REVIEWS_AUDIENCE = value;
+    }
+    resetReviewsAudience();
+  };
+  beforeEach(() => {
+    process.env.FRONTEND_SOURCE = 'https://dj.example.org, http://localhost:3000';
+    mockQueue.length = 0;
+    mockSend.mockReset();
+    mockSend.mockResolvedValue(undefined);
+    mockCapture.mockReset();
+    audience('true');
+  });
+  afterAll(() => {
+    audience(savedAudience);
+    if (savedFrontend === undefined) {
+      delete process.env.FRONTEND_SOURCE;
+    } else {
+      process.env.FRONTEND_SOURCE = savedFrontend;
+    }
+  });
+
+  test.each([
+    ['true', 1],
+    ['1', 1],
+    ['staff', 0],
+    [undefined, 0],
+    ['TRUE', 0],
+    ['yes', 0],
+  ])('with the audience %p it sends %i email', async (value, count) => {
+    audience(value);
+    mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
+    await notifyAsked(ASKED, 'dj-2', 'md-1');
+    expect(mockSend).toHaveBeenCalledTimes(count);
+  });
+
+  test.each([
+    ["the requester's staff name", [{ name: 'Test MD' }], 'Test MD'],
+    ['"A music director" when the name is null', [{ name: null }], 'A music director'],
+    ['"A music director" when the requester has no account', [], 'A music director'],
+    ['"A music director" when the name lookup fails', new Error('db down'), 'A music director'],
+  ])('the email names %s, in the decided copy', async (_name, lookup, who) => {
+    mockQueue.push(lookup, ACCOUNT);
+    await notifyAsked(ASKED, 'dj-2', 'md-1');
+    const line = `${who} asked you to review Juana Molina – DOGA. Take it from your reviews page; the request lapses after 7 days if nobody takes it.`;
+    const url = 'https://dj.example.org/dashboard/reviews/mine';
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend.mock.calls[0][0]).toEqual({
+      to: ['dj@example.org'],
+      subject: "You've been asked to review Juana Molina – DOGA",
+      text: `${line}\n${url}`,
+      html: `<p>${line}</p><p><a href="${url}">Open your reviews</a></p>`,
+    });
+  });
+
+  test.each([
+    ['gone', []],
+    ['banned', [{ email: 'dj@example.org', banned: true, banExpires: null }]],
+  ])('sends nothing to an account that is %s (or not a member)', async (_name, account) => {
+    mockQueue.push([{ name: 'Test MD' }], account);
+    await notifyAsked(ASKED, 'dj-2', 'md-1');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('a failed send is reported and swallowed', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
+    mockSend.mockRejectedValueOnce(new Error('ses down'));
+    await expect(notifyAsked(ASKED, 'dj-2', 'md-1')).resolves.toBeUndefined();
+    expect(mockCapture).toHaveBeenCalledTimes(1);
+    jest.restoreAllMocks();
   });
 });

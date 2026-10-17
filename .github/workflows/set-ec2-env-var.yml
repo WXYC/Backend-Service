@@ -100,6 +100,11 @@ jobs:
           # hard-fails on empty.
           DONATE_URL: ${{ secrets.DONATE_URL }}
           DONATE_ENABLED: ${{ secrets.DONATE_ENABLED }}
+          # Who the review screens are open to (BS#3385, BS#3358): `staff`, or
+          # `true`/`1` for everyone; anything else is off. Set it to the same
+          # value as the DJ site's NEXT_PUBLIC_REVIEWS_ENABLED. Only
+          # apps/backend reads it (restart_target=backend, the default).
+          REVIEWS_AUDIENCE: ${{ secrets.REVIEWS_AUDIENCE }}
           # Digital-archive playback endpoint (BS#2320, epic
           # WXYC/wxyc-dj-ios#135). Carried through the same allowlist as
           # DONATE_* above — light-up is meant to be a variable-only change.
@@ -381,6 +386,7 @@ jobs:
             ENRICHMENT_SUPPRESS_LML_BUDGET) VALUE="$ENRICHMENT_SUPPRESS_LML_BUDGET" ;;
             DONATE_URL) VALUE="$DONATE_URL" ;;
             DONATE_ENABLED) VALUE="$DONATE_ENABLED" ;;
+            REVIEWS_AUDIENCE) VALUE="$REVIEWS_AUDIENCE" ;;
             DIGITAL_ARCHIVE_STREAMING_ENABLED) VALUE="$DIGITAL_ARCHIVE_STREAMING_ENABLED" ;;
             DIGITAL_ARCHIVE_SIGN_TTL_SECONDS) VALUE="$DIGITAL_ARCHIVE_SIGN_TTL_SECONDS" ;;
             DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT" ;;

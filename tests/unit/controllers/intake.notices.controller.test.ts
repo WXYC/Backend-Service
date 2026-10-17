@@ -6,6 +6,7 @@
 const mockTransition = jest.fn<(...args: unknown[]) => unknown>();
 const mockNotifyDigital = jest.fn<(...args: unknown[]) => Promise<void>>();
 const mockNotifyPass = jest.fn<(...args: unknown[]) => Promise<void>>();
+const mockNotifyAsked = jest.fn<(...args: unknown[]) => Promise<void>>();
 
 const mockMemberAccount = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 
@@ -15,6 +16,7 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 }));
 jest.mock('../../../apps/backend/services/review-notices.service', () => ({
   notifyPass: mockNotifyPass,
+  notifyAsked: mockNotifyAsked,
   notifyDigitalTaken: mockNotifyDigital,
 }));
 jest.mock('../../../apps/backend/services/review-print.service', () => ({ printIntakeItem: jest.fn() }));
@@ -25,7 +27,7 @@ jest.mock('../../../apps/backend/utils/review-grants', () => ({
 }));
 
 import type { Request, Response } from 'express';
-import { acceptIntake, checkoutIntake } from '../../../apps/backend/controllers/intake.controller';
+import { acceptIntake, checkoutIntake, requestIntake } from '../../../apps/backend/controllers/intake.controller';
 
 const item = (digital: boolean) => ({ artist_name: 'Juana Molina', album_title: 'DOGA', digital });
 const respond = () => ({ json: jest.fn(), status: jest.fn(() => ({ json: jest.fn() })) }) as unknown as Response;
@@ -39,6 +41,7 @@ const call = async (handler: typeof checkoutIntake, result: object) => {
 beforeEach(() => {
   jest.clearAllMocks();
   mockNotifyDigital.mockResolvedValue(undefined);
+  mockNotifyAsked.mockResolvedValue(undefined);
   mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
 });
 
@@ -87,4 +90,38 @@ test.each([
   );
   expect(mockTransition).toHaveBeenCalledTimes(1);
   expect(mockNotifyDigital).not.toHaveBeenCalled();
+});
+
+// BS#3385: a request tells the asked DJ, after the commit and without holding the response; the audience gate is the notice's own.
+describe('POST /intake/{id}/request', () => {
+  const callRequest = async (result: object) => {
+    mockTransition.mockResolvedValue(result);
+    const res = respond();
+    await requestIntake(
+      { params: { id: '4' }, body: { dj_id: 'dj-2' } } as unknown as Request<{ id: string }>,
+      res,
+      jest.fn()
+    );
+    return res;
+  };
+
+  test('starts the asked notice with the asked DJ and the requester, and answers the item', async () => {
+    const res = await callRequest({ outcome: 'updated', item: item(false) });
+    expect(mockNotifyAsked).toHaveBeenCalledWith({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-2', 'dj-1');
+    expect(res.json).toHaveBeenCalledWith(item(false));
+  });
+
+  test.each(['state_changed', 'already_filed', 'forbidden', 'not_found'])(
+    'a refused request (%s) sends nothing',
+    async (outcome) => {
+      await callRequest({ outcome, item: item(false) }).catch(() => {});
+      expect(mockNotifyAsked).not.toHaveBeenCalled();
+    }
+  );
+
+  test('a send that never settles does not hold the response', async () => {
+    mockNotifyAsked.mockReturnValue(new Promise<void>(() => {}));
+    const res = await callRequest({ outcome: 'updated', item: item(false) });
+    expect(res.json).toHaveBeenCalledWith(item(false));
+  });
 });
