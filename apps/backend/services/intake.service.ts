@@ -64,8 +64,15 @@ export const filedStateSql = (column: SQL): SQL =>
     sql`, `
   )})`;
 
-/** Columns the contract's `IntakeItem` does not carry: the audit columns. */
-const UNEXPOSED = new Set(['logged_by', 'filed_by', 'printed_by', 'finalized_by']);
+/** Columns the contract's `IntakeItem` does not carry: the audit columns, and the lookup's bookkeeping (`bandcamp_url_entered`, `links_checked_at`). */
+const UNEXPOSED = new Set([
+  'logged_by',
+  'filed_by',
+  'printed_by',
+  'finalized_by',
+  'bandcamp_url_entered',
+  'links_checked_at',
+]);
 
 export const effectiveState = sql<IntakeItemState>`CASE WHEN ${intake_items.state} = 'requested' AND (${intake_items.requested_dj_id} IS NULL OR ${intake_items.requested_at} IS NULL OR ${intake_items.requested_at} < now() - interval '7 days') THEN 'pool' ELSE ${intake_items.state}::text END`;
 // coalesce: no CHECK ties checked_out_at to the state, and a NULL stamp must read false, never SQL NULL.
@@ -91,7 +98,7 @@ export const reviewAuthorsSql = (draftsOnly = false) =>
 /** Mirror of the contract's `IntakeItem` (`wxyc-shared/api.yaml`); private because Backend-Service stays on `@wxyc/shared` 5.x. Timestamps serialize to ISO strings. */
 export type IntakeItemResponse = Omit<
   typeof intake_items.$inferSelect,
-  'logged_by' | 'filed_by' | 'printed_by' | 'finalized_by'
+  'logged_by' | 'filed_by' | 'printed_by' | 'finalized_by' | 'bandcamp_url_entered' | 'links_checked_at'
 > & {
   effective_state: IntakeItemState;
   overdue: boolean;
@@ -105,7 +112,14 @@ export type IntakeItemResponse = Omit<
 
 export type IntakeFields = Pick<
   NewIntakeItem,
-  'artist_name' | 'album_title' | 'record_label' | 'label_id' | 'format_id' | 'discogs_release_id'
+  | 'artist_name'
+  | 'album_title'
+  | 'record_label'
+  | 'label_id'
+  | 'format_id'
+  | 'discogs_release_id'
+  | 'bandcamp_url'
+  | 'bandcamp_url_entered'
 >;
 
 /** What `POST /intake` carries for its kind: a digital album has no `format_id` of its own (the service stores the CD-R format's), and a disc must have one. */

@@ -172,6 +172,38 @@ describe('buildIntakeSelect — staff names (BS#3052)', () => {
   });
 });
 
+describe('buildIntakeSelect — listen-first links (BS#3390)', () => {
+  const { sql: text } = render({ includePasses: true });
+
+  it.each(['spotify_url', 'apple_music_url', 'bandcamp_url'])('serves %s', (column) => {
+    expect(text).toContain(`"intake_items"."${column}"`);
+  });
+
+  it.each(['bandcamp_url_entered', 'links_checked_at'])(
+    'keeps the lookup bookkeeping column %s off the wire',
+    (column) => {
+      expect(text).not.toContain(column);
+    }
+  );
+});
+
+describe('buildIntakePatch — the Bandcamp link (BS#3390)', () => {
+  it.each([
+    ['a link sets the flag', { bandcamp_url: 'https://label.bandcamp.com/album/x', bandcamp_url_entered: true }, true],
+    ['null clears the link and the flag', { bandcamp_url: null, bandcamp_url_entered: false }, false],
+  ])('%s', (_name, patch, entered) => {
+    const { sql: text, params } = buildIntakePatch(7, patch).toSQL();
+    expect(text).toContain('"bandcamp_url" = $');
+    expect(text).toContain('"bandcamp_url_entered" = $');
+    expect(params).toContain(entered);
+  });
+
+  it('leaves both columns out of an UPDATE that does not carry the key', () => {
+    const { sql: text } = buildIntakePatch(7, { album_title: 'DOGA' }).toSQL();
+    expect(text).not.toContain('bandcamp_url');
+  });
+});
+
 describe('buildIntakeSelect — passes', () => {
   it('omits passes entirely when the caller lacks reviews:manage', () => {
     expect(render({ includePasses: false }).sql).not.toContain('intake_item_passes');

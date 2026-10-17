@@ -526,6 +526,21 @@ components:
           description: >-
             True when the album reached the station as files, not a disc. `format_id` is then the CD-R format from the moment it is logged. It stays true after filing.
         discogs_release_id: { type: integer, nullable: true }
+        spotify_url:
+          type: string
+          nullable: true
+          description: >-
+            A link to the record on Spotify, or null when none is known. A preview for choosing and hearing a record, not the station's review copy. Filled by a lookup, never entered by a music director.
+        apple_music_url:
+          type: string
+          nullable: true
+          description: >-
+            A link to the record on Apple Music, or null when none is known. A preview for choosing and hearing a record, not the station's review copy. Filled by a lookup, never entered by a music director.
+        bandcamp_url:
+          type: string
+          nullable: true
+          description: >-
+            A link to the record on Bandcamp, or null when none is known. A preview for choosing and hearing a record, not the station's review copy. Entered by a music director when adding or editing the record, or filled by a lookup; a found link never replaces one a music director entered.
         state: { $ref: '#/components/schemas/IntakeItemState' }
         effective_state: { $ref: '#/components/schemas/IntakeItemState' }
         overdue: { type: boolean }
@@ -597,6 +612,12 @@ components:
         label_id: { type: integer, nullable: true }
         format_id: { type: integer }
         discogs_release_id: { type: integer, nullable: true }
+        bandcamp_url:
+          type: string
+          nullable: true
+          maxLength: 512
+          description: >-
+            A link to the record on Bandcamp, a preview for choosing and hearing it and not the station's review copy. Surrounding whitespace is trimmed. A blank or whitespace-only string means no link, the same as `null`. Any other value must be an `https` URL on `bandcamp.com` or a subdomain of it, or the request is a 400. On `PATCH`, `null` or a blank string clears it. Any link sent counts as entered by a music director, and a lookup never replaces it.
 
     NewIntakeItemRequest:
       description: >-
