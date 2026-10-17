@@ -237,17 +237,23 @@ export const logIntakeItem = async (fields: NewIntakeFields, loggedBy: string) =
 const refusalFor = async (id: number, transition?: IntakeTransitionRefusal | 'citation') =>
   refusalOutcome(await getIntakeItem(id, false), transition);
 
-type IntakeTransitionRefusal = { from: IntakeItemState[]; identityGuarded: boolean };
+type IntakeTransitionRefusal = {
+  from: IntakeItemState[];
+  identityGuarded: boolean;
+  /** The UPDATE refuses a `checked_out` item that has a submitted review, for every caller (`pass`). */
+  blockedBySubmittedReview?: boolean;
+};
 
 /**
  * The pure decision behind `refusalFor`, split out so its precedence is testable without a database:
  * missing is `not_found`; no transition is `already_filed`; `'citation'` (a PATCH that sets a citation) is `already_filed`
  * for a filed item (it can't be edited at all, so that outranks the citation) and otherwise `invalid_citation`; otherwise an identity-guarded refusal on an item still in
  * one of the `from` effective states is `forbidden` and anything else is `state_changed`, which therefore outranks the identity 403.
- * A `reviewed` item with no checkout (`checked_out_at` null) has nothing to return, so it is `state_changed` for every caller.
+ * A `reviewed` item with no checkout (`checked_out_at` null) has nothing to return, so it is `state_changed` for every caller. So is a
+ * `checked_out` item with a submitted review when the transition refuses one (`blockedBySubmittedReview`): the state is the refusal, not the caller.
  */
 export const refusalOutcome = (
-  item: Pick<IntakeItemResponse, 'effective_state' | 'checked_out_at'> | undefined,
+  item: Pick<IntakeItemResponse, 'effective_state' | 'checked_out_at' | 'submitted_review_count'> | undefined,
   transition?: IntakeTransitionRefusal | 'citation'
 ) => {
   if (!item) return 'not_found' as const;
@@ -256,6 +262,13 @@ export const refusalOutcome = (
   }
   if (!transition) return 'already_filed' as const;
   if (item.effective_state === 'reviewed' && item.checked_out_at === null) return 'state_changed' as const;
+  if (
+    transition.blockedBySubmittedReview &&
+    item.effective_state === 'checked_out' &&
+    item.submitted_review_count > 0
+  ) {
+    return 'state_changed' as const;
+  }
   return transition.identityGuarded && transition.from.includes(item.effective_state)
     ? ('forbidden' as const)
     : ('state_changed' as const);
@@ -409,6 +422,8 @@ const TAKEN = (actor: ReviewsActor) => ({
   checked_out_at: sql`now()`,
 });
 const TO_POOL = { state: 'pool' as const, ...CLEAR_REQUEST };
+/** The row as it stood before the UPDATE; `RETURNING` alone would show the new values. */
+const before = alias(intake_items, 'before');
 
 /**
  * `from` lists the EFFECTIVE states the action works from. `only` is the identity condition, which goes
@@ -423,6 +438,7 @@ const TRANSITIONS: Record<
     set: (actor: ReviewsActor, djId?: string) => PgUpdateSetSource<typeof intake_items>;
     only?: (actor: ReviewsActor) => SQL | undefined;
     also?: SQL;
+    blockedBySubmittedReview?: true;
   }
 > = {
   checkout: { from: ['pool'], set: TAKEN, also: sql`${submittedReviewCount} = 0` },
@@ -442,7 +458,16 @@ const TRANSITIONS: Record<
   },
   cancel_request: { from: ['requested'], set: () => TO_POOL },
   accept: { from: ['requested'], set: TAKEN, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
-  pass: { from: ['requested'], set: () => TO_POOL, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },
+  // The requested DJ declines a request; the holder gives back a record they have (BS#3388), unless a review of it is
+  // submitted, which they mark returned with `release`. A holder's draft stays with its author.
+  pass: {
+    from: ['requested', 'checked_out'],
+    set: () => ({ ...TO_POOL, checked_out_by: null, checked_out_at: null }),
+    only: (actor) =>
+      sql`((${intake_items.state} = 'requested' AND ${intake_items.requested_dj_id} = ${actor.id}) OR (${intake_items.state} = 'checked_out' AND ${intake_items.checked_out_by} = ${actor.id}))`,
+    also: sql`(${intake_items.state} <> 'checked_out' OR ${submittedReviewCount} = 0)`,
+    blockedBySubmittedReview: true,
+  },
 };
 
 export const buildTransition = (
@@ -456,6 +481,7 @@ export const buildTransition = (
   return executor
     .update(intake_items)
     .set(t.set(actor, djId))
+    .from(before)
     .where(
       and(
         eq(intake_items.id, id),
@@ -464,13 +490,18 @@ export const buildTransition = (
           sql`, `
         )})`,
         t.only?.(actor),
-        t.also
+        t.also,
+        eq(before.id, intake_items.id)
       )
     )
-    .returning({ id: intake_items.id });
+    .returning({ id: intake_items.id, before_state: before.state });
 };
 
-/** One `UPDATE … WHERE <effective-state precondition> [AND identity] RETURNING`; a pass records its row in the same transaction. */
+/**
+ * One `UPDATE … WHERE <effective-state precondition> [AND identity] RETURNING`; a pass records its row in the same transaction.
+ * `answeredRequest` is whether the item was `requested` when the UPDATE ran (read in that statement, not before it): the only pass
+ * that emails the music directors is one that answers a request, because only then is one of them waiting.
+ */
 export const transitionIntakeItem = async (action: IntakeAction, id: number, actor: ReviewsActor, djId?: string) => {
   const rows =
     action === 'pass'
@@ -480,9 +511,15 @@ export const transitionIntakeItem = async (action: IntakeAction, id: number, act
           return updated;
         })
       : await buildTransition(action, id, actor, djId);
-  if (rows.length > 0) return { outcome: 'updated' as const, item: (await getIntakeItem(id, actor.manage))! };
-  const { from, only } = TRANSITIONS[action];
-  return { outcome: await refusalFor(id, { from, identityGuarded: !!only?.(actor) }) };
+  if (rows.length > 0) {
+    return {
+      outcome: 'updated' as const,
+      item: (await getIntakeItem(id, actor.manage))!,
+      answeredRequest: rows[0].before_state === 'requested',
+    };
+  }
+  const { from, only, blockedBySubmittedReview } = TRANSITIONS[action];
+  return { outcome: await refusalFor(id, { from, identityGuarded: !!only?.(actor), blockedBySubmittedReview }) };
 };
 
 /**

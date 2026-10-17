@@ -281,7 +281,7 @@ describe('buildTransition (BS#2798)', () => {
     ['request', ['pool']],
     ['cancel_request', ['requested']],
     ['accept', ['requested']],
-    ['pass', ['requested']],
+    ['pass', ['requested', 'checked_out']],
   ] as const)('%s is one UPDATE whose WHERE carries the id and the effective-state precondition %s', (action, from) => {
     const { text, params } = render(action, 7, md, 'dj-2');
     expect(text.trimStart()).toMatch(/^update /);
@@ -327,12 +327,38 @@ describe('buildTransition (BS#2798)', () => {
     expect(text.slice(text.indexOf(' where '))).not.toContain('"checked_out_by" =');
   });
 
-  it.each(['accept', 'pass'] as const)(
-    '%s requires requested_dj_id = caller in the WHERE, even for a manager',
+  it('accept requires requested_dj_id = caller in the WHERE, even for a manager', () => {
+    const { text, params } = render('accept', 7, md);
+    expect(text).toContain(`${t}."requested_dj_id" = $`);
+    expect(params).toContain('md-1');
+  });
+
+  it('pass accepts the requested DJ of a request or the holder of a held item, even for a manager', () => {
+    const { text, params } = render('pass', 7, md);
+    expect(text).toMatch(
+      new RegExp(
+        `\\(\\(${t}."state" = 'requested' and ${t}."requested_dj_id" = \\$\\d+\\) or \\(${t}."state" = 'checked_out' and ${t}."checked_out_by" = \\$\\d+\\)\\)`
+      )
+    );
+    expect(params.filter((param) => param === 'md-1')).toHaveLength(2);
+  });
+
+  it('pass refuses a held item with a submitted review in the same UPDATE', () => {
+    const { text } = render('pass', 7, dj);
+    expect(text).toMatch(
+      new RegExp(
+        `\\(${t}."state" <> 'checked_out' or \\(select count\\(\\*\\)::int from "${SCHEMA}"."reviews" where .*"status" = 'submitted'\\) = 0\\)`
+      )
+    );
+  });
+
+  it.each(['checkout', 'release', 'request', 'cancel_request', 'accept', 'pass'] as const)(
+    '%s returns the state the row held before the update, read through a self-join',
     (action) => {
-      const { text, params } = render(action, 7, md);
-      expect(text).toContain(`${t}."requested_dj_id" = $`);
-      expect(params).toContain('md-1');
+      const { text } = render(action, 7, md, 'dj-2');
+      expect(text).toContain(`from ${t} "before"`);
+      expect(text).toContain(`"before"."id" = ${t}."id"`);
+      expect(text).toMatch(/returning .*"before"."state"/);
     }
   );
 
@@ -349,11 +375,14 @@ describe('buildTransition (BS#2798)', () => {
     expect(params).toEqual(expect.arrayContaining(['requested', 'dj-2']));
   });
 
-  it('cancel_request and pass clear the request fields and return the item to pool', () => {
-    for (const action of ['cancel_request', 'pass'] as const) {
-      const { params } = render(action, 7, action === 'pass' ? dj : md);
-      expect(params.slice(0, 3)).toEqual(['pool', null, null]);
-    }
+  it('cancel_request clears the request fields and returns the item to pool', () => {
+    expect(render('cancel_request', 7, md).params.slice(0, 3)).toEqual(['pool', null, null]);
+  });
+
+  it('pass also clears the checkout, so a held item leaves its holder', () => {
+    const { text, params } = render('pass', 7, dj);
+    expect(text).toMatch(/"checked_out_by" = \$\d+, "checked_out_at" = \$\d+/);
+    expect(params.slice(0, 5)).toEqual(['pool', null, null, null, null]);
   });
 });
 
@@ -401,6 +430,18 @@ describe('refusalOutcome — 409 state_changed ranks before the identity 403', (
       { effective_state: 'reviewed', checked_out_at: null },
       { from: ['checked_out', 'reviewed'], identityGuarded: true },
       'state_changed',
+    ],
+    [
+      'a pass of a held item with a submitted review: state_changed for its holder and everyone else',
+      { effective_state: 'checked_out', submitted_review_count: 1 },
+      { from: ['requested', 'checked_out'], identityGuarded: true, blockedBySubmittedReview: true },
+      'state_changed',
+    ],
+    [
+      'a pass of a held item with no submitted review, by someone else',
+      { effective_state: 'checked_out', submitted_review_count: 0 },
+      { from: ['requested', 'checked_out'], identityGuarded: true, blockedBySubmittedReview: true },
+      'forbidden',
     ],
     [
       'an unguarded release of a reviewed item with no checkout',
