@@ -832,14 +832,14 @@ describe('notifyAsked', () => {
   ])('the email names %s, in the decided copy', async (_name, lookup, who) => {
     mockQueue.push(lookup, ACCOUNT);
     await notifyAsked(ASKED, 'dj-2', 'md-1');
-    const line = `${who} asked you to review Juana Molina – DOGA. Take it from your reviews page; the request lapses after 7 days if nobody takes it.`;
+    const line = `${who} asked you to review Juana Molina – DOGA. It's under Requests for me on your reviews page, where you can write a review or pass. After 7 days, the record goes back to the review shelf.`;
     const url = 'https://dj.example.org/dashboard/reviews/mine';
     expect(mockSend).toHaveBeenCalledTimes(1);
     expect(mockSend.mock.calls[0][0]).toEqual({
       to: ['dj@example.org'],
       subject: "You've been asked to review Juana Molina – DOGA",
       text: `${line}\n${url}`,
-      html: `<p>${line}</p><p><a href="${url}">Open your reviews</a></p>`,
+      html: `<p>${line.replace("'", '&#39;')}</p><p><a href="${url}">Open your reviews</a></p>`,
     });
   });
 

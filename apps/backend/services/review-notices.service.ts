@@ -235,7 +235,7 @@ export const notifyAsked = async (
   return notifyAccount(askedUserId, {
     subject: `You've been asked to review ${what}`,
     lines: [
-      `${requester ?? 'A music director'} asked you to review ${what}. Take it from your reviews page; the request lapses after 7 days if nobody takes it.`,
+      `${requester ?? 'A music director'} asked you to review ${what}. It's under Requests for me on your reviews page, where you can write a review or pass. After 7 days, the record goes back to the review shelf.`,
     ],
     links: [{ path: '/dashboard/reviews/mine', label: 'Open your reviews' }],
     context: { item_id: item.id },
