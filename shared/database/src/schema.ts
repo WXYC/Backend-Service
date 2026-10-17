@@ -3082,6 +3082,12 @@ export const intake_items = wxyc_schema.table(
     // An album that arrived as files: `format_id` is the CD-R format, burned once its review is chosen. Never cleared.
     digital: boolean('digital').notNull().default(false),
     discogs_release_id: integer('discogs_release_id'),
+    // Listen-first links (BS#3390). Only `bandcamp_url` is ever entered; `bandcamp_url_entered` marks a music director's link so a lookup never replaces it. `links_checked_at` is the lookup's own stamp.
+    spotify_url: varchar('spotify_url', { length: 512 }),
+    apple_music_url: varchar('apple_music_url', { length: 512 }),
+    bandcamp_url: varchar('bandcamp_url', { length: 512 }),
+    bandcamp_url_entered: boolean('bandcamp_url_entered').notNull().default(false),
+    links_checked_at: timestamp('links_checked_at', { withTimezone: true }),
     state: intakeItemStateEnum('state').notNull().default('pool'),
     logged_by: varchar('logged_by', { length: 255 }).references(() => user.id, { onDelete: 'set null' }),
     logged_at: timestamp('logged_at', { withTimezone: true }).defaultNow().notNull(),
