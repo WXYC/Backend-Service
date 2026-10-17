@@ -247,6 +247,13 @@ export const MONITOR_CONFIG: MonitorConfig = {
   schedule: { type: 'crontab', value: CRON_SCHEDULE },
   checkinMargin: CHECKIN_MARGIN_MINUTES,
   maxRuntime: MAX_RUNTIME_MINUTES,
+  // A healthy run of this job is a no-op, so a missed check-in is the only sign
+  // it stopped; a failure threshold above 1 would add a full 30-minute cadence
+  // before anyone hears about it.
+  failureIssueThreshold: 1,
+  // One OK check-in proves the cron is running again, so the issue should
+  // resolve on the first good run.
+  recoveryThreshold: 1,
   // The crontab on the EC2 host runs in UTC; `deploy-base.yml` installs the
   // `cron-schedule` string verbatim without a TZ line.
   timezone: 'Etc/UTC',

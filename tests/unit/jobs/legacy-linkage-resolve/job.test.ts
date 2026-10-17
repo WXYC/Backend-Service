@@ -502,6 +502,8 @@ describe('legacy-linkage-resolve: Sentry cron monitor (signal a)', () => {
     expect(CRON_SCHEDULE).toBe(pkg['cron-schedule']);
     expect(MONITOR_CONFIG.schedule).toEqual({ type: 'crontab', value: CRON_SCHEDULE });
     expect(MONITOR_CONFIG.timezone).toBe('Etc/UTC');
+    expect(MONITOR_CONFIG.failureIssueThreshold).toBe(1);
+    expect(MONITOR_CONFIG.recoveryThreshold).toBe(1);
   });
 
   it('detects a missed run inside one cadence plus margin, and flags a wedged run before the next fires', () => {
