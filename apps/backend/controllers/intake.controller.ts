@@ -1,4 +1,5 @@
 import { intakeItemStateEnum } from '@wxyc/database';
+import { hasUrlParserDifferentialChar } from '@wxyc/lml-client';
 import type { RequestHandler, Response } from 'express';
 import * as intakeService from '../services/intake.service.js';
 import type {
@@ -75,11 +76,21 @@ const parseKind = (body: Record<string, unknown>): NewIntakeKind => {
 /** `bandcamp_url` is the `varchar(512)` column's width. */
 const BANDCAMP_URL_MAX = 512;
 
-/** `bandcamp_url` on create and patch: blank or `null` clears it, anything else must be an `https` URL on `bandcamp.com` or a subdomain (parsed, so `bandcamp.com.evil.com` and `evil.com/bandcamp.com` fail). */
+/**
+ * `bandcamp_url` on create and patch: blank or `null` clears it, anything else must be an `https` URL on `bandcamp.com` or a subdomain
+ * (parsed, so `bandcamp.com.evil.com` and `evil.com/bandcamp.com` fail). A backslash, space or control character is refused before the
+ * parse (`hasUrlParserDifferentialChar`, BS#1710): WHATWG folds or strips them, so `https://bandcamp.com\@evil.example/x` reads as
+ * bandcamp.com here but as evil.example to an RFC 3986 client. Credentials are refused too. What is stored is the parser's `href`, the
+ * string the check approved, and the 512 limit applies to it as well, because normalizing can lengthen it.
+ */
 const parseBandcampUrl = (raw: unknown): string | null | undefined => {
   const value = normalizeOptionalText(raw, 'bandcamp_url', BANDCAMP_URL_MAX);
   if (!value) {
     return value;
+  }
+  const invalid = () => new WxycError('Invalid Parameter: bandcamp_url must be a Bandcamp link', 400);
+  if (hasUrlParserDifferentialChar(value)) {
+    throw invalid();
   }
   let url: URL | undefined;
   try {
@@ -87,23 +98,27 @@ const parseBandcampUrl = (raw: unknown): string | null | undefined => {
   } catch {
     url = undefined;
   }
-  if (url?.protocol !== 'https:' || (url.hostname !== 'bandcamp.com' && !url.hostname.endsWith('.bandcamp.com'))) {
-    throw new WxycError('Invalid Parameter: bandcamp_url must be a Bandcamp link', 400);
+  if (
+    url?.protocol !== 'https:' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    (url.hostname !== 'bandcamp.com' && !url.hostname.endsWith('.bandcamp.com'))
+  ) {
+    throw invalid();
   }
-  return value;
+  if (url.href.length > BANDCAMP_URL_MAX) {
+    throw new WxycError(`bandcamp_url must be ${BANDCAMP_URL_MAX} characters or fewer`, 400);
+  }
+  return url.href;
 };
 
-/** The optional columns, parsed the same way on create and on patch; `undefined` means "not supplied". Any Bandcamp link sent counts as entered by a music director, so the flag follows the link. */
-const parseOptionals = (body: Record<string, unknown>) => {
-  const bandcamp_url = parseBandcampUrl(body.bandcamp_url);
-  return {
-    record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
-    label_id: parseInt4BodyId(body.label_id, 'label_id', { nullable: true }),
-    discogs_release_id: parseInt4BodyId(body.discogs_release_id, 'discogs_release_id', { nullable: true }),
-    bandcamp_url,
-    bandcamp_url_entered: bandcamp_url === undefined ? undefined : bandcamp_url !== null,
-  };
-};
+/** The optional columns, parsed the same way on create and on patch; `undefined` means "not supplied". The service derives `bandcamp_url_entered` from `bandcamp_url`. */
+const parseOptionals = (body: Record<string, unknown>) => ({
+  record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
+  label_id: parseInt4BodyId(body.label_id, 'label_id', { nullable: true }),
+  discogs_release_id: parseInt4BodyId(body.discogs_release_id, 'discogs_release_id', { nullable: true }),
+  bandcamp_url: parseBandcampUrl(body.bandcamp_url),
+});
 
 /** The `POST /intake` body: both names are required, and the kind rule is in the return type, so no cast is needed downstream. A new item starts uncited. */
 const parseNewFields = (body: Record<string, unknown>): NewIntakeFields => {

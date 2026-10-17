@@ -617,7 +617,7 @@ components:
           nullable: true
           maxLength: 512
           description: >-
-            A link to the record on Bandcamp, a preview for choosing and hearing it and not the station's review copy. Surrounding whitespace is trimmed. A blank or whitespace-only string means no link, the same as `null`. Any other value must be an `https` URL on `bandcamp.com` or a subdomain of it, or the request is a 400. On `PATCH`, `null` or a blank string clears it. Any link sent counts as entered by a music director, and a lookup never replaces it.
+            A link to the record on Bandcamp, a preview for choosing and hearing it and not the station's review copy. Surrounding whitespace is trimmed. A blank or whitespace-only string means no link, the same as `null`. Any other value must be an `https` URL on `bandcamp.com` or a subdomain of it, with no credentials and no backslash, space or control character, or the request is a 400. The stored value is the normalized URL (the host lower-cased), which must also fit in 512 characters. On `PATCH`, `null` or a blank string clears it. Any link sent counts as entered by a music director, and a lookup never replaces it.
 
     NewIntakeItemRequest:
       description: >-
