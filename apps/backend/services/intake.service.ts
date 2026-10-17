@@ -98,6 +98,7 @@ export type IntakeItemResponse = Omit<
   submitted_review_count: number;
   draft_authors?: string[];
   requested_dj_name: string | null;
+  requested_by_name: string | null;
   checked_out_by_name: string | null;
   passes?: { dj_name: string; passed_at: string; dj_id: string }[];
 };
@@ -117,7 +118,7 @@ export type NewIntakeFields = Omit<IntakeFields, 'format_id'> & NewIntakeKind;
 export type IntakeCitations = Pick<NewIntakeItem, 'cited_album_id' | 'cited_submission_id'>;
 
 /**
- * Every item column the contract exposes, plus the staff names (`requested_dj_name`, `checked_out_by_name`, `passes[].dj_name`).
+ * Every item column the contract exposes, plus the staff names (`requested_dj_name`, `requested_by_name`, `checked_out_by_name`, `passes[].dj_name`).
  * Each is `staffNameSql`: the person's real name, else `auth_user.name`; read at request time, never stored. Only `reviews:read`
  * callers reach this, so the real name goes to staff and never to a public read (docs/pii.md).
  * `passes` and `draft_authors` are correlated aggregates in the same statement (one query for the
@@ -137,6 +138,7 @@ export const buildIntakeSelect = (opts: {
   limit?: number;
 }) => {
   const requester = alias(user, 'requester');
+  const asker = alias(user, 'asker');
   const holder = alias(user, 'holder');
   const exposed = Object.fromEntries(Object.entries(getTableColumns(intake_items)).filter(([k]) => !UNEXPOSED.has(k)));
   return (
@@ -147,6 +149,7 @@ export const buildIntakeSelect = (opts: {
         overdue: overdue.as('overdue'),
         submitted_review_count: submittedReviewCount.as('submitted_review_count'),
         requested_dj_name: staffNameSql(requester).as('requested_dj_name'),
+        requested_by_name: staffNameSql(asker).as('requested_by_name'),
         checked_out_by_name: staffNameSql(holder).as('checked_out_by_name'),
         ...(opts.includePasses && {
           passes: passesSql.as('passes'),
@@ -155,6 +158,7 @@ export const buildIntakeSelect = (opts: {
       })
       .from(intake_items)
       .leftJoin(requester, eq(requester.id, intake_items.requested_dj_id))
+      .leftJoin(asker, eq(asker.id, intake_items.requested_by))
       .leftJoin(holder, eq(holder.id, intake_items.checked_out_by))
       .where(
         and(
@@ -305,7 +309,7 @@ const setsCitation = (patch: IntakeCitations) => patch.cited_album_id != null ||
  * A patch that changes the stored `cited_album_id` (a different release, null, or a submission cited instead) also takes off a review
  * accepted through that citation (`RELEASE_ACCEPTED_REVIEW`, decision 34): one that is not the item's own, found by reading the review row
  * unlocked (a review's `intake_item_id` never changes). Decided on the value the patch leaves, not on the key it carries.
- * Setting a citation also withdraws a pending request in the same UPDATE (BS#3383): `requested` becomes `pool` and the request fields are nulled, a lapsed request included; a `checked_out` item keeps its holder.
+ * Setting a citation also withdraws a pending request in the same UPDATE (BS#3383): `requested` becomes `pool` and the request fields (CLEAR_REQUEST) are nulled, a lapsed request included; a `checked_out` item keeps its holder.
  */
 export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
   if (patch.cited_album_id != null && patch.cited_submission_id != null) {
@@ -338,10 +342,13 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
       ...((takesOffReview || withdrawsRequest) && {
         state: sql`CASE${takesOffReview ? sql` WHEN ${takesOffReview} THEN ${RELEASED_STATE}` : sql``}${withdrawsRequest ? sql` WHEN ${withdrawsRequest} THEN 'pool'` : sql``} ELSE ${intake_items.state} END`,
       }),
-      ...(withdrawsRequest && {
-        requested_dj_id: unlessWithdrawn(sql`${intake_items.requested_dj_id}`),
-        requested_at: unlessWithdrawn(sql`${intake_items.requested_at}`),
-      }),
+      ...(withdrawsRequest &&
+        Object.fromEntries(
+          Object.keys(CLEAR_REQUEST).map((key) => [
+            key,
+            unlessWithdrawn(sql`${intake_items[key as keyof typeof CLEAR_REQUEST]}`),
+          ])
+        )),
       // Setting one citation clears the other, in the same UPDATE.
       ...(patch.cited_album_id != null && { cited_submission_id: null }),
       ...(patch.cited_submission_id != null && { cited_album_id: null }),
@@ -414,7 +421,7 @@ export const deleteIntakeItem = async (id: number) =>
 
 export type IntakeAction = 'checkout' | 'release' | 'request' | 'cancel_request' | 'accept' | 'pass';
 
-const CLEAR_REQUEST = { requested_dj_id: null, requested_at: null };
+const CLEAR_REQUEST = { requested_dj_id: null, requested_at: null, requested_by: null };
 const TAKEN = (actor: ReviewsActor) => ({
   state: 'checked_out' as const,
   ...CLEAR_REQUEST,
@@ -452,7 +459,12 @@ const TRANSITIONS: Record<
   },
   request: {
     from: ['pool'],
-    set: (_, djId) => ({ state: 'requested', requested_dj_id: djId, requested_at: sql`now()` }),
+    set: (actor, djId) => ({
+      state: 'requested',
+      requested_dj_id: djId,
+      requested_by: actor.id,
+      requested_at: sql`now()`,
+    }),
   },
   cancel_request: { from: ['requested'], set: () => TO_POOL },
   accept: { from: ['requested'], set: TAKEN, only: (actor) => eq(intake_items.requested_dj_id, actor.id) },

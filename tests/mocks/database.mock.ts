@@ -666,6 +666,7 @@ export const intake_items = {
   logged_by: 'intake_items.logged_by',
   logged_at: 'intake_items.logged_at',
   requested_dj_id: 'intake_items.requested_dj_id',
+  requested_by: 'intake_items.requested_by',
   requested_at: 'intake_items.requested_at',
   checked_out_by: 'intake_items.checked_out_by',
   checked_out_at: 'intake_items.checked_out_at',

@@ -161,6 +161,7 @@ describe('buildIntakeSelect — staff names (BS#3052)', () => {
 
   it.each([
     ['requested_dj_name', 'requester'],
+    ['requested_by_name', 'asker'],
     ['checked_out_by_name', 'holder'],
   ])('%s is the staff name of the %s join', (field, aliasName) => {
     expect(text).toContain(`${renderOf(staffNameSql(alias(user, aliasName)))} as "${field}"`);
@@ -300,7 +301,7 @@ describe('buildTransition (BS#2798)', () => {
   it('checkout stamps the holder and clears any stale request fields', () => {
     const { text, params } = render('checkout', 7, dj);
     expect(text).toMatch(
-      /set "state" = \$\d+, "requested_dj_id" = \$\d+, "requested_at" = \$\d+, "checked_out_by" = \$\d+, "checked_out_at" = now\(\)/
+      /set "state" = \$\d+, "requested_dj_id" = \$\d+, "requested_by" = \$\d+, "requested_at" = \$\d+, "checked_out_by" = \$\d+, "checked_out_at" = now\(\)/
     );
     expect(params).toEqual(expect.arrayContaining(['checked_out', null, 'dj-1']));
   });
@@ -377,20 +378,20 @@ describe('buildTransition (BS#2798)', () => {
     expect(params).toEqual(expect.arrayContaining(['checked_out', null, 'dj-1']));
   });
 
-  it('request stamps the target DJ and requested_at', () => {
+  it('request stamps the target DJ, the asking account and requested_at', () => {
     const { text, params } = render('request', 7, md, 'dj-2');
     expect(text).toContain('"requested_at" = now()');
-    expect(params).toEqual(expect.arrayContaining(['requested', 'dj-2']));
+    expect(params).toEqual(expect.arrayContaining(['requested', 'dj-2', 'md-1']));
   });
 
   it('cancel_request clears the request fields and returns the item to pool', () => {
-    expect(render('cancel_request', 7, md).params.slice(0, 3)).toEqual(['pool', null, null]);
+    expect(render('cancel_request', 7, md).params.slice(0, 4)).toEqual(['pool', null, null, null]);
   });
 
   it('pass also clears the checkout, so a held item leaves its holder', () => {
     const { text, params } = render('pass', 7, dj);
     expect(text).toMatch(/"checked_out_by" = \$\d+, "checked_out_at" = \$\d+/);
-    expect(params.slice(0, 5)).toEqual(['pool', null, null, null, null]);
+    expect(params.slice(0, 6)).toEqual(['pool', null, null, null, null, null]);
   });
 });
 
@@ -597,7 +598,7 @@ describe('buildIntakePatch — setting a citation withdraws a pending request (B
   ])('citing %s decides on the stored state in the same UPDATE and nulls the request fields', (_name, patch) => {
     const text = render(patch);
     expect(text).toContain(`when ${WITHDRAWS} then 'pool' else ${T}."state" end`);
-    for (const column of ['requested_dj_id', 'requested_at']) {
+    for (const column of ['requested_dj_id', 'requested_at', 'requested_by']) {
       expect(text).toContain(`"${column}" = case when ${WITHDRAWS} then null else ${T}."${column}" end`);
     }
   });
@@ -619,6 +620,7 @@ describe('buildIntakePatch — setting a citation withdraws a pending request (B
     expect(text).not.toContain(WITHDRAWS);
     expect(text).not.toContain('"requested_dj_id" =');
     expect(text).not.toContain('"requested_at" =');
+    expect(text).not.toContain('"requested_by" =');
   });
 });
 
@@ -806,6 +808,7 @@ describe('acceptReview (BS#2860)', () => {
       accepted_by: 'md-1',
       requested_dj_id: null,
       requested_at: null,
+      requested_by: null,
     });
     // The holder columns are written only through the digital guard (BS#3101), pinned in the writeAcceptance block below.
     expect(Object.keys(sets[0])).toEqual(expect.arrayContaining(['checked_out_by', 'checked_out_at']));

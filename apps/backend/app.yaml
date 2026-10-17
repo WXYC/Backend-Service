@@ -501,8 +501,8 @@ components:
         days old, or whose `requested_dj_id` is null (the DJ's account was
         deleted), reads as `pool`; `overdue` is true for an item whose checkout
         (`checked_out_at`) is more than 14 days old, `checked_out` or `reviewed`
-        alike (a returned item has no checkout). A read never changes `state`. Its three DJ-name
-        fields (`requested_dj_name`, `checked_out_by_name`, `passes[].dj_name`) hold the person's real
+        alike (a returned item has no checkout). A read never changes `state`. Its four name
+        fields (`requested_dj_name`, `requested_by_name`, `checked_out_by_name`, `passes[].dj_name`) hold the person's real
         name as shown inside the station, falling back to their account name (on-air handle, else
         username) when no real name is on file, current at read time. They are station-only: not for
         any public or anonymous surface, because they hold a legal name, and never for client
@@ -540,6 +540,16 @@ components:
           nullable: true
           description: >-
             The requested DJ's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
+        requested_by:
+          type: string
+          nullable: true
+          description: >-
+            The asking music director's account id, set together with `requested_dj_id` when the item enters `requested`. Withdrawing the request, the requested DJ accepting or passing it, a checkout, accepting a review for the item and filing each clear it, so an item in any other state reads `null`. A read never writes, so a stale `requested` item, whose `effective_state` reads `pool`, keeps it set. `null` while `state` is `requested` means the request was made before the server recorded the asker, or the asker's account has since been deleted.
+        requested_by_name:
+          type: string
+          nullable: true
+          description: >-
+            The asker's real name as shown inside the station, falling back to their account name (on-air handle, else username) when no real name is on file, current at read time. `null` whenever `requested_by` is `null`. Station-only: not for any public or anonymous surface, because it holds a legal name; never for client telemetry (analytics properties, error breadcrumbs, logs).
         requested_at: { type: string, format: date-time, nullable: true }
         checked_out_by: { type: string, nullable: true }
         checked_out_by_name:
