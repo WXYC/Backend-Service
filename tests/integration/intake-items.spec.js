@@ -481,6 +481,84 @@ describe('/intake (BS#2796)', () => {
       expect(res.status).toBe(400);
     });
 
+    describe('listen-first links (BS#3390)', () => {
+      const linkRow = async (id) =>
+        (
+          await sql.unsafe(
+            `SELECT spotify_url, apple_music_url, bandcamp_url, bandcamp_url_entered, links_checked_at FROM "${SCHEMA}".intake_items WHERE id = $1`,
+            [id]
+          )
+        )[0];
+      const countMine = async () =>
+        Number(
+          (
+            await sql.unsafe(`SELECT count(*) FROM "${SCHEMA}".intake_items WHERE artist_name = $1`, [
+              `${PREFIX} links`,
+            ])
+          )[0].count
+        );
+      const body = (extra) => ({ artist_name: `${PREFIX} links`, album_title: 'Links', format_id: formatId, ...extra });
+
+      test.each([
+        ['a label subdomain', 'https://label.bandcamp.com/album/x'],
+        ['the bare host', 'https://bandcamp.com/juana-molina'],
+      ])('POST stores %s and marks it entered; the read returns it and never the flag', async (_name, url) => {
+        const created = await auth.post('/intake').send(body({ bandcamp_url: url }));
+        expect(created.status).toBe(200);
+        expect(created.body).toMatchObject({ bandcamp_url: url, spotify_url: null, apple_music_url: null });
+        expect(created.body).not.toHaveProperty('bandcamp_url_entered');
+        expect(created.body).not.toHaveProperty('links_checked_at');
+        expect(await linkRow(created.body.id)).toMatchObject({ bandcamp_url: url, bandcamp_url_entered: true });
+        const read = await auth.get(`/intake/${created.body.id}`);
+        expect(read.body.bandcamp_url).toBe(url);
+      });
+
+      test('an item added without links reads three nulls and an unset flag', async () => {
+        const created = await auth.post('/intake').send(body({}));
+        expect(created.body).toMatchObject({ spotify_url: null, apple_music_url: null, bandcamp_url: null });
+        expect(await linkRow(created.body.id)).toMatchObject({ bandcamp_url_entered: false, links_checked_at: null });
+      });
+
+      test.each([
+        ['plain http', 'http://label.bandcamp.com/album/x'],
+        ['another host with bandcamp.com in the path', 'https://evil.com/bandcamp.com'],
+        ['bandcamp.com as a prefix of another host', 'https://bandcamp.com.evil.com'],
+        ['a non-URL', 'not a link'],
+        ['more than 512 characters', `https://label.bandcamp.com/${'a'.repeat(512)}`],
+      ])('POST refuses %s with a 400 and writes nothing', async (_name, url) => {
+        const before = await countMine();
+        const res = await auth.post('/intake').send(body({ bandcamp_url: url }));
+        expect(res.status).toBe(400);
+        expect(await countMine()).toBe(before);
+      });
+
+      test('PATCH enters a link, a refused link leaves the stored one, and null or a blank string clears link and flag', async () => {
+        const id = (await auth.post('/intake').send(body({}))).body.id;
+        const url = 'https://label.bandcamp.com/album/x';
+
+        expect((await auth.patch(`/intake/${id}`).send({ bandcamp_url: url })).body.bandcamp_url).toBe(url);
+        expect(await linkRow(id)).toMatchObject({ bandcamp_url: url, bandcamp_url_entered: true });
+
+        expect((await auth.patch(`/intake/${id}`).send({ bandcamp_url: 'http://evil.com/x' })).status).toBe(400);
+        expect(await linkRow(id)).toMatchObject({ bandcamp_url: url, bandcamp_url_entered: true });
+
+        for (const cleared of [null, '  ']) {
+          await auth.patch(`/intake/${id}`).send({ bandcamp_url: url });
+          const res = await auth.patch(`/intake/${id}`).send({ bandcamp_url: cleared });
+          expect(res.status).toBe(200);
+          expect(res.body.bandcamp_url).toBeNull();
+          expect(await linkRow(id)).toMatchObject({ bandcamp_url: null, bandcamp_url_entered: false });
+        }
+      });
+
+      test('a PATCH that does not carry the key leaves the link and the flag alone', async () => {
+        const url = 'https://label.bandcamp.com/album/x';
+        const id = (await auth.post('/intake').send(body({ bandcamp_url: url }))).body.id;
+        await auth.patch(`/intake/${id}`).send({ album_title: 'Links (2)' });
+        expect(await linkRow(id)).toMatchObject({ bandcamp_url: url, bandcamp_url_entered: true });
+      });
+    });
+
     describe('digital albums (BS#3100)', () => {
       const rowOf = async (id) => (await sql.unsafe(`SELECT * FROM "${SCHEMA}".intake_items WHERE id = $1`, [id]))[0];
       const countMine = async () =>

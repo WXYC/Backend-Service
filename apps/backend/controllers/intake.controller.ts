@@ -72,12 +72,38 @@ const parseKind = (body: Record<string, unknown>): NewIntakeKind => {
   return { digital, format_id };
 };
 
-/** The three optional logging columns, parsed the same way on create and on patch; `undefined` means "not supplied". */
-const parseOptionals = (body: Record<string, unknown>) => ({
-  record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
-  label_id: parseInt4BodyId(body.label_id, 'label_id', { nullable: true }),
-  discogs_release_id: parseInt4BodyId(body.discogs_release_id, 'discogs_release_id', { nullable: true }),
-});
+/** `bandcamp_url` is the `varchar(512)` column's width. */
+const BANDCAMP_URL_MAX = 512;
+
+/** `bandcamp_url` on create and patch: blank or `null` clears it, anything else must be an `https` URL on `bandcamp.com` or a subdomain (parsed, so `bandcamp.com.evil.com` and `evil.com/bandcamp.com` fail). */
+const parseBandcampUrl = (raw: unknown): string | null | undefined => {
+  const value = normalizeOptionalText(raw, 'bandcamp_url', BANDCAMP_URL_MAX);
+  if (!value) {
+    return value;
+  }
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    url = undefined;
+  }
+  if (url?.protocol !== 'https:' || (url.hostname !== 'bandcamp.com' && !url.hostname.endsWith('.bandcamp.com'))) {
+    throw new WxycError('Invalid Parameter: bandcamp_url must be a Bandcamp link', 400);
+  }
+  return value;
+};
+
+/** The optional columns, parsed the same way on create and on patch; `undefined` means "not supplied". Any Bandcamp link sent counts as entered by a music director, so the flag follows the link. */
+const parseOptionals = (body: Record<string, unknown>) => {
+  const bandcamp_url = parseBandcampUrl(body.bandcamp_url);
+  return {
+    record_label: normalizeOptionalText(body.record_label, 'record_label', TEXT_MAX),
+    label_id: parseInt4BodyId(body.label_id, 'label_id', { nullable: true }),
+    discogs_release_id: parseInt4BodyId(body.discogs_release_id, 'discogs_release_id', { nullable: true }),
+    bandcamp_url,
+    bandcamp_url_entered: bandcamp_url === undefined ? undefined : bandcamp_url !== null,
+  };
+};
 
 /** The `POST /intake` body: both names are required, and the kind rule is in the return type, so no cast is needed downstream. A new item starts uncited. */
 const parseNewFields = (body: Record<string, unknown>): NewIntakeFields => {
