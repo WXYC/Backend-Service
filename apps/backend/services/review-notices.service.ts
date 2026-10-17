@@ -35,28 +35,17 @@ export const assignedLine = (
 
 const requestedHolder = (item: NoticeItem) => (item.effective_state === 'requested' ? item.requested_dj_id : null);
 
-/** The assigned line's sentence, in the copy the station decided on 2026-10-06 (BS#2806); a digital album is taken, not checked out (copy round 5, 2026-10-11, BS#3103). */
-const lineText = (line: AssignedLine, digital: boolean) => {
+/** The assigned line's sentence, in the copy the station decided on 2026-10-06 (BS#2806); one wording for a disc and a digital album (copy round 10, 2026-10-16, BS#3392). */
+const lineText = (line: AssignedLine) => {
   switch (line.kind) {
     case 'holder':
       return 'This review is from the DJ who has the record.';
     case 'other_dj':
-      if (digital) {
-        return line.holderName === null
-          ? 'This review is from another DJ; a different DJ has taken the record.'
-          : `This review is from another DJ; ${line.holderName} has taken the record.`;
-      }
-      return line.holderName === null
-        ? 'This review is from another DJ; the record is checked out to a different DJ.'
-        : `This review is from another DJ; the record is with ${line.holderName}.`;
+      return `This review is from another DJ; the record is with ${line.holderName ?? 'a different DJ'}.`;
     case 'removed_holder':
-      return digital
-        ? 'This review is from another DJ; the record was taken by an account that has since been removed.'
-        : "This review is from another DJ; the record is checked out and its holder's account was removed.";
+      return 'This review is from another DJ; the record is with an account that was removed.';
     case 'pool':
-      return digital
-        ? 'This review is from another DJ; nobody has taken the record.'
-        : 'This review is from another DJ; nobody has the record checked out.';
+      return 'This review is from another DJ; nobody has the record.';
   }
 };
 
@@ -220,7 +209,7 @@ export const notifyReviewSubmitted = (n: ReviewNotice) =>
     subject: `Review waiting to be accepted: ${record(n.artist, n.album)}`,
     lines: [
       `A review of ${record(n.artist, n.album)} by ${n.author ?? 'a DJ'} is waiting to be accepted.`,
-      lineText(n.line, n.digital),
+      lineText(n.line),
     ],
   });
 
@@ -261,7 +250,7 @@ export const notifyDigitalTaken = async (item: { id: number; artist: string; alb
       links: [itemLink(item.id)],
       context,
       subject: `Send the files: ${what}`,
-      lines: [`${snapshotAuthor(taker.name) ?? 'A DJ'} took ${what} to review. Send the files to ${taker.email}.`],
+      lines: [`${snapshotAuthor(taker.name) ?? 'A DJ'} is reviewing ${what}. Send the files to ${taker.email}.`],
     },
     { excludeUserIds: [takerUserId] }
   );
@@ -319,9 +308,9 @@ export const notifyReviewEdited = (n: AuthorNotice) =>
 /** Notice 2: a music director recorded a review in the account's name. */
 export const notifyReviewRecorded = (n: AuthorNotice) =>
   notifyAccount(n.authorUserId, {
-    subject: `A review was recorded in your name: ${record(n.artist, n.album)}`,
+    subject: `Your review of ${record(n.artist, n.album)} is in the DJ site`,
     lines: [
-      `${n.name ?? 'A music director'} recorded a review of ${record(n.artist, n.album)} in your name.`,
+      `${n.name ?? 'A music director'} put your review of ${record(n.artist, n.album)} into the DJ site.`,
       "You can edit it, and it isn't published anywhere until you choose where it can appear and how you're credited.",
     ],
     links: [reviewLink(n.reviewId)],
