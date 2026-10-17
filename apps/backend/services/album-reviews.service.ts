@@ -155,10 +155,12 @@ export const toAlbumReviewDTO = (row: AlbumReviewRow): AlbumReviewDTO => ({
  * ETL upsert.
  */
 const buildWhere = ({ album_id, artist }: AlbumReviewsQueryFilters): SQL | undefined => {
-  // Leaves out a row `jobs/album-reviews-import` copied into `reviews`, per ADR 0011.
+  // Leaves out a row `jobs/album-reviews-import` copied into `reviews`, or that a submitted review on its own
+  // release was copied from, per ADR 0011.
   const conditions: SQL[] = [
     isNotNull(album_review_submissions.review),
     sql`NOT EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.imported_from_submission_id} = ${album_review_submissions.id})`,
+    sql`NOT EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.copied_from_submission_id} = ${album_review_submissions.id} AND ${reviews.album_id} = ${album_review_submissions.album_id} AND ${reviews.status} = 'submitted')`,
   ];
   if (album_id !== undefined) {
     conditions.push(eq(album_review_submissions.album_id, album_id));

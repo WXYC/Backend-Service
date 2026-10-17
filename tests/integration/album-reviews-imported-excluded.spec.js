@@ -12,6 +12,7 @@ const { createAuthRequest } = require('../utils/test_helpers');
 const { getTestDb } = require('../utils/db');
 const {
   seedLibraryRelease,
+  seedIntakeItem,
   removeSeededLibraryReleases,
   seedReview,
   seedFormSubmission,
@@ -66,5 +67,53 @@ describe('GET /album-reviews leaves out an imported row (BS#3132)', () => {
     expect(res.body.album_reviews.map((row) => row.id).sort((a, b) => a - b)).toEqual(
       [imported.id, skipped.id].sort((a, b) => a - b)
     );
+  });
+});
+
+describe('GET /album-reviews leaves out a row while a submitted copy of it is on its release (BS#3159)', () => {
+  let auth;
+
+  beforeAll(() => {
+    auth = createAuthRequest(request, global.access_token);
+  });
+
+  afterAll(async () => {
+    await removeSeededFormSubmissions();
+    await removeSeededLibraryReleases();
+  });
+
+  // `copy` returns the columns of the review seeded from the form row, or null to seed none.
+  test.each([
+    ['a submitted copy on its release', true, (form) => ({ album_id: form.album_id, status: 'submitted' })],
+    ['a draft copy on its release', false, (form) => ({ album_id: form.album_id, status: 'draft' })],
+    ['a copy on another release', false, async () => ({ album_id: (await seedLibraryRelease()).id })],
+    ['a copy on an unfiled record', false, async () => ({ intake_item_id: (await seedIntakeItem()).id })],
+    ['a copy that was deleted', false, (form) => ({ album_id: form.album_id, remove: true })],
+    ['a citation with no copy', false, () => null],
+  ])('with %s, the row is left out: %s', async (_name, excluded, copy) => {
+    const artist = `Copy Probe ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const release = await seedLibraryRelease({ artist_name: artist });
+    const form = await seedFormSubmission({
+      album_id: release.id,
+      artist_name: artist,
+      norm_artist: artist.toLowerCase(),
+      review: 'Copied by a music director.',
+    });
+    const overrides = await copy(form);
+    if (overrides !== null) {
+      const { remove, ...columns } = overrides;
+      const seeded = await seedReview({ copied_from_submission_id: form.id, ...columns });
+      if (remove) {
+        const sql = getTestDb();
+        await sql`DELETE FROM ${sql(SCHEMA)}.reviews WHERE id = ${seeded.id}`;
+      }
+    }
+
+    for (const query of [{ album_id: String(release.id) }, { artist }]) {
+      const res = await auth.get('/album-reviews').query({ ...query, limit: 100 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.album_reviews.map((row) => row.id)).toEqual(excluded ? [] : [form.id]);
+    }
   });
 });

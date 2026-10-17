@@ -51,6 +51,7 @@ const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
 
 /** The row the import job (BS#3132) copied into `reviews` is left out: it is an ordinary review on its release now. */
 const NOT_IMPORTED = sql`NOT EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.imported_from_submission_id} = ${album_review_submissions.id})`;
+const NOT_COPIED = sql`NOT EXISTS (SELECT 1 FROM ${reviews} WHERE ${reviews.copied_from_submission_id} = ${album_review_submissions.id} AND ${reviews.album_id} = ${album_review_submissions.album_id} AND ${reviews.status} = 'submitted')`;
 
 /** Columns that must NEVER appear in the projection or on the wire.
  *  social_consent_raw is the name-adjacent aside that is never served;
@@ -218,6 +219,7 @@ describe('getAlbumReviewsPage', () => {
       and(
         isNotNull(album_review_submissions.review),
         NOT_IMPORTED,
+        NOT_COPIED,
         eq(album_review_submissions.norm_artist, 'stereolab')
       )
     );
@@ -230,7 +232,12 @@ describe('getAlbumReviewsPage', () => {
 
     const whereArg = mockDb._chain.where.mock.calls[0][0] as unknown;
     expect(whereArg).toEqual(
-      and(isNotNull(album_review_submissions.review), NOT_IMPORTED, eq(album_review_submissions.album_id, 7042))
+      and(
+        isNotNull(album_review_submissions.review),
+        NOT_IMPORTED,
+        NOT_COPIED,
+        eq(album_review_submissions.album_id, 7042)
+      )
     );
   });
 
@@ -244,7 +251,7 @@ describe('getAlbumReviewsPage', () => {
     await getAlbumReviewsPage({}, 50, 0);
 
     const whereArg = mockDb._chain.where.mock.calls[0][0] as unknown;
-    expect(whereArg).toEqual(and(isNotNull(album_review_submissions.review), NOT_IMPORTED));
+    expect(whereArg).toEqual(and(isNotNull(album_review_submissions.review), NOT_IMPORTED, NOT_COPIED));
   });
 });
 
@@ -286,6 +293,7 @@ describe('buildWhere parity (page vs count)', () => {
       and(
         isNotNull(album_review_submissions.review),
         NOT_IMPORTED,
+        NOT_COPIED,
         eq(album_review_submissions.album_id, 7042),
         eq(album_review_submissions.norm_artist, 'cat power')
       )
