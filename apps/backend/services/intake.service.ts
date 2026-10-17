@@ -112,15 +112,15 @@ export type IntakeItemResponse = Omit<
 
 export type IntakeFields = Pick<
   NewIntakeItem,
-  | 'artist_name'
-  | 'album_title'
-  | 'record_label'
-  | 'label_id'
-  | 'format_id'
-  | 'discogs_release_id'
-  | 'bandcamp_url'
-  | 'bandcamp_url_entered'
+  'artist_name' | 'album_title' | 'record_label' | 'label_id' | 'format_id' | 'discogs_release_id' | 'bandcamp_url'
 >;
+
+/**
+ * The rule that `bandcamp_url_entered` follows the link, applied here so it holds for every writer of `IntakeFields` (BS#3390): a link
+ * sets the flag, a clear (`null`) clears it, and no `bandcamp_url` key leaves the stored flag alone. The flag is not an input.
+ */
+export const withBandcampEntered = <T extends { bandcamp_url?: string | null }>(fields: T) =>
+  fields.bandcamp_url === undefined ? fields : { ...fields, bandcamp_url_entered: fields.bandcamp_url !== null };
 
 /** What `POST /intake` carries for its kind: a digital album has no `format_id` of its own (the service stores the CD-R format's), and a disc must have one. */
 export type NewIntakeKind = { digital: true; format_id?: undefined } | { digital?: false; format_id: number };
@@ -234,7 +234,7 @@ export const logIntakeItem = async (fields: NewIntakeFields, loggedBy: string) =
   try {
     const [{ id }] = await db
       .insert(intake_items)
-      .values({ ...fields, format_id: formatId, logged_by: loggedBy })
+      .values({ ...withBandcampEntered(fields), format_id: formatId, logged_by: loggedBy })
       .returning({ id: intake_items.id });
     return { outcome: 'logged' as const, item: (await getIntakeItem(id, true))! };
   } catch (error) {
@@ -346,7 +346,7 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
   return db
     .update(intake_items)
     .set({
-      ...patch,
+      ...withBandcampEntered(patch),
       ...(takesOffReview && {
         accepted_review_id: unlessKept(sql`${intake_items.accepted_review_id}`, sql`NULL`),
         accepted_by: unlessKept(sql`${intake_items.accepted_by}`, sql`NULL`),

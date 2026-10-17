@@ -45,6 +45,7 @@ import {
   passesSql,
   acceptReview,
   memberAccount,
+  withBandcampEntered,
 } from '../../../apps/backend/services/intake.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -187,20 +188,54 @@ describe('buildIntakeSelect — listen-first links (BS#3390)', () => {
   );
 });
 
-describe('buildIntakePatch — the Bandcamp link (BS#3390)', () => {
-  it.each([
-    ['a link sets the flag', { bandcamp_url: 'https://label.bandcamp.com/album/x', bandcamp_url_entered: true }, true],
-    ['null clears the link and the flag', { bandcamp_url: null, bandcamp_url_entered: false }, false],
-  ])('%s', (_name, patch, entered) => {
-    const { sql: text, params } = buildIntakePatch(7, patch).toSQL();
+describe('the Bandcamp entered flag follows the link for every writer (BS#3390)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  const LINK = 'https://label.bandcamp.com/album/x';
+  const CASES = [
+    ['a link sets the flag', LINK, true],
+    ['null clears the link and the flag', null, false],
+  ] as const;
+
+  it.each(CASES)('withBandcampEntered: %s', (_name, link, entered) => {
+    expect(withBandcampEntered({ bandcamp_url: link })).toEqual({ bandcamp_url: link, bandcamp_url_entered: entered });
+  });
+
+  it('withBandcampEntered: no bandcamp_url key leaves the flag out', () => {
+    expect(withBandcampEntered({ album_title: 'DOGA' })).toEqual({ album_title: 'DOGA' });
+  });
+
+  it.each(CASES)('buildIntakePatch: %s', (_name, link, entered) => {
+    const { sql: text, params } = buildIntakePatch(7, { bandcamp_url: link }).toSQL();
     expect(text).toContain('"bandcamp_url" = $');
     expect(text).toContain('"bandcamp_url_entered" = $');
     expect(params).toContain(entered);
   });
 
-  it('leaves both columns out of an UPDATE that does not carry the key', () => {
+  it('buildIntakePatch: leaves both columns out of an UPDATE that does not carry the key', () => {
     const { sql: text } = buildIntakePatch(7, { album_title: 'DOGA' }).toSQL();
     expect(text).not.toContain('bandcamp_url');
+  });
+
+  it.each(CASES)('logIntakeItem: %s', async (_name, link, entered) => {
+    const values = jest.fn(() => ({ returning: () => Promise.reject(new Error('stop after the insert')) }));
+    jest.spyOn(db, 'insert').mockReturnValue({ values } as never);
+    await expect(
+      logIntakeItem(
+        { artist_name: 'Juana Molina', album_title: 'DOGA', digital: false, format_id: 1, bandcamp_url: link },
+        'u1'
+      )
+    ).rejects.toThrow('stop after the insert');
+    expect(values).toHaveBeenCalledWith(expect.objectContaining({ bandcamp_url: link, bandcamp_url_entered: entered }));
+  });
+
+  it('logIntakeItem: no link leaves the flag to its column default', async () => {
+    const values = jest.fn(() => ({ returning: () => Promise.reject(new Error('stop after the insert')) }));
+    jest.spyOn(db, 'insert').mockReturnValue({ values } as never);
+    await expect(
+      logIntakeItem({ artist_name: 'Juana Molina', album_title: 'DOGA', digital: false, format_id: 1 }, 'u1')
+    ).rejects.toThrow('stop after the insert');
+    expect(values).toHaveBeenCalledWith(expect.not.objectContaining({ bandcamp_url_entered: expect.anything() }));
   });
 });
 
