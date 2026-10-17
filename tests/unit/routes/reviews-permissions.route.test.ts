@@ -222,6 +222,7 @@ describe('POST /reviews', () => {
     { medium: 'handwritten' },
     { accept: false },
     { accept: true },
+    { copied_from_submission_id: 5 },
   ])('a DJ sending %j is a 403 and nothing is created', async (keys) => {
     expect((await post({ intake_item_id: 4, ...keys })).status).toBe(403);
     expect(mockCreate).not.toHaveBeenCalled();
@@ -273,9 +274,30 @@ describe('POST /reviews, on behalf (BS#2866)', () => {
     );
   });
 
-  test.each([{ accept: true }, { accept: false }])('a release subject sending %j is a 400', async (keys) => {
-    expect((await post({ album_id: 9, author: 'Test Reviewer', ...keys })).status).toBe(400);
-    expect(mockRecord).not.toHaveBeenCalled();
+  test.each([{ accept: true }, { accept: false }, { copied_from_submission_id: 5 }])(
+    'a release subject sending %j is a 400',
+    async (keys) => {
+      expect((await post({ album_id: 9, author: 'Test Reviewer', ...keys })).status).toBe(400);
+      expect(mockRecord).not.toHaveBeenCalled();
+    }
+  );
+
+  test('an item subject passes copied_from_submission_id to the service, and omits it when not sent', async () => {
+    await post({ intake_item_id: 4, author: 'Test Reviewer', copied_from_submission_id: 5 });
+    expect(mockRecord).toHaveBeenLastCalledWith(
+      expect.anything(),
+      {},
+      {
+        author: 'Test Reviewer',
+        author_user_id: undefined,
+        medium: 'typed',
+        accept: true,
+        copied_from_submission_id: 5,
+      },
+      MANAGER
+    );
+    await post({ intake_item_id: 4, author: 'Test Reviewer' });
+    expect(mockRecord.mock.calls[1][2].copied_from_submission_id).toBeUndefined();
   });
 
   test.each([
@@ -291,6 +313,13 @@ describe('POST /reviews, on behalf (BS#2866)', () => {
     ['publish_apps ticked', { author: 'Test Reviewer', publish_apps: true }],
     ['publish_instagram ticked', { author: 'Test Reviewer', publish_instagram: true }],
     ['a credit', { author: 'Test Reviewer', credit: 'dj_name' }],
+    ['a copied_from_submission_id with no author', { copied_from_submission_id: 5 }],
+    ['a string copied_from_submission_id', { author: 'Test Reviewer', copied_from_submission_id: '5' }],
+    ['a fractional copied_from_submission_id', { author: 'Test Reviewer', copied_from_submission_id: 1.5 }],
+    ['a zero copied_from_submission_id', { author: 'Test Reviewer', copied_from_submission_id: 0 }],
+    ['a negative copied_from_submission_id', { author: 'Test Reviewer', copied_from_submission_id: -3 }],
+    ['a null copied_from_submission_id', { author: 'Test Reviewer', copied_from_submission_id: null }],
+    ['an out-of-range copied_from_submission_id', { author: 'Test Reviewer', copied_from_submission_id: 2 ** 31 }],
   ])('%s is a 400 and nothing is created', async (_, keys) => {
     expect((await post({ intake_item_id: 4, ...keys })).status).toBe(400);
     expect(mockRecord).not.toHaveBeenCalled();
@@ -307,9 +336,16 @@ describe('POST /reviews, on behalf (BS#2866)', () => {
     ['subject_not_held', 409],
     ['text_required', 400],
     ['unknown_author', 400],
+    ['unknown_submission', 400],
   ])('%s is a %i', async (outcome, status) => {
     mockRecord.mockResolvedValue({ outcome });
     expect((await post({ intake_item_id: 4, author: 'Test Reviewer' })).status).toBe(status);
+  });
+
+  test('unknown_submission names the key in its message', async () => {
+    mockRecord.mockResolvedValue({ outcome: 'unknown_submission' });
+    const res = await post({ intake_item_id: 4, author: 'Test Reviewer', copied_from_submission_id: 5 });
+    expect([res.status, res.body.message]).toEqual([400, 'copied_from_submission_id names no form review']);
   });
 
   test('the closed reason of a 409 is subject_not_held', async () => {

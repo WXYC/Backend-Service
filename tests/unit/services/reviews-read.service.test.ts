@@ -193,16 +193,18 @@ describe('review reads (BS#2805)', () => {
     expect(last().split('lp.review_id = "wxyc_schema"."reviews"."id"').length - 1).toBe(2);
   });
 
-  // BS#3132: `reviews.imported_from_submission_id` is internal provenance. `selectReview` and the lists share one
-  // select list, so rendering the reads covers every `Review` the API returns (get, list, create, edit, submit).
+  // BS#3132, BS#3428: `reviews.imported_from_submission_id` and `reviews.copied_from_submission_id` are internal
+  // provenance. `selectReview` and the lists share one select list, so rendering the reads covers every `Review` the
+  // API returns (get, list, create, edit, submit).
   test.each([
     ['getReview', () => getReview(3, ACTOR)],
     ['the plain list', () => listReviews({}, ACTOR)],
     ['the album list', () => listReviews({ album_id: 9 }, ACTOR)],
-  ])('%s selects the review columns but never the import provenance (BS#3132)', async (_n, run) => {
+  ])('%s selects the review columns but never the provenance (BS#3132, BS#3428)', async (_n, run) => {
     await run();
     expect(last()).toContain('"author_user_id"');
     expect(last()).not.toContain('imported_from_submission_id');
+    expect(last()).not.toContain('copied_from_submission_id');
   });
 
   test('the revision read checks the review visibility rule first and answers undefined when nothing is visible (BS#2861)', async () => {

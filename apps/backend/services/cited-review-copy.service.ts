@@ -62,6 +62,7 @@ export const copyCitedCoverReviews = async (tx: Tx, albumId: number) => {
     .for('share');
 
   // `imported_from_submission_id` is unique and names the import's row; the copy is the record's own review.
+  // `copied_from_submission_id` is not unique and the copy is still a copy of that form review, so it is carried over.
   const reviewColumns = copiedColumns(reviews, ['id', 'intake_item_id', 'album_id', 'imported_from_submission_id']);
   const revisionColumns = copiedColumns(review_revisions, ['id', 'review_id']);
   // A table interpolated into `sql` renders without its alias, so each FROM/JOIN names it explicitly.

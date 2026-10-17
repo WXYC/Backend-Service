@@ -6044,6 +6044,7 @@ export const SET_NULL_REFERENCES: Record<string, Record<string, PgColumn>> = {
     author_user_id: auth_user.id,
     recorded_by_user_id: auth_user.id,
     imported_from_submission_id: album_review_submissions.id,
+    copied_from_submission_id: album_review_submissions.id,
   },
   review_revisions: { edited_by_user_id: auth_user.id },
   review_prints: { review_id: reviews.id, revision_id: review_revisions.id, printed_by: auth_user.id },

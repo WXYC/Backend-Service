@@ -2923,8 +2923,17 @@ export const reviews = wxyc_schema.table(
     imported_from_submission_id: integer('imported_from_submission_id').references(() => album_review_submissions.id, {
       onDelete: 'set null',
     }),
+    // The form-archive row a music director's copy of a form review came from (set by an on-behalf `POST /reviews`).
+    // Form rows can be deleted by hand, hence SET NULL; not unique, since one form review can be copied onto
+    // more than one record.
+    copied_from_submission_id: integer('copied_from_submission_id').references(() => album_review_submissions.id, {
+      onDelete: 'set null',
+    }),
   },
   (table) => [
+    index('reviews_copied_from_submission_id_idx')
+      .on(table.copied_from_submission_id)
+      .where(sql`${table.copied_from_submission_id} IS NOT NULL`),
     uniqueIndex('reviews_imported_from_submission_id_uq')
       .on(table.imported_from_submission_id)
       .where(sql`${table.imported_from_submission_id} IS NOT NULL`),

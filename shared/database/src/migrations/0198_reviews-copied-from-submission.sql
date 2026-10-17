@@ -1,0 +1,6 @@
+-- BS#3428: records which form-archive review a music director's copy of it came from (the on-behalf `copied_from_submission_id` of `POST /reviews`). SET NULL because a form row can be deleted by hand. Not unique, since one form review can be copied onto more than one record. The partial index serves the album page's NOT EXISTS (BS#3159) and the foreign key's delete.
+-- DDL-only: a nullable column with no default rewrites nothing, and the index is built over an all-NULL column. No backfill: no copy-and-cite copy exists in production, and one made before the DJ site sends the field keeps it NULL.
+-- @no-precondition-needed: the column is new and all NULL, so the foreign key has no rows to violate it.
+ALTER TABLE "wxyc_schema"."reviews" ADD COLUMN "copied_from_submission_id" integer;--> statement-breakpoint
+ALTER TABLE "wxyc_schema"."reviews" ADD CONSTRAINT "reviews_copied_from_submission_id_album_review_submissions_id_fk" FOREIGN KEY ("copied_from_submission_id") REFERENCES "wxyc_schema"."album_review_submissions"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "reviews_copied_from_submission_id_idx" ON "wxyc_schema"."reviews" USING btree ("copied_from_submission_id") WHERE "wxyc_schema"."reviews"."copied_from_submission_id" IS NOT NULL;
