@@ -340,6 +340,7 @@ services:
       # that both surfaces keep agreeing.
       - MUTATION_4XX_METRICS_DISABLED=true
       - SSE_METRICS_DISABLED=true
+      - ROTATION_ARTIST_BACKFILL_METRICS_DISABLED=true
     ports:
       - '${CI_PORT:-8081}:8080'
 
