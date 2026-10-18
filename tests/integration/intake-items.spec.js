@@ -557,6 +557,72 @@ describe('/intake (BS#2796)', () => {
         await auth.patch(`/intake/${id}`).send({ album_title: 'Links (2)' });
         expect(await linkRow(id)).toMatchObject({ bandcamp_url: url, bandcamp_url_entered: true });
       });
+
+      // The lookup a rename starts is not waited for. The integration mock LML has no streaming-check route, so the lookup
+      // stores nothing and the row read right after the PATCH response is the UPDATE's own result.
+      describe('a PATCH that changes the names clears the found links, and one that does not leaves them (BS#3483)', () => {
+        const SPOTIFY = 'https://open.spotify.com/album/6rZWXgnhYd3CTeLZDSYyvD';
+        const APPLE = 'https://music.apple.com/us/album/doga/1234567890';
+        const BANDCAMP = 'https://sonamos.bandcamp.com/album/doga';
+        const NEW_BANDCAMP = 'https://sonamos.bandcamp.com/album/segundo';
+        const CHECKED_AT = '2026-09-01T12:00:00.000Z';
+        const NAMES = { artist_name: `${PREFIX} rename`, album_title: 'DOGA' };
+        const FOUND = { spotify_url: SPOTIFY, apple_music_url: APPLE, bandcamp_url: BANDCAMP };
+        const NOTHING = { spotify_url: null, apple_music_url: null, bandcamp_url: null, links_checked_at: null };
+
+        test.each([
+          ['artist_name changed', {}, { artist_name: `${PREFIX} rename (2)` }, NOTHING],
+          ['album_title changed', {}, { album_title: 'Segundo' }, NOTHING],
+          ['both names changed', {}, { artist_name: `${PREFIX} rename (2)`, album_title: 'Segundo' }, NOTHING],
+          [
+            'a rename keeps an entered Bandcamp link and its flag',
+            { bandcamp_url_entered: true },
+            { album_title: 'Segundo' },
+            {
+              spotify_url: null,
+              apple_music_url: null,
+              bandcamp_url: BANDCAMP,
+              bandcamp_url_entered: true,
+              links_checked_at: null,
+            },
+          ],
+          [
+            'a rename carrying a new Bandcamp link stores and enters it',
+            {},
+            { album_title: 'Segundo', bandcamp_url: NEW_BANDCAMP },
+            {
+              spotify_url: null,
+              apple_music_url: null,
+              bandcamp_url: NEW_BANDCAMP,
+              bandcamp_url_entered: true,
+              links_checked_at: null,
+            },
+          ],
+          [
+            'the stored names re-sent',
+            {},
+            { ...NAMES },
+            { ...FOUND, bandcamp_url_entered: false, links_checked_at: new Date(CHECKED_AT) },
+          ],
+          [
+            'a record_label-only edit',
+            {},
+            { record_label: 'Sonamos' },
+            { ...FOUND, bandcamp_url_entered: false, links_checked_at: new Date(CHECKED_AT) },
+          ],
+        ])('%s', async (_name, seededExtra, patch, expected) => {
+          const id = await seed('rename', {
+            ...NAMES,
+            ...FOUND,
+            links_checked_at: CHECKED_AT,
+            bandcamp_url_entered: false,
+            ...seededExtra,
+          });
+          const res = await auth.patch(`/intake/${id}`).send(patch);
+          expect(res.status).toBe(200);
+          expect(await linkRow(id)).toEqual(expect.objectContaining(expected));
+        });
+      });
     });
 
     describe('digital albums (BS#3100)', () => {
