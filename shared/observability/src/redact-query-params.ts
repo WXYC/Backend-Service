@@ -1,5 +1,5 @@
 import { types } from 'node:util';
-import { exceptionFromError, getClient, isError as isSentryError } from '@sentry/core';
+import { exceptionFromError, getClient } from '@sentry/core';
 import type { Breadcrumb, ErrorEvent, EventHint, Exception, StackFrame } from '@sentry/core';
 
 /**
@@ -63,13 +63,20 @@ function carriesRow(error: Error): boolean {
   return typeof detail === 'string' && FAILING_ROW.test(detail);
 }
 
+/** Sentry's own error tags, read locally so this module needs no Sentry helper for the check. */
+function hasErrorTag(value: unknown): boolean {
+  return ['[object Error]', '[object Exception]', '[object DOMException]', '[object DOMError]'].includes(
+    Object.prototype.toString.call(value)
+  );
+}
+
 /**
  * What Sentry follows as an error, so the guards walk exactly what it walks: `instanceof Error` misses errors from
  * another realm (Node core errors under a vm context), so also ask the engine, and Sentry also takes an object
  * tagged `[object Error]` (and its other error tags) as a `cause` or an `errors` member.
  */
 function isError(value: unknown): value is Error {
-  return value instanceof Error || types.isNativeError(value) || copies.has(value as object) || isSentryError(value);
+  return value instanceof Error || types.isNativeError(value) || copies.has(value as object) || hasErrorTag(value);
 }
 
 /** The copies `redactError` made: a copy of a cross-realm error is no longer native, yet must still be followed down a cause chain. */

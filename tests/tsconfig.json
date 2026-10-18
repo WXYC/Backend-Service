@@ -17,7 +17,8 @@
       "@/*": ["apps/backend/*"],
       "@wxyc/database": ["shared/database/src/index.ts"],
       "@wxyc/database/streaming-merge-sql": ["shared/database/src/streaming-merge-sql.ts"],
-      "@wxyc/observability/metrics": ["shared/observability/src/metrics.ts"]
+      "@wxyc/observability/metrics": ["shared/observability/src/metrics.ts"],
+      "@wxyc/observability/sentry": ["shared/observability/src/sentry-reporter.ts"]
     },
     "types": ["jest", "node"]
   },
