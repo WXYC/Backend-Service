@@ -207,9 +207,17 @@ describe('the Bandcamp entered flag follows the link for every writer (BS#3390)'
 
   it.each(CASES)('buildIntakePatch: %s', (_name, link, entered) => {
     const { sql: text, params } = buildIntakePatch(7, { bandcamp_url: link }).toSQL();
-    expect(text).toContain('"bandcamp_url" = $');
-    expect(text).toContain('"bandcamp_url_entered" = $');
-    expect(params).toContain(entered);
+    const stored = `"${SCHEMA}"."intake_items"."bandcamp_url"`;
+    const flag = `"${SCHEMA}"."intake_items"."bandcamp_url_entered"`;
+    const sent = '$1::text IS DISTINCT FROM ' + stored;
+    expect(text.replace(/\$\d+/g, '$1')).toContain(
+      `"bandcamp_url_entered" = CASE WHEN $1::text IS DISTINCT FROM ${stored} THEN $1::text IS NOT NULL ELSE ${flag} END`
+    );
+    expect(text.replace(/\$\d+/g, '$1')).toContain(
+      `"bandcamp_url" = CASE WHEN ${sent} THEN $1::text ELSE ${stored} END`
+    );
+    expect(params).toContain(link);
+    expect(params).not.toContain(entered);
   });
 
   it.each([
@@ -274,7 +282,7 @@ describe('buildIntakePatch — a rename clears the found links in the same UPDAT
       'a rename that also enters a Bandcamp link, which the patch writes',
       { album_title: 'Moon Pix', bandcamp_url: 'https://label.bandcamp.com/album/x' },
       ALBUM,
-      '"bandcamp_url" = $,',
+      `"bandcamp_url" = CASE WHEN $::text IS DISTINCT FROM ${column('bandcamp_url')} THEN $::text ELSE ${cleared('bandcamp_url', ALBUM, ENTERED_KEPT).replace(/^"bandcamp_url" = /, '')} END`,
       ALBUM,
     ],
   ])(

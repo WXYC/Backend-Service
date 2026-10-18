@@ -117,7 +117,8 @@ export type IntakeFields = Pick<
 
 /**
  * The rule that `bandcamp_url_entered` follows the link, applied here so it holds for every writer of `IntakeFields` (BS#3390): a link
- * sets the flag, a clear (`null`) clears it, and no `bandcamp_url` key leaves the stored flag alone. The flag is not an input.
+ * sets the flag, a clear (`null`) clears it, and no `bandcamp_url` key leaves the stored flag alone. The flag is not an input. The insert path
+ * only: `buildIntakePatch` compares the sent link with the stored one instead (BS#3482).
  */
 export const withBandcampEntered = <T extends { bandcamp_url?: string | null }>(fields: T) =>
   fields.bandcamp_url === undefined ? fields : { ...fields, bandcamp_url_entered: fields.bandcamp_url !== null };
@@ -326,7 +327,8 @@ const setsCitation = (patch: IntakeCitations) => patch.cited_album_id != null ||
  * Setting a citation also withdraws a pending request in the same UPDATE (BS#3383): `requested` becomes `pool` and the request fields (CLEAR_REQUEST) are nulled, a lapsed request included; a `checked_out` item keeps its holder.
  * A patch that changes `artist_name` or `album_title` (BS#3391) clears, in the same UPDATE, the found links and `links_checked_at`,
  * because they were looked up for the old names: so a renamed record never keeps another record's link, whether or not a later lookup
- * runs or succeeds. A music director's Bandcamp link (`bandcamp_url_entered`) is kept, and a `bandcamp_url` in the same patch wins.
+ * runs or succeeds. A music director's Bandcamp link (`bandcamp_url_entered`) is kept, and a `bandcamp_url` in the same patch that differs from the stored one wins; one equal to it (an echo of the record) is not an entry,
+ * so it leaves the link and flag as stored, and a rename still clears a found one.
  * "Changes" is decided against the stored names, read `FOR UPDATE` in the same statement (`prior`), and comes back as `renamed`, so
  * the caller starts the lookup only for an actual change.
  */
@@ -347,6 +349,15 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
   const renamed = prior && or(...names.map((name) => ne(prior[name], patch[name] as string)));
   const clearedOnRename = (column: AnyPgColumn, unless?: AnyPgColumn) =>
     sql`CASE WHEN ${renamed}${unless ? sql` AND NOT ${unless}` : sql``} THEN NULL ELSE ${column} END`;
+  const { bandcamp_url: sentLink, ...rest } = patch;
+  // A sent link differing from the stored one is a person's entry; an unchanged one is an echo and leaves link and flag as stored (a rename still clears a found one).
+  const bandcampSet =
+    sentLink === undefined
+      ? {}
+      : {
+          bandcamp_url_entered: sql`CASE WHEN ${sentLink}::text IS DISTINCT FROM ${intake_items.bandcamp_url} THEN ${sentLink}::text IS NOT NULL ELSE ${intake_items.bandcamp_url_entered} END`,
+          bandcamp_url: sql`CASE WHEN ${sentLink}::text IS DISTINCT FROM ${intake_items.bandcamp_url} THEN ${sentLink}::text ELSE ${renamed ? clearedOnRename(intake_items.bandcamp_url, intake_items.bandcamp_url_entered) : intake_items.bandcamp_url} END`,
+        };
   const leaves = patch.cited_submission_id != null ? null : patch.cited_album_id; // `undefined`: the stored value stays
   const citationChanged =
     leaves === undefined
@@ -371,7 +382,8 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
         bandcamp_url: clearedOnRename(intake_items.bandcamp_url, intake_items.bandcamp_url_entered),
         links_checked_at: clearedOnRename(intake_items.links_checked_at),
       }),
-      ...withBandcampEntered(patch),
+      ...rest,
+      ...bandcampSet,
       ...(takesOffReview && {
         accepted_review_id: unlessKept(sql`${intake_items.accepted_review_id}`, sql`NULL`),
         accepted_by: unlessKept(sql`${intake_items.accepted_by}`, sql`NULL`),
