@@ -1,5 +1,5 @@
-import { and, desc, eq, getTableColumns, notInArray, sql, type SQL } from 'drizzle-orm';
-import { alias, type PgUpdateSetSource } from 'drizzle-orm/pg-core';
+import { and, desc, eq, getTableColumns, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { alias, type AnyPgColumn, type PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import {
   db,
   extractConstraintName,
@@ -324,11 +324,29 @@ const setsCitation = (patch: IntakeCitations) => patch.cited_album_id != null ||
  * accepted through that citation (`RELEASE_ACCEPTED_REVIEW`, decision 34): one that is not the item's own, found by reading the review row
  * unlocked (a review's `intake_item_id` never changes). Decided on the value the patch leaves, not on the key it carries.
  * Setting a citation also withdraws a pending request in the same UPDATE (BS#3383): `requested` becomes `pool` and the request fields (CLEAR_REQUEST) are nulled, a lapsed request included; a `checked_out` item keeps its holder.
+ * A patch that changes `artist_name` or `album_title` (BS#3391) clears, in the same UPDATE, the found links and `links_checked_at`,
+ * because they were looked up for the old names: so a renamed record never keeps another record's link, whether or not a later lookup
+ * runs or succeeds. A music director's Bandcamp link (`bandcamp_url_entered`) is kept, and a `bandcamp_url` in the same patch wins.
+ * "Changes" is decided against the stored names, read `FOR UPDATE` in the same statement (`prior`), and comes back as `renamed`, so
+ * the caller starts the lookup only for an actual change.
  */
 export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
   if (patch.cited_album_id != null && patch.cited_submission_id != null) {
     throw new WxycError('cited_album_id and cited_submission_id cannot both be set', 400);
   }
+  const names = (['artist_name', 'album_title'] as const).filter((name) => patch[name] !== undefined);
+  const prior =
+    names.length === 0
+      ? undefined
+      : db
+          .select({ id: intake_items.id, artist_name: intake_items.artist_name, album_title: intake_items.album_title })
+          .from(intake_items)
+          .where(eq(intake_items.id, id))
+          .for('update')
+          .as('prior');
+  const renamed = prior && or(...names.map((name) => ne(prior[name], patch[name] as string)));
+  const clearedOnRename = (column: AnyPgColumn, unless?: AnyPgColumn) =>
+    sql`CASE WHEN ${renamed}${unless ? sql` AND NOT ${unless}` : sql``} THEN NULL ELSE ${column} END`;
   const leaves = patch.cited_submission_id != null ? null : patch.cited_album_id; // `undefined`: the stored value stays
   const citationChanged =
     leaves === undefined
@@ -343,9 +361,16 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
   // Citing withdraws a pending request (a lapsed one is stored `requested` too); a `checked_out` holder and every other state stay.
   const withdrawsRequest = setsCitation(patch) ? sql`${intake_items.state} = 'requested'` : undefined;
   const unlessWithdrawn = (column: SQL) => sql`CASE WHEN ${withdrawsRequest} THEN NULL ELSE ${column} END`;
-  return db
+  const update = db
     .update(intake_items)
     .set({
+      // Before the patch's own fields, so a `bandcamp_url` the patch carries replaces the cleared one.
+      ...(renamed && {
+        spotify_url: clearedOnRename(intake_items.spotify_url),
+        apple_music_url: clearedOnRename(intake_items.apple_music_url),
+        bandcamp_url: clearedOnRename(intake_items.bandcamp_url, intake_items.bandcamp_url_entered),
+        links_checked_at: clearedOnRename(intake_items.links_checked_at),
+      }),
       ...withBandcampEntered(patch),
       ...(takesOffReview && {
         accepted_review_id: unlessKept(sql`${intake_items.accepted_review_id}`, sql`NULL`),
@@ -367,8 +392,20 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
       ...(patch.cited_album_id != null && { cited_submission_id: null }),
       ...(patch.cited_submission_id != null && { cited_album_id: null }),
     })
-    .where(and(eq(intake_items.id, id), notInArray(intake_items.state, FILED_STATES), citationValidSql(patch)))
-    .returning({ id: intake_items.id });
+    .$dynamic();
+  if (prior) {
+    update.from(prior);
+  }
+  return update
+    .where(
+      and(
+        eq(intake_items.id, id),
+        prior && eq(prior.id, intake_items.id),
+        notInArray(intake_items.state, FILED_STATES),
+        citationValidSql(patch)
+      )
+    )
+    .returning({ id: intake_items.id, renamed: sql<boolean>`${renamed ?? sql`false`}` });
 };
 
 export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> & IntakeCitations) => {
@@ -388,7 +425,7 @@ export const updateIntakeItem = async (id: number, patch: Partial<IntakeFields> 
     if (rows.length === 0) {
       return { outcome: await refusalFor(id, setsCitation(patch) ? 'citation' : undefined) };
     }
-    return { outcome: 'updated' as const, item: (await getIntakeItem(id, true))! };
+    return { outcome: 'updated' as const, item: (await getIntakeItem(id, true))!, renamed: rows[0].renamed };
   } catch (error) {
     if (isUnknownReference(error)) return { outcome: 'unknown_reference' as const };
     throw error;
