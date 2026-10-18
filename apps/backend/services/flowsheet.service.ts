@@ -886,9 +886,28 @@ export const addHourlyBreakpoint = async (
   throw new WxycError('Breakpoint for this hour was removed while it was being added; retry.', 409);
 };
 
+/**
+ * Row-scoped write gate (BS#3438). `showMemberMiddleware` only proves the caller is on the show that is open NOW; the
+ * row-keyed writes name a row by id, so each calls this against the row's own `show_id`, read inside the write's
+ * transaction. The row's show must be open and the caller an active member of it. A NULL `show_id` belongs to no
+ * open show. `caller` is the DJ id, or null under the development-only AUTH_BYPASS (see `rowWriteCaller`).
+ */
+const assertCallerMayWriteRow = async (
+  trx: Pick<typeof db, 'select'>,
+  show_id: number | null,
+  caller: string | null
+): Promise<void> => {
+  if (caller === null) return;
+  if (show_id !== null) {
+    const [show] = await trx.select({ end_time: shows.end_time }).from(shows).where(eq(shows.id, show_id));
+    if (show?.end_time === null && (await getDJsInShow(show_id, true, trx)).some((dj) => dj.id === caller)) return;
+  }
+  throw new WxycError('Bad Request: DJ not a member of the show this entry belongs to', 400);
+};
+
 // Returns undefined when no row matches entry_id (double delete / stale id);
 // the controller maps that to a 404 (PR #1532 review).
-export const removeTrack = async (entry_id: number): Promise<FSEntry | undefined> => {
+export const removeTrack = async (entry_id: number, caller: string | null): Promise<FSEntry | undefined> => {
   /*
     TODO: logic for updating album playcount
    */
@@ -920,8 +939,17 @@ export const removeTrack = async (entry_id: number): Promise<FSEntry | undefined
   //     .where(inArray(library.id, matching_album_ids));
   // }
 
-  const response = await db.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
-  return response[0];
+  return db.transaction(async (trx) => {
+    const [row] = await trx
+      .select({ show_id: flowsheet.show_id })
+      .from(flowsheet)
+      .where(eq(flowsheet.id, entry_id))
+      .for('update');
+    if (!row) return undefined;
+    await assertCallerMayWriteRow(trx, row.show_id, caller);
+    const response = await trx.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
+    return response[0];
+  });
 };
 
 /**
@@ -1207,7 +1235,11 @@ export const findLibraryReleasesByText = async (
 
 // Returns undefined when the UPDATE matches no row (entry deleted out from
 // under the edit); the controller maps that to a 404 (PR #1532 review).
-export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): Promise<FSEntry | undefined> => {
+export const updateEntry = async (
+  entry_id: number,
+  entry: UpdateRequestBody,
+  caller: string | null
+): Promise<FSEntry | undefined> => {
   // Defense in depth (BS#1099): construct the update object from named
   // fields so even if a future controller starts passing the raw body,
   // mass-assignment of internal columns (metadata_status, legacy_entry_id,
@@ -1231,6 +1263,7 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
   return db.transaction(async (trx) => {
     const [current] = await trx
       .select({
+        show_id: flowsheet.show_id,
         entry_type: flowsheet.entry_type,
         artist_name: flowsheet.artist_name,
         album_title: flowsheet.album_title,
@@ -1242,6 +1275,7 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
       .for('update')
       .limit(1);
     if (!current) return undefined;
+    await assertCallerMayWriteRow(trx, current.show_id, caller);
 
     let linkSet: PgUpdateSetSource<typeof flowsheet> = {};
     if (entry.album_id != null) {
@@ -2502,15 +2536,19 @@ export const getRecentShows = async (
   };
 };
 
-export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promise<User[]> => {
+export const getDJsInShow = async (
+  show_id: number,
+  activeOnly: boolean,
+  executor: Pick<typeof db, 'select'> = db
+): Promise<User[]> => {
   let showDJsInstance: ShowDJ[];
   if (activeOnly) {
-    showDJsInstance = await db
+    showDJsInstance = await executor
       .select()
       .from(show_djs)
       .where(and(eq(show_djs.show_id, show_id), eq(show_djs.active, true)));
   } else {
-    showDJsInstance = await db.select().from(show_djs).where(eq(show_djs.show_id, show_id));
+    showDJsInstance = await executor.select().from(show_djs).where(eq(show_djs.show_id, show_id));
   }
 
   const dj_ids = showDJsInstance.map((dj) => {
@@ -2525,7 +2563,7 @@ export const getDJsInShow = async (show_id: number, activeOnly: boolean): Promis
   // request.
   if (dj_ids.length === 0) return [];
 
-  return await db.select().from(user).where(inArray(user.id, dj_ids));
+  return await executor.select().from(user).where(inArray(user.id, dj_ids));
 };
 
 export const getAlbumFromDB = async (album_id: number) => {
@@ -2551,7 +2589,11 @@ export const getAlbumFromDB = async (album_id: number) => {
 // (a concurrent delete landed after the reorder transaction committed); the
 // controller maps that to a 404 (PR #1532 review). A missing row at
 // transaction START still throws the 404 WxycError inside the transaction.
-export const changeOrder = async (entry_id: number, position_new: number): Promise<FSEntry | undefined> => {
+export const changeOrder = async (
+  entry_id: number,
+  position_new: number,
+  caller: string | null
+): Promise<FSEntry | undefined> => {
   await db.transaction(
     async (trx) => {
       const result = await trx
@@ -2561,11 +2603,14 @@ export const changeOrder = async (entry_id: number, position_new: number): Promi
         })
         .from(flowsheet)
         .where(eq(flowsheet.id, entry_id))
-        .limit(1);
+        .limit(1)
+        .for('update');
 
       if (result.length === 0) {
         throw new WxycError(`Flowsheet entry ${entry_id} not found`, 404);
       }
+
+      await assertCallerMayWriteRow(trx, result[0].show_id, caller);
 
       const position_old = result[0].play_order;
       const show_id = result[0].show_id;

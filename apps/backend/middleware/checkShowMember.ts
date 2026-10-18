@@ -1,5 +1,17 @@
-import { RequestHandler } from 'express';
+import { Request, RequestHandler, Response } from 'express';
 import { getDJsInCurrentShow } from '../services/flowsheet.service.js';
+
+const isDevAuthBypass = () => process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV === 'development';
+
+const callerId = (req: Pick<Request, 'auth'>, res: Pick<Response, 'locals'>) =>
+  req.auth?.id || req.auth?.sub || res.locals.decodedJWT?.id || res.locals.decodedJWT?.userId;
+
+/**
+ * The caller identity for the row-scoped write gate (BS#3438): the DJ id (empty when none resolves, which matches
+ * no member), or null under the same development-only AUTH_BYPASS the middleware honors below.
+ */
+export const rowWriteCaller = (req: Pick<Request, 'auth'>, res: Pick<Response, 'locals'>): string | null =>
+  isDevAuthBypass() ? null : (callerId(req, res) ?? '');
 
 export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
   // Positive-list gate (BS#1097): bypass requires explicit NODE_ENV=development.
@@ -10,13 +22,13 @@ export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
   // membership chain untested. The auth bypass still populates req.auth.id
   // (JWT decode or raw user-id fallback), so the check below runs correctly
   // under bypass; only local dev keeps the hatch.
-  if (process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV === 'development') {
+  if (isDevAuthBypass()) {
     return next();
   }
 
   try {
     const show_djs = await getDJsInCurrentShow();
-    const user_id = req.auth?.id || req.auth?.sub || res.locals.decodedJWT?.id || res.locals.decodedJWT?.userId;
+    const user_id = callerId(req, res);
     const dj_in_show = show_djs.some((dj) => dj.id === user_id);
 
     if (!dj_in_show) {
