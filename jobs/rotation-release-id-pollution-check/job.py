@@ -682,7 +682,10 @@ def main() -> int:
 
             sentry_sdk.flush(timeout=2.0)
             if _posthog is not None:
-                posthog_send(lambda ph: ph.flush(2.0))
+                try:
+                    _posthog.shutdown()  # flushes queued events
+                except Exception as err:  # noqa: BLE001
+                    log("warning", "posthog_flush_failed", "PostHog flush failed", error_message=str(err))
     return exit_code
 
 
