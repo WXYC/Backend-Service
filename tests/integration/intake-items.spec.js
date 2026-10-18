@@ -35,6 +35,7 @@ const {
   removeSeededFormSubmissions,
   managerAccessToken,
 } = require('../utils/intake_seed');
+const { isMockApiAvailable, resetMockApi, getMockRequests, simulateError } = require('../utils/mock_api');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE';
@@ -558,8 +559,10 @@ describe('/intake (BS#2796)', () => {
         expect(await linkRow(id)).toMatchObject({ bandcamp_url: url, bandcamp_url_entered: true });
       });
 
-      // The lookup a rename starts is not waited for. The integration mock LML has no streaming-check route, so the lookup
-      // stores nothing and the row read right after the PATCH response is the UPDATE's own result.
+      // The lookup a rename starts is not waited for, so it must not be able to write: each row arms a 500 on the mock LML's
+      // streaming-check, the lookup fails and stores nothing, and the row read right after the PATCH is the UPDATE's own result.
+      // Without the mock's control API (the parallel runner) the lookup gets the mock's 404 or, with no LML configured, does not run,
+      // and the lookup columns are not checked.
       describe('a PATCH that changes the names clears the found links, and one that does not leaves them (BS#3483)', () => {
         const SPOTIFY = 'https://open.spotify.com/album/6rZWXgnhYd3CTeLZDSYyvD';
         const APPLE = 'https://music.apple.com/us/album/doga/1234567890';
@@ -569,11 +572,51 @@ describe('/intake (BS#2796)', () => {
         const NAMES = { artist_name: `${PREFIX} rename`, album_title: 'DOGA' };
         const FOUND = { spotify_url: SPOTIFY, apple_music_url: APPLE, bandcamp_url: BANDCAMP };
         const NOTHING = { spotify_url: null, apple_music_url: null, bandcamp_url: null, links_checked_at: null };
+        const BARRIER_TITLE = 'Halo';
+        let mockApiAvailable = false;
+
+        /** The names of each streaming-check the mock LML received for this table (an earlier test's lookup may land late). */
+        const lookupsAsked = async () =>
+          (await getMockRequests('lml'))
+            .filter((r) => r.path === '/api/v1/streaming-check' && r.body?.artist?.startsWith(NAMES.artist_name))
+            .map((r) => ({ artist_name: r.body.artist, album_title: r.body.title }));
+
+        /** Polls the request log until the barrier rename's lookup and `count` lookups in all have arrived, or 5 s pass. */
+        const lookupsOnceArrived = async (count) => {
+          const deadline = Date.now() + 5000;
+          let asked = await lookupsAsked();
+          while (
+            Date.now() < deadline &&
+            !(asked.length >= count && asked.some((l) => l.album_title === BARRIER_TITLE))
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            asked = await lookupsAsked();
+          }
+          return asked;
+        };
+
+        beforeAll(async () => {
+          mockApiAvailable = await isMockApiAvailable();
+        });
+
+        beforeEach(async () => {
+          if (mockApiAvailable) {
+            await resetMockApi();
+            await simulateError('lml', '/api/v1/streaming-check', 500);
+          }
+        });
+
+        // The armed 500 has no count, so it would outlive this block (see slack-webhook.spec.js).
+        afterAll(async () => {
+          if (mockApiAvailable) {
+            await resetMockApi();
+          }
+        });
 
         test.each([
-          ['artist_name changed', {}, { artist_name: `${PREFIX} rename (2)` }, NOTHING],
-          ['album_title changed', {}, { album_title: 'Segundo' }, NOTHING],
-          ['both names changed', {}, { artist_name: `${PREFIX} rename (2)`, album_title: 'Segundo' }, NOTHING],
+          ['artist_name changed', {}, { artist_name: `${PREFIX} rename (2)` }, NOTHING, true],
+          ['album_title changed', {}, { album_title: 'Segundo' }, NOTHING, true],
+          ['both names changed', {}, { artist_name: `${PREFIX} rename (2)`, album_title: 'Segundo' }, NOTHING, true],
           [
             'a rename keeps an entered Bandcamp link and its flag',
             { bandcamp_url_entered: true },
@@ -585,6 +628,7 @@ describe('/intake (BS#2796)', () => {
               bandcamp_url_entered: true,
               links_checked_at: null,
             },
+            true,
           ],
           [
             'a rename carrying a new Bandcamp link stores and enters it',
@@ -597,20 +641,23 @@ describe('/intake (BS#2796)', () => {
               bandcamp_url_entered: true,
               links_checked_at: null,
             },
+            true,
           ],
           [
             'the stored names re-sent',
             {},
             { ...NAMES },
             { ...FOUND, bandcamp_url_entered: false, links_checked_at: new Date(CHECKED_AT) },
+            false,
           ],
           [
             'a record_label-only edit',
             {},
             { record_label: 'Sonamos' },
             { ...FOUND, bandcamp_url_entered: false, links_checked_at: new Date(CHECKED_AT) },
+            false,
           ],
-        ])('%s', async (_name, seededExtra, patch, expected) => {
+        ])('%s (starts a lookup: %s)', async (_name, seededExtra, patch, expected, startsLookup) => {
           const id = await seed('rename', {
             ...NAMES,
             ...FOUND,
@@ -621,6 +668,20 @@ describe('/intake (BS#2796)', () => {
           const res = await auth.patch(`/intake/${id}`).send(patch);
           expect(res.status).toBe(200);
           expect(await linkRow(id)).toEqual(expect.objectContaining(expected));
+          if (!mockApiAvailable) {
+            return;
+          }
+          // `renamed` is not in the response, so the lookup it starts is observed at the mock. A later real rename is the barrier: a
+          // lookup this PATCH started was sent before that one, so once the barrier's has arrived, an absent lookup is not merely late.
+          const names = {
+            artist_name: patch.artist_name ?? NAMES.artist_name,
+            album_title: patch.album_title ?? NAMES.album_title,
+          };
+          expect((await auth.patch(`/intake/${id}`).send({ album_title: BARRIER_TITLE })).status).toBe(200);
+          const wanted = [...(startsLookup ? [names] : []), { ...names, album_title: BARRIER_TITLE }];
+          const asked = await lookupsOnceArrived(wanted.length);
+          expect(asked).toHaveLength(wanted.length);
+          expect(asked).toEqual(expect.arrayContaining(wanted));
         });
       });
     });
