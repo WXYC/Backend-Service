@@ -65,6 +65,7 @@ describe('lml-client policy', () => {
         'library-canonical-entity': 2,
         'library-add-album-streaming': 4,
         'library-update-album-streaming': 4,
+        'intake-streaming-links': 4,
         'metadata-service': 5,
         'enrichment-worker': 5,
         'flowsheet-metadata-backfill': 5,

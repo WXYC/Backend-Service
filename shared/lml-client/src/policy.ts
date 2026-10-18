@@ -198,6 +198,7 @@ export const ALL_LML_CALLERS = [
   // Class 4 — streaming availability checks.
   'library-add-album-streaming',
   'library-update-album-streaming',
+  'intake-streaming-links',
   // Class 5 — batch/backfill enrichment.
   'metadata-service',
   'enrichment-worker',
@@ -305,6 +306,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'library-canonical-entity': 2,
   'library-add-album-streaming': 4,
   'library-update-album-streaming': 4,
+  'intake-streaming-links': 4,
   'metadata-service': 5,
   'enrichment-worker': 5,
   'flowsheet-metadata-backfill': 5,
