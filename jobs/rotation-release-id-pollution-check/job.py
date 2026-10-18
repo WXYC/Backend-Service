@@ -270,7 +270,16 @@ class TokenBucket:
         return True
 
 
-def posthog_message_properties(message: str, fingerprint: list[str], extras: dict[str, object]) -> dict[str, object]:
+def posthog_fingerprint(kind: str, rotation_id: int) -> str:
+    """PostHog ``$exception_fingerprint``: the ``fingerprint_for`` parts joined
+    with ``:``. PostHog types the property as one string (a list is dropped as
+    InvalidProperties). ``run-degraded`` is per-run, not per-row, so its
+    placeholder id is left off (BS#3410)."""
+    parts = [JOB_NAME, kind] if kind == "run-degraded" else fingerprint_for(kind, rotation_id)
+    return ":".join(parts)
+
+
+def posthog_message_properties(message: str, fingerprint: str, extras: dict[str, object]) -> dict[str, object]:
     """Properties for a message-only alert sent as a synthesized ``$exception``
     (posthog-python's ``capture_exception`` is a no-op without an active exception)."""
     return {
@@ -306,7 +315,10 @@ def init_posthog(env: dict[str, str]):
 
 def posthog_send(capture) -> None:
     """Run ``capture(client)`` against the active client, swallowing any failure."""
-    if _posthog is None or not _posthog_bucket.allow():
+    if _posthog is None:
+        return
+    if not _posthog_bucket.allow():
+        log("warning", "posthog_send_dropped", "PostHog send dropped by the flood guard")
         return
     try:
         capture(_posthog)
@@ -314,18 +326,26 @@ def posthog_send(capture) -> None:
         log("warning", "posthog_send_failed", "PostHog send failed", error_message=str(err))
 
 
+def posthog_report_exception(err: BaseException) -> None:
+    """Mirror the job-failure exception to PostHog error tracking, fail-open."""
+    posthog_send(lambda ph: ph.capture_exception(
+        err, distinct_id=JOB_NAME,
+        properties={"repo": "Backend-Service", "tool": JOB_NAME, "run_id": _RUN_ID,
+                    "$process_person_profile": False}))
+
+
 def emit_alert(kind: str, rotation_id: int, message: str, extras: dict[str, object], dry_run: bool) -> None:
     if dry_run:
         log("info", "would_alert", message, kind=kind, rotation_id=rotation_id, **extras)
         return
-    fingerprint = fingerprint_for(kind, rotation_id)
     posthog_send(lambda ph: ph.capture(
         "$exception", distinct_id=JOB_NAME,
-        properties=posthog_message_properties(message, fingerprint, {"kind": kind, "rotation_id": rotation_id, **extras})))
+        properties=posthog_message_properties(
+            message, posthog_fingerprint(kind, rotation_id), {"kind": kind, "rotation_id": rotation_id, **extras})))
     import sentry_sdk  # lazy: --self-test and DRY_RUN paths never need the SDK
 
     with sentry_sdk.new_scope() as scope:
-        scope.fingerprint = fingerprint
+        scope.fingerprint = fingerprint_for(kind, rotation_id)
         scope.set_tag("kind", kind)
         scope.set_tag("rotation_id", str(rotation_id))
         for key, value in extras.items():
@@ -419,9 +439,14 @@ def self_test() -> int:
     check("fingerprint_for provenance", fingerprint_for("provenance", 99999),
           ["rotation-release-id-pollution-check", "provenance", "99999"])
 
-    props = posthog_message_properties("m", fingerprint_for("mismatch", 21529), {"kind": "mismatch"})
+    # PostHog types $exception_fingerprint as one string (cymbal: Option<String>); a list is dropped.
+    check("posthog_fingerprint mismatch", posthog_fingerprint("mismatch", 21529),
+          "rotation-release-id-pollution-check:mismatch:21529")
+    check("posthog_fingerprint run-degraded", posthog_fingerprint("run-degraded", 0),
+          "rotation-release-id-pollution-check:run-degraded")
+    props = posthog_message_properties("m", posthog_fingerprint("mismatch", 21529), {"kind": "mismatch"})
     check("posthog fingerprint", props["$exception_fingerprint"],
-          ["rotation-release-id-pollution-check", "mismatch", "21529"])
+          "rotation-release-id-pollution-check:mismatch:21529")
     check("posthog exception_list", props["$exception_list"],
           [{"type": "Warning", "value": "m", "mechanism": {"handled": True, "synthetic": True}}])
     check("posthog tags", (props["repo"], props["tool"], props["run_id"] == _RUN_ID, props["kind"]),
@@ -436,15 +461,63 @@ def self_test() -> int:
 
     class _Ph:
         def capture(self, event, **kw):
-            sent.append((event, kw["properties"]["$exception_fingerprint"]))
+            sent.append((event, kw["distinct_id"], kw["properties"]["$exception_fingerprint"]))
 
-    global _posthog
-    _posthog = _Ph()
-    posthog_send(lambda ph: ph.capture("$exception", properties=props))
-    emit_alert("mismatch", 1, "m", {}, dry_run=True)  # dry run must not reach PostHog
-    _posthog = None
-    check("posthog_send captures fingerprint", sent,
-          [("$exception", ["rotation-release-id-pollution-check", "mismatch", "21529"])])
+        def capture_exception(self, err, **kw):
+            sent.append(("capture_exception", str(err), kw["distinct_id"], kw["properties"]["tool"]))
+
+    class _RaisingPh:
+        def capture(self, event, **kw):
+            raise RuntimeError("posthog down")
+
+    class _FakeScope:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def set_tag(self, *a):
+            pass
+
+        def set_extra(self, *a):
+            pass
+
+    # emit_alert imports sentry_sdk lazily; a stub keeps the self-test SDK-free.
+    sentry_stub = type(sys)("sentry_sdk")
+    sentry_stub.new_scope = _FakeScope
+    sentry_stub.capture_message = lambda message, level: sent.append(("sentry", message, level))
+    real_sentry = sys.modules.get("sentry_sdk")
+    sys.modules["sentry_sdk"] = sentry_stub
+    global _posthog, _posthog_bucket
+    real_bucket = _posthog_bucket
+    try:
+        _posthog = _Ph()
+        _posthog_bucket = TokenBucket(5, 0.0, clock=lambda: 0.0)
+        emit_alert("mismatch", 1, "m", {}, dry_run=True)  # dry run must not reach PostHog
+        check("dry run sends nothing", sent, [])
+        emit_alert("mismatch", 21529, "m", {}, dry_run=False)
+        check("emit_alert reaches PostHog then Sentry", sent,
+              [("$exception", JOB_NAME, "rotation-release-id-pollution-check:mismatch:21529"),
+               ("sentry", "m", "warning")])
+        sent.clear()
+        posthog_report_exception(ValueError("boom"))
+        check("job failure reported to PostHog", sent, [("capture_exception", "boom", JOB_NAME, JOB_NAME)])
+        _posthog = _RaisingPh()
+        sent.clear()
+        emit_alert("provenance", 7, "p", {}, dry_run=False)
+        check("PostHog failure fails open, Sentry still fires", sent, [("sentry", "p", "warning")])
+        _posthog = _Ph()
+        _posthog_bucket = TokenBucket(0, 0.0, clock=lambda: 0.0)
+        sent.clear()
+        emit_alert("mismatch", 2, "m", {}, dry_run=False)
+        check("empty bucket drops the PostHog event only", sent, [("sentry", "m", "warning")])
+    finally:
+        _posthog, _posthog_bucket = None, real_bucket
+        if real_sentry is None:
+            sys.modules.pop("sentry_sdk", None)
+        else:
+            sys.modules["sentry_sdk"] = real_sentry
 
     # Provenance: in-baseline ids never alert; unknown ids do; shrinkage is silent.
     check("provenance in-baseline quiet", provenance_anomalies([7960, 43162], PROVENANCE_BASELINE), [])
@@ -670,10 +743,7 @@ def main() -> int:
             import sentry_sdk
 
             sentry_sdk.capture_exception(err)
-            posthog_send(lambda ph: ph.capture_exception(
-                err, distinct_id=JOB_NAME,
-                properties={"repo": "Backend-Service", "tool": JOB_NAME, "run_id": _RUN_ID,
-                            "$process_person_profile": False}))
+            posthog_report_exception(err)
         exit_code = 1
     finally:
         conn.close()
