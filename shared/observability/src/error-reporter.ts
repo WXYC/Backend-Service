@@ -33,7 +33,11 @@ export interface ErrorReporter {
   captureException(err: unknown, context?: ReportContext): void;
   captureMessage(message: string, context?: ReportContext): void;
   addBreadcrumb(crumb: ReportBreadcrumb): void;
-  /** Tags every report made while handling the current request. */
+  /**
+   * Tags every report made while handling the current request. In Sentry terms this is
+   * the current scope, not the isolation scope: run-wide tags such as a job logger's
+   * `Sentry.setTag` are a different thing and do not go through this method.
+   */
   setRequestTag(key: string, value: string): void;
   /** Counts an event. Counters are greppable log lines, not paging signals. */
   recordCounter(name: string, value: number, fields?: CounterFields): void;
@@ -88,8 +92,19 @@ export class CompositeReporter implements ErrorReporter {
     this.each((r) => r.recordCounter(name, value, fields));
   }
 
+  /**
+   * Flushes every reporter in parallel; resolves `false` if any reporter times out, rejects
+   * or throws. There is no deadline of its own: it is bounded only if each reporter honours
+   * `timeoutMs`.
+   */
   async flush(timeoutMs?: number): Promise<boolean> {
-    const results = await Promise.all(this.reporters.map((r) => r.flush(timeoutMs).catch(() => false)));
+    const results = await Promise.all(
+      this.reporters.map((r) =>
+        Promise.resolve()
+          .then(() => r.flush(timeoutMs))
+          .catch(() => false)
+      )
+    );
     return results.every(Boolean);
   }
 }
