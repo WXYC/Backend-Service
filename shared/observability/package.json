@@ -17,6 +17,12 @@
       "import": "./dist/metrics.mjs",
       "require": "./dist/metrics.js"
     },
+    "./sentry": {
+      "source": "./src/sentry-reporter.ts",
+      "types": "./dist/sentry-reporter.d.ts",
+      "import": "./dist/sentry-reporter.mjs",
+      "require": "./dist/sentry-reporter.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

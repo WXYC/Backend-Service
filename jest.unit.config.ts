@@ -44,6 +44,7 @@ const config: Config = {
     // resolution against shared/observability/dist, which CI's unit-tests
     // job never builds (BS#2169).
     '^@wxyc/observability/metrics$': '<rootDir>/shared/observability/src/metrics.ts',
+    '^@wxyc/observability/sentry$': '<rootDir>/shared/observability/src/sentry-reporter.ts',
     // Mock database client for any path resolving to shared/database/src/client
     '^.*/shared/database/src/client(\\.js)?$': '<rootDir>/tests/mocks/database.mock.ts',
     // Mock better-auth modules (ESM-only, can't be transformed by ts-jest)
