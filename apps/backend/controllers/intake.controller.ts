@@ -195,7 +195,7 @@ export const logIntake: RequestHandler = async (req, res) => {
   }
   if (result.outcome === 'unknown_reference') throw new WxycError('format_id or label_id does not exist', 400);
   // After the commit and not awaited: LML's answer never holds the response, and the lookup never rejects.
-  void lookUpIntakeLinks(result.item, false);
+  void lookUpIntakeLinks(result.item);
   res.json(result.item);
 };
 
@@ -211,8 +211,9 @@ export const patchIntake: RequestHandler<{ id: string }> = async (req, res) => {
   if (result.outcome === 'already_filed') return void conflict(res, 'already_filed');
   if (result.outcome === 'invalid_citation') return void conflict(res, 'invalid_citation');
   if (result.outcome === 'unknown_reference') throw new WxycError('format_id or label_id does not exist', 400);
-  if (result.item && (patch.artist_name !== undefined || patch.album_title !== undefined)) {
-    void lookUpIntakeLinks(result.item, true);
+  // Only an edit that changed a stored name, which has already cleared the found links (`buildIntakePatch`); re-sent names start nothing.
+  if (result.renamed) {
+    void lookUpIntakeLinks(result.item);
   }
   res.json(result.item);
 };

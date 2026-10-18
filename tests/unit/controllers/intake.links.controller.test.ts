@@ -1,6 +1,7 @@
 /**
  * When `POST /intake` and `PATCH /intake/{id}` start the link lookup (BS#3391): after the commit, not awaited, for a new item and for
- * an edit that supplies a name, and not for an edit of anything else. The lookup itself is pinned in `intake-links.service.test.ts`.
+ * an edit the service reports changed a stored name (`renamed`), and not for an edit that re-sends the names or edits anything else.
+ * The lookup itself is pinned in `intake-links.service.test.ts`, the rename test in `intake.service.sql.test.ts`.
  */
 const mockLog = jest.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockUpdate = jest.fn<(...args: unknown[]) => Promise<unknown>>();
@@ -25,7 +26,7 @@ const respond = () => ({ json: jest.fn(), status: jest.fn(() => ({ json: jest.fn
 beforeEach(() => {
   jest.clearAllMocks();
   mockLog.mockResolvedValue({ outcome: 'logged', item: ITEM });
-  mockUpdate.mockResolvedValue({ outcome: 'updated', item: ITEM });
+  mockUpdate.mockResolvedValue({ outcome: 'updated', item: ITEM, renamed: true });
   mockLookUp.mockResolvedValue(undefined);
 });
 
@@ -33,25 +34,29 @@ describe('the link lookup (BS#3391)', () => {
   test('a new item starts it, with the names kept', async () => {
     const res = respond();
     await logIntake({ body: { ...ITEM, format_id: 1 }, auth: { id: 'dj-1' } } as unknown as Request, res, jest.fn());
-    expect(mockLookUp).toHaveBeenCalledWith(ITEM, false);
+    expect(mockLookUp).toHaveBeenCalledWith(ITEM);
     expect(res.json).toHaveBeenCalledWith(ITEM);
   });
 
+  /** [case, PATCH body, the service's `renamed`, whether the lookup starts]. */
   test.each([
-    ['an artist name', { artist_name: 'Cat Power' }],
-    ['an album title', { album_title: 'Moon Pix' }],
-  ])('an edit supplying %s starts it as a rename', async (_name, body) => {
+    ['an artist rename starts it', { artist_name: 'Cat Power' }, true, true],
+    ['an album rename starts it', { album_title: 'Moon Pix' }, true, true],
+    [
+      're-sent names, unchanged, do not',
+      { artist_name: 'Juana Molina', album_title: 'DOGA', record_label: 'Sonamos' },
+      false,
+      false,
+    ],
+    ['an edit of other fields does not', { record_label: 'Sonamos' }, false, false],
+  ])('%s', async (_name, body, renamed, starts) => {
+    mockUpdate.mockResolvedValue({ outcome: 'updated', item: ITEM, renamed });
     await patchIntake({ params: { id: '4' }, body } as unknown as Request<{ id: string }>, respond(), jest.fn());
-    expect(mockLookUp).toHaveBeenCalledWith(ITEM, true);
-  });
-
-  test('an edit of other fields does not start it', async () => {
-    await patchIntake(
-      { params: { id: '4' }, body: { record_label: 'Sonamos' } } as unknown as Request<{ id: string }>,
-      respond(),
-      jest.fn()
-    );
-    expect(mockLookUp).not.toHaveBeenCalled();
+    if (starts) {
+      expect(mockLookUp).toHaveBeenCalledWith(ITEM);
+    } else {
+      expect(mockLookUp).not.toHaveBeenCalled();
+    }
   });
 
   test('a refused create or edit starts nothing', async () => {

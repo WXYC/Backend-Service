@@ -212,9 +212,12 @@ describe('the Bandcamp entered flag follows the link for every writer (BS#3390)'
     expect(params).toContain(entered);
   });
 
-  it('buildIntakePatch: leaves both columns out of an UPDATE that does not carry the key', () => {
-    const { sql: text } = buildIntakePatch(7, { album_title: 'DOGA' }).toSQL();
-    expect(text).not.toContain('bandcamp_url');
+  it.each([
+    ['an edit of another field leaves both columns out', { record_label: 'Sonamos' }, 'bandcamp_url'],
+    ['a rename never writes the flag', { album_title: 'DOGA' }, 'bandcamp_url_entered'],
+  ])('buildIntakePatch: %s', (_name, patch, absent) => {
+    const { sql: text } = buildIntakePatch(7, patch).toSQL();
+    expect(text).not.toContain(`"${absent}" =`);
   });
 
   it.each(CASES)('logIntakeItem: %s', async (_name, link, entered) => {
@@ -236,6 +239,69 @@ describe('the Bandcamp entered flag follows the link for every writer (BS#3390)'
       logIntakeItem({ artist_name: 'Juana Molina', album_title: 'DOGA', digital: false, format_id: 1 }, 'u1')
     ).rejects.toThrow('stop after the insert');
     expect(values).toHaveBeenCalledWith(expect.not.objectContaining({ bandcamp_url_entered: expect.anything() }));
+  });
+});
+
+describe('buildIntakePatch — a rename clears the found links in the same UPDATE (BS#3391)', () => {
+  const column = (name: string) => `"${SCHEMA}"."intake_items"."${name}"`;
+  /** `column = CASE WHEN <renamed> THEN NULL ELSE column END`, with `<renamed>` the stored names (`prior`) against the patch's. */
+  const cleared = (name: string, renamed: string, unless = '') =>
+    `"${name}" = CASE WHEN ${renamed}${unless} THEN NULL ELSE ${column(name)} END`;
+  const ARTIST = '"prior"."artist_name" <> $';
+  const ALBUM = '"prior"."album_title" <> $';
+  const ENTERED_KEPT = ` AND NOT ${column('bandcamp_url_entered')}`;
+  const placeholders = (text: string) => text.replace(/\$\d+/g, '$');
+
+  it('reads the stored names FOR UPDATE in the same statement', () => {
+    const { sql: text } = buildIntakePatch(7, { album_title: 'Moon Pix' }).toSQL();
+    expect(placeholders(text)).toContain(
+      `from (select "id", "artist_name", "album_title" from "${SCHEMA}"."intake_items" where ${column('id')} = $ for update) "prior" where (${column('id')} = $ and "prior"."id" = ${column('id')} and`
+    );
+  });
+
+  /** [case, patch, the rename test, the Bandcamp SET it must render, what RETURNING reports]. */
+  it.each([
+    ['an artist rename', { artist_name: 'Cat Power' }, ARTIST, cleared('bandcamp_url', ARTIST, ENTERED_KEPT), ARTIST],
+    ['an album rename', { album_title: 'Moon Pix' }, ALBUM, cleared('bandcamp_url', ALBUM, ENTERED_KEPT), ALBUM],
+    [
+      'both names',
+      { artist_name: 'Cat Power', album_title: 'Moon Pix' },
+      `(${ARTIST} or ${ALBUM})`,
+      cleared('bandcamp_url', `(${ARTIST} or ${ALBUM})`, ENTERED_KEPT),
+      `(${ARTIST} or ${ALBUM})`,
+    ],
+    [
+      'a rename that also enters a Bandcamp link, which the patch writes',
+      { album_title: 'Moon Pix', bandcamp_url: 'https://label.bandcamp.com/album/x' },
+      ALBUM,
+      '"bandcamp_url" = $,',
+      ALBUM,
+    ],
+  ])(
+    '%s clears Spotify, Apple Music, a found Bandcamp link and the check time',
+    (_name, patch, renamed, bandcamp, returned) => {
+      const text = placeholders(buildIntakePatch(7, patch).toSQL().sql);
+      expect(text).toContain(cleared('spotify_url', renamed));
+      expect(text).toContain(cleared('apple_music_url', renamed));
+      expect(text).toContain(cleared('links_checked_at', renamed));
+      expect(text).toContain(bandcamp);
+      expect(text.endsWith(`returning ${column('id')}, ${returned}`)).toBe(true);
+    }
+  );
+
+  it.each([true, false])("updateIntakeItem passes the UPDATE's renamed (%s) to the caller", async (renamed) => {
+    const { builder } = createLockLog();
+    jest.spyOn(db, 'update').mockReturnValue(builder([{ id: 7, renamed }]) as never);
+    jest.spyOn(db, 'select').mockReturnValue(builder([{ id: 7 }]) as never);
+    expect(await updateIntakeItem(7, { album_title: 'Moon Pix' })).toMatchObject({ outcome: 'updated', renamed });
+    jest.restoreAllMocks();
+  });
+
+  it('an edit of other fields clears nothing and reports no rename', () => {
+    const text = buildIntakePatch(7, { record_label: 'Sonamos' }).toSQL().sql;
+    expect(text).not.toMatch(/"(spotify_url|apple_music_url|links_checked_at)" =/);
+    expect(text).not.toContain('for update');
+    expect(text).toMatch(/returning "id", false$/);
   });
 });
 

@@ -169,7 +169,8 @@ export interface LmlPolicy {
  * `library.controller.ts` off of its sibling metadata `lookup` call, which
  * needs a different class), and `proxy` (the shared label for the
  * currently-hard-coded-30s `getRelease`/`getArtistDetails`/`resolveEntity`
- * reads).
+ * reads). `intake-streaming-links` (BS#3391) is a later class-4 label, the
+ * intake link lookup in `intake-links.service.ts`.
  *
  * `ALL_LML_CALLERS` is the single source of truth this type is derived
  * from — tests iterate over it so "every registered caller resolves to

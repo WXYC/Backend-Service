@@ -1672,7 +1672,9 @@ export interface CallerOption {
  * in-tree call site (`library.controller.ts`'s add/update-album streaming
  * checks) is migrated in this PR to supply a distinct class-4 label
  * (`library-add-album-streaming` / `library-update-album-streaming`), so
- * there is no legitimate caller-less call site left to accommodate.
+ * there is no legitimate caller-less call site left to accommodate. The
+ * intake link lookup (`intake-links.service.ts`, BS#3391) is the third,
+ * `intake-streaming-links`.
  */
 export interface StreamingCheckOptions {
   caller: LmlCaller;
@@ -1798,8 +1800,8 @@ export async function validateTrackOnRelease(releaseId: number, track: string, a
  * @param artist - Artist name
  * @param title - Album title
  * @param options - REQUIRED caller label (BS#1826 PR 2, class 4:
- *   `library-add-album-streaming` / `library-update-album-streaming`). See
- *   `StreamingCheckOptions`.
+ *   `library-add-album-streaming` / `library-update-album-streaming` /
+ *   `intake-streaming-links`). See `StreamingCheckOptions`.
  * @returns Streaming availability result with per-source URLs
  */
 export async function checkStreamingAvailability(

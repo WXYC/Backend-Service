@@ -10,6 +10,7 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
   logIntakeItem: mockLog,
   updateIntakeItem: mockUpdate,
 }));
+jest.mock('../../../apps/backend/services/intake-links.service', () => ({ lookUpIntakeLinks: jest.fn() }));
 jest.mock('../../../apps/backend/services/review-notices.service', () => ({}));
 jest.mock('../../../apps/backend/services/review-print.service', () => ({ printIntakeItem: jest.fn() }));
 jest.mock('../../../apps/backend/services/library-filing.service', () => ({}));
