@@ -7,7 +7,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getDJsInCurrentShow: mockGetDJsInCurrentShow,
 }));
 
-import { showMemberMiddleware } from '../../../apps/backend/middleware/checkShowMember';
+import { rowWriteCaller, showMemberMiddleware } from '../../../apps/backend/middleware/checkShowMember';
 
 function createMockReqResNext(userId: string) {
   const req = {
@@ -152,5 +152,30 @@ describe('showMemberMiddleware', () => {
 
     expect(next).toHaveBeenCalledWith(dbError);
     expect(statusMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('rowWriteCaller (BS#3438)', () => {
+  const originalAuthBypass = process.env.AUTH_BYPASS;
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    if (originalAuthBypass !== undefined) process.env.AUTH_BYPASS = originalAuthBypass;
+    else delete process.env.AUTH_BYPASS;
+    if (originalNodeEnv !== undefined) process.env.NODE_ENV = originalNodeEnv;
+    else delete process.env.NODE_ENV;
+  });
+
+  it.each([
+    ['AUTH_BYPASS=true under NODE_ENV=development', 'true', 'development', { auth: { id: 'dj-alice' } }, null],
+    ['AUTH_BYPASS=true under NODE_ENV=test', 'true', 'test', { auth: { id: 'dj-alice' } }, 'dj-alice'],
+    ['no bypass, id on req.auth', undefined, 'production', { auth: { id: 'dj-alice' } }, 'dj-alice'],
+    ['no bypass, no identity at all', undefined, 'production', {}, ''],
+  ])('%s', (_name, bypass, nodeEnv, reqFields, expected) => {
+    if (bypass === undefined) delete process.env.AUTH_BYPASS;
+    else process.env.AUTH_BYPASS = bypass;
+    process.env.NODE_ENV = nodeEnv;
+
+    expect(rowWriteCaller(reqFields as unknown as Request, { locals: {} } as unknown as Response)).toBe(expected);
   });
 });

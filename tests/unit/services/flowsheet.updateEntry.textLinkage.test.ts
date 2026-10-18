@@ -114,7 +114,7 @@ beforeEach(() => {
 describe('updateEntry — linkage provenance on album_id', () => {
   it('stamps dj_bin_pick when the patch sets a non-null album_id', async () => {
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
-    await updateEntry(7, { album_id: 42 });
+    await updateEntry(7, { album_id: 42 }, null);
     expect(setArg()).toMatchObject({ album_id: 42, linkage_source: 'dj_bin_pick', linkage_confidence: null });
     expect(setArg().linked_at).toBeDefined();
     expect(mockLookup).not.toHaveBeenCalled();
@@ -123,14 +123,14 @@ describe('updateEntry — linkage provenance on album_id', () => {
   it('keeps rule precedence: a pick wins over a carried album_title and never calls the matcher', async () => {
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
     mockLookup.mockReturnValue([{ id: 5 }]);
-    await updateEntry(7, { album_id: 42, album_title: 'x' });
+    await updateEntry(7, { album_id: 42, album_title: 'x' }, null);
     expect(setArg()).toMatchObject({ album_id: 42, linkage_source: 'dj_bin_pick', linkage_confidence: null });
     expect(mockLookup).not.toHaveBeenCalled();
   });
 
   it('clears all three linkage columns when the patch sets album_id: null', async () => {
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'dj_bin_pick' })]);
-    await updateEntry(7, { album_id: null });
+    await updateEntry(7, { album_id: null }, null);
     expect(setArg()).toEqual({ album_id: null, ...CLEARED });
     expect(mockLookup).not.toHaveBeenCalled();
   });
@@ -206,7 +206,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
   ])('$name', async ({ row, candidates, expected, patch = { album_title: 'Quiet Signs (Deluxe)' } }) => {
     mockPreRead.mockReturnValue([row]);
     mockLookup.mockReturnValue(candidates);
-    await updateEntry(7, patch);
+    await updateEntry(7, patch, null);
     expect(mockLookup).toHaveBeenCalledTimes(1);
     const set = setArg();
     expect(set).toMatchObject(patch);
@@ -236,7 +236,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     ],
   ])('never calls the matcher or touches the link on %s', async (_name, row, patch) => {
     mockPreRead.mockReturnValue([row]);
-    await updateEntry(7, patch);
+    await updateEntry(7, patch, null);
     expect(mockLookup).not.toHaveBeenCalled();
     expect(setArg()).not.toHaveProperty('linkage_source');
     expect(setArg()).not.toHaveProperty('album_id');
@@ -245,7 +245,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
   it('matches on the locked row merged with the patch, not the patch alone', async () => {
     mockPreRead.mockReturnValue([track()]);
     mockLookup.mockReturnValue([{ id: 5 }]);
-    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' });
+    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' }, null);
     const { params } = new PgDialect().sqlToQuery(mockLookupWhere.mock.calls[0][0]);
     // Album leg then artist leg, each twice: the patched title and the locked row's artist.
     expect(params).toEqual(['Quiet Signs (Deluxe)', 'Jessica Pratt', 'Quiet Signs (Deluxe)', 'Jessica Pratt']);
@@ -254,7 +254,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
   it('looks up an artist-only patch with the patched artist and the locked album title', async () => {
     mockPreRead.mockReturnValue([track()]);
     mockLookup.mockReturnValue([{ id: 5 }]);
-    await updateEntry(7, { artist_name: 'Jessica Pratt Band' });
+    await updateEntry(7, { artist_name: 'Jessica Pratt Band' }, null);
     const { params } = new PgDialect().sqlToQuery(mockLookupWhere.mock.calls[0][0]);
     expect(params).toEqual(['Quiet Signs', 'Jessica Pratt Band', 'Quiet Signs', 'Jessica Pratt Band']);
   });
@@ -268,7 +268,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     async (_field, patch, expectedParams) => {
       mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
       mockLookup.mockReturnValue([]);
-      await updateEntry(7, patch);
+      await updateEntry(7, patch, null);
       const { params } = new PgDialect().sqlToQuery(mockLookupWhere.mock.calls[0][0]);
       expect(params).toEqual(expectedParams);
       expect(setArg()).toMatchObject({ ...patch, album_id: null, ...CLEARED });
@@ -278,7 +278,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
   it('orders the current album_id first so the candidate cap can never truncate it out', async () => {
     mockPreRead.mockReturnValue([track({ album_id: 9, linkage_source: 'direct_text_match' })]);
     mockLookup.mockReturnValue([{ id: 9 }, { id: 5 }]);
-    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' });
+    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' }, null);
     const [preferCurrent, byId] = mockLookupOrderBy.mock.calls[0];
     const { sql: text, params } = new PgDialect().sqlToQuery(preferCurrent);
     expect(text).toMatch(/^\("[^"]+"\."library"\."id" = \$1\) desc$/);
@@ -292,7 +292,7 @@ describe('updateEntry — text re-match on an artist/album edit', () => {
     mockLookup.mockImplementation(() => {
       throw boom;
     });
-    await expect(updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' })).resolves.toEqual({ id: 7 });
+    await expect(updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' }, null)).resolves.toEqual({ id: 7 });
     // The failed lookup ran inside the savepoint, which rolls back alone; the outer UPDATE still runs.
     expect(mockSavepoint).toHaveBeenCalledTimes(1);
     expect(setArg()).toEqual({ album_title: 'Quiet Signs (Deluxe)' });
@@ -309,7 +309,7 @@ describe('updateEntry — transaction shape', () => {
     // by an edit waiting on one (BS#2474). The savepoint keeps a failed lookup from aborting the UPDATE.
     mockPreRead.mockReturnValue([track()]);
     mockLookup.mockReturnValue([{ id: 5 }]);
-    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' });
+    await updateEntry(7, { album_title: 'Quiet Signs (Deluxe)' }, null);
     expect(mockSavepoint).toHaveBeenCalledTimes(1);
     expect(mockSavepointSelect).toHaveBeenCalledTimes(1);
     expect(mockLookup).toHaveBeenCalledTimes(1);
@@ -318,13 +318,13 @@ describe('updateEntry — transaction shape', () => {
 
   it('pre-reads the row FOR UPDATE', async () => {
     mockPreRead.mockReturnValue([track()]);
-    await updateEntry(7, { track_title: 'x' });
+    await updateEntry(7, { track_title: 'x' }, null);
     expect(mockForLock).toHaveBeenCalledWith('update');
   });
 
   it('returns undefined without updating when the row is gone', async () => {
     mockPreRead.mockReturnValue([]);
-    await expect(updateEntry(7, { track_title: 'x' })).resolves.toBeUndefined();
+    await expect(updateEntry(7, { track_title: 'x' }, null)).resolves.toBeUndefined();
     expect(mockUpdateSet).not.toHaveBeenCalled();
   });
 });

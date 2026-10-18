@@ -12,6 +12,7 @@ import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/
 import { getDiscogsUnavailableFlagsById } from '../services/library.service.js';
 import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
+import { rowWriteCaller } from '../middleware/checkShowMember.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
 import { parseBoundedInt } from '../utils/query-params.js';
@@ -634,10 +635,11 @@ const sendProjectedEntry = async (res: Response, statusCode: number, entry: FSEn
  *    filter), so a client renders the outgoing show's trailing rows above the
  *    new `show_start` marker; scoping to the latest show would go silent for
  *    rows visibly on screen, in exactly the show-transition window where
- *    divergence is most likely. And the abuse it would guard against can't
- *    happen: all three routes sit behind `showMemberMiddleware`, so the
- *    caller is a member of the CURRENT show. `forceEndShow` is the one site
- *    that does scope, and the one route with no member middleware.
+ *    divergence is most likely. Who may write a row is a separate question
+ *    from who hears about it: the three writes authorize the caller against
+ *    the ROW's show inside the service (BS#3438), so a refetch only ever
+ *    follows a write the caller was entitled to make. `forceEndShow` is the
+ *    one site that does scope, and the one route with no member middleware.
  *
  * `broadcast` cannot throw into the handler: per-client write failures are
  * caught inside it and recorded via sse-metrics.
@@ -987,7 +989,7 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
     throw new WxycError('Bad Request, Missing entry identifier: entry_id', 400);
   }
 
-  const removedEntry = await flowsheet_service.removeTrack(entry_id);
+  const removedEntry = await flowsheet_service.removeTrack(entry_id, rowWriteCaller(req, res));
   // `.returning()` matched no row (double delete / already-gone id). Pre-#1532
   // this serialized as a misleading 200-with-empty-body; projecting undefined
   // would be a bare TypeError -> 500 (the BS#1271 class). 404 is the honest
@@ -1006,8 +1008,8 @@ export const deleteEntry: RequestHandler<object, unknown, { entry_id: number }> 
   // is the push, and only for a row that actually existed (the 404 above
   // already returned otherwise).
   //
-  // Not scoped by show, deliberately: the feed is global and the route is
-  // member-gated — see rule 3 on `broadcastFlowsheetRefetch`. Nothing else
+  // Not scoped by show, deliberately: the feed is global and the write is
+  // authorized against the row's own show — see rule 3 on `broadcastFlowsheetRefetch`. Nothing else
   // runs between the commit and here, so the delete cannot 500 after the row
   // is already gone.
   broadcastFlowsheetRefetch('delete');
@@ -1075,7 +1077,7 @@ export const updateEntry: RequestHandler<object, unknown, { entry_id: number; da
     throw new WxycError('Bad Request, No updatable fields provided in: data', 400);
   }
 
-  const updatedEntry = await flowsheet_service.updateEntry(entry_id, picked);
+  const updatedEntry = await flowsheet_service.updateEntry(entry_id, picked, rowWriteCaller(req, res));
   // UPDATE matched no row (entry deleted out from under the edit). See the
   // 404 rationale on deleteEntry above.
   if (!updatedEntry) {
@@ -1784,7 +1786,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
   const release = await orderMutex.acquire();
   let updatedEntry;
   try {
-    updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position);
+    updatedEntry = await flowsheet_service.changeOrder(entry_id, new_position, rowWriteCaller(req, res));
   } finally {
     release();
   }
