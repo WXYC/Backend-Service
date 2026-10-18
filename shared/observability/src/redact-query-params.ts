@@ -63,9 +63,9 @@ function carriesRow(error: Error): boolean {
   return typeof detail === 'string' && FAILING_ROW.test(detail);
 }
 
-/** Sentry's own error tags, read locally so this module needs no Sentry helper for the check. */
+/** The tags `@sentry/core` 11.4 `isError` accepts, read locally so this module needs no Sentry helper for the check. */
 function hasErrorTag(value: unknown): boolean {
-  return ['[object Error]', '[object Exception]', '[object DOMException]', '[object DOMError]'].includes(
+  return ['[object Error]', '[object Exception]', '[object DOMException]', '[object WebAssembly.Exception]'].includes(
     Object.prototype.toString.call(value)
   );
 }

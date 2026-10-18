@@ -127,10 +127,49 @@ describe('CompositeReporter', () => {
     }
   });
 
-  it('flush resolves false if any reporter times out or rejects', async () => {
+  it.each([
+    ['captureException', (c: ErrorReporter) => c.captureException(new Error('x'))],
+    ['captureMessage', (c: ErrorReporter) => c.captureMessage('m')],
+    ['addBreadcrumb', (c: ErrorReporter) => c.addBreadcrumb({ message: 'c' })],
+    ['setRequestTag', (c: ErrorReporter) => c.setRequestTag('k', 'v')],
+    ['recordCounter', (c: ErrorReporter) => c.recordCounter('n', 1)],
+  ] as const)('%s reaches the later reporters when an earlier one throws', (method, call) => {
     const [a, b] = [fake(), fake()];
-    b.flush.mockRejectedValue(new Error('down'));
-    await expect(new CompositeReporter([a, b]).flush(100)).resolves.toBe(false);
-    await expect(new CompositeReporter([a]).flush(100)).resolves.toBe(true);
+    a[method].mockImplementation(() => {
+      throw new Error('a down');
+    });
+    expect(() => call(new CompositeReporter([a, b]))).not.toThrow();
+    expect(b[method]).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['rejects', (r: jest.Mocked<ErrorReporter>) => r.flush.mockRejectedValue(new Error('down'))],
+    ['resolves false', (r: jest.Mocked<ErrorReporter>) => r.flush.mockResolvedValue(false)],
+    [
+      'throws synchronously',
+      (r: jest.Mocked<ErrorReporter>) =>
+        r.flush.mockImplementation(() => {
+          throw new Error('sync');
+        }),
+    ],
+  ] as const)('flush resolves false, and still flushes the others, when a reporter %s', async (_case, breakIt) => {
+    const [a, b, c] = [fake(), fake(), fake()];
+    breakIt(b);
+    await expect(new CompositeReporter([a, b, c]).flush(100)).resolves.toBe(false);
+    for (const r of [a, b, c]) {
+      expect(r.flush).toHaveBeenCalledWith(100);
+    }
+  });
+
+  it('flush resolves true when every reporter delivers', async () => {
+    await expect(new CompositeReporter([fake(), fake()]).flush(100)).resolves.toBe(true);
+  });
+
+  it('flushes the reporters in parallel, not one after another', async () => {
+    const [a, b] = [fake(), fake()];
+    a.flush.mockReturnValue(new Promise<boolean>(() => undefined));
+    void new CompositeReporter([a, b]).flush(100);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(b.flush).toHaveBeenCalledWith(100);
   });
 });
