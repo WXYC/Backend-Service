@@ -22,7 +22,8 @@ const LINK_URL_MAX = 512;
  * An LML URL as it may be stored, or `null` (BS#3391). The streaming-check's sources are not screened by the client, so each one gets
  * the #1712 field check (`isSpotifyAlbumSlotUrl`, `isAppleMusicUrl`, `isBandcampUrl`, which leaves Bandcamp's custom-domain storefronts
  * in) plus the bar the entered Bandcamp link meets: no backslash, space or control character (`hasUrlParserDifferentialChar`), `https`,
- * no credentials, and at most 512 characters.
+ * no credentials, and at most 512 characters. It is stored as the URL's `href`, the form the `PATCH /intake` controller makes of a sent
+ * Bandcamp link, so a client that echoes a found link sends back the stored value and `buildIntakePatch` does not take the echo for an entry.
  */
 export const screenLinkUrl = (
   url: string | null | undefined,
@@ -37,10 +38,16 @@ export const screenLinkUrl = (
   } catch {
     return null;
   }
-  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || !isServiceUrl(url)) {
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    !isServiceUrl(url) ||
+    parsed.href.length > LINK_URL_MAX
+  ) {
     return null;
   }
-  return url;
+  return parsed.href;
 };
 
 /**

@@ -210,6 +210,7 @@ describe('lookUpIntakeLinks (BS#3391)', () => {
 
 describe('screenLinkUrl: every LML URL meets the stored-link bar before it is stored (BS#3391)', () => {
   const LONG = `https://open.spotify.com/album/${'a'.repeat(512 - 'https://open.spotify.com/album/'.length + 1)}`;
+  const BANDCAMP_DOGA = 'https://sonamos.bandcamp.com/album/doga';
   it.each([
     ['a Spotify album', SPOTIFY, isSpotifyAlbumSlotUrl, SPOTIFY],
     [
@@ -242,6 +243,22 @@ describe('screenLinkUrl: every LML URL meets the stored-link bar before it is st
     ['a NUL character', 'https://x.bandcamp.com/\u0000a', isBandcampUrl, null],
     ['a DEL character', 'https://x.bandcamp.com/\u007fa', isBandcampUrl, null],
     ['over 512 characters', LONG, isSpotifyAlbumSlotUrl, null],
+    // The stored form is the URL's `href`, the form the PATCH controller makes of a sent link, so an echoed found link equals the stored one.
+    [
+      'a bare Bandcamp host gains its trailing slash',
+      'https://sonamos.bandcamp.com',
+      isBandcampUrl,
+      'https://sonamos.bandcamp.com/',
+    ],
+    ['an uppercase host is lowercased', 'https://Sonamos.Bandcamp.com/album/doga', isBandcampUrl, BANDCAMP_DOGA],
+    ['the default port is dropped', 'https://sonamos.bandcamp.com:443/album/doga', isBandcampUrl, BANDCAMP_DOGA],
+    [
+      'a non-ASCII path is percent-encoded',
+      'https://sonamos.bandcamp.com/album/dóga',
+      isBandcampUrl,
+      'https://sonamos.bandcamp.com/album/d%C3%B3ga',
+    ],
+    ['an href over 512 characters', `https://sonamos.bandcamp.com/album/${'ó'.repeat(100)}`, isBandcampUrl, null],
     ['a non-URL', 'not a link', isBandcampUrl, null],
     ['null', null, isBandcampUrl, null],
     ['undefined', undefined, isBandcampUrl, null],

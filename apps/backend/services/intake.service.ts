@@ -118,10 +118,18 @@ export type IntakeFields = Pick<
 /**
  * The rule that `bandcamp_url_entered` follows the link, applied here so it holds for every writer of `IntakeFields` (BS#3390): a link
  * sets the flag, a clear (`null`) clears it, and no `bandcamp_url` key leaves the stored flag alone. The flag is not an input. The insert path
- * only: `buildIntakePatch` compares the sent link with the stored one instead (BS#3482).
+ * only: `buildIntakePatch` compares the sent link with the stored one instead (`sentLinkChanged`), so an echo of the stored link is not an entry.
  */
 export const withBandcampEntered = <T extends { bandcamp_url?: string | null }>(fields: T) =>
   fields.bandcamp_url === undefined ? fields : { ...fields, bandcamp_url_entered: fields.bandcamp_url !== null };
+
+/**
+ * Whether a PATCH's `bandcamp_url` differs from the stored link, NULL-safe: the one test that decides both Bandcamp columns in `buildIntakePatch`.
+ * A different value (or `null` over a stored link) is a person's entry; an equal one is an echo of the record. The controller sends the URL's
+ * `href`, and the lookup stores that form too (`screenLinkUrl`), so an echoed found link compares equal.
+ */
+export const sentLinkChanged = (sentLink: string | null) =>
+  sql`${sentLink}::text IS DISTINCT FROM ${intake_items.bandcamp_url}`;
 
 /** What `POST /intake` carries for its kind: a digital album has no `format_id` of its own (the service stores the CD-R format's), and a disc must have one. */
 export type NewIntakeKind = { digital: true; format_id?: undefined } | { digital?: false; format_id: number };
@@ -351,13 +359,10 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
     sql`CASE WHEN ${renamed}${unless ? sql` AND NOT ${unless}` : sql``} THEN NULL ELSE ${column} END`;
   const { bandcamp_url: sentLink, ...rest } = patch;
   // A sent link differing from the stored one is a person's entry; an unchanged one is an echo and leaves link and flag as stored (a rename still clears a found one).
-  const bandcampSet =
-    sentLink === undefined
-      ? {}
-      : {
-          bandcamp_url_entered: sql`CASE WHEN ${sentLink}::text IS DISTINCT FROM ${intake_items.bandcamp_url} THEN ${sentLink}::text IS NOT NULL ELSE ${intake_items.bandcamp_url_entered} END`,
-          bandcamp_url: sql`CASE WHEN ${sentLink}::text IS DISTINCT FROM ${intake_items.bandcamp_url} THEN ${sentLink}::text ELSE ${renamed ? clearedOnRename(intake_items.bandcamp_url, intake_items.bandcamp_url_entered) : intake_items.bandcamp_url} END`,
-        };
+  const linkChanged = sentLink === undefined ? undefined : sentLinkChanged(sentLink);
+  const keptLink = renamed
+    ? clearedOnRename(intake_items.bandcamp_url, intake_items.bandcamp_url_entered)
+    : intake_items.bandcamp_url;
   const leaves = patch.cited_submission_id != null ? null : patch.cited_album_id; // `undefined`: the stored value stays
   const citationChanged =
     leaves === undefined
@@ -383,7 +388,10 @@ export const buildIntakePatch = (id: number, patch: Partial<IntakeFields> & Inta
         links_checked_at: clearedOnRename(intake_items.links_checked_at),
       }),
       ...rest,
-      ...bandcampSet,
+      ...(linkChanged && {
+        bandcamp_url_entered: sql`CASE WHEN ${linkChanged} THEN ${sentLink === null ? sql`FALSE` : sql`TRUE`} ELSE ${intake_items.bandcamp_url_entered} END`,
+        bandcamp_url: sql`CASE WHEN ${linkChanged} THEN ${sentLink}::text ELSE ${keptLink} END`,
+      }),
       ...(takesOffReview && {
         accepted_review_id: unlessKept(sql`${intake_items.accepted_review_id}`, sql`NULL`),
         accepted_by: unlessKept(sql`${intake_items.accepted_by}`, sql`NULL`),

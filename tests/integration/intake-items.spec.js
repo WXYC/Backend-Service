@@ -559,45 +559,6 @@ describe('/intake (BS#2796)', () => {
         expect(await linkRow(id)).toMatchObject({ bandcamp_url: url, bandcamp_url_entered: true });
       });
 
-      describe('a PATCH that echoes a found Bandcamp link does not promote it (BS#3482)', () => {
-        const FOUND_URL = 'https://sonamos.bandcamp.com/album/doga';
-        const OTHER_URL = 'https://sonamos.bandcamp.com/album/segundo';
-        const seedFound = (extra = {}) =>
-          seedIntakeItem({
-            artist_name: `${PREFIX} echo`,
-            album_title: 'DOGA',
-            bandcamp_url: FOUND_URL,
-            bandcamp_url_entered: false,
-            links_checked_at: new Date('2026-09-01T12:00:00Z'),
-            ...extra,
-          });
-
-        test('re-sending the stored link leaves it found, and a later rename clears it and the check time', async () => {
-          const id = (await seedFound()).id;
-          expect((await auth.patch(`/intake/${id}`).send({ bandcamp_url: FOUND_URL })).status).toBe(200);
-          expect(await linkRow(id)).toMatchObject({ bandcamp_url: FOUND_URL, bandcamp_url_entered: false });
-          await auth.patch(`/intake/${id}`).send({ album_title: 'Segundo' });
-          expect(await linkRow(id)).toMatchObject({ bandcamp_url: null, links_checked_at: null });
-        });
-
-        test.each([
-          ['a different valid link sets it and marks it entered', OTHER_URL, false, OTHER_URL, true],
-          ['a re-sent entered link stays entered', FOUND_URL, true, FOUND_URL, true],
-          ['null clears the link and the flag', null, true, null, false],
-          ['a blank string clears the link and the flag', '  ', true, null, false],
-        ])('%s', async (_name, sent, entered, link, flag) => {
-          const id = (await seedFound({ bandcamp_url_entered: entered })).id;
-          expect((await auth.patch(`/intake/${id}`).send({ bandcamp_url: sent })).status).toBe(200);
-          expect(await linkRow(id)).toMatchObject({ bandcamp_url: link, bandcamp_url_entered: flag });
-        });
-
-        test('no key leaves both alone', async () => {
-          const id = (await seedFound()).id;
-          await auth.patch(`/intake/${id}`).send({ record_label: 'Sonamos' });
-          expect(await linkRow(id)).toMatchObject({ bandcamp_url: FOUND_URL, bandcamp_url_entered: false });
-        });
-      });
-
       // The lookup a rename starts is not waited for, so it must not be able to write: each row arms a 500 on the mock LML's
       // streaming-check, the lookup fails and stores nothing, and the row read right after the PATCH is the UPDATE's own result.
       // Without the mock's control API (the parallel runner) the lookup gets the mock's 404 or, with no LML configured, does not run,
@@ -681,6 +642,52 @@ describe('/intake (BS#2796)', () => {
               links_checked_at: null,
             },
             true,
+          ],
+          [
+            'a rename with the found Bandcamp link re-sent clears it: an echo is not an entry',
+            {},
+            { album_title: 'Segundo', bandcamp_url: BANDCAMP },
+            { ...NOTHING, bandcamp_url_entered: false },
+            true,
+          ],
+          [
+            'a rename with the entered Bandcamp link re-sent keeps it and its flag',
+            { bandcamp_url_entered: true },
+            { album_title: 'Segundo', bandcamp_url: BANDCAMP },
+            {
+              spotify_url: null,
+              apple_music_url: null,
+              bandcamp_url: BANDCAMP,
+              bandcamp_url_entered: true,
+              links_checked_at: null,
+            },
+            true,
+          ],
+          [
+            'the found Bandcamp link re-sent stays found',
+            {},
+            { bandcamp_url: BANDCAMP },
+            { ...FOUND, bandcamp_url_entered: false, links_checked_at: new Date(CHECKED_AT) },
+            false,
+          ],
+          [
+            'a different Bandcamp link is stored and entered',
+            {},
+            { bandcamp_url: NEW_BANDCAMP },
+            {
+              ...FOUND,
+              bandcamp_url: NEW_BANDCAMP,
+              bandcamp_url_entered: true,
+              links_checked_at: new Date(CHECKED_AT),
+            },
+            false,
+          ],
+          [
+            'the entered Bandcamp link re-sent stays entered',
+            { bandcamp_url_entered: true },
+            { bandcamp_url: BANDCAMP },
+            { ...FOUND, bandcamp_url_entered: true, links_checked_at: new Date(CHECKED_AT) },
+            false,
           ],
           [
             'the stored names re-sent',
