@@ -249,14 +249,83 @@ def make_pause_probe(conn, schema: str, lookback_seconds: float, pause_ms: float
     return probe
 
 
+POSTHOG_ALERT_BURST = 50
+POSTHOG_ALERT_REFILL_PER_SEC = 1.0
+
+
+class TokenBucket:
+    """Flood guard for PostHog sends: ``burst`` immediate, then ``refill_per_sec``."""
+
+    def __init__(self, burst: int, refill_per_sec: float, clock=time.monotonic) -> None:
+        self.burst, self.refill_per_sec, self.clock = float(burst), refill_per_sec, clock
+        self.tokens, self.stamp = float(burst), clock()
+
+    def allow(self) -> bool:
+        now = self.clock()
+        self.tokens = min(self.burst, self.tokens + (now - self.stamp) * self.refill_per_sec)
+        self.stamp = now
+        if self.tokens < 1:
+            return False
+        self.tokens -= 1
+        return True
+
+
+def posthog_message_properties(message: str, fingerprint: list[str], extras: dict[str, object]) -> dict[str, object]:
+    """Properties for a message-only alert sent as a synthesized ``$exception``
+    (posthog-python's ``capture_exception`` is a no-op without an active exception)."""
+    return {
+        **extras,
+        "$exception_list": [{"type": "Warning", "value": message, "mechanism": {"handled": True, "synthetic": True}}],
+        "$exception_level": "warning",
+        "$exception_fingerprint": fingerprint,
+        "$process_person_profile": False,
+        "repo": "Backend-Service",
+        "tool": JOB_NAME,
+        "run_id": _RUN_ID,
+    }
+
+
+_posthog = None
+_posthog_bucket = TokenBucket(POSTHOG_ALERT_BURST, POSTHOG_ALERT_REFILL_PER_SEC)
+
+
+def init_posthog(env: dict[str, str]):
+    """Fail-open PostHog errors client: None when ``POSTHOG_ERRORS_API_KEY`` is
+    unset or the SDK cannot start, leaving the job exactly as it was."""
+    key = (env.get("POSTHOG_ERRORS_API_KEY") or "").strip()
+    if not key:
+        return None
+    try:
+        from posthog import Posthog  # lazy, like sentry_sdk
+
+        return Posthog(key, host=env.get("POSTHOG_HOST") or "https://us.i.posthog.com")
+    except Exception as err:  # noqa: BLE001 — error reporting must never fail the job
+        log("warning", "posthog_init_failed", "PostHog disabled", error_message=str(err))
+        return None
+
+
+def posthog_send(capture) -> None:
+    """Run ``capture(client)`` against the active client, swallowing any failure."""
+    if _posthog is None or not _posthog_bucket.allow():
+        return
+    try:
+        capture(_posthog)
+    except Exception as err:  # noqa: BLE001
+        log("warning", "posthog_send_failed", "PostHog send failed", error_message=str(err))
+
+
 def emit_alert(kind: str, rotation_id: int, message: str, extras: dict[str, object], dry_run: bool) -> None:
     if dry_run:
         log("info", "would_alert", message, kind=kind, rotation_id=rotation_id, **extras)
         return
+    fingerprint = fingerprint_for(kind, rotation_id)
+    posthog_send(lambda ph: ph.capture(
+        "$exception", distinct_id=JOB_NAME,
+        properties=posthog_message_properties(message, fingerprint, {"kind": kind, "rotation_id": rotation_id, **extras})))
     import sentry_sdk  # lazy: --self-test and DRY_RUN paths never need the SDK
 
     with sentry_sdk.new_scope() as scope:
-        scope.fingerprint = fingerprint_for(kind, rotation_id)
+        scope.fingerprint = fingerprint
         scope.set_tag("kind", kind)
         scope.set_tag("rotation_id", str(rotation_id))
         for key, value in extras.items():
@@ -349,6 +418,33 @@ def self_test() -> int:
           ["rotation-release-id-pollution-check", "mismatch", "21529"])
     check("fingerprint_for provenance", fingerprint_for("provenance", 99999),
           ["rotation-release-id-pollution-check", "provenance", "99999"])
+
+    props = posthog_message_properties("m", fingerprint_for("mismatch", 21529), {"kind": "mismatch"})
+    check("posthog fingerprint", props["$exception_fingerprint"],
+          ["rotation-release-id-pollution-check", "mismatch", "21529"])
+    check("posthog exception_list", props["$exception_list"],
+          [{"type": "Warning", "value": "m", "mechanism": {"handled": True, "synthetic": True}}])
+    check("posthog tags", (props["repo"], props["tool"], props["run_id"] == _RUN_ID, props["kind"]),
+          ("Backend-Service", JOB_NAME, True, "mismatch"))
+    now = [0.0]
+    bucket = TokenBucket(2, 1.0, clock=lambda: now[0])
+    check("bucket burst then drop", [bucket.allow() for _ in range(3)], [True, True, False])
+    now[0] = 1.0
+    check("bucket refills", bucket.allow(), True)
+    check("posthog no key -> None", init_posthog({}), None)
+    sent: list[tuple] = []
+
+    class _Ph:
+        def capture(self, event, **kw):
+            sent.append((event, kw["properties"]["$exception_fingerprint"]))
+
+    global _posthog
+    _posthog = _Ph()
+    posthog_send(lambda ph: ph.capture("$exception", properties=props))
+    emit_alert("mismatch", 1, "m", {}, dry_run=True)  # dry run must not reach PostHog
+    _posthog = None
+    check("posthog_send captures fingerprint", sent,
+          [("$exception", ["rotation-release-id-pollution-check", "mismatch", "21529"])])
 
     # Provenance: in-baseline ids never alert; unknown ids do; shrinkage is silent.
     check("provenance in-baseline quiet", provenance_anomalies([7960, 43162], PROVENANCE_BASELINE), [])
@@ -521,6 +617,8 @@ def main() -> int:
         sentry_sdk.set_tag("repo", "Backend-Service")
         sentry_sdk.set_tag("tool", JOB_NAME)
         sentry_sdk.set_tag("run_id", _RUN_ID)
+        global _posthog
+        _posthog = init_posthog(dict(os.environ))
 
     rate_per_min = env_non_negative(os.environ.get("BACKFILL_LML_RATE_PER_MIN"), 20.0)
     timeout_s = env_non_negative(os.environ.get("BACKFILL_LML_RESOLVE_TIMEOUT_MS"), 15000.0) / 1000.0
@@ -572,6 +670,10 @@ def main() -> int:
             import sentry_sdk
 
             sentry_sdk.capture_exception(err)
+            posthog_send(lambda ph: ph.capture_exception(
+                err, distinct_id=JOB_NAME,
+                properties={"repo": "Backend-Service", "tool": JOB_NAME, "run_id": _RUN_ID,
+                            "$process_person_profile": False}))
         exit_code = 1
     finally:
         conn.close()
@@ -579,6 +681,8 @@ def main() -> int:
             import sentry_sdk
 
             sentry_sdk.flush(timeout=2.0)
+            if _posthog is not None:
+                posthog_send(lambda ph: ph.flush(2.0))
     return exit_code
 
 
