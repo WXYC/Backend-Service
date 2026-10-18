@@ -53,6 +53,7 @@ import {
 
 import { fetchIdentityRefresh, type FetchOutcome } from './lml-fetch.js';
 import { log } from './logger.js';
+import { emitBackfillCounters } from './metrics.js';
 
 /**
  * LML#525's per-request batch cap. Hard contract — see file header.
@@ -370,6 +371,17 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
         log('warn', 'totals_span_failed', 'projectTotalsSpan threw; original error preserved', {
           error_message: e instanceof Error ? e.message : String(e),
         });
+      }
+      // Awaited here so the CloudWatch counters are sent before the job
+      // closes the logger, on the success and failure paths alike (BS#3401).
+      if (!dryRun) {
+        try {
+          await emitBackfillCounters(totals);
+        } catch (e) {
+          log('warn', 'metrics_emit_failed', 'emitBackfillCounters threw; original error preserved', {
+            error_message: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
     }
   }
