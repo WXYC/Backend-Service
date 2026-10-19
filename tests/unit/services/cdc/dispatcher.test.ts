@@ -5,7 +5,11 @@ let oversizedHandler: Handler | undefined;
 let errorHandler: Handler | undefined;
 const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
 
-jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
+jest.mock('@wxyc/observability', () =>
+  jest
+    .requireActual<typeof import('../../../utils/observability')>('../../../utils/observability')
+    .mockObservabilityBarrel({ logCounter: mockLogCounter })
+);
 jest.mock('@wxyc/database', () => ({
   onCdcOversizedEvent: (h: Handler) => {
     oversizedHandler = h;

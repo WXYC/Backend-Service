@@ -52,7 +52,11 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
 }));
 
 const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
-jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
+jest.mock('@wxyc/observability', () =>
+  jest
+    .requireActual<typeof import('../../utils/observability')>('../../utils/observability')
+    .mockObservabilityBarrel({ logCounter: mockLogCounter })
+);
 jest.mock('@sentry/node', () => ({
   startSpan: <T>(_opts: unknown, callback: () => T | Promise<T>): Promise<T> => Promise.resolve(callback()),
   getActiveSpan: () => ({ setAttribute: jest.fn(), setAttributes: jest.fn() }),

@@ -103,3 +103,7 @@ Moved verbatim out of `CLAUDE.md`'s Database section.
 ## Lint cache
 
 `npm run lint` (pre-push hook and CI) is uncached, so its error attribution is sound. `npm run lint:fast` keeps a content-keyed ESLint cache in `.cache/eslint`, which is unsound for type-aware rules: a file's verdict can depend on other files' types, so a stale entry can report an error against a file you never touched (BS#2555). Treat `lint:fast` attributions as unreliable, and when a typed-lint error points at an untouched file, run `rm -rf .cache/eslint` before diagnosing anything else.
+
+## Observability seam helpers
+
+`tests/utils/observability.ts` is the way to assert on captures and counters. `useSpyReporter()` registers a complete spy `ErrorReporter` (every method a `jest.fn()`) around each test and restores the setup reporter afterwards; `createSpyReporter()` builds one without registering it. To replace `logCounter` or another barrel export, use `mockObservabilityBarrel({ logCounter: mockLogCounter })` as the `jest.mock('@wxyc/observability', ...)` factory body (called through `jest.requireActual`, see the helper's doc comment) so `getErrorReporter` and `setErrorReporter` survive. Do not cast a partial object to `ErrorReporter` or return a hand-written barrel.

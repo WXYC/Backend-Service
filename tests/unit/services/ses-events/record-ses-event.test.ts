@@ -2,7 +2,11 @@ import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
 const logCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
 
-jest.mock('@wxyc/observability', () => ({ logCounter }));
+jest.mock('@wxyc/observability', () =>
+  jest
+    .requireActual<typeof import('../../../utils/observability')>('../../../utils/observability')
+    .mockObservabilityBarrel({ logCounter: logCounter })
+);
 
 import { recordSesEvent } from '../../../../apps/backend/services/ses-events/record-ses-event';
 import type { SesEvent } from '../../../../apps/backend/services/ses-events/types';
