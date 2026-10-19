@@ -249,8 +249,9 @@ def make_pause_probe(conn, schema: str, lookback_seconds: float, pause_ms: float
     return probe
 
 
-POSTHOG_ALERT_BURST = 50
-POSTHOG_ALERT_REFILL_PER_SEC = 1.0
+POSTHOG_ALERT_BURST = 10  # per-run event budget (error-tracking contract), no refill
+POSTHOG_ALERT_REFILL_PER_SEC = 0.0
+POSTHOG_DEDUPE_WINDOW_S = 60.0
 
 
 class TokenBucket:
@@ -270,6 +271,25 @@ class TokenBucket:
         return True
 
 
+class Dedupe:
+    """Drops a key seen again within ``window_s`` seconds (checked before the bucket)."""
+
+    def __init__(self, window_s: float, clock=time.monotonic) -> None:
+        self.window_s, self.clock, self.last = window_s, clock, {}
+
+    def seen(self, key: str) -> bool:
+        now = self.clock()
+        last = self.last.get(key)
+        if last is not None and now - last < self.window_s:
+            return True
+        self.last[key] = now
+        return False
+
+
+def posthog_environment(node_env: str | None) -> str:
+    return node_env if node_env in ("production", "staging", "development") else "production"
+
+
 def posthog_fingerprint(kind: str, rotation_id: int) -> str:
     """PostHog ``$exception_fingerprint``: the ``fingerprint_for`` parts joined
     with ``:``. PostHog types the property as one string (a list is dropped as
@@ -284,18 +304,22 @@ def posthog_message_properties(message: str, fingerprint: str, extras: dict[str,
     (posthog-python's ``capture_exception`` is a no-op without an active exception)."""
     return {
         **extras,
-        "$exception_list": [{"type": "Warning", "value": message, "mechanism": {"handled": True, "synthetic": True}}],
+        "$exception_list": [{"type": "Message", "value": message,
+                            "mechanism": {"type": "generic", "handled": True, "synthetic": True}}],
         "$exception_level": "warning",
         "$exception_fingerprint": fingerprint,
         "$process_person_profile": False,
         "repo": "Backend-Service",
         "tool": JOB_NAME,
         "run_id": _RUN_ID,
+        "service": JOB_NAME,
+        "environment": posthog_environment(os.environ.get("NODE_ENV")),
     }
 
 
 _posthog = None
 _posthog_bucket = TokenBucket(POSTHOG_ALERT_BURST, POSTHOG_ALERT_REFILL_PER_SEC)
+_posthog_dedupe = Dedupe(POSTHOG_DEDUPE_WINDOW_S)
 
 
 def init_posthog(env: dict[str, str]):
@@ -313,9 +337,10 @@ def init_posthog(env: dict[str, str]):
         return None
 
 
-def posthog_send(capture) -> None:
-    """Run ``capture(client)`` against the active client, swallowing any failure."""
-    if _posthog is None:
+def posthog_send(capture, fingerprint: str) -> None:
+    """Run ``capture(client)`` against the active client, swallowing any failure.
+    A fingerprint repeated within 60 s is dropped before it spends a token."""
+    if _posthog is None or _posthog_dedupe.seen(fingerprint):
         return
     if not _posthog_bucket.allow():
         log("warning", "posthog_send_dropped", "PostHog send dropped by the flood guard")
@@ -331,17 +356,20 @@ def posthog_report_exception(err: BaseException) -> None:
     posthog_send(lambda ph: ph.capture_exception(
         err, distinct_id=JOB_NAME,
         properties={"repo": "Backend-Service", "tool": JOB_NAME, "run_id": _RUN_ID,
-                    "$process_person_profile": False}))
+                    "service": JOB_NAME, "environment": posthog_environment(os.environ.get("NODE_ENV")),
+                    "$process_person_profile": False}),
+        f"{JOB_NAME}:exception:{type(err).__name__}")
 
 
 def emit_alert(kind: str, rotation_id: int, message: str, extras: dict[str, object], dry_run: bool) -> None:
     if dry_run:
         log("info", "would_alert", message, kind=kind, rotation_id=rotation_id, **extras)
         return
+    fingerprint = posthog_fingerprint(kind, rotation_id)
     posthog_send(lambda ph: ph.capture(
         "$exception", distinct_id=JOB_NAME,
         properties=posthog_message_properties(
-            message, posthog_fingerprint(kind, rotation_id), {"kind": kind, "rotation_id": rotation_id, **extras})))
+            message, fingerprint, {"kind": kind, "rotation_id": rotation_id, **extras})), fingerprint)
     import sentry_sdk  # lazy: --self-test and DRY_RUN paths never need the SDK
 
     with sentry_sdk.new_scope() as scope:
@@ -448,9 +476,18 @@ def self_test() -> int:
     check("posthog fingerprint", props["$exception_fingerprint"],
           "rotation-release-id-pollution-check:mismatch:21529")
     check("posthog exception_list", props["$exception_list"],
-          [{"type": "Warning", "value": "m", "mechanism": {"handled": True, "synthetic": True}}])
+          [{"type": "Message", "value": "m", "mechanism": {"type": "generic", "handled": True, "synthetic": True}}])
     check("posthog tags", (props["repo"], props["tool"], props["run_id"] == _RUN_ID, props["kind"]),
           ("Backend-Service", JOB_NAME, True, "mismatch"))
+    check("posthog service/environment", (props["service"], props["environment"]), (JOB_NAME, "production"))
+    check("environment mapping", [posthog_environment(v) for v in (None, "staging", "development", "production", "test")],
+          ["production", "staging", "development", "production", "production"])
+    dnow = [0.0]
+    dedupe = Dedupe(60.0, clock=lambda: dnow[0])
+    dnow[0] = 5.0
+    check("dedupe first, repeat, other", [dedupe.seen("a"), dedupe.seen("a"), dedupe.seen("b")], [False, True, False])
+    dnow[0] = 66.0
+    check("dedupe window expires", dedupe.seen("a"), False)
     now = [0.0]
     bucket = TokenBucket(2, 1.0, clock=lambda: now[0])
     check("bucket burst then drop", [bucket.allow() for _ in range(3)], [True, True, False])
@@ -464,7 +501,8 @@ def self_test() -> int:
             sent.append((event, kw["distinct_id"], kw["properties"]["$exception_fingerprint"]))
 
         def capture_exception(self, err, **kw):
-            sent.append(("capture_exception", str(err), kw["distinct_id"], kw["properties"]["tool"]))
+            sent.append(("capture_exception", str(err), kw["distinct_id"], kw["properties"]["tool"],
+                         kw["properties"]["service"], kw["properties"]["environment"]))
 
     class _RaisingPh:
         def capture(self, event, **kw):
@@ -489,11 +527,12 @@ def self_test() -> int:
     sentry_stub.capture_message = lambda message, level: sent.append(("sentry", message, level))
     real_sentry = sys.modules.get("sentry_sdk")
     sys.modules["sentry_sdk"] = sentry_stub
-    global _posthog, _posthog_bucket
-    real_bucket = _posthog_bucket
+    global _posthog, _posthog_bucket, _posthog_dedupe
+    real_bucket, real_dedupe = _posthog_bucket, _posthog_dedupe
     try:
         _posthog = _Ph()
         _posthog_bucket = TokenBucket(5, 0.0, clock=lambda: 0.0)
+        _posthog_dedupe = Dedupe(POSTHOG_DEDUPE_WINDOW_S, clock=lambda: 0.0)
         emit_alert("mismatch", 1, "m", {}, dry_run=True)  # dry run must not reach PostHog
         check("dry run sends nothing", sent, [])
         emit_alert("mismatch", 21529, "m", {}, dry_run=False)
@@ -502,7 +541,7 @@ def self_test() -> int:
                ("sentry", "m", "warning")])
         sent.clear()
         posthog_report_exception(ValueError("boom"))
-        check("job failure reported to PostHog", sent, [("capture_exception", "boom", JOB_NAME, JOB_NAME)])
+        check("job failure reported to PostHog", sent, [("capture_exception", "boom", JOB_NAME, JOB_NAME, JOB_NAME, "production")])
         _posthog = _RaisingPh()
         sent.clear()
         emit_alert("provenance", 7, "p", {}, dry_run=False)
@@ -512,8 +551,23 @@ def self_test() -> int:
         sent.clear()
         emit_alert("mismatch", 2, "m", {}, dry_run=False)
         check("empty bucket drops the PostHog event only", sent, [("sentry", "m", "warning")])
+        # Per-run budget: capacity 10, no refill, so the 11th distinct send is dropped.
+        _posthog_bucket = TokenBucket(POSTHOG_ALERT_BURST, POSTHOG_ALERT_REFILL_PER_SEC, clock=lambda: 0.0)
+        _posthog_dedupe = Dedupe(POSTHOG_DEDUPE_WINDOW_S, clock=lambda: 0.0)
+        sent.clear()
+        for rid in range(11):
+            emit_alert("mismatch", rid, "m", {}, dry_run=False)
+        check("11th distinct send dropped", [e[0] for e in sent].count("$exception"), 10)
+        # A repeat inside the window is dropped before the bucket, so it spends no token.
+        _posthog_bucket = TokenBucket(2, 0.0, clock=lambda: 0.0)
+        _posthog_dedupe = Dedupe(POSTHOG_DEDUPE_WINDOW_S, clock=lambda: 0.0)
+        sent.clear()
+        for rid in (1, 1, 2):
+            emit_alert("mismatch", rid, "m", {}, dry_run=False)
+        check("in-window repeat spends no token", [e[2] for e in sent if e[0] == "$exception"],
+              ["rotation-release-id-pollution-check:mismatch:1", "rotation-release-id-pollution-check:mismatch:2"])
     finally:
-        _posthog, _posthog_bucket = None, real_bucket
+        _posthog, _posthog_bucket, _posthog_dedupe = None, real_bucket, real_dedupe
         if real_sentry is None:
             sys.modules.pop("sentry_sdk", None)
         else:
