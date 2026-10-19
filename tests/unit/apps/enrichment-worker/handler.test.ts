@@ -168,8 +168,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
   });
 
   it('does NOT fire captureMessage when cause is lml_no_match (by-design Discogs miss)', async () => {
-    // Dashboard aggregation of the no-match rate uses the
-    // outcome counters, not per-event Sentry issues.
+    // A by-design miss is not a Sentry issue.
     mockEnrichmentBulkLookup.mockResolvedValueOnce(noMatchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_no_match');
 

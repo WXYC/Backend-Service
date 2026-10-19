@@ -9,11 +9,8 @@
  *   4. Finalize the row with the response (enrich.ts → flips `enriching`
  *      → terminal state, writes the metadata columns).
  *
- * Wrapped in a single Sentry transaction so trace events for one CDC tick
- * group together (cache_stats from the lookup span land as attributes on
- * the same transaction — see LML#213 + BS#646). Worker-side projection of
- * the outcome (`enrichment.outcome`) lets the Sentry trace explorer slice
- * matched/no-match/raced rates without per-row metric inventory.
+ * No span or per-outcome metric is emitted (BS#3403): matched/no-match/raced
+ * rates are no longer observable from Sentry; read them from `metadata_status`.
  *
  * Errors handling:
  *   - Filter rejected → silent skip (not interesting).
@@ -35,9 +32,7 @@
  * #1304). captureMessage fires only on `lml_degraded` outcomes that this
  * worker actually wrote — the LML#408 `_resolve_fallback_artwork` class
  * BS#969 was filed to surface. Three classes are deliberately silent:
- *   - `lml_no_match`: by-design Discogs miss, not a degradation. The
- *     `enrichment.outcome` span attribute (still set every tick) is the
- *     source of truth for dashboard-side rate aggregation.
+ *   - `lml_no_match`: by-design Discogs miss, not a degradation.
  *   - `_raced` outcomes: a sibling worker / C6 sweep wrote the user-visible
  *     state. Firing here would cascade C6 recovery into a captureMessage
  *     flood whose events don't correspond to actual degradation.

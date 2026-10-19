@@ -596,10 +596,6 @@ function albumMetadataCacheKey(artistName: string, releaseTitle?: string, trackT
  * full_release_date/discogs_artist_id) inline on the top-1 artwork
  * block. One round-trip iOS → BS → LML.
  *
- * `proxy.metadata.album.upstream_calls` Sentry attribute reads 0 on
- * local hit, 1 on cold fallthrough — splittable in the trace explorer
- * so the p50/p95 cohort distinction stays visible.
- *
  * Local-first base fields (BS#1827): `artistName` / `releaseTitle` /
  * `trackTitle` are assembled from the request itself, and `recordLabel` /
  * `labelId` / `metadataStatus` — when a linked flowsheet row is known —

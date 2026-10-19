@@ -142,8 +142,7 @@ export class LmlLookupCoordinator {
    * is caller-relative (BS#2528, `isCallerRelativeDegradation`) — that one
    * resolves normally to the asking caller but is withheld from the LRU so
    * it can't be replayed to an unrelated caller. When `requireSearchType`
-   * is set, returns `null` on mismatch after projecting
-   * `lml.coordinator.trust_reject_reason` onto the span; otherwise the
+   * is set, returns `null` on mismatch; otherwise the
    * return is the raw `LookupResponse`.
    */
   async lookup(

@@ -352,8 +352,7 @@ const main = async (): Promise<void> => {
 };
 
 /**
- * Wrap one sweep tick. The sweep itself opens a Sentry span and projects
- * the recovered count onto a child span (see `sweep.ts`); this wrapper
+ * Wrap one sweep tick. This wrapper
  * exists to catch DB errors so an unhealthy sweep can't unhandled-reject
  * and tear down the worker via setInterval's fire-and-forget callback.
  */
