@@ -1,31 +1,21 @@
 import { jest, describe, it, expect, beforeEach } from '@jest/globals';
 
-const setAttribute = jest.fn();
-const setStatus = jest.fn();
-const startSpan = jest.fn();
+const logCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
 
-jest.mock('@sentry/node', () => ({
-  startSpan: (...args: unknown[]) => (startSpan as unknown as (...a: unknown[]) => unknown)(...args),
-}));
+jest.mock('@wxyc/observability', () => ({ logCounter }));
 
 import { emitSesEventSpan } from '../../../../apps/backend/services/ses-events/emit-span';
 import type { SesEvent } from '../../../../apps/backend/services/ses-events/types';
 
 beforeEach(() => {
-  setAttribute.mockReset();
-  setStatus.mockReset();
-  startSpan.mockReset();
-  startSpan.mockImplementation((_opts: unknown, cb: unknown) => {
-    const span = { setAttribute, setStatus };
-    return (cb as (s: typeof span) => unknown)(span);
-  });
+  logCounter.mockReset();
 });
 
 const sendTs = new Date('2026-05-24T10:00:00.000Z');
 const deliveredAt = new Date('2026-05-24T10:00:02.500Z');
 
 describe('emitSesEventSpan', () => {
-  it('emits a Send span with name "ses.event" and op "email.ses"', () => {
+  it('logs a ses.event counter for a Send', () => {
     const event: SesEvent = {
       kind: 'Send',
       messageId: 'mid-1',
@@ -33,12 +23,12 @@ describe('emitSesEventSpan', () => {
       recipients: ['user@example.com'],
     };
     emitSesEventSpan(event);
-    expect(startSpan).toHaveBeenCalledTimes(1);
-    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
-    expect(callArgs[0]).toMatchObject({ name: 'ses.event', op: 'email.ses' });
-    expect((callArgs[0].attributes as Record<string, unknown>)['email.event_type']).toBe('Send');
-    expect((callArgs[0].attributes as Record<string, unknown>)['email.recipient_domain']).toBe('example.com');
-    expect((callArgs[0].attributes as Record<string, unknown>)['email.message_id']).toBe('mid-1');
+    expect(logCounter).toHaveBeenCalledTimes(1);
+    expect(logCounter).toHaveBeenCalledWith('ses.event', 1, {
+      'email.event_type': 'Send',
+      'email.message_id': 'mid-1',
+      'email.recipient_domain': 'example.com',
+    });
   });
 
   it('NEVER includes the recipient local-part in attributes', () => {
@@ -52,8 +42,7 @@ describe('emitSesEventSpan', () => {
       processingTimeMillis: 100,
     };
     emitSesEventSpan(event);
-    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
-    const attrs = callArgs[0].attributes as Record<string, string | number>;
+    const attrs = logCounter.mock.calls[0][2] as Record<string, string | number>;
     for (const v of Object.values(attrs)) {
       const text = typeof v === 'string' ? v : String(v);
       expect(text).not.toMatch(/secret\.local\.part/);
@@ -72,8 +61,7 @@ describe('emitSesEventSpan', () => {
       processingTimeMillis: 1234,
     };
     emitSesEventSpan(event);
-    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
-    const attrs = callArgs[0].attributes as Record<string, unknown>;
+    const attrs = logCounter.mock.calls[0][2];
     expect(attrs['ses.delivery_latency_ms']).toBe(2500);
     expect(attrs['ses.processing_time_ms']).toBe(1234);
   });
@@ -89,36 +77,32 @@ describe('emitSesEventSpan', () => {
       processingTimeMillis: 100,
     };
     emitSesEventSpan(event);
-    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
-    const attrs = callArgs[0].attributes as Record<string, unknown>;
+    const attrs = logCounter.mock.calls[0][2];
     expect(attrs['ses.delivery_latency_ms']).toBe(0);
   });
 
-  it('sets failed_precondition status on Bounce', () => {
-    const event: SesEvent = {
+  it('logs bounce and delay fields', () => {
+    emitSesEventSpan({
       kind: 'Bounce',
       messageId: 'mid-5',
       sendTimestamp: sendTs,
       recipient: 'user@example.com',
       bounceType: 'Permanent',
       bounceSubType: 'General',
-    };
-    emitSesEventSpan(event);
-    // Sentry numeric status codes: 1 = OK, 2 = ERROR
-    expect(setStatus).toHaveBeenCalledWith({ code: 2, message: 'failed_precondition' });
-  });
-
-  it('sets deadline_exceeded status on DeliveryDelay', () => {
-    const event: SesEvent = {
+    });
+    expect(logCounter.mock.calls[0][2]).toMatchObject({
+      'email.bounce_type': 'Permanent',
+      'email.bounce_subtype': 'General',
+    });
+    emitSesEventSpan({
       kind: 'DeliveryDelay',
       messageId: 'mid-6',
       sendTimestamp: sendTs,
       recipient: 'user@example.com',
       delayType: 'MailboxFull',
       expirationTime: null,
-    };
-    emitSesEventSpan(event);
-    expect(setStatus).toHaveBeenCalledWith({ code: 2, message: 'deadline_exceeded' });
+    });
+    expect(logCounter.mock.calls[1][2]).toMatchObject({ 'email.delay_type': 'MailboxFull' });
   });
 
   it('trims smtpResponse to 500 chars', () => {
@@ -133,8 +117,7 @@ describe('emitSesEventSpan', () => {
       processingTimeMillis: 0,
     };
     emitSesEventSpan(event);
-    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
-    const attrs = callArgs[0].attributes as Record<string, unknown>;
+    const attrs = logCounter.mock.calls[0][2];
     expect((attrs['email.smtp_response'] as string).length).toBe(500);
   });
 
@@ -146,8 +129,7 @@ describe('emitSesEventSpan', () => {
       reason: 'Bad content',
     };
     emitSesEventSpan(event);
-    const callArgs = startSpan.mock.calls[0] as unknown as [Record<string, unknown>, unknown];
-    const attrs = callArgs[0].attributes as Record<string, unknown>;
+    const attrs = logCounter.mock.calls[0][2];
     expect(attrs['email.recipient_domain']).toBe('unknown');
   });
 });

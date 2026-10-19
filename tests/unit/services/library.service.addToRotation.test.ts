@@ -59,11 +59,11 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: { lookup: () => Promise.resolve(null) },
 }));
 
-const mockSentryMetricsCount = jest.fn<(name: string, value: number, opts: unknown) => void>();
+const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
+jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
 jest.mock('@sentry/node', () => ({
   startSpan: <T>(_opts: unknown, callback: () => T | Promise<T>): Promise<T> => Promise.resolve(callback()),
   getActiveSpan: () => ({ setAttribute: jest.fn(), setAttributes: jest.fn() }),
-  metrics: { count: mockSentryMetricsCount },
 }));
 
 import { addToRotation, classifyLmlResolveError } from '../../../apps/backend/services/library.service';
@@ -191,7 +191,7 @@ describe('addToRotation (BS#1380)', () => {
     expect(valuesArg.lml_identity_id).toBe(LML_IDENTITY_ID);
 
     expect(result?.lml_identity_id).toBe(LML_IDENTITY_ID);
-    expect(mockSentryMetricsCount).not.toHaveBeenCalled();
+    expect(mockLogCounter).not.toHaveBeenCalled();
   });
 
   test('library_identity hit + LML resolve failure → discogs_release_id + source still land, lml_identity_id = NULL, counter fires', async () => {
@@ -227,9 +227,10 @@ describe('addToRotation (BS#1380)', () => {
     expect(result?.lml_identity_id).toBeNull();
 
     // Counter fires once with the correct reason bucket.
-    expect(mockSentryMetricsCount).toHaveBeenCalledTimes(1);
-    expect(mockSentryMetricsCount).toHaveBeenCalledWith('lml.resolve.fallback_to_null', 1, {
-      attributes: { caller: 'add_to_rotation', reason: 'timeout' },
+    expect(mockLogCounter).toHaveBeenCalledTimes(1);
+    expect(mockLogCounter).toHaveBeenCalledWith('lml.resolve.fallback_to_null', 1, {
+      caller: 'add_to_rotation',
+      reason: 'timeout',
     });
   });
 

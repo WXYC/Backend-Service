@@ -51,11 +51,11 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: { lookup: () => Promise.resolve(null) },
 }));
 
-const mockSentryMetricsCount = jest.fn<(name: string, value: number, opts: unknown) => void>();
+const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
+jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
 jest.mock('@sentry/node', () => ({
   startSpan: <T>(_opts: unknown, callback: () => T | Promise<T>): Promise<T> => Promise.resolve(callback()),
   getActiveSpan: () => ({ setAttribute: jest.fn(), setAttributes: jest.fn() }),
-  metrics: { count: mockSentryMetricsCount },
 }));
 
 import {
@@ -176,16 +176,17 @@ describe('reconcileLibraryUrlsToLml (fail-open)', () => {
 
     await expect(reconcileLibraryUrlsToLml(['https://www.discogs.com/release/9'])).resolves.toBeUndefined();
 
-    expect(mockSentryMetricsCount).toHaveBeenCalledTimes(1);
-    expect(mockSentryMetricsCount).toHaveBeenCalledWith('lml.resolve.fallback_to_null', 1, {
-      attributes: { caller: 'library_urls', reason: 'timeout' },
+    expect(mockLogCounter).toHaveBeenCalledTimes(1);
+    expect(mockLogCounter).toHaveBeenCalledWith('lml.resolve.fallback_to_null', 1, {
+      caller: 'library_urls',
+      reason: 'timeout',
     });
   });
 
   test('no derivable URLs → no resolve calls, no counter', async () => {
     await reconcileLibraryUrlsToLml(['https://example.com/x', '   ']);
     expect(mockResolveIdentity).not.toHaveBeenCalled();
-    expect(mockSentryMetricsCount).not.toHaveBeenCalled();
+    expect(mockLogCounter).not.toHaveBeenCalled();
   });
 });
 
@@ -230,8 +231,9 @@ describe('setLibraryUrls (write + reconcile + re-read)', () => {
     const result = await setLibraryUrls(LIBRARY_ID, ['https://www.discogs.com/release/3']);
 
     expect(db.insert).toHaveBeenCalledWith(library_urls);
-    expect(mockSentryMetricsCount).toHaveBeenCalledWith('lml.resolve.fallback_to_null', 1, {
-      attributes: { caller: 'library_urls', reason: 'timeout' },
+    expect(mockLogCounter).toHaveBeenCalledWith('lml.resolve.fallback_to_null', 1, {
+      caller: 'library_urls',
+      reason: 'timeout',
     });
     expect(result?.id).toBe(LIBRARY_ID);
   });

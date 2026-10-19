@@ -39,11 +39,11 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   lmlLookupCoordinator: { lookup: () => Promise.resolve(null) },
 }));
 
-const mockSentryMetricsCount = jest.fn<(name: string, value: number, opts: unknown) => void>();
+const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
+jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
 jest.mock('@sentry/node', () => ({
   startSpan: <T>(_opts: unknown, callback: () => T | Promise<T>): Promise<T> => Promise.resolve(callback()),
   getActiveSpan: () => ({ setAttribute: jest.fn(), setAttributes: jest.fn() }),
-  metrics: { count: mockSentryMetricsCount },
 }));
 
 import { recheckDiscogsAvailability } from '../../../apps/backend/services/library.service';
@@ -153,12 +153,10 @@ describe('recheckDiscogsAvailability', () => {
 
     expect(result).toEqual({ outcome: 'low_confidence_match', confidence: 0.85 });
     expect(db.transaction).not.toHaveBeenCalled();
-    expect(mockSentryMetricsCount).toHaveBeenCalledWith(
+    expect(mockLogCounter).toHaveBeenCalledWith(
       'lml.lookup.recheck.match_found_on_flagged',
       1,
-      expect.objectContaining({
-        attributes: expect.objectContaining({ confidence: 0.85, library_id: 42 }),
-      })
+      expect.objectContaining({ confidence: 0.85, library_id: 42 })
     );
     // Only the timestamp UPDATE ran (db.update once, no transaction).
     expect(db.update).toHaveBeenCalledTimes(1);
@@ -172,7 +170,7 @@ describe('recheckDiscogsAvailability', () => {
     const result = await recheckDiscogsAvailability(42, 'Some Artist', 'Some Album');
 
     expect(result).toEqual({ outcome: 'no_match' });
-    expect(mockSentryMetricsCount).not.toHaveBeenCalled();
+    expect(mockLogCounter).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
     expect(db.update).toHaveBeenCalledTimes(1);
   });
@@ -195,7 +193,7 @@ describe('recheckDiscogsAvailability', () => {
     // No timestamp stamp, no rotation/library writes, no Sentry counter.
     expect(db.update).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
-    expect(mockSentryMetricsCount).not.toHaveBeenCalled();
+    expect(mockLogCounter).not.toHaveBeenCalled();
   });
 
   it('multi-rotation-row: updates ALL rotation rows for the album_id in one statement (issue test 9)', async () => {

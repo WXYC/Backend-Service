@@ -1,13 +1,9 @@
-import * as Sentry from '@sentry/node';
+import { logCounter } from '@wxyc/observability';
 import type { SesEvent } from './types.js';
 
 /**
- * Emit a Sentry span for one SES event. The span has:
+ * Log one `ses.event` counter line for an SES event (BS#3402). Fields:
  *
- *   name: 'ses.event'
- *   op:   'email.ses'
- *
- *   attributes:
  *     email.event_type:       'Send' | 'Delivery' | 'Bounce' | ...
  *     email.message_id:       SES mail.messageId
  *     email.recipient_domain: the part after '@' in the first recipient
@@ -18,33 +14,11 @@ import type { SesEvent } from './types.js';
  *     email.delay_type:       (DeliveryDelay only)
  *     email.reject_reason:    (Reject only) trimmed to 500 chars
  *     ses.delivery_latency_ms: (Delivery only) ms from mail.timestamp to
- *                             delivery.timestamp — folded into the same
- *                             creation-time attributes bag (not a separate
- *                             `measurements` block) so Sentry indexes it
- *                             numerically for avg/percentile aggregation
- *     ses.processing_time_ms:  (Delivery only) delivery.processingTimeMillis,
- *                             folded in alongside ses.delivery_latency_ms
- *
- *   span status:
- *     ok                 on Send/Delivery
- *     failed_precondition on Bounce/Complaint/Reject
- *     deadline_exceeded   on DeliveryDelay
- *
- * Span lifetime is synchronous. We open it, set everything, end it. No
- * fetch to wrap — this is pure projection of an already-completed event
- * onto a span the trace explorer can search and aggregate.
+ *                             delivery.timestamp
+ *     ses.processing_time_ms:  (Delivery only) delivery.processingTimeMillis
  */
 export function emitSesEventSpan(event: SesEvent): void {
-  Sentry.startSpan(
-    {
-      name: 'ses.event',
-      op: 'email.ses',
-      attributes: { ...buildAttributes(event), ...buildMeasurements(event) },
-    },
-    (span) => {
-      span.setStatus(buildStatus(event));
-    }
-  );
+  logCounter('ses.event', 1, { ...buildAttributes(event), ...buildMeasurements(event) });
 }
 
 function buildAttributes(event: SesEvent): Record<string, string | number> {
@@ -85,27 +59,6 @@ function buildMeasurements(event: SesEvent): Record<string, number> {
     'ses.delivery_latency_ms': latencyMs,
     'ses.processing_time_ms': event.processingTimeMillis,
   };
-}
-
-// Sentry encodes span status as a numeric enum: 0 = UNSET, 1 = OK, 2 = ERROR.
-// The constants ship as `Sentry.SPAN_STATUS_OK` / `SPAN_STATUS_ERROR`; we
-// inline the literals here so this module doesn't depend on a stable name
-// for an SDK-internal export that has churned across recent versions.
-const STATUS_OK = 1 as const;
-const STATUS_ERROR = 2 as const;
-
-function buildStatus(event: SesEvent): { code: typeof STATUS_OK | typeof STATUS_ERROR; message?: string } {
-  switch (event.kind) {
-    case 'Send':
-    case 'Delivery':
-      return { code: STATUS_OK };
-    case 'Bounce':
-    case 'Complaint':
-    case 'Reject':
-      return { code: STATUS_ERROR, message: 'failed_precondition' };
-    case 'DeliveryDelay':
-      return { code: STATUS_ERROR, message: 'deadline_exceeded' };
-  }
 }
 
 function firstRecipient(event: SesEvent): string {

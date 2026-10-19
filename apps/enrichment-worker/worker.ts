@@ -14,6 +14,7 @@
  */
 
 import * as Sentry from '@sentry/node';
+import { logCounter } from '@wxyc/observability';
 import {
   closeDatabaseConnection,
   enableLivenessProbe,
@@ -253,41 +254,26 @@ const main = async (): Promise<void> => {
   // backend's CDC dispatcher subscribe; they're independent LISTEN
   // connections, so each process needs its own sink.
   onCdcOversizedEvent((event) => {
-    Sentry.captureMessage('cdc.oversized_payload', {
-      level: 'warning',
-      tags: {
-        subsystem: 'cdc',
-        consumer: 'enrichment-worker',
-        table: event.table,
-        action: event.action,
-        reason: event.reason,
-      },
-      extra: {
-        schema: event.schema,
-        primary_key: event.primary_key,
-        payload_bytes: event.payload_bytes,
-        timestamp: event.timestamp,
-      },
-      fingerprint: ['cdc-oversized-payload'],
+    logCounter('cdc.oversized_payload', 1, {
+      subsystem: 'cdc',
+      consumer: 'enrichment-worker',
+      table: event.table,
+      action: event.action,
+      reason: event.reason,
+      schema: event.schema,
+      primary_key: event.primary_key ?? '',
+      payload_bytes: event.payload_bytes,
     });
   });
   onCdcErrorEvent((event) => {
-    Sentry.captureMessage('cdc.trigger_exception', {
-      level: 'error',
-      tags: {
-        subsystem: 'cdc',
-        consumer: 'enrichment-worker',
-        table: event.table,
-        action: event.action,
-        reason: event.reason,
-        sqlstate: event.sqlstate,
-      },
-      extra: {
-        schema: event.schema,
-        sqlerrm: event.sqlerrm,
-        timestamp: event.timestamp,
-      },
-      fingerprint: ['cdc-trigger-exception'],
+    logCounter('cdc.trigger_exception', 1, {
+      subsystem: 'cdc',
+      consumer: 'enrichment-worker',
+      table: event.table,
+      action: event.action,
+      reason: event.reason,
+      sqlstate: event.sqlstate,
+      schema: event.schema,
     });
   });
 

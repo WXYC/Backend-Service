@@ -12,28 +12,20 @@
  *
  * BS#1120 fallback-channel sinks: `cdc_oversized` and `cdc_error` notifications
  * (emitted by migration 0094 when the primary `cdc` payload would have been
- * dropped) are wired here to `captureMessage` so AC #3's "emit a metric
- * Sentry can alert on" is satisfied. Subscribing only — the cdc-listener owns
- * the LISTEN; this module owns the Sentry signal.
+ * dropped) are wired here to `logCounter` (BS#3402), one structured log line each.
+ * Subscribing only — the cdc-listener owns the LISTEN; this module owns the
+ * signal.
  */
 
-import { getErrorReporter } from '@wxyc/observability';
+import { logCounter } from '@wxyc/observability';
 import { onCdcErrorEvent, onCdcOversizedEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
-
-/**
- * Stable Sentry fingerprints for the BS#1120 fallback channels. Each channel
- * gets a single issue group so alert thresholds count notifications, not
- * per-table churn. (The `table` is on `tags` for breakdown queries.)
- */
-const OVERSIZED_FINGERPRINT = ['cdc-oversized-payload'];
-const ERROR_FINGERPRINT = ['cdc-trigger-exception'];
 
 let fallbackSinksRegistered = false;
 
 /**
- * Wires the BS#1120 fallback channels to Sentry. Idempotent: a second call is
+ * Wires the BS#1120 fallback channels to counters. Idempotent: a second call is
  * a no-op so a stray `startCdcDispatcher()` (e.g. dev hot-reload) doesn't
- * stack duplicate captures. Exported so tests can drive the wiring without
+ * stack duplicate counts. Exported so tests can drive the wiring without
  * coupling to module-init order. `__resetCdcFallbackSinksForTests` lets the
  * test harness drop the latch between cases.
  */
@@ -42,40 +34,25 @@ export function registerCdcFallbackSinks(): void {
   fallbackSinksRegistered = true;
 
   onCdcOversizedEvent((event) => {
-    getErrorReporter().captureMessage('cdc.oversized_payload', {
-      level: 'warning',
-      tags: {
-        subsystem: 'cdc',
-        table: event.table,
-        action: event.action,
-        reason: event.reason,
-      },
-      extra: {
-        schema: event.schema,
-        primary_key: event.primary_key,
-        payload_bytes: event.payload_bytes,
-        timestamp: event.timestamp,
-      },
-      fingerprint: OVERSIZED_FINGERPRINT,
+    logCounter('cdc.oversized_payload', 1, {
+      subsystem: 'cdc',
+      table: event.table,
+      action: event.action,
+      reason: event.reason,
+      schema: event.schema,
+      primary_key: event.primary_key ?? '',
+      payload_bytes: event.payload_bytes,
     });
   });
 
   onCdcErrorEvent((event) => {
-    getErrorReporter().captureMessage('cdc.trigger_exception', {
-      level: 'error',
-      tags: {
-        subsystem: 'cdc',
-        table: event.table,
-        action: event.action,
-        reason: event.reason,
-        sqlstate: event.sqlstate,
-      },
-      extra: {
-        schema: event.schema,
-        sqlerrm: event.sqlerrm,
-        timestamp: event.timestamp,
-      },
-      fingerprint: ERROR_FINGERPRINT,
+    logCounter('cdc.trigger_exception', 1, {
+      subsystem: 'cdc',
+      table: event.table,
+      action: event.action,
+      reason: event.reason,
+      sqlstate: event.sqlstate,
+      schema: event.schema,
     });
   });
 }
