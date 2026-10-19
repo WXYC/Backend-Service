@@ -1,5 +1,6 @@
 import * as Sentry from '@sentry/node';
 import { createJobLogger, resolveTracesSampleRate } from '@wxyc/observability/job-logger';
+import { getErrorReporter } from '@wxyc/observability';
 
 jest.mock('@sentry/node', () => ({
   init: jest.fn(),
@@ -180,6 +181,20 @@ describe('createJobLogger', () => {
     initLogger({ repo: 'r', tool: 't' });
     await closeLogger();
     expect(order).toEqual(['flush-start:2000', 'flush-done', 'close:2000']);
+  });
+
+  it('initLogger registers the logger reporter as the process-wide reporter', () => {
+    const { reporter, initLogger } = createJobLogger({ jobName: 'demo-job' });
+    initLogger({ repo: 'r', tool: 't' });
+    expect(getErrorReporter()).toBe(reporter);
+  });
+
+  it('a capture through getErrorReporter after initLogger reaches the logger reporter', () => {
+    const { reporter, initLogger } = createJobLogger({ jobName: 'demo-job' });
+    const capture = jest.spyOn(reporter, 'captureMessage');
+    initLogger({ repo: 'r', tool: 't' });
+    getErrorReporter().captureMessage('shared-lib warning', { level: 'warning' });
+    expect(capture).toHaveBeenCalledWith('shared-lib warning', { level: 'warning' });
   });
 
   it('errorMessage handles non-Error throws', () => {
