@@ -1,5 +1,5 @@
 export { parseSesEvent } from './parse-ses-event.js';
-export { emitSesEventSpan } from './emit-span.js';
+export { recordSesEvent } from './record-ses-event.js';
 export { validateSnsMessage, type ValidatedSnsMessage } from './sns-validator.js';
 export { confirmSubscription } from './confirm-subscription.js';
 export type {

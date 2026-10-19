@@ -2,10 +2,10 @@
  * Discriminated union of the six SES event types we observe for transactional
  * email instrumentation. The shape comes from the SES "Configuration Set →
  * SNS event publishing" documented payload; we keep a narrow projection that
- * carries only the fields we surface on Sentry spans.
+ * carries only the fields we log on `ses.event` lines.
  *
  * Recipient values are intentionally kept as full email addresses inside this
- * module, but only the domain part is allowed to leave it (see emit-span.ts).
+ * module, but only the domain part is allowed to leave it (see record-ses-event.ts).
  * Treat any local-part as PII; never log or attribute it.
  */
 

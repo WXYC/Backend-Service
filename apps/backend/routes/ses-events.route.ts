@@ -2,7 +2,7 @@ import { getErrorReporter } from '@wxyc/observability';
 import express, { Router } from 'express';
 import {
   confirmSubscription,
-  emitSesEventSpan,
+  recordSesEvent,
   parseSesEvent,
   validateSnsMessage,
 } from '../services/ses-events/index.js';
@@ -12,9 +12,11 @@ import {
  *
  * SNS HTTPS subscriber for the `ses-delivery-events-prod` topic. Receives
  * Send/Delivery/Bounce/Complaint/Reject/DeliveryDelay events from the SES
- * Configuration Set attached to the `wxyc.org` sending identity, and emits
- * one Sentry span per event so `Send → Delivery` p50/p90/p99 is visible in
- * the trace explorer.
+ * Configuration Set attached to the `wxyc.org` sending identity, and logs
+ * one `ses.event` counter line per event (BS#3402; see
+ * `services/ses-events/record-ses-event.ts`). Delivery lines carry
+ * `ses.delivery_latency_ms`, so `Send → Delivery` latency can be read from
+ * the logs.
  *
  * Auth model: SNS X.509 signature validation IS the auth. We pin the topic
  * ARN via `SES_EVENTS_SNS_TOPIC_ARN`. We do NOT require X-Internal-Key here
@@ -99,11 +101,11 @@ ses_events_route.post('/', express.text({ type: '*/*', limit: '64kb' }), async (
   }
 
   try {
-    emitSesEventSpan(event);
+    recordSesEvent(event);
   } catch (e) {
     // Observability must never break the receive path. SES will retry on
-    // 5xx, so a Sentry-emit blip should still 200 to AWS.
-    console.warn('[ses-events] failed to emit span', e);
+    // 5xx, so a logging blip should still 200 to AWS.
+    console.warn('[ses-events] failed to record event', e);
   }
 
   res.json({ ok: true });

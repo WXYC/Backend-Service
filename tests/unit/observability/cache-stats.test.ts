@@ -2,19 +2,16 @@
  * Unit tests for the cache-stats observability helper (BS#989 / G6).
  *
  * Coverage:
- *   1. `recordCacheLookup` projects `cache_hit` / `cache_name` / `cache_size`
- *      / `cache_capacity` onto the active Sentry span on both hit and miss,
- *      and is a safe no-op when there is no active span or the SDK throws.
+ *   1. `recordCacheLookup` aggregates hit/miss counts per cache name in
+ *      process and writes one `cache.lookup` summary line per name per
+ *      60 s interval (nothing in a quiet interval), plus a flush on
+ *      `flushCacheLookups` / `stopPeriodicEmit` (graceful shutdown).
  *   2. `recordCacheEviction` + `emitPeriodicCacheStats` track capacity-driven
- *      evictions per cache name and project them (plus current size) onto a
- *      "BackgroundJob"-op span, resetting the counters after each emit.
+ *      evictions per cache name and log them (plus current size, as a gauge),
+ *      resetting the counters after each emit.
  *   3. `startPeriodicEmit` / `stopPeriodicEmit` schedule and cancel the
  *      once-per-minute (default) recurring emit without double-registering
  *      a timer.
- *
- * Mirrors the LML#213 cache_stats pattern (wrap-at-chokepoint +
- * project-onto-span) and this repo's existing Sentry-mock idiom (see
- * `tests/unit/controllers/proxy.controller.test.ts`).
  */
 import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
@@ -24,6 +21,7 @@ jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
 
 import {
   recordCacheLookup,
+  flushCacheLookups,
   recordCacheEviction,
   emitPeriodicCacheStats,
   startPeriodicEmit,
@@ -47,27 +45,111 @@ describe('cache-stats', () => {
     __resetCacheStatsForTests();
   });
 
-  describe('recordCacheLookup', () => {
-    it('logs cache.lookup with cache_hit=true, cache_name, cache_size, cache_capacity on a hit', () => {
-      recordCacheLookup('artwork', true, fakeCache(12, 200));
+  describe('recordCacheLookup (aggregated per interval)', () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
 
-      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
-        cache_hit: true,
+    it('writes nothing at lookup time', () => {
+      recordCacheLookup('artwork', true, fakeCache(12, 200));
+      recordCacheLookup('artwork', false, fakeCache(13, 200));
+
+      expect(mockLogCounter).not.toHaveBeenCalled();
+    });
+
+    it('N lookups produce one cache.lookup summary line per cache name per 60s interval', () => {
+      jest.useFakeTimers();
+      for (let i = 0; i < 50; i += 1) {
+        recordCacheLookup('artwork', i % 5 !== 0, fakeCache(100 + i, 200));
+      }
+      recordCacheLookup('metadata_album', false, fakeCache(0, 2000));
+      recordCacheLookup('metadata_album', true, fakeCache(1, 2000));
+
+      jest.advanceTimersByTime(59_999);
+      expect(mockLogCounter).not.toHaveBeenCalled();
+
+      jest.advanceTimersByTime(1);
+      expect(mockLogCounter).toHaveBeenCalledTimes(2);
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 50, {
         cache_name: 'artwork',
-        cache_size: 12,
+        cache_hits: 40,
+        cache_misses: 10,
+        cache_size: 149,
         cache_capacity: 200,
+      });
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 2, {
+        cache_name: 'metadata_album',
+        cache_hits: 1,
+        cache_misses: 1,
+        cache_size: 1,
+        cache_capacity: 2000,
       });
     });
 
-    it('logs cache_hit=false on a miss', () => {
-      recordCacheLookup('metadata_album', false, fakeCache(0, 2000));
+    it('a quiet interval after a flush writes nothing', () => {
+      jest.useFakeTimers();
+      recordCacheLookup('tracklist', true, fakeCache(1, 500));
+      jest.advanceTimersByTime(60_000);
+      expect(mockLogCounter).toHaveBeenCalledTimes(1);
 
-      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
-        cache_hit: false,
-        cache_name: 'metadata_album',
-        cache_size: 0,
-        cache_capacity: 2000,
-      });
+      mockLogCounter.mockClear();
+      jest.advanceTimersByTime(5 * 60_000);
+      expect(mockLogCounter).not.toHaveBeenCalled();
+    });
+
+    it('counts restart from zero in the interval after a flush', () => {
+      jest.useFakeTimers();
+      recordCacheLookup('tracklist', true, fakeCache(1, 500));
+      jest.advanceTimersByTime(60_000);
+      mockLogCounter.mockClear();
+
+      recordCacheLookup('tracklist', false, fakeCache(2, 500));
+      jest.advanceTimersByTime(60_000);
+      expect(mockLogCounter.mock.calls).toEqual([
+        [
+          'cache.lookup',
+          1,
+          { cache_name: 'tracklist', cache_hits: 0, cache_misses: 1, cache_size: 2, cache_capacity: 500 },
+        ],
+      ]);
+    });
+
+    it('flushCacheLookups writes the pending summaries immediately and cancels the pending timer', () => {
+      jest.useFakeTimers();
+      recordCacheLookup('negative', false, fakeCache(3, 1000));
+
+      flushCacheLookups();
+      expect(mockLogCounter).toHaveBeenCalledTimes(1);
+
+      mockLogCounter.mockClear();
+      jest.advanceTimersByTime(60_000);
+      expect(mockLogCounter).not.toHaveBeenCalled();
+    });
+
+    it('stopPeriodicEmit (graceful shutdown) flushes pending lookup summaries', () => {
+      recordCacheLookup('spotify_track', true, fakeCache(4, 500));
+
+      stopPeriodicEmit();
+
+      expect(mockLogCounter).toHaveBeenCalledWith(
+        'cache.lookup',
+        1,
+        expect.objectContaining({ cache_name: 'spotify_track', cache_hits: 1, cache_misses: 0 })
+      );
+    });
+
+    it('schedules the flush timer with unref() so it never holds the process open', () => {
+      const unref = jest.fn();
+      const setTimeoutSpy = jest
+        .spyOn(global, 'setTimeout')
+        .mockImplementation((() => ({ unref })) as unknown as typeof setTimeout);
+      recordCacheLookup('artwork', true, fakeCache(1, 10));
+      recordCacheLookup('artwork', true, fakeCache(1, 10));
+
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
+      expect(unref).toHaveBeenCalledTimes(1);
+      setTimeoutSpy.mockRestore();
     });
 
     it.each([
@@ -81,6 +163,7 @@ describe('cache-stats', () => {
       'spotify_track',
     ] as const)('accepts the %s cache name', (name) => {
       recordCacheLookup(name, true, fakeCache(1, 10));
+      flushCacheLookups();
       expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, expect.objectContaining({ cache_name: name }));
     });
   });
@@ -100,11 +183,11 @@ describe('cache-stats', () => {
 
       expect(mockLogCounter.mock.calls).toEqual([
         ['cache.artwork.evictions.count', 2],
-        ['cache.artwork.size', 150],
+        ['cache.artwork.size', 150, { kind: 'gauge' }],
         ['cache.negative.evictions.count', 1],
-        ['cache.negative.size', 999],
+        ['cache.negative.size', 999, { kind: 'gauge' }],
         ['cache.tracklist.evictions.count', 0],
-        ['cache.tracklist.size', 3],
+        ['cache.tracklist.size', 3, { kind: 'gauge' }],
       ]);
     });
 
@@ -156,7 +239,7 @@ describe('cache-stats', () => {
 
       expect(mockLogCounter.mock.calls).toEqual([
         ['cache.artwork.evictions.count', 1],
-        ['cache.artwork.size', 1],
+        ['cache.artwork.size', 1, { kind: 'gauge' }],
       ]);
       jest.useRealTimers();
     });

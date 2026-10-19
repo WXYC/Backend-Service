@@ -122,8 +122,18 @@ jest.mock('../../../apps/backend/config/wxycReviews', () => ({
 // `Sentry.captureException` on the cache-first DB-error catch arm)
 // continue to load without a confusing "X is not a function" TypeError
 // far from the change site.
-const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
-jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
+jest.mock('@wxyc/observability', () => ({ logCounter: jest.fn() }));
+// Lookups aggregate in process and flush on a timer (BS#3402), so these tests
+// assert what each chokepoint passes to `recordCacheLookup`, snapshotting the
+// cache's size/capacity at call time.
+const mockRecordCacheLookup = jest.fn<(lookup: Record<string, unknown>) => void>();
+jest.mock('../../../apps/backend/services/observability/cache-stats', () => ({
+  ...jest.requireActual<typeof import('../../../apps/backend/services/observability/cache-stats')>(
+    '../../../apps/backend/services/observability/cache-stats'
+  ),
+  recordCacheLookup: (name: string, hit: boolean, cache: { size: number; max: number }) =>
+    mockRecordCacheLookup({ cache_hit: hit, cache_name: name, cache_size: cache.size, cache_capacity: cache.max }),
+}));
 const mockSpanSetAttributes = jest.fn();
 const mockGetActiveSpan = jest.fn(() => ({ setAttributes: mockSpanSetAttributes }));
 jest.mock('@sentry/node', () => ({
@@ -457,7 +467,7 @@ describe('proxy.controller', () => {
         __resetNegativeCacheForTests();
       });
 
-      it('projects cache_name="artwork" onto the Sentry span for the positive-artwork path', async () => {
+      it('reports cache_name="artwork" to recordCacheLookup for the positive-artwork path', async () => {
         mockFind.mockResolvedValue({
           artworkUrl: 'https://i.discogs.com/cache-stats.jpg',
           releaseUrl: 'https://discogs.com/release/cache-stats',
@@ -478,7 +488,7 @@ describe('proxy.controller', () => {
         } as unknown as Request;
 
         await searchArtwork(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: false,
           cache_name: 'artwork',
           cache_size: 1,
@@ -486,7 +496,7 @@ describe('proxy.controller', () => {
         });
 
         await searchArtwork(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: true,
           cache_name: 'artwork',
           cache_size: 1,
@@ -494,7 +504,7 @@ describe('proxy.controller', () => {
         });
       });
 
-      it('projects cache_name="negative" onto the Sentry span for the confirmed-absence path', async () => {
+      it('reports cache_name="negative" to recordCacheLookup for the confirmed-absence path', async () => {
         mockFind.mockResolvedValue({
           artworkUrl: null,
           releaseUrl: null,
@@ -510,7 +520,7 @@ describe('proxy.controller', () => {
         } as unknown as Request;
 
         await searchArtwork(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: false,
           cache_name: 'negative',
           cache_size: 1,
@@ -518,7 +528,7 @@ describe('proxy.controller', () => {
         });
 
         await searchArtwork(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: true,
           cache_name: 'negative',
           cache_size: 1,
@@ -543,15 +553,12 @@ describe('proxy.controller', () => {
 
         await searchArtwork(req, createMockRes() as Response, mockNext);
 
-        // A full miss touches artworkCache (miss) then writes negativeCache, but
-        // both project onto the SAME request span with the same fixed keys. Only
-        // the terminal negative decision must be projected — projecting the
-        // artwork get-miss too would clobber it (last-write-wins), leaving a
-        // misleading signal. Exactly one projection, and never `cache_name:'artwork'`.
-        expect(mockLogCounter).toHaveBeenCalledTimes(1);
-        expect(mockLogCounter).toHaveBeenCalledWith(
-          'cache.lookup',
-          1,
+        // A full miss touches artworkCache (miss) then writes negativeCache. Only
+        // the terminal negative decision is counted as a lookup; counting the
+        // intermediate artwork get-miss too would double-count one request.
+        // Exactly one lookup, and never `cache_name:'artwork'`.
+        expect(mockRecordCacheLookup).toHaveBeenCalledTimes(1);
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith(
           expect.objectContaining({ cache_name: 'negative', cache_hit: false })
         );
       });
@@ -2261,7 +2268,7 @@ describe('proxy.controller', () => {
         expect(secondResult.artistName).toBe('Can');
       });
 
-      it('projects cache_hit=true onto the Sentry span on a repeat request, cache_hit=false on the first', async () => {
+      it('reports cache_hit=true to recordCacheLookup on a repeat request, cache_hit=false on the first', async () => {
         mockSelectLinkedFlowsheetRow.mockResolvedValue(null);
         mockLookupMetadata.mockResolvedValue({
           results: [],
@@ -2278,7 +2285,7 @@ describe('proxy.controller', () => {
         // BS#989: chokepoint cache-stats projection (replaces the old
         // `proxy.metadata.album.cache_hit`-only attribute). cache_size=1
         // because the miss path populates the cache before this call.
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: false,
           cache_name: 'metadata_album',
           cache_size: 1,
@@ -2286,7 +2293,7 @@ describe('proxy.controller', () => {
         });
 
         await getAlbumMetadata(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: true,
           cache_name: 'metadata_album',
           cache_size: 1,
@@ -2778,7 +2785,7 @@ describe('proxy.controller', () => {
         expect(mockGetArtistDetails).toHaveBeenCalledTimes(2);
       });
 
-      it('projects cache_hit onto the Sentry span', async () => {
+      it('reports cache_hit to recordCacheLookup', async () => {
         mockGetArtistDetails.mockResolvedValue({
           artist_id: 8001,
           name: 'Stereolab',
@@ -2797,7 +2804,7 @@ describe('proxy.controller', () => {
         await getArtistMetadata(req, createMockRes() as Response, mockNext);
         // BS#989: chokepoint cache-stats projection (replaces the old
         // `proxy.metadata.artist.cache_hit`-only attribute).
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: false,
           cache_name: 'metadata_artist',
           cache_size: 1,
@@ -2805,7 +2812,7 @@ describe('proxy.controller', () => {
         });
 
         await getArtistMetadata(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: true,
           cache_name: 'metadata_artist',
           cache_size: 1,
@@ -2977,7 +2984,7 @@ describe('proxy.controller', () => {
         expect(posTtl).toBeGreaterThan(60 * 60 * 1000); // well over an hour
       });
 
-      it('projects cache_hit onto the Sentry span', async () => {
+      it('reports cache_hit to recordCacheLookup', async () => {
         mockResolveEntity.mockResolvedValue({ name: 'Stereolab', type: 'artist', id: 8002 });
 
         const req = { query: { type: 'artist', id: '8002' } } as unknown as Request;
@@ -2985,7 +2992,7 @@ describe('proxy.controller', () => {
         await resolveEntity(req, createMockRes() as Response, mockNext);
         // BS#989: chokepoint cache-stats projection (replaces the old
         // `proxy.entity.resolve.cache_hit`-only attribute).
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: false,
           cache_name: 'entity_resolve',
           cache_size: 1,
@@ -2993,7 +3000,7 @@ describe('proxy.controller', () => {
         });
 
         await resolveEntity(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: true,
           cache_name: 'entity_resolve',
           cache_size: 1,
@@ -3186,7 +3193,7 @@ describe('proxy.controller', () => {
         expect(mockFetch).toHaveBeenCalledTimes(2);
       });
 
-      it('projects cache_hit onto the Sentry span', async () => {
+      it('reports cache_hit to recordCacheLookup', async () => {
         mockFetch.mockResolvedValueOnce({
           ok: true,
           json: () => Promise.resolve({ access_token: 'mock-token', expires_in: 3600 }),
@@ -3206,7 +3213,7 @@ describe('proxy.controller', () => {
         await getSpotifyTrack(req, createMockRes() as Response, mockNext);
         // BS#989: chokepoint cache-stats projection (replaces the old
         // `proxy.spotify.track.cache_hit`-only attribute).
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: false,
           cache_name: 'spotify_track',
           cache_size: 1,
@@ -3214,7 +3221,7 @@ describe('proxy.controller', () => {
         });
 
         await getSpotifyTrack(req, createMockRes() as Response, mockNext);
-        expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+        expect(mockRecordCacheLookup).toHaveBeenCalledWith({
           cache_hit: true,
           cache_name: 'spotify_track',
           cache_size: 1,
@@ -3491,7 +3498,7 @@ describe('proxy.controller', () => {
       );
     });
 
-    it('projects cache_name="tracklist" onto the Sentry span for hit and miss (BS#989)', async () => {
+    it('reports cache_name="tracklist" to recordCacheLookup for hit and miss (BS#989)', async () => {
       mockGetDiscogsReleaseIdByLegacyId.mockResolvedValue(42);
       mockGetRelease.mockResolvedValue({
         release_id: 42,
@@ -3503,7 +3510,7 @@ describe('proxy.controller', () => {
       const req = { params: { libraryId: '12345' } } as unknown as Request;
 
       await libraryTracks(req, createMockRes() as Response, mockNext);
-      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+      expect(mockRecordCacheLookup).toHaveBeenCalledWith({
         cache_hit: false,
         cache_name: 'tracklist',
         cache_size: 1,
@@ -3511,7 +3518,7 @@ describe('proxy.controller', () => {
       });
 
       await libraryTracks(req, createMockRes() as Response, mockNext);
-      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+      expect(mockRecordCacheLookup).toHaveBeenCalledWith({
         cache_hit: true,
         cache_name: 'tracklist',
         cache_size: 1,

@@ -8648,14 +8648,12 @@ export function __resetTrackSearchCacheForTests(): void {
  * return the mapped `EnrichedLibraryResult[]` (BS rows, `matched_via`, LML
  * ordering) without touching LML or the BS PG JOIN.
  *
- * **Telemetry (BS#828, BS#989).** Wraps the call in a `catalog.track_search`
- * Sentry span and projects onto it: the unified BS#989 cache stats via
- * `recordCacheLookup('track_search', ...)` — `cache_hit` (true on hit, false
- * on miss) plus `cache_name` / `cache_size` / `cache_capacity`, replacing the
- * former `track_search.cache_hit`-only attribute; `track_search.master_lookup_ms`
- * (LML hop only — 0 on cache hit, set by the inner via the active span on
- * miss); and `track_search.latency_ms` (total). Pattern: wrap-at-chokepoint +
- * project-onto-span (sibling: LML#213 / BS#646 for LML cache_stats).
+ * **Telemetry (BS#828, BS#989, BS#3402).** Counts the cache touch via
+ * `recordCacheLookup('track_search', ...)`, which aggregates hits and misses
+ * into a periodic `cache.lookup` log line (see `cache-stats.ts`). Also wraps
+ * the call in a `catalog.track_search` Sentry span carrying
+ * `track_search.master_lookup_ms` (LML hop only — 0 on cache hit, set by the
+ * inner via the active span on miss) and `track_search.latency_ms` (total).
  * Callers up the cascade in `searchLibrary` must not add their own
  * instrumentation.
  *
@@ -8708,13 +8706,9 @@ export async function searchLibraryByTrackRaw(query: string, limit: number): Pro
       }
       results = results.slice(0, limit);
     }
-    // BS#989: chokepoint cache-stats projection (cache_hit/cache_name/
-    // cache_size/cache_capacity) — placed after the possible `.set()` above
-    // so `cache_size` reflects the post-touch occupancy. Replaces the old
-    // `track_search.cache_hit`-only `span.setAttribute` call; `span` here
-    // IS the active span (we're inside this method's own `Sentry.startSpan`
-    // callback), so `recordCacheLookup`'s `Sentry.getActiveSpan()` resolves
-    // to the same span this function already owns.
+    // BS#989: chokepoint cache-stats count — placed after the possible
+    // `.set()` above so the recorded `cache_size` reflects the post-touch
+    // occupancy.
     recordCacheLookup('track_search', cacheHit, trackSearchCache);
 
     // Observability must never break the request path. If the Sentry SDK
