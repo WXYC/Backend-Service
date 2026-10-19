@@ -263,20 +263,21 @@ export const ALL_LML_CALLERS = [
   // It gets its own label rather than borrowing the donor's (which the
   // issue body suggested) so a drain-caused LML regression is attributable:
   // sharing a label would make this traffic indistinguishable from a job
-  // that is not running, on both the `lml.caller` span attribute and LML's
-  // per-caller metrics.
+  // that is not running, in LML's per-caller metrics.
   'streaming-columns-drain',
   // BS#2775: the one-shot fill for `album_metadata` rows carrying a Discogs
   // match and no `artist_bio`. Class 5 — same offline bulk shape as its
   // `streaming-columns-drain` donor, and its own label for the same reason:
-  // a ~13k-album drain has to be attributable on the `lml.caller` span and
-  // LML's per-caller metrics rather than hiding under another job's name.
+  // a ~13k-album drain has to be attributable in LML's per-caller metrics
+  // rather than hiding under another job's name.
   'album-metadata-bio-fill',
   // BS#3138: the one-shot re-ask of `album_metadata` rows whose stored
   // release disagrees with LML's release pin (tracker BS#3137). Class 5 —
   // same offline bulk shape as its `album-metadata-bio-fill` donor, and its
-  // own label so its LML sheds and `lml.cache.api_calls` (the canary's
-  // Discogs-calls-per-album stop condition) are readable for this job alone.
+  // own label so its LML sheds are readable for this job alone. The canary's
+  // Discogs-calls-per-album stop condition used to read the `lml.cache.api_calls`
+  // span attribute; BS#3403 removed that attribute.
+  // TODO(follow-up to #3403): replace the `lml.cache.*` span-attribute signal with a log- or metric-based one.
   // It is the one paced offline caller that sets
   // `allowReleaseResolutionFallback` (see that option's doc comment).
   'album-metadata-reask',

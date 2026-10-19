@@ -123,8 +123,7 @@ export function isTrustedLmlAlbumMatch(response: LmlTrustGateInput): boolean {
 /**
  * Fold diacritics, casefold, then strip everything but letters/digits,
  * collapsing to single spaces. Deliberately NOT `@wxyc/database`'s
- * `normalizeAlbumTitle`: `@wxyc/lml-client` depends only on `@sentry/node`
- * and `@wxyc/shared`, and that normalizer carries a dedup-key stability
+ * `normalizeAlbumTitle`: `@wxyc/lml-client` depends only on `@wxyc/shared`, and that normalizer carries a dedup-key stability
  * contract tied to a live cron (BS#2217 — considered and rejected). The same
  * dependency-boundary argument rules out `@wxyc/database`'s `foldArtistName`,
  * whose NFD-fold-then-casefold step is the closer twin of the folding below:

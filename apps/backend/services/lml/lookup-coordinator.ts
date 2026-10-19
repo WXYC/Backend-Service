@@ -102,8 +102,7 @@ export type CoordinatorLookupOptions = Pick<
 > & {
   /**
    * When set, the coordinator returns `null` if the resolved response's
-   * `search_type` doesn't match, after projecting
-   * `lml.coordinator.trust_reject_reason` onto the per-lookup span. This
+   * `search_type` doesn't match. This
    * gate runs per-call, independent of cache admission (BS#2528) — a
    * response that does get written to the LRU is written raw, so a
    * permissive caller and a strict caller can share that cached payload
