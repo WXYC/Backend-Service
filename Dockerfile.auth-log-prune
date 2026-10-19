@@ -15,12 +15,14 @@ COPY ./package* ./
 COPY ./jobs/auth-log-prune/package* ./jobs/auth-log-prune/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/authentication/package* ./shared/authentication/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --link --from=builder /jobs/auth-log-prune/dist ./jobs/auth-log-prune/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
 COPY --link --from=builder /shared/authentication/dist ./shared/authentication/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # A single DELETE against a table bounded by the retention window itself —
 # the API's 5s default statement timeout is fine here, unlike the paged
