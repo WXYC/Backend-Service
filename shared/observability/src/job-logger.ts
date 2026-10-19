@@ -23,9 +23,13 @@ export type LogLevel = 'info' | 'warn' | 'error';
 type BaseTags = { repo: string; tool: string; run_id: string };
 
 export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) return 1;
+  if (raw === undefined) {
+    return 1;
+  }
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 1;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    return 1;
+  }
   return parsed;
 };
 
@@ -62,7 +66,9 @@ export const createJobLogger = ({ jobName }: { jobName: string }) => {
   };
 
   const log = (level: LogLevel, step: string, message: string, fields: Record<string, unknown> = {}): void => {
-    if (!baseTags) return;
+    if (!baseTags) {
+      return;
+    }
     const line = JSON.stringify({ timestamp: new Date().toISOString(), level, step, message, ...baseTags, ...fields });
     (level === 'error' ? process.stderr : process.stdout).write(line + '\n');
   };

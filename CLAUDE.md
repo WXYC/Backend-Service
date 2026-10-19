@@ -40,7 +40,7 @@ npm workspaces:
 | `@wxyc/database` | `shared/database/` | Drizzle schema, client, migrations, ETL utilities. |
 | `@wxyc/authentication` | `shared/authentication/` | Auth middleware, roles, JWT verification |
 | `@wxyc/lml-client` | `shared/lml-client/` | HTTP client for LML: single chokepoint with limiter and breaker. |
-| `@wxyc/observability` | Sentry filters/config (every `SENTRY_DATA_COLLECTION` field must stay spelled out; Sentry 11 defaults are PII-on); `./metrics` emitter never re-exported from the barrel. |
+| `@wxyc/observability` | Sentry filters/config (every `SENTRY_DATA_COLLECTION` field must stay spelled out; Sentry 11 defaults are PII-on); `./metrics` emitter never re-exported from the barrel; `./job-logger` is the shared `createJobLogger` for `jobs/`. |
 
 Jobs under `jobs/<name>/` (full text per job in [`docs/jobs.md`](docs/jobs.md)):
 
