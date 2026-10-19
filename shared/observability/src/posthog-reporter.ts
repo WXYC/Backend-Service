@@ -98,9 +98,9 @@ export class PostHogReporter implements ErrorReporter {
   }
 
   captureMessage(message: string, context?: ReportContext): void {
-    const fingerprint = context?.fingerprint?.join(':') ?? message;
+    const value = String(redactLogValue(message));
+    const fingerprint = context?.fingerprint?.join(':') ?? value;
     this.send(fingerprint, () => {
-      const value = String(redactLogValue(message));
       this.client?.capture({
         distinctId: this.options.service,
         event: '$exception',
@@ -161,7 +161,7 @@ export class PostHogReporter implements ErrorReporter {
       ...this.options.properties,
       ...tags,
       ...extra,
-      ...(crumbs.length > 0 ? { breadcrumbs: crumbs } : {}),
+      ...(crumbs.length > 0 ? { breadcrumbs: [...crumbs] } : {}),
       service: this.options.service,
       environment: this.environment,
       ...(this.options.release ? { release: this.options.release } : {}),
