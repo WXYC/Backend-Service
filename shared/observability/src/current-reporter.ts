@@ -1,4 +1,4 @@
-import type { CounterFields, ErrorReporter, ReportBreadcrumb, ReportContext } from './error-reporter.js';
+import type { ErrorReporter, ReportBreadcrumb, ReportContext } from './error-reporter.js';
 
 /** Discards every report. The default, so a library used before any app wiring never throws. */
 const noopReporter: ErrorReporter = {
@@ -6,7 +6,6 @@ const noopReporter: ErrorReporter = {
   captureMessage(_message: string, _context?: ReportContext): void {},
   addBreadcrumb(_crumb: ReportBreadcrumb): void {},
   setRequestTag(_key: string, _value: string): void {},
-  recordCounter(_name: string, _value: number, _fields?: CounterFields): void {},
   flush(_timeoutMs?: number): Promise<boolean> {
     return Promise.resolve(true);
   },

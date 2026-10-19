@@ -10,6 +10,7 @@
 import * as Sentry from '@sentry/node';
 import { randomUUID } from 'crypto';
 import { SentryReporter } from './sentry-reporter.js';
+import { logCounter } from './error-reporter.js';
 import type { CounterFields, ErrorReporter } from './error-reporter.js';
 
 export type LoggerConfig = {
@@ -86,10 +87,10 @@ export const createJobLogger = ({ jobName }: { jobName: string }) => {
     reporter.captureMessage(message, { level: 'warning', tags: { step }, extra });
   };
 
-  /** Counter that never breaks the job's main loop. */
+  /** Counter line carrying the run's `repo`, `tool` and `run_id` (call-site fields cannot override them); before `initLogger` it carries none. Never breaks the job's main loop. */
   const captureCounter = (name: string, value: number, fields: CounterFields = {}): void => {
     try {
-      reporter.recordCounter(name, value, fields);
+      logCounter(name, value, { ...fields, ...baseTags });
     } catch (err) {
       console.warn(`logger: failed to emit counter metric "${name}"`, err);
     }

@@ -25,7 +25,7 @@ export interface ReportBreadcrumb {
   data?: Record<string, unknown>;
 }
 
-/** Fields of a counter: flat, primitive-valued, so every backend can carry them. */
+/** Fields of a counter (see `logCounter`; counters are greppable log lines, not paging signals): flat, primitive-valued, so every backend can carry them. */
 export type CounterFields = Record<string, string | number | boolean>;
 
 /** What call sites report through. Every method must be safe to call on the error path. */
@@ -39,8 +39,6 @@ export interface ErrorReporter {
    * `Sentry.setTag` are a different thing and do not go through this method.
    */
   setRequestTag(key: string, value: string): void;
-  /** Counts an event. Counters are greppable log lines, not paging signals. */
-  recordCounter(name: string, value: number, fields?: CounterFields): void;
   /** Resolves once buffered reports are delivered or `timeoutMs` passes; resolves `false` on timeout. */
   flush(timeoutMs?: number): Promise<boolean>;
 }
@@ -86,10 +84,6 @@ export class CompositeReporter implements ErrorReporter {
 
   setRequestTag(key: string, value: string): void {
     this.each((r) => r.setRequestTag(key, value));
-  }
-
-  recordCounter(name: string, value: number, fields?: CounterFields): void {
-    this.each((r) => r.recordCounter(name, value, fields));
   }
 
   /**

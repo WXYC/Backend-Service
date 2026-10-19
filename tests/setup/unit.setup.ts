@@ -28,7 +28,6 @@ setErrorReporter({
   captureMessage: (message, context) => sentryReporter().captureMessage(message, context),
   addBreadcrumb: (crumb) => sentryReporter().addBreadcrumb(crumb),
   setRequestTag: (key, value) => sentryReporter().setRequestTag(key, value),
-  recordCounter: (name, value, fields) => sentryReporter().recordCounter(name, value, fields),
   flush: (timeoutMs) => sentryReporter().flush(timeoutMs),
 });
 

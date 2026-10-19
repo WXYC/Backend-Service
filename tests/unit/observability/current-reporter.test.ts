@@ -14,7 +14,6 @@ function spyReporter(): jest.Mocked<ErrorReporter> {
     captureMessage: jest.fn(),
     addBreadcrumb: jest.fn(),
     setRequestTag: jest.fn(),
-    recordCounter: jest.fn(),
     flush: jest.fn().mockResolvedValue(true),
   };
 }
@@ -50,7 +49,6 @@ describe('process-wide error reporter', () => {
       reporter.captureMessage('hello');
       reporter.addBreadcrumb({ message: 'crumb' });
       reporter.setRequestTag('request_id', 'r1');
-      reporter.recordCounter('c', 1);
     }).not.toThrow();
     await expect(reporter.flush()).resolves.toBe(true);
   });
