@@ -233,6 +233,15 @@ describe('PostHogReporter', () => {
       expect(crumbs[0].timestamp).toBe(T0.toISOString());
     });
 
+    it('sends a copy of the trail, so later breadcrumbs do not change a captured event', () => {
+      const reporter = build();
+      reporter.addBreadcrumb({ message: 'before' });
+      reporter.captureException(new Error('boom'));
+      reporter.addBreadcrumb({ message: 'after' });
+      const crumbs = sentProperties()['breadcrumbs'] as Array<{ message: string }>;
+      expect(crumbs.map((c) => c.message)).toEqual(['before']);
+    });
+
     it('sends no breadcrumbs property when the trail is empty', () => {
       build().captureException(new Error('boom'));
       expect(sentProperties()).not.toHaveProperty('breadcrumbs');
@@ -262,6 +271,17 @@ describe('PostHogReporter', () => {
       build().captureException(err);
       const sent = client.captureException.mock.calls[0][0] as Error;
       expect(sent.message).not.toContain('Jane Q Public');
+    });
+  });
+
+  describe('privacy: messages', () => {
+    it('sends neither the value nor the default fingerprint with bound parameters', () => {
+      build().captureMessage('Failed query: select * from djs where real_name = $1\nparams: Jane Q Public');
+      const properties = sentProperties();
+      expect(JSON.stringify(properties)).not.toContain('Jane Q Public');
+      expect(properties['$exception_fingerprint']).toBe(
+        (properties['$exception_list'] as Array<{ value: string }>)[0].value
+      );
     });
   });
 
