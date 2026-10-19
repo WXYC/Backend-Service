@@ -62,7 +62,7 @@ describe('Express error filter registration on expressIntegration', () => {
   });
 });
 
-// Tracing is off (BS#3393): no preload may sample traces, pin a trace
+// Tracing is off (BS#3403): no preload may sample traces, pin a trace
 // lifecycle, or register a transaction filter.
 describe('tracing configuration', () => {
   it.each([

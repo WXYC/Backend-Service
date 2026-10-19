@@ -6,8 +6,7 @@ import { db } from '../../mocks/database.mock';
 // (`totalNonAlias` from the count query) and the merge-instead-of-replace
 // behavior in `library-search.service.ts::searchLibrary`.
 //
-// Mocks `library.service`'s `runCatalogTrackSearchCascade` directly (mirrors
-// `library-search.cascade-span.test.ts`) rather than extending
+// Mocks `library.service`'s `runCatalogTrackSearchCascade` directly rather than extending
 // `library-search-alias.test.ts` — that file already imports the *real*
 // `library.service` for its Both-mode describes, and Jest's module mock
 // registry is per-file, so a real and a mocked `library.service` can't

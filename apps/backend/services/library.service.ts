@@ -2999,88 +2999,6 @@ type ArtworkEnrichable = {
   artwork_url: string | null | undefined;
 };
 
-/**
- * Closed outcome vocabulary for one row's pass through the
- * `Promise.allSettled` batch below, for `projectArtworkEnrichOutcomes`.
- * Counts are PER-ASK, not per-row: a retryable row is re-asked on every
- * later search that returns it (BS#2522's negative marker only suppresses
- * a DEFINITIVE no-match), and the coordinator in-flight-coalesces a
- * meaningful share of same-key lookups, so one ask's tally can reflect more
- * than one caller's request. `stamped` counts stamp ATTEMPTS, not confirmed
- * writes — `stampArtworkLookupAttempt` swallows its own DB error and its
- * `WHERE` is a no-op when a concurrent writer already filled `artwork_url`.
- * `rejected` merges every thrown settlement — a client-side limiter/breaker
- * shed (`LimiterShedError`, BS#1748), an LML transport error, or a DB write
- * failure from `updateArtworkUrl` itself — so a row whose own cover write
- * throws is counted `rejected` even though the in-memory `row.artwork_url`
- * already carries that cover.
- *
- * `persisted` and `retryable_degraded` (span attributes, not variants of
- * this type) are each a parent total; `persisted_degraded` is the subset of
- * `persisted` whose reply was degraded or timed out (BS#2757's fix — #2760
- * question 1). `retryable_trusted` / `retryable_trusted_deadline` are
- * nested subsets of `retryable_degraded` — see `classifyArtworkEnrichOutcome`
- * for what "trusted" means here and `projectArtworkEnrichOutcomes` for how
- * the parent sums are assembled.
- *
- * Exported for the unit-test parity matrix; not part of the public service
- * surface.
- */
-export type ArtworkEnrichOutcome =
-  | 'persisted'
-  | 'persisted_degraded'
-  | 'stamped'
-  | 'retryable_untrusted'
-  | 'retryable_trusted'
-  | 'retryable_trusted_deadline'
-  | 'rejected';
-
-/**
- * Classify one settled (non-thrown) row by what `enrichWithArtwork` already
- * decided — `trusted` (`isTrustedLmlAlbumMatch`, i.e. `search_type ===
- * 'direct'`) and `hasCover` (whether `filterSpacerGif` left a usable URL) —
- * plus the response's own `degraded` / `degraded_reason` / `timeout`. Pure,
- * so it's table-tested directly; `enrichWithArtwork` is the only caller,
- * classifying once per row, up front, and calling `isTrustedLmlAlbumMatch`
- * exactly once.
- *
- * `trusted` alone overstates the retryable-trusted population: LML can
- * answer `search_type: 'direct'` with `results: []` on a budget-exhausted
- * reply (`core/search.py` appends to `strategies_tried` before the attempt,
- * and `get_search_type_from_state` returns `'direct'` with no
- * empty-results override), and `isTrustedLmlAlbumMatch` reads only
- * `search_type`. A no-cover row with no candidate `results` entry isn't a
- * trusted match that got cut off — LML never substantively answered — so
- * it falls to the plain `retryable_untrusted` bucket.
- *
- * `retryable_trusted_deadline` narrows further to specifically
- * `degraded_reason === 'deadline_exceeded'` — the only shape that says the
- * tail ran far enough to find (or miss) a cover before THIS caller's budget
- * cut it off. `cache_only` sheds before any tail step, `upstream_unavailable`
- * means the Discogs breaker was open, and a bare `timeout: true` (no
- * `degraded`) ran the whole tail with no budget signal at all — none of
- * those answer "how far did the tail get," which is what BS#2760's decision
- * gate is about.
- *
- * `rejected` is never produced here — a thrown settlement never reaches a
- * `LookupResponse` to classify, so the `Promise.allSettled` loop below
- * assigns that outcome directly.
- */
-export function classifyArtworkEnrichOutcome(
-  trusted: boolean,
-  hasCover: boolean,
-  response: LookupResponse
-): ArtworkEnrichOutcome {
-  const degradedOrTimeout = response.degraded || response.timeout;
-  if (hasCover) return degradedOrTimeout ? 'persisted_degraded' : 'persisted';
-  if (!degradedOrTimeout) return 'stamped';
-  const trustedWithCandidate = trusted && (response.results?.length ?? 0) > 0;
-  if (!trustedWithCandidate) return 'retryable_untrusted';
-  return response.degraded && response.degraded_reason === 'deadline_exceeded'
-    ? 'retryable_trusted_deadline'
-    : 'retryable_trusted';
-}
-
 export async function enrichWithArtwork<T extends ArtworkEnrichable>(
   results: T[],
   options: { maxLookups?: number } = {}
@@ -3096,7 +3014,7 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
   if (budgeted.length === 0) return results;
 
   const settlements = await Promise.allSettled(
-    budgeted.map(async (row): Promise<ArtworkEnrichOutcome | undefined> => {
+    budgeted.map(async (row): Promise<void> => {
       // Deliberately NOT `requireSearchType: 'direct'`, though the trust
       // rule is unchanged and `isTrustedLmlAlbumMatch` below is the very
       // predicate that gate applies. The coordinator's gate collapses
@@ -3113,9 +3031,8 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       });
       // Unreachable via this caller's overload (`requireSearchType` is
       // never passed, so the coordinator's return type is non-null) —
-      // kept as defensive dead code. Not classified: there is no
-      // `LookupResponse` to tally an outcome against.
-      if (lookupResult === null) return undefined;
+      // kept as defensive dead code.
+      if (lookupResult === null) return;
 
       // Evaluate trust and extract artwork BEFORE looking at `degraded`
       // / `timeout`, mirroring the rotation picker
@@ -3127,21 +3044,12 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // `api.yaml` defines `degraded` as "trustworthy but incomplete",
       // not "says nothing about this release." So a trusted match with
       // a usable cover is persisted regardless of either flag.
-      // `trusted` is saved (rather than re-derived) so the BS#2766
-      // outcome classification below can read it without a second
-      // `isTrustedLmlAlbumMatch` call.
       const trusted = isTrustedLmlAlbumMatch(lookupResult);
       const artworkUrl = trusted ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url) : null;
-      // BS#2766: classify once, up front — the branches below are
-      // exactly the behavior this classification mirrors (see
-      // `classifyArtworkEnrichOutcome`), so computing it here rather
-      // than at each `return` can't drift from what the row actually
-      // did.
-      const outcome = classifyArtworkEnrichOutcome(trusted, Boolean(artworkUrl), lookupResult);
       if (artworkUrl) {
         row.artwork_url = artworkUrl;
         await updateArtworkUrl(row.id, artworkUrl);
-        return outcome;
+        return;
       }
 
       // Nothing usable above. A degraded/timed-out reply with no usable
@@ -3160,7 +3068,7 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // retryable rather than risk stamping a row LML never actually
       // checked. Client-side sheds never reach this line: the
       // coordinator re-throws those (BS#1748).
-      if (lookupResult.degraded || lookupResult.timeout) return outcome;
+      if (lookupResult.degraded || lookupResult.timeout) return;
 
       // Below this point LML genuinely responded about this release
       // with nothing usable, so that is durable knowledge and gets
@@ -3168,7 +3076,6 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // carried no usable cover. A transient failure throws past all
       // of this into the rejected settlement arm.
       await stampArtworkLookupAttempt(row.id);
-      return outcome;
     })
   );
 

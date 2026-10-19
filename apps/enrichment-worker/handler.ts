@@ -140,8 +140,8 @@ export function makeEnrichmentHandler(): (event: CdcEvent) => void {
     //
     // BS#1108: register in the in-flight set so the SIGTERM drain can await
     // pending lookups before the DB pool closes. `handleCandidate`'s body
-    // is wrapped in try/catch for LML + DB errors, but the outer
-    // Sentry capture calls can throw outside any try/catch — if
+    // is wrapped in try/catch for LML + DB errors, but the catch arms
+    // call Sentry.captureException, which can itself throw — if
     // Sentry's internals throw (e.g. exporter error, disposed hub during
     // shutdown) the promise rejects. Chain `.catch(() => {})` so the
     // discarded `void promise.finally(...)` can't produce an
