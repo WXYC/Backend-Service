@@ -27,7 +27,16 @@
 // rejection) — so the stand-in is a pass-through, not an async wrapper.
 const mockWithMonitor = jest.fn((_slug: string, callback: () => unknown) => callback());
 const mockCaptureMessage = jest.fn();
+const mockLog = jest.fn();
 const mockCaptureException = jest.fn();
+
+jest.mock('@wxyc/observability/job-logger', () => {
+  const actual = jest.requireActual('@wxyc/observability/job-logger');
+  return {
+    ...actual,
+    createJobLogger: (opts: { jobName: string }) => ({ ...actual.createJobLogger(opts), log: mockLog }),
+  };
+});
 
 jest.mock('@sentry/node', () => ({
   init: jest.fn(),
@@ -35,13 +44,13 @@ jest.mock('@sentry/node', () => ({
   captureException: mockCaptureException,
   captureMessage: mockCaptureMessage,
   close: jest.fn().mockResolvedValue(true),
+  flush: jest.fn().mockResolvedValue(true),
   withMonitor: mockWithMonitor,
 }));
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { db, artists, flowsheet, library, rotation, getLastRunTimestamp, updateLastRun } from '@wxyc/database';
-import * as logger from '../../../../jobs/legacy-linkage-resolve/logger';
 import {
   CHECKIN_MARGIN_MINUTES,
   CRON_SCHEDULE,
@@ -717,7 +726,7 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
     // try/finally: a failing assertion between spyOn and mockRestore must not
     // leak the spy into later tests (BS#2071 review) — jest.clearAllMocks()
     // in beforeEach clears call history but does not undo an active spyOn.
-    const logSpy = jest.spyOn(logger, 'log').mockImplementation(() => undefined);
+    const logSpy = mockLog;
     try {
       queueDryRun(12, 0);
 
@@ -726,7 +735,7 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
       const flowsheetCall = logSpy.mock.calls.find((call) => call[1] === 'resolve-flowsheet');
       expect(flowsheetCall?.[3]).toEqual(expect.objectContaining({ candidates: 12, resolved: 0, residual: null }));
     } finally {
-      logSpy.mockRestore();
+      logSpy.mockClear();
     }
   });
 });
@@ -967,7 +976,7 @@ describe('legacy-linkage-resolve: text-match pass ships disabled (BS#3061)', () 
     '%j skips the pass: no statements, one info log, no warning',
     async (raw) => {
       if (raw !== undefined) process.env[ENV] = raw;
-      const logSpy = jest.spyOn(logger, 'log').mockImplementation(() => undefined);
+      const logSpy = mockLog;
       try {
         queueRun(idle, idle);
 
@@ -978,7 +987,7 @@ describe('legacy-linkage-resolve: text-match pass ships disabled (BS#3061)', () 
         expect(logSpy.mock.calls.filter((call) => call[1] === 'text-match')).toHaveLength(1);
         expect(mockCaptureMessage).not.toHaveBeenCalled();
       } finally {
-        logSpy.mockRestore();
+        logSpy.mockClear();
       }
     }
   );

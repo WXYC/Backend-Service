@@ -94,10 +94,14 @@ import {
   requirePositiveInt,
   isLockContentionError,
 } from '@wxyc/database';
-import { initLogger, log, captureError, captureWarning, errorMessage, closeLogger } from './logger.js';
+import { createJobLogger } from '@wxyc/observability/job-logger';
 import { isRetiredLinkageCandidateError } from './retired-candidate.js';
 
 export const JOB_NAME = 'legacy-linkage-resolve';
+
+const { initLogger, log, captureError, captureWarning, errorMessage, closeLogger } = createJobLogger({
+  jobName: JOB_NAME,
+});
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 
