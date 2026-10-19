@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/metrics.ts', 'src/sentry-reporter.ts'],
+  entry: ['src/index.ts', 'src/metrics.ts', 'src/sentry-reporter.ts', 'src/job-logger.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   tsconfig: './tsconfig.build.json',

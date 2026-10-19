@@ -23,6 +23,12 @@
       "import": "./dist/sentry-reporter.mjs",
       "require": "./dist/sentry-reporter.js"
     },
+    "./job-logger": {
+      "source": "./src/job-logger.ts",
+      "types": "./dist/job-logger.d.ts",
+      "import": "./dist/job-logger.mjs",
+      "require": "./dist/job-logger.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
