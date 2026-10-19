@@ -241,3 +241,21 @@ describe('deploy-base.yml wires the shared builder image ahead of the build matr
     expect(outputsMatch?.[0]).toContain('builder_image_tag');
   });
 });
+
+// @wxyc/authentication keeps @wxyc/observability external in its bundle (BS#3396), so an image that
+// ships the one must ship the other, or its `npm install --omit=dev` cannot link the workspace.
+describe('images that ship @wxyc/authentication also ship @wxyc/observability (BS#3396)', () => {
+  const shippingAuthentication = nodeTargetDockerfiles().filter((name) =>
+    readDockerfile(name).includes('./shared/authentication/package*')
+  );
+
+  it('finds the images that ship @wxyc/authentication', () => {
+    expect(shippingAuthentication.length).toBeGreaterThan(0);
+  });
+
+  it.each(shippingAuthentication)('%s copies shared/observability', (name) => {
+    const text = readDockerfile(name);
+    expect(text).toContain('COPY ./shared/observability/package* ./shared/observability/');
+    expect(text).toContain('COPY --link --from=builder /shared/observability/dist ./shared/observability/dist');
+  });
+});
