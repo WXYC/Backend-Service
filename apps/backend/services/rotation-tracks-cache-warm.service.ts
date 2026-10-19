@@ -38,7 +38,7 @@
  *   startRotationTracksCacheWarm() — fire-and-forget kickoff; called once
  *                                   from `app.ts` post-`listen`.
  */
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import {
   db,
   rotation,
@@ -256,7 +256,7 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
       }
     } catch (err) {
       counters.errors += 1;
-      Sentry.captureException(err, {
+      getErrorReporter().captureException(err, {
         tags: { subsystem: 'rotation-tracks-cache-warm' },
         extra: { rotation_id: rotationId },
       });
@@ -279,7 +279,7 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
         }
       } catch (err) {
         counters.releaseFetchErrors += 1;
-        Sentry.captureException(err, {
+        getErrorReporter().captureException(err, {
           tags: { subsystem: 'rotation-tracks-cache-warm', phase: 'release_fetch' },
           extra: { rotation_id: rotationId, release_id: result.releaseId },
         });
@@ -329,7 +329,7 @@ export async function warmRotationTracksCache(opts: WarmOptions = {}): Promise<W
  */
 export function startRotationTracksCacheWarm(): void {
   void warmRotationTracksCache().catch((err) => {
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { subsystem: 'rotation-tracks-cache-warm' },
     });
     console.error(`${LOG_PREFIX} walk aborted:`, err);

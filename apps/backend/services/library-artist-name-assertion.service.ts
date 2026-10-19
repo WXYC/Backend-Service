@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { db, library, artists } from '@wxyc/database';
 
 /**
@@ -53,7 +53,7 @@ async function runNullCheck(): Promise<void> {
   const rows = result as unknown as Array<{ n: number | string | null }>;
   const n = Number(rows[0]?.n ?? 0);
   if (n > 0) {
-    Sentry.captureMessage(`library.artist_name has ${n} NULL row(s) — denormalization is degraded`, {
+    getErrorReporter().captureMessage(`library.artist_name has ${n} NULL row(s) — denormalization is degraded`, {
       level: 'warning',
       tags: { tool: 'library-search', step: 'health-check' },
       extra: { count: n },
@@ -90,7 +90,7 @@ async function runDriftCheck(): Promise<void> {
   const n = Number(rows[0]?.n ?? 0);
   if (n > 0) {
     const sampleIds = (rows[0]?.sample_ids ?? []).map((id) => Number(id));
-    Sentry.captureMessage(
+    getErrorReporter().captureMessage(
       `library.artist_name has ${n} row(s) drift from artists.artist_name — denormalization is stale`,
       {
         level: 'warning',

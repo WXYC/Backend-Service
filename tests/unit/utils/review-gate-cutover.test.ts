@@ -1,6 +1,6 @@
-import * as Sentry from '@sentry/node';
+import type { ErrorReporter } from '@wxyc/observability';
 
-jest.mock('@sentry/node', () => ({ captureException: jest.fn() }));
+const captureException = jest.fn();
 
 type Helper = typeof import('../../../apps/backend/utils/review-gate-cutover');
 
@@ -10,6 +10,10 @@ const load = (value: string | undefined): Helper => {
   else process.env.REVIEW_GATE_CUTOVER_DATE = value;
   let mod!: Helper;
   jest.isolateModules(() => {
+    // The isolated registry has its own reporter holder, so register the spy inside it.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { setErrorReporter } = require('@wxyc/observability') as typeof import('@wxyc/observability');
+    setErrorReporter({ captureException } as unknown as ErrorReporter);
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     mod = require('../../../apps/backend/utils/review-gate-cutover');
   });
@@ -62,13 +66,13 @@ describe('a malformed value', () => {
       expect(helper.isGateOn(new Date('2020-01-01T00:00:00Z'))).toBe(true);
       expect(helper.isOnOrBeforeCutover('2000-01-01')).toBe(false);
       helper.isGateOn();
-      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+      expect(captureException).toHaveBeenCalledTimes(1);
     }
   );
 
   it('reports nothing for a well-formed or unset value', () => {
     load('2027-01-12').isGateOn();
     load(undefined).isGateOn();
-    expect(Sentry.captureException).not.toHaveBeenCalled();
+    expect(captureException).not.toHaveBeenCalled();
   });
 });

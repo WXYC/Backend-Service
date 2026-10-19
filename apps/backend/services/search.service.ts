@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { sql, type SQL } from 'drizzle-orm';
 import { db, flowsheet, rotation, library, extractSqlState } from '@wxyc/database';
 import {
@@ -403,7 +403,7 @@ export async function searchFlowsheet(
         throw reason;
       }
       console.warn(`flowsheet search: '${tier}' tier timed out, falling back to the prior tier's result`, reason);
-      Sentry.captureException(reason, {
+      getErrorReporter().captureException(reason, {
         fingerprint: ['flowsheet-search-fallback-tier'],
         tags: { subsystem: 'flowsheet-search', tier },
         extra: { q, page, limit, cursor },
@@ -460,13 +460,13 @@ export async function searchFlowsheet(
         `flowsheet search: '${resolvedTier}' tier's count query timed out; returning lower-bound total`,
         reason
       );
-      Sentry.captureException(reason, {
+      getErrorReporter().captureException(reason, {
         fingerprint: ['flowsheet-search-fallback-tier-count'],
         tags: { subsystem: 'flowsheet-search', tier: resolvedTier },
         extra: { q, page, limit, cursor },
       });
     } else {
-      Sentry.captureException(reason, {
+      getErrorReporter().captureException(reason, {
         tags: { subsystem: 'flowsheet-search' },
         // `cursor`, not just `page`: in cursor mode `page` is always 0, so
         // without the token there is nothing in this report that says WHERE in

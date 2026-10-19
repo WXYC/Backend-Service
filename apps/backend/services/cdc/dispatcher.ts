@@ -12,12 +12,12 @@
  *
  * BS#1120 fallback-channel sinks: `cdc_oversized` and `cdc_error` notifications
  * (emitted by migration 0094 when the primary `cdc` payload would have been
- * dropped) are wired here to `Sentry.captureMessage` so AC #3's "emit a metric
+ * dropped) are wired here to `captureMessage` so AC #3's "emit a metric
  * Sentry can alert on" is satisfied. Subscribing only — the cdc-listener owns
  * the LISTEN; this module owns the Sentry signal.
  */
 
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { onCdcErrorEvent, onCdcOversizedEvent, startCdcListener, stopCdcListener } from '@wxyc/database';
 
 /**
@@ -42,7 +42,7 @@ export function registerCdcFallbackSinks(): void {
   fallbackSinksRegistered = true;
 
   onCdcOversizedEvent((event) => {
-    Sentry.captureMessage('cdc.oversized_payload', {
+    getErrorReporter().captureMessage('cdc.oversized_payload', {
       level: 'warning',
       tags: {
         subsystem: 'cdc',
@@ -61,7 +61,7 @@ export function registerCdcFallbackSinks(): void {
   });
 
   onCdcErrorEvent((event) => {
-    Sentry.captureMessage('cdc.trigger_exception', {
+    getErrorReporter().captureMessage('cdc.trigger_exception', {
       level: 'error',
       tags: {
         subsystem: 'cdc',

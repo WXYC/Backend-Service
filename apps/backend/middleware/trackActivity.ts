@@ -1,5 +1,5 @@
 import { RequestHandler } from 'express';
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { recordActivity } from '../services/activityTracking.service.js';
 
 /**
@@ -10,7 +10,7 @@ export const trackActivity: RequestHandler = (req, res, next) => {
   if (req.auth?.id) {
     recordActivity(req.auth.id).catch((error) => {
       console.error('Failed to record activity:', error);
-      Sentry.captureException(error, {
+      getErrorReporter().captureException(error, {
         tags: { subsystem: 'activity-tracking' },
         extra: { userId: req.auth?.id },
       });

@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { eq, sql, type SQL } from 'drizzle-orm';
 import { db, intake_items, member, readStaffName, snapshotAuthor, staffNameSql, user } from '@wxyc/database';
 import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
@@ -140,7 +140,7 @@ const scrubbed = (err: unknown) => {
 const reportFailure = (err: unknown, context: Record<string, unknown>) => {
   const safe = scrubbed(err);
   console.error('[review-notices] Failed to send a review notice:', safe);
-  Sentry.captureException(safe, { tags: { subsystem: 'review-notices' }, extra: context });
+  getErrorReporter().captureException(safe, { tags: { subsystem: 'review-notices' }, extra: context });
 };
 
 type NoticeLink = { path: string; label: string };

@@ -1,6 +1,6 @@
 import { Request, RequestHandler, Response } from 'express';
 import { Mutex } from 'async-mutex';
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/database';
 
 // play_order is computed by the service layer, not provided by controllers
@@ -247,7 +247,7 @@ const projectEntriesV2 = (entries: IFSEntry[]): Record<string, unknown>[] => {
   const dense = entries.filter(Boolean);
   const dropped = entries.length - dense.length;
   if (dropped > 0) {
-    Sentry.captureException(
+    getErrorReporter().captureException(
       new Error(
         `Dropped ${dropped} nullish flowsheet ${dropped === 1 ? 'entry' : 'entries'} before V2 projection (BS#1864)`
       )
@@ -462,7 +462,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     // `undefined`, which omits `on_air` below — clients decode an absent field as
     // "unknown" and hide the banner, rather than the endpoint 500ing the playlist.
     flowsheet_service.getOnAirDJName().catch((error: unknown) => {
-      Sentry.captureException(error);
+      getErrorReporter().captureException(error);
       return undefined;
     }),
   ]);
@@ -520,7 +520,9 @@ export const getLatest: RequestHandler = async (req, res) => {
     // projectEntriesV2 captures on the list paths — surface it here too rather
     // than letting it hide behind an ordinary empty-flowsheet 204.
     if (entries.length > 0) {
-      Sentry.captureException(new Error('Dropped a nullish flowsheet head entry before V2 projection (BS#1864)'));
+      getErrorReporter().captureException(
+        new Error('Dropped a nullish flowsheet head entry before V2 projection (BS#1864)')
+      );
     }
     res.status(204).end();
   }
@@ -718,7 +720,10 @@ async function annotateTextLinkage(fsEntry: NewFSEntry, show_id: number): Promis
       linked_at: new Date(),
     };
   } catch (err) {
-    Sentry.captureException(err, { tags: { tool: 'flowsheet', subsystem: 'text-linkage' }, extra: { show_id } });
+    getErrorReporter().captureException(err, {
+      tags: { tool: 'flowsheet', subsystem: 'text-linkage' },
+      extra: { show_id },
+    });
     return fsEntry;
   }
 }
@@ -930,7 +935,7 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       // review: the Sentry warning must not fire when the entry was rejected,
       // not recorded).
       const fsEntry = await annotateTextLinkage(buildSnapshotEntryOrRefuse(), latestShow.id);
-      Sentry.captureMessage('Flowsheet album_id not found in library — degrading to snapshot fields', {
+      getErrorReporter().captureMessage('Flowsheet album_id not found in library — degrading to snapshot fields', {
         level: 'warning',
         tags: { tool: 'flowsheet' },
         extra: { album_id: body.album_id, show_id: latestShow.id },

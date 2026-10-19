@@ -9,8 +9,10 @@ import {
   filterSentryTransactionEvent,
   redactSentryBreadcrumb,
   redactSentryEventQueryParams,
+  setErrorReporter,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
+import { SentryReporter } from '@wxyc/observability/sentry';
 import { resolveTracesSampleRate } from './sentry-config.js';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 
@@ -65,3 +67,7 @@ Sentry.init({
   // or request bodies (BS#3004).
   dataCollection: SENTRY_DATA_COLLECTION,
 });
+
+// Every capture, breadcrumb and request tag in apps/backend goes through the
+// ErrorReporter seam (BS#3395); Sentry is its only backend for now.
+setErrorReporter(new SentryReporter());
