@@ -109,19 +109,48 @@ describe('createJobLogger', () => {
     });
   });
 
-  it('captureCounter maps to the reporter recordCounter', () => {
-    const { reporter, captureCounter } = createJobLogger({ jobName: 'demo-job' });
-    const spy = jest.spyOn(reporter, 'recordCounter').mockImplementation(() => undefined);
-    captureCounter('c', 2, { k: 'v' });
-    expect(spy).toHaveBeenCalledWith('c', 2, { k: 'v' });
-  });
-
-  it('captureCounter never throws', () => {
-    const { reporter, captureCounter } = createJobLogger({ jobName: 'demo-job' });
-    jest.spyOn(reporter, 'recordCounter').mockImplementation(() => {
-      throw new Error('x');
+  describe('captureCounter', () => {
+    let consoleLog: jest.SpyInstance;
+    beforeEach(() => {
+      consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
     });
-    expect(() => captureCounter('c', 1)).not.toThrow();
+    afterEach(() => consoleLog.mockRestore());
+
+    it('writes exactly one line with the metric, value, call-site fields and the run fields', () => {
+      const { initLogger, captureCounter } = createJobLogger({ jobName: 'demo-job' });
+      initLogger({ repo: 'r', tool: 't', runId: 'run-1' });
+      captureCounter('c', 2, { k: 'v' });
+      expect(consoleLog).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(consoleLog.mock.calls[0][0])).toEqual({
+        metric: 'c',
+        value: 2,
+        k: 'v',
+        repo: 'r',
+        tool: 't',
+        run_id: 'run-1',
+      });
+    });
+
+    it('does not let call-site fields override the run fields', () => {
+      const { initLogger, captureCounter } = createJobLogger({ jobName: 'demo-job' });
+      initLogger({ repo: 'r', tool: 't', runId: 'run-1' });
+      captureCounter('c', 1, { repo: 'x', tool: 'y', run_id: 'z' });
+      expect(JSON.parse(consoleLog.mock.calls[0][0])).toMatchObject({ repo: 'r', tool: 't', run_id: 'run-1' });
+    });
+
+    it('emits without run fields, and does not throw, before initLogger', () => {
+      const { captureCounter } = createJobLogger({ jobName: 'demo-job' });
+      expect(() => captureCounter('c', 1, { k: 'v' })).not.toThrow();
+      expect(JSON.parse(consoleLog.mock.calls[0][0])).toEqual({ metric: 'c', value: 1, k: 'v' });
+    });
+
+    it('never throws', () => {
+      consoleLog.mockImplementation(() => {
+        throw new Error('x');
+      });
+      const { captureCounter } = createJobLogger({ jobName: 'demo-job' });
+      expect(() => captureCounter('c', 1)).not.toThrow();
+    });
   });
 
   it('closeLogger flushes the reporter, closes Sentry and silences log', async () => {

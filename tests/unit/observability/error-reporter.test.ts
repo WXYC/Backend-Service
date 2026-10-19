@@ -57,16 +57,6 @@ describe('SentryReporter', () => {
     await expect(new SentryReporter().flush(500)).resolves.toBe(true);
     expect(sentry.flush).toHaveBeenCalledWith(500);
   });
-
-  it('writes counters as a log line and never calls Sentry metrics', () => {
-    new SentryReporter().recordCounter('lml.resolve.fallback_to_null', 1, { caller: 'add_to_rotation' });
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(log.mock.calls[0][0])).toEqual({
-      metric: 'lml.resolve.fallback_to_null',
-      value: 1,
-      caller: 'add_to_rotation',
-    });
-  });
 });
 
 describe('logCounter', () => {
@@ -102,7 +92,6 @@ describe('CompositeReporter', () => {
     captureMessage: jest.fn(),
     addBreadcrumb: jest.fn(),
     setRequestTag: jest.fn(),
-    recordCounter: jest.fn(),
     flush: jest.fn().mockResolvedValue(true),
   });
 
@@ -117,14 +106,21 @@ describe('CompositeReporter', () => {
     composite.captureMessage('m');
     composite.addBreadcrumb({ message: 'c' });
     composite.setRequestTag('k', 'v');
-    composite.recordCounter('n', 1, { f: 'x' });
     for (const r of [a, b]) {
       expect(r.captureException).toHaveBeenCalledWith(err, { tags: { t: '1' } });
       expect(r.captureMessage).toHaveBeenCalledWith('m', undefined);
       expect(r.addBreadcrumb).toHaveBeenCalledWith({ message: 'c' });
       expect(r.setRequestTag).toHaveBeenCalledWith('k', 'v');
-      expect(r.recordCounter).toHaveBeenCalledWith('n', 1, { f: 'x' });
     }
+  });
+
+  it('writes no counter line: counters do not go through reporters', () => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    const composite = new CompositeReporter([fake(), fake()]);
+    composite.captureException(new Error('x'));
+    composite.captureMessage('m');
+    expect(log).not.toHaveBeenCalled();
+    log.mockRestore();
   });
 
   it.each([
@@ -132,7 +128,6 @@ describe('CompositeReporter', () => {
     ['captureMessage', (c: ErrorReporter) => c.captureMessage('m')],
     ['addBreadcrumb', (c: ErrorReporter) => c.addBreadcrumb({ message: 'c' })],
     ['setRequestTag', (c: ErrorReporter) => c.setRequestTag('k', 'v')],
-    ['recordCounter', (c: ErrorReporter) => c.recordCounter('n', 1)],
   ] as const)('%s reaches the later reporters when an earlier one throws', (method, call) => {
     const [a, b] = [fake(), fake()];
     a[method].mockImplementation(() => {
