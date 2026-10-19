@@ -19,6 +19,7 @@
       "@wxyc/database/streaming-merge-sql": ["shared/database/src/streaming-merge-sql.ts"],
       "@wxyc/observability/job-logger": ["shared/observability/src/job-logger.ts"],
       "@wxyc/observability/metrics": ["shared/observability/src/metrics.ts"],
+      "@wxyc/observability/posthog": ["shared/observability/src/posthog-reporter.ts"],
       "@wxyc/observability/sentry": ["shared/observability/src/sentry-reporter.ts"]
     },
     "types": ["jest", "node"]
