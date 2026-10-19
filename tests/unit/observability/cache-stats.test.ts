@@ -18,21 +18,9 @@
  */
 import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
-const mockSpanSetAttributes = jest.fn();
-const mockGetActiveSpan = jest.fn<() => { setAttributes: typeof mockSpanSetAttributes } | undefined>(() => ({
-  setAttributes: mockSpanSetAttributes,
-}));
+const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
 
-const mockBackgroundSpanSetAttributes = jest.fn();
-type MockBackgroundSpan = { setAttributes: (attrs: object) => void; isRecording: () => boolean };
-const mockStartSpan = jest.fn((_opts: { name: string; op: string }, callback: (span: MockBackgroundSpan) => unknown) =>
-  callback({ setAttributes: mockBackgroundSpanSetAttributes, isRecording: () => true })
-);
-
-jest.mock('@sentry/node', () => ({
-  getActiveSpan: mockGetActiveSpan,
-  startSpan: mockStartSpan,
-}));
+jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
 
 import {
   recordCacheLookup,
@@ -51,14 +39,6 @@ function fakeCache(size: number, max: number): { size: number; max: number } {
 describe('cache-stats', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockGetActiveSpan.mockReturnValue({ setAttributes: mockSpanSetAttributes });
-    // `clearAllMocks` resets call history but not a custom `mockImplementation`
-    // installed by an earlier test (e.g. the "swallows Sentry.startSpan
-    // throwing" case below) — reinstall the default pass-through explicitly
-    // so tests stay isolated.
-    mockStartSpan.mockImplementation((_opts, callback) =>
-      callback({ setAttributes: mockBackgroundSpanSetAttributes, isRecording: () => true })
-    );
     __resetCacheStatsForTests();
   });
 
@@ -68,10 +48,10 @@ describe('cache-stats', () => {
   });
 
   describe('recordCacheLookup', () => {
-    it('projects cache_hit=true, cache_name, cache_size, cache_capacity onto the active span on a hit', () => {
+    it('logs cache.lookup with cache_hit=true, cache_name, cache_size, cache_capacity on a hit', () => {
       recordCacheLookup('artwork', true, fakeCache(12, 200));
 
-      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
         cache_hit: true,
         cache_name: 'artwork',
         cache_size: 12,
@@ -79,10 +59,10 @@ describe('cache-stats', () => {
       });
     });
 
-    it('projects cache_hit=false on a miss', () => {
+    it('logs cache_hit=false on a miss', () => {
       recordCacheLookup('metadata_album', false, fakeCache(0, 2000));
 
-      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
         cache_hit: false,
         cache_name: 'metadata_album',
         cache_size: 0,
@@ -101,29 +81,12 @@ describe('cache-stats', () => {
       'spotify_track',
     ] as const)('accepts the %s cache name', (name) => {
       recordCacheLookup(name, true, fakeCache(1, 10));
-      expect(mockSpanSetAttributes).toHaveBeenCalledWith(expect.objectContaining({ cache_name: name }));
-    });
-
-    it('is a no-op when there is no active span', () => {
-      mockGetActiveSpan.mockReturnValue(undefined);
-      expect(() => recordCacheLookup('artwork', true, fakeCache(1, 10))).not.toThrow();
-    });
-
-    it('swallows and logs an error instead of throwing when the Sentry SDK throws', () => {
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-      mockSpanSetAttributes.mockImplementation(() => {
-        throw new Error('Sentry SDK exploded');
-      });
-
-      expect(() => recordCacheLookup('artwork', true, fakeCache(1, 10))).not.toThrow();
-      expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('[CacheStats]'), expect.any(Error));
-
-      consoleWarnSpy.mockRestore();
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, expect.objectContaining({ cache_name: name }));
     });
   });
 
   describe('recordCacheEviction + emitPeriodicCacheStats', () => {
-    it('projects cache.<name>.evictions.count and cache.<name>.size for every registered cache', () => {
+    it('logs cache.<name>.evictions.count and cache.<name>.size for every registered cache', () => {
       recordCacheEviction('artwork');
       recordCacheEviction('artwork');
       recordCacheEviction('negative');
@@ -135,18 +98,14 @@ describe('cache-stats', () => {
       ];
       emitPeriodicCacheStats(caches);
 
-      expect(mockStartSpan).toHaveBeenCalledWith(
-        expect.objectContaining({ op: 'BackgroundJob' }),
-        expect.any(Function)
-      );
-      expect(mockBackgroundSpanSetAttributes).toHaveBeenCalledWith({
-        'cache.artwork.evictions.count': 2,
-        'cache.artwork.size': 150,
-        'cache.negative.evictions.count': 1,
-        'cache.negative.size': 999,
-        'cache.tracklist.evictions.count': 0,
-        'cache.tracklist.size': 3,
-      });
+      expect(mockLogCounter.mock.calls).toEqual([
+        ['cache.artwork.evictions.count', 2],
+        ['cache.artwork.size', 150],
+        ['cache.negative.evictions.count', 1],
+        ['cache.negative.size', 999],
+        ['cache.tracklist.evictions.count', 0],
+        ['cache.tracklist.size', 3],
+      ]);
     });
 
     it('resets eviction counters after each emit so the value reads as a rate, not a cumulative total', () => {
@@ -154,56 +113,11 @@ describe('cache-stats', () => {
       const caches: RegisteredCache[] = [{ name: 'artwork', cache: fakeCache(10, 200) }];
 
       emitPeriodicCacheStats(caches);
-      expect(mockBackgroundSpanSetAttributes).toHaveBeenLastCalledWith(
-        expect.objectContaining({ 'cache.artwork.evictions.count': 1 })
-      );
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.artwork.evictions.count', 1);
 
-      mockBackgroundSpanSetAttributes.mockClear();
+      mockLogCounter.mockClear();
       emitPeriodicCacheStats(caches);
-      expect(mockBackgroundSpanSetAttributes).toHaveBeenLastCalledWith(
-        expect.objectContaining({ 'cache.artwork.evictions.count': 0 })
-      );
-    });
-
-    it('keeps eviction counts when the span is not recording, so an unsampled emit does not drop them', () => {
-      recordCacheEviction('artwork');
-      const caches: RegisteredCache[] = [{ name: 'artwork', cache: fakeCache(10, 200) }];
-
-      // First emit lands on an unsampled (non-recording) BackgroundJob span:
-      // setAttributes is a no-op, so the reset must be skipped or the single
-      // eviction is lost forever between emits.
-      mockStartSpan.mockImplementationOnce((_opts, callback) =>
-        callback({ setAttributes: mockBackgroundSpanSetAttributes, isRecording: () => false })
-      );
-      emitPeriodicCacheStats(caches);
-
-      // Next emit is recorded and must still see the carried-over eviction.
-      emitPeriodicCacheStats(caches);
-      expect(mockBackgroundSpanSetAttributes).toHaveBeenLastCalledWith(
-        expect.objectContaining({ 'cache.artwork.evictions.count': 1 })
-      );
-    });
-
-    it('reports zero evictions for a cache that has never evicted', () => {
-      const caches: RegisteredCache[] = [{ name: 'spotify_track', cache: fakeCache(0, 2000) }];
-      emitPeriodicCacheStats(caches);
-
-      expect(mockBackgroundSpanSetAttributes).toHaveBeenCalledWith({
-        'cache.spotify_track.evictions.count': 0,
-        'cache.spotify_track.size': 0,
-      });
-    });
-
-    it('swallows and logs an error instead of throwing when Sentry.startSpan throws', () => {
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-      mockStartSpan.mockImplementation(() => {
-        throw new Error('Sentry SDK exploded');
-      });
-
-      expect(() => emitPeriodicCacheStats([{ name: 'artwork', cache: fakeCache(1, 10) }])).not.toThrow();
-      expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('[CacheStats]'), expect.any(Error));
-
-      consoleWarnSpy.mockRestore();
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.artwork.evictions.count', 0);
     });
   });
 
@@ -240,10 +154,10 @@ describe('cache-stats', () => {
 
       jest.advanceTimersByTime(1_000);
 
-      expect(mockBackgroundSpanSetAttributes).toHaveBeenCalledWith({
-        'cache.artwork.evictions.count': 1,
-        'cache.artwork.size': 1,
-      });
+      expect(mockLogCounter.mock.calls).toEqual([
+        ['cache.artwork.evictions.count', 1],
+        ['cache.artwork.size', 1],
+      ]);
       jest.useRealTimers();
     });
 
@@ -251,11 +165,11 @@ describe('cache-stats', () => {
       jest.useFakeTimers();
       startPeriodicEmit([{ name: 'artwork', cache: fakeCache(1, 10) }], 1_000);
       stopPeriodicEmit();
-      mockBackgroundSpanSetAttributes.mockClear();
+      mockLogCounter.mockClear();
 
       jest.advanceTimersByTime(5_000);
 
-      expect(mockBackgroundSpanSetAttributes).not.toHaveBeenCalled();
+      expect(mockLogCounter).not.toHaveBeenCalled();
       jest.useRealTimers();
     });
 

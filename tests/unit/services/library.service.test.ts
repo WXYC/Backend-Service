@@ -102,6 +102,8 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
 // the inner method's `Sentry.getActiveSpan()?.setAttributes(...)` lands
 // on the outer span the test asserts against.
 const mockSpanSetAttribute = jest.fn();
+const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
+jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
 const mockSpanSetAttributes = jest.fn();
 type SpanLike = { setAttribute: typeof mockSpanSetAttribute; setAttributes: typeof mockSpanSetAttributes };
 const spanInstance: SpanLike = { setAttribute: mockSpanSetAttribute, setAttributes: mockSpanSetAttributes };
@@ -2016,7 +2018,7 @@ describe('library.service', () => {
       // cache_name/cache_size/cache_capacity shape (replaces the old
       // track_search.cache_hit-only setAttribute call). cache_size=1
       // because the miss path populates the cache before this call.
-      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
         cache_hit: false,
         cache_name: 'track_search',
         cache_size: 1,
@@ -2055,7 +2057,7 @@ describe('library.service', () => {
       expect(results).toHaveLength(1);
       expect(mockStartSpan).toHaveBeenCalledTimes(1);
       // cache_size stays 1 — a hit doesn't write a second entry for the same key.
-      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
+      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
         cache_hit: true,
         cache_name: 'track_search',
         cache_size: 1,

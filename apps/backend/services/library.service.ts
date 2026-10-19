@@ -2,7 +2,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, ne, notExists, or, sql, SQL, t
 import { alias, getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
-import { getErrorReporter } from '@wxyc/observability';
+import { getErrorReporter, logCounter } from '@wxyc/observability';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import WxycError from '../utils/error.js';
@@ -914,16 +914,9 @@ export const addToRotation = async (
         // BS#1380: classify once at fallback time so each reason bucket
         // signals a different operational response (timeout → LML
         // latency, 5xx → LML deploy regression, 4xx → BS-side caller bug,
-        // network → infra noise). v10 SDK shape — `Sentry.metrics.count(
-        // name, value, {attributes})`. Pre-v8
-        // `Sentry.metrics.increment(..., {tags})` was removed.
-        try {
-          Sentry.metrics.count('lml.resolve.fallback_to_null', 1, {
-            attributes: { caller: 'add_to_rotation', reason },
-          });
-        } catch {
-          // Observability must never break the request path; swallow.
-        }
+        // network → infra noise). Emitted as a structured log line
+        // (BS#3402); `logCounter` never throws.
+        logCounter('lml.resolve.fallback_to_null', 1, { caller: 'add_to_rotation', reason });
         // lml_identity_id stays NULL; INSERT proceeds.
       }
       values.lml_identity_id = lmlIdentityId;
@@ -1068,13 +1061,7 @@ export async function reconcileLibraryUrlsToLml(urls: string[]): Promise<void> {
       await resolveIdentity(request);
     } catch (err) {
       const reason = classifyLmlResolveError(err);
-      try {
-        Sentry.metrics.count('lml.resolve.fallback_to_null', 1, {
-          attributes: { caller: 'library_urls', reason },
-        });
-      } catch {
-        // Observability must never break the write path; swallow.
-      }
+      logCounter('lml.resolve.fallback_to_null', 1, { caller: 'library_urls', reason });
     }
   }
 }
@@ -7203,13 +7190,12 @@ export const recheckDiscogsAvailability = async (
   const confidence = typeof rawConfidence === 'number' ? rawConfidence : 0;
 
   if (confidence < DISCOGS_RECHECK_CONFIDENCE_FLOOR) {
-    try {
-      Sentry.metrics.count('lml.lookup.recheck.match_found_on_flagged', 1, {
-        attributes: { confidence, artist_name, album_title, library_id: album_id },
-      });
-    } catch {
-      // Observability must never break the request path; swallow.
-    }
+    logCounter('lml.lookup.recheck.match_found_on_flagged', 1, {
+      confidence,
+      artist_name,
+      album_title,
+      library_id: album_id,
+    });
     await stampDiscogsRecheckTimestamp(album_id);
     return { outcome: 'low_confidence_match', confidence };
   }
