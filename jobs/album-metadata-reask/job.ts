@@ -17,7 +17,7 @@
 import { readFile } from 'fs/promises';
 import { setTimeout as sleep } from 'timers/promises';
 import { closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
-import { BULK_LOOKUP_INPUT_CAP } from '@wxyc/lml-client';
+import { BULK_LOOKUP_INPUT_CAP, setLmlCounterSink } from '@wxyc/lml-client';
 import { CATALOG_STATEMENT_TIMEOUT_DEFAULT, runCatalogPass, type CatalogPassResult } from './catalog-pass.js';
 import { RESTORE_STATEMENT_TIMEOUT_DEFAULT, runRestore, type RestoreOptions, type RestoreResult } from './restore.js';
 import { READ_TIMEOUT_DEFAULT, countCohort, enumerateCohort, type CohortCounts, type CohortInputs } from './cohort.js';
@@ -29,7 +29,7 @@ import {
   type HoldReason,
   type InputFile,
 } from './inputs.js';
-import { captureError, closeLogger, initLogger, log } from './logger.js';
+import { captureError, closeLogger, emitCounter, initLogger, log } from './logger.js';
 import { previewLine, readStored, sampleStratified } from './preview.js';
 import { runBatch, type AdmittedRow, type BatchTotals } from './run-batch.js';
 
@@ -486,6 +486,8 @@ export const runPreview = async (options: ReaskOptions): Promise<PreviewSummary>
 
 export const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
+  // Discogs-calls-per-album signal for the canary (BS#3508).
+  setLmlCounterSink(emitCounter);
   try {
     // The summary is already on the `dry_run_plan`, `preview_done`, `catalog_pass`, `restore_plan` or `restore` line.
     const mode = resolveMode();

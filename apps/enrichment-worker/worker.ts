@@ -25,7 +25,7 @@ import {
   startCdcListener,
   stopCdcListener,
 } from '@wxyc/database';
-import { envInt } from '@wxyc/lml-client';
+import { envInt, setLmlCounterSink } from '@wxyc/lml-client';
 import { drainInFlightCandidates, makeEnrichmentHandler } from './handler.js';
 import { startHealthcheckServer, type HealthState } from './healthcheck.js';
 import { sweepStrandedClaims } from './sweep.js';
@@ -136,6 +136,8 @@ async function runShutdownStep(label: string, work: Promise<unknown> | (() => Pr
 }
 
 const main = async (): Promise<void> => {
+  // LML cache_stats counter lines (BS#3508); lml-client takes the sink by injection.
+  setLmlCounterSink(logCounter);
   console.log('[enrichment-worker] starting');
 
   // Healthcheck starts BEFORE the CDC listener so the deploy probe can hit

@@ -1145,6 +1145,47 @@ export async function lookupBySong(
 }
 
 /**
+ * BS#3508: a sink for named numeric counters, shaped like `logCounter` from
+ * `@wxyc/observability` (which callers pass in) so this package needs no dependency on it.
+ */
+export type LmlCounterSink = (name: string, value: number, fields: Record<string, string>) => void;
+
+let counterSink: LmlCounterSink | undefined;
+
+/** Installs the counter sink (or clears it with `undefined`). With none installed, counters are dropped. */
+export function setLmlCounterSink(sink: LmlCounterSink | undefined): void {
+  counterSink = sink;
+}
+
+function emitCounter(name: string, value: number, fields: Record<string, string>): void {
+  try {
+    counterSink?.(name, value, fields);
+  } catch {
+    // a failing sink must never break a lookup
+  }
+}
+
+/**
+ * BS#3508: reports LML's response `cache_stats` as one counter-sink line per numeric
+ * stat (`lml.cache.<key>`), tagged with `caller` and `endpoint`. The schema is freeform
+ * (`additionalProperties: true`), so narrow to a plain object and keep only finite
+ * numbers: missing or malformed stats emit nothing. Returns whether any line was emitted.
+ */
+function emitCacheStats(stats: unknown, caller: string, endpoint: 'lookup' | 'bulk'): boolean {
+  if (!stats || typeof stats !== 'object' || Array.isArray(stats)) {
+    return false;
+  }
+  let emitted = false;
+  for (const [key, value] of Object.entries(stats)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      emitCounter(`lml.cache.${key}`, value, { caller, endpoint });
+      emitted = true;
+    }
+  }
+  return emitted;
+}
+
+/**
  * Shared chokepoint for POST /api/v1/lookup.
  *
  * BS#1293: the `discogsUnavailable` gate short-circuits here, before the
@@ -1207,6 +1248,7 @@ async function postLookup(
       // null it here so no downstream writer persists it under the Spotify
       // slot and the writers' `?? searchUrls.spotify_url` fallback wins.
       const parsed = sanitizeLookupStreamingUrls((await response.json()) as LookupResponse);
+      emitCacheStats((parsed as { cache_stats?: unknown }).cache_stats, options?.caller ?? 'unknown', 'lookup');
 
       return parsed;
     });
@@ -1408,6 +1450,14 @@ export async function bulkLookupMetadata(
       );
 
       const parsed = (await response.json()) as BulkLookupResponse & { cache_stats?: unknown };
+
+      // BS#3508: LML aggregates the in-process cache counters across the whole batch via
+      // one `init_cache_stats()`, so the stats are per request. The batch size rides
+      // along so Discogs calls per item is computable from logs.
+      const caller = options?.caller ?? 'unknown';
+      if (emitCacheStats(parsed.cache_stats, caller, 'bulk')) {
+        emitCounter('lml.lookup.items', sendItems.length, { caller, endpoint: 'bulk' });
+      }
 
       // BS#1710: same streaming-URL host invariant as postLookup, applied to
       // each per-item verdict's nested LookupResponse (null on `status: error`).

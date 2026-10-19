@@ -8,10 +8,12 @@ import {
   SENTRY_DATA_COLLECTION,
   redactSentryBreadcrumb,
   redactSentryEventQueryParams,
+  logCounter,
   setErrorReporter,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
 import { SentryReporter } from '@wxyc/observability/sentry';
+import { setLmlCounterSink } from '@wxyc/lml-client';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
 
 // Immediately after .env loads, because .env is one of the ways a reserved AWS
@@ -59,3 +61,6 @@ Sentry.init({
 // Every capture, breadcrumb and request tag in apps/backend goes through the
 // ErrorReporter seam (BS#3395); Sentry is its only backend for now.
 setErrorReporter(new SentryReporter());
+
+// LML cache_stats counter lines (BS#3508); lml-client takes the sink by injection so it needs no @wxyc/observability.
+setLmlCounterSink(logCounter);
