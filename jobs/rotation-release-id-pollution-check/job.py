@@ -252,6 +252,7 @@ def make_pause_probe(conn, schema: str, lookback_seconds: float, pause_ms: float
 POSTHOG_ALERT_BURST = 10  # per-run event budget (error-tracking contract), no refill
 POSTHOG_ALERT_REFILL_PER_SEC = 0.0
 POSTHOG_DEDUPE_WINDOW_S = 60.0
+POSTHOG_DEDUPE_MAX_KEYS = 1000  # cap on the table of recent keys (error-tracking contract section 5)
 
 
 class TokenBucket:
@@ -272,18 +273,31 @@ class TokenBucket:
 
 
 class Dedupe:
-    """Drops a key seen again within ``window_s`` seconds (checked before the bucket)."""
+    """Drops a key admitted again within ``window_s`` seconds (checked before the bucket).
 
-    def __init__(self, window_s: float, clock=time.monotonic) -> None:
-        self.window_s, self.clock, self.last = window_s, clock, {}
+    ``seen`` only reads; ``record`` stores a key once the bucket has admitted its
+    send, so a rejected send never suppresses a later repeat. The table stays
+    bounded (error-tracking contract section 5): ``record`` prunes expired keys
+    and, past ``max_keys``, evicts the oldest."""
+
+    def __init__(self, window_s: float, clock=time.monotonic, max_keys: int = POSTHOG_DEDUPE_MAX_KEYS) -> None:
+        self.window_s, self.clock, self.max_keys = window_s, clock, max_keys
+        self.last: dict[str, float] = {}  # insertion order == time order (keys re-inserted on record)
 
     def seen(self, key: str) -> bool:
-        now = self.clock()
         last = self.last.get(key)
-        if last is not None and now - last < self.window_s:
-            return True
+        return last is not None and self.clock() - last < self.window_s
+
+    def record(self, key: str) -> None:
+        now = self.clock()
+        self.last.pop(key, None)
+        # Oldest first, so pruning stops at the first unexpired key.
+        while self.last:
+            oldest = next(iter(self.last))
+            if now - self.last[oldest] < self.window_s and len(self.last) < self.max_keys:
+                break
+            del self.last[oldest]
         self.last[key] = now
-        return False
 
 
 def posthog_environment(node_env: str | None) -> str:
@@ -339,12 +353,14 @@ def init_posthog(env: dict[str, str]):
 
 def posthog_send(capture, fingerprint: str) -> None:
     """Run ``capture(client)`` against the active client, swallowing any failure.
-    A fingerprint repeated within 60 s is dropped before it spends a token."""
+    A fingerprint repeated within 60 s is dropped before it spends a token; only
+    a send the bucket admits records its fingerprint for dedupe."""
     if _posthog is None or _posthog_dedupe.seen(fingerprint):
         return
     if not _posthog_bucket.allow():
         log("warning", "posthog_send_dropped", "PostHog send dropped by the flood guard")
         return
+    _posthog_dedupe.record(fingerprint)
     try:
         capture(_posthog)
     except Exception as err:  # noqa: BLE001
@@ -485,9 +501,23 @@ def self_test() -> int:
     dnow = [0.0]
     dedupe = Dedupe(60.0, clock=lambda: dnow[0])
     dnow[0] = 5.0
-    check("dedupe first, repeat, other", [dedupe.seen("a"), dedupe.seen("a"), dedupe.seen("b")], [False, True, False])
+    check("dedupe unrecorded key not seen", dedupe.seen("a"), False)
+    dedupe.record("a")
+    check("dedupe recorded repeat, other", [dedupe.seen("a"), dedupe.seen("b")], [True, False])
     dnow[0] = 66.0
     check("dedupe window expires", dedupe.seen("a"), False)
+    # The table of recent keys stays bounded (error-tracking contract section 5).
+    dedupe.record("b")
+    check("dedupe prunes expired keys on insert", sorted(dedupe.last), ["b"])
+    capped = Dedupe(60.0, clock=lambda: 0.0, max_keys=3)
+    for k in ("k1", "k2", "k3", "k4", "k5"):
+        capped.record(k)
+    check("dedupe cap evicts the oldest", (len(capped.last), capped.seen("k1"), capped.seen("k2"), capped.seen("k5")),
+          (3, False, False, True))
+    many = Dedupe(60.0, clock=lambda: 0.0)
+    for i in range(POSTHOG_DEDUPE_MAX_KEYS + 500):
+        many.record(f"fp{i}")
+    check("dedupe default cap holds", len(many.last), POSTHOG_DEDUPE_MAX_KEYS)
     now = [0.0]
     bucket = TokenBucket(2, 1.0, clock=lambda: now[0])
     check("bucket burst then drop", [bucket.allow() for _ in range(3)], [True, True, False])
@@ -566,6 +596,16 @@ def self_test() -> int:
             emit_alert("mismatch", rid, "m", {}, dry_run=False)
         check("in-window repeat spends no token", [e[2] for e in sent if e[0] == "$exception"],
               ["rotation-release-id-pollution-check:mismatch:1", "rotation-release-id-pollution-check:mismatch:2"])
+        # Only admitted keys count toward dedupe: a send the bucket rejects leaves
+        # no key behind, so a later repeat still reaches PostHog once tokens return.
+        _posthog_bucket = TokenBucket(0, 0.0, clock=lambda: 0.0)
+        _posthog_dedupe = Dedupe(POSTHOG_DEDUPE_WINDOW_S, clock=lambda: 0.0)
+        sent.clear()
+        emit_alert("mismatch", 3, "m", {}, dry_run=False)
+        _posthog_bucket = TokenBucket(1, 0.0, clock=lambda: 0.0)
+        emit_alert("mismatch", 3, "m", {}, dry_run=False)
+        check("bucket-rejected key does not suppress a repeat", [e[2] for e in sent if e[0] == "$exception"],
+              ["rotation-release-id-pollution-check:mismatch:3"])
     finally:
         _posthog, _posthog_bucket, _posthog_dedupe = None, real_bucket, real_dedupe
         if real_sentry is None:
