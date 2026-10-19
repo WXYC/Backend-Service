@@ -883,16 +883,10 @@ export interface LookupOptions {
    */
   budgetMs?: number | null;
   /**
-   * Caller-class label projected onto the Sentry `lml.lookup` span as the
-   * `lml.caller` attribute (BS#1235). Used to slice the rolled-up p95 in
-   * Sentry's trace explorer (and the Epic A acceptance routine at
-   * WXYC/library-metadata-lookup#338) so interactive paths
-   * (proxy/library/rotation, ~5 s budget) and background paths
-   * (enrichment-worker, ~29 s budget) don't fight each other in the rollup.
-   * Lowercase kebab-case scoped to the call site (e.g. `proxy-album-metadata`,
-   * `enrichment-worker`, `library-track-search`). Omit at your peril — missing
-   * callers project as `lml.caller=unknown`, which is meant as a Sentry
-   * flag-of-shame so untracked call sites surface in queries.
+   * Caller-class label (BS#1235), so interactive paths (proxy/library/rotation,
+   * ~5 s budget) and background paths (enrichment-worker, ~29 s budget) are
+   * told apart. Lowercase kebab-case scoped to the call site (e.g.
+   * `proxy-album-metadata`, `enrichment-worker`, `library-track-search`).
    *
    * BS#1826: a registered caller (see `ALL_LML_CALLERS` in `policy.ts`) now
    * also supplies the DEFAULT `timeoutMs`/`budgetMs` for this call, used
@@ -1151,13 +1145,7 @@ export async function lookupBySong(
 }
 
 /**
- * Shared chokepoint for POST /api/v1/lookup. Wraps the call in a Sentry span
- * so the LML response's cache_stats (memory hits / pg hits / pg misses / api
- * calls / pg time / api time) lands as attributes on the BS transaction's
- * trace. Filterable in Sentry's trace explorer (e.g.
- * `lml.cache.api_calls > 0`) so per-callsite instrumentation isn't needed for
- * the metadata-backfill pilot or the runtime hot path. Sibling LML-side
- * projection at WXYC/library-metadata-lookup#213.
+ * Shared chokepoint for POST /api/v1/lookup.
  *
  * BS#1293: the `discogsUnavailable` gate short-circuits here, before the
  * limiter is touched — a gated call consumes no `Semaphore` permit and no
@@ -2100,7 +2088,7 @@ const ARTIST_RESOLVE_TIMEOUT_SLACK_MS = 30_000;
  * @param names - Bare artist names (1..=25), sent verbatim.
  * @param options.timeoutMs - Override the batch-size-scaled default socket timeout (ms).
  * @param options.limiter - Override the default runtime limiter (see the token bullet above).
- * @param options.caller - Caller-class label projected onto the span as `lml.caller`.
+ * @param options.caller - Caller-class label.
  * @param options.dryRun - Run every tier but skip the `entity.identity` write-back.
  */
 export async function resolveArtistNamesBulk(
@@ -2279,7 +2267,7 @@ const ARTIST_GENRES_TIMEOUT_SLACK_MS = 20_000;
  * @param artists - Artists to resolve (1..=`ARTIST_GENRES_BATCH_CAP`).
  * @param options.timeoutMs - Override the batch-size-scaled default socket timeout (ms).
  * @param options.limiter - Override the default runtime limiter (see the token note above).
- * @param options.caller - Caller-class label projected onto the span as `lml.caller`.
+ * @param options.caller - Caller-class label.
  */
 export async function fetchArtistGenresBulk(
   artists: ArtistGenresRequestItem[],

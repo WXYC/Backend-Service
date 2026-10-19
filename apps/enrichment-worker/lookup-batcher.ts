@@ -74,7 +74,7 @@ export const ENRICHMENT_BULK_WINDOW_MS = envInt('ENRICHMENT_BULK_WINDOW_MS', 50)
 // independent `envInt('ENRICHMENT_LML_BUDGET_MS', 29000)` reads that could
 // drift if only one call site's env var was overridden).
 
-/** Caller-class label projected onto the `lml.caller` Sentry span (BS#1235). */
+/** Caller-class label (BS#1235). */
 const ENRICHMENT_CALLER = 'enrichment-worker';
 
 /**

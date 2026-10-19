@@ -26,8 +26,7 @@
  * `lml_no_match` cause is by-design Discogs miss (not a degradation) and is
  * suppressed at the call site; `lml_timeout` lives on the catch arm and was
  * dropped entirely (captureException there is the source of truth). The
- * classifier here still returns `lml_no_match` so dashboard aggregation off
- * the span attribute can split the classes; suppression is the caller's
+ * classifier here still returns `lml_no_match`; suppression is the caller's
  * decision, not this module's.
  */
 
