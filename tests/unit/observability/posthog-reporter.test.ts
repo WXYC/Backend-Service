@@ -154,8 +154,11 @@ describe('PostHogReporter', () => {
         .mockImplementation(() => undefined);
       PostHogMock.mockImplementationOnce(() => real);
       build().captureException(new Error('boom'), { level, fingerprint: ['f'] });
-      for (let i = 0; i < 20 && capture.mock.calls.length === 0; i += 1) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
+      // The SDK reads source files from disk (context lines) before it reaches the sink, so poll against a
+      // wall-clock deadline instead of a fixed number of ticks.
+      const deadline = Date.now() + 5000;
+      while (capture.mock.calls.length === 0 && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
       }
       expect(capture).toHaveBeenCalledTimes(1);
       const message = capture.mock.calls[0][0];
