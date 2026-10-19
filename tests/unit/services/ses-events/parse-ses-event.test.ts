@@ -6,7 +6,7 @@ import { parseSesEvent } from '../../../../apps/backend/services/ses-events/pars
  * https://docs.aws.amazon.com/ses/latest/dg/event-publishing-retrieving-sns-contents.html
  * — the SNS-wrapped event publishing schema.
  *
- * Fields we don't surface on spans (mail.headers, mail.commonHeaders, the
+ * Fields we don't log (mail.headers, mail.commonHeaders, the
  * full mail.tags map, etc.) are still kept in fixtures so the parser is
  * exercised against the real shape, not a stripped-down one.
  */

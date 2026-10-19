@@ -8,16 +8,22 @@ import type { SesEvent } from './types.js';
  *     email.message_id:       SES mail.messageId
  *     email.recipient_domain: the part after '@' in the first recipient
  *                             (NEVER the local-part — PII)
- *     email.smtp_response:    (Delivery only) trimmed to 500 chars
+ *     email.smtp_response:    (Delivery only) email addresses redacted,
+ *                             then trimmed to 500 chars
  *     email.bounce_type:      (Bounce only)
  *     email.bounce_subtype:   (Bounce only)
  *     email.delay_type:       (DeliveryDelay only)
- *     email.reject_reason:    (Reject only) trimmed to 500 chars
+ *     email.reject_reason:    (Reject only) email addresses redacted,
+ *                             then trimmed to 500 chars
  *     ses.delivery_latency_ms: (Delivery only) ms from mail.timestamp to
  *                             delivery.timestamp
  *     ses.processing_time_ms:  (Delivery only) delivery.processingTimeMillis
+ *
+ * The two free-text fields are raw MTA/SES text, and some receiving MTAs
+ * echo the recipient address in their SMTP reply, so anything email-shaped
+ * in them is replaced with `<redacted>` before the line is written.
  */
-export function emitSesEventSpan(event: SesEvent): void {
+export function recordSesEvent(event: SesEvent): void {
   logCounter('ses.event', 1, { ...buildAttributes(event), ...buildMeasurements(event) });
 }
 
@@ -30,7 +36,7 @@ function buildAttributes(event: SesEvent): Record<string, string | number> {
   };
 
   if (event.kind === 'Delivery') {
-    base['email.smtp_response'] = trim(event.smtpResponse, 500);
+    base['email.smtp_response'] = trim(redactEmailAddresses(event.smtpResponse), 500);
     return base;
   }
   if (event.kind === 'Bounce') {
@@ -39,7 +45,7 @@ function buildAttributes(event: SesEvent): Record<string, string | number> {
     return base;
   }
   if (event.kind === 'Reject') {
-    base['email.reject_reason'] = trim(event.reason, 500);
+    base['email.reject_reason'] = trim(redactEmailAddresses(event.reason), 500);
     return base;
   }
   if (event.kind === 'DeliveryDelay') {
@@ -71,6 +77,17 @@ function extractDomain(address: string): string {
   const at = address.lastIndexOf('@');
   if (at < 0 || at === address.length - 1) return 'unknown';
   return address.slice(at + 1).toLowerCase();
+}
+
+/**
+ * Anything shaped like `local@domain`. Deliberately broad: a false positive
+ * only costs a little diagnostic text, a false negative leaks an address.
+ */
+const EMAIL_SHAPED = /[^\s<>()[\]"',;:@]+@[^\s<>()[\]"',;:@]+/g;
+
+/** Replace every email-shaped token in MTA/SES free text with `<redacted>`. Runs before trimming, so a cut-off address can't slip through. */
+function redactEmailAddresses(value: string): string {
+  return value.replace(EMAIL_SHAPED, '<redacted>');
 }
 
 function trim(value: string, max: number): string {

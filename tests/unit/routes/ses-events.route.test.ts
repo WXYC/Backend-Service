@@ -4,7 +4,7 @@ import request from 'supertest';
 
 const mockValidate = jest.fn();
 const mockParseSesEvent = jest.fn();
-const mockEmitSesEventSpan = jest.fn();
+const mockRecordSesEvent = jest.fn();
 const mockConfirmSubscription = jest.fn();
 const mockSentryCaptureException = jest.fn();
 const mockSentryCaptureMessage = jest.fn();
@@ -15,8 +15,8 @@ jest.mock('../../../apps/backend/services/ses-events/sns-validator', () => ({
 jest.mock('../../../apps/backend/services/ses-events/parse-ses-event', () => ({
   parseSesEvent: (...args: unknown[]) => (mockParseSesEvent as unknown as (...a: unknown[]) => unknown)(...args),
 }));
-jest.mock('../../../apps/backend/services/ses-events/emit-span', () => ({
-  emitSesEventSpan: (...args: unknown[]) => (mockEmitSesEventSpan as unknown as (...a: unknown[]) => unknown)(...args),
+jest.mock('../../../apps/backend/services/ses-events/record-ses-event', () => ({
+  recordSesEvent: (...args: unknown[]) => (mockRecordSesEvent as unknown as (...a: unknown[]) => unknown)(...args),
 }));
 jest.mock('../../../apps/backend/services/ses-events/confirm-subscription', () => ({
   confirmSubscription: (...args: unknown[]) =>
@@ -44,7 +44,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockValidate.mockReset();
   mockParseSesEvent.mockReset();
-  mockEmitSesEventSpan.mockReset();
+  mockRecordSesEvent.mockReset();
   mockConfirmSubscription.mockReset();
   mockSentryCaptureException.mockReset();
   mockSentryCaptureMessage.mockReset();
@@ -70,10 +70,10 @@ describe('POST /internal/ses-events', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, confirmed: true });
     expect(mockConfirmSubscription).toHaveBeenCalledTimes(1);
-    expect(mockEmitSesEventSpan).not.toHaveBeenCalled();
+    expect(mockRecordSesEvent).not.toHaveBeenCalled();
   });
 
-  it('processes a Notification and emits a span', async () => {
+  it('processes a Notification and records the event', async () => {
     mockValidate.mockResolvedValueOnce({
       Type: 'Notification',
       MessageId: 'n-1',
@@ -95,7 +95,7 @@ describe('POST /internal/ses-events', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
-    expect(mockEmitSesEventSpan).toHaveBeenCalledTimes(1);
+    expect(mockRecordSesEvent).toHaveBeenCalledTimes(1);
     expect(mockConfirmSubscription).not.toHaveBeenCalled();
   });
 
@@ -112,7 +112,7 @@ describe('POST /internal/ses-events', () => {
       expect.any(Error),
       expect.objectContaining({ tags: expect.objectContaining({ subsystem: 'ses-events', stage: 'validate' }) })
     );
-    expect(mockEmitSesEventSpan).not.toHaveBeenCalled();
+    expect(mockRecordSesEvent).not.toHaveBeenCalled();
   });
 
   it('returns 400 + captures Sentry when the SES payload is unparseable', async () => {
@@ -134,10 +134,10 @@ describe('POST /internal/ses-events', () => {
       expect.stringMatching(/Message is not JSON/),
       expect.objectContaining({ tags: expect.objectContaining({ subsystem: 'ses-events', stage: 'parse' }) })
     );
-    expect(mockEmitSesEventSpan).not.toHaveBeenCalled();
+    expect(mockRecordSesEvent).not.toHaveBeenCalled();
   });
 
-  it('still returns 200 if span emission throws (observability never breaks the receive path)', async () => {
+  it('still returns 200 if recording the event throws (observability never breaks the receive path)', async () => {
     mockValidate.mockResolvedValueOnce({
       Type: 'Notification',
       MessageId: 'n-3',
@@ -146,7 +146,7 @@ describe('POST /internal/ses-events', () => {
       Message: JSON.stringify({ eventType: 'Send', mail: {} }),
     } as never);
     mockParseSesEvent.mockReturnValueOnce({ kind: 'Send' });
-    mockEmitSesEventSpan.mockImplementationOnce(() => {
+    mockRecordSesEvent.mockImplementationOnce(() => {
       throw new Error('sentry transport blew up');
     });
 

@@ -102,8 +102,18 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
 // the inner method's `Sentry.getActiveSpan()?.setAttributes(...)` lands
 // on the outer span the test asserts against.
 const mockSpanSetAttribute = jest.fn();
-const mockLogCounter = jest.fn<(name: string, value: number, fields?: Record<string, unknown>) => void>();
-jest.mock('@wxyc/observability', () => ({ logCounter: mockLogCounter }));
+jest.mock('@wxyc/observability', () => ({ logCounter: jest.fn() }));
+// Lookups aggregate in process and flush on a timer (BS#3402), so these tests
+// assert what each chokepoint passes to `recordCacheLookup`, snapshotting the
+// cache's size/capacity at call time.
+const mockRecordCacheLookup = jest.fn<(lookup: Record<string, unknown>) => void>();
+jest.mock('../../../apps/backend/services/observability/cache-stats', () => ({
+  ...jest.requireActual<typeof import('../../../apps/backend/services/observability/cache-stats')>(
+    '../../../apps/backend/services/observability/cache-stats'
+  ),
+  recordCacheLookup: (name: string, hit: boolean, cache: { size: number; max: number }) =>
+    mockRecordCacheLookup({ cache_hit: hit, cache_name: name, cache_size: cache.size, cache_capacity: cache.max }),
+}));
 const mockSpanSetAttributes = jest.fn();
 type SpanLike = { setAttribute: typeof mockSpanSetAttribute; setAttributes: typeof mockSpanSetAttributes };
 const spanInstance: SpanLike = { setAttribute: mockSpanSetAttribute, setAttributes: mockSpanSetAttributes };
@@ -2018,7 +2028,7 @@ describe('library.service', () => {
       // cache_name/cache_size/cache_capacity shape (replaces the old
       // track_search.cache_hit-only setAttribute call). cache_size=1
       // because the miss path populates the cache before this call.
-      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+      expect(mockRecordCacheLookup).toHaveBeenCalledWith({
         cache_hit: false,
         cache_name: 'track_search',
         cache_size: 1,
@@ -2057,7 +2067,7 @@ describe('library.service', () => {
       expect(results).toHaveLength(1);
       expect(mockStartSpan).toHaveBeenCalledTimes(1);
       // cache_size stays 1 — a hit doesn't write a second entry for the same key.
-      expect(mockLogCounter).toHaveBeenCalledWith('cache.lookup', 1, {
+      expect(mockRecordCacheLookup).toHaveBeenCalledWith({
         cache_hit: true,
         cache_name: 'track_search',
         cache_size: 1,

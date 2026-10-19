@@ -178,17 +178,13 @@ export const searchArtwork: RequestHandler<object, unknown, unknown, ArtworkSear
 
   // Check negative cache first (NSFW or not found)
   if (negativeCache.has(cacheKey)) {
-    // BS#989: chokepoint cache-stats projection. `recordCacheLookup` projects
-    // fixed `cache_hit`/`cache_name`/`cache_size` keys onto the active request
-    // span, so two calls on one request collide — `setAttributes` is
-    // last-write-wins on those keys. We therefore project exactly once per
-    // request, on the branch that DECIDES it: the negative-cache hit here, the
+    // BS#989: chokepoint cache-stats count. Each request is counted exactly
+    // once, on the branch that DECIDES it: the negative-cache hit here, the
     // artwork hit below, or — on a full miss (negative miss AND artwork miss) —
     // the single write branch that resolves the request further down (negative
     // set, or artwork set). The intermediate artwork get-miss is deliberately
-    // NOT projected on its own; its outcome is carried by whichever write
-    // branch runs, and projecting it too would clobber that terminal signal
-    // with a stale `cache_name='artwork', cache_size=0`.
+    // NOT counted on its own; its outcome is carried by whichever write branch
+    // runs, and counting it too would double-count one request.
     recordCacheLookup('negative', true, negativeCache);
     res.status(404).json({ message: 'No artwork available' });
     return;

@@ -11,12 +11,22 @@
  * span attributes.
  *
  *   - `recordCacheLookup(name, hit, cache)` — call once per get/set at a
- *     cache chokepoint. Logs `cache.lookup` with `cache_hit` / `cache_name` /
- *     `cache_size` / `cache_capacity`.
+ *     cache chokepoint. Lookups sit on hot request paths, so they are NOT
+ *     logged one line per call (an unbounded per-request stdout stream is a
+ *     disk-fill risk on the EC2 host, whose `docker run` sets no log
+ *     rotation). Instead they aggregate in process: per cache name, a hit
+ *     count, a miss count, and the last-seen size/capacity. One
+ *     `cache.lookup` summary line per cache name is written per interval
+ *     (60 s by default, an `unref()`'d timer armed by the first lookup after
+ *     a flush), with `value` = total lookups and `cache_hits` /
+ *     `cache_misses` / `cache_size` / `cache_capacity` fields. A quiet
+ *     interval arms no timer and writes nothing. `stopPeriodicEmit` (called
+ *     on graceful shutdown) flushes what is pending.
  *
  *   - `startPeriodicEmit(caches)` / `stopPeriodicEmit()` — a once-per-minute
  *     (per worker, default) timer that logs `cache.<name>.evictions.count`
- *     (since the previous emit) + `cache.<name>.size` for every registered
+ *     (since the previous emit) + `cache.<name>.size` (a point-in-time gauge,
+ *     tagged `kind: "gauge"`) for every registered
  *     cache. Evictions are counted via `recordCacheEviction`, which callers
  *     wire into each `LRUCache`'s `dispose` option (filtered to
  *     `reason === 'evict'` — capacity-driven displacement — so TTL expiry,
@@ -57,18 +67,66 @@ const evictionCounts = new Map<CacheName, number>();
 
 let periodicEmitTimer: ReturnType<typeof setInterval> | null = null;
 
+/** Per-cache-name lookup tallies accumulated since the last flush. */
+interface LookupTally {
+  hits: number;
+  misses: number;
+  /** Last-seen `cache.size` — a snapshot at the most recent lookup. */
+  size: number;
+  /** Last-seen `cache.max`. */
+  capacity: number;
+}
+
+const lookupTallies = new Map<CacheName, LookupTally>();
+
+let lookupFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
 /**
- * Log `cache.lookup` with `cache_hit`, `cache_name`, `cache_size` and
- * `cache_capacity` for a single cache touch. Call this once per get/set
- * at the cache chokepoint — not per caller up the stack.
+ * Count one cache touch toward the current interval's `cache.lookup`
+ * summary for `cacheName`. Call this once per get/set at the cache
+ * chokepoint — not per caller up the stack. Writes nothing itself; the
+ * first lookup after a flush arms a one-shot `unref()`'d timer that calls
+ * `flushCacheLookups` when the interval ends.
  */
 export function recordCacheLookup(cacheName: CacheName, hit: boolean, cache: CacheLike): void {
-  logCounter('cache.lookup', 1, {
-    cache_hit: hit,
-    cache_name: cacheName,
-    cache_size: cache.size,
-    cache_capacity: cache.max,
-  });
+  const tally = lookupTallies.get(cacheName) ?? { hits: 0, misses: 0, size: 0, capacity: 0 };
+  if (hit) {
+    tally.hits += 1;
+  } else {
+    tally.misses += 1;
+  }
+  tally.size = cache.size;
+  tally.capacity = cache.max;
+  lookupTallies.set(cacheName, tally);
+
+  if (lookupFlushTimer === null) {
+    lookupFlushTimer = setTimeout(flushCacheLookups, readIntervalFromEnv());
+    lookupFlushTimer.unref?.();
+  }
+}
+
+/**
+ * Write one `cache.lookup` summary line per cache name with lookups since
+ * the previous flush (`value` = hits + misses), then clear the tallies and
+ * cancel the pending flush timer. Writes nothing when there were no
+ * lookups. Called by the interval timer and by `stopPeriodicEmit` on
+ * graceful shutdown; exported for tests and ad-hoc runs.
+ */
+export function flushCacheLookups(): void {
+  if (lookupFlushTimer !== null) {
+    clearTimeout(lookupFlushTimer);
+    lookupFlushTimer = null;
+  }
+  for (const [name, tally] of lookupTallies) {
+    logCounter('cache.lookup', tally.hits + tally.misses, {
+      cache_name: name,
+      cache_hits: tally.hits,
+      cache_misses: tally.misses,
+      cache_size: tally.size,
+      cache_capacity: tally.capacity,
+    });
+  }
+  lookupTallies.clear();
 }
 
 /**
@@ -82,7 +140,7 @@ export function recordCacheEviction(cacheName: CacheName): void {
 
 /**
  * Log `cache.<name>.evictions.count` (since the previous emit) and
- * `cache.<name>.size` for every registered cache, one line each, then reset
+ * `cache.<name>.size` (a gauge, so the line carries `kind: "gauge"`) for every registered cache, one line each, then reset
  * the eviction counters to 0 so the next emit reads as a rate, not a
  * cumulative total.
  *
@@ -92,7 +150,7 @@ export function recordCacheEviction(cacheName: CacheName): void {
 export function emitPeriodicCacheStats(caches: readonly RegisteredCache[]): void {
   for (const { name, cache } of caches) {
     logCounter(`cache.${name}.evictions.count`, evictionCounts.get(name) ?? 0);
-    logCounter(`cache.${name}.size`, cache.size);
+    logCounter(`cache.${name}.size`, cache.size, { kind: 'gauge' });
     evictionCounts.set(name, 0);
   }
 }
@@ -104,7 +162,9 @@ export function emitPeriodicCacheStats(caches: readonly RegisteredCache[]): void
  */
 function readIntervalFromEnv(): number {
   const raw = process.env.CACHE_STATS_PERIODIC_EMIT_INTERVAL_MS;
-  if (!raw) return DEFAULT_PERIODIC_EMIT_INTERVAL_MS;
+  if (!raw) {
+    return DEFAULT_PERIODIC_EMIT_INTERVAL_MS;
+  }
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PERIODIC_EMIT_INTERVAL_MS;
 }
@@ -120,21 +180,29 @@ export function startPeriodicEmit(
   caches: readonly RegisteredCache[],
   intervalMs: number = readIntervalFromEnv()
 ): void {
-  if (periodicEmitTimer !== null) return;
+  if (periodicEmitTimer !== null) {
+    return;
+  }
   periodicEmitTimer = setInterval(() => emitPeriodicCacheStats(caches), intervalMs);
   periodicEmitTimer.unref?.();
 }
 
-/** Cancel the periodic emit timer. Safe to call when not running (e.g. shutdown, tests). */
+/**
+ * Cancel the periodic emit timer and flush any pending `cache.lookup`
+ * summaries, so a graceful shutdown doesn't drop the last partial interval.
+ * Safe to call when not running (e.g. shutdown, tests).
+ */
 export function stopPeriodicEmit(): void {
   if (periodicEmitTimer !== null) {
     clearInterval(periodicEmitTimer);
     periodicEmitTimer = null;
   }
+  flushCacheLookups();
 }
 
-/** Test-only: reset eviction counters and cancel any running timer between cases. */
+/** Test-only: reset eviction counters and lookup tallies, and cancel any running timers, between cases. */
 export function __resetCacheStatsForTests(): void {
   evictionCounts.clear();
+  lookupTallies.clear();
   stopPeriodicEmit();
 }

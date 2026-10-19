@@ -4,7 +4,7 @@ const logCounter = jest.fn<(name: string, value: number, fields?: Record<string,
 
 jest.mock('@wxyc/observability', () => ({ logCounter }));
 
-import { emitSesEventSpan } from '../../../../apps/backend/services/ses-events/emit-span';
+import { recordSesEvent } from '../../../../apps/backend/services/ses-events/record-ses-event';
 import type { SesEvent } from '../../../../apps/backend/services/ses-events/types';
 
 beforeEach(() => {
@@ -14,7 +14,7 @@ beforeEach(() => {
 const sendTs = new Date('2026-05-24T10:00:00.000Z');
 const deliveredAt = new Date('2026-05-24T10:00:02.500Z');
 
-describe('emitSesEventSpan', () => {
+describe('recordSesEvent', () => {
   it('logs a ses.event counter for a Send', () => {
     const event: SesEvent = {
       kind: 'Send',
@@ -22,7 +22,7 @@ describe('emitSesEventSpan', () => {
       sendTimestamp: sendTs,
       recipients: ['user@example.com'],
     };
-    emitSesEventSpan(event);
+    recordSesEvent(event);
     expect(logCounter).toHaveBeenCalledTimes(1);
     expect(logCounter).toHaveBeenCalledWith('ses.event', 1, {
       'email.event_type': 'Send',
@@ -41,7 +41,7 @@ describe('emitSesEventSpan', () => {
       smtpResponse: '250 OK',
       processingTimeMillis: 100,
     };
-    emitSesEventSpan(event);
+    recordSesEvent(event);
     const attrs = logCounter.mock.calls[0][2] as Record<string, string | number>;
     for (const v of Object.values(attrs)) {
       const text = typeof v === 'string' ? v : String(v);
@@ -60,7 +60,7 @@ describe('emitSesEventSpan', () => {
       smtpResponse: '250 OK',
       processingTimeMillis: 1234,
     };
-    emitSesEventSpan(event);
+    recordSesEvent(event);
     const attrs = logCounter.mock.calls[0][2];
     expect(attrs['ses.delivery_latency_ms']).toBe(2500);
     expect(attrs['ses.processing_time_ms']).toBe(1234);
@@ -76,13 +76,13 @@ describe('emitSesEventSpan', () => {
       smtpResponse: '250 OK',
       processingTimeMillis: 100,
     };
-    emitSesEventSpan(event);
+    recordSesEvent(event);
     const attrs = logCounter.mock.calls[0][2];
     expect(attrs['ses.delivery_latency_ms']).toBe(0);
   });
 
   it('logs bounce and delay fields', () => {
-    emitSesEventSpan({
+    recordSesEvent({
       kind: 'Bounce',
       messageId: 'mid-5',
       sendTimestamp: sendTs,
@@ -94,7 +94,7 @@ describe('emitSesEventSpan', () => {
       'email.bounce_type': 'Permanent',
       'email.bounce_subtype': 'General',
     });
-    emitSesEventSpan({
+    recordSesEvent({
       kind: 'DeliveryDelay',
       messageId: 'mid-6',
       sendTimestamp: sendTs,
@@ -116,7 +116,7 @@ describe('emitSesEventSpan', () => {
       smtpResponse: longResp,
       processingTimeMillis: 0,
     };
-    emitSesEventSpan(event);
+    recordSesEvent(event);
     const attrs = logCounter.mock.calls[0][2];
     expect((attrs['email.smtp_response'] as string).length).toBe(500);
   });
@@ -128,8 +128,54 @@ describe('emitSesEventSpan', () => {
       sendTimestamp: sendTs,
       reason: 'Bad content',
     };
-    emitSesEventSpan(event);
+    recordSesEvent(event);
     const attrs = logCounter.mock.calls[0][2];
     expect(attrs['email.recipient_domain']).toBe('unknown');
+  });
+});
+
+describe('recordSesEvent redacts email addresses from MTA/SES free text', () => {
+  it.each([
+    ['250 2.0.0 OK <secret.person@example.com> accepted', '250 2.0.0 OK <<redacted>> accepted'],
+    ['250 OK: queued as 12345 for Secret.Person+tag@Mail.Example.CO.uk', '250 OK: queued as 12345 for <redacted>'],
+    ['250 2.1.5 a@b.org and c.d@e.net delivered', '250 2.1.5 <redacted> and <redacted> delivered'],
+    ['250 OK', '250 OK'],
+  ])('Delivery smtp_response %j logs as %j', (smtpResponse, expected) => {
+    recordSesEvent({
+      kind: 'Delivery',
+      messageId: 'mid-r1',
+      sendTimestamp: sendTs,
+      deliveredAt,
+      recipient: 'secret.person@example.com',
+      smtpResponse,
+      processingTimeMillis: 10,
+    });
+    expect(logCounter.mock.calls[0][2]?.['email.smtp_response']).toBe(expected);
+  });
+
+  it('redacts an address in a Reject reason', () => {
+    recordSesEvent({
+      kind: 'Reject',
+      messageId: 'mid-r2',
+      sendTimestamp: sendTs,
+      reason: 'Bad content for recipient someone@example.org',
+    });
+    expect(logCounter.mock.calls[0][2]?.['email.reject_reason']).toBe('Bad content for recipient <redacted>');
+  });
+
+  it('redacts before trimming, so a cut-off address cannot leak its local part', () => {
+    const smtpResponse = `${'x'.repeat(480)} secret.person@example.com`;
+    recordSesEvent({
+      kind: 'Delivery',
+      messageId: 'mid-r3',
+      sendTimestamp: sendTs,
+      deliveredAt,
+      recipient: 'secret.person@example.com',
+      smtpResponse,
+      processingTimeMillis: 10,
+    });
+    const logged = logCounter.mock.calls[0][2]?.['email.smtp_response'] as string;
+    expect(logged).not.toMatch(/secret/);
+    expect(logged.length).toBeLessThanOrEqual(500);
   });
 });
