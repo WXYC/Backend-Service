@@ -365,6 +365,80 @@ describe('PostHogReporter', () => {
     });
   });
 
+  describe('privacy: final payload (before_send)', () => {
+    // Built at run time: the SDK attaches source context lines to frames, and a literal here would quote itself into the payload.
+    const BOUND = ['Jane', 'Q', 'Public'].join(' ');
+    const PARAMS = `Failed query: select * from djs where real_name = $1\nparams: ${BOUND}`;
+
+    /** What the real posthog-node client queues for a capture, after its own `before_send` ran. */
+    const queuedThrough = async (
+      capture: (reporter: PostHogReporter) => void,
+      options: Partial<PostHogReporterOptions> = {}
+    ) => {
+      jest.useRealTimers();
+      const { PostHog: RealPostHog } = jest.requireActual<typeof import('posthog-node')>('posthog-node');
+      PostHogMock.mockImplementationOnce(
+        (key: string, opts?: object) => new RealPostHog(key, { ...opts, disabled: true })
+      );
+      const reporter = build(options);
+      const real = PostHogMock.mock.results[0].value as InstanceType<typeof RealPostHog>;
+      const queue = jest
+        .spyOn(real as unknown as { enqueue: (...args: unknown[]) => void }, 'enqueue')
+        .mockImplementation(() => undefined);
+      capture(reporter);
+      const deadline = Date.now() + 5000;
+      while (queue.mock.calls.length === 0 && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      expect(queue).toHaveBeenCalledTimes(1);
+      return queue.mock.calls[0][1] as { properties: Record<string, any> };
+    };
+
+    it('sends the SQL of a Drizzle error whose cause carries params, and no bound value anywhere in $exception_list', async () => {
+      const cause = new Error(PARAMS);
+      const drizzle = new Error('Failed query: select 1', { cause });
+      const { properties } = await queuedThrough((reporter) => reporter.captureException(drizzle));
+      const list = JSON.stringify(properties['$exception_list']);
+      expect(list).toContain('select * from djs where real_name');
+      expect(list).not.toContain(BOUND);
+    });
+
+    it('scrubs a context tag, a run-wide property and a request tag that hold a params string', async () => {
+      const { properties } = await queuedThrough(
+        (reporter) =>
+          reporter.runInScope(() => {
+            reporter.setRequestTag('request_note', PARAMS);
+            reporter.captureException(new Error('boom'), { tags: { sql: PARAMS } });
+          }),
+        { properties: { run_note: PARAMS } }
+      );
+      expect(properties['sql']).toBe('Failed query: select * from djs where real_name = $1\nparams: [redacted]');
+      expect(properties['run_note']).toBe(properties['sql']);
+      expect(properties['request_note']).toBe(properties['sql']);
+      expect(JSON.stringify(properties)).not.toContain(BOUND);
+    });
+
+    it('drops the stacktrace of an exception value that holds a params part and scrubs the rest', () => {
+      build();
+      const beforeSend = PostHogMock.mock.calls[0][1]?.before_send as (e: any) => any;
+      const frames = [{ filename: BOUND, function: 'x' }];
+      const event = {
+        event: '$exception',
+        properties: {
+          $exception_list: [
+            { type: 'Error', value: PARAMS, stacktrace: { type: 'raw', frames } },
+            { type: 'Error', value: 'plain', stacktrace: { type: 'raw', frames: [{ function: 'kept' }] } },
+          ],
+        },
+      };
+      const out = beforeSend(event);
+      expect(out.properties.$exception_list[0]).not.toHaveProperty('stacktrace');
+      expect(out.properties.$exception_list[0].value).toContain('[redacted]');
+      expect(out.properties.$exception_list[1].stacktrace.frames).toEqual([{ function: 'kept' }]);
+      expect(beforeSend(null)).toBeNull();
+    });
+  });
+
   describe('privacy: messages', () => {
     it('sends neither the value nor the default fingerprint with bound parameters', () => {
       build().captureMessage('Failed query: select * from djs where real_name = $1\nparams: Jane Q Public');

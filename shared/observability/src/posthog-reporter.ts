@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { PostHog } from 'posthog-node';
+import type { BeforeSendFn } from 'posthog-node';
 import type { ErrorReporter, ReportBreadcrumb, ReportContext } from './error-reporter.js';
-import { redactLogValue, redactQueryParams } from './redact-query-params.js';
+import { redactLogValue, redactQueryParams, scrubEventStrings } from './redact-query-params.js';
 
 /**
  * `ErrorReporter` over posthog-node, sending `$exception` events to the "Services" project
@@ -80,6 +81,25 @@ const fingerprintOf = (err: unknown): string => {
 const mapEnvironment = (raw: string | undefined): 'production' | 'staging' | 'development' =>
   raw === 'staging' || raw === 'development' ? raw : 'production';
 
+/**
+ * posthog-node `before_send` (BS#3054 on the PostHog path): the every-string scrub over the whole outgoing event,
+ * after the SDK has merged tags, run-wide properties and the `$exception_list` it builds from the error and its
+ * `cause` chain. The inputs are redacted earlier, so this is the backstop for what they miss. It fails closed:
+ * an event the scrub cannot walk is dropped, never sent raw.
+ */
+const redactPostHogEvent: BeforeSendFn = (event) => {
+  if (!event) {
+    return event;
+  }
+  try {
+    const list: unknown = event.properties?.['$exception_list'];
+    scrubEventStrings(event, Array.isArray(list) ? list : []);
+    return event;
+  } catch {
+    return null;
+  }
+};
+
 export class PostHogReporter implements ErrorReporter {
   private readonly client: PostHog | null = null;
   private readonly environment: string;
@@ -107,7 +127,10 @@ export class PostHogReporter implements ErrorReporter {
       return;
     }
     try {
-      this.client = new PostHog(apiKey, { host: process.env.POSTHOG_HOST || DEFAULT_HOST });
+      this.client = new PostHog(apiKey, {
+        host: process.env.POSTHOG_HOST || DEFAULT_HOST,
+        before_send: redactPostHogEvent,
+      });
     } catch (err) {
       console.warn(`PostHogReporter disabled: ${err instanceof Error ? err.message : String(err)}`);
     }

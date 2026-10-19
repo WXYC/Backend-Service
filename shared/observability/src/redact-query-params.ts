@@ -335,6 +335,21 @@ function scrubStrings(node: unknown, depth = 0): void {
 }
 
 /**
+ * The last pass over an outgoing event, vendor-neutral: an exception value that holds a params part loses its
+ * stack (frames made from the params lines cannot be told from real ones), then every string in `event` is
+ * scrubbed in place. `exceptions` are members of `event`, so a vendor adapter only says where its event keeps them.
+ */
+export function scrubEventStrings(
+  event: unknown,
+  exceptions: ReadonlyArray<{ value?: unknown; stacktrace?: unknown }>
+): void {
+  for (const exception of exceptions) {
+    if (typeof exception?.value === 'string' && exception.value.includes(PARAMS_MARKER)) delete exception.stacktrace;
+  }
+  scrubStrings(event);
+}
+
+/**
  * `beforeSend` for the Express servers. Each exception value in the event (the
  * error and its `linkedErrors` causes) is rebuilt, message and stack, from
  * `hint.originalException` redacted by `redactQueryParams`. When there is no
