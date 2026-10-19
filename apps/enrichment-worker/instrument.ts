@@ -1,5 +1,4 @@
-// Sentry preload (node --import). Mirrors apps/backend/instrument.ts so the
-// worker's outbound LML fetch spans nest under a CDC handler transaction.
+// Sentry preload (node --import). Mirrors apps/backend/instrument.ts.
 // Sentry stays inactive when SENTRY_DSN is unset (the SDK silently no-ops).
 
 import { config } from 'dotenv';
@@ -15,18 +14,6 @@ config();
 // that happen to call CloudWatch today, is the point of BS#2532.
 warnIfReservedAwsCredentialsPresent();
 
-// Default 0.1 — the worker is many-instance and high-throughput; full sample
-// of every CDC handler transaction would dominate the BS Sentry budget. The
-// runtime backend defaults to 1.0 because per-request HTTP transactions are
-// already bounded by user traffic. Operators can override with
-// SENTRY_TRACES_SAMPLE_RATE per-deploy without a code change.
-const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) return 0.1;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 0.1;
-  return parsed;
-};
-
 Sentry.init({
   // Sentry 11 turned this on by default, which titles captureMessage events
   // with a minified function name (BS#3002).
@@ -36,7 +23,6 @@ Sentry.init({
   dsn: process.env.SENTRY_DSN,
   release: process.env.SENTRY_RELEASE,
   environment: process.env.NODE_ENV || 'production',
-  tracesSampleRate: resolveTracesSampleRate(),
   // Sentry 10's data-collection posture: no end-user IPs, IP-bearing headers
   // or request bodies (BS#3004).
   dataCollection: SENTRY_DATA_COLLECTION,

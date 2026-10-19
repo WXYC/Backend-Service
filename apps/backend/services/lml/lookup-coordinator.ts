@@ -78,7 +78,6 @@
  * (BS#2528, see above) follows the same non-caching rule without throwing —
  * it resolves normally and is simply never written to the LRU.
  */
-import * as Sentry from '@sentry/node';
 import { LRUCache } from 'lru-cache';
 
 import {
@@ -166,113 +165,90 @@ export class LmlLookupCoordinator {
     options?: CoordinatorLookupOptions
   ): Promise<LookupResponse | null> {
     const key = this.cacheKey(artist, album, song);
-    // BS#1826 PR 2: `options?.caller` is now the typed, registered
-    // `LmlCaller` union (or `undefined` on the zero-args overload) — no
-    // longer a loose `string` that could be defaulted to the literal
-    // `'unknown'` and threaded back into a `caller: LmlCaller` field
-    // downstream. `callerLabel` is a `string`-widened copy for Sentry
-    // attribute projection ONLY; `options.caller` itself (still `LmlCaller |
-    // undefined`) is what actually forwards to `fetchUncached` below, so a
-    // real caller is never overwritten and an absent one stays absent.
-    const callerLabel: string = options?.caller ?? 'unknown';
+    const cached = this.cache.get(key);
+    if (cached) {
+      return this.applyTrustGate(cached, options);
+    }
 
-    return Sentry.startSpan({ name: 'lml.coordinator.lookup', op: 'function' }, async (span) => {
-      const cached = this.cache.get(key);
-      if (cached) {
-        this.setSpanAttrs(span, { hit: 'cache', caller: callerLabel });
-        return this.applyTrustGate(cached, options, span);
-      }
+    const existing = this.inflight.get(key);
+    if (existing) {
+      return this.applyTrustGate(await existing.promise, options);
+    }
 
-      const existing = this.inflight.get(key);
-      if (existing) {
-        this.setSpanAttrs(span, { hit: 'inflight', caller: callerLabel });
-        return this.applyTrustGate(await existing.promise, options, span);
-      }
+    // Populate cache BEFORE releasing the in-flight entry. The naive
+    // `.finally(() => inflight.delete(key))` runs *before* the outer
+    // `await promise` resumes to set the cache, opening a microtask
+    // gap where a same-key caller arriving in the gap sees neither
+    // cache nor inflight and issues a redundant wire call. Sequencing
+    // cache.set → inflight.delete inside the settle chain itself
+    // closes the gap for a response that DOES get cached — an arriving
+    // caller then always sees the cache hit by the next event-loop
+    // turn. BS#2528: this is no longer every settled response — a
+    // caller-relative reply (`isCallerRelativeDegradation`) skips the
+    // `cache.set` below on purpose, so a caller arriving after that
+    // settle sees neither cache nor inflight and reissues a fresh wire
+    // call, same as it would after an error. Rejections skip the
+    // success arm and propagate through `.finally`; the in-flight
+    // entry is then cleared without caching the error, so the next
+    // request retries.
+    //
+    // **Read-only contract**: the cached `LookupResponse` is returned
+    // by reference to every coalesced + cache-hit caller for up to 5
+    // min. Callsites must NOT mutate the response or any nested field
+    // (`results`, `artwork`, etc.) — doing so poisons subsequent reads.
+    // All current callsites read-only; a deep freeze would be safer
+    // but costs O(n) per cache-set on every response. Tracked as a
+    // follow-up if mutation footguns appear.
+    // Forward `options` as-is so a real caller is never overwritten and an absent one stays absent.
+    const settle = this.fetchUncached(artist, album, song, options)
+      .then((result) => {
+        // BS#1748: a limiter shed RESOLVES as an empty LookupResponse (the
+        // client degrades simple callers gracefully), but caching it here —
+        // and letting it flow to ArtworkFinder as an empty array — would
+        // record a transient ~30 s breaker-open / queue saturation as a
+        // CONFIRMED no-match for 5 min (this LRU) to ~24 h (the artwork
+        // negative cache), the exact BS#1089 regression. Surface a shed as
+        // the transient failure it is: throw so it's neither cached here nor
+        // negative-cached downstream (ArtworkFinder's erroredResponse path),
+        // matching how a timeout already behaves at this boundary.
+        const shedReason = shedReasonOf(result);
+        if (shedReason) {
+          throw new LimiterShedError(shedReason);
+        }
+        // BS#2528: a degraded/timeout reply whose outcome depends on the
+        // CALLING request itself — a short-budget caller's deadline
+        // exhausted, LML's admission shed returning `cache_only` only to
+        // a low-priority caller class, or an internal timeout source the
+        // wire shape can't distinguish from either of those — is not
+        // evidence about the catalog. Writing it here would replay one
+        // caller's circumstances to every other caller sharing this key
+        // for up to 5 min. Still returned, never thrown: the asking
+        // caller's own degraded-reply handling (`enrichWithArtwork`,
+        // `applyTrustGate`, etc.) sees it exactly as LML sent it. Only
+        // `degraded_reason: 'upstream_unavailable'` describes LML's own
+        // load — equally true for every caller — and keeps caching as
+        // before.
+        if (!isCallerRelativeDegradation(result)) {
+          this.cache.set(key, result);
+        }
+        return result;
+      })
+      .finally(() => {
+        this.inflight.delete(key);
+      });
+    this.inflight.set(key, { promise: settle });
 
-      // Populate cache BEFORE releasing the in-flight entry. The naive
-      // `.finally(() => inflight.delete(key))` runs *before* the outer
-      // `await promise` resumes to set the cache, opening a microtask
-      // gap where a same-key caller arriving in the gap sees neither
-      // cache nor inflight and issues a redundant wire call. Sequencing
-      // cache.set → inflight.delete inside the settle chain itself
-      // closes the gap for a response that DOES get cached — an arriving
-      // caller then always sees the cache hit by the next event-loop
-      // turn. BS#2528: this is no longer every settled response — a
-      // caller-relative reply (`isCallerRelativeDegradation`) skips the
-      // `cache.set` below on purpose, so a caller arriving after that
-      // settle sees neither cache nor inflight and reissues a fresh wire
-      // call, same as it would after an error. Rejections skip the
-      // success arm and propagate through `.finally`; the in-flight
-      // entry is then cleared without caching the error, so the next
-      // request retries.
-      //
-      // **Read-only contract**: the cached `LookupResponse` is returned
-      // by reference to every coalesced + cache-hit caller for up to 5
-      // min. Callsites must NOT mutate the response or any nested field
-      // (`results`, `artwork`, etc.) — doing so poisons subsequent reads.
-      // All current callsites read-only; a deep freeze would be safer
-      // but costs O(n) per cache-set on every response. Tracked as a
-      // follow-up if mutation footguns appear.
-      // Forward `options` as-is — `options.caller` is already the same
-      // `LmlCaller | undefined` value `callerLabel` above widened for
-      // Sentry projection, so there is no "resolved vs. raw" divergence
-      // left to reconcile (BS#1826 PR 2: pre-PR2 this defaulted a missing
-      // caller to the literal `'unknown'` and threaded THAT back onto the
-      // wire options; that literal is not a member of `LmlCaller`, so it
-      // can no longer be forwarded through a typed `caller` field).
-      const settle = this.fetchUncached(artist, album, song, options)
-        .then((result) => {
-          // BS#1748: a limiter shed RESOLVES as an empty LookupResponse (the
-          // client degrades simple callers gracefully), but caching it here —
-          // and letting it flow to ArtworkFinder as an empty array — would
-          // record a transient ~30 s breaker-open / queue saturation as a
-          // CONFIRMED no-match for 5 min (this LRU) to ~24 h (the artwork
-          // negative cache), the exact BS#1089 regression. Surface a shed as
-          // the transient failure it is: throw so it's neither cached here nor
-          // negative-cached downstream (ArtworkFinder's erroredResponse path),
-          // matching how a timeout already behaves at this boundary.
-          const shedReason = shedReasonOf(result);
-          if (shedReason) {
-            throw new LimiterShedError(shedReason);
-          }
-          // BS#2528: a degraded/timeout reply whose outcome depends on the
-          // CALLING request itself — a short-budget caller's deadline
-          // exhausted, LML's admission shed returning `cache_only` only to
-          // a low-priority caller class, or an internal timeout source the
-          // wire shape can't distinguish from either of those — is not
-          // evidence about the catalog. Writing it here would replay one
-          // caller's circumstances to every other caller sharing this key
-          // for up to 5 min. Still returned, never thrown: the asking
-          // caller's own degraded-reply handling (`enrichWithArtwork`,
-          // `applyTrustGate`, etc.) sees it exactly as LML sent it. Only
-          // `degraded_reason: 'upstream_unavailable'` describes LML's own
-          // load — equally true for every caller — and keeps caching as
-          // before.
-          if (!isCallerRelativeDegradation(result)) {
-            this.cache.set(key, result);
-          }
-          return result;
-        })
-        .finally(() => {
-          this.inflight.delete(key);
-        });
-      this.inflight.set(key, { promise: settle });
-      this.setSpanAttrs(span, { hit: 'miss', caller: callerLabel });
-
-      return this.applyTrustGate(await settle, options, span);
-    });
+    return this.applyTrustGate(await settle, options);
   }
 
   /**
    * Per-call gate: cached responses are stored raw so a permissive caller
    * and a strict caller can share one cached payload and reach different
-   * verdicts. The rejection attribute lands on the per-lookup span,
-   * co-located with `lml.coordinator.hit` and `.caller`.
+   * verdicts.
    */
   private applyTrustGate(
     response: LookupResponse,
-    options: CoordinatorLookupOptions | undefined,
-    span: ReturnType<typeof Sentry.getActiveSpan>
+    options: CoordinatorLookupOptions | undefined
   ): LookupResponse | null {
     if (!options?.requireSearchType) return response;
     // BS#1356: delegates to the shared predicate instead of re-deriving the
@@ -281,13 +257,6 @@ export class LmlLookupCoordinator {
     // prior direct comparison — including the fail-closed-on-absent case,
     // which strict equality inside the predicate already handles.
     if (isTrustedLmlAlbumMatch(response)) return response;
-    if (span) {
-      try {
-        span.setAttribute('lml.coordinator.trust_reject_reason', `search_type:${response.search_type}`);
-      } catch (err) {
-        console.warn('lml.coordinator: failed to project trust_reject_reason onto span', err);
-      }
-    }
     return null;
   }
 
@@ -319,21 +288,6 @@ export class LmlLookupCoordinator {
    */
   private cacheKey(artist: string | undefined, album: string | undefined, song: string | undefined): string {
     return [normalize(artist), normalize(album), normalize(song)].join('|');
-  }
-
-  private setSpanAttrs(
-    span: ReturnType<typeof Sentry.getActiveSpan>,
-    attrs: { hit: 'cache' | 'inflight' | 'miss'; caller: string }
-  ): void {
-    if (!span) return;
-    try {
-      span.setAttributes({
-        'lml.coordinator.hit': attrs.hit,
-        'lml.coordinator.caller': attrs.caller,
-      });
-    } catch (err) {
-      console.warn('lml.coordinator: failed to project attrs onto span', err);
-    }
   }
 }
 

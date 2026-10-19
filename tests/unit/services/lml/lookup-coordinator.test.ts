@@ -53,22 +53,6 @@ jest.mock('@wxyc/lml-client', () => {
   };
 });
 
-// Capture span attribute writes so the requireSearchType tests can assert
-// `lml.coordinator.trust_reject_reason` lands on the per-lookup span. The
-// real Sentry SDK is uninitialized in unit tests and `startSpan` would pass
-// a no-op span — useless for verifying observability output.
-const mockSpanSetAttribute = jest.fn();
-const mockSpanSetAttributes = jest.fn();
-type StartSpanCallback<T> = (span: {
-  setAttribute: typeof mockSpanSetAttribute;
-  setAttributes: typeof mockSpanSetAttributes;
-}) => T | Promise<T>;
-jest.mock('@sentry/node', () => ({
-  ...jest.requireActual<object>('@sentry/node'),
-  startSpan: <T>(_opts: unknown, cb: StartSpanCallback<T>) =>
-    cb({ setAttribute: mockSpanSetAttribute, setAttributes: mockSpanSetAttributes }),
-}));
-
 import {
   LmlLookupCoordinator,
   _resetLmlLookupCoordinatorForTest,
@@ -507,8 +491,7 @@ describe('LmlLookupCoordinator', () => {
     // compilation, fallback, song_as_artist, none) are candidate matches LML
     // returned when the typed album wasn't found; persisting them off a
     // librarian-typed row writes the wrong release. Gate lives at the
-    // coordinator so the rejection attribute lands on the per-lookup span
-    // co-located with `lml.coordinator.hit` and `.caller`. BS#1355.
+    // coordinator. BS#1355.
 
     function withSearchType(search_type: LookupResponse['search_type']): LookupResponse {
       return { ...fakeResponse(), search_type };
@@ -525,7 +508,7 @@ describe('LmlLookupCoordinator', () => {
       expect(result?.search_type).toBe('alternative');
     });
 
-    it('returns null and emits trust_reject_reason when search_type does not match', async () => {
+    it('returns null when search_type does not match', async () => {
       mockLookupMetadata.mockResolvedValue(withSearchType('alternative'));
 
       const result = await lmlLookupCoordinator.lookup('Noura', 'Yenbett', undefined, {
@@ -534,13 +517,9 @@ describe('LmlLookupCoordinator', () => {
       });
 
       expect(result).toBeNull();
-      expect(mockSpanSetAttribute).toHaveBeenCalledWith(
-        'lml.coordinator.trust_reject_reason',
-        'search_type:alternative'
-      );
     });
 
-    it('passes the response through when search_type matches and emits no reject attribute', async () => {
+    it('passes the response through when search_type matches', async () => {
       mockLookupMetadata.mockResolvedValue(withSearchType('direct'));
 
       const result = await lmlLookupCoordinator.lookup('Autechre', 'Confield', undefined, {
@@ -550,7 +529,6 @@ describe('LmlLookupCoordinator', () => {
 
       expect(result).not.toBeNull();
       expect(result?.search_type).toBe('direct');
-      expect(mockSpanSetAttribute).not.toHaveBeenCalledWith('lml.coordinator.trust_reject_reason', expect.anything());
     });
 
     it.each<LookupResponse['search_type']>(['alternative', 'compilation', 'fallback', 'song_as_artist', 'none'])(
@@ -564,10 +542,6 @@ describe('LmlLookupCoordinator', () => {
         });
 
         expect(result).toBeNull();
-        expect(mockSpanSetAttribute).toHaveBeenCalledWith(
-          'lml.coordinator.trust_reject_reason',
-          `search_type:${search_type}`
-        );
       }
     );
 
@@ -590,10 +564,6 @@ describe('LmlLookupCoordinator', () => {
       });
       expect(strict).toBeNull();
       expect(mockLookupMetadata).not.toHaveBeenCalled();
-      expect(mockSpanSetAttribute).toHaveBeenCalledWith(
-        'lml.coordinator.trust_reject_reason',
-        'search_type:alternative'
-      );
     });
   });
 

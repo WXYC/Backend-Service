@@ -1,4 +1,3 @@
-import * as Sentry from '@sentry/node';
 import { inArray, sql, type Column, type SQL } from 'drizzle-orm';
 import {
   db,
@@ -466,16 +465,7 @@ export async function searchLibrary(
   const trimmed = params.q.trim();
   if (!passesCascadeGate(trimmed, conditions)) return { results, total };
 
-  // Attribute set at startSpan creation so Sentry indexes it numerically
-  // (avoids the BS#1081 string-typing trap that breaks avg/p50/p90).
-  const cascadeResults = await Sentry.startSpan(
-    {
-      name: 'catalog.cascade',
-      op: 'catalog.cascade',
-      attributes: { 'cascade.query_word_count': conditions.length },
-    },
-    () => runCascade(params, trimmed)
-  );
+  const cascadeResults = await runCascade(params, trimmed);
   if (cascadeResults.length === 0) return { results, total };
   // Today's pure-fallback path (zero primary rows at all — alias OFF or
   // alias ON with no alias hits either), unchanged.

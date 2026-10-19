@@ -1,7 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, isNull, ne, notExists, or, sql, SQL, type Column } from 'drizzle-orm';
 import { alias, getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
-import * as Sentry from '@sentry/node';
 import { getErrorReporter, logCounter } from '@wxyc/observability';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
@@ -2373,36 +2372,6 @@ export function isVariousArtistsName(name: string): boolean {
   return false;
 }
 
-/**
- * Classify why a tier-3 LML lookup did or didn't produce a trusted match, for
- * `projectPickerLmlOutcome` below. `trusted` wins outright (a positive result
- * is a positive result, degraded or not); otherwise `degraded`/`timeout`
- * take priority over a plain untrusted `search_type`, since they're the more
- * specific "LML couldn't fully answer" signal BS#2731 exists to track.
- */
-function classifyPickerLmlOutcome(trusted: boolean, response: LookupResponse): string {
-  if (trusted) return 'trusted';
-  if (response.degraded) return `degraded:${response.degraded_reason ?? 'unknown'}`;
-  if (response.timeout) return 'timeout';
-  return `untrusted:${response.search_type ?? 'unknown'}`;
-}
-
-/**
- * BS#2731: per-call telemetry for the tier-3 picker lookup, restoring
- * visibility the old `requireSearchType` gate collapsed away (that gate
- * turned "degraded" and "untrusted match" into the same opaque `null`).
- * Mirrors the coordinator's own `trust_reject_reason` span projection
- * (`lookup-coordinator.ts`'s `applyTrustGate`) — same try/catch-and-warn
- * shape, same "the active span, whatever it is" target.
- */
-function projectPickerLmlOutcome(outcome: string): void {
-  try {
-    Sentry.getActiveSpan()?.setAttribute('picker.lml_outcome', outcome);
-  } catch (err) {
-    console.warn('[library.service] failed to project picker.lml_outcome onto span', err);
-  }
-}
-
 async function resolveRotationDiscogsReleaseViaLml(
   rotationId: number,
   artistName: string | null,
@@ -2446,8 +2415,6 @@ async function resolveRotationDiscogsReleaseViaLml(
       source = releaseId !== null || inlineTracklist !== null ? { releaseId, inlineTracklist } : null;
     }
 
-    projectPickerLmlOutcome(classifyPickerLmlOutcome(trusted, response));
-
     // Only the negative branch is gated on degraded/timeout — a trusted
     // match extracted above is real and already sitting in `source`
     // regardless of this flag (BS#1890-style: a degraded reply packages
@@ -2463,7 +2430,6 @@ async function resolveRotationDiscogsReleaseViaLml(
     // cache, no stamp, same as before BS#2731. The picker degrades to
     // free-text for this one request; the next request retries LML from
     // scratch.
-    projectPickerLmlOutcome('error');
     console.warn(
       '[library.service] LML /lookup for rotation_id=%d failed; degrading picker to free-text: %s',
       rotationId,
@@ -3115,71 +3081,6 @@ export function classifyArtworkEnrichOutcome(
     : 'retryable_trusted';
 }
 
-/**
- * Cap on how many `library.id`s `projectArtworkEnrichOutcomes` joins into
- * `artwork_enrich.retryable_deadline_trusted_ids`. Span attributes are
- * strings/numbers of bounded size; this keeps one call's row-identity
- * attribute small regardless of batch size (`ARTWORK_WARM_MAX_ROWS` bounds
- * the batch itself, but a `searchForAlbum` call is unbounded).
- */
-const ARTWORK_ENRICH_DEADLINE_TRUSTED_IDS_CAP = 20;
-
-/**
- * BS#2766: tally per-row outcomes across one `enrichWithArtwork` call and
- * set the `artwork_enrich.*` attributes once, on the span this call owns —
- * the `span` parameter, NEVER `Sentry.getActiveSpan()` — after
- * `Promise.allSettled` resolves. One attribute per row would overwrite
- * itself under one shared span.
- *
- * Both of `enrichWithArtwork`'s call sites (`library.controller.ts`'s
- * `searchForAlbum` and the catalog-query warm path) run it detached: neither
- * awaits it, and the HTTP response goes out before this function's first LML
- * round-trip resolves. By then the request's own Express span
- * (`request_handler.express`, what a plain `Sentry.getActiveSpan()` call in
- * the detached continuation would return) has already ended and is frozen —
- * `SentrySpan.setAttribute` silently no-ops on a frozen span, and that op is
- * separately stripped from any surviving transaction by
- * `filterSentryTransactionEvent` (`shared/observability/src/sentry-filters.ts`)
- * regardless. `enrichWithArtwork` therefore opens its OWN `forceTransaction:
- * true` span below (after the three early returns, so a call that budgets no
- * lookups creates no transaction) and writes onto THAT span directly — a
- * detached `getActiveSpan()` attribute never reaches Sentry; an attribute on
- * a call-owned `forceTransaction` span does, as its own transaction sharing
- * the originating request's trace id.
- *
- * `deadlineTrustedIds` feeds `artwork_enrich.retryable_deadline_trusted_ids`
- * (comma-joined, capped, omitted entirely when empty) — row identity for the
- * one population the decision gate's two-week sum needs to de-duplicate: a
- * retryable row is re-asked on every later search that returns it, so a raw
- * count is asks, not rows.
- */
-function projectArtworkEnrichOutcomes(
-  span: Sentry.Span,
-  tally: Record<ArtworkEnrichOutcome, number>,
-  deadlineTrustedIds: number[]
-): void {
-  try {
-    const attributes: Record<string, number | string> = {
-      'artwork_enrich.persisted': tally.persisted + tally.persisted_degraded,
-      'artwork_enrich.persisted_degraded': tally.persisted_degraded,
-      'artwork_enrich.stamped': tally.stamped,
-      'artwork_enrich.retryable_degraded':
-        tally.retryable_untrusted + tally.retryable_trusted + tally.retryable_trusted_deadline,
-      'artwork_enrich.retryable_degraded_trusted': tally.retryable_trusted + tally.retryable_trusted_deadline,
-      'artwork_enrich.retryable_deadline_trusted': tally.retryable_trusted_deadline,
-      'artwork_enrich.rejected': tally.rejected,
-    };
-    if (deadlineTrustedIds.length > 0) {
-      attributes['artwork_enrich.retryable_deadline_trusted_ids'] = deadlineTrustedIds
-        .slice(0, ARTWORK_ENRICH_DEADLINE_TRUSTED_IDS_CAP)
-        .join(',');
-    }
-    span.setAttributes(attributes);
-  } catch (err) {
-    console.warn('[Library] failed to project artwork_enrich outcomes onto span', err);
-  }
-}
-
 export async function enrichWithArtwork<T extends ArtworkEnrichable>(
   results: T[],
   options: { maxLookups?: number } = {}
@@ -3194,119 +3095,90 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
   const budgeted = options.maxLookups === undefined ? eligible : eligible.slice(0, options.maxLookups);
   if (budgeted.length === 0) return results;
 
-  // BS#2766: own transaction, opened here (after every early return, so a
-  // call that budgets no lookups creates none) rather than relying on
-  // whatever span is active when this detached call started — see
-  // `projectArtworkEnrichOutcomes` for why. `forceTransaction: true` also
-  // makes the per-row `lml.coordinator.lookup` spans below children of THIS
-  // transaction instead of shipping as standalone orphan transactions.
-  return Sentry.startSpan(
-    { name: 'enrichWithArtwork', op: 'catalog.artwork_enrich', forceTransaction: true },
-    async (span): Promise<T[]> => {
-      const settlements = await Promise.allSettled(
-        budgeted.map(async (row): Promise<ArtworkEnrichOutcome | undefined> => {
-          // Deliberately NOT `requireSearchType: 'direct'`, though the trust
-          // rule is unchanged and `isTrustedLmlAlbumMatch` below is the very
-          // predicate that gate applies. The coordinator's gate collapses
-          // "LML degraded" and "LML answered, and the match is untrusted"
-          // into the same `null`, and only the second of those may be
-          // stamped — so a caller that has to tell them apart must read the
-          // response itself. Asking without the gate changes nothing else:
-          // cache admission is independent of this gate (BS#2528 — a
-          // response is cached raw, or withheld entirely per
-          // `isCallerRelativeDegradation`, before any requireSearchType
-          // gating ever runs).
-          const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
-            caller: 'library-enrich-artwork',
-          });
-          // Unreachable via this caller's overload (`requireSearchType` is
-          // never passed, so the coordinator's return type is non-null) —
-          // kept as defensive dead code. Not classified: there is no
-          // `LookupResponse` to tally an outcome against.
-          if (lookupResult === null) return undefined;
+  const settlements = await Promise.allSettled(
+    budgeted.map(async (row): Promise<ArtworkEnrichOutcome | undefined> => {
+      // Deliberately NOT `requireSearchType: 'direct'`, though the trust
+      // rule is unchanged and `isTrustedLmlAlbumMatch` below is the very
+      // predicate that gate applies. The coordinator's gate collapses
+      // "LML degraded" and "LML answered, and the match is untrusted"
+      // into the same `null`, and only the second of those may be
+      // stamped — so a caller that has to tell them apart must read the
+      // response itself. Asking without the gate changes nothing else:
+      // cache admission is independent of this gate (BS#2528 — a
+      // response is cached raw, or withheld entirely per
+      // `isCallerRelativeDegradation`, before any requireSearchType
+      // gating ever runs).
+      const lookupResult = await lmlLookupCoordinator.lookup(row.artist_name, row.album_title, undefined, {
+        caller: 'library-enrich-artwork',
+      });
+      // Unreachable via this caller's overload (`requireSearchType` is
+      // never passed, so the coordinator's return type is non-null) —
+      // kept as defensive dead code. Not classified: there is no
+      // `LookupResponse` to tally an outcome against.
+      if (lookupResult === null) return undefined;
 
-          // Evaluate trust and extract artwork BEFORE looking at `degraded`
-          // / `timeout`, mirroring the rotation picker
-          // (`resolveRotationDiscogsReleaseViaLml`, BS#2731) and
-          // `DiscogsProvider.search` (BS#1890). A degraded/timed-out reply
-          // carries whatever `state` LML had accumulated at the moment it
-          // shed — artwork is present only when the shed landed after
-          // `fetch_artwork` ran, and when it's present it's real, since
-          // `api.yaml` defines `degraded` as "trustworthy but incomplete",
-          // not "says nothing about this release." So a trusted match with
-          // a usable cover is persisted regardless of either flag.
-          // `trusted` is saved (rather than re-derived) so the BS#2766
-          // outcome classification below can read it without a second
-          // `isTrustedLmlAlbumMatch` call.
-          const trusted = isTrustedLmlAlbumMatch(lookupResult);
-          const artworkUrl = trusted ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url) : null;
-          // BS#2766: classify once, up front — the branches below are
-          // exactly the behavior this classification mirrors (see
-          // `classifyArtworkEnrichOutcome`), so computing it here rather
-          // than at each `return` can't drift from what the row actually
-          // did.
-          const outcome = classifyArtworkEnrichOutcome(trusted, Boolean(artworkUrl), lookupResult);
-          if (artworkUrl) {
-            row.artwork_url = artworkUrl;
-            await updateArtworkUrl(row.id, artworkUrl);
-            return outcome;
-          }
-
-          // Nothing usable above. A degraded/timed-out reply with no usable
-          // trusted cover leaves the row retryable rather than stamping it
-          // as a confirmed miss — caller deadline, admission-control
-          // pressure, or an upstream it couldn't reach. This caller's
-          // `library-enrich-artwork` class carries a 2000 ms LML budget
-          // (`policy.ts`'s `LIBRARY_ENRICH_ARTWORK_BUDGET_FALLBACK_MS`),
-          // which makes `deadline_exceeded` LML's routine answer on a cold
-          // Discogs cascade — exactly the hard-to-resolve rows the marker
-          // exists for, so stamping here would poison the population it is
-          // meant to serve. Known limit: this call site can't distinguish
-          // "LML shed before `fetch_artwork` ran" from "`fetch_artwork` ran
-          // and found nothing" — a degraded/timeout reply is conservatively
-          // treated as "couldn't ask" either way, so both shapes stay
-          // retryable rather than risk stamping a row LML never actually
-          // checked. Client-side sheds never reach this line: the
-          // coordinator re-throws those (BS#1748).
-          if (lookupResult.degraded || lookupResult.timeout) return outcome;
-
-          // Below this point LML genuinely responded about this release
-          // with nothing usable, so that is durable knowledge and gets
-          // stamped: the match was untrusted, or it was trusted and
-          // carried no usable cover. A transient failure throws past all
-          // of this into the rejected settlement arm.
-          await stampArtworkLookupAttempt(row.id);
-          return outcome;
-        })
-      );
-
-      const tally: Record<ArtworkEnrichOutcome, number> = {
-        persisted: 0,
-        persisted_degraded: 0,
-        stamped: 0,
-        retryable_untrusted: 0,
-        retryable_trusted: 0,
-        retryable_trusted_deadline: 0,
-        rejected: 0,
-      };
-      const deadlineTrustedIds: number[] = [];
-      for (let i = 0; i < settlements.length; i++) {
-        const settlement = settlements[i];
-        if (settlement.status === 'rejected') {
-          tally.rejected += 1;
-          console.warn('[Library] Artwork enrichment failed:', settlement.reason);
-        } else if (settlement.value !== undefined) {
-          tally[settlement.value] += 1;
-          if (settlement.value === 'retryable_trusted_deadline') {
-            deadlineTrustedIds.push(budgeted[i].id);
-          }
-        }
+      // Evaluate trust and extract artwork BEFORE looking at `degraded`
+      // / `timeout`, mirroring the rotation picker
+      // (`resolveRotationDiscogsReleaseViaLml`, BS#2731) and
+      // `DiscogsProvider.search` (BS#1890). A degraded/timed-out reply
+      // carries whatever `state` LML had accumulated at the moment it
+      // shed — artwork is present only when the shed landed after
+      // `fetch_artwork` ran, and when it's present it's real, since
+      // `api.yaml` defines `degraded` as "trustworthy but incomplete",
+      // not "says nothing about this release." So a trusted match with
+      // a usable cover is persisted regardless of either flag.
+      // `trusted` is saved (rather than re-derived) so the BS#2766
+      // outcome classification below can read it without a second
+      // `isTrustedLmlAlbumMatch` call.
+      const trusted = isTrustedLmlAlbumMatch(lookupResult);
+      const artworkUrl = trusted ? filterSpacerGif(lookupResult.results?.[0]?.artwork?.artwork_url) : null;
+      // BS#2766: classify once, up front — the branches below are
+      // exactly the behavior this classification mirrors (see
+      // `classifyArtworkEnrichOutcome`), so computing it here rather
+      // than at each `return` can't drift from what the row actually
+      // did.
+      const outcome = classifyArtworkEnrichOutcome(trusted, Boolean(artworkUrl), lookupResult);
+      if (artworkUrl) {
+        row.artwork_url = artworkUrl;
+        await updateArtworkUrl(row.id, artworkUrl);
+        return outcome;
       }
-      projectArtworkEnrichOutcomes(span, tally, deadlineTrustedIds);
 
-      return results;
-    }
+      // Nothing usable above. A degraded/timed-out reply with no usable
+      // trusted cover leaves the row retryable rather than stamping it
+      // as a confirmed miss — caller deadline, admission-control
+      // pressure, or an upstream it couldn't reach. This caller's
+      // `library-enrich-artwork` class carries a 2000 ms LML budget
+      // (`policy.ts`'s `LIBRARY_ENRICH_ARTWORK_BUDGET_FALLBACK_MS`),
+      // which makes `deadline_exceeded` LML's routine answer on a cold
+      // Discogs cascade — exactly the hard-to-resolve rows the marker
+      // exists for, so stamping here would poison the population it is
+      // meant to serve. Known limit: this call site can't distinguish
+      // "LML shed before `fetch_artwork` ran" from "`fetch_artwork` ran
+      // and found nothing" — a degraded/timeout reply is conservatively
+      // treated as "couldn't ask" either way, so both shapes stay
+      // retryable rather than risk stamping a row LML never actually
+      // checked. Client-side sheds never reach this line: the
+      // coordinator re-throws those (BS#1748).
+      if (lookupResult.degraded || lookupResult.timeout) return outcome;
+
+      // Below this point LML genuinely responded about this release
+      // with nothing usable, so that is durable knowledge and gets
+      // stamped: the match was untrusted, or it was trusted and
+      // carried no usable cover. A transient failure throws past all
+      // of this into the rejected settlement arm.
+      await stampArtworkLookupAttempt(row.id);
+      return outcome;
+    })
   );
+
+  for (const settlement of settlements) {
+    if (settlement.status === 'rejected') {
+      console.warn('[Library] Artwork enrichment failed:', settlement.reason);
+    }
+  }
+
+  return results;
 }
 
 /**
@@ -8485,17 +8357,9 @@ export async function searchAlbumsByTitle(albumTitle: string, limit = 5): Promis
 async function searchLibraryByTrackUncachedOrThrow(
   query: string
 ): Promise<{ results: TaggedLibraryViewEntry[]; cacheable: boolean }> {
-  const lookupStart = performance.now();
   const response = await lookupBySong(query, {
     caller: 'library-track-search',
   });
-  try {
-    Sentry.getActiveSpan()?.setAttributes({
-      'track_search.master_lookup_ms': performance.now() - lookupStart,
-    });
-  } catch (err) {
-    console.warn('[Library] searchLibraryByTrack: failed to project master_lookup_ms onto span', err);
-  }
 
   // Checked separately: `shedReasonOf` reads `.outcome`, which
   // `isCallerRelativeDegradation` can't see (`timeout`/`degraded` are
@@ -8677,49 +8541,37 @@ export function __resetTrackSearchCacheForTests(): void {
  * @returns Array of enriched library results with `matched_via` populated
  */
 export async function searchLibraryByTrackRaw(query: string, limit: number): Promise<TaggedLibraryViewEntry[]> {
-  return Sentry.startSpan({ name: 'searchLibraryByTrack', op: 'catalog.track_search' }, async (span) => {
-    const start = performance.now();
-    // track_search.master_lookup_ms is set only on a miss, by
-    // searchLibraryByTrackUncachedOrThrow via the active span.
-    // `cacheable` starts false so neither the catch arm (LML threw) nor the
-    // cache-hit arm (the inner call never runs) reaches `trackSearchCache.set`
-    // below.
-    let cacheable = false;
-    let results: TaggedLibraryViewEntry[];
+  // `cacheable` starts false so neither the catch arm (LML threw) nor the
+  // cache-hit arm (the inner call never runs) reaches `trackSearchCache.set`
+  // below.
+  let cacheable = false;
+  let results: TaggedLibraryViewEntry[];
 
-    const key = trackSearchCacheKey(query);
-    const cached = trackSearchCache.get(key);
-    const cacheHit = cached !== undefined;
-    if (cacheHit) {
-      results = cached.slice(0, limit);
-    } else {
-      // Fetch the full LML-bounded result; the cache stores the un-sliced array.
-      try {
-        const outcome = await searchLibraryByTrackUncachedOrThrow(query);
-        results = outcome.results;
-        cacheable = outcome.cacheable;
-      } catch {
-        results = [];
-      }
-      if (cacheable) {
-        trackSearchCache.set(key, results);
-      }
-      results = results.slice(0, limit);
-    }
-    // BS#989: chokepoint cache-stats count — placed after the possible
-    // `.set()` above so the recorded `cache_size` reflects the post-touch
-    // occupancy.
-    recordCacheLookup('track_search', cacheHit, trackSearchCache);
-
-    // Observability must never break the request path. If the Sentry SDK
-    // (or a custom transport hook) throws, swallow the error and continue.
+  const key = trackSearchCacheKey(query);
+  const cached = trackSearchCache.get(key);
+  const cacheHit = cached !== undefined;
+  if (cacheHit) {
+    results = cached.slice(0, limit);
+  } else {
+    // Fetch the full LML-bounded result; the cache stores the un-sliced array.
     try {
-      span.setAttributes({ 'track_search.latency_ms': performance.now() - start });
-    } catch (err) {
-      console.warn('[Library] searchLibraryByTrack: failed to project latency onto span', err);
+      const outcome = await searchLibraryByTrackUncachedOrThrow(query);
+      results = outcome.results;
+      cacheable = outcome.cacheable;
+    } catch {
+      results = [];
     }
-    return results;
-  });
+    if (cacheable) {
+      trackSearchCache.set(key, results);
+    }
+    results = results.slice(0, limit);
+  }
+  // BS#989: chokepoint cache-stats count — placed after the possible
+  // `.set()` above so the recorded `cache_size` reflects the post-touch
+  // occupancy.
+  recordCacheLookup('track_search', cacheHit, trackSearchCache);
+
+  return results;
 }
 
 /**

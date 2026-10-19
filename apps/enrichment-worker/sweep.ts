@@ -46,23 +46,8 @@
  *   to keep that invariant even if the policy's budget is bumped via its
  *   `LML_CLASS5_TIMEOUT_MS` env lever. The 60s floor matches the original
  *   C6 design.
- *
- * Sentry projection:
- *
- *   Operational outcome surfaces as TWO spans per tick: the outer
- *   `enrichment.sweep.stranded` op span marks the work, and a child
- *   `enrichment.sweep.stranded.result` span carries the numeric
- *   `sweep.stranded_recovered_count` via the `attributes` field of
- *   `startSpan`. Per BS#1081 (and MEMORY's
- *   `feedback_sentry_attribute_typing_trap`), numeric values set via
- *   `setAttribute(name, number)` AFTER span creation are indexed as
- *   strings, breaking aggregation (avg/p50/p95/sum) on Sentry trace
- *   explorer dashboards. Passing them via the `attributes` option at
- *   creation indexes them as numbers. Same pattern as
- *   `jobs/artist-search-alias-consumer/job.ts:75-100`.
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import { db, flowsheet } from '@wxyc/database';
 import { resolveLmlPolicy } from '@wxyc/lml-client';
@@ -94,38 +79,16 @@ export const STRANDED_TTL_SECONDS = Math.max(60, Math.ceil(ENRICHMENT_LML_BUDGET
  * Sentry; this function does not swallow.
  */
 export async function sweepStrandedClaims(): Promise<number> {
-  return Sentry.startSpan(
-    {
-      name: 'enrichment.sweep.stranded',
-      op: 'db.query',
-      attributes: { 'sweep.ttl_seconds': STRANDED_TTL_SECONDS },
-    },
-    async () => {
-      const reverted = await db
-        .update(flowsheet)
-        .set({
-          metadata_status: 'pending',
-          enriching_since: null,
-        })
-        .where(
-          sql`${flowsheet.metadata_status} = 'enriching' AND ${flowsheet.enriching_since} < now() - make_interval(secs => ${STRANDED_TTL_SECONDS})`
-        )
-        .returning({ id: flowsheet.id });
+  const reverted = await db
+    .update(flowsheet)
+    .set({
+      metadata_status: 'pending',
+      enriching_since: null,
+    })
+    .where(
+      sql`${flowsheet.metadata_status} = 'enriching' AND ${flowsheet.enriching_since} < now() - make_interval(secs => ${STRANDED_TTL_SECONDS})`
+    )
+    .returning({ id: flowsheet.id });
 
-      const count = reverted.length;
-      // Surface the count as a child span whose numeric attribute is set
-      // at creation time (BS#1081 typing-trap workaround). The child span
-      // is a no-op other than as a carrier for the indexed attribute.
-      Sentry.startSpan(
-        {
-          name: 'enrichment.sweep.stranded.result',
-          attributes: { 'sweep.stranded_recovered_count': count },
-        },
-        () => {
-          /* attribute set at creation; nothing else to do */
-        }
-      );
-      return count;
-    }
-  );
+  return reverted.length;
 }

@@ -1,4 +1,3 @@
-import * as Sentry from '@sentry/node';
 import { checkStreamingAvailability, isLmlConfigured } from '@wxyc/lml-client';
 import { Album, db, parseRotationBin, RotationBin, RotationRelease, ROTATION_BINS } from '@wxyc/database';
 import { INT2_MAX, INT4_MAX } from '../utils/constants.js';
@@ -639,18 +638,6 @@ export async function enrichNewAlbum(
       });
     } catch (e) {
       console.warn('Failed to emit streaming-check telemetry:', (e as Error).message);
-    }
-
-    try {
-      // `on_streaming` is `boolean | null`; Sentry's SpanAttributeValue has
-      // no `null` member, so a null verdict (LML's "inconclusive" case)
-      // omits the attribute entirely rather than coercing it to a string.
-      Sentry.getActiveSpan()?.setAttributes({
-        'streaming_check.errored_sources': streamingResult.value.errored_sources,
-        'streaming_check.on_streaming': streamingResult.value.on_streaming ?? undefined,
-      });
-    } catch (e) {
-      console.warn('Failed to project streaming-check telemetry onto span:', (e as Error).message);
     }
   }
 

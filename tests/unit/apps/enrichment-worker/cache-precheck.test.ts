@@ -30,7 +30,6 @@
 import { jest } from '@jest/globals';
 
 jest.mock('@sentry/node', () => ({
-  startSpan: jest.fn(),
   captureException: jest.fn(),
   captureMessage: jest.fn(),
 }));
@@ -78,8 +77,6 @@ import * as Sentry from '@sentry/node';
 
 import { makeEnrichmentHandler } from '../../../../apps/enrichment-worker/handler';
 
-type SpanLike = { setAttribute: jest.Mock };
-
 const makeCandidate = (overrides: Record<string, unknown> = {}) => ({
   id: 42,
   entry_type: 'track' as const,
@@ -91,16 +88,13 @@ const makeCandidate = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const driveOneTick = async (candidate: ReturnType<typeof makeCandidate>): Promise<SpanLike> => {
-  const span: SpanLike = { setAttribute: jest.fn() };
-  (Sentry.startSpan as jest.Mock).mockImplementation((_opts: unknown, fn: any) => fn(span));
+const driveOneTick = async (candidate: ReturnType<typeof makeCandidate>): Promise<void> => {
   mockFilterForEnrichment.mockReturnValueOnce(candidate);
   mockClaimRowForEnrichment.mockResolvedValueOnce({ claimed: true, id: candidate.id });
 
   const handler = makeEnrichmentHandler();
   handler({} as any);
   await new Promise((resolve) => setImmediate(resolve));
-  return span;
 };
 
 const matchResponse = {
@@ -129,13 +123,11 @@ describe('enrichment-worker cache-first pre-check (B1 / BS#1747)', () => {
     mockHasLoadBearingAlbumMetadata.mockResolvedValueOnce(true);
     mockFinalizeFromCachedMetadata.mockResolvedValueOnce('cache_hit');
 
-    const span = await driveOneTick(makeCandidate({ album_id: 7 }));
+    await driveOneTick(makeCandidate({ album_id: 7 }));
 
     expect(mockHasLoadBearingAlbumMetadata).toHaveBeenCalledWith(7);
     expect(mockEnrichmentBulkLookup).not.toHaveBeenCalled();
     expect(mockFinalizeFromCachedMetadata).toHaveBeenCalledTimes(1);
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'cache_hit');
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.lml_skipped', true);
   });
 
   it('still calls LML when the album row is a self-heal-eligible shell (verdict false)', async () => {
@@ -146,12 +138,11 @@ describe('enrichment-worker cache-first pre-check (B1 / BS#1747)', () => {
     mockEnrichmentBulkLookup.mockResolvedValueOnce(matchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match');
 
-    const span = await driveOneTick(makeCandidate({ album_id: 7 }));
+    await driveOneTick(makeCandidate({ album_id: 7 }));
 
     expect(mockHasLoadBearingAlbumMetadata).toHaveBeenCalledWith(7);
     expect(mockEnrichmentBulkLookup).toHaveBeenCalledTimes(1);
     expect(mockFinalizeFromCachedMetadata).not.toHaveBeenCalled();
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_match');
   });
 
   it('does not consult the pre-check for unlinked rows (album_id null) and always calls LML', async () => {

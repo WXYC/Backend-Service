@@ -306,21 +306,13 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   },
 }));
 
-// BS#1228: streaming-check partial-error telemetry (PostHog capture + Sentry
-// span projection). Mirrors the `getPostHogClient` mock shape once pinned by
-// tests/unit/middleware/legacy/mirror.posthog.test.ts (removed in BS#2403) and the
-// `Sentry.getActiveSpan()?.setAttributes(...)` span mock shape in
-// tests/unit/services/library-search.cascade-span.test.ts.
+// BS#1228: streaming-check partial-error telemetry (PostHog capture). Mirrors the
+// `getPostHogClient` mock shape once pinned by
+// tests/unit/middleware/legacy/mirror.posthog.test.ts (removed in BS#2403).
 const mockPostHogCapture = jest.fn();
 const mockGetPostHogClient = jest.fn(() => ({ capture: mockPostHogCapture }));
 jest.mock('../../../apps/backend/utils/posthog', () => ({
   getPostHogClient: mockGetPostHogClient,
-}));
-
-type SpanLike = { setAttributes: jest.Mock };
-const mockSpan: SpanLike = { setAttributes: jest.fn() };
-jest.mock('@sentry/node', () => ({
-  getActiveSpan: () => mockSpan,
 }));
 
 import {
@@ -1235,21 +1227,6 @@ describe('library.controller', () => {
         });
       });
 
-      it('projects streaming_check.errored_sources and streaming_check.on_streaming onto the active Sentry span', async () => {
-        mockCheckStreamingAvailability.mockResolvedValue({
-          on_streaming: false,
-          errored_sources: ['bandcamp'],
-        });
-
-        const res = mockResponse();
-        await addAlbum(req(), res, next);
-
-        expect(mockSpan.setAttributes).toHaveBeenCalledWith({
-          'streaming_check.errored_sources': ['bandcamp'],
-          'streaming_check.on_streaming': false,
-        });
-      });
-
       it('does not emit telemetry when errored_sources is an empty array', async () => {
         mockCheckStreamingAvailability.mockResolvedValue({ on_streaming: true, errored_sources: [] });
 
@@ -1257,7 +1234,6 @@ describe('library.controller', () => {
         await addAlbum(req(), res, next);
 
         expect(mockPostHogCapture).not.toHaveBeenCalled();
-        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
       });
 
       it('does not emit telemetry when errored_sources is absent (pre-1.8.0 shape / defensive optional chaining)', async () => {
@@ -1267,7 +1243,6 @@ describe('library.controller', () => {
         await addAlbum(req(), res, next);
 
         expect(mockPostHogCapture).not.toHaveBeenCalled();
-        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
       });
 
       it('swallows a PostHog capture failure and degrades to console.warn instead of bubbling up', async () => {
@@ -3477,18 +3452,6 @@ describe('library.controller', () => {
         album_title: null,
         record_label: null,
       });
-      // Where the count does go: the active span, so an import's blast radius
-      // is reconstructable from tracing.
-      expect(mockSpan.setAttributes).toHaveBeenCalledWith({ 'rotation_link.flowsheet_rows_linked': 3 });
-    });
-
-    it('projects nothing onto the span when no link happened', async () => {
-      mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'already_linked' });
-      const req = { params: { rotation_id: '42' }, body: { album_id: 5 } } as unknown as Request;
-      const res = mockResponse();
-
-      await expect(linkRotationToAlbum(req, res, next)).rejects.toThrow('already linked');
-      expect(mockSpan.setAttributes).not.toHaveBeenCalled();
     });
 
     it('returns 404 when the rotation row does not exist', async () => {
@@ -3531,7 +3494,6 @@ describe('library.controller', () => {
       );
       expect(err.statusCode).toBe(409);
       expect(err.code).toBeUndefined();
-      expect(mockSpan.setAttributes).not.toHaveBeenCalled();
     });
   });
 
@@ -6699,64 +6661,6 @@ describe('library.controller', () => {
         );
         expect(mockLinkRotationToAlbum).toHaveBeenCalledWith(12, 8, mockInsertAlbum.mock.calls[0][2]);
         expect(res.status).toHaveBeenCalledWith(201);
-      });
-
-      it('POST /library records rotation_link.flowsheet_rows_linked on the span after the import commits', async () => {
-        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
-        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 3 });
-        mockSpan.setAttributes.mockClear();
-
-        await addAlbum(importReq(12), mockResponse(), next);
-
-        expect(mockSpan.setAttributes).toHaveBeenCalledWith({ 'rotation_link.flowsheet_rows_linked': 3 });
-      });
-
-      it('POST /library records nothing on the span for a refused import', async () => {
-        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
-        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'already_linked' });
-        mockSpan.setAttributes.mockClear();
-
-        await addAlbum(importReq(12), mockResponse(), next);
-
-        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
-      });
-
-      it('POST /library still answers 201 when setting the span attribute throws', async () => {
-        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
-        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 3 });
-        mockSpan.setAttributes.mockImplementationOnce(() => {
-          throw new Error('span closed');
-        });
-        const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-        const res = mockResponse();
-
-        await addAlbum(importReq(12), res, next);
-
-        expect(res.status).toHaveBeenCalledWith(201);
-        expect(consoleWarnSpy).toHaveBeenCalledWith(
-          'Failed to project rotation-link telemetry onto span:',
-          'span closed'
-        );
-        consoleWarnSpy.mockRestore();
-      });
-
-      it('POST /library records nothing on the span when the import transaction fails to commit', async () => {
-        (
-          db.transaction as jest.Mock<(fn: (tx: unknown) => Promise<unknown>) => Promise<unknown>>
-        ).mockImplementationOnce(async (fn) => {
-          await fn(db);
-          throw new Error('commit failed');
-        });
-        mockInsertAlbum.mockImplementation((album) => Promise.resolve({ id: 8, ...album }));
-        mockLinkRotationToAlbum.mockResolvedValue({ outcome: 'linked', rotation: {}, flowsheetRowsLinked: 3 });
-        mockSpan.setAttributes.mockClear();
-
-        const res = mockResponse();
-
-        await expect(addAlbum(importReq(12), res, next)).rejects.toThrow('commit failed');
-
-        expect(res.status).not.toHaveBeenCalledWith(201);
-        expect(mockSpan.setAttributes).not.toHaveBeenCalled();
       });
 
       it('POST /library without it still takes the pre_cutover basis and links nothing', async () => {

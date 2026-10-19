@@ -16,7 +16,6 @@ import {
   venues,
 } from '@wxyc/database';
 import { LRUCache } from 'lru-cache';
-import * as Sentry from '@sentry/node';
 
 /**
  * Concerts read service — backs `GET /concerts` (BS#1603, on-tour
@@ -837,11 +836,6 @@ const upcomingShowsMapsCache = new LRUCache<string, Promise<UpcomingShowsMaps>>(
  */
 export const getUpcomingShowsMapsCached = (today: string): Promise<UpcomingShowsMaps> => {
   const hit = upcomingShowsMapsCache.get(today);
-  // Boolean attribute is safe via the late setAttribute path (the numeric
-  // string-typing trap of BS#1070/#1081 only affects avg/p50 aggregations on
-  // numbers). Lets prod confirm getLatest's hit ratio — i.e. that it stopped
-  // scanning `concerts` on every poll.
-  Sentry.getActiveSpan()?.setAttribute('concerts.upcoming_maps.cache_hit', hit !== undefined);
   if (hit !== undefined) {
     return hit;
   }

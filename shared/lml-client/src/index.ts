@@ -8,8 +8,6 @@
  * Response types are generated from wxyc-shared/api.yaml — see @wxyc/shared/dtos.
  */
 
-import * as Sentry from '@sentry/node';
-
 import type {
   DiscogsReleaseMetadata,
   DiscogsArtistDetails,
@@ -948,9 +946,6 @@ export interface GatedLookupResponse extends LookupResponse {
   outcome?: LookupSkippedOutcome | LookupShedOutcome;
 }
 
-/** Sentry `lml.lookup.skipped_reason` value stamped by the BS#1293 gate. */
-const DISCOGS_UNAVAILABLE_SKIPPED_REASON = 'discogs_unavailable';
-
 /**
  * BS#1748: the `LookupResponse`-shaped empty result the limiter returns in
  * place of a real LML call when a call is shed (queue saturated or breaker
@@ -1068,22 +1063,6 @@ export function isCallerRelativeDegradation(response: {
 }
 
 /**
- * Build the shed `GatedLookupResponse` inside a Sentry span that carries the
- * `lml.shed_reason` attribute, so a shed is queryable in the trace explorer
- * (`lml.shed_reason:shed_breaker_open`) the same way the BS#1293 skip is.
- */
-function shedLookupResponse(reason: LookupShedOutcome, caller: LmlCaller | undefined): GatedLookupResponse {
-  return Sentry.startSpan({ name: 'lml.lookup', op: 'lml.lookup.shed' }, (span) => {
-    try {
-      span.setAttributes({ 'lml.shed_reason': reason, 'lml.caller': caller ?? 'unknown' });
-    } catch (err) {
-      console.warn('lml.client: failed to project shed_reason + caller onto span', err);
-    }
-    return buildShedLookupResponse(reason);
-  });
-}
-
-/**
  * Builds the `LookupResponse`-shaped skipped outcome the BS#1293 gate
  * returns in place of a real LML call — the same required fields a genuine
  * empty result would carry (`results: []`, `search_type: 'none'`, …) plus
@@ -1196,17 +1175,7 @@ async function postLookup(
   }
 ): Promise<GatedLookupResponse> {
   if (options?.discogsUnavailable && !options?.forceLookup) {
-    return Sentry.startSpan({ name: 'lml.lookup', op: 'lml.lookup.skipped' }, async (span) => {
-      try {
-        span.setAttributes({
-          'lml.lookup.skipped_reason': DISCOGS_UNAVAILABLE_SKIPPED_REASON,
-          'lml.caller': options?.caller ?? 'unknown',
-        });
-      } catch (err) {
-        console.warn('lml.client: failed to project skipped_reason + caller onto span', err);
-      }
-      return buildSkippedLookupResponse();
-    });
+    return buildSkippedLookupResponse();
   }
 
   // BS#906 / G4: Mirror LML's Discogs ceilings on the client so back-pressure
@@ -1234,64 +1203,28 @@ async function postLookup(
   );
   try {
     return await activeLimiter.run(async () => {
-      return await Sentry.startSpan({ name: 'lml.lookup', op: 'http.client' }, async (span) => {
-        try {
-          span.setAttributes({
-            'lml.queue_depth': activeLimiter.state().queueDepth,
-            'lml.caller': options?.caller ?? 'unknown',
-          });
-        } catch (err) {
-          console.warn('lml.client: failed to project queue_depth + caller onto span', err);
-        }
+      const response = await lmlFetch(
+        '/api/v1/lookup',
+        {
+          method: 'POST',
+          headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
+          body: JSON.stringify(body),
+        },
+        effectiveTimeoutMs
+      );
 
-        const response = await lmlFetch(
-          '/api/v1/lookup',
-          {
-            method: 'POST',
-            headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
-            body: JSON.stringify(body),
-          },
-          effectiveTimeoutMs
-        );
+      // BS#1710: enforce the streaming-URL host invariant at this untrusted
+      // boundary. LML's `artwork.spotify_url` can carry a non-Spotify URL
+      // (Deezer/Apple/…) sourced from the library `streaming_links` artifact;
+      // null it here so no downstream writer persists it under the Spotify
+      // slot and the writers' `?? searchUrls.spotify_url` fallback wins.
+      const parsed = sanitizeLookupStreamingUrls((await response.json()) as LookupResponse);
 
-        // BS#1710: enforce the streaming-URL host invariant at this untrusted
-        // boundary. LML's `artwork.spotify_url` can carry a non-Spotify URL
-        // (Deezer/Apple/…) sourced from the library `streaming_links` artifact;
-        // null it here so no downstream writer persists it under the Spotify
-        // slot and the writers' `?? searchUrls.spotify_url` fallback wins.
-        const parsed = sanitizeLookupStreamingUrls((await response.json()) as LookupResponse);
-
-        // cache_stats schema is freeform today (additionalProperties: true). Until
-        // wxyc-shared#86 tightens the type, treat it as a loose record and only
-        // forward numeric fields onto the span. Narrow defensively to a real plain
-        // object — Object.entries on a string/array would produce junk attributes
-        // like lml.cache.0=...
-        const stats = (parsed as { cache_stats?: unknown }).cache_stats;
-        if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
-          const attrs: Record<string, number> = {};
-          for (const [key, value] of Object.entries(stats)) {
-            if (typeof value === 'number' && Number.isFinite(value)) {
-              attrs[`lml.cache.${key}`] = value;
-            }
-          }
-          if (Object.keys(attrs).length > 0) {
-            // Observability must never break the request path. If the Sentry SDK
-            // (or a custom transport hook) throws, swallow the error and continue
-            // — the lookup result is what callers depend on.
-            try {
-              span.setAttributes(attrs);
-            } catch (err) {
-              console.warn('lml.client: failed to project cache_stats onto span', err);
-            }
-          }
-        }
-
-        return parsed;
-      });
+      return parsed;
     });
   } catch (err) {
     if (err instanceof LimiterShedError) {
-      return shedLookupResponse(err.reason, options?.caller);
+      return buildShedLookupResponse(err.reason);
     }
     throw err;
   }
@@ -1457,18 +1390,7 @@ export async function bulkLookupMetadata(
   // Every item flagged: skip the wire call entirely, same gate as the
   // single-item path — no limiter/token spend, no fetch.
   if (sendItems.length === 0) {
-    return Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'lml.lookup.skipped' }, async (span) => {
-      try {
-        span.setAttributes({
-          'lml.bulk.size': items.length,
-          'lml.lookup.skipped_reason': DISCOGS_UNAVAILABLE_SKIPPED_REASON,
-          'lml.caller': options?.caller ?? 'unknown',
-        });
-      } catch (err) {
-        console.warn('lml.client: failed to project bulk.size + skipped_reason + caller onto span', err);
-      }
-      return { results: items.map((_, index) => buildSkippedBulkResultItem(index)) };
-    });
+    return { results: items.map((_, index) => buildSkippedBulkResultItem(index)) };
   }
 
   const activeLimiter = options?.limiter ?? defaultLimiter;
@@ -1484,97 +1406,64 @@ export async function bulkLookupMetadata(
   );
   try {
     return await activeLimiter.run(async () => {
-      return await Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'http.client' }, async (span) => {
-        try {
-          span.setAttributes({
-            'lml.queue_depth': activeLimiter.state().queueDepth,
-            'lml.bulk.size': items.length,
-            'lml.caller': options?.caller ?? 'unknown',
-          });
-        } catch (err) {
-          console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto span', err);
+      // BS#1815 / LML#920: query-flag opt-in, mirroring the doc comment on
+      // `allowReleaseResolutionFallback` above. Omitted (not `?...=false`)
+      // when unset so the wire request is byte-identical to the pre-#1815
+      // shape for every caller that doesn't pass the option.
+      const bulkPath = options?.allowReleaseResolutionFallback
+        ? '/api/v1/lookup/bulk?allow_release_resolution_fallback=true'
+        : '/api/v1/lookup/bulk';
+
+      const response = await lmlFetch(
+        bulkPath,
+        {
+          method: 'POST',
+          headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
+          body: JSON.stringify({ items: sendItems }),
+        },
+        effectiveTimeoutMs
+      );
+
+      const parsed = (await response.json()) as BulkLookupResponse & { cache_stats?: unknown };
+
+      // BS#1710: same streaming-URL host invariant as postLookup, applied to
+      // each per-item verdict's nested LookupResponse (null on `status: error`).
+      for (const item of parsed.results ?? []) {
+        if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
+      }
+
+      // BS#1293: with no gated items the wire batch is identical to the
+      // caller's `items` in the same order, so return LML's verdicts
+      // verbatim — preserving each result's own `index`. Reconstructing
+      // positionally in this case would overwrite `.index` with a cursor and
+      // defeat downstream misalignment guards that intentionally trust LML's
+      // reported index (e.g. album-level-backfill's `result.index !== i`
+      // BS#1088 regression pin) and would fabricate `{ index }`-only entries
+      // from a short/gapped response instead of surfacing the mismatch.
+      if (skippedIndices.size === 0) {
+        return { results: parsed.results };
+      }
+
+      // Skips present: the caller's index space diverges from `sendItems`, so
+      // splice the synthetic skipped verdicts back in at their original
+      // positions and reindex the real verdicts (LML returned them aligned to
+      // `sendItems`, not the caller's original `items`) so the final array is
+      // index-aligned with the caller's input in input order.
+      let sentCursor = 0;
+      const results = items.map((_, index) => {
+        if (skippedIndices.has(index)) {
+          return buildSkippedBulkResultItem(index);
         }
-
-        // BS#1815 / LML#920: query-flag opt-in, mirroring the doc comment on
-        // `allowReleaseResolutionFallback` above. Omitted (not `?...=false`)
-        // when unset so the wire request is byte-identical to the pre-#1815
-        // shape for every caller that doesn't pass the option.
-        const bulkPath = options?.allowReleaseResolutionFallback
-          ? '/api/v1/lookup/bulk?allow_release_resolution_fallback=true'
-          : '/api/v1/lookup/bulk';
-
-        const response = await lmlFetch(
-          bulkPath,
-          {
-            method: 'POST',
-            headers: buildLookupHeaders(effectiveBudgetMs, options?.caller),
-            body: JSON.stringify({ items: sendItems }),
-          },
-          effectiveTimeoutMs
-        );
-
-        const parsed = (await response.json()) as BulkLookupResponse & { cache_stats?: unknown };
-
-        // Same defensive cache_stats projection as postLookup (line ~463).
-        // LML aggregates the in-process cache counters across the whole batch
-        // via a single `init_cache_stats()` at the route top, so one set of
-        // attributes per bulk call is correct.
-        const stats = parsed.cache_stats;
-        if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
-          const attrs: Record<string, number> = {};
-          for (const [key, value] of Object.entries(stats)) {
-            if (typeof value === 'number' && Number.isFinite(value)) {
-              attrs[`lml.cache.${key}`] = value;
-            }
-          }
-          if (Object.keys(attrs).length > 0) {
-            try {
-              span.setAttributes(attrs);
-            } catch (err) {
-              console.warn('lml.client: failed to project cache_stats onto bulk span', err);
-            }
-          }
-        }
-
-        // BS#1710: same streaming-URL host invariant as postLookup, applied to
-        // each per-item verdict's nested LookupResponse (null on `status: error`).
-        for (const item of parsed.results ?? []) {
-          if (item.lookup != null) sanitizeLookupStreamingUrls(item.lookup);
-        }
-
-        // BS#1293: with no gated items the wire batch is identical to the
-        // caller's `items` in the same order, so return LML's verdicts
-        // verbatim — preserving each result's own `index`. Reconstructing
-        // positionally in this case would overwrite `.index` with a cursor and
-        // defeat downstream misalignment guards that intentionally trust LML's
-        // reported index (e.g. album-level-backfill's `result.index !== i`
-        // BS#1088 regression pin) and would fabricate `{ index }`-only entries
-        // from a short/gapped response instead of surfacing the mismatch.
-        if (skippedIndices.size === 0) {
-          return { results: parsed.results };
-        }
-
-        // Skips present: the caller's index space diverges from `sendItems`, so
-        // splice the synthetic skipped verdicts back in at their original
-        // positions and reindex the real verdicts (LML returned them aligned to
-        // `sendItems`, not the caller's original `items`) so the final array is
-        // index-aligned with the caller's input in input order.
-        let sentCursor = 0;
-        const results = items.map((_, index) => {
-          if (skippedIndices.has(index)) {
-            return buildSkippedBulkResultItem(index);
-          }
-          const sentResult = parsed.results[sentCursor];
-          sentCursor += 1;
-          return { ...sentResult, index };
-        });
-
-        return { results };
+        const sentResult = parsed.results[sentCursor];
+        sentCursor += 1;
+        return { ...sentResult, index };
       });
+
+      return { results };
     });
   } catch (err) {
     if (err instanceof LimiterShedError) {
-      return shedBulkResponse(items.length, err.reason, options.caller);
+      return shedBulkResponse(items.length, err.reason);
     }
     throw err;
   }
@@ -1622,20 +1511,9 @@ function buildShedBulkResultItem(index: number, reason: LookupShedOutcome): Bulk
   };
 }
 
-/**
- * Build the all-items-shed `BulkLookupResponse` inside a Sentry span carrying
- * `lml.shed_reason` + `lml.bulk.size`, mirroring the single-item
- * `shedLookupResponse` observability seam.
- */
-function shedBulkResponse(itemCount: number, reason: LookupShedOutcome, caller: LmlCaller): BulkLookupResponse {
-  return Sentry.startSpan({ name: 'lml.lookup.bulk', op: 'lml.lookup.shed' }, (span) => {
-    try {
-      span.setAttributes({ 'lml.shed_reason': reason, 'lml.bulk.size': itemCount, 'lml.caller': caller });
-    } catch (err) {
-      console.warn('lml.client: failed to project shed_reason + bulk.size + caller onto span', err);
-    }
-    return { results: Array.from({ length: itemCount }, (_, index) => buildShedBulkResultItem(index, reason)) };
-  });
+/** Build the all-items-shed `BulkLookupResponse`. */
+function shedBulkResponse(itemCount: number, reason: LookupShedOutcome): BulkLookupResponse {
+  return { results: Array.from({ length: itemCount }, (_, index) => buildShedBulkResultItem(index, reason)) };
 }
 
 /**
@@ -2247,56 +2125,44 @@ export async function resolveArtistNamesBulk(
 
   const activeLimiter = options?.limiter ?? defaultLimiter;
   return activeLimiter.run(async () => {
-    return await Sentry.startSpan({ name: 'lml.artists.resolve.bulk', op: 'http.client' }, async (span) => {
-      try {
-        span.setAttributes({
-          'lml.queue_depth': activeLimiter.state().queueDepth,
-          'lml.bulk.size': names.length,
-          'lml.caller': options?.caller ?? 'unknown',
-        });
-      } catch (err) {
-        console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto resolve span', err);
-      }
+    const response = await lmlFetch(
+      '/api/v1/artists/resolve/bulk',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      timeoutMs
+    );
 
-      const response = await lmlFetch(
-        '/api/v1/artists/resolve/bulk',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        },
-        timeoutMs
+    let parsed: ArtistResolveBulkResponse;
+    try {
+      parsed = (await response.json()) as ArtistResolveBulkResponse;
+    } catch (err) {
+      // A 200 with an unparseable body (truncated stream, or an HTML error
+      // page a proxy slipped in front of LML) would otherwise throw a bare
+      // SyntaxError that escapes the `LmlClientError` contract this function's
+      // JSDoc promises. Wrap it so consumers see one error type.
+      throw new LmlClientError(
+        `resolveArtistNamesBulk: LML returned an unparseable body: ${(err as Error).message}`,
+        502
       );
+    }
 
-      let parsed: ArtistResolveBulkResponse;
-      try {
-        parsed = (await response.json()) as ArtistResolveBulkResponse;
-      } catch (err) {
-        // A 200 with an unparseable body (truncated stream, or an HTML error
-        // page a proxy slipped in front of LML) would otherwise throw a bare
-        // SyntaxError that escapes the `LmlClientError` contract this function's
-        // JSDoc promises. Wrap it so consumers see one error type.
-        throw new LmlClientError(
-          `resolveArtistNamesBulk: LML returned an unparseable body: ${(err as Error).message}`,
-          502
-        );
-      }
+    // The whole contract is positional: `results[i]` is the verdict for
+    // `names[i]` (`ArtistResolveResult` carries no `index` field, unlike
+    // `BulkLookupResultItem`). A short, long, reordered, or missing array
+    // would let a consumer silently mis-attribute a `discogs_artist_id` to
+    // the wrong name and write it. Fail loud at the chokepoint instead.
+    if (!Array.isArray(parsed.results) || parsed.results.length !== names.length) {
+      const got = Array.isArray(parsed.results) ? `${parsed.results.length} result(s)` : 'a non-array results field';
+      throw new LmlClientError(
+        `resolveArtistNamesBulk: LML returned ${got} for ${names.length} name(s); expected an index-aligned 1:1 array`,
+        502
+      );
+    }
 
-      // The whole contract is positional: `results[i]` is the verdict for
-      // `names[i]` (`ArtistResolveResult` carries no `index` field, unlike
-      // `BulkLookupResultItem`). A short, long, reordered, or missing array
-      // would let a consumer silently mis-attribute a `discogs_artist_id` to
-      // the wrong name and write it. Fail loud at the chokepoint instead.
-      if (!Array.isArray(parsed.results) || parsed.results.length !== names.length) {
-        const got = Array.isArray(parsed.results) ? `${parsed.results.length} result(s)` : 'a non-array results field';
-        throw new LmlClientError(
-          `resolveArtistNamesBulk: LML returned ${got} for ${names.length} name(s); expected an index-aligned 1:1 array`,
-          502
-        );
-      }
-
-      return parsed;
-    });
+    return parsed;
   });
 }
 
@@ -2436,71 +2302,59 @@ export async function fetchArtistGenresBulk(
 
   const activeLimiter = options?.limiter ?? defaultLimiter;
   return activeLimiter.run(async () => {
-    return await Sentry.startSpan({ name: 'lml.artists.genres.bulk', op: 'http.client' }, async (span) => {
-      try {
-        span.setAttributes({
-          'lml.queue_depth': activeLimiter.state().queueDepth,
-          'lml.bulk.size': artists.length,
-          'lml.caller': options?.caller ?? 'unknown',
-        });
-      } catch (err) {
-        console.warn('lml.client: failed to project queue_depth + bulk.size + caller onto genres span', err);
-      }
+    const response = await lmlFetch(
+      '/api/v1/artists/genres/bulk',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      timeoutMs
+    );
 
-      const response = await lmlFetch(
-        '/api/v1/artists/genres/bulk',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        },
-        timeoutMs
+    let parsed: ArtistGenresBulkResponse;
+    try {
+      parsed = (await response.json()) as ArtistGenresBulkResponse;
+    } catch (err) {
+      throw new LmlClientError(
+        `fetchArtistGenresBulk: LML returned an unparseable body: ${(err as Error).message}`,
+        502
       );
+    }
 
-      let parsed: ArtistGenresBulkResponse;
-      try {
-        parsed = (await response.json()) as ArtistGenresBulkResponse;
-      } catch (err) {
+    // Positional contract: `results[i]` is the verdict for `artists[i]`. A
+    // short / long / missing array — or a null body — would let the consumer
+    // write one artist's genres onto another's Discogs id. Fail loud at the
+    // chokepoint (mirrors `resolveArtistNamesBulk`).
+    if (parsed == null || !Array.isArray(parsed.results) || parsed.results.length !== artists.length) {
+      const got =
+        parsed != null && Array.isArray(parsed.results)
+          ? `${parsed.results.length} result(s)`
+          : 'a non-array results field';
+      throw new LmlClientError(
+        `fetchArtistGenresBulk: LML returned ${got} for ${artists.length} artist(s); expected an index-aligned 1:1 array`,
+        502
+      );
+    }
+
+    // Defense-in-depth beyond length: when both the request item and the
+    // echoed verdict carry a Discogs id, they MUST match at this index. LML
+    // echoes `discogs_artist_id` for exactly this check (LML#781); a mismatch
+    // means the array was reordered under us, which the length check alone
+    // can't catch. The consumer (BS#1624) zips genres to Discogs ids
+    // positionally, so a silent reorder would mis-attribute a genre set.
+    for (let i = 0; i < artists.length; i++) {
+      const sent = artists[i].discogs_artist_id;
+      const echoed = parsed.results[i].discogs_artist_id;
+      if (sent != null && echoed != null && sent !== echoed) {
         throw new LmlClientError(
-          `fetchArtistGenresBulk: LML returned an unparseable body: ${(err as Error).message}`,
+          `fetchArtistGenresBulk: LML echoed discogs_artist_id ${echoed} at index ${i} but the request sent ${sent}; the results array is misordered`,
           502
         );
       }
+    }
 
-      // Positional contract: `results[i]` is the verdict for `artists[i]`. A
-      // short / long / missing array — or a null body — would let the consumer
-      // write one artist's genres onto another's Discogs id. Fail loud at the
-      // chokepoint (mirrors `resolveArtistNamesBulk`).
-      if (parsed == null || !Array.isArray(parsed.results) || parsed.results.length !== artists.length) {
-        const got =
-          parsed != null && Array.isArray(parsed.results)
-            ? `${parsed.results.length} result(s)`
-            : 'a non-array results field';
-        throw new LmlClientError(
-          `fetchArtistGenresBulk: LML returned ${got} for ${artists.length} artist(s); expected an index-aligned 1:1 array`,
-          502
-        );
-      }
-
-      // Defense-in-depth beyond length: when both the request item and the
-      // echoed verdict carry a Discogs id, they MUST match at this index. LML
-      // echoes `discogs_artist_id` for exactly this check (LML#781); a mismatch
-      // means the array was reordered under us, which the length check alone
-      // can't catch. The consumer (BS#1624) zips genres to Discogs ids
-      // positionally, so a silent reorder would mis-attribute a genre set.
-      for (let i = 0; i < artists.length; i++) {
-        const sent = artists[i].discogs_artist_id;
-        const echoed = parsed.results[i].discogs_artist_id;
-        if (sent != null && echoed != null && sent !== echoed) {
-          throw new LmlClientError(
-            `fetchArtistGenresBulk: LML echoed discogs_artist_id ${echoed} at index ${i} but the request sent ${sent}; the results array is misordered`,
-            502
-          );
-        }
-      }
-
-      return parsed;
-    });
+    return parsed;
   });
 }
 
