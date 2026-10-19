@@ -1,6 +1,6 @@
 {
   "extends": ["../../tsconfig.base.json"],
-  "references": [{ "path": "../../shared/database" }, { "path": "../../shared/lml-client" }],
+  "references": [{ "path": "../../shared/database" }, { "path": "../../shared/lml-client" }, { "path": "../../shared/observability" }],
   "include": ["."],
   "compilerOptions": {
     "module": "esnext",

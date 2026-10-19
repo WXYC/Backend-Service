@@ -20,7 +20,7 @@
  */
 
 import { readFileSync, writeFileSync } from 'fs';
-import { captureError, closeLogger, initLogger, log } from './logger.js';
+import { createJobLogger } from '@wxyc/observability/job-logger';
 import { runInventoryAndBind, closeDatabase } from './orchestrate.js';
 import { formatSummary } from './report.js';
 import { exportReviewCsv, importReviewCsv } from './csv.js';
@@ -28,6 +28,8 @@ import { applyReviewDecisions } from './write.js';
 import { loadNeedsReviewRows } from './review.js';
 
 const JOB_NAME = 'digital-archive-bind';
+
+const { initLogger, log, captureError, closeLogger } = createJobLogger({ jobName: JOB_NAME });
 
 const flagValue = (name: string): string | undefined => {
   const args = process.argv.slice(2);

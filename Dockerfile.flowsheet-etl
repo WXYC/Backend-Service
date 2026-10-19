@@ -12,11 +12,13 @@ WORKDIR /flowsheet-etl
 COPY ./package* ./
 COPY ./jobs/flowsheet-etl/package* ./jobs/flowsheet-etl/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev
 
 COPY --link --from=builder /jobs/flowsheet-etl/dist ./jobs/flowsheet-etl/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Override the @wxyc/database default of 5s. ETL UPDATE/SELECT batches can
 # legitimately take tens of seconds on the 2.6M-row flowsheet table. The

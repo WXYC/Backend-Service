@@ -16,6 +16,7 @@ COPY ./jobs/library-artwork-url-backfill/package* ./jobs/library-artwork-url-bac
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
 COPY ./shared/metadata/package* ./shared/metadata/
+COPY ./shared/observability/package* ./shared/observability/
 
 # `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
 # (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
@@ -27,6 +28,7 @@ COPY --link --from=builder /jobs/library-artwork-url-backfill/dist ./jobs/librar
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
 COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Long-running per-statement timeout: per-row UPDATEs are tiny (single-column,
 # id-equality WHERE) but the SELECT batch joins library to artists; a tightly

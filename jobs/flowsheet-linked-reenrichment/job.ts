@@ -65,10 +65,12 @@ import {
 } from '@wxyc/database';
 import { bulkLookupMetadata, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
 import { cleanDiscogsBio, filterSpacerGif } from '@wxyc/metadata';
-import * as Sentry from '@sentry/node';
-import { captureError, closeLogger, initLogger, log } from './logger.js';
+import { getErrorReporter } from '@wxyc/observability';
+import { createJobLogger } from '@wxyc/observability/job-logger';
 
 const JOB_NAME = 'flowsheet-linked-reenrichment';
+
+const { initLogger, log, captureError, closeLogger } = createJobLogger({ jobName: JOB_NAME });
 
 /**
  * Frozen cohort `add_time` upper bound (BS#1443, re-verified 2026-07-13).
@@ -585,7 +587,7 @@ export const runBatch = async (
   // LML's input-order contract (BS#1088). One breadcrumb + one stable-
   // fingerprint message per non-zero batch caps FIFO pressure.
   if (unexpected_index > 0) {
-    Sentry.addBreadcrumb({
+    getErrorReporter().addBreadcrumb({
       category: JOB_NAME,
       message: 'unexpected_result_index',
       level: 'warning',
@@ -596,7 +598,7 @@ export const runBatch = async (
         first_mismatch_album_id: firstMismatchAlbumId,
       },
     });
-    Sentry.captureMessage(`${JOB_NAME}.unexpected_index`, {
+    getErrorReporter().captureMessage(`${JOB_NAME}.unexpected_index`, {
       level: 'warning',
       tags: { source: JOB_NAME },
       extra: {

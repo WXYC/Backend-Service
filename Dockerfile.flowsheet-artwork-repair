@@ -16,6 +16,7 @@ COPY ./jobs/flowsheet-artwork-repair/package* ./jobs/flowsheet-artwork-repair/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
 COPY ./shared/metadata/package* ./shared/metadata/
+COPY ./shared/observability/package* ./shared/observability/
 
 # `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
 # (GitHub Packages, `@wxyc:registry` in `.npmrc`). Mirrors the pattern in
@@ -26,6 +27,7 @@ COPY --link --from=builder /jobs/flowsheet-artwork-repair/dist ./jobs/flowsheet-
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
 COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Long-running per-statement timeout: the enumeration query's predicate
 # (`metadata_status='enriched_match' AND artwork_url IS NULL AND album_id IS

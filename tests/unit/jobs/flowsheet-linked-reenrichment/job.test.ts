@@ -30,6 +30,8 @@ jest.mock('@sentry/node', () => ({
 }));
 
 import * as Sentry from '@sentry/node';
+import { setErrorReporter } from '@wxyc/observability';
+import { SentryReporter } from '@wxyc/observability/sentry';
 import { db, album_metadata, checkLiveActivity } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import {
@@ -120,6 +122,8 @@ const stripEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
 };
 
 beforeEach(() => {
+  // runBatch reports through the process-wide reporter, which initLogger registers in production.
+  setErrorReporter(new SentryReporter());
   jest.clearAllMocks();
   (checkLiveActivity as jest.Mock).mockResolvedValue(false);
   jest.spyOn(console, 'log').mockImplementation(() => {});
