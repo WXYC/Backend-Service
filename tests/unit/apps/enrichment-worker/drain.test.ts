@@ -29,7 +29,6 @@
 import { jest } from '@jest/globals';
 
 jest.mock('@sentry/node', () => ({
-  startSpan: jest.fn(),
   captureException: jest.fn(),
   captureMessage: jest.fn(),
 }));
@@ -74,8 +73,6 @@ import {
   _resetInFlightCandidatesForTest,
 } from '../../../../apps/enrichment-worker/handler';
 
-type SpanLike = { setAttribute: jest.Mock };
-
 const makeCandidate = (id: number) => ({
   id,
   entry_type: 'track' as const,
@@ -91,11 +88,6 @@ const makeCandidate = (id: number) => ({
  * across multiple in-flight invocations.
  */
 function dispatchTick(id: number): void {
-  const span: SpanLike = { setAttribute: jest.fn() };
-  (Sentry.startSpan as jest.Mock).mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (_opts: unknown, fn: any) => fn(span)
-  );
   mockFilterForEnrichment.mockReturnValueOnce(makeCandidate(id));
   mockClaimRowForEnrichment.mockResolvedValueOnce({ claimed: true, id });
   const handler = makeEnrichmentHandler();
@@ -127,7 +119,7 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
 
       dispatchTick(1);
       // Yield once so the dispatched `void handleCandidate(...)` reaches
-      // its `await Sentry.startSpan(...)` and the wrapper has had a chance
+      // its first await and the wrapper has had a chance
       // to add itself to the registry.
       await new Promise((resolve) => setImmediate(resolve));
 
@@ -172,16 +164,16 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
       expect(getInFlightCandidateCount()).toBe(0);
     });
 
-    it('does not raise unhandledRejection when Sentry.startSpan throws synchronously', async () => {
-      // Defensive: handleCandidate wraps its body in try/catch but the outer
-      // `await Sentry.startSpan(...)` sits outside any try/catch. If Sentry's
-      // internals throw (exporter error, disposed hub during shutdown), the
-      // handleCandidate promise rejects. The dispatcher's `void promise.finally(...)`
-      // would otherwise discard the rejection and surface as an
-      // unhandledRejection in production. The `.catch(() => {})` chain pins
-      // that contract here.
+    it('does not raise unhandledRejection when Sentry.captureException throws from a catch arm', async () => {
+      // Defensive: handleCandidate wraps its body in try/catch, but the catch
+      // arms call Sentry.captureException. If Sentry's internals throw
+      // (exporter error, disposed hub during shutdown), the handleCandidate
+      // promise rejects. The dispatcher's `void promise.finally(...)` would
+      // otherwise discard the rejection and surface as an unhandledRejection
+      // in production. The `.catch(() => {})` chain pins that contract here.
       mockFilterForEnrichment.mockReturnValueOnce(makeCandidate(99));
-      (Sentry.startSpan as jest.Mock).mockImplementation(() => {
+      mockClaimRowForEnrichment.mockRejectedValueOnce(new Error('db down'));
+      (Sentry.captureException as jest.Mock).mockImplementation(() => {
         throw new Error('Sentry exporter dead during shutdown');
       });
 

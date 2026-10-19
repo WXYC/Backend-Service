@@ -464,8 +464,8 @@ describe('lml.client', () => {
     // from Sentry traces and we'd lose visibility into the negative-cache
     // hit rate post-deploy. Companion to WXYC/library-metadata-lookup#341.
 
-    it('returns the LookupResponse intact when wrapped in a span', async () => {
-      // Regression: the span wrapper must not swallow or alter the response payload.
+    it('returns the LookupResponse intact', async () => {
+      // Regression: the client must not swallow or alter the response payload.
       const lookupResponse = {
         results: [{ library_item: { id: 42 } }],
         search_type: 'direct',

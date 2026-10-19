@@ -142,7 +142,6 @@ const LIBRARY_SERVICE_FUNCTION_EXPORTS = [
   'updateArtworkUrl',
   'mapLookupToCanonicalEntity',
   'updateCanonicalEntity',
-  'classifyArtworkEnrichOutcome',
   'enrichWithArtwork',
   'runCatalogTrackSearchCascade',
   'fuzzySearchLibrary',

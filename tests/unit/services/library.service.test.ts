@@ -126,7 +126,6 @@ import {
   markAlbumMissing,
   markAlbumFound,
   enrichWithArtwork,
-  classifyArtworkEnrichOutcome,
   updateArtworkUrl,
   updateAlbumInDB,
   resolveRotationPickerSource,
@@ -2972,124 +2971,6 @@ describe('library.service', () => {
           expect(db.update).not.toHaveBeenCalled();
           expect(enriched[0].artwork_url).toBeNull();
         }
-      });
-    });
-
-    /**
-     * BS#2766: the pure classifier `enrichWithArtwork` calls once per row to
-     * decide which `artwork_enrich.*` bucket a settled lookup falls into.
-     * Table-tested directly (no Sentry/DB mocks needed) because it's a pure
-     * function of (trusted, hasCover, response) — mirrors
-     * `classifyPickerLmlOutcome`'s role for `picker.lml_outcome` (BS#2731),
-     * except that one has no standalone test and this one does, since the
-     * issue asks for the classifier to be verified in isolation from the
-     * span-projection plumbing below.
-     *
-     * Review follow-up: `trusted` alone is not enough to decide the
-     * `retryable_trusted*` buckets — LML can answer `search_type: 'direct'`
-     * with `results: []` on a budget-exhausted reply, so the classifier also
-     * reads `response.results.length` and `response.degraded_reason`. The
-     * cases below exercise both axes, including the three reasons that must
-     * NOT count as the `retryable_trusted_deadline` decision-gate population
-     * (`cache_only`, `upstream_unavailable`, a bare `timeout` with no
-     * `degraded` flag).
-     */
-    describe('classifyArtworkEnrichOutcome (pure classifier)', () => {
-      const response = (fields: {
-        degraded?: boolean;
-        timeout?: boolean;
-        degraded_reason?: 'deadline_exceeded' | 'cache_only' | 'upstream_unavailable';
-        results?: unknown[];
-      }): LookupResponse =>
-        ({
-          degraded: fields.degraded ?? false,
-          timeout: fields.timeout ?? false,
-          degraded_reason: fields.degraded_reason,
-          results: fields.results ?? [],
-        }) as LookupResponse;
-
-      it.each([
-        { label: 'trusted cover, clean reply', trusted: true, hasCover: true, fields: {}, expected: 'persisted' },
-        {
-          label: 'trusted cover, degraded (deadline_exceeded) reply',
-          trusted: true,
-          hasCover: true,
-          fields: { degraded: true, degraded_reason: 'deadline_exceeded' },
-          expected: 'persisted_degraded',
-        },
-        {
-          label: 'trusted cover, timed-out reply',
-          trusted: true,
-          hasCover: true,
-          fields: { timeout: true },
-          expected: 'persisted_degraded',
-        },
-        {
-          label: 'untrusted match, no cover, clean reply',
-          trusted: false,
-          hasCover: false,
-          fields: {},
-          expected: 'stamped',
-        },
-        {
-          label: 'trusted match, no cover (e.g. spacer gif), clean reply',
-          trusted: true,
-          hasCover: false,
-          fields: {},
-          expected: 'stamped',
-        },
-        {
-          label: 'untrusted match, no cover, degraded reply',
-          trusted: false,
-          hasCover: false,
-          fields: { degraded: true, degraded_reason: 'upstream_unavailable', results: [{}] },
-          expected: 'retryable_untrusted',
-        },
-        {
-          label: 'untrusted match, no cover, timed-out reply',
-          trusted: false,
-          hasCover: false,
-          fields: { timeout: true },
-          expected: 'retryable_untrusted',
-        },
-        {
-          label:
-            'trusted "direct" match but budget-exhausted EMPTY results, degraded (deadline_exceeded) — not a cut-off trusted match',
-          trusted: true,
-          hasCover: false,
-          fields: { degraded: true, degraded_reason: 'deadline_exceeded', results: [] },
-          expected: 'retryable_untrusted',
-        },
-        {
-          label: 'trusted candidate, no cover, degraded (deadline_exceeded) — the decision-gate population',
-          trusted: true,
-          hasCover: false,
-          fields: { degraded: true, degraded_reason: 'deadline_exceeded', results: [{}] },
-          expected: 'retryable_trusted_deadline',
-        },
-        {
-          label: 'trusted candidate, no cover, bare timeout (no degraded flag) — ran the whole tail',
-          trusted: true,
-          hasCover: false,
-          fields: { timeout: true, results: [{}] },
-          expected: 'retryable_trusted',
-        },
-        {
-          label: 'trusted candidate, no cover, degraded (cache_only) — shed before any tail step',
-          trusted: true,
-          hasCover: false,
-          fields: { degraded: true, degraded_reason: 'cache_only', results: [{}] },
-          expected: 'retryable_trusted',
-        },
-        {
-          label: 'trusted candidate, no cover, degraded (upstream_unavailable) — the Discogs breaker was open',
-          trusted: true,
-          hasCover: false,
-          fields: { degraded: true, degraded_reason: 'upstream_unavailable', results: [{}] },
-          expected: 'retryable_trusted',
-        },
-      ] as const)('$label', ({ trusted, hasCover, fields, expected }) => {
-        expect(classifyArtworkEnrichOutcome(trusted, hasCover, response(fields))).toBe(expected);
       });
     });
   });

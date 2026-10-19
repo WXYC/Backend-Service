@@ -211,10 +211,6 @@ describe('reserved-credentials source', () => {
  * Source-text assertions rather than an import, because these files are
  * `node --import` preloads whose module scope calls `Sentry.init()` and
  * `config()` — importing one into a test would execute both.
- *
- * Mirrors the `instrument.ts wiring` block in
- * `tests/unit/config/sentry-transaction-filter.test.ts`, which pins the other
- * thing the preloads are load-bearing for.
  */
 describe('instrument.ts wiring (BS#2532)', () => {
   it.each([
