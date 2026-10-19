@@ -12,14 +12,22 @@ const noopReporter: ErrorReporter = {
   },
 };
 
-let current: ErrorReporter = noopReporter;
+/**
+ * The holder lives on `globalThis` under a registered symbol, not in a module-local `let`. A process
+ * can load this module more than once: a library built as both ESM and CJS (`@wxyc/authentication`)
+ * may resolve the CJS build while its app registers through the ESM one. A module-local holder would
+ * give each copy its own slot, and the library would see the no-op default and drop every capture.
+ * `Symbol.for` returns the same symbol in every copy and module format, so they all share one slot.
+ */
+const SLOT = Symbol.for('@wxyc/observability/error-reporter');
+type GlobalWithReporter = typeof globalThis & { [SLOT]?: ErrorReporter };
 
 /** Registers the process-wide reporter, replacing any earlier one. An app does this once at startup, next to its SDK init. */
 export function setErrorReporter(reporter: ErrorReporter): void {
-  current = reporter;
+  (globalThis as GlobalWithReporter)[SLOT] = reporter;
 }
 
 /** The process-wide reporter; a no-op until `setErrorReporter` is called. Call sites resolve it per call, never at import time. */
 export function getErrorReporter(): ErrorReporter {
-  return current;
+  return (globalThis as GlobalWithReporter)[SLOT] ?? noopReporter;
 }
