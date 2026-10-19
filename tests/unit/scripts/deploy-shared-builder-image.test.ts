@@ -242,20 +242,183 @@ describe('deploy-base.yml wires the shared builder image ahead of the build matr
   });
 });
 
-// @wxyc/authentication keeps @wxyc/observability external in its bundle (BS#3396), so an image that
-// ships the one must ship the other, or its `npm install --omit=dev` cannot link the workspace.
-describe('images that ship @wxyc/authentication also ship @wxyc/observability (BS#3396)', () => {
-  const shippingAuthentication = nodeTargetDockerfiles().filter((name) =>
-    readDockerfile(name).includes('./shared/authentication/package*')
+// A `shared/*` workspace that depends on another one (BS#3396: authentication -> observability) needs the
+// dependency built first and shipped in every image that ships the dependent (BS#3518). Both are derived from
+// the `shared/*/package.json` files, so a new edge in the graph fails here instead of at build or deploy.
+interface SharedWorkspace {
+  name: string;
+  dir: string;
+  deps: string[];
+}
+
+function sharedWorkspaces(): SharedWorkspace[] {
+  const dirs = fs
+    .readdirSync(path.join(repoRoot, 'shared'))
+    .filter((d) => fs.existsSync(path.join(repoRoot, 'shared', d, 'package.json')))
+    .sort();
+  const manifests = dirs.map((dir) => ({
+    dir,
+    pkg: JSON.parse(fs.readFileSync(path.join(repoRoot, 'shared', dir, 'package.json'), 'utf-8')),
+  }));
+  const names = new Set<string>(manifests.map((m) => m.pkg.name));
+  return manifests.map(({ dir, pkg }) => ({
+    name: pkg.name,
+    dir,
+    deps: [
+      ...new Set(
+        [pkg.dependencies, pkg.peerDependencies, pkg.optionalDependencies]
+          .flatMap((group) => Object.keys(group ?? {}))
+          .filter((dep) => names.has(dep))
+      ),
+    ].sort(),
+  }));
+}
+
+/** Transitive `@wxyc/*` workspace dependencies of `name`, excluding itself. */
+function transitiveDeps(name: string, graph: Map<string, SharedWorkspace>): string[] {
+  const seen = new Set<string>();
+  const visit = (n: string) => {
+    for (const dep of graph.get(n)?.deps ?? []) {
+      if (!seen.has(dep)) {
+        seen.add(dep);
+        visit(dep);
+      }
+    }
+  };
+  visit(name);
+  return [...seen].sort();
+}
+
+/**
+ * The order of shared workspaces npm builds for `npm run build --workspace=...`: explicit names in the order
+ * given, then each `shared/**` glob expanded alphabetically, skipping anything already listed. Non-shared
+ * globs (apps/**, jobs/**) are irrelevant to the shared graph.
+ */
+function sharedBuildOrder(command: string, shared: SharedWorkspace[]): string[] {
+  const order: string[] = [];
+  const add = (name: string) => {
+    if (!order.includes(name)) {
+      order.push(name);
+    }
+  };
+  for (const [, arg] of command.matchAll(/--workspace=(\S+)/g)) {
+    if (arg === 'shared/**' || arg === 'shared/*') {
+      shared.forEach((w) => add(w.name));
+    } else if (arg.startsWith('@wxyc/')) {
+      add(arg);
+    } else if (arg.startsWith('shared/')) {
+      const match = shared.find((w) => w.dir === arg.slice('shared/'.length));
+      if (match) {
+        add(match.name);
+      }
+    }
+  }
+  return order;
+}
+
+/** Messages for each shared workspace missing from, or built after, a workspace that depends on it. */
+function buildOrderProblems(command: string, where: string, shared: SharedWorkspace[]): string[] {
+  const order = sharedBuildOrder(command, shared);
+  const problems: string[] = [];
+  for (const w of shared) {
+    if (!order.includes(w.name)) {
+      continue;
+    }
+    for (const dep of w.deps) {
+      const depIndex = order.indexOf(dep);
+      if (depIndex === -1) {
+        problems.push(
+          `${where}: ${w.name} depends on ${dep}, which is never built; add --workspace=${dep} before it in ${where}`
+        );
+      } else if (depIndex > order.indexOf(w.name)) {
+        problems.push(
+          `${where}: ${dep} is built after ${w.name}, which depends on it; list --workspace=${dep} before ${w.name} in ${where}`
+        );
+      }
+    }
+  }
+  return problems;
+}
+
+describe('shared workspace dependency graph (BS#3518)', () => {
+  const shared = sharedWorkspaces();
+  const graph = new Map(shared.map((w) => [w.name, w]));
+  const rootScripts: Record<string, string> = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8')
+  ).scripts;
+  const deployBuilderBuild = readDockerfile(SHARED_BUILDER_DOCKERFILE)
+    .split('\n')
+    .find((line) => line.startsWith('RUN npm run build'));
+
+  it('finds the shared workspaces and at least one shared-to-shared edge', () => {
+    expect(shared.length).toBeGreaterThan(2);
+    expect(shared.some((w) => w.deps.length > 0)).toBe(true);
+  });
+
+  it('sharedBuildOrder expands globs alphabetically after explicit names', () => {
+    const fake = [
+      { name: '@wxyc/a', dir: 'a', deps: [] },
+      { name: '@wxyc/z', dir: 'z', deps: [] },
+      { name: '@wxyc/m', dir: 'm', deps: [] },
+    ];
+    expect(sharedBuildOrder('x --workspace=@wxyc/z --workspace=shared/** --workspace=apps/**', fake)).toEqual([
+      '@wxyc/z',
+      '@wxyc/a',
+      '@wxyc/m',
+    ]);
+  });
+
+  it('flags a dependency built after, or never built before, its dependent', () => {
+    const fake = [
+      { name: '@wxyc/a', dir: 'a', deps: ['@wxyc/z'] },
+      { name: '@wxyc/z', dir: 'z', deps: [] },
+    ];
+    expect(buildOrderProblems('--workspace=shared/**', 'f', fake)).toHaveLength(1);
+    expect(buildOrderProblems('--workspace=@wxyc/z --workspace=shared/**', 'f', fake)).toEqual([]);
+    expect(buildOrderProblems('--workspace=@wxyc/a', 'f', fake)).toHaveLength(1);
+  });
+
+  it('builds every shared workspace after the shared workspaces it depends on, in each build command', () => {
+    expect(deployBuilderBuild).toBeDefined();
+    const commands: [string, string][] = [
+      ['package.json "build" script', rootScripts.build],
+      ['package.json "lint:prebuild" script', rootScripts['lint:prebuild']],
+      ['package.json "predev" script', rootScripts.predev],
+      [`${SHARED_BUILDER_DOCKERFILE} build line`, deployBuilderBuild ?? ''],
+    ];
+    const problems = commands.flatMap(([where, command]) => buildOrderProblems(command, where, shared));
+    expect(problems).toEqual([]);
+  });
+
+  it('finds the images that ship a shared workspace', () => {
+    const shipping = nodeTargetDockerfiles().filter((name) => readDockerfile(name).includes('./shared/'));
+    expect(shipping.length).toBeGreaterThan(0);
+  });
+
+  it.each(nodeTargetDockerfiles())(
+    '%s ships the transitive @wxyc/* dependencies of every shared workspace it ships',
+    (name) => {
+      const text = readDockerfile(name);
+      const problems: string[] = [];
+      for (const w of shared) {
+        if (!text.includes(`./shared/${w.dir}/package*`)) {
+          continue;
+        }
+        for (const dep of transitiveDeps(w.name, graph)) {
+          const depDir = graph.get(dep)?.dir;
+          if (!text.includes(`COPY ./shared/${depDir}/package* ./shared/${depDir}/`)) {
+            problems.push(
+              `${name} ships ${w.name} but not ${dep}'s package.json; add its COPY ./shared/${depDir}/package* line to ${name}`
+            );
+          }
+          if (!text.includes(`COPY --link --from=builder /shared/${depDir}/dist ./shared/${depDir}/dist`)) {
+            problems.push(
+              `${name} ships ${w.name} but not ${dep}'s dist; add its COPY --link --from=builder /shared/${depDir}/dist line to ${name}`
+            );
+          }
+        }
+      }
+      expect(problems).toEqual([]);
+    }
   );
-
-  it('finds the images that ship @wxyc/authentication', () => {
-    expect(shippingAuthentication.length).toBeGreaterThan(0);
-  });
-
-  it.each(shippingAuthentication)('%s copies shared/observability', (name) => {
-    const text = readDockerfile(name);
-    expect(text).toContain('COPY ./shared/observability/package* ./shared/observability/');
-    expect(text).toContain('COPY --link --from=builder /shared/observability/dist ./shared/observability/dist');
-  });
 });
