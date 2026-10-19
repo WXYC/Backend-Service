@@ -79,6 +79,38 @@ describe('tracing configuration', () => {
     expect(initOptions).not.toHaveProperty('traceLifecycle');
     expect(initOptions).not.toHaveProperty('beforeSendTransaction');
   });
+
+  // Omitting `tracesSampleRate` is not enough: the SDK falls back to the
+  // SENTRY_TRACES_SAMPLE_RATE env var, and the EC2 `.env` may still set it.
+  // `Sentry.init` must therefore see neither the option nor the env var.
+  it.each([
+    ['backend', '../../../apps/backend/instrument'],
+    ['auth', '../../../apps/auth/instrument'],
+    ['enrichment-worker', '../../../apps/enrichment-worker/instrument'],
+  ])('%s leaves tracing off even when SENTRY_TRACES_SAMPLE_RATE=1 is in the environment', (_app, relPath) => {
+    const previousRate = process.env.SENTRY_TRACES_SAMPLE_RATE;
+    process.env.SENTRY_TRACES_SAMPLE_RATE = '1';
+    let envAtInit: string | undefined = 'unset';
+    mockInit.mockImplementationOnce(() => {
+      envAtInit = process.env.SENTRY_TRACES_SAMPLE_RATE;
+    });
+    try {
+      jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require(relPath);
+      });
+    } finally {
+      if (previousRate === undefined) {
+        delete process.env.SENTRY_TRACES_SAMPLE_RATE;
+      } else {
+        process.env.SENTRY_TRACES_SAMPLE_RATE = previousRate;
+      }
+    }
+    const initOptions = mockInit.mock.calls[0][0] as Record<string, unknown>;
+    expect(initOptions).not.toHaveProperty('tracesSampleRate');
+    expect(initOptions).not.toHaveProperty('tracesSampler');
+    expect(envAtInit).toBeUndefined();
+  });
 });
 
 // What each preload hands `Sentry.init`, not what its source text says: a

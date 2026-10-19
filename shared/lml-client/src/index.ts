@@ -64,8 +64,8 @@ export type {
 // `src/` (jest `moduleNameMapper`), so a package-specifier import would let the
 // script run a stale build of the predicate its tests vouch for — the precise
 // drift it is supposed to rule out. And this barrel calls
-// `initDefaultLimiter()` at module scope and imports `@sentry/node`, which is
-// the module-graph weight the script's own header documents avoiding. The deep
+// `initDefaultLimiter()` at module scope and carries the
+// module-graph weight the script's own header documents avoiding. The deep
 // import buys the property outright: it loads the very same source file this
 // barrel re-exports from, so the script and the write path cannot diverge.
 import {
@@ -1297,11 +1297,6 @@ export const BULK_LOOKUP_INPUT_CAP = 100;
  *   forwards the same value into each per-item `perform_lookup`'s
  *   `caller_budget_ms` arg (LML#345). Pairs with BS#1053 / LML#370 once the
  *   hard-cap follow-up lands — sending the header here is a no-op until then.
- * - **Span op mirrors `postLookup`** (`http.client`); `lml.bulk.size` is a
- *   bulk-specific attribute. `lml.cache.*` projection is byte-for-byte
- *   identical so existing Sentry queries (`lml.cache.api_calls > 0`, etc.)
- *   work without per-call refactors.
- *
  * Client-side validation rejects empty + oversize batches before the wire
  * call — a 422/400 round-trip costs an LML deploy slot and a TCP RTT for
  * no information gain.

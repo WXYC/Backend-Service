@@ -14,6 +14,9 @@ config();
 // that happen to call CloudWatch today, is the point of BS#2532.
 warnIfReservedAwsCredentialsPresent();
 
+// @sentry/node falls back to SENTRY_TRACES_SAMPLE_RATE when no option is given, and a stale `.env` may still set it; tracing stays off (BS#3403).
+delete process.env.SENTRY_TRACES_SAMPLE_RATE;
+
 Sentry.init({
   // Sentry 11 turned this on by default, which titles captureMessage events
   // with a minified function name (BS#3002).

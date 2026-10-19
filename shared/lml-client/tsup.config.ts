@@ -8,5 +8,5 @@ export default defineConfig({
   outDir: 'dist',
   clean: true,
   sourcemap: true,
-  external: ['@sentry/node', '@wxyc/shared'],
+  external: ['@wxyc/shared'],
 });

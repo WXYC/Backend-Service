@@ -3032,7 +3032,9 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // Unreachable via this caller's overload (`requireSearchType` is
       // never passed, so the coordinator's return type is non-null) —
       // kept as defensive dead code.
-      if (lookupResult === null) return;
+      if (lookupResult === null) {
+        return;
+      }
 
       // Evaluate trust and extract artwork BEFORE looking at `degraded`
       // / `timeout`, mirroring the rotation picker
@@ -3068,7 +3070,9 @@ export async function enrichWithArtwork<T extends ArtworkEnrichable>(
       // retryable rather than risk stamping a row LML never actually
       // checked. Client-side sheds never reach this line: the
       // coordinator re-throws those (BS#1748).
-      if (lookupResult.degraded || lookupResult.timeout) return;
+      if (lookupResult.degraded || lookupResult.timeout) {
+        return;
+      }
 
       // Below this point LML genuinely responded about this release
       // with nothing usable, so that is durable knowledge and gets
