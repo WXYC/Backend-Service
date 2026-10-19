@@ -200,6 +200,7 @@ Pre-push hook (husky) runs automatically:
 
 ```bash
 npm run typecheck        # tsc --noEmit, but only @wxyc/database + shared/** + apps/** -- jobs/** and tests/** are NOT covered
+npm run typecheck:tests  # tests/ against tests/typecheck-baseline.json (per-file error ratchet; CI runs it, pre-push does not)
 npm run lint             # ESLint with TypeScript + security rules
 ```
 
