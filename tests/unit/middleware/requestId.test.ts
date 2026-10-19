@@ -1,16 +1,14 @@
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { useSpyReporter } from '../../utils/observability';
 import type { Request, Response, NextFunction } from 'express';
 
 // The middleware tags requests through the process-wide ErrorReporter; register a spy for it
-const mockSetRequestTag = jest.fn();
-beforeAll(() => setErrorReporter({ setRequestTag: mockSetRequestTag } as unknown as ErrorReporter));
+const reporter = useSpyReporter();
 
 // Mock crypto.randomUUID
 const mockRandomUUID = jest.fn<() => string>().mockReturnValue('generated-uuid-1234');
 jest.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(mockRandomUUID);
 
-import { setErrorReporter } from '@wxyc/observability';
-import type { ErrorReporter } from '@wxyc/observability';
 import { requestIdMiddleware } from '../../../apps/backend/middleware/requestId.js';
 
 describe('requestIdMiddleware', () => {
@@ -58,7 +56,7 @@ describe('requestIdMiddleware', () => {
   it('tags the request with request_id through the error reporter', () => {
     requestIdMiddleware(req as Request, res as Response, next);
 
-    expect(mockSetRequestTag).toHaveBeenCalledWith('request_id', 'generated-uuid-1234');
+    expect(reporter.setRequestTag).toHaveBeenCalledWith('request_id', 'generated-uuid-1234');
   });
 
   it('tags the request with the client-provided request_id', () => {
@@ -66,6 +64,6 @@ describe('requestIdMiddleware', () => {
 
     requestIdMiddleware(req as Request, res as Response, next);
 
-    expect(mockSetRequestTag).toHaveBeenCalledWith('request_id', 'client-id-9999');
+    expect(reporter.setRequestTag).toHaveBeenCalledWith('request_id', 'client-id-9999');
   });
 });

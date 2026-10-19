@@ -1,6 +1,7 @@
-import type { ErrorReporter } from '@wxyc/observability';
+import { createSpyReporter } from '../../utils/observability';
 
-const captureException = jest.fn();
+const reporter = createSpyReporter();
+const captureException = reporter.captureException;
 
 type Helper = typeof import('../../../apps/backend/utils/review-gate-cutover');
 
@@ -13,7 +14,7 @@ const load = (value: string | undefined): Helper => {
     // The isolated registry has its own reporter holder, so register the spy inside it.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { setErrorReporter } = require('@wxyc/observability') as typeof import('@wxyc/observability');
-    setErrorReporter({ captureException } as unknown as ErrorReporter);
+    setErrorReporter(reporter);
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     mod = require('../../../apps/backend/utils/review-gate-cutover');
   });

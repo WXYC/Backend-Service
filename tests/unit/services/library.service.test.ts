@@ -102,7 +102,11 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
 // the inner method's `Sentry.getActiveSpan()?.setAttributes(...)` lands
 // on the outer span the test asserts against.
 const mockSpanSetAttribute = jest.fn();
-jest.mock('@wxyc/observability', () => ({ logCounter: jest.fn() }));
+jest.mock('@wxyc/observability', () =>
+  jest
+    .requireActual<typeof import('../../utils/observability')>('../../utils/observability')
+    .mockObservabilityBarrel({ logCounter: jest.fn() })
+);
 // Lookups aggregate in process and flush on a timer (BS#3402), so these tests
 // assert what each chokepoint passes to `recordCacheLookup`, snapshotting the
 // cache's size/capacity at call time.

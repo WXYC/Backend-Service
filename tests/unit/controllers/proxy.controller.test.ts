@@ -122,7 +122,11 @@ jest.mock('../../../apps/backend/config/wxycReviews', () => ({
 // `Sentry.captureException` on the cache-first DB-error catch arm)
 // continue to load without a confusing "X is not a function" TypeError
 // far from the change site.
-jest.mock('@wxyc/observability', () => ({ logCounter: jest.fn() }));
+jest.mock('@wxyc/observability', () =>
+  jest
+    .requireActual<typeof import('../../utils/observability')>('../../utils/observability')
+    .mockObservabilityBarrel({ logCounter: jest.fn() })
+);
 // Lookups aggregate in process and flush on a timer (BS#3402), so these tests
 // assert what each chokepoint passes to `recordCacheLookup`, snapshotting the
 // cache's size/capacity at call time.
