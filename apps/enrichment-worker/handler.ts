@@ -44,7 +44,7 @@
  * BS#1291 RCA for the quota exhaustion context that motivated this trim.
  */
 
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import type { CdcEvent } from '@wxyc/database';
 
 import { claimRowForEnrichment } from './claim.js';
@@ -213,7 +213,7 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
       // doing so under a transient LML failure could re-deliver the
       // event to a sibling worker mid-failure, amplifying load against
       // an already-struggling LML.
-      Sentry.captureException(err, {
+      getErrorReporter().captureException(err, {
         tags: { component: 'enrichment-worker', step: 'lml_lookup' },
         extra: { flowsheet_id: candidate.id },
       });
@@ -243,7 +243,7 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
     // Net result: captureMessage fires only on `lml_degraded` outcomes
     // this worker wrote.
     if (emptyCause !== null && !outcome.endsWith('_raced') && !SUPPRESSED_EMPTY_CAUSES.has(emptyCause)) {
-      Sentry.captureMessage('enrichment-empty-outcome', {
+      getErrorReporter().captureMessage('enrichment-empty-outcome', {
         level: 'warning',
         tags: {
           subsystem: 'metadata',
@@ -262,7 +262,7 @@ async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
     // DB error during claim or finalize. Same defensive posture: capture
     // + log, row state is whatever PG ended up with. C6 sweep handles
     // any stranded `enriching` rows.
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { component: 'enrichment-worker', step: 'claim_or_finalize' },
       extra: { flowsheet_id: candidate.id },
     });

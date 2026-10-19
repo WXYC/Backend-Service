@@ -14,7 +14,7 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { logCounter } from '@wxyc/observability';
+import { getErrorReporter, logCounter } from '@wxyc/observability';
 import {
   closeDatabaseConnection,
   enableLivenessProbe,
@@ -128,7 +128,7 @@ async function runShutdownStep(label: string, work: Promise<unknown> | (() => Pr
     ]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { component: 'enrichment-worker', step: `shutdown_${label}` },
     });
     console.error(`[enrichment-worker] shutdown step ${label} failed`, { error: message });
@@ -201,7 +201,7 @@ const main = async (): Promise<void> => {
       try {
         const remaining = await drainInFlightCandidates(WORKER_DRAIN_DEADLINE_MS);
         if (remaining > 0) {
-          Sentry.captureMessage(`enrichment-worker exiting with ${remaining} in-flight candidate(s)`, {
+          getErrorReporter().captureMessage(`enrichment-worker exiting with ${remaining} in-flight candidate(s)`, {
             level: 'warning',
             tags: {
               component: 'enrichment-worker',
@@ -216,7 +216,7 @@ const main = async (): Promise<void> => {
         // Defensive: drainInFlightCandidates is contractually
         // non-throwing, but if a future change reintroduces a throw we'd
         // rather capture it than skip the close_db step below.
-        Sentry.captureException(err, {
+        getErrorReporter().captureException(err, {
           tags: { component: 'enrichment-worker', step: 'shutdown_drain_in_flight' },
         });
       }
@@ -364,7 +364,7 @@ async function runSweep(): Promise<void> {
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { component: 'enrichment-worker', step: 'stranded_claim_sweep' },
     });
     console.error('[enrichment-worker] sweep failed', { error: message });
@@ -390,7 +390,7 @@ async function runStreamingReaskSweep(): Promise<void> {
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { component: 'enrichment-worker', step: 'streaming_reask_sweep' },
     });
     console.error('[enrichment-worker] streaming-reask sweep failed', { error: message });

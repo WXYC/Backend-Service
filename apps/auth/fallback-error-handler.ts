@@ -6,7 +6,7 @@
 // stripped. In non-production environments the detailed message is preserved
 // to aid dev debugging, mirroring the pattern in
 // `apps/backend/middleware/errorHandler.ts`.
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import type { Request, Response, NextFunction } from 'express';
 
 export function fallbackErrorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
@@ -21,7 +21,7 @@ export function fallbackErrorHandler(err: unknown, _req: Request, res: Response,
   // distinct issue. This call is also load-bearing for
   // `tests/unit/auth/fallback-error-handler.test.ts` — do not remove it as
   // a "redundant Sentry call" cleanup without re-reading BS#1221.
-  Sentry.captureException(err);
+  getErrorReporter().captureException(err);
 
   if (process.env.NODE_ENV === 'production') {
     res.status(500).json({ error: 'Internal server error' });

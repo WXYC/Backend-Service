@@ -8,8 +8,10 @@ import {
   SENTRY_DATA_COLLECTION,
   redactSentryBreadcrumb,
   redactSentryEventQueryParams,
+  setErrorReporter,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
+import { SentryReporter } from '@wxyc/observability/sentry';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter.js';
 
 // At boot, not on the first password-reset/OTP send: this container publishes
@@ -50,3 +52,7 @@ Sentry.init({
   // or request bodies (BS#3004).
   dataCollection: SENTRY_DATA_COLLECTION,
 });
+
+// Every capture and breadcrumb in this container goes through the ErrorReporter
+// seam (BS#3396); Sentry is its only backend for now.
+setErrorReporter(new SentryReporter());

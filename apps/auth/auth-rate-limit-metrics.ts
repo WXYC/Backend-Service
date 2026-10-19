@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import type { NextFunction, Request, Response } from 'express';
 import type { Options, RateLimitExceededEventHandler } from 'express-rate-limit';
 import { createBufferedMetricEmitter } from '@wxyc/observability/metrics';
@@ -82,7 +82,7 @@ export function makeHandler(limiter: LimiterName): RateLimitExceededEventHandler
     // Breadcrumb, not captureMessage/captureException — a per-request Sentry
     // event on a rate-limit path is exactly the flood PR #691 and the org's
     // Sentry-quota history argue against.
-    Sentry.addBreadcrumb({
+    getErrorReporter().addBreadcrumb({
       category: 'auth.ratelimit',
       level: 'warning',
       message: `GET ${ROUTE} rate limited (${limiter})`,

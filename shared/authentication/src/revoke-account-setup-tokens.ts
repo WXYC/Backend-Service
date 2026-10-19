@@ -27,7 +27,7 @@
  * mirroring `account-setup-token.ts`.
  */
 
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { db, verification } from '@wxyc/database';
 import { and, eq, like, lt, ne } from 'drizzle-orm';
 
@@ -84,7 +84,7 @@ export async function revokeOutstandingAccountSetupTokens(
     return revoked.length;
   } catch (error) {
     console.error('Error revoking outstanding account-setup tokens:', error);
-    Sentry.captureException(error, {
+    getErrorReporter().captureException(error, {
       tags: { subsystem: 'account-setup-invite', step: 'revoke-outstanding-tokens' },
       extra: { userId },
     });

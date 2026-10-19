@@ -32,10 +32,9 @@
 import { jest } from '@jest/globals';
 import type { Express, NextFunction, Request, Response } from 'express';
 
-const mockSentryCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({
-  captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
-}));
+import { useSpyReporter } from '../../utils/observability';
+
+const reporter = useSpyReporter();
 
 import { auth } from '../../mocks/authentication.mock';
 import { db, recordAccountAuditEvent } from '../../mocks/database.mock';
@@ -176,7 +175,7 @@ function expectAudited(fields: Record<string, unknown>): void {
 }
 
 beforeEach(() => {
-  mockSentryCaptureException.mockClear();
+  reporter.captureException.mockClear();
   auth.api.getSession = () => Promise.resolve(null);
 });
 

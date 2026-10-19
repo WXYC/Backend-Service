@@ -17,12 +17,6 @@ jest.mock('better-auth/plugins/organization/access', () => ({
   defaultStatements: {},
 }));
 
-// Mock Sentry so the new captureException calls don't blow up in tests
-const mockSentryCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({
-  captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
-}));
-
 // Mock @wxyc/database for admin role sync
 const mockDbUpdate = jest.fn().mockReturnValue({
   set: jest.fn().mockReturnValue({

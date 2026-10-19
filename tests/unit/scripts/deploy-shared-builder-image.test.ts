@@ -167,7 +167,7 @@ describe('shared builder image replaces per-target npm ci (BS#2718)', () => {
       expect(text).toMatch(/^ARG NPM_TOKEN$/m);
       expect(text).toMatch(/^RUN npm ci$/m);
       expect(text).toMatch(
-        /^RUN npm run build --workspace=@wxyc\/database --workspace=shared\/\*\* --workspace=apps\/\*\* --workspace=jobs\/\*\*$/m
+        /^RUN npm run build --workspace=@wxyc\/database --workspace=@wxyc\/observability --workspace=shared\/\*\* --workspace=apps\/\*\* --workspace=jobs\/\*\*$/m
       );
       // `npm ci` must come AFTER the COPYs of shared/apps/jobs, not before.
       // A manifest-only-first split (COPY only package.json's, npm ci, THEN

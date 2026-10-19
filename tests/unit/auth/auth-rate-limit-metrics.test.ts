@@ -1,7 +1,7 @@
 /**
  * Auth-specific wiring for the BS#2169 GET /auth/get-session rate limiters:
  * namespace, metric name, dimension set, KeyKind classification, the
- * AUTH_RATE_LIMIT_METRICS_DISABLED short-circuit, the Sentry breadcrumb, and
+ * AUTH_RATE_LIMIT_METRICS_DISABLED short-circuit, the error-reporter breadcrumb, and
  * the response body/status the custom `handler` sends. Generic emitter
  * mechanics (buffering, coalescing, flush timing, swallow-on-failure) are
  * covered separately by tests/unit/observability/metrics.test.ts.
@@ -19,10 +19,9 @@ jest.mock('@aws-sdk/client-cloudwatch', () => ({
   PutMetricDataCommand: mockPutMetricDataCommand,
 }));
 
-const mockAddBreadcrumb = jest.fn();
-jest.mock('@sentry/node', () => ({
-  addBreadcrumb: (...args: unknown[]) => mockAddBreadcrumb(...args),
-}));
+import { useSpyReporter } from '../../utils/observability';
+
+const reporter = useSpyReporter();
 
 import { makeHandler, __resetForTests, __flushForTests } from '../../../apps/auth/auth-rate-limit-metrics';
 
@@ -96,7 +95,6 @@ describe('auth-rate-limit-metrics', () => {
     mockSend.mockReset();
     mockSend.mockResolvedValue({});
     mockPutMetricDataCommand.mockClear();
-    mockAddBreadcrumb.mockClear();
     delete process.env.AUTH_RATE_LIMIT_METRICS_DISABLED;
     __resetForTests();
   });
@@ -159,17 +157,19 @@ describe('auth-rate-limit-metrics', () => {
     expect(dimensionMap(datum).KeyKind).toBe('ip');
   });
 
-  it('adds a Sentry breadcrumb, not a captured exception or message', () => {
+  it('adds a breadcrumb, not a captured exception or message', () => {
     const handler = makeHandler('identity');
     const req = makeReq({ headers: {} });
     const res = makeRes();
 
     handler(req, res, jest.fn(), rateLimitOptions);
 
-    expect(mockAddBreadcrumb).toHaveBeenCalledTimes(1);
-    const [breadcrumb] = mockAddBreadcrumb.mock.calls[0] as [{ category: string; level: string }];
+    expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(1);
+    const [breadcrumb] = reporter.addBreadcrumb.mock.calls[0];
     expect(breadcrumb.category).toBe('auth.ratelimit');
     expect(breadcrumb.level).toBe('warning');
+    expect(reporter.captureException).not.toHaveBeenCalled();
+    expect(reporter.captureMessage).not.toHaveBeenCalled();
   });
 
   it('sends the shared 429 body shape via res.status(...).json(...)', () => {
@@ -241,6 +241,6 @@ describe('auth-rate-limit-metrics', () => {
     handler(req, res, jest.fn(), rateLimitOptions);
 
     expect(res.statusCode).toBe(429);
-    expect(mockAddBreadcrumb).toHaveBeenCalledTimes(1);
+    expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(1);
   });
 });

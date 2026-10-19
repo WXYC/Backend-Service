@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { randomBytes } from 'node:crypto';
 import { auth } from './auth.definition';
 import { sendAccountSetupEmail } from './email';
@@ -87,7 +87,7 @@ export async function createAndSendAccountSetupInvite(
     await sendAccountSetupEmail({ to: email, setupUrl });
     return { sent: true };
   } catch (error) {
-    Sentry.captureException(error, {
+    getErrorReporter().captureException(error, {
       tags: { subsystem: 'account-setup-invite' },
       extra: { userId, email },
     });

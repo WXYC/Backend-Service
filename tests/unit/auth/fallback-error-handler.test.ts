@@ -1,13 +1,11 @@
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 
-// Mock Sentry so we can assert on captureException invocations without booting
-// the SDK. Keep the mock factory variable name prefixed with `mock` so Jest's
-// out-of-band hoisting allows the reference (see provision-user.test.ts).
-const mockSentryCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({
-  captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
-}));
+// The handler captures through the process-wide ErrorReporter; a spy reporter lets us assert on
+// captureException invocations without booting the SDK.
+import { useSpyReporter } from '../../utils/observability';
+
+const reporter = useSpyReporter();
 
 import { fallbackErrorHandler } from '../../../apps/auth/fallback-error-handler';
 
@@ -28,7 +26,7 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
   const originalNodeEnv = process.env.NODE_ENV;
 
   beforeEach(() => {
-    mockSentryCaptureException.mockClear();
+    reporter.captureException.mockClear();
   });
 
   afterEach(() => {
@@ -59,8 +57,8 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
 
     fallbackErrorHandler(leakyError, mockReq, res, mockNext);
 
-    expect(mockSentryCaptureException).toHaveBeenCalledTimes(1);
-    expect(mockSentryCaptureException).toHaveBeenCalledWith(leakyError);
+    expect(reporter.captureException).toHaveBeenCalledTimes(1);
+    expect(reporter.captureException).toHaveBeenCalledWith(leakyError);
   });
 
   it('preserves the detailed message in development for debugging', () => {
@@ -72,7 +70,7 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
 
     expect(statusMock).toHaveBeenCalledWith(500);
     expect(jsonMock).toHaveBeenCalledWith({ error: 'detailed dev message' });
-    expect(mockSentryCaptureException).toHaveBeenCalledWith(error);
+    expect(reporter.captureException).toHaveBeenCalledWith(error);
   });
 
   it('preserves the detailed message in test environment', () => {
@@ -107,6 +105,6 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
     fallbackErrorHandler('something broke', mockReq, res, mockNext);
 
     expect(jsonMock).toHaveBeenCalledWith({ error: 'Internal server error' });
-    expect(mockSentryCaptureException).toHaveBeenCalledWith('something broke');
+    expect(reporter.captureException).toHaveBeenCalledWith('something broke');
   });
 });
