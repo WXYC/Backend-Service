@@ -9,6 +9,12 @@ import { redactLogValue, redactQueryParams } from './redact-query-params.js';
  * `patterns/error-tracking.md`. Fail-open: no `POSTHOG_ERRORS_API_KEY` means every call is a no-op,
  * and nothing here throws. It imports no per-module-copy state; the process-wide reporter slot is
  * the holder in `current-reporter.ts`.
+ *
+ * Request scope: breadcrumbs and request tags are kept per request in an AsyncLocalStorage opened by
+ * `runInScope`. An HTTP app MUST wrap each request in `runInScope` (BS#3409 wires that middleware);
+ * without it, `setRequestTag` is a no-op, because a tag kept process-wide would leak one request's
+ * `request_id` onto another request's events. Outside a scope, breadcrumbs go to a small bounded
+ * process-level ring, which is right for a job: one flow per process.
  */
 
 /** `daily`: a long-running process (capacity 20, refills `ceiling` a day). `run`: a scheduled run (capacity `ceiling`, no refill). */
@@ -33,6 +39,8 @@ const DEDUPE_MAX_KEYS = 1000;
 const DROP_LOG_INTERVAL_MS = 60_000;
 /** Breadcrumbs kept per scope: half of Sentry's default of 100, enough to show the lead-up without bloating an event. */
 const BREADCRUMB_RING_SIZE = 50;
+/** The outside-scope ring is smaller: a job needs the lead-up, and a missing wrapper should leak little. */
+const PROCESS_RING_SIZE = 20;
 
 interface Scope {
   crumbs: Array<Record<string, unknown>>;
@@ -40,6 +48,33 @@ interface Scope {
 }
 
 const newScope = (): Scope => ({ crumbs: [], tags: {} });
+
+const fingerprintOf = (err: unknown): string => {
+  if (err instanceof Error) {
+    return `${err.name}:${err.message}`;
+  }
+  if (typeof err !== 'object' || err === null) {
+    return String(err);
+  }
+  try {
+    const record = err as Record<string, unknown>;
+    const name = err.constructor?.name ?? 'Object';
+    const label = [record['message'], record['code']].find((v) => typeof v === 'string' || typeof v === 'number');
+    if (label !== undefined) {
+      return `${name}:${String(label)}`;
+    }
+    const parts = Object.keys(record)
+      .sort()
+      .map((k) => (['string', 'number', 'boolean'].includes(typeof record[k]) ? `${k}=${String(record[k])}` : k));
+    let hash = 0;
+    for (const ch of parts.join('|')) {
+      hash = (Math.imul(hash, 31) + ch.charCodeAt(0)) | 0;
+    }
+    return `${name}:#${(hash >>> 0).toString(16)}`;
+  } catch {
+    return 'Object:unkeyable';
+  }
+};
 
 /** Unset or unknown (`test`, `prod`) is production, so a production process that lacks NODE_ENV is never tagged as development. */
 const mapEnvironment = (raw: string | undefined): 'production' | 'staging' | 'development' =>
@@ -49,8 +84,9 @@ export class PostHogReporter implements ErrorReporter {
   private readonly client: PostHog | null = null;
   private readonly environment: string;
   private readonly requestScopes = new AsyncLocalStorage<Scope>();
-  /** Used outside `runInScope`: a job's one run, or an app before its middleware opens a scope per request. */
-  private readonly processScope = newScope();
+  /** Breadcrumbs outside `runInScope` (a job's one run). Request tags are never kept here. */
+  private readonly processCrumbs: Array<Record<string, unknown>> = [];
+  private warnedNoScope = false;
   private readonly recentKeys = new Map<string, number>();
   private readonly capacity: number;
   private readonly refillPerMs: number;
@@ -84,7 +120,7 @@ export class PostHogReporter implements ErrorReporter {
 
   captureException(err: unknown, context?: ReportContext): void {
     const fingerprint = context?.fingerprint?.join(':');
-    const key = fingerprint ?? (err instanceof Error ? `${err.name}:${err.message}` : String(err));
+    const key = fingerprint ?? fingerprintOf(err);
     this.send(key, () => {
       // posthog-node sets `$exception_level: "error"` itself and a caller value overrides it silently,
       // so a level is passed only when it differs.
@@ -119,15 +155,22 @@ export class PostHogReporter implements ErrorReporter {
     if (!this.client) {
       return;
     }
-    const { crumbs } = this.scope();
+    const scope = this.requestScopes.getStore();
+    const crumbs = scope ? scope.crumbs : this.processCrumbs;
     crumbs.push(redactLogValue({ ...crumb, timestamp: new Date().toISOString() }) as Record<string, unknown>);
-    if (crumbs.length > BREADCRUMB_RING_SIZE) {
+    if (crumbs.length > (scope ? BREADCRUMB_RING_SIZE : PROCESS_RING_SIZE)) {
       crumbs.shift();
     }
   }
 
   setRequestTag(key: string, value: string): void {
-    this.scope().tags[key] = value;
+    const scope = this.requestScopes.getStore();
+    if (scope) {
+      scope.tags[key] = value;
+    } else if (this.client && !this.warnedNoScope) {
+      this.warnedNoScope = true;
+      console.warn('PostHogReporter.setRequestTag ignored outside runInScope; wrap each request in runInScope');
+    }
   }
 
   async flush(timeoutMs = 2000): Promise<boolean> {
@@ -148,13 +191,11 @@ export class PostHogReporter implements ErrorReporter {
     }
   }
 
-  private scope(): Scope {
-    return this.requestScopes.getStore() ?? this.processScope;
-  }
-
   /** The properties on every event; the contract fields come last so tags and run-wide properties cannot override them. */
   private properties(context?: ReportContext): Record<string, unknown> {
-    const { tags, crumbs } = this.scope();
+    const scope = this.requestScopes.getStore();
+    const tags = scope?.tags;
+    const crumbs = scope ? scope.crumbs : this.processCrumbs;
     const extra = context?.extra ? { extra: redactLogValue(context.extra) } : {};
     return {
       ...context?.tags,
