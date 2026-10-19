@@ -1,7 +1,6 @@
 import { jest } from '@jest/globals';
-import { getErrorReporter } from '@wxyc/observability';
-import type { ErrorReporter } from '@wxyc/observability';
-import { useSpyReporter } from '../../utils/observability';
+import { getErrorReporter, setErrorReporter } from '@wxyc/observability';
+import { createSpyReporter, useSpyReporter } from '../../utils/observability';
 
 // @wxyc/authentication is built as both ESM and CJS (BS#3396): an app can register its reporter through
 // one build of @wxyc/observability while the library resolves the other. This pins that a capture made
@@ -57,15 +56,23 @@ describe('@wxyc/authentication error reporting', () => {
 
   it('sees a reporter registered through another copy of the barrel', async () => {
     const appCopy = loadBarrelCopy();
-    const registered: ErrorReporter = reporter;
-    appCopy.setErrorReporter(registered);
-
-    expect(getErrorReporter()).toBe(registered);
-    await createAndSendAccountSetupInvite({
-      userId: 'user-id-001',
-      email: 'newdj@test.wxyc.org',
-      redirectTo: 'https://dj.wxyc.org/onboarding',
-    });
-    expect(reporter.captureException).toHaveBeenCalledTimes(1);
+    const distinct = createSpyReporter();
+    const previous = getErrorReporter();
+    appCopy.setErrorReporter(distinct);
+    try {
+      expect(getErrorReporter()).toBe(distinct);
+      await createAndSendAccountSetupInvite({
+        userId: 'user-id-001',
+        email: 'newdj@test.wxyc.org',
+        redirectTo: 'https://dj.wxyc.org/onboarding',
+      });
+      expect(distinct.captureException).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'ses down' }),
+        expect.objectContaining({ tags: { subsystem: 'account-setup-invite' } })
+      );
+      expect(reporter.captureException).not.toHaveBeenCalled();
+    } finally {
+      setErrorReporter(previous);
+    }
   });
 });
