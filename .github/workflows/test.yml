@@ -298,6 +298,14 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # BS#3509: jest transpiles tests without type-checking them, so interface
+      # drift in a typed helper merged green (BS#3502 vs BS#3500). Fails on any
+      # file with more errors than tests/typecheck-baseline.json. Must follow
+      # "Type check", whose `lint:prebuild` builds the workspace dists the
+      # tests/tsconfig.json paths and imports resolve against.
+      - name: Type check tests (BS#3509)
+        run: npm run typecheck:tests
+
       # BS#2537: importing the real `auth` object resolves `@wxyc/database`
       # to its BUILT dist (single tsup entry, no per-module dist file), so
       # this step must land after "Type check" above, whose `lint:prebuild`
