@@ -275,9 +275,8 @@ export const ALL_LML_CALLERS = [
   // release disagrees with LML's release pin (tracker BS#3137). Class 5 —
   // same offline bulk shape as its `album-metadata-bio-fill` donor, and its
   // own label so its LML sheds are readable for this job alone. The canary's
-  // Discogs-calls-per-album stop condition used to read the `lml.cache.api_calls`
-  // span attribute; BS#3403 removed that attribute.
-  // TODO(follow-up to #3403): replace the `lml.cache.*` span-attribute signal with a log- or metric-based one.
+  // Discogs-calls-per-album stop condition reads the `lml.cache.api_calls` and
+  // `lml.lookup.items` counter lines the client emits (BS#3508).
   // It is the one paced offline caller that sets
   // `allowReleaseResolutionFallback` (see that option's doc comment).
   'album-metadata-reask',

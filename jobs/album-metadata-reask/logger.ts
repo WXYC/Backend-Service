@@ -91,6 +91,19 @@ export const log = (level: LogLevel, step: string, message: string, fields: Reco
   }
 };
 
+/**
+ * Counter sink for `@wxyc/lml-client` (`setLmlCounterSink`): writes the same one-line shape as
+ * `logCounter` in `@wxyc/observability`, `{"metric": name, "value": …, …fields}`, so the job
+ * needs no dependency on that package. Works before `initLogger()`; never throws.
+ */
+export const emitCounter = (name: string, value: number, fields: Record<string, string> = {}): void => {
+  try {
+    process.stdout.write(JSON.stringify({ ...fields, metric: name, value }) + '\n');
+  } catch {
+    // unserialisable input: drop the counter rather than throw
+  }
+};
+
 /** Capture an exception to Sentry with the current run's tags + an extra `step`. */
 export const captureError = (error: unknown, step: string, extra: Record<string, unknown> = {}): void => {
   Sentry.captureException(error, { tags: { step }, extra });
