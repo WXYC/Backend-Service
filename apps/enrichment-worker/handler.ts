@@ -141,7 +141,7 @@ export function makeEnrichmentHandler(): (event: CdcEvent) => void {
     // BS#1108: register in the in-flight set so the SIGTERM drain can await
     // pending lookups before the DB pool closes. `handleCandidate`'s body
     // is wrapped in try/catch for LML + DB errors, but the outer
-    // `Sentry.startSpan(...)` call itself sits outside any try/catch — if
+    // Sentry capture calls can throw outside any try/catch — if
     // Sentry's internals throw (e.g. exporter error, disposed hub during
     // shutdown) the promise rejects. Chain `.catch(() => {})` so the
     // discarded `void promise.finally(...)` can't produce an
@@ -162,139 +162,118 @@ export function makeEnrichmentHandler(): (event: CdcEvent) => void {
 }
 
 async function handleCandidate(candidate: EnrichmentCandidate): Promise<void> {
-  await Sentry.startSpan(
-    {
-      name: 'enrichment.consumer.tick',
-      op: 'queue.process',
-      attributes: {
-        'enrichment.flowsheet_id': candidate.id,
-        'enrichment.has_album': candidate.album_title !== null,
-        'enrichment.has_track': candidate.track_title !== null,
-      },
-    },
-    async (span) => {
-      try {
-        const claim = await claimRowForEnrichment(candidate.id);
-        if (!claim.claimed) {
-          span.setAttribute('enrichment.outcome', 'claim_lost');
-          return;
-        }
-
-        // B1 (BS#1747): cache-first. Only linked rows (album_id non-null)
-        // have an album_metadata row to consult. Skip the LML call only when
-        // a load-bearing field (artwork_url / discogs_url) is already
-        // non-null — a real, persisted Discogs match. Null and
-        // search-URL-only shells fall through and still call LML, so a false
-        // no-match written during a cold-cache degradation window self-heals
-        // (BS#1089 negative-cache-poisoning guard — see precheck.ts). This is
-        // the largest LML call-count cut in the latency plan: it kills the
-        // 50×/album amplifier where a release played 50× paid 50 cold lookups.
-        if (candidate.album_id !== null && (await hasLoadBearingAlbumMetadata(candidate.album_id))) {
-          const cacheOutcome = await finalizeFromCachedMetadata(candidate);
-          span.setAttribute('enrichment.outcome', cacheOutcome);
-          span.setAttribute('enrichment.lml_skipped', true);
-          return;
-        }
-
-        let outcome: FinalizeOutcome;
-        let emptyCause: ReturnType<typeof classifyEmptyCause> | null = null;
-        try {
-          // B3 (BS#1749): coalesce this row's lookup into a burst-batched
-          // `bulkLookupMetadata` call instead of a per-row `lookupMetadata`
-          // round-trip. `enrichmentBulkLookup` buffers concurrent CDC ticks,
-          // flushes them through one bulk call (chunked at LML's 100-item cap),
-          // and resolves this caller with its own per-index `LookupResponse` —
-          // drop-in with the per-row contract (resolves on match/no-match,
-          // rejects into the catch arm below on a per-item error or a failed
-          // bulk call). It sets `extended: true` on every item so the 8
-          // LML-only fields (genres/styles/tracklist/label/full_release_date/
-          // discogs_artist_id/artist_image_url/profile_tokens) still land in
-          // album_metadata (BS#1336) — cache-only on the bulk path (LML#685),
-          // so no incremental Discogs cost.
-          // `'live'` lane (BS#1978): this is the CDC path whose cold
-          // non-library rotation arrivals the budget suppression exists for.
-          // The lane is declared here rather than inferred inside the batcher
-          // because the batcher coalesces both sources into one buffer.
-          const response = await enrichmentBulkLookup(candidate, 'live');
-          outcome = await finalizeRow(candidate, response);
-          // G7 (BS#969): defer the captureMessage until after the
-          // span.setAttribute below, but compute the classification while the
-          // response is still in scope. `null` means the response was a real
-          // user-visible match; non-null means we need to fire.
-          // BS#2217 review: pass the same album `finalizeRow` gated on, so the
-          // classification describes the write that was actually made.
-          if (isEmptyOutcome(response, candidate.album_title)) {
-            emptyCause = classifyEmptyCause(response, candidate.album_title);
-          }
-        } catch (err) {
-          // Row stays `enriching`. C6 stranded-claim sweep recovers it past
-          // `enriching_since + 60s`. We do NOT revert to `pending` here —
-          // doing so under a transient LML failure could re-deliver the
-          // event to a sibling worker mid-failure, amplifying load against
-          // an already-struggling LML.
-          span.setAttribute('enrichment.outcome', 'lml_error');
-          Sentry.captureException(err, {
-            tags: { component: 'enrichment-worker', step: 'lml_lookup' },
-            extra: { flowsheet_id: candidate.id },
-          });
-          // BS#1311: the paired captureMessage on the catch arm was dropped.
-          // captureException above is the source-of-truth for the stack
-          // trace; the extra captureMessage was a redundant second quota
-          // slot per timeout (see file header for the full volume-control
-          // rationale). The `enrichment.outcome=lml_error` span attribute
-          // above keeps the throw class visible to dashboard aggregation.
-          console.error('[enrichment-worker] lml error; row left in enriching state', {
-            id: candidate.id,
-            artist: candidate.artist_name,
-            error: (err as Error).message,
-          });
-          return;
-        }
-
-        span.setAttribute('enrichment.outcome', outcome);
-
-        // G7 (BS#969): emit the aggregated empty-outcome signal for rows
-        // this worker finalized with no user-visible artwork URL — the
-        // LML#408 `_resolve_fallback_artwork` class. Stable fingerprint so
-        // cause-tagged aggregation persists across releases.
-        //
-        // BS#1311 volume control (see file header for the full rationale):
-        //   - skip when outcome ends in `_raced` — a sibling worker / C6
-        //     sweep wrote the user-visible state, not this worker
-        //   - skip when cause is `lml_no_match` — by-design Discogs miss,
-        //     not a degradation; the span attribute carries the signal
-        // Net result: captureMessage fires only on `lml_degraded` outcomes
-        // this worker wrote.
-        if (emptyCause !== null && !outcome.endsWith('_raced') && !SUPPRESSED_EMPTY_CAUSES.has(emptyCause)) {
-          Sentry.captureMessage('enrichment-empty-outcome', {
-            level: 'warning',
-            tags: {
-              subsystem: 'metadata',
-              cause: emptyCause,
-              transaction: 'enrichment.consumer.tick',
-              outcome,
-            },
-            extra: {
-              flowsheet_id: candidate.id,
-              artist: candidate.artist_name,
-            },
-            fingerprint: EMPTY_OUTCOME_FINGERPRINT,
-          });
-        }
-      } catch (err) {
-        // DB error during claim or finalize. Same defensive posture: capture
-        // + log, row state is whatever PG ended up with. C6 sweep handles
-        // any stranded `enriching` rows.
-        span.setAttribute('enrichment.outcome', 'db_error');
-        Sentry.captureException(err, {
-          tags: { component: 'enrichment-worker', step: 'claim_or_finalize' },
-          extra: { flowsheet_id: candidate.id },
-        });
-        console.error('[enrichment-worker] db error during enrichment', {
-          id: candidate.id,
-          error: (err as Error).message,
-        });
-      }
+  try {
+    const claim = await claimRowForEnrichment(candidate.id);
+    if (!claim.claimed) {
+      return;
     }
-  );
+
+    // B1 (BS#1747): cache-first. Only linked rows (album_id non-null)
+    // have an album_metadata row to consult. Skip the LML call only when
+    // a load-bearing field (artwork_url / discogs_url) is already
+    // non-null — a real, persisted Discogs match. Null and
+    // search-URL-only shells fall through and still call LML, so a false
+    // no-match written during a cold-cache degradation window self-heals
+    // (BS#1089 negative-cache-poisoning guard — see precheck.ts). This is
+    // the largest LML call-count cut in the latency plan: it kills the
+    // 50×/album amplifier where a release played 50× paid 50 cold lookups.
+    if (candidate.album_id !== null && (await hasLoadBearingAlbumMetadata(candidate.album_id))) {
+      await finalizeFromCachedMetadata(candidate);
+      return;
+    }
+
+    let outcome: FinalizeOutcome;
+    let emptyCause: ReturnType<typeof classifyEmptyCause> | null = null;
+    try {
+      // B3 (BS#1749): coalesce this row's lookup into a burst-batched
+      // `bulkLookupMetadata` call instead of a per-row `lookupMetadata`
+      // round-trip. `enrichmentBulkLookup` buffers concurrent CDC ticks,
+      // flushes them through one bulk call (chunked at LML's 100-item cap),
+      // and resolves this caller with its own per-index `LookupResponse` —
+      // drop-in with the per-row contract (resolves on match/no-match,
+      // rejects into the catch arm below on a per-item error or a failed
+      // bulk call). It sets `extended: true` on every item so the 8
+      // LML-only fields (genres/styles/tracklist/label/full_release_date/
+      // discogs_artist_id/artist_image_url/profile_tokens) still land in
+      // album_metadata (BS#1336) — cache-only on the bulk path (LML#685),
+      // so no incremental Discogs cost.
+      // `'live'` lane (BS#1978): this is the CDC path whose cold
+      // non-library rotation arrivals the budget suppression exists for.
+      // The lane is declared here rather than inferred inside the batcher
+      // because the batcher coalesces both sources into one buffer.
+      const response = await enrichmentBulkLookup(candidate, 'live');
+      outcome = await finalizeRow(candidate, response);
+      // G7 (BS#969): defer the captureMessage until after finalizeRow,
+      // but compute the classification while the
+      // response is still in scope. `null` means the response was a real
+      // user-visible match; non-null means we need to fire.
+      // BS#2217 review: pass the same album `finalizeRow` gated on, so the
+      // classification describes the write that was actually made.
+      if (isEmptyOutcome(response, candidate.album_title)) {
+        emptyCause = classifyEmptyCause(response, candidate.album_title);
+      }
+    } catch (err) {
+      // Row stays `enriching`. C6 stranded-claim sweep recovers it past
+      // `enriching_since + 60s`. We do NOT revert to `pending` here —
+      // doing so under a transient LML failure could re-deliver the
+      // event to a sibling worker mid-failure, amplifying load against
+      // an already-struggling LML.
+      Sentry.captureException(err, {
+        tags: { component: 'enrichment-worker', step: 'lml_lookup' },
+        extra: { flowsheet_id: candidate.id },
+      });
+      // BS#1311: the paired captureMessage on the catch arm was dropped.
+      // captureException above is the source-of-truth for the stack
+      // trace; the extra captureMessage was a redundant second quota
+      // slot per timeout (see file header for the full volume-control
+      // rationale).
+      console.error('[enrichment-worker] lml error; row left in enriching state', {
+        id: candidate.id,
+        artist: candidate.artist_name,
+        error: (err as Error).message,
+      });
+      return;
+    }
+
+    // G7 (BS#969): emit the aggregated empty-outcome signal for rows
+    // this worker finalized with no user-visible artwork URL — the
+    // LML#408 `_resolve_fallback_artwork` class. Stable fingerprint so
+    // cause-tagged aggregation persists across releases.
+    //
+    // BS#1311 volume control (see file header for the full rationale):
+    //   - skip when outcome ends in `_raced` — a sibling worker / C6
+    //     sweep wrote the user-visible state, not this worker
+    //   - skip when cause is `lml_no_match` — by-design Discogs miss,
+    //     not a degradation
+    // Net result: captureMessage fires only on `lml_degraded` outcomes
+    // this worker wrote.
+    if (emptyCause !== null && !outcome.endsWith('_raced') && !SUPPRESSED_EMPTY_CAUSES.has(emptyCause)) {
+      Sentry.captureMessage('enrichment-empty-outcome', {
+        level: 'warning',
+        tags: {
+          subsystem: 'metadata',
+          cause: emptyCause,
+          transaction: 'enrichment.consumer.tick',
+          outcome,
+        },
+        extra: {
+          flowsheet_id: candidate.id,
+          artist: candidate.artist_name,
+        },
+        fingerprint: EMPTY_OUTCOME_FINGERPRINT,
+      });
+    }
+  } catch (err) {
+    // DB error during claim or finalize. Same defensive posture: capture
+    // + log, row state is whatever PG ended up with. C6 sweep handles
+    // any stranded `enriching` rows.
+    Sentry.captureException(err, {
+      tags: { component: 'enrichment-worker', step: 'claim_or_finalize' },
+      extra: { flowsheet_id: candidate.id },
+    });
+    console.error('[enrichment-worker] db error during enrichment', {
+      id: candidate.id,
+      error: (err as Error).message,
+    });
+  }
 }

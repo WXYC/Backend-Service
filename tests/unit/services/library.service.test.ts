@@ -94,14 +94,6 @@ jest.mock('../../../apps/backend/services/lml/lookup-coordinator', () => ({
   },
 }));
 
-// Mock @sentry/node so we can assert that searchLibraryByTrack creates a
-// catalog.track_search span and projects per-search measurements onto it
-// without initializing Sentry. startSpan(opts, callback) wraps a span mock
-// and returns the callback's result — preserving the function's return
-// value and generic. getActiveSpan() returns the same span instance so
-// the inner method's `Sentry.getActiveSpan()?.setAttributes(...)` lands
-// on the outer span the test asserts against.
-const mockSpanSetAttribute = jest.fn();
 jest.mock('@wxyc/observability', () =>
   jest
     .requireActual<typeof import('../../utils/observability')>('../../utils/observability')
@@ -117,19 +109,6 @@ jest.mock('../../../apps/backend/services/observability/cache-stats', () => ({
   ),
   recordCacheLookup: (name: string, hit: boolean, cache: { size: number; max: number }) =>
     mockRecordCacheLookup({ cache_hit: hit, cache_name: name, cache_size: cache.size, cache_capacity: cache.max }),
-}));
-const mockSpanSetAttributes = jest.fn();
-type SpanLike = { setAttribute: typeof mockSpanSetAttribute; setAttributes: typeof mockSpanSetAttributes };
-const spanInstance: SpanLike = { setAttribute: mockSpanSetAttribute, setAttributes: mockSpanSetAttributes };
-const mockStartSpan = jest.fn(
-  <T>(_opts: { name: string; op: string }, callback: (span: SpanLike) => T | Promise<T>): Promise<T> =>
-    Promise.resolve(callback(spanInstance))
-);
-const mockGetActiveSpan = jest.fn(() => spanInstance);
-jest.mock('@sentry/node', () => ({
-  startSpan: <T>(opts: { name: string; op: string }, callback: (span: SpanLike) => T | Promise<T>): Promise<T> =>
-    mockStartSpan(opts, callback),
-  getActiveSpan: () => mockGetActiveSpan(),
 }));
 
 import {
@@ -1949,7 +1928,7 @@ describe('library.service', () => {
     });
   });
 
-  describe('searchLibraryByTrack telemetry (Sentry span)', () => {
+  describe('searchLibraryByTrack cache stats', () => {
     const trackRow = {
       id: 101,
       code_letters: 'PR',
@@ -2005,25 +1984,9 @@ describe('library.service', () => {
       jest.clearAllMocks();
       resetCatalogTierRows();
       __resetTrackSearchCacheForTests();
-      // Restore the default span instance so cross-test mockImplementation
-      // changes (e.g., the "setAttributes throws" test) don't bleed.
-      mockSpanSetAttributes.mockReset();
-      mockSpanSetAttribute.mockReset();
     });
 
-    it('wraps the call in a catalog.track_search Sentry span on every invocation', async () => {
-      primeMissPath();
-
-      await searchLibraryByTrack('Back, Baby', 10);
-
-      expect(mockStartSpan).toHaveBeenCalledTimes(1);
-      expect(mockStartSpan.mock.calls[0][0]).toEqual({
-        name: 'searchLibraryByTrack',
-        op: 'catalog.track_search',
-      });
-    });
-
-    it('projects cache_hit=false + master_lookup_ms + latency_ms on a cache miss (LML succeeded)', async () => {
+    it('records cache_hit=false on a cache miss (LML succeeded)', async () => {
       primeMissPath();
 
       await searchLibraryByTrack('Back, Baby', 10);
@@ -2038,30 +2001,12 @@ describe('library.service', () => {
         cache_size: 1,
         cache_capacity: 1000,
       });
-      // master_lookup_ms is projected by the inner method via the active span.
-      const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
-      expect(setAttrsKeys).toContain('track_search.master_lookup_ms');
-      expect(setAttrsKeys).toContain('track_search.latency_ms');
-      // All emitted `*_ms` timing values are finite numbers. Scoped to `_ms`
-      // keys (not every setAttributes call) because the BS#989 cache-stats
-      // projection above shares this same mock and carries non-numeric
-      // `cache_name` (string) / `cache_hit` (boolean) values.
-      for (const call of mockSpanSetAttributes.mock.calls) {
-        for (const [key, value] of Object.entries(call[0] as Record<string, unknown>)) {
-          if (!key.endsWith('_ms')) continue;
-          expect(typeof value).toBe('number');
-          expect(Number.isFinite(value as number)).toBe(true);
-        }
-      }
     });
 
-    it('projects cache_hit=true + latency_ms on a cache hit (no LML call, no master_lookup_ms)', async () => {
+    it('records cache_hit=true on a cache hit (no LML call)', async () => {
       primeMissPath();
       // Warm the cache.
       await searchLibraryByTrack('Back, Baby', 10);
-      mockSpanSetAttribute.mockReset();
-      mockSpanSetAttributes.mockReset();
-      mockStartSpan.mockClear();
       mockLookupBySong.mockReset();
 
       // Second call hits the cache.
@@ -2069,7 +2014,6 @@ describe('library.service', () => {
 
       expect(mockLookupBySong).not.toHaveBeenCalled();
       expect(results).toHaveLength(1);
-      expect(mockStartSpan).toHaveBeenCalledTimes(1);
       // cache_size stays 1 — a hit doesn't write a second entry for the same key.
       expect(mockRecordCacheLookup).toHaveBeenCalledWith({
         cache_hit: true,
@@ -2077,46 +2021,15 @@ describe('library.service', () => {
         cache_size: 1,
         cache_capacity: 1000,
       });
-      const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
-      expect(setAttrsKeys).toContain('track_search.latency_ms');
-      // master_lookup_ms is not projected on hit — the inner method never runs.
-      expect(setAttrsKeys).not.toContain('track_search.master_lookup_ms');
     });
 
-    it('still projects latency_ms when LML fails (degraded path is still observable)', async () => {
+    it('returns an empty result when LML fails', async () => {
       mockLookupBySong.mockRejectedValue(new Error('LML 502 Bad Gateway'));
       db.select.mockReset();
 
       const results = await searchLibraryByTrack('Back, Baby', 10);
 
       expect(results).toEqual([]);
-      const setAttrsKeys = mockSpanSetAttributes.mock.calls.flatMap((c) => Object.keys(c[0] as object));
-      expect(setAttrsKeys).toContain('track_search.latency_ms');
-    });
-
-    it('resolves successfully when span.setAttributes throws (observability must not break the request path)', async () => {
-      primeMissPath();
-      mockSpanSetAttributes.mockImplementation(() => {
-        throw new Error('sentry boom');
-      });
-
-      // `clearMocks` (jest.unit.config.ts) clears call history before every
-      // test but not a `mockImplementation` override, and this block has no
-      // `beforeEach` that restores one. Left as-is, this throwing stub would
-      // bleed into every later `describe` in this file that reaches
-      // `Sentry.getActiveSpan()?.setAttributes(...)` — harmless while nothing
-      // downstream called it, but BS#2766's `enrichWithArtwork` telemetry
-      // now does, so restore the default (non-throwing) double in `finally`
-      // — not after the assertions — so a failing assertion here still
-      // cleans it up instead of leaking a broken span double forward.
-      try {
-        const results = await searchLibraryByTrack('Back, Baby', 10);
-
-        expect(results).toHaveLength(1);
-        expect(results[0].id).toBe(101);
-      } finally {
-        mockSpanSetAttributes.mockReset();
-      }
     });
   });
 
@@ -3179,353 +3092,6 @@ describe('library.service', () => {
         expect(classifyArtworkEnrichOutcome(trusted, hasCover, response(fields))).toBe(expected);
       });
     });
-
-    /**
-     * BS#2766: `enrichWithArtwork` tallies the `ArtworkEnrichOutcome` of
-     * every row in its `Promise.allSettled` batch and projects the sums onto
-     * a span THIS CALL OWNS, once, after the batch settles.
-     *
-     * Review follow-up (the span fix): a plain detached `getActiveSpan()`
-     * attribute never reaches Sentry from this call site — probed and
-     * confirmed against the real SDK — because both call sites
-     * (`library.controller.ts`) run `enrichWithArtwork` detached from the
-     * response, and by the time this function's first LML round-trip
-     * resolves, the request's own Express span has already ended and gone
-     * `_frozen`. `enrichWithArtwork` therefore opens its own
-     * `forceTransaction: true` span and writes onto the `span` callback
-     * parameter, never `Sentry.getActiveSpan()`. The tests below pin both
-     * halves: the span is opened with the right shape (and NOT opened on an
-     * early return), and the attributes land on that span specifically, not
-     * on whatever happens to be "active".
-     */
-    describe('artwork_enrich outcome span telemetry (BS#2766)', () => {
-      beforeEach(() => {
-        // `clearMocks` (jest.unit.config.ts) clears call history but not a
-        // `mockImplementation` override — the "setAttributes throws" case
-        // below installs one, so every test in this block restores the
-        // default (non-throwing) span double first, regardless of run order.
-        mockSpanSetAttributes.mockReset();
-        mockGetActiveSpan.mockImplementation(() => spanInstance);
-      });
-
-      const directMatchWith = (artworkUrl: string | null, flags: Record<string, unknown> = {}) => ({
-        results: [
-          {
-            library_item: { id: 7, title: 'Quiet Signs', artist: 'Jessica Pratt', call_number: '', library_url: '' },
-            artwork: {
-              release_id: 4242,
-              release_url: 'https://www.discogs.com/release/4242',
-              artwork_url: artworkUrl,
-              confidence: 0.95,
-            },
-          },
-        ],
-        search_type: 'direct',
-        song_not_found: false,
-        found_on_compilation: false,
-        degraded: false,
-        timeout: false,
-        ...flags,
-      });
-
-      const cleanMiss = {
-        results: [],
-        search_type: 'none',
-        song_not_found: false,
-        found_on_compilation: false,
-      };
-
-      const zeroTally = {
-        'artwork_enrich.persisted': 0,
-        'artwork_enrich.persisted_degraded': 0,
-        'artwork_enrich.stamped': 0,
-        'artwork_enrich.retryable_degraded': 0,
-        'artwork_enrich.retryable_degraded_trusted': 0,
-        'artwork_enrich.retryable_deadline_trusted': 0,
-        'artwork_enrich.rejected': 0,
-      };
-
-      it('opens its own forceTransaction span with the exact expected shape', async () => {
-        mockLookupMetadata.mockResolvedValue(cleanMiss);
-        mockStampWrite();
-
-        await enrichWithArtwork([
-          { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
-        ]);
-
-        expect(mockStartSpan).toHaveBeenCalledTimes(1);
-        expect(mockStartSpan.mock.calls[0][0]).toEqual({
-          name: 'enrichWithArtwork',
-          op: 'catalog.artwork_enrich',
-          forceTransaction: true,
-        });
-      });
-
-      it('opens no span at all on an early return (every row already has artwork)', async () => {
-        const results = [
-          {
-            id: 7,
-            artist_name: 'Jessica Pratt',
-            album_title: 'Quiet Signs',
-            artwork_url: 'https://i.discogs.com/quiet-signs.jpg',
-          },
-        ];
-
-        await enrichWithArtwork(results);
-
-        expect(mockStartSpan).not.toHaveBeenCalled();
-        expect(mockLookupMetadata).not.toHaveBeenCalled();
-      });
-
-      it('writes attributes onto the span this call owns, not onto whatever span happens to be active', async () => {
-        const decoySetAttributes = jest.fn();
-        const decoySpan = { setAttribute: jest.fn(), setAttributes: decoySetAttributes };
-        mockGetActiveSpan.mockImplementation(() => decoySpan);
-        mockLookupMetadata.mockResolvedValue(cleanMiss);
-        mockStampWrite();
-
-        try {
-          await enrichWithArtwork([
-            { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
-          ]);
-
-          expect(decoySetAttributes).not.toHaveBeenCalled();
-          expect(mockSpanSetAttributes).toHaveBeenCalledWith({ ...zeroTally, 'artwork_enrich.stamped': 1 });
-        } finally {
-          mockGetActiveSpan.mockImplementation(() => spanInstance);
-        }
-      });
-
-      it.each([
-        {
-          label: 'a degraded (deadline_exceeded) reply WITH trusted artwork',
-          setup: () =>
-            mockLookupMetadata.mockResolvedValue(
-              directMatchWith('https://i.discogs.com/quiet-signs.jpg', {
-                degraded: true,
-                degraded_reason: 'deadline_exceeded',
-              })
-            ),
-          expected: { ...zeroTally, 'artwork_enrich.persisted': 1, 'artwork_enrich.persisted_degraded': 1 },
-        },
-        {
-          label:
-            'a degraded (deadline_exceeded) reply WITHOUT trusted artwork (trusted candidate, no cover) — the decision-gate population',
-          setup: () =>
-            mockLookupMetadata.mockResolvedValue(
-              directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' })
-            ),
-          expected: {
-            ...zeroTally,
-            'artwork_enrich.retryable_degraded': 1,
-            'artwork_enrich.retryable_degraded_trusted': 1,
-            'artwork_enrich.retryable_deadline_trusted': 1,
-            'artwork_enrich.retryable_deadline_trusted_ids': '7',
-          },
-        },
-        {
-          label:
-            'a trusted "direct" match with budget-exhausted EMPTY results, degraded (deadline_exceeded) — plain retryable_degraded only',
-          setup: () =>
-            mockLookupMetadata.mockResolvedValue({
-              results: [],
-              search_type: 'direct',
-              song_not_found: false,
-              found_on_compilation: false,
-              degraded: true,
-              degraded_reason: 'deadline_exceeded',
-            }),
-          expected: { ...zeroTally, 'artwork_enrich.retryable_degraded': 1 },
-        },
-        {
-          label: 'degraded (upstream_unavailable), trusted candidate, no cover — the Discogs breaker was open',
-          setup: () =>
-            mockLookupMetadata.mockResolvedValue(
-              directMatchWith(null, { degraded: true, degraded_reason: 'upstream_unavailable' })
-            ),
-          expected: {
-            ...zeroTally,
-            'artwork_enrich.retryable_degraded': 1,
-            'artwork_enrich.retryable_degraded_trusted': 1,
-          },
-        },
-        {
-          label: 'degraded (cache_only), trusted candidate, no cover — shed before any tail step',
-          setup: () =>
-            mockLookupMetadata.mockResolvedValue(
-              directMatchWith(null, { degraded: true, degraded_reason: 'cache_only' })
-            ),
-          expected: {
-            ...zeroTally,
-            'artwork_enrich.retryable_degraded': 1,
-            'artwork_enrich.retryable_degraded_trusted': 1,
-          },
-        },
-        {
-          label: 'a bare timeout (no degraded flag) with no usable match, untrusted',
-          setup: () => mockLookupMetadata.mockResolvedValue({ ...cleanMiss, timeout: true }),
-          expected: { ...zeroTally, 'artwork_enrich.retryable_degraded': 1 },
-        },
-        {
-          label: 'a bare timeout (no degraded flag), trusted candidate, no cover — ran the whole tail',
-          setup: () => mockLookupMetadata.mockResolvedValue(directMatchWith(null, { timeout: true })),
-          expected: {
-            ...zeroTally,
-            'artwork_enrich.retryable_degraded': 1,
-            'artwork_enrich.retryable_degraded_trusted': 1,
-          },
-        },
-        {
-          label: 'a clean hit',
-          setup: () => mockLookupMetadata.mockResolvedValue(directMatchWith('https://i.discogs.com/quiet-signs.jpg')),
-          expected: { ...zeroTally, 'artwork_enrich.persisted': 1 },
-        },
-        {
-          label: 'a clean miss',
-          setup: () => mockLookupMetadata.mockResolvedValue(cleanMiss),
-          expected: { ...zeroTally, 'artwork_enrich.stamped': 1 },
-        },
-        {
-          label: 'an untrusted match',
-          setup: () =>
-            mockLookupMetadata.mockResolvedValue(
-              directMatchWith('https://i.discogs.com/quiet-signs.jpg', { search_type: 'fallback' })
-            ),
-          expected: { ...zeroTally, 'artwork_enrich.stamped': 1 },
-        },
-        {
-          label: 'a spacer-gif result',
-          setup: () =>
-            mockLookupMetadata.mockResolvedValue(directMatchWith('https://st.discogs.com/images/spacer.gif')),
-          expected: { ...zeroTally, 'artwork_enrich.stamped': 1 },
-        },
-        {
-          label: 'a thrown shed',
-          setup: () => mockLookupMetadata.mockRejectedValue(new MockLimiterShedError('breaker_open')),
-          expected: { ...zeroTally, 'artwork_enrich.rejected': 1 },
-        },
-      ])('projects the right artwork_enrich attributes for $label', async ({ setup, expected }) => {
-        setup();
-        mockStampWrite();
-        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-
-        await enrichWithArtwork([
-          { id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
-        ]);
-
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith(expected);
-        consoleSpy.mockRestore();
-      });
-
-      /**
-       * Acceptance criterion: one call's batch, covering every bucket, with
-       * at least two rows landing in the same bucket — fails if the tally
-       * loop used `= 1` instead of `+= 1`. WXYC-representative artists
-       * (org CLAUDE.md "Example Music Data"), keyed by album title through
-       * `mockLookupMetadata.mockImplementation` so each row gets its own
-       * reply.
-       */
-      it('tallies a multi-row batch, with more than one row per bucket, into the exact attribute object', async () => {
-        mockStampWrite();
-        const responsesByAlbum: Record<string, unknown> = {
-          'Quiet Signs': directMatchWith('https://i.discogs.com/quiet-signs.jpg'),
-          DOGA: directMatchWith('https://i.discogs.com/doga.jpg', {
-            degraded: true,
-            degraded_reason: 'deadline_exceeded',
-          }),
-          Edits: directMatchWith('https://i.discogs.com/edits.jpg', { timeout: true }),
-          'Duke Ellington & John Coltrane': cleanMiss,
-          'Aluminum Tunes': directMatchWith('https://i.discogs.com/aluminum.jpg', {
-            search_type: 'fallback',
-            degraded: true,
-            degraded_reason: 'upstream_unavailable',
-          }),
-          'Moon Pix': directMatchWith(null, { timeout: true }),
-          'Miss Universe': directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' }),
-          'El Bueno y El Malo': directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' }),
-        };
-        mockLookupMetadata.mockImplementation((_artist: unknown, album: string | undefined) => {
-          if (album === 'Live at Trafó') return Promise.reject(new MockLimiterShedError('breaker_open'));
-          const response = album !== undefined ? responsesByAlbum[album] : undefined;
-          if (!response) return Promise.reject(new Error(`no fixture for album ${album ?? '(undefined)'}`));
-          return Promise.resolve(response);
-        });
-        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-
-        await enrichWithArtwork([
-          { id: 1, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null },
-          { id: 2, artist_name: 'Juana Molina', album_title: 'DOGA', artwork_url: null },
-          { id: 3, artist_name: 'Chuquimamani-Condori', album_title: 'Edits', artwork_url: null },
-          {
-            id: 4,
-            artist_name: 'Duke Ellington & John Coltrane',
-            album_title: 'Duke Ellington & John Coltrane',
-            artwork_url: null,
-          },
-          { id: 5, artist_name: 'Stereolab', album_title: 'Aluminum Tunes', artwork_url: null },
-          { id: 6, artist_name: 'Cat Power', album_title: 'Moon Pix', artwork_url: null },
-          { id: 7, artist_name: 'Nilüfer Yanya', album_title: 'Miss Universe', artwork_url: null },
-          { id: 8, artist_name: 'Hermanos Gutiérrez', album_title: 'El Bueno y El Malo', artwork_url: null },
-          { id: 9, artist_name: 'Csillagrablók', album_title: 'Live at Trafó', artwork_url: null },
-        ]);
-
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
-          'artwork_enrich.persisted': 3,
-          'artwork_enrich.persisted_degraded': 2,
-          'artwork_enrich.stamped': 1,
-          'artwork_enrich.retryable_degraded': 4,
-          'artwork_enrich.retryable_degraded_trusted': 3,
-          'artwork_enrich.retryable_deadline_trusted': 2,
-          'artwork_enrich.rejected': 1,
-          'artwork_enrich.retryable_deadline_trusted_ids': '7,8',
-        });
-        consoleSpy.mockRestore();
-      });
-
-      it('caps the retryable_deadline_trusted_ids attribute at 20 while the count attribute reflects the full tally', async () => {
-        mockStampWrite();
-        mockLookupMetadata.mockResolvedValue(
-          directMatchWith(null, { degraded: true, degraded_reason: 'deadline_exceeded' })
-        );
-        const rowCount = 25;
-        const rows = Array.from({ length: rowCount }, (_, i) => ({
-          id: i + 1,
-          artist_name: 'Jessica Pratt',
-          album_title: `Quiet Signs ${i + 1}`,
-          artwork_url: null,
-        }));
-
-        await enrichWithArtwork(rows);
-
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({
-          ...zeroTally,
-          'artwork_enrich.retryable_degraded': rowCount,
-          'artwork_enrich.retryable_degraded_trusted': rowCount,
-          'artwork_enrich.retryable_deadline_trusted': rowCount,
-          'artwork_enrich.retryable_deadline_trusted_ids': Array.from({ length: 20 }, (_, i) => i + 1).join(','),
-        });
-      });
-
-      it('resolves successfully and leaves persist/stamp behavior unchanged when the callback span setAttributes throws', async () => {
-        mockSpanSetAttributes.mockImplementation(() => {
-          throw new Error('sentry boom');
-        });
-        const chain = mockStampWrite();
-        mockLookupMetadata.mockResolvedValue(cleanMiss);
-        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-
-        const results = [{ id: 7, artist_name: 'Jessica Pratt', album_title: 'Quiet Signs', artwork_url: null }];
-        const enriched = await enrichWithArtwork(results);
-
-        // Observability threw; the row's own outcome (stamp the negative
-        // marker on a clean miss) must still have happened exactly as it
-        // would without telemetry at all.
-        expect(enriched[0].artwork_url).toBeNull();
-        const setArg = chain.set.mock.calls[0]?.[0] as Record<string, unknown>;
-        expect(Object.keys(setArg)).toEqual(['artwork_lookup_attempted_at']);
-        consoleSpy.mockRestore();
-      });
-    });
   });
 
   describe('updateAlbumInDB artwork-marker reset', () => {
@@ -4189,56 +3755,6 @@ describe('library.service', () => {
         expect(second).toEqual({ releaseId: 4080, inlineTracklist: null });
 
         expect(mockLookupMetadata).toHaveBeenCalledTimes(2);
-        consoleSpy.mockRestore();
-      });
-    });
-
-    describe('picker.lml_outcome span telemetry (BS#2731)', () => {
-      // Restores the per-call visibility the old `requireSearchType` gate
-      // collapsed away (that gate turned "degraded" and "untrusted match"
-      // into the same opaque `null`). Mirrors the coordinator's own
-      // `trust_reject_reason` span projection.
-      it.each([
-        ['a trusted direct match', { results: [{ artwork: { release_id: 4080 } }], search_type: 'direct' }, 'trusted'],
-        [
-          'a trusted direct match under a degraded reply',
-          {
-            results: [{ artwork: { release_id: 4080 } }],
-            search_type: 'direct',
-            degraded: true,
-            degraded_reason: 'deadline_exceeded',
-          },
-          'trusted',
-        ],
-        [
-          'an untrusted alternative match',
-          { results: [{ artwork: { release_id: 999 } }], search_type: 'alternative' },
-          'untrusted:alternative',
-        ],
-        ['a genuine empty no-match', { results: [], search_type: 'none' }, 'untrusted:none'],
-        [
-          'a degraded reply with no usable match',
-          { results: [], search_type: 'none', degraded: true, degraded_reason: 'cache_only' },
-          'degraded:cache_only',
-        ],
-        ['a timed-out reply with no usable match', { results: [], search_type: 'none', timeout: true }, 'timeout'],
-      ])('projects the right picker.lml_outcome for %s', async (_label, response, expectedOutcome) => {
-        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
-        mockLookupMetadata.mockResolvedValueOnce(response);
-
-        await resolveRotationPickerSource(42);
-
-        expect(mockSpanSetAttribute).toHaveBeenCalledWith('picker.lml_outcome', expectedOutcome);
-      });
-
-      it('projects picker.lml_outcome=error when the lookup throws', async () => {
-        mockRow({ direct: null, fallback: null, artist_name: 'Autechre', album_title: 'Confield' });
-        mockLookupMetadata.mockRejectedValueOnce(new Error('LML timeout'));
-        const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-
-        await resolveRotationPickerSource(42);
-
-        expect(mockSpanSetAttribute).toHaveBeenCalledWith('picker.lml_outcome', 'error');
         consoleSpy.mockRestore();
       });
     });

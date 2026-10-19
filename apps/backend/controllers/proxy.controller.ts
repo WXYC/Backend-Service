@@ -20,7 +20,6 @@
  * immediately above their handler.
  */
 import { RequestHandler } from 'express';
-import * as Sentry from '@sentry/node';
 import { getArtworkFinder } from '../services/artwork/finder.js';
 import { classify as classifyNSFW } from '../services/artwork/nsfw.js';
 import {
@@ -648,7 +647,6 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
   const cachedEnrichment = albumMetadataCache.get(cacheKey);
   const cacheHit = cachedEnrichment !== undefined;
 
-  let upstreamCalls = 0;
   let albumId: number | null = null;
 
   if (cacheHit) {
@@ -701,11 +699,6 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     if (persisted) Object.assign(metadata, buildLocalMetadataResponse(persisted));
 
     if (!persisted) {
-      // Count the LML attempt before awaiting it — counting on success only
-      // would conflate the LML-failure cohort with the local-hit cohort on
-      // the trace explorer's `upstream_calls=0` split, masking LML incidents
-      // as healthy cache-hit growth.
-      upstreamCalls += 1;
       let artwork: DiscogsMatchResult | undefined;
       try {
         const lookupResponse: LookupResponse = await lmlLookupCoordinator.lookup(artistName, releaseTitle, trackTitle, {
@@ -853,16 +846,6 @@ export const getAlbumMetadata: RequestHandler<object, unknown, unknown, AlbumMet
     }
   }
 
-  // Project the upstream-call count onto the active Sentry span so we can
-  // split p50/p95 by cohort in the trace explorer. Wrap in try/except —
-  // observability must never break the request path.
-  try {
-    Sentry.getActiveSpan()?.setAttributes({
-      'proxy.metadata.album.upstream_calls': upstreamCalls,
-    });
-  } catch (err) {
-    console.warn('[ProxyController] failed to project Sentry attrs', err);
-  }
   // BS#989: chokepoint cache-stats projection (cache_hit/cache_name/
   // cache_size/cache_capacity), replacing the old `proxy.metadata.album.
   // cache_hit`-only attribute. Positioned after the possible `.set()` above
@@ -1216,7 +1199,6 @@ export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySear
     // SQLite catalog, so "local/empty" is empty here). Only re-throw a
     // non-LML programming error so genuine bugs still surface.
     if (!(err instanceof LmlClientError)) throw err;
-    Sentry.getActiveSpan()?.setAttributes({ 'proxy.library_search.degraded': true });
     console.warn(`[ProxyController] library search degraded to empty (LML ${err.statusCode ?? 'error'})`, err.message);
     results = { results: [], total: 0, query: q ?? null };
   }

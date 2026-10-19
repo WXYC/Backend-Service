@@ -62,22 +62,22 @@ describe('Express error filter registration on expressIntegration', () => {
   });
 });
 
-// Sentry 11 defaults `traceLifecycle` to 'stream', under which no transaction
-// event is built and `beforeSendTransaction` never runs — so the BS#2089 /
-// BS#2406 `filterSentryTransactionEvent` would be wired but dead (BS#2948).
-// The enrichment worker has no transaction filter, so it is deliberately left
-// on the default, like the jobs/* loggers.
-describe('trace lifecycle', () => {
+// Tracing is off (BS#3393): no preload may sample traces, pin a trace
+// lifecycle, or register a transaction filter.
+describe('tracing configuration', () => {
   it.each([
     ['backend', '../../../apps/backend/instrument'],
     ['auth', '../../../apps/auth/instrument'],
-  ])('%s pins the static trace lifecycle', (_app, relPath) => {
+    ['enrichment-worker', '../../../apps/enrichment-worker/instrument'],
+  ])('%s passes no tracing options to Sentry.init', (_app, relPath) => {
     jest.isolateModules(() => {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       require(relPath);
     });
-    const initOptions = mockInit.mock.calls[0][0] as { traceLifecycle?: string };
-    expect(initOptions.traceLifecycle).toBe('static');
+    const initOptions = mockInit.mock.calls[0][0] as Record<string, unknown>;
+    expect(initOptions).not.toHaveProperty('tracesSampleRate');
+    expect(initOptions).not.toHaveProperty('traceLifecycle');
+    expect(initOptions).not.toHaveProperty('beforeSendTransaction');
   });
 });
 
@@ -150,12 +150,4 @@ describe('failed-query parameter scrub', () => {
       expect((kept?.data?.arguments?.[1] as Error).message).toBe('Failed query: select 1\nparams: [redacted]');
     }
   );
-
-  // Sentry 11's Express channel puts `error.message` in the failing layer's span
-  // status. Static trace lifecycle drops that message from the transaction JSON;
-  // span streaming would send it as an attribute, bound parameters included.
-  // Moving the filter to streaming (BS#2959) must scrub span statuses first.
-  it.each(APPS)('%s pins traceLifecycle: static, which keeps span status messages out of Sentry', (_app, relPath) => {
-    expect(initOptionsFor(relPath)).toMatchObject({ traceLifecycle: 'static' });
-  });
 });

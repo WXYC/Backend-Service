@@ -48,7 +48,6 @@
  * `_resetLookupBatcherForTest` clears it between tests.
  */
 
-import * as Sentry from '@sentry/node';
 import { bulkLookupMetadata, envInt, LmlClientError, type BulkLookupItem, type LookupResponse } from '@wxyc/lml-client';
 
 /**
@@ -258,24 +257,6 @@ function flushBuffer(): void {
 
 async function dispatchChunk(chunk: PendingLookup[], lane: EnrichmentLookupLane): Promise<void> {
   const suppressBudget = isBudgetSuppressed(lane);
-  // BS#1978: record the lane and the resolved suppression decision on a span
-  // so the post-rollout comparison the rollout plan calls for can actually
-  // partition suppressed from unsuppressed dispatches. Without this the only
-  // way to separate the two cohorts in Sentry is by wall-clock guesswork
-  // around the flip, which a mid-window flip or a rollback destroys.
-  Sentry.startSpan(
-    {
-      name: 'enrichment.bulk.dispatch',
-      attributes: {
-        'enrichment.lane': lane,
-        'enrichment.budget_suppressed': suppressBudget,
-        'enrichment.chunk_size': chunk.length,
-      },
-    },
-    () => {
-      /* attributes set at creation; the dispatch itself is spanned by the client */
-    }
-  );
   try {
     const response = await bulkLookupMetadata(
       chunk.map((pending) => pending.item),

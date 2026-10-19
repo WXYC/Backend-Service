@@ -1,5 +1,4 @@
 import { Request, RequestHandler, Response } from 'express';
-import * as Sentry from '@sentry/node';
 import {
   Album,
   Artist,
@@ -171,7 +170,6 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   // create (the review gate, `insertAlbum`'s basis check) rolls back the
   // `labels` row that new label text minted.
   let inserted_album: Album;
-  let flowsheetRowsLinked: number | undefined;
   try {
     inserted_album = await db.transaction(async (tx) => {
       // Resolve label text to label_id via upsert, or label_id to the
@@ -211,7 +209,6 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
         throw new RotationNotEligibleError(
           'This rotation entry was linked or moved to another bin while the import was saving. Nothing was created; reload to see where it stands.'
         );
-      flowsheetRowsLinked = link.flowsheetRowsLinked;
       return album;
     });
   } catch (err) {
@@ -220,15 +217,6 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
       return;
     }
     throw err;
-  }
-
-  // Same guarded form as `linkRotationToAlbum`: the import is committed, so a telemetry failure must not 500 it.
-  if (flowsheetRowsLinked !== undefined) {
-    try {
-      Sentry.getActiveSpan()?.setAttributes({ 'rotation_link.flowsheet_rows_linked': flowsheetRowsLinked });
-    } catch (e) {
-      console.warn('Failed to project rotation-link telemetry onto span:', (e as Error).message);
-    }
   }
 
   const enriched_album = await enrichNewAlbum(
@@ -2393,21 +2381,6 @@ export const linkRotationToAlbum: RequestHandler<{ rotation_id: string }, unknow
         409
       );
     case 'linked':
-      // BS#2410 (plan D7): how many of this rotation row's flowsheet plays the
-      // link resolved. Deliberately NOT on the wire — dj-site has nothing to
-      // render from it and the published shape is pinned to the rotation
-      // projection — but an import's blast radius should be reconstructable
-      // from tracing rather than by querying the flowsheet after the fact.
-      // Own try/catch for the same reason the streaming-check projection has
-      // one: the write is already committed, so a telemetry failure must not
-      // turn a successful link into a 500.
-      try {
-        Sentry.getActiveSpan()?.setAttributes({
-          'rotation_link.flowsheet_rows_linked': result.flowsheetRowsLinked,
-        });
-      } catch (e) {
-        console.warn('Failed to project rotation-link telemetry onto span:', (e as Error).message);
-      }
       res.status(200).json(result.rotation);
       break;
     default: {

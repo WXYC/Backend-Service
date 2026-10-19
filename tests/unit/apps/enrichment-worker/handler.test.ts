@@ -20,9 +20,7 @@
  *
  * Net result pinned here: captureMessage fires only on `lml_degraded`
  * outcomes that this worker actually wrote (the LML#408 class) — the
- * dominant case BS#969 was filed to surface. The `enrichment.outcome`
- * span attribute (still set on every tick) remains the source of truth
- * for dashboard-side rate aggregation of the no-match and raced classes.
+ * dominant case BS#969 was filed to surface.
  */
 
 import { jest } from '@jest/globals';
@@ -31,7 +29,6 @@ import { jest } from '@jest/globals';
 // mock at module-load time. unit.setup.ts's clearMocks: true handles per-test
 // reset; we just need the symbols to exist.
 jest.mock('@sentry/node', () => ({
-  startSpan: jest.fn(),
   captureException: jest.fn(),
   captureMessage: jest.fn(),
 }));
@@ -77,8 +74,6 @@ import * as Sentry from '@sentry/node';
 
 import { makeEnrichmentHandler } from '../../../../apps/enrichment-worker/handler';
 
-type SpanLike = { setAttribute: jest.Mock };
-
 const makeCandidate = () => ({
   id: 42,
   entry_type: 'track' as const,
@@ -89,12 +84,7 @@ const makeCandidate = () => ({
   album_id: null,
 });
 
-const driveOneTick = async (): Promise<SpanLike> => {
-  const span: SpanLike = { setAttribute: jest.fn() };
-  (Sentry.startSpan as jest.Mock).mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (_opts: unknown, fn: any) => fn(span)
-  );
+const driveOneTick = async (): Promise<void> => {
   const candidate = makeCandidate();
   mockFilterForEnrichment.mockReturnValueOnce(candidate);
   mockClaimRowForEnrichment.mockResolvedValueOnce({ claimed: true, id: 42 });
@@ -106,7 +96,6 @@ const driveOneTick = async (): Promise<SpanLike> => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   handler({} as any);
   await new Promise((resolve) => setImmediate(resolve));
-  return span;
 };
 
 const matchResponseWithArtwork = {
@@ -145,9 +134,8 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     mockEnrichmentBulkLookup.mockResolvedValueOnce(degradedResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match');
 
-    const span = await driveOneTick();
+    await driveOneTick();
 
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_match');
     expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     expect(Sentry.captureMessage).toHaveBeenCalledWith(
       'enrichment-empty-outcome',
@@ -165,9 +153,8 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     mockEnrichmentBulkLookup.mockResolvedValueOnce(degradedResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_match_raced');
 
-    const span = await driveOneTick();
+    await driveOneTick();
 
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_match_raced');
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
@@ -175,21 +162,19 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     mockEnrichmentBulkLookup.mockResolvedValueOnce(noMatchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_no_match_raced');
 
-    const span = await driveOneTick();
+    await driveOneTick();
 
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_no_match_raced');
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
   it('does NOT fire captureMessage when cause is lml_no_match (by-design Discogs miss)', async () => {
     // Dashboard aggregation of the no-match rate uses the
-    // `enrichment.outcome` span attribute, not per-event Sentry issues.
+    // outcome counters, not per-event Sentry issues.
     mockEnrichmentBulkLookup.mockResolvedValueOnce(noMatchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_no_match');
 
-    const span = await driveOneTick();
+    await driveOneTick();
 
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_no_match');
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
@@ -212,9 +197,8 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     mockEnrichmentBulkLookup.mockResolvedValueOnce(untrustedMatchResponse);
     mockFinalizeRow.mockResolvedValueOnce('enriched_no_match');
 
-    const span = await driveOneTick();
+    await driveOneTick();
 
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'enriched_no_match');
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 
@@ -260,9 +244,8 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
     // redundant and BS#1311 drops it.
     mockEnrichmentBulkLookup.mockRejectedValueOnce(new Error('LML timeout'));
 
-    const span = await driveOneTick();
+    await driveOneTick();
 
-    expect(span.setAttribute).toHaveBeenCalledWith('enrichment.outcome', 'lml_error');
     expect(Sentry.captureException).toHaveBeenCalledTimes(1);
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });

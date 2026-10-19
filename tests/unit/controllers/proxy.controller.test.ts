@@ -113,15 +113,6 @@ jest.mock('../../../apps/backend/config/wxycReviews', () => ({
   getConfig: mockWxycReviewsConfig,
 }));
 
-// BS#1331 acceptance: the cohort split for trace explorer turns on
-// `proxy.metadata.album.upstream_calls`. Override only `getActiveSpan`
-// from the real `@sentry/node` module so the cache-first test can assert
-// the attribute lands as a number; outside a tracing context the real
-// `getActiveSpan()` is null and the call short-circuits. Preserving the
-// rest of the module surface lets future controller hardening (e.g.
-// `Sentry.captureException` on the cache-first DB-error catch arm)
-// continue to load without a confusing "X is not a function" TypeError
-// far from the change site.
 jest.mock('@wxyc/observability', () =>
   jest
     .requireActual<typeof import('../../utils/observability')>('../../utils/observability')
@@ -137,12 +128,6 @@ jest.mock('../../../apps/backend/services/observability/cache-stats', () => ({
   ),
   recordCacheLookup: (name: string, hit: boolean, cache: { size: number; max: number }) =>
     mockRecordCacheLookup({ cache_hit: hit, cache_name: name, cache_size: cache.size, cache_capacity: cache.max }),
-}));
-const mockSpanSetAttributes = jest.fn();
-const mockGetActiveSpan = jest.fn(() => ({ setAttributes: mockSpanSetAttributes }));
-jest.mock('@sentry/node', () => ({
-  ...jest.requireActual<object>('@sentry/node'),
-  getActiveSpan: mockGetActiveSpan,
 }));
 
 // library.service mock — only the helper libraryTracks consumes
@@ -1958,7 +1943,6 @@ describe('proxy.controller', () => {
 
         expect(mockLookupMetadata).toHaveBeenCalledTimes(1);
         expect(res.status).toHaveBeenCalledWith(200);
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 1 });
         const result = (res.json as jest.Mock).mock.calls[0][0];
         expect(result.discogsReleaseId).toBe(11);
       });
@@ -2002,34 +1986,6 @@ describe('proxy.controller', () => {
         const result = (res.json as jest.Mock).mock.calls[0][0];
         expect(result.discogsReleaseId).toBe(99);
         expect(result.artworkUrl).toBe('https://i.discogs.com/cold.jpg');
-      });
-
-      it('projects upstream_calls=0 onto the active Sentry span on local hit', async () => {
-        // The hook here is the trace-explorer cohort split: anything > 0
-        // is a fallthrough, 0 is a steady-state hit. Without this signal
-        // we can't distinguish "the cache-first path saved 5s" from "we
-        // never reached the cache-first path" in the prod p95.
-        mockLookupAlbumMetadataById.mockResolvedValue({
-          artwork_url: 'https://i.discogs.com/x.jpg',
-          discogs_url: 'https://www.discogs.com/release/1',
-          release_year: 2020,
-          spotify_url: null,
-          apple_music_url: null,
-          youtube_music_url: null,
-          bandcamp_url: null,
-          soundcloud_url: null,
-          artist_bio: null,
-          artist_wikipedia_url: null,
-        });
-
-        const req = {
-          query: { artistName: 'Local Artist', releaseTitle: 'Local Album' },
-        } as unknown as Request;
-        const res = createMockRes();
-
-        await getAlbumMetadata(req, res as Response, mockNext);
-
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 0 });
       });
     });
 
@@ -2304,7 +2260,6 @@ describe('proxy.controller', () => {
           cache_capacity: 2000,
         });
         // A cache hit makes zero upstream calls, same as a local hit.
-        expect(mockSpanSetAttributes).toHaveBeenCalledWith({ 'proxy.metadata.album.upstream_calls': 0 });
       });
 
       it('does not cache a transient LML failure: a repeat request re-attempts the lookup', async () => {
