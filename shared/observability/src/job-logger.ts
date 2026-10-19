@@ -10,6 +10,7 @@
 import * as Sentry from '@sentry/node';
 import { randomUUID } from 'crypto';
 import { SentryReporter } from './sentry-reporter.js';
+import { setErrorReporter } from './current-reporter.js';
 import { logCounter } from './error-reporter.js';
 import type { CounterFields, ErrorReporter } from './error-reporter.js';
 
@@ -59,6 +60,9 @@ export const createJobLogger = ({ jobName }: { jobName: string }) => {
       environment: process.env.NODE_ENV || 'production',
       tracesSampleRate: resolveTracesSampleRate(),
     });
+    // Register next to the SDK init, as each app does, so captures from shared libraries
+    // that resolve `getErrorReporter()` per call reach this job's reporter.
+    setErrorReporter(reporter);
     Sentry.setTag('repo', config.repo);
     Sentry.setTag('tool', config.tool);
     Sentry.setTag('run_id', runId);
