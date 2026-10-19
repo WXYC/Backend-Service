@@ -1,7 +1,7 @@
 // `instrument.ts` is loaded via `node --import` (see package.json `start`
 // script), not statically imported here, so Sentry's auto-instrumentation
 // runs before `express` is loaded into the module graph.
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import express from 'express';
 import swaggerUi from 'swagger-ui-express';
 import { parse as parse_yaml } from 'yaml';
@@ -211,7 +211,7 @@ const server = app.listen(port, () => {
   // its only consumer, the tubafrenzy reconciliation monitor (WXYC/wiki#92).
   void startCdcDispatcher().catch((err) => {
     console.error('startCdcDispatcher failed to start:', err);
-    Sentry.captureException(err, { tags: { subsystem: 'cdc' } });
+    getErrorReporter().captureException(err, { tags: { subsystem: 'cdc' } });
   });
   // CDC handler: rebroadcasts terminal metadata UPDATEs as SSE
   // `liveFs:update` so dj-site stays in sync after the enrichment-worker
@@ -230,7 +230,7 @@ const server = app.listen(port, () => {
   // why it belongs at startup (every flip already recreates the container).
   void reconcileCatalogExportFlag('DIGITAL_ARCHIVE_STREAMING_ENABLED').catch((err) => {
     console.error('reconcileCatalogExportFlag failed:', err);
-    Sentry.captureException(err, { tags: { subsystem: 'digital-archive' } });
+    getErrorReporter().captureException(err, { tags: { subsystem: 'digital-archive' } });
   });
   // BS#989 (G6): once-per-minute cache-stats emit for the eight in-process
   // LRU caches (proxy.controller.ts's seven + library.service.ts's
@@ -280,7 +280,7 @@ function shutdown(signal: string): void {
   // server.close() — they don't depend on each other.
   void drainInFlightEnrichments(ENRICHMENT_DRAIN_DEADLINE_MS).then((remaining) => {
     if (remaining > 0) {
-      Sentry.captureMessage(`Backend exiting with ${remaining} in-flight enrichment promise(s)`, {
+      getErrorReporter().captureMessage(`Backend exiting with ${remaining} in-flight enrichment promise(s)`, {
         level: 'warning',
         tags: { subsystem: 'metadata', metric: 'in_flight_dropped' },
         extra: { remaining, signal, deadline_ms: ENRICHMENT_DRAIN_DEADLINE_MS },

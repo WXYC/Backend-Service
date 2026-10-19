@@ -24,7 +24,7 @@ describe('CDC startup error handling (BS#1222)', () => {
 
     const catchBody = match[1];
     expect(catchBody).toMatch(/console\.error\(/);
-    expect(catchBody).toMatch(/Sentry\.captureException\(/);
+    expect(catchBody).toMatch(/getErrorReporter\(\)\.captureException\(/);
     expect(catchBody).toMatch(/subsystem:\s*['"]cdc['"]/);
   });
 

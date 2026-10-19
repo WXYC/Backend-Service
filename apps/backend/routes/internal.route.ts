@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import {
   db,
@@ -443,20 +443,23 @@ internal_route.post('/flowsheet-webhook', async (req, res) => {
       let markerTimestamp: Date;
       if (parsedStartTime === null) {
         if (entry.startTime) {
-          Sentry.captureMessage('[webhook] flowsheet entry startTime present but unparseable — using delivery clock', {
-            level: 'warning',
-            tags: { subsystem: 'flowsheet-webhook' },
-            extra: {
-              legacy_entry_id: entry.id,
-              unparseable_start_time_raw: entry.startTime,
-              unparseable_start_time_type: typeof entry.startTime,
-            },
-            fingerprint: UNPARSEABLE_START_TIME_FINGERPRINT,
-          });
+          getErrorReporter().captureMessage(
+            '[webhook] flowsheet entry startTime present but unparseable — using delivery clock',
+            {
+              level: 'warning',
+              tags: { subsystem: 'flowsheet-webhook' },
+              extra: {
+                legacy_entry_id: entry.id,
+                unparseable_start_time_raw: entry.startTime,
+                unparseable_start_time_type: typeof entry.startTime,
+              },
+              fingerprint: UNPARSEABLE_START_TIME_FINGERPRINT,
+            }
+          );
         }
         markerTimestamp = now;
       } else if (isBeyondFutureTolerance(parsedStartTime, now)) {
-        Sentry.captureMessage(
+        getErrorReporter().captureMessage(
           '[webhook] flowsheet entry startTime beyond future tolerance — clamped to delivery clock',
           {
             level: 'warning',
@@ -845,10 +848,13 @@ internal_route.post('/streaming-status-webhook', async (req, res) => {
   }
 
   if (failures.length > 0) {
-    Sentry.captureMessage(`[webhook] streaming-status: ${failures.length}/${changes.length} row update(s) failed`, {
-      level: 'warning',
-      extra: { failures: failures.slice(0, 20) },
-    });
+    getErrorReporter().captureMessage(
+      `[webhook] streaming-status: ${failures.length}/${changes.length} row update(s) failed`,
+      {
+        level: 'warning',
+        extra: { failures: failures.slice(0, 20) },
+      }
+    );
   }
 
   res.json({ processed, errors: failures.length, failures });

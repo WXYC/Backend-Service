@@ -17,7 +17,7 @@
  * how many enrichments were abandoned mid-flight. Post-Epic C the runtime
  * path is gone and this whole apparatus retires alongside it.
  */
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { sql } from 'drizzle-orm';
 import { album_metadata, db, flowsheet } from '@wxyc/database';
 import { fetchMetadata } from './metadata.service.js';
@@ -179,7 +179,7 @@ export function fireAndForgetMetadataForRow(input: EnrichmentInput): void {
     })
     .catch(async (err) => {
       console.error('[Flowsheet] Metadata fetch failed:', err);
-      Sentry.captureException(err, {
+      getErrorReporter().captureException(err, {
         tags: { subsystem: 'metadata' },
         extra: {
           flowsheetId: input.flowsheetId,

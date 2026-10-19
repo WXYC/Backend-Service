@@ -11,7 +11,7 @@
  * Ported from request-parser routers/request.py search_song_as_artist()
  */
 
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { ParsedRequest, EnrichedLibraryResult, SearchState, SearchStrategyType } from '../../types.js';
 import { searchLibrary, filterResultsByArtist, searchAlbumsByTitle } from '../../../library.service.js';
 import { isCompilationArtist, MAX_SEARCH_RESULTS } from '../../matching/index.js';
@@ -76,7 +76,7 @@ export async function executeSongAsArtist(
     // this catch becoming a silent sink for real defects.
     const error = e instanceof Error ? e : new Error(String(e));
     if (shouldCaptureExpressError(error)) {
-      Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'request-line' } });
+      getErrorReporter().captureException(error, { level: 'warning', tags: { subsystem: 'request-line' } });
     }
     return [];
   }

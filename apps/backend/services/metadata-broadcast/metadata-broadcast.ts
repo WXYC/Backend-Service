@@ -43,7 +43,7 @@
  * so there's no per-client duplication.
  */
 
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import type { CdcEvent } from '@wxyc/database';
 import { onCdcEvent } from '@wxyc/database';
 import type { LiveFsInsertEvent } from '@wxyc/shared/dtos';
@@ -536,7 +536,7 @@ export function setupMetadataBroadcast(): void {
       // (unsubAll on write failure); this guard catches anything else
       // (e.g. an empty topic set wouldn't throw, but a future change
       // might). Surface to Sentry so a sudden rate spike isn't invisible.
-      Sentry.captureException(err, {
+      getErrorReporter().captureException(err, {
         tags: { module: 'metadata-broadcast', subsystem: 'sse' },
         extra: { id: payload.id, metadata_status: payload.metadata_status },
       });
@@ -584,7 +584,7 @@ export function setupMetadataBroadcast(): void {
         payload,
       });
     } catch (err) {
-      Sentry.captureException(err, {
+      getErrorReporter().captureException(err, {
         tags: { module: 'metadata-broadcast', subsystem: 'sse' },
         extra: { id: payload.id },
       });

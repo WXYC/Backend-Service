@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import WxycError from '../utils/error.js';
 import { Response } from 'express';
 import { recordBroadcast, recordBroadcastFailure } from '../services/sse/sse-metrics.js';
@@ -84,7 +84,7 @@ export class ServerEventsManager {
       try {
         client.res.write(ServerEventsManager.HEARTBEAT_FRAME);
       } catch (error) {
-        Sentry.captureException(error, {
+        getErrorReporter().captureException(error, {
           tags: { subsystem: 'sse', op: 'heartbeat' },
           extra: { client_id: clientId },
         });
@@ -260,7 +260,7 @@ export class ServerEventsManager {
           // surfaces the exception so we can read the underlying error
           // (write-after-end, EPIPE, etc.) when the rate spikes.
           recordBroadcastFailure(topicId);
-          Sentry.captureException(error, {
+          getErrorReporter().captureException(error, {
             tags: { subsystem: 'sse', op: 'broadcast', topic: topicId },
             extra: { client_id: client.id },
           });
@@ -288,7 +288,7 @@ export class ServerEventsManager {
         client.res.write(message);
       } catch (error) {
         recordBroadcastFailure(topicId);
-        Sentry.captureException(error, {
+        getErrorReporter().captureException(error, {
           tags: { subsystem: 'sse', op: 'dispatch', topic: topicId },
           extra: { client_id: client.id },
         });

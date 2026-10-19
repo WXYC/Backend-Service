@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import express, { Router } from 'express';
 import {
   confirmSubscription,
@@ -43,14 +43,14 @@ ses_events_route.post('/', express.text({ type: '*/*', limit: '64kb' }), async (
   try {
     validated = await validateSnsMessage(parsed);
   } catch (e) {
-    Sentry.captureException(e, { tags: { subsystem: 'ses-events', stage: 'validate' } });
+    getErrorReporter().captureException(e, { tags: { subsystem: 'ses-events', stage: 'validate' } });
     res.status(400).json({ error: 'invalid signature or topic' });
     return;
   }
 
   if (validated.Type === 'SubscriptionConfirmation') {
     if (!validated.SubscribeURL) {
-      Sentry.captureMessage('SES events: SubscriptionConfirmation missing SubscribeURL', {
+      getErrorReporter().captureMessage('SES events: SubscriptionConfirmation missing SubscribeURL', {
         level: 'error',
         tags: { subsystem: 'ses-events', stage: 'confirm' },
       });
@@ -60,7 +60,7 @@ ses_events_route.post('/', express.text({ type: '*/*', limit: '64kb' }), async (
     try {
       await confirmSubscription(validated.SubscribeURL);
     } catch (e) {
-      Sentry.captureException(e, { tags: { subsystem: 'ses-events', stage: 'confirm' } });
+      getErrorReporter().captureException(e, { tags: { subsystem: 'ses-events', stage: 'confirm' } });
       res.status(500).json({ error: 'failed to confirm subscription' });
       return;
     }
@@ -81,7 +81,7 @@ ses_events_route.post('/', express.text({ type: '*/*', limit: '64kb' }), async (
   try {
     messagePayload = JSON.parse(validated.Message);
   } catch {
-    Sentry.captureMessage('SES events: SNS Notification.Message is not JSON', {
+    getErrorReporter().captureMessage('SES events: SNS Notification.Message is not JSON', {
       level: 'error',
       tags: { subsystem: 'ses-events', stage: 'parse' },
     });
@@ -93,7 +93,7 @@ ses_events_route.post('/', express.text({ type: '*/*', limit: '64kb' }), async (
   try {
     event = parseSesEvent(messagePayload);
   } catch (e) {
-    Sentry.captureException(e, { tags: { subsystem: 'ses-events', stage: 'parse' } });
+    getErrorReporter().captureException(e, { tags: { subsystem: 'ses-events', stage: 'parse' } });
     res.status(400).json({ error: 'unparseable ses event' });
     return;
   }

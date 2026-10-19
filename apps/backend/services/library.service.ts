@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, ne, notExists, or, sql, SQL, t
 import { alias, getTableConfig, type PgColumn, type PgTable } from 'drizzle-orm/pg-core';
 import { LRUCache } from 'lru-cache';
 import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
 import { RotationAddRequest } from '../controllers/library.controller.js';
 import WxycError from '../utils/error.js';
@@ -4961,7 +4962,7 @@ export const refileArtistInGenre = async (
       return { outcome: 'already_filed' };
     }
     if (isLockContentionError(error)) {
-      Sentry.addBreadcrumb({
+      getErrorReporter().addBreadcrumb({
         category: 'library.refile',
         level: 'warning',
         message: 'POST /library/artists/:id/refile stood down on lock contention',
@@ -5050,7 +5051,7 @@ export const deleteArtistFromDB = async (
       // Not an error condition worth a Sentry issue, matching
       // `deleteAlbumFromDB` -- a live writer held the row and this
       // transaction stood down on purpose. Breadcrumb only.
-      Sentry.addBreadcrumb({
+      getErrorReporter().addBreadcrumb({
         category: 'library.delete',
         level: 'warning',
         message: 'DELETE /library/artists/:id stood down on lock contention',
@@ -5172,7 +5173,7 @@ const runDeleteArtistTransaction = async (
         actor_role: actor.role ?? null,
       })
     );
-    Sentry.addBreadcrumb({
+    getErrorReporter().addBreadcrumb({
       category: 'library.delete',
       level: 'warning',
       message: 'DELETE /library/artists/:id hard-deleted an artist',
@@ -6737,7 +6738,7 @@ export const restoreDeletedBatch = async (
     if (isLockContentionError(error)) {
       // Same posture as the delete path: a deliberate stand-down, not a
       // Sentry issue. Breadcrumb only, so it shows as context later.
-      Sentry.addBreadcrumb({
+      getErrorReporter().addBreadcrumb({
         category: 'library.restore',
         level: 'warning',
         message: 'POST /library/deleted/:batchId/restore stood down on lock contention',
@@ -6958,7 +6959,7 @@ const runRestoreBatchTransaction = async (
   if (outcome.outcome === 'restored') {
     const { entities } = outcome;
     console.warn('[Library] restore', JSON.stringify({ batch_id: batchId, resolution: resolution ?? null, entities }));
-    Sentry.addBreadcrumb({
+    getErrorReporter().addBreadcrumb({
       category: 'library.restore',
       level: 'info',
       message: 'POST /library/deleted/:batchId/restore replayed a batch',
@@ -7784,7 +7785,7 @@ export const deleteAlbumFromDB = async (
       // Not an error condition worth a Sentry issue: it means a live writer
       // held the row and this transaction stood down on purpose. Breadcrumb
       // only, so it shows up as context if something else fails later.
-      Sentry.addBreadcrumb({
+      getErrorReporter().addBreadcrumb({
         category: 'library.delete',
         level: 'warning',
         message: 'DELETE /library/:id stood down on lock contention',
@@ -8056,7 +8057,7 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
         actor_role: attribution.deleted_by_role,
       })
     );
-    Sentry.addBreadcrumb({
+    getErrorReporter().addBreadcrumb({
       category: 'library.delete',
       level: 'warning',
       message: 'DELETE /library/:id hard-deleted a release',

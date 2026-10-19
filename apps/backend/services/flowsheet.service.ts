@@ -1,5 +1,5 @@
 import { sql, asc, desc, eq, and, or, isNull, isNotNull, gt, lt, lte, gte, inArray } from 'drizzle-orm';
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import WxycError from '../utils/error.js';
 import {
   db,
@@ -1068,7 +1068,7 @@ export const fillMissingHourlyBreakpoints = async (
     const missing = generateMissingBreakpoints(watermark, ceiling);
 
     if (missing.length >= LONG_CATCH_UP_WARN_THRESHOLD) {
-      Sentry.captureMessage('Hourly breakpoint fill ran an unusually long catch-up', {
+      getErrorReporter().captureMessage('Hourly breakpoint fill ran an unusually long catch-up', {
         level: 'warning',
         tags: { subsystem: 'auto-hour-breakpoints' },
         extra: {
@@ -1118,7 +1118,7 @@ export const fillMissingHourlyBreakpoints = async (
       .returning({ id: flowsheet.id });
     return inserted.length;
   } catch (err) {
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { subsystem: 'auto-hour-breakpoints' },
       extra: { show_id: show.id },
     });
@@ -1280,7 +1280,7 @@ export const updateEntry = async (entry_id: number, entry: UpdateRequestBody): P
         }
       } catch (err) {
         // The text edit still applies and the link is left as it was; a failed lookup never fails the PATCH.
-        Sentry.captureException(err, {
+        getErrorReporter().captureException(err, {
           tags: { tool: 'flowsheet', subsystem: 'text-linkage' },
           extra: { entry_id },
         });
@@ -1435,7 +1435,7 @@ const createJoinNotification = async (id: string, show_id: number): Promise<FSEn
   // rendered to the public on-air playlist — and a Sentry warning carries
   // dj_id + show_id so the cause is debuggable.
   if (!display_dj_name) {
-    Sentry.captureMessage('Suppressed dj_join marker: DJ display name unresolvable', {
+    getErrorReporter().captureMessage('Suppressed dj_join marker: DJ display name unresolvable', {
       level: 'warning',
       tags: { tool: 'flowsheet', entry_type: 'dj_join' },
       extra: { dj_id: id, show_id },
@@ -1631,7 +1631,7 @@ const createLeaveNotification = async (dj_id: string, show_id: number, addTime?:
   // Symmetric to createJoinNotification: suppress the row and log a Sentry
   // warning when the DJ name is unresolvable (epic #1288).
   if (!display_dj_name) {
-    Sentry.captureMessage('Suppressed dj_leave marker: DJ display name unresolvable', {
+    getErrorReporter().captureMessage('Suppressed dj_leave marker: DJ display name unresolvable', {
       level: 'warning',
       tags: { tool: 'flowsheet', entry_type: 'dj_leave' },
       extra: { dj_id, show_id },
@@ -2074,7 +2074,7 @@ export const closeShowFromTerminalShowEndMarker = async (showId: number): Promis
 
     return closed.length;
   } catch (err) {
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { subsystem: 'close-show-from-show-end-marker' },
       extra: { show_id: showId },
     });
@@ -2747,7 +2747,7 @@ export const getAdjacentShowIds = async (show_id: number): Promise<AdjacentShowI
       next_show_id: next[0]?.id ?? null,
     };
   } catch (err) {
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { subsystem: 'adjacent-shows' },
       extra: { show_id },
     });
@@ -2944,7 +2944,7 @@ export const attachCriticReviews = async <T extends CriticReviewAttachable>(entr
       }
     }
   } catch (err) {
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { subsystem: 'attach-critic-reviews' },
       extra: { album_id_count: albumIds.length },
     });

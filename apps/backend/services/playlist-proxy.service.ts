@@ -78,7 +78,7 @@
  *                         sync pre-Phase-3, since there is no more
  *                         in-memory buffer to read synchronously).
  */
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { db, flowsheet, album_metadata, rotation, library, artists } from '@wxyc/database';
 import { sql, inArray, and, isNotNull, eq, desc, asc } from 'drizzle-orm';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
@@ -1040,7 +1040,7 @@ async function resolveUpcomingShows(
   try {
     await attachUpcomingShows(targets);
   } catch (err) {
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { subsystem: 'playlist-proxy-upcoming-shows' },
       extra: { candidate_count: candidates.length },
     });
@@ -1083,7 +1083,7 @@ async function resolveCriticReviews(candidates: RecentRow[]): Promise<Map<number
   try {
     await attachCriticReviews(targets);
   } catch (err) {
-    Sentry.captureException(err, {
+    getErrorReporter().captureException(err, {
       tags: { subsystem: 'playlist-proxy-critic-reviews' },
       extra: { candidate_count: candidates.length },
     });

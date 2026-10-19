@@ -26,7 +26,7 @@
  * every takeover in one Sentry issue so the count is the issue's event count
  * and an alert can fire on the first occurrence.
  */
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import type { FlowsheetJoinIntent } from '@wxyc/shared/dtos';
 
 /**
@@ -54,7 +54,7 @@ export interface GoLiveHandoff {
  * only on the happy path would drop it.
  */
 export function recordGoLiveHandoff(intent: FlowsheetJoinIntent, handoff: GoLiveHandoff): void {
-  Sentry.captureMessage(`Go-live handoff: ${intent}`, {
+  getErrorReporter().captureMessage(`Go-live handoff: ${intent}`, {
     level: 'info',
     fingerprint: ['go-live-handoff', intent],
     tags: { tool: 'flowsheet', handoff_intent: intent },

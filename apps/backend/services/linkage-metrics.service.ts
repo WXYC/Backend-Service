@@ -18,7 +18,7 @@
  * Sentry with `subsystem='lml-linkage'` so the operator can filter the issue
  * stream by subsystem instead of by stack trace.
  */
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { sql } from 'drizzle-orm';
 import { db } from '@wxyc/database';
 
@@ -72,7 +72,7 @@ export const reportLinkageError = (
   context?: Record<string, unknown>,
   extraTags?: Record<string, string>
 ): void => {
-  Sentry.captureException(error, {
+  getErrorReporter().captureException(error, {
     tags: { subsystem: 'lml-linkage', ...(extraTags ?? {}) },
     extra: context,
   });

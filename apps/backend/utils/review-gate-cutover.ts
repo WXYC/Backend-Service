@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { nyCalendarDate } from '@wxyc/database';
 
 /**
@@ -30,7 +30,7 @@ const cutover = (): string | null => {
   if (isRealDate(raw)) return raw;
   if (!reported) {
     reported = true;
-    Sentry.captureException(
+    getErrorReporter().captureException(
       new Error('REVIEW_GATE_CUTOVER_DATE is not a real YYYY-MM-DD date; treating the gate as on')
     );
   }

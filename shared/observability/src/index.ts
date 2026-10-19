@@ -9,4 +9,5 @@ export {
 } from './redact-query-params.js';
 export { installConsoleRedaction } from './console-redaction.js';
 export { CompositeReporter, logCounter } from './error-reporter.js';
+export { getErrorReporter, setErrorReporter } from './current-reporter.js';
 export type { CounterFields, ErrorReporter, ReportBreadcrumb, ReportContext, ReportLevel } from './error-reporter.js';
