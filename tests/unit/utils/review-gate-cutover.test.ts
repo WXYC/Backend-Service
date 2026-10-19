@@ -1,6 +1,6 @@
-import { createSpyReporter } from '../../utils/observability';
+import { useSpyReporter } from '../../utils/observability';
 
-const reporter = createSpyReporter();
+const reporter = useSpyReporter();
 const captureException = reporter.captureException;
 
 type Helper = typeof import('../../../apps/backend/utils/review-gate-cutover');
@@ -11,10 +11,8 @@ const load = (value: string | undefined): Helper => {
   else process.env.REVIEW_GATE_CUTOVER_DATE = value;
   let mod!: Helper;
   jest.isolateModules(() => {
-    // The isolated registry has its own reporter holder, so register the spy inside it.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { setErrorReporter } = require('@wxyc/observability') as typeof import('@wxyc/observability');
-    setErrorReporter(reporter);
+    // The reporter holder lives on globalThis (Symbol.for('@wxyc/observability/error-reporter')), so the
+    // isolated registry shares the spy that useSpyReporter registers; useSpyReporter restores the setup reporter.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     mod = require('../../../apps/backend/utils/review-gate-cutover');
   });
