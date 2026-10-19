@@ -9,9 +9,13 @@
  * has more errors than `tests/typecheck-baseline.json` records, or has errors
  * and is absent from it. The baseline holds the errors that predate the check;
  * it only goes down. Fix errors, then run with `--update` to rewrite it.
+ * `--update` only ever lowers counts: if any file's count rose, or a new file
+ * has errors, it refuses (exit 1, writes nothing). A deliberate raise needs
+ * `--update --allow-increase`, which a reviewer must look at.
  *
  * The run must be clean before anything is compared or written: tsc's exit
- * status is honored, a diagnostic with no file location (TS5083, say) is a hard
+ * status is honored (only tsc's normal codes 0, 1 and 2 count as a run; any
+ * other code is a hard failure even with diagnostics), a diagnostic with no file location (TS5083, say) is a hard
  * failure, and a non-zero exit with no parseable diagnostic (an OOM, a crash)
  * is a hard failure. `--update` refuses to write after an unclean run, so it
  * can never record an empty baseline. A file whose count drops below its
@@ -19,7 +23,8 @@
  *
  * Flags: `--input <file>` reads tsc output from a file instead of running tsc
  * (with `--exit-code <n>` standing in for tsc's exit status, default 0);
- * `--baseline <file>` overrides the baseline path; `--update` rewrites it.
+ * `--baseline <file>` overrides the baseline path; `--update` rewrites it
+ * (lower counts only unless `--allow-increase` is also given).
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -76,7 +81,11 @@ if (unattributed.length > 0) {
   problems.push(`tsc reported ${unattributed.length} error(s) with no file location:`);
   problems.push(...unattributed.slice(0, 10).map((l) => `  ${l}`));
 }
-if (exitCode !== 0 && total === 0) {
+if (![0, 1, 2].includes(exitCode)) {
+  problems.push(
+    `tsc exited with status ${exitCode}, which is not a normal tsc exit code (0, 1 or 2): crash, out of memory or kill.`
+  );
+} else if (exitCode !== 0 && total === 0) {
   problems.push(`tsc exited with status ${exitCode} but produced no parseable diagnostics (crash or out of memory?).`);
 }
 if (problems.length > 0) {
@@ -87,16 +96,47 @@ if (problems.length > 0) {
   process.exit(2);
 }
 
+const readBaseline = () => JSON.parse(readFileSync(baselinePath, 'utf8'));
+
 if (args.includes('--update')) {
+  if (!args.includes('--allow-increase')) {
+    let current = {};
+    try {
+      current = readBaseline();
+    } catch (e) {
+      if (e.code !== 'ENOENT') {
+        console.error(`check-tests-typecheck: could not read the baseline: ${e.message}`);
+        process.exit(2);
+      }
+    }
+    const raised = Object.entries(sorted).filter(([file, n]) => n > (current[file] ?? 0));
+    if (raised.length > 0) {
+      console.error(
+        'check-tests-typecheck: --update only lowers counts, and these files rose or are new. Nothing was written.'
+      );
+      console.error(
+        'Fix the errors, or (if the raise is deliberate and a reviewer will look at it) pass --allow-increase.'
+      );
+      console.error(
+        'If this looks wrong, run `npm run lint:prebuild` first: missing shared dists produce thousands of spurious errors.'
+      );
+      for (const [file, n] of raised) {
+        console.error(`  ${file}: ${n} errors, baseline ${current[file] ?? 0}`);
+      }
+      process.exit(1);
+    }
+  }
   writeFileSync(baselinePath, JSON.stringify(sorted, null, 2) + '\n');
   console.log(`Baseline rewritten: ${total} errors in ${Object.keys(sorted).length} files.`);
   process.exit(0);
 }
 
-const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+const baseline = readBaseline();
 const regressions = Object.entries(sorted).filter(([file, n]) => n > (baseline[file] ?? 0));
 if (regressions.length > 0) {
-  console.error('tests/ type errors above the baseline (fix them; do not raise the baseline):');
+  console.error(
+    'type errors in files covered by tests/tsconfig.json above the baseline (fix them; do not raise the baseline):'
+  );
   for (const [file, n] of regressions) {
     console.error(`  ${file}: ${n} errors, baseline ${baseline[file] ?? 0}`);
   }
@@ -105,11 +145,11 @@ if (regressions.length > 0) {
 const stale = Object.entries(baseline).filter(([file, n]) => (sorted[file] ?? 0) < n);
 if (stale.length > 0) {
   console.error(
-    'tests/ type errors are below the baseline, so it is stale. Run `npm run typecheck:tests -- --update` and commit it in this PR to lock the improvement in:'
+    'type errors in files covered by tests/tsconfig.json are below the baseline, so it is stale. Run `npm run lint:prebuild` first (the shared dists must exist), then `npm run typecheck:tests -- --update`, and commit the result in this PR to lock the improvement in:'
   );
   for (const [file, n] of stale) {
     console.error(`  ${file}: ${sorted[file] ?? 0} errors, baseline ${n}`);
   }
   process.exit(1);
 }
-console.log(`tests/ type errors: ${total} (baseline matches).`);
+console.log(`type errors in files covered by tests/tsconfig.json: ${total} (baseline matches).`);

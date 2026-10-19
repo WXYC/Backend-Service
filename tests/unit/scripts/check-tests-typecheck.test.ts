@@ -90,6 +90,7 @@ describe('check-tests-typecheck', () => {
     const input = path.join(dir, 'tsc.txt');
     const baselinePath = path.join(dir, 'baseline.json');
     fs.writeFileSync(input, err('tests/b.test.ts'));
+    fs.writeFileSync(baselinePath, '{"tests/b.test.ts":4}');
     try {
       const res = spawnSync('node', [scriptPath, '--input', input, '--baseline', baselinePath, '--update'], {
         encoding: 'utf8',
@@ -99,5 +100,68 @@ describe('check-tests-typecheck', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('fails on a non-tsc exit code even when diagnostics were parsed', () => {
+    const res = run([err('tests/a.test.ts'), err('tests/a.test.ts')], { 'tests/a.test.ts': 2 }, ['--exit-code', '137']);
+    expect(res.status).toBe(2);
+  });
+
+  it.each([0, 1, 2])('treats tsc exit code %i as a normal run', (code) => {
+    const res = run([err('tests/a.test.ts')], { 'tests/a.test.ts': 1 }, ['--exit-code', String(code)]);
+    expect(res.status).toBe(0);
+  });
+
+  describe('--update only lowers counts', () => {
+    function update(tscOutput: string[], baseline: Record<string, number>, extra: string[] = []) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tests-typecheck-'));
+      const input = path.join(dir, 'tsc.txt');
+      const baselinePath = path.join(dir, 'baseline.json');
+      const before = JSON.stringify(baseline);
+      fs.writeFileSync(input, tscOutput.join('\n'));
+      fs.writeFileSync(baselinePath, before);
+      try {
+        const res = spawnSync(
+          'node',
+          [scriptPath, '--input', input, '--baseline', baselinePath, '--update', ...extra],
+          { encoding: 'utf8' }
+        );
+        return { res, before, after: fs.readFileSync(baselinePath, 'utf8') };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it('refuses a raised count, names the file and leaves the baseline untouched', () => {
+      const { res, before, after } = update([err('tests/a.test.ts'), err('tests/a.test.ts')], { 'tests/a.test.ts': 1 });
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('tests/a.test.ts');
+      expect(after).toBe(before);
+    });
+
+    it('refuses a new file with errors and leaves the baseline untouched', () => {
+      const { res, before, after } = update([err('tests/a.test.ts'), err('tests/new.test.ts')], {
+        'tests/a.test.ts': 1,
+      });
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('tests/new.test.ts');
+      expect(after).toBe(before);
+    });
+
+    it('writes when counts only went down or files were cleared', () => {
+      const { res, after } = update([err('tests/a.test.ts')], { 'tests/a.test.ts': 3, 'tests/b.test.ts': 1 });
+      expect(res.status).toBe(0);
+      expect(JSON.parse(after)).toEqual({ 'tests/a.test.ts': 1 });
+    });
+
+    it('writes a raise with --allow-increase', () => {
+      const { res, after } = update(
+        [err('tests/a.test.ts'), err('tests/a.test.ts'), err('tests/new.test.ts')],
+        { 'tests/a.test.ts': 1 },
+        ['--allow-increase']
+      );
+      expect(res.status).toBe(0);
+      expect(JSON.parse(after)).toEqual({ 'tests/a.test.ts': 2, 'tests/new.test.ts': 1 });
+    });
   });
 });
