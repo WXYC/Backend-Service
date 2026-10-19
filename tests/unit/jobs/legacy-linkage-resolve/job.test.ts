@@ -723,20 +723,12 @@ describe('legacy-linkage-resolve: drain check (signal c)', () => {
   });
 
   it('logs residual as null, not 0, on a dry run — 0 would misreport a nonzero cohort as fully drained', async () => {
-    // try/finally: a failing assertion between spyOn and mockRestore must not
-    // leak the spy into later tests (BS#2071 review) — jest.clearAllMocks()
-    // in beforeEach clears call history but does not undo an active spyOn.
-    const logSpy = mockLog;
-    try {
-      queueDryRun(12, 0);
+    queueDryRun(12, 0);
 
-      await runResolve(true);
+    await runResolve(true);
 
-      const flowsheetCall = logSpy.mock.calls.find((call) => call[1] === 'resolve-flowsheet');
-      expect(flowsheetCall?.[3]).toEqual(expect.objectContaining({ candidates: 12, resolved: 0, residual: null }));
-    } finally {
-      logSpy.mockClear();
-    }
+    const flowsheetCall = mockLog.mock.calls.find((call) => call[1] === 'resolve-flowsheet');
+    expect(flowsheetCall?.[3]).toEqual(expect.objectContaining({ candidates: 12, resolved: 0, residual: null }));
   });
 });
 
@@ -976,19 +968,14 @@ describe('legacy-linkage-resolve: text-match pass ships disabled (BS#3061)', () 
     '%j skips the pass: no statements, one info log, no warning',
     async (raw) => {
       if (raw !== undefined) process.env[ENV] = raw;
-      const logSpy = mockLog;
-      try {
-        queueRun(idle, idle);
+      queueRun(idle, idle);
 
-        const result = await runResolve(false);
+      const result = await runResolve(false);
 
-        expect(textMatchSql()).toEqual([]);
-        expect(result.textMatch).toEqual({ candidates: 0, resolved: 0, residual: 0, deferred: false });
-        expect(logSpy.mock.calls.filter((call) => call[1] === 'text-match')).toHaveLength(1);
-        expect(mockCaptureMessage).not.toHaveBeenCalled();
-      } finally {
-        logSpy.mockClear();
-      }
+      expect(textMatchSql()).toEqual([]);
+      expect(result.textMatch).toEqual({ candidates: 0, resolved: 0, residual: 0, deferred: false });
+      expect(mockLog.mock.calls.filter((call) => call[1] === 'text-match')).toHaveLength(1);
+      expect(mockCaptureMessage).not.toHaveBeenCalled();
     }
   );
 

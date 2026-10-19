@@ -135,6 +135,24 @@ describe('createJobLogger', () => {
     expect(stdout).not.toHaveBeenCalled();
   });
 
+  it('closeLogger awaits reporter.flush(2000) before calling Sentry.close(2000)', async () => {
+    const { reporter, initLogger, closeLogger } = createJobLogger({ jobName: 'demo-job' });
+    const order: string[] = [];
+    jest.spyOn(reporter, 'flush').mockImplementation(async (timeout) => {
+      order.push(`flush-start:${timeout}`);
+      await new Promise((resolve) => setImmediate(resolve));
+      order.push('flush-done');
+      return true;
+    });
+    sentry.close.mockImplementationOnce((timeout) => {
+      order.push(`close:${timeout}`);
+      return Promise.resolve(true);
+    });
+    initLogger({ repo: 'r', tool: 't' });
+    await closeLogger();
+    expect(order).toEqual(['flush-start:2000', 'flush-done', 'close:2000']);
+  });
+
   it('errorMessage handles non-Error throws', () => {
     const { errorMessage } = createJobLogger({ jobName: 'demo-job' });
     expect(errorMessage(new Error('m'))).toBe('m');
