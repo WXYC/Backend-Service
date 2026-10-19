@@ -140,6 +140,32 @@ describe('PostHogReporter', () => {
     });
   });
 
+  describe('payload through the real posthog-node client', () => {
+    it.each([
+      ['warning', 'warning'],
+      [undefined, 'error'],
+    ] as const)('level %s reaches the client payload with $exception_level %s', async (level, expected) => {
+      jest.useRealTimers();
+      const { PostHog: RealPostHog } = jest.requireActual<typeof import('posthog-node')>('posthog-node');
+      const real = new RealPostHog('phc_test', { host: 'http://127.0.0.1:1', disabled: true });
+      // posthog-node routes captureException through this internal sink; spying there sees the final payload.
+      const capture = jest
+        .spyOn(real as unknown as { _capturePreparedEvent: (m: Record<string, any>) => void }, '_capturePreparedEvent')
+        .mockImplementation(() => undefined);
+      PostHogMock.mockImplementationOnce(() => real);
+      build().captureException(new Error('boom'), { level, fingerprint: ['f'] });
+      for (let i = 0; i < 20 && capture.mock.calls.length === 0; i += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(capture).toHaveBeenCalledTimes(1);
+      const message = capture.mock.calls[0][0];
+      expect(message.event).toBe('$exception');
+      expect(message.properties?.['$exception_level']).toBe(expected);
+      expect(message.properties?.['$exception_fingerprint']).toBe('f');
+      expect(message.properties?.['service']).toBe('backend');
+    });
+  });
+
   describe('captureMessage payload', () => {
     it('sends a synthesized $exception with one Message entry and the message as fingerprint', () => {
       build().captureMessage('rebuild failed: 3 tables missing');
@@ -207,8 +233,10 @@ describe('PostHogReporter', () => {
       const reporter = build({
         properties: { repo: 'Backend-Service', tool: 'legacy-linkage-resolve', run_id: 'run-1', service: 'spoofed' },
       });
-      reporter.setRequestTag('request_id', 'req-9');
-      reporter.captureMessage('m');
+      reporter.runInScope(() => {
+        reporter.setRequestTag('request_id', 'req-9');
+        reporter.captureMessage('m');
+      });
       expect(sentProperties()).toMatchObject({
         repo: 'Backend-Service',
         tool: 'legacy-linkage-resolve',
@@ -222,10 +250,12 @@ describe('PostHogReporter', () => {
   describe('breadcrumbs', () => {
     it('attaches the trail to an exception, keeping the last 50', () => {
       const reporter = build();
-      for (let i = 0; i < 60; i += 1) {
-        reporter.addBreadcrumb({ category: 'db', message: `step ${i}`, data: { i } });
-      }
-      reporter.captureException(new Error('boom'));
+      reporter.runInScope(() => {
+        for (let i = 0; i < 60; i += 1) {
+          reporter.addBreadcrumb({ category: 'db', message: `step ${i}`, data: { i } });
+        }
+        reporter.captureException(new Error('boom'));
+      });
       const crumbs = sentProperties()['breadcrumbs'] as Array<{ message: string; timestamp: string }>;
       expect(crumbs).toHaveLength(50);
       expect(crumbs[0].message).toBe('step 10');
@@ -262,6 +292,64 @@ describe('PostHogReporter', () => {
       client.captureException.mockClear();
       reporter.captureException(new Error('later'));
       expect(sentProperties()).not.toHaveProperty('request_id');
+    });
+  });
+
+  describe('request scope fallback', () => {
+    const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    it('keeps two interleaved concurrent flows from seeing each other tags or breadcrumbs', async () => {
+      jest.useRealTimers();
+      const reporter = build({ budget: { kind: 'run', ceiling: 10 } });
+      const flow = (id: string, other: string) =>
+        reporter.runInScope(async () => {
+          reporter.setRequestTag('request_id', id);
+          reporter.addBreadcrumb({ message: `${id} start` });
+          await tick();
+          await Promise.resolve();
+          reporter.addBreadcrumb({ message: `${id} middle` });
+          await tick();
+          reporter.captureException(new Error(`${id} failed`), { fingerprint: [id] });
+          return other;
+        });
+      await Promise.all([flow('A', 'B'), flow('B', 'A')]);
+
+      const byId = new Map(
+        client.captureException.mock.calls.map(([, , props]) => [props['request_id'] as string, props])
+      );
+      expect(byId.size).toBe(2);
+      for (const id of ['A', 'B']) {
+        const crumbs = (byId.get(id)?.['breadcrumbs'] as Array<{ message: string }>).map((c) => c.message);
+        expect(crumbs).toEqual([`${id} start`, `${id} middle`]);
+      }
+    });
+
+    it('drops a request tag set outside any scope, so it never appears on an event', () => {
+      const reporter = build();
+      reporter.setRequestTag('request_id', 'leaky');
+      reporter.captureException(new Error('boom'));
+      reporter.runInScope(() => reporter.captureException(new Error('inside')));
+      for (const [, , props] of client.captureException.mock.calls) {
+        expect(props).not.toHaveProperty('request_id');
+      }
+      expect(client.captureException).toHaveBeenCalledTimes(2);
+    });
+
+    it('warns about a missing scope wrapper once per process', () => {
+      const reporter = build();
+      reporter.setRequestTag('a', '1');
+      reporter.setRequestTag('b', '2');
+      const scopeWarnings = warn.mock.calls.filter(([m]) => String(m).includes('runInScope'));
+      expect(scopeWarnings).toHaveLength(1);
+    });
+
+    it('bounds the outside-scope breadcrumb ring', () => {
+      const reporter = build();
+      for (let i = 0; i < 500; i += 1) {
+        reporter.addBreadcrumb({ message: `n${i}` });
+      }
+      reporter.captureException(new Error('boom'));
+      expect((sentProperties()['breadcrumbs'] as unknown[]).length).toBeLessThanOrEqual(50);
     });
   });
 
@@ -345,6 +433,51 @@ describe('PostHogReporter', () => {
       reporter.captureException(new Error('boom'));
       reporter.captureException(new Error('boom'));
       expect(client.captureException).toHaveBeenCalledTimes(2);
+    });
+
+    it('records the dedupe key only after admission: a bucket-rejected event can still send later', () => {
+      const daily = build({ budget: { kind: 'daily', ceiling: 8640 } });
+      for (let i = 0; i < 20; i += 1) {
+        daily.captureMessage(`fill ${i}`);
+      }
+      daily.captureMessage('late');
+      expect(client.capture).toHaveBeenCalledTimes(20);
+      jest.setSystemTime(T0.getTime() + 10_000);
+      daily.captureMessage('late');
+      expect(client.capture).toHaveBeenCalledTimes(21);
+    });
+
+    it('bounds the dedupe memory at 1,000 keys, forgetting the oldest first', () => {
+      const reporter = build({ budget: { kind: 'run', ceiling: 5000 } });
+      for (let i = 0; i < 1001; i += 1) {
+        reporter.captureMessage(`key ${i}`);
+      }
+      client.capture.mockClear();
+      reporter.captureMessage('key 0');
+      expect(client.capture).toHaveBeenCalledTimes(1);
+      reporter.captureMessage('key 1000');
+      expect(client.capture).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let distinct plain-object throws suppress each other', () => {
+      const reporter = build();
+      reporter.captureException({ code: 'E_ONE', detail: 'a' });
+      reporter.captureException({ code: 'E_TWO', detail: 'b' });
+      reporter.captureException({ code: 'E_ONE', detail: 'a' });
+      expect(client.captureException).toHaveBeenCalledTimes(2);
+    });
+
+    it('keys plain objects by message, else by stable primitive content, and survives cycles', () => {
+      const reporter = build();
+      reporter.captureException({ message: 'x' });
+      reporter.captureException({ message: 'y' });
+      reporter.captureException({ a: 1, b: 'q' });
+      reporter.captureException({ b: 'q', a: 2 });
+      const cyclic: Record<string, unknown> = { n: 1 };
+      cyclic['self'] = cyclic;
+      reporter.captureException(cyclic);
+      reporter.captureException(Object.create(null));
+      expect(client.captureException).toHaveBeenCalledTimes(6);
     });
 
     it('logs dropped events at most once a minute', () => {
