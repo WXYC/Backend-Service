@@ -14,11 +14,13 @@ COPY ./.npmrc ./
 COPY ./package* ./
 COPY ./jobs/flowsheet-april-gap-import/package* ./jobs/flowsheet-april-gap-import/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --link --from=builder /jobs/flowsheet-april-gap-import/dist ./jobs/flowsheet-april-gap-import/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # The date-window candidate scan and the Backend-side floor COUNT both walk
 # a meaningful slice of the 2.6M-row flowsheet table; the API's tight 5s

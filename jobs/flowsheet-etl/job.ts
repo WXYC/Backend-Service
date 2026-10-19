@@ -37,11 +37,13 @@ import {
   resolveMessage,
 } from './transform.js';
 import { fetchLegacyShows, fetchLegacyEntries, closeLegacyConnection } from './fetch-legacy.js';
-import { initLogger, log, captureError, closeLogger } from './logger.js';
+import { createJobLogger } from '@wxyc/observability/job-logger';
 import { isBackwardsWriteAllowed, backwardsWriteRefusalMessage } from './backwards-write-guard.js';
 import { buildShowIdMap, type DbClient } from './show-id-map.js';
 
 const JOB_NAME = 'flowsheet-etl';
+
+const { initLogger, log, captureError, closeLogger } = createJobLogger({ jobName: JOB_NAME });
 const BATCH_SIZE = 5000;
 
 /**

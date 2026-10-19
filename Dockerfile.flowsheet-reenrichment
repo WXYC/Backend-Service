@@ -16,6 +16,7 @@ COPY ./jobs/flowsheet-reenrichment/package* ./jobs/flowsheet-reenrichment/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
 COPY ./shared/metadata/package* ./shared/metadata/
+COPY ./shared/observability/package* ./shared/observability/
 
 # `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
 # (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
@@ -26,6 +27,7 @@ COPY --link --from=builder /jobs/flowsheet-reenrichment/dist ./jobs/flowsheet-re
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
 COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
 COPY --link --from=builder /shared/metadata/dist ./shared/metadata/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Long-running per-statement timeout: per-row UPDATEs over a large table
 # can spend tens of seconds on hot batches. The API's tight 5s default is
