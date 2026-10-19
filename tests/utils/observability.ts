@@ -12,7 +12,6 @@ export function createSpyReporter(): SpyReporter {
     captureMessage: jest.fn<ErrorReporter['captureMessage']>(),
     addBreadcrumb: jest.fn<ErrorReporter['addBreadcrumb']>(),
     setRequestTag: jest.fn<ErrorReporter['setRequestTag']>(),
-    recordCounter: jest.fn<ErrorReporter['recordCounter']>(),
     flush: jest.fn<ErrorReporter['flush']>().mockResolvedValue(true),
   };
 }
