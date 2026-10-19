@@ -43,10 +43,9 @@ jest.mock('drizzle-orm', () => ({
   ne: (col: unknown, val: unknown) => ({ op: 'ne', col, val }),
 }));
 
-const mockSentryCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({
-  captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
-}));
+import { useSpyReporter } from '../../utils/observability';
+
+const reporter = useSpyReporter();
 
 import {
   revokeOutstandingAccountSetupTokens,
@@ -123,7 +122,7 @@ describe('revokeOutstandingAccountSetupTokens()', () => {
     // Never throws: revocation is a hardening step on paths (invite send,
     // onboarding completion) that must still succeed for the DJ.
     await expect(revokeOutstandingAccountSetupTokens('user-id-001')).resolves.toBe(0);
-    expect(mockSentryCaptureException).toHaveBeenCalledWith(
+    expect(reporter.captureException).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
         tags: { subsystem: 'account-setup-invite', step: 'revoke-outstanding-tokens' },

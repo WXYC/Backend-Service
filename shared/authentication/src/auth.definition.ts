@@ -1,4 +1,4 @@
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import {
   account,
   db,
@@ -229,13 +229,16 @@ export const auth = betterAuth({
           // contract drifted (e.g. a better-auth upgrade) and the DJ silently got
           // an un-extended 1-hour link, re-opening BS#1969 with no other signal.
           if (extended.length === 0) {
-            Sentry.captureException(new Error('Account-setup token expiry extension matched no verification row'), {
-              tags: { subsystem: 'account-setup-invite', step: 'extend-token-expiry' },
-            });
+            getErrorReporter().captureException(
+              new Error('Account-setup token expiry extension matched no verification row'),
+              {
+                tags: { subsystem: 'account-setup-invite', step: 'extend-token-expiry' },
+              }
+            );
           }
         } catch (error) {
           console.error('Error extending account-setup token expiry:', error);
-          Sentry.captureException(error, {
+          getErrorReporter().captureException(error, {
             tags: { subsystem: 'account-setup-invite', step: 'extend-token-expiry' },
           });
         }
@@ -264,7 +267,7 @@ export const auth = betterAuth({
         url: resetUrl,
       }).catch((error) => {
         console.error(`Error sending ${emailType} email:`, error);
-        Sentry.captureException(error, {
+        getErrorReporter().captureException(error, {
           tags: { subsystem: 'auth-reset-email', email_type: emailType },
         });
       });
@@ -420,7 +423,7 @@ export const auth = betterAuth({
           // user-visible email; the other three callers in this file still
           // use console.error and can be migrated as a follow-up.
           console.error('Error sending OTP email:', error);
-          Sentry.captureException(error, { tags: { subsystem: 'auth-otp', email_type: type } });
+          getErrorReporter().captureException(error, { tags: { subsystem: 'auth-otp', email_type: type } });
         });
       },
       otpLength: 6,
@@ -525,7 +528,7 @@ export const auth = betterAuth({
           // transient DB error — the session is still valid, just at the
           // default expiry. Surface to Sentry so we notice the drift.
           console.error('[device-auth] Failed to clamp session TTL:', error);
-          Sentry.captureException(error, { tags: { subsystem: 'device-authorization' } });
+          getErrorReporter().captureException(error, { tags: { subsystem: 'device-authorization' } });
         }
       }
     }),
@@ -641,7 +644,7 @@ export const auth = betterAuth({
             return capSessionUpdateAgainstDeviceFlow(payload, cap);
           } catch (error) {
             console.error('[device-auth] Session-update cap lookup failed:', error);
-            Sentry.captureException(error, { tags: { subsystem: 'device-authorization' } });
+            getErrorReporter().captureException(error, { tags: { subsystem: 'device-authorization' } });
             return;
           }
         },

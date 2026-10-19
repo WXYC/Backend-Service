@@ -2,10 +2,9 @@ import { jest } from '@jest/globals';
 
 // --- Mocks ---
 
-const mockSentryCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({
-  captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
-}));
+import { useSpyReporter } from '../../utils/observability';
+
+const reporter = useSpyReporter();
 
 const mockFindUserByEmail = jest.fn();
 const mockAdapterFindOne = jest.fn();
@@ -89,7 +88,7 @@ describe('createAutoDjUser()', () => {
         await createAutoDjUser();
 
         expect(mockProvisionUser).not.toHaveBeenCalled();
-        expect(mockSentryCaptureException).toHaveBeenCalledWith(
+        expect(reporter.captureException).toHaveBeenCalledWith(
           expect.any(Error),
           expect.objectContaining({ tags: { subsystem: 'auto-dj-user' } })
         );
@@ -106,7 +105,7 @@ describe('createAutoDjUser()', () => {
 
       expect(mockFindUserByEmail).toHaveBeenCalledWith('auto-dj@wxyc.org');
       expect(mockProvisionUser).not.toHaveBeenCalled();
-      expect(mockSentryCaptureException).not.toHaveBeenCalled();
+      expect(reporter.captureException).not.toHaveBeenCalled();
     });
   });
 
@@ -119,7 +118,7 @@ describe('createAutoDjUser()', () => {
 
       expect(mockProvisionUser).not.toHaveBeenCalled();
       // A missing org is a defensive skip, not an error — do not page on it.
-      expect(mockSentryCaptureException).not.toHaveBeenCalled();
+      expect(reporter.captureException).not.toHaveBeenCalled();
     });
   });
 
@@ -166,7 +165,7 @@ describe('createAutoDjUser()', () => {
 
       await expect(createAutoDjUser()).resolves.toBeUndefined();
 
-      expect(mockSentryCaptureException).toHaveBeenCalledWith(
+      expect(reporter.captureException).toHaveBeenCalledWith(
         expect.any(Error),
         expect.objectContaining({ tags: { subsystem: 'auto-dj-user' } })
       );

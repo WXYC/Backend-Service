@@ -25,7 +25,7 @@
  * keyed on userId extracted from claims.
  */
 
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import type { Request, Response } from 'express';
 import { eq, sql } from 'drizzle-orm';
 import { db, banned_fingerprints, user } from '@wxyc/database';
@@ -159,7 +159,7 @@ export async function checkRequestBanHandler(req: Request, res: Response): Promi
     return res.status(200).json({ userId, fingerprint, banned: false });
   } catch (error) {
     console.error('[CHECK REQUEST BAN] Unexpected error:', error);
-    Sentry.captureException(error, { tags: { subsystem: 'check-request-ban' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'check-request-ban' } });
     return res.status(500).json({ error: 'internal_server_error' });
   }
 }

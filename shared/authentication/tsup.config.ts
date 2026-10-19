@@ -21,5 +21,5 @@ export default defineConfig({
   outDir: 'dist',
   clean: true,
   sourcemap: true,
-  external: ['drizzle-orm', 'postgres', 'better-auth', '@wxyc/shared', '@sentry/node'],
+  external: ['drizzle-orm', 'postgres', 'better-auth', '@wxyc/shared', '@wxyc/observability'],
 });

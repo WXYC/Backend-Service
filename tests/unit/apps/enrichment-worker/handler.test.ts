@@ -2,7 +2,7 @@
  * Unit tests for enrichment-worker handler.ts captureMessage volume control
  * (BS#1311 / follow-up to BS#969).
  *
- * The original PR #1304 (closes #969) fired `Sentry.captureMessage` on every
+ * The original PR #1304 (closes #969) fired `captureMessage` on every
  * empty outcome — degraded LML matches, no-match verdicts, raced finalize
  * outcomes, and the catch-arm path. Post-hoc code review surfaced two HIGH
  * issues against the unrestored WXYC org Sentry quota (BS#1291 RCA):
@@ -25,13 +25,11 @@
 
 import { jest } from '@jest/globals';
 
-// Mock @sentry/node BEFORE importing handler.ts so the handler picks up the
-// mock at module-load time. unit.setup.ts's clearMocks: true handles per-test
-// reset; we just need the symbols to exist.
-jest.mock('@sentry/node', () => ({
-  captureException: jest.fn(),
-  captureMessage: jest.fn(),
-}));
+// The handler reports through the process-wide ErrorReporter; a spy registered per test records
+// what it sends.
+import { useSpyReporter } from '../../../utils/observability';
+
+const reporter = useSpyReporter();
 
 // B3 (BS#1749): the handler no longer calls `lookupMetadata` directly — it
 // coalesces the lookup through `enrichmentBulkLookup` (lookup-batcher.ts). Mock
@@ -69,8 +67,6 @@ jest.mock('../../../../apps/enrichment-worker/enrich.js', () => {
     finalizeRow: mockFinalizeRow,
   };
 });
-
-import * as Sentry from '@sentry/node';
 
 import { makeEnrichmentHandler } from '../../../../apps/enrichment-worker/handler';
 
@@ -136,8 +132,8 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
 
     await driveOneTick();
 
-    expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
-    expect(Sentry.captureMessage).toHaveBeenCalledWith(
+    expect(reporter.captureMessage).toHaveBeenCalledTimes(1);
+    expect(reporter.captureMessage).toHaveBeenCalledWith(
       'enrichment-empty-outcome',
       expect.objectContaining({
         level: 'warning',
@@ -155,7 +151,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
 
     await driveOneTick();
 
-    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(reporter.captureMessage).not.toHaveBeenCalled();
   });
 
   it('does NOT fire captureMessage when outcome ends in _raced (enriched_no_match_raced)', async () => {
@@ -164,7 +160,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
 
     await driveOneTick();
 
-    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(reporter.captureMessage).not.toHaveBeenCalled();
   });
 
   it('does NOT fire captureMessage when cause is lml_no_match (by-design Discogs miss)', async () => {
@@ -174,7 +170,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
 
     await driveOneTick();
 
-    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(reporter.captureMessage).not.toHaveBeenCalled();
   });
 
   it('does NOT fire captureMessage on an untrusted search_type with a populated artwork_url (BS#1359 — classifies lml_no_match, suppressed)', async () => {
@@ -198,7 +194,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
 
     await driveOneTick();
 
-    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(reporter.captureMessage).not.toHaveBeenCalled();
   });
 
   it('routes the row through the burst batcher (one call per candidate)', async () => {
@@ -233,7 +229,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
 
     await driveOneTick();
 
-    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(reporter.captureMessage).not.toHaveBeenCalled();
   });
 
   it('catch arm: captureException stays, captureMessage is dropped (no double-fire on LML throw)', async () => {
@@ -245,7 +241,7 @@ describe('makeEnrichmentHandler captureMessage volume control (BS#1311)', () => 
 
     await driveOneTick();
 
-    expect(Sentry.captureException).toHaveBeenCalledTimes(1);
-    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    expect(reporter.captureException).toHaveBeenCalledTimes(1);
+    expect(reporter.captureMessage).not.toHaveBeenCalled();
   });
 });

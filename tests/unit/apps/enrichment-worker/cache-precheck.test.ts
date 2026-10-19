@@ -29,11 +29,6 @@
 
 import { jest } from '@jest/globals';
 
-jest.mock('@sentry/node', () => ({
-  captureException: jest.fn(),
-  captureMessage: jest.fn(),
-}));
-
 // B3 (BS#1749): the handler's LML call now goes through the burst batcher.
 // Mock that seam; the pre-check assertions only care whether an LML call is
 // issued at all, which the batcher stands in for here.
@@ -72,8 +67,6 @@ jest.mock('../../../../apps/enrichment-worker/precheck.js', () => ({
   hasLoadBearingAlbumMetadata: mockHasLoadBearingAlbumMetadata,
   finalizeFromCachedMetadata: mockFinalizeFromCachedMetadata,
 }));
-
-import * as Sentry from '@sentry/node';
 
 import { makeEnrichmentHandler } from '../../../../apps/enrichment-worker/handler';
 

@@ -25,10 +25,9 @@ jest.mock('../../../shared/authentication/src/revoke-account-setup-tokens', () =
   revokeOutstandingAccountSetupTokens: (...args: unknown[]) => mockRevokeOutstandingAccountSetupTokens(...args),
 }));
 
-const mockSentryCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({
-  captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
-}));
+import { useSpyReporter } from '../../utils/observability';
+
+const reporter = useSpyReporter();
 
 // --- Import after mocks (url-rewrite + account-setup-token are real leaves) ---
 import { createAndSendAccountSetupInvite } from '../../../shared/authentication/src/account-setup';
@@ -140,7 +139,7 @@ describe('createAndSendAccountSetupInvite()', () => {
 
   it('returns { sent: true } and does not touch Sentry on a successful send', async () => {
     await expect(createAndSendAccountSetupInvite(input)).resolves.toEqual({ sent: true });
-    expect(mockSentryCaptureException).not.toHaveBeenCalled();
+    expect(reporter.captureException).not.toHaveBeenCalled();
   });
 
   it('captures to Sentry and returns { sent: false, error } when the send throws', async () => {
@@ -150,7 +149,7 @@ describe('createAndSendAccountSetupInvite()', () => {
 
     expect(result).toEqual({ sent: false, error: 'SES throttled' });
     // observability regression-guard: dropping the capture must fail loudly
-    expect(mockSentryCaptureException).toHaveBeenCalledWith(
+    expect(reporter.captureException).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
         tags: { subsystem: 'account-setup-invite' },
@@ -175,7 +174,7 @@ describe('createAndSendAccountSetupInvite()', () => {
 
     expect(result).toEqual({ sent: false, error: 'verification insert failed' });
     expect(mockSendAccountSetupEmail).not.toHaveBeenCalled();
-    expect(mockSentryCaptureException).toHaveBeenCalledWith(
+    expect(reporter.captureException).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
         tags: { subsystem: 'account-setup-invite' },

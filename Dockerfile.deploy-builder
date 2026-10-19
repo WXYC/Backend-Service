@@ -44,7 +44,7 @@ COPY ./apps ./apps
 COPY ./jobs ./jobs
 
 RUN npm ci
-RUN npm run build --workspace=@wxyc/database --workspace=shared/** --workspace=apps/** --workspace=jobs/**
+RUN npm run build --workspace=@wxyc/database --workspace=@wxyc/observability --workspace=shared/** --workspace=apps/** --workspace=jobs/**
 
 # Collect just the dist/** output for every workspace into one tree that
 # mirrors the repo layout (apps/<x>/dist, jobs/<x>/dist, shared/<x>/dist), so

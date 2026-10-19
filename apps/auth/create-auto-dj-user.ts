@@ -31,7 +31,7 @@
  *     updates — same limitation `createDefaultUser` has today.
  */
 
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { AUTO_DJ_USERNAME, auth } from '@wxyc/authentication';
 import { provisionUser } from './provision-user';
 
@@ -94,6 +94,6 @@ export const createAutoDjUser = async (): Promise<void> => {
     console.log('Auto-DJ user created successfully with dj role.');
   } catch (error) {
     console.error('[AUTO-DJ USER] Error creating auto-dj user:', error);
-    Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'auto-dj-user' } });
+    getErrorReporter().captureException(error, { level: 'warning', tags: { subsystem: 'auto-dj-user' } });
   }
 };

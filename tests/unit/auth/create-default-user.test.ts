@@ -3,10 +3,9 @@ import { inspect } from 'util';
 
 // --- Mocks ---
 
-const mockSentryCaptureException = jest.fn();
-jest.mock('@sentry/node', () => ({
-  captureException: (...args: unknown[]) => mockSentryCaptureException(...args),
-}));
+import { useSpyReporter } from '../../utils/observability';
+
+const reporter = useSpyReporter();
 
 const mockFindUserByEmail = jest.fn<(email: string) => Promise<unknown>>();
 const mockAdapterFindOne =
@@ -141,7 +140,7 @@ describe('createDefaultUser()', () => {
     await expect(createDefaultUser()).resolves.toBeUndefined();
 
     expect(mockProvisionUser).not.toHaveBeenCalled();
-    expect(mockSentryCaptureException).toHaveBeenCalledTimes(1);
+    expect(reporter.captureException).toHaveBeenCalledTimes(1);
   });
 
   // The configured real name is bound into the insert; a failed insert must not print it (BS#3054).
@@ -156,7 +155,7 @@ describe('createDefaultUser()', () => {
 
     expect(inspect(consoleSpy.mock.calls, { depth: 10, showHidden: true })).not.toContain('Test Reviewer');
     expect(consoleSpy.mock.calls[0][0]).toContain('[DEFAULT USER]');
-    expect(mockSentryCaptureException).toHaveBeenCalledWith(failure, expect.anything());
+    expect(reporter.captureException).toHaveBeenCalledWith(failure, expect.anything());
     consoleSpy.mockRestore();
   });
 });

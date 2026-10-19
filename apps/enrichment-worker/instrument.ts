@@ -3,7 +3,8 @@
 
 import { config } from 'dotenv';
 import * as Sentry from '@sentry/node';
-import { SENTRY_DATA_COLLECTION, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
+import { SENTRY_DATA_COLLECTION, setErrorReporter, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
+import { SentryReporter } from '@wxyc/observability/sentry';
 
 config();
 
@@ -30,3 +31,7 @@ Sentry.init({
   // or request bodies (BS#3004).
   dataCollection: SENTRY_DATA_COLLECTION,
 });
+
+// Every capture and breadcrumb in this container goes through the ErrorReporter
+// seam (BS#3396); Sentry is its only backend for now.
+setErrorReporter(new SentryReporter());

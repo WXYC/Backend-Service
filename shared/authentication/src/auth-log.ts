@@ -3,9 +3,8 @@
  *
  * better-auth logs the raw error it caught, and a failed Drizzle query's
  * message quotes every bound value, `auth_user.real_name` included (BS#3054).
- * This package cannot depend on `@wxyc/observability` (it builds first), so the
- * auth app registers that package's `redactLogValue` at startup with
- * `setAuthLogRedactor`. Until it does, the sink fails closed: an error is
+ * The auth app registers `@wxyc/observability`'s `redactLogValue` at startup with
+ * `setAuthLogRedactor`, so this sink stays free of the package's redaction logic. Until it does, the sink fails closed: an error is
  * logged as its class name and a fixed placeholder, never its message or the
  * error object, and a string is cut at the `\nparams: ` marker that Drizzle's
  * message puts before the bound values. That covers every process that builds

@@ -28,10 +28,9 @@
 
 import { jest } from '@jest/globals';
 
-jest.mock('@sentry/node', () => ({
-  captureException: jest.fn(),
-  captureMessage: jest.fn(),
-}));
+import { useSpyReporter } from '../../../utils/observability';
+
+const reporter = useSpyReporter();
 
 // B3 (BS#1749): the handler's LML lookup now runs through the burst batcher.
 // Mock that seam so a never-resolving / rejecting return value simulates a
@@ -63,8 +62,6 @@ jest.mock('../../../../apps/enrichment-worker/enrich.js', () => {
     finalizeRow: mockFinalizeRow,
   };
 });
-
-import * as Sentry from '@sentry/node';
 
 import {
   drainInFlightCandidates,
@@ -164,16 +161,16 @@ describe('enrichment-worker in-flight drain (BS#1108)', () => {
       expect(getInFlightCandidateCount()).toBe(0);
     });
 
-    it('does not raise unhandledRejection when Sentry.captureException throws from a catch arm', async () => {
+    it('does not raise unhandledRejection when reporter.captureException throws from a catch arm', async () => {
       // Defensive: handleCandidate wraps its body in try/catch, but the catch
-      // arms call Sentry.captureException. If Sentry's internals throw
+      // arms call reporter.captureException. If the backend's internals throw
       // (exporter error, disposed hub during shutdown), the handleCandidate
       // promise rejects. The dispatcher's `void promise.finally(...)` would
       // otherwise discard the rejection and surface as an unhandledRejection
       // in production. The `.catch(() => {})` chain pins that contract here.
       mockFilterForEnrichment.mockReturnValueOnce(makeCandidate(99));
       mockClaimRowForEnrichment.mockRejectedValueOnce(new Error('db down'));
-      (Sentry.captureException as jest.Mock).mockImplementation(() => {
+      reporter.captureException.mockImplementation(() => {
         throw new Error('Sentry exporter dead during shutdown');
       });
 

@@ -2,7 +2,6 @@
 // `instrument.ts` is loaded via `node --import` (see package.json `start`
 // script), not statically imported here, so Sentry's auto-instrumentation
 // runs before `express` is loaded into the module graph.
-import * as Sentry from '@sentry/node';
 import { config } from 'dotenv';
 config();
 
@@ -29,7 +28,7 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
-import { redactQueryParams } from '@wxyc/observability';
+import { getErrorReporter, redactQueryParams } from '@wxyc/observability';
 import { installAuthLogRedaction } from './log-redaction';
 import {
   adminPrefixAuditMiddleware,
@@ -439,7 +438,7 @@ app.get('/auth/admin/resolve-organization', async (req, res) => {
     return res.json(org);
   } catch (error) {
     console.error('[RESOLVE ORG] Unexpected error:', error);
-    Sentry.captureException(error, { tags: { subsystem: 'resolve-organization' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'resolve-organization' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -491,7 +490,7 @@ app.post('/auth/admin/provision-user', async (req, res) => {
       return res.status(error.statusCode).json({ error: error.message });
     }
     console.error('[PROVISION USER] Unexpected error:', redactQueryParams(error));
-    Sentry.captureException(error, { tags: { subsystem: 'provision-user' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'provision-user' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -551,7 +550,7 @@ const stationSignupAdminGate = async (req: Request, res: Response, next: NextFun
     // A session lookup that throws must not fall through to the routes with
     // no actor resolved. Same 500 shape the operation wrapper below writes.
     console.error('[STATION SIGNUP ADMIN] gate: session lookup failed', error);
-    Sentry.captureException(error, { tags: { subsystem: 'station-signup-gate' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'station-signup-gate' } });
     res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -597,7 +596,7 @@ const stationSignupAdminRoute =
         // untyped throw to `corrupt`) or answered `200 {passcodes: []}` on an
         // empty table, and rotate fell through to a code-less 500.
         console.error(`[STATION SIGNUP ADMIN] ${subsystem}: STATION_PASSCODE_KEY is not set`, error);
-        Sentry.captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
+        getErrorReporter().captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
         return res.status(503).json({
           error:
             'STATION_PASSCODE_KEY is not set on the auth service, so station passcodes can be neither revealed ' +
@@ -610,7 +609,7 @@ const stationSignupAdminRoute =
         // failing closed. 503, and say what fixes it — the runbook lives at
         // the top of station-passcode.ts.
         console.error(`[STATION SIGNUP ADMIN] ${subsystem}: active passcode row will not decrypt`, error);
-        Sentry.captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
+        getErrorReporter().captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
         return res.status(503).json({
           error:
             'An active station passcode will not decrypt, so the signup gate is failing closed. Set ' +
@@ -620,7 +619,7 @@ const stationSignupAdminRoute =
         });
       }
       console.error(`[STATION SIGNUP ADMIN] ${subsystem}: unexpected error`, error);
-      Sentry.captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
+      getErrorReporter().captureException(error, { tags: { subsystem: `station-signup-${subsystem}` } });
       return res.status(500).json({ error: 'Internal server error' });
     }
   };
@@ -739,7 +738,7 @@ const lookupEmailHandler = async (req: Request, res: Response) => {
     return res.json({ email });
   } catch (error) {
     console.error('[LOOKUP EMAIL] Unexpected error:', error);
-    Sentry.captureException(error, { tags: { subsystem: 'lookup-email' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'lookup-email' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -754,7 +753,7 @@ const completeOnboardingHandler = async (req: Request, res: Response) => {
       return res.status(error.statusCode).json({ error: error.message, code: error.code });
     }
     console.error('[COMPLETE ONBOARDING] Unexpected error:', redactQueryParams(error));
-    Sentry.captureException(error, { tags: { subsystem: 'complete-onboarding' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'complete-onboarding' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -772,7 +771,7 @@ const updateIdentityHandler = async (req: Request, res: Response) => {
       return res.status(error.statusCode).json({ error: error.message, code: error.code });
     }
     console.error('[UPDATE IDENTITY] Unexpected error:', redactQueryParams(error));
-    Sentry.captureException(error, { tags: { subsystem: 'update-identity' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'update-identity' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -793,7 +792,7 @@ const stationSignupHandler = async (req: Request, res: Response) => {
       return res.status(error.statusCode).json({ error: error.message, code: error.code });
     }
     console.error('[STATION SIGNUP] Unexpected error:', redactQueryParams(error));
-    Sentry.captureException(error, { tags: { subsystem: 'station-signup' } });
+    getErrorReporter().captureException(error, { tags: { subsystem: 'station-signup' } });
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -1346,7 +1345,7 @@ app.use(fallbackErrorHandler);
 
 const onAdminSyncError = (error: unknown) => {
   console.error('[ADMIN PERMISSIONS] Error fixing admin roles:', error);
-  Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'admin-sync' } });
+  getErrorReporter().captureException(error, { level: 'warning', tags: { subsystem: 'admin-sync' } });
 };
 
 // Reconcile the admin flag for existing stationManagers. Runs on every boot,
@@ -1459,11 +1458,11 @@ void (async () => {
           '[OIDC BOOTSTRAP] Failed to sync trustedClients — OIDC token exchange will 500 until this is resolved.',
           error
         );
-        Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'oidc-bootstrap' } });
+        getErrorReporter().captureException(error, { level: 'warning', tags: { subsystem: 'oidc-bootstrap' } });
       }
     } catch (error) {
       console.error('[AUTH CONTEXT] Failed to resolve auth.$context before bootstrap:', error);
-      Sentry.captureException(error, { level: 'warning', tags: { subsystem: 'auth-context' } });
+      getErrorReporter().captureException(error, { level: 'warning', tags: { subsystem: 'auth-context' } });
     }
   }
 
