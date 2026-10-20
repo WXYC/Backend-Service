@@ -61,7 +61,7 @@ import {
   type BulkLookupItem,
   type BulkLookupResponse,
 } from '@wxyc/lml-client';
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 
 const JOB_NAME = 'catalog-popularity-freetext-resolve';
@@ -629,7 +629,7 @@ export const runBatch = async (
   await Promise.all(upsertPromises);
 
   if (unexpected_index > 0) {
-    Sentry.addBreadcrumb({
+    getErrorReporter().addBreadcrumb({
       category: JOB_NAME,
       message: 'unexpected_result_index',
       level: 'warning',
@@ -639,7 +639,7 @@ export const runBatch = async (
         first_mismatch_got: firstMismatchGot,
       },
     });
-    Sentry.captureMessage(`${JOB_NAME}.unexpected_index`, {
+    getErrorReporter().captureMessage(`${JOB_NAME}.unexpected_index`, {
       level: 'warning',
       tags: { source: JOB_NAME },
       extra: { unexpected_index, scanned: items.length },

@@ -16,10 +16,10 @@ import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-jest.mock('@wxyc/lml-client', () => ({
-  ...jest.requireActual('@wxyc/lml-client'),
-  bulkLookupMetadata: jest.fn(),
-}));
+jest.mock('@wxyc/lml-client', () => {
+  const actual = jest.requireActual<typeof import('@wxyc/lml-client')>('@wxyc/lml-client');
+  return { ...actual, bulkLookupMetadata: jest.fn(), setLmlCounterSink: jest.fn(actual.setLmlCounterSink) };
+});
 jest.mock('../../../../jobs/album-metadata-reask/cohort', () => ({
   ...jest.requireActual<Record<string, unknown>>('../../../../jobs/album-metadata-reask/cohort'),
   countCohort: jest.fn(),
@@ -30,11 +30,13 @@ jest.mock('@sentry/node', () => ({
   init: jest.fn(),
   captureException: jest.fn(),
   setTag: jest.fn(),
+  // closeLogger drains the reporter before closing the client.
+  flush: jest.fn(() => Promise.resolve(true)),
   close: jest.fn(() => Promise.resolve(true)),
 }));
 
 import { db } from '@wxyc/database';
-import { bulkLookupMetadata } from '@wxyc/lml-client';
+import { bulkLookupMetadata, setLmlCounterSink } from '@wxyc/lml-client';
 import * as cohort from '../../../../jobs/album-metadata-reask/cohort';
 import type { CohortCounts, ReaskCandidate } from '../../../../jobs/album-metadata-reask/cohort';
 import { main, resolveOptions, runReask } from '../../../../jobs/album-metadata-reask/job';
@@ -253,5 +255,26 @@ describe('main', () => {
       .filter((chunk) => chunk.trimStart().startsWith('{'))
       .map((chunk) => JSON.parse(chunk) as Record<string, unknown>);
     expect(lines).toContainEqual(expect.objectContaining({ step, tool: 'album-metadata-reask' }));
+  });
+
+  // BS#3398: the LML client's counters go out through the job logger's counter sink, as `{"metric", "value", ...}` lines.
+  it('wires the job logger counter sink into the LML client', async () => {
+    process.env = { ...originalEnv, ...env };
+    process.argv = ['node', 'job.js'];
+    (db.execute as unknown as jest.Mock).mockResolvedValue([] as never);
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const consoleLog = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    await main();
+
+    const sink = (setLmlCounterSink as unknown as jest.Mock).mock.calls.at(-1)?.[0] as (n: string, v: number) => void;
+    expect(typeof sink).toBe('function');
+    consoleLog.mockClear();
+    sink('lml.discogs_calls_per_album', 2);
+    expect(JSON.parse(String(consoleLog.mock.calls[0][0]))).toMatchObject({
+      metric: 'lml.discogs_calls_per_album',
+      value: 2,
+    });
   });
 });

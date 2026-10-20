@@ -48,7 +48,7 @@ import {
   requireNonNegativeInt,
   type CheckLiveActivityFn,
 } from '@wxyc/database';
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { LmlAuthError, lmlApiKeyFingerprint, type LookupResponse } from '@wxyc/lml-client';
 import { classifyArtworkProvenance, isWrongArtworkProvenance } from '@wxyc/metadata';
 import type { RemediationOutcome, WrongArtworkRow } from './remediate.js';
@@ -333,7 +333,7 @@ export const runRemediation = async (opts: RunRemediationOptions): Promise<RunRe
         // `jobs/flowsheet-metadata-backfill/orchestrate.ts`).
         if (error instanceof LmlAuthError) {
           const bearerFingerprint = lmlApiKeyFingerprint() ?? 'unset';
-          Sentry.addBreadcrumb({
+          getErrorReporter().addBreadcrumb({
             category: 'lml.auth',
             message: `LML rejected the shared bearer with ${error.statusCode}`,
             level: 'error',

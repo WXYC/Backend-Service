@@ -15,10 +15,12 @@ ENV DB_APPLICATION_NAME=wxyc-album-critic-reviews-etl
 COPY ./package* ./
 COPY ./jobs/album-critic-reviews-etl/package* ./jobs/album-critic-reviews-etl/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev
 
 COPY --link --from=builder /jobs/album-critic-reviews-etl/dist ./jobs/album-critic-reviews-etl/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/album-critic-reviews-etl"]
