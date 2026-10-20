@@ -3751,18 +3751,25 @@ async function searchLibraryBothMode(
       return tsvectorResults;
     }
     const { enabled: aliasEnabled, minSimilarity: aliasMinSimilarity } = getCatalogSearchAliasConfig();
-    const room = n - tsvectorResults.length;
+    // `n` counts ALBUMS, not rows (see `albumScopedQuery`), so the room left
+    // is measured in distinct ids. Today `albumScopedQuery`'s `DISTINCT ON
+    // (id)` hands back one row per album and the two counts agree; counting
+    // ids keeps the probe's room right if a tier ever returns an album's
+    // rotation fan-out rows, rather than borrowing that invariant.
+    const stage1Ids = new Set(tsvectorResults.map((r) => r.id));
+    const room = n - stage1Ids.size;
     // `trimmed.length >= 2` mirrors stage 2's own gate below. With no room
-    // left the probe could only add rows the cap then cuts, so skip the query.
+    // left the probe could only add albums past `n`, so skip the query.
     if (!aliasEnabled || room <= 0 || trimmed.length < 2) {
       return tsvectorResults;
     }
     const aliasRows = await searchLibraryAliasHitsAfterTsvector(trimmed, room, aliasMinSimilarity, on_streaming);
     // The probe's SQL already excludes every stage-1 match; dedupe by id
     // anyway so a future change to either predicate cannot show one release
-    // twice.
-    const stage1Ids = new Set(tsvectorResults.map((r) => r.id));
-    return [...tsvectorResults, ...aliasRows.filter((r) => !stage1Ids.has(r.id))].slice(0, n);
+    // twice. No row-count slice: the probe is already album-capped at
+    // `room`, so the page holds at most `n` albums, and a row slice could
+    // cut an album's rows in half.
+    return [...tsvectorResults, ...aliasRows.filter((r) => !stage1Ids.has(r.id))];
   }
 
   if (trimmed.length >= 2) {
