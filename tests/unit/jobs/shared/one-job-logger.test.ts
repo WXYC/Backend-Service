@@ -41,7 +41,7 @@ describe('one createJobLogger instance per job', () => {
     const { initLogger, log, closeLogger } = await import(`../../../../jobs/${job}/logger`);
     const writes: string[] = [];
     const spy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
-      writes.push(String(chunk));
+      writes.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString('utf-8'));
       return true;
     });
     try {
