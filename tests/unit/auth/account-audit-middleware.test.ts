@@ -853,6 +853,13 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
   const grant = (name: string) => `capability.grant.${name}`;
   const revoke = (name: string) => `capability.revoke.${name}`;
 
+  // The 400 row queues an after-read the 2xx guard correctly never consumes;
+  // drop it so it cannot leak into the next test's `limit` queue.
+  afterEach(() => {
+    db._chain.limit.mockReset();
+    db._chain.limit.mockImplementation(() => db._chain);
+  });
+
   it.each([
     ['grants one', ['a'], ['a', 'x'], 200, [grant('x')]],
     ['revokes one', ['a', 'x'], ['a'], 200, [revoke('x')]],
@@ -863,9 +870,9 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
   ])('%s', async (_name, before, after, status, expectedActions) => {
     auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
     db._chain.limit.mockResolvedValueOnce([{ capabilities: before }] as never);
-    if (status < 300) {
-      db._chain.limit.mockResolvedValueOnce([{ capabilities: after }] as never);
-    }
+    // The after-read is queued on EVERY row, so on the 400 row only the 2xx
+    // guard stands between a changed after-read and a capability audit row.
+    db._chain.limit.mockResolvedValueOnce([{ capabilities: after }] as never);
     const { res, next } = await start(
       adminPrefixAuditMiddleware(),
       mockAdminReq({ path: '/update-user', body: { userId: 'dj-1', data: {} } })
@@ -880,5 +887,38 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
     for (const action of expectedActions) {
       expectAudited({ action, actorUserId: 'manager-1', subjectUserId: 'dj-1', outcome: status });
     }
+  });
+
+  it('holds the handler until the before-read resolves, and reads the after-state only once the response finishes', async () => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    const order: string[] = [];
+    let releaseBefore: (rows: unknown) => void = () => undefined;
+    db._chain.limit.mockImplementationOnce(() => {
+      order.push('before-read');
+      return new Promise((resolve) => {
+        releaseBefore = resolve;
+      });
+    });
+    db._chain.limit.mockImplementationOnce(() => {
+      order.push('after-read');
+      return Promise.resolve([{ capabilities: ['a', 'x'] }]);
+    });
+    const res = mockRes();
+    const next = jest.fn(() => {
+      order.push('next');
+    });
+    adminPrefixAuditMiddleware()(mockAdminReq({ path: '/update-user', body: { userId: 'dj-1', data: {} } }), res, next);
+    await flush();
+    expect(order).toEqual(['before-read']);
+    expect(next).not.toHaveBeenCalled();
+
+    releaseBefore([{ capabilities: ['a'] }]);
+    await flush();
+    expect(order).toEqual(['before-read', 'next']);
+
+    res.statusCode = 200;
+    await settle(res);
+    expect(order).toEqual(['before-read', 'next', 'after-read']);
+    expectAudited({ action: 'capability.grant.x', actorUserId: 'manager-1', subjectUserId: 'dj-1' });
   });
 });
