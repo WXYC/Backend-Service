@@ -394,6 +394,20 @@ describe('PostHogReporter', () => {
       return queue.mock.calls[0][1] as { properties: Record<string, any> };
     };
 
+    it('rewrites a crash to the contract mechanism: handled false, the crash type, level error', async () => {
+      const { properties } = await queuedThrough((reporter) =>
+        reporter.captureCrash(new Error('kaboom'), 'onuncaughtexception')
+      );
+      expect(properties['$exception_list'][0].mechanism).toMatchObject({ type: 'onuncaughtexception', handled: false });
+      expect(properties['$exception_level']).toBe('error');
+      expect(properties).not.toHaveProperty('$wxyc_crash_mechanism');
+    });
+
+    it('leaves a handled capture as handled true', async () => {
+      const { properties } = await queuedThrough((reporter) => reporter.captureException(new Error('boom')));
+      expect(properties['$exception_list'][0].mechanism).toMatchObject({ handled: true });
+    });
+
     it('sends the SQL of a Drizzle error whose cause carries params, and no bound value anywhere in $exception_list', async () => {
       const cause = new Error(PARAMS);
       const drizzle = new Error('Failed query: select 1', { cause });
