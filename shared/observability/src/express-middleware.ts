@@ -17,7 +17,8 @@ const routeTemplates = new WeakMap<object, string>();
 /**
  * Express 5 resets `req.baseUrl` to '' once an error leaves a mounted router while `req.route` stays the inner route,
  * so the error middleware cannot rebuild the template. The router assigns `req.route` while `req.baseUrl` is still the
- * mount prefix, so intercept that assignment and remember the combined template.
+ * mount prefix, so intercept that assignment and remember the combined template. A router mounted at a
+ * parameterised path would put the real values in `req.baseUrl`, so they would reach the route tag; nothing mounts that way.
  */
 function trackRouteTemplate(req: unknown): void {
   if (typeof req !== 'object' || req === null) {
