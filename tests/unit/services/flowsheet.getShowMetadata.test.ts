@@ -44,7 +44,9 @@ describe('getShowMetadata', () => {
 
     // specialty_shows select
     const specialtySelect = createMockQueryChain();
-    specialtySelect.where.mockResolvedValue([{ id: 7, specialty_name: 'Jazz Hour' }]);
+    specialtySelect.where.mockResolvedValue([
+      { id: 7, specialty_name: 'Jazz Hour', slug: 'jazz-hour', short_name: 'Jazz' },
+    ]);
     db.select.mockReturnValueOnce(specialtySelect);
 
     const result = await getShowMetadata(42);
@@ -55,6 +57,7 @@ describe('getShowMetadata', () => {
         specialty_id: 7,
         show_name: 'Test Show',
         specialty_show_name: 'Jazz Hour',
+        specialty: expect.objectContaining({ id: 7, slug: 'jazz-hour', name: 'Jazz Hour', short_name: 'Jazz' }),
         show_djs: [{ id: 'user-1', dj_name: 'DJ Test' }],
       })
     );

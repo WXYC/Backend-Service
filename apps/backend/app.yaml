@@ -20,6 +20,29 @@ components:
       description: JWT token from AWS Cognito
 
   schemas:
+    SpecialtyShowRef:
+      type: object
+      description: Public projection of a specialty_shows catalog row.
+      required: [id, slug, name, short_name, tagline, logs_playcuts, default_spotlight_role, artwork, accent_color]
+      properties:
+        id: { type: integer }
+        slug: { type: string }
+        name: { type: string }
+        short_name: { type: string }
+        tagline: { type: string, nullable: true }
+        logs_playcuts: { type: boolean }
+        default_spotlight_role:
+          type: string
+          nullable: true
+          enum: [performer, dj, reader, guest, host]
+        artwork:
+          type: object
+          nullable: true
+          properties:
+            square_url: { type: string }
+            master_url: { type: string }
+            wide_url: { type: string }
+        accent_color: { type: string, nullable: true }
     # The one rotation-bin definition; tests/unit/apps/backend/app-yaml-rotation-bin.test.ts pins it to ROTATION_BINS.
     # The two bare `type: string` rotation_bin fields (AlbumView and CatalogExportRow) stay unreferenced: they are
     # nullable passthroughs of the stored freq_enum value (so already limited to these bins), and wxyc-shared's
@@ -1980,9 +2003,13 @@ paths:
                   description: Required only when starting a new show
                 specialty_id:
                   type: integer
-                  description: id of specialty show entry
+                  description: >
+                    id of specialty show entry. Honored on the new-show and takeover paths only; a co-host
+                    join ignores it. Must name an active catalog row.
 
       responses:
+        '400':
+          description: specialty_id is unknown or names a retired specialty show (nothing is written)
         '200':
           description: Successfully joined/started show
           content:
@@ -2379,6 +2406,11 @@ paths:
                     type: string
                   specialty_show:
                     type: string
+                  specialty:
+                    allOf:
+                      - $ref: '#/components/schemas/SpecialtyShowRef'
+                    nullable: true
+                    description: The show's specialty program, null for regular shows. `specialty_show_name` stays for compatibility.
                   start_time:
                     type: string
                     format: date-time

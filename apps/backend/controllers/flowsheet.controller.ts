@@ -19,6 +19,7 @@ import { parseBoundedInt } from '../utils/query-params.js';
 import { codePointLength } from '../utils/text-fields.js';
 import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
 import { FsEvents, Topics, serverEventsMgr } from '../utils/serverEvents.js';
+import type { SpecialtyShowRef } from '../services/flowsheet/specialty-ref.js';
 
 export type QueryParams = {
   page?: string;
@@ -1198,6 +1199,16 @@ const showAlreadyOpenError = async (show: Show): Promise<WxycError> =>
  */
 const DJ_NAME_OVERRIDE_MAX_LENGTH = 255;
 
+/**
+ * 400 for a `specialty_id` that is unknown or retired, before any write (BS#3454).
+ * Only the new-show and takeover paths call it: a co-host inherits the open show's tag.
+ */
+const assertSpecialtyTaggable = async (specialty_id: number | undefined): Promise<void> => {
+  if (specialty_id != null && !(await flowsheet_service.isSpecialtyShowTaggable(specialty_id))) {
+    throw new WxycError('Bad Request: specialty_id is unknown or names a retired specialty show', 400);
+  }
+};
+
 //POST
 export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res) => {
   const current_show = await flowsheet_service.getLatestShow();
@@ -1265,6 +1276,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
   }
 
   if (current_show?.end_time !== null || latestEntryIsShowEnd) {
+    await assertSpecialtyTaggable(req.body.specialty_id);
     const show_session: Show = await flowsheet_service.startShow(
       req.body.dj_id,
       req.body.show_name,
@@ -1391,6 +1403,9 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     if (req.body.expected_show_id !== current_show.id) {
       throw await showAlreadyOpenError(current_show);
     }
+
+    // Before `endShow`: a bad id must never close somebody else's show.
+    await assertSpecialtyTaggable(req.body.specialty_id);
 
     // `resolveShowEndInstant` (MAX(add_time) floored at start_time), never
     // `now()`. `now()` is right for a prompt handoff and a lie for an abandoned
@@ -1812,6 +1827,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
 
 export interface ShowMetadata extends Show {
   specialty_show_name: string;
+  specialty: SpecialtyShowRef | null;
   show_djs: { id: string | null; dj_name: string | null }[];
 }
 
