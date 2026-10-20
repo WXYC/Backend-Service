@@ -11,8 +11,41 @@ interface RequestLike {
   route?: { path?: unknown };
 }
 
+/** Full route templates (mount prefix included) keyed by request; filled by `requestScopeMiddleware`. */
+const routeTemplates = new WeakMap<object, string>();
+
+/**
+ * Express 5 resets `req.baseUrl` to '' once an error leaves a mounted router while `req.route` stays the inner route,
+ * so the error middleware cannot rebuild the template. The router assigns `req.route` while `req.baseUrl` is still the
+ * mount prefix, so intercept that assignment and remember the combined template.
+ */
+function trackRouteTemplate(req: unknown): void {
+  if (typeof req !== 'object' || req === null) {
+    return;
+  }
+  const target = req as RequestLike;
+  let current = target.route;
+  try {
+    Object.defineProperty(target, 'route', {
+      configurable: true,
+      enumerable: true,
+      get: () => current,
+      set: (value: { path?: unknown } | undefined) => {
+        current = value;
+        if (typeof value?.path === 'string') {
+          const template = `${target.baseUrl ?? ''}${value.path}`;
+          routeTemplates.set(target, template.length > 1 ? template.replace(/\/+$/, '') || '/' : template);
+        }
+      },
+    });
+  } catch {
+    // observability must not break the request path
+  }
+}
+
 /** Wraps the rest of the request in the registered reporter's scope, or just continues if it has none. Register it after the body parsers (a parser's stream callbacks run outside the scope) and before the first middleware that tags or breadcrumbs. */
-export function requestScopeMiddleware(_req: unknown, _res: unknown, next: () => void): void {
+export function requestScopeMiddleware(req: unknown, _res: unknown, next: () => void): void {
+  trackRouteTemplate(req);
   const reporter = getErrorReporter();
   if (reporter.runInScope) {
     reporter.runInScope(next);
@@ -43,7 +76,9 @@ export function createExpressErrorMiddleware({ shouldCapture, statusOf }: Expres
     try {
       if (shouldCapture(err as Error)) {
         const requestId = res.getHeader('X-Request-Id');
-        const routePath = typeof req.route?.path === 'string' ? `${req.baseUrl ?? ''}${req.route.path}` : 'unmatched';
+        const routePath =
+          routeTemplates.get(req) ??
+          (typeof req.route?.path === 'string' ? `${req.baseUrl ?? ''}${req.route.path}` : 'unmatched');
         getExpressErrorReporter().captureException(err instanceof Error ? err : new Error(String(err)), {
           tags: {
             ...(typeof requestId === 'string' ? { request_id: requestId } : {}),

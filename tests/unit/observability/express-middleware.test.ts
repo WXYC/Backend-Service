@@ -19,6 +19,16 @@ import WxycError from '../../../apps/backend/utils/error';
 const mockClient = { captureException: jest.fn(), capture: jest.fn(), flush: jest.fn() };
 jest.mock('posthog-node', () => ({ PostHog: jest.fn(() => mockClient) }));
 
+const EXPECTED_EVENT_KEYS = [
+  '$process_person_profile',
+  'environment',
+  'method',
+  'request_id',
+  'route',
+  'service',
+  'status',
+];
+
 const sentProperties = (): Array<Record<string, unknown>> => [
   ...mockClient.captureException.mock.calls.map((call) => call[2] as Record<string, unknown>),
   ...mockClient.capture.mock.calls.map((call) => call[0].properties as Record<string, unknown>),
@@ -118,7 +128,11 @@ describe('Express request scope and PostHog error middleware', () => {
       for (const leak of ['secret', 'session', 'Authorization', '7?token', '127.0.0.1', '::1']) {
         expect(serialized).not.toContain(leak);
       }
-      expect(Object.keys(event)).not.toEqual(expect.arrayContaining(['headers', 'cookies', 'query', 'body', 'ip']));
+      // Exact set: anything beyond the reporter's own fields and the four tags fails (BS#3004).
+      for (const forbidden of ['headers', 'cookies', 'query', 'body', 'ip']) {
+        expect(event).not.toHaveProperty(forbidden);
+      }
+      expect(Object.keys(event).sort()).toEqual(EXPECTED_EVENT_KEYS);
     });
 
     it('reports to the express reporter only, never to the process-wide reporter Sentry also sits behind', async () => {
@@ -203,6 +217,20 @@ describe('Express request scope and PostHog error middleware', () => {
       await request(app).get('/');
       expect(sentProperties()[0]).toMatchObject({ status: 503, route: '/' });
     });
+    it('tags errors from a router-mounted route with the full template, mount prefix included', async () => {
+      const router = express.Router();
+      router.get('/:id', (_req, _res, next) => next(new Error('boom')));
+      router.get('/', (_req, _res, next) => next(new Error('boom on the index')));
+      const app = express();
+      app.use(requestScopeMiddleware);
+      app.use('/flowsheet', router);
+      app.use(createExpressErrorMiddleware({ shouldCapture: () => true, statusOf: () => 500 }));
+      app.use((_err: unknown, _req: unknown, res: express.Response, _next: unknown) => res.sendStatus(500));
+      await request(app).get('/flowsheet/7');
+      await request(app).get('/flowsheet?x=1');
+      expect(sentProperties().map((e) => e.route)).toEqual(['/flowsheet/:id', '/flowsheet']);
+    });
+
     it('names the route "unmatched" when the error came from outside any route', async () => {
       const app = express();
       app.use((_req, _res, next) => next(new Error('boom')));

@@ -1,4 +1,6 @@
 import { jest } from '@jest/globals';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Request, Response, NextFunction } from 'express';
 
 // The handler captures through the process-wide ErrorReporter; a spy reporter lets us assert on
@@ -106,5 +108,16 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
 
     expect(jsonMock).toHaveBeenCalledWith({ error: 'Internal server error' });
     expect(reporter.captureException).toHaveBeenCalledWith('something broke');
+  });
+});
+
+// BS#3409: fallbackErrorHandler already reports every pipeline error through the composite reporter (Sentry and
+// PostHog), so apps/auth must not also register the PostHog-only Express error middleware, or each error reaches
+// PostHog twice. Booting app.ts needs a database, so pin the wiring at the source.
+describe('auth app wiring (BS#3409)', () => {
+  it('registers no PostHog Express error middleware beside fallbackErrorHandler', () => {
+    const source = readFileSync(join(__dirname, '../../../apps/auth/app.ts'), 'utf8');
+    expect(source).not.toMatch(/createExpressErrorMiddleware\s*\(/);
+    expect(source).toMatch(/app\.use\(fallbackErrorHandler\)/);
   });
 });
