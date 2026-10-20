@@ -123,7 +123,7 @@ import {
   setCursorPosition,
   wrapCursor,
 } from './watermark.js';
-import { initLogger, log, captureError, captureWarning, closeLogger } from './logger.js';
+import { initLogger, log, captureError, captureWarning, closeLogger, withHeartbeat } from './logger.js';
 
 const requireLmlConfigured = (): void => {
   if (!process.env.LIBRARY_METADATA_URL) {
@@ -602,10 +602,11 @@ export const runOnce = async (dryRun: boolean): Promise<void> => {
   // `withMonitor` re-throws, so `main`'s catch is unchanged.
   await Sentry.withMonitor(
     JOB_NAME,
-    async () => {
-      await recheck();
-      await updateLastRun(LIVENESS_JOB_NAME, startedAt);
-    },
+    () =>
+      withHeartbeat(async () => {
+        await recheck();
+        await updateLastRun(LIVENESS_JOB_NAME, startedAt);
+      }),
     MONITOR_CONFIG
   );
   log('info', 'heartbeat', 'Recorded cronjob_runs heartbeat.', { last_run: startedAt.toISOString() });

@@ -42,6 +42,7 @@ describe('createJobLogger', () => {
         'log',
         'reporter',
         'resolveTracesSampleRate',
+        'withHeartbeat',
       ].sort()
     );
   });

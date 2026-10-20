@@ -6,6 +6,6 @@
 
 import { createJobLogger } from '@wxyc/observability/job-logger';
 
-export const { initLogger, log, captureError, captureWarning, closeLogger } = createJobLogger({
+export const { initLogger, log, captureError, captureWarning, closeLogger, withHeartbeat } = createJobLogger({
   jobName: 'flowsheet-no-match-recheck',
 });
