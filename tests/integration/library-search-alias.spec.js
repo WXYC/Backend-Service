@@ -911,3 +911,184 @@ async function cleanupBs2031Rows(sql, wxycSchema) {
   ]);
   await sql.unsafe(`DELETE FROM ${wxycSchema}.artists WHERE id = ANY($1::int[])`, [artistIds]);
 }
+
+/**
+ * GET /library/ Both-mode — alias hits after a stage-1 tsvector hit (BS#3552).
+ *
+ * `searchLibraryBothMode` used to return as soon as the tsvector tier found
+ * anything, and only the trigram tier (stage 2) reads `artist_search_alias`.
+ * So the station librarian's search for `Giddens` matched Jerry Giddens in
+ * stage 1 and never reached the Carolina Chocolate Drops card, which is filed
+ * with the alternate name "Rhiannon Giddens" (CA 49/8). This seeds that real
+ * shape:
+ *
+ *   - DIRECT ('Jerry Giddens'): `giddens:*` matches its `search_doc`, so it
+ *     is a stage-1 row.
+ *   - ALIAS ('Carolina Chocolate Drops'), two releases, with the
+ *     `wxyc_library_alt` variant 'Rhiannon Giddens' that the
+ *     artist-search-alias consumer writes from `library.alternate_artist_name`.
+ *     Neither the artist name nor the titles contain the query word, so these
+ *     rows can only arrive through the alias substrate.
+ *
+ * The cases run against real pg_trgm and the real tsvector, because the
+ * similarity of 'Rhiannon Giddens' to 'Giddens' (about 0.47, over the 0.40
+ * floor) is part of what is under test.
+ *
+ * The backend in CI runs with `CATALOG_SEARCH_ALIAS_ENABLED=true`, and this
+ * runner cannot see the backend's environment. Set
+ * `CATALOG_SEARCH_ALIAS_ENABLED=false` on the jest runner as well when the
+ * backend under test runs with the flag off; the suite then asserts the
+ * flag-off contract (no alias rows, stage 1 alone) instead.
+ */
+const BS3552 = {
+  DIRECT_ARTIST_ID: 9601,
+  DIRECT_LIBRARY_ID: 9601,
+  ALIAS_ARTIST_ID: 9602,
+  ALIAS_LIBRARY_IDS: [9602, 9603],
+  VARIANT: 'Rhiannon Giddens',
+};
+
+describe('GET /library/ Both-mode — alias hits after a stage-1 tsvector hit (BS#3552)', () => {
+  let auth;
+  let sql;
+  const wxycSchema = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
+  const aliasFlagOff = process.env.CATALOG_SEARCH_ALIAS_ENABLED === 'false';
+  const { DIRECT_ARTIST_ID, DIRECT_LIBRARY_ID, ALIAS_ARTIST_ID, ALIAS_LIBRARY_IDS, VARIANT } = BS3552;
+  const aliasHint = [{ matched_variant: VARIANT, source: 'wxyc_library_alt' }];
+
+  async function seedAliasRow() {
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artist_search_alias
+         (artist_id, source, variant, related_artist_id, external_subject_id,
+          external_object_id, active, method, confidence, last_verified_at)
+       VALUES ($1, 'wxyc_library_alt', $2, NULL, NULL, NULL, NULL, 'alt_curated', 0.85, NOW())
+       ON CONFLICT (artist_id, source, variant) DO UPDATE SET last_verified_at = NOW()`,
+      [ALIAS_ARTIST_ID, VARIANT]
+    );
+  }
+
+  async function bothMode(query) {
+    const res = await auth.get('/library/').query({ artist_name: query, album_title: query, n: 50 }).expect(200);
+    return res.body;
+  }
+
+  beforeAll(async () => {
+    auth = createAuthRequest(request, global.access_token);
+    sql = getTestDb();
+    await cleanupBs3552Rows(sql, wxycSchema);
+
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.artists (id, artist_name, alphabetical_name, code_letters)
+       VALUES ($1, 'Jerry Giddens', 'Giddens, Jerry', 'GI'),
+              ($2, 'Carolina Chocolate Drops', 'Carolina Chocolate Drops', 'CA')
+       ON CONFLICT (id) DO NOTHING`,
+      [DIRECT_ARTIST_ID, ALIAS_ARTIST_ID]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+       VALUES ($1, $3, 9601), ($2, $3, 9602)
+       ON CONFLICT (artist_id, genre_id) DO NOTHING`,
+      [DIRECT_ARTIST_ID, ALIAS_ARTIST_ID, TEST_GENRE_ID]
+    );
+    await sql.unsafe(
+      `INSERT INTO ${wxycSchema}.library
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, label, label_id, legacy_release_id)
+       VALUES
+         ($1, $2, $6, $7, 'Livin'' Ain''t Easy', 1, 'Jerry Giddens', NULL, NULL, 65950),
+         ($3, $4, $6, $7, 'Songs of our Native Daughters', 8, 'Carolina Chocolate Drops', 'Smithsonian Folkways', NULL, 65951),
+         ($5, $4, $6, $7, 'Genuine Negro Jig', 4, 'Carolina Chocolate Drops', 'Nonesuch', NULL, 65952)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        DIRECT_LIBRARY_ID,
+        DIRECT_ARTIST_ID,
+        ALIAS_LIBRARY_IDS[0],
+        ALIAS_ARTIST_ID,
+        ALIAS_LIBRARY_IDS[1],
+        TEST_GENRE_ID,
+        TEST_FORMAT_ID,
+      ]
+    );
+    await seedAliasRow();
+  });
+
+  afterAll(async () => {
+    await cleanupBs3552Rows(sql, wxycSchema);
+  });
+
+  const flagOnCase = aliasFlagOff ? test.skip : test;
+  const flagOffCase = aliasFlagOff ? test : test.skip;
+
+  flagOnCase.each([
+    {
+      label: 'surname query: stage 1 hits Jerry Giddens, the alias rows follow it',
+      query: 'Giddens',
+      expectDirect: true,
+    },
+    {
+      label: 'full-name query: falls through to the stage-2 alias path (regression, unchanged)',
+      query: 'Rhiannon Giddens',
+      expectDirect: false,
+    },
+  ])('$label', async ({ query, expectDirect }) => {
+    const body = await bothMode(query);
+
+    const aliasRows = body.filter((r) => ALIAS_LIBRARY_IDS.includes(r.id));
+    if (aliasRows.length === 0) {
+      throw new Error(
+        `[BS#3552] No Carolina Chocolate Drops rows for "${query}". Likely causes: (1) the backend is ` +
+          'running without CATALOG_SEARCH_ALIAS_ENABLED=true (set it on the backend service in ' +
+          'dev_env/docker-compose.yml or test.yml, or in .env for local `npm run dev`); (2) Both-mode ' +
+          'returns after a stage-1 hit again, before the alias probe runs.'
+      );
+    }
+    expect(aliasRows.map((r) => r.id).sort()).toEqual([...ALIAS_LIBRARY_IDS].sort());
+    for (const row of aliasRows) {
+      expect(row.matched_via_alias).toEqual(aliasHint);
+    }
+
+    if (expectDirect) {
+      const directIndex = body.findIndex((r) => r.id === DIRECT_LIBRARY_ID);
+      expect(directIndex).toBeGreaterThanOrEqual(0);
+      expect(body[directIndex].matched_via_alias).toBeUndefined();
+      // BS#2020: an alias-only row never outranks a stage-1 row. Every
+      // untagged row on this page came from stage 1, so all of them must lead.
+      const lastDirect = body.reduce((last, r, i) => (r.matched_via_alias ? last : i), -1);
+      const firstAlias = body.findIndex((r) => r.matched_via_alias);
+      expect(lastDirect).toBeLessThan(firstAlias);
+    }
+  });
+
+  flagOnCase('control: without the alias row, the surname query returns stage 1 alone', async () => {
+    await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`, [ALIAS_ARTIST_ID]);
+    try {
+      const body = await bothMode('Giddens');
+
+      expect(body.some((r) => r.id === DIRECT_LIBRARY_ID)).toBe(true);
+      expect(body.filter((r) => ALIAS_LIBRARY_IDS.includes(r.id))).toEqual([]);
+    } finally {
+      await seedAliasRow();
+    }
+  });
+
+  flagOffCase('flag off: the surname query returns stage 1 alone, with no alias rows', async () => {
+    const body = await bothMode('Giddens');
+
+    expect(body.some((r) => r.id === DIRECT_LIBRARY_ID)).toBe(true);
+    expect(body.filter((r) => ALIAS_LIBRARY_IDS.includes(r.id))).toEqual([]);
+    body.forEach((row) => {
+      expect(row.matched_via_alias).toBeUndefined();
+    });
+  });
+});
+
+async function cleanupBs3552Rows(sql, wxycSchema) {
+  const artistIds = [BS3552.DIRECT_ARTIST_ID, BS3552.ALIAS_ARTIST_ID];
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = ANY($1::int[])`, [artistIds]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.library WHERE id = ANY($1::int[])`, [
+    [BS3552.DIRECT_LIBRARY_ID, ...BS3552.ALIAS_LIBRARY_IDS],
+  ]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id = ANY($1::int[])`, [
+    artistIds,
+  ]);
+  await sql.unsafe(`DELETE FROM ${wxycSchema}.artists WHERE id = ANY($1::int[])`, [artistIds]);
+}

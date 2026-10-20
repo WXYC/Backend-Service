@@ -50,6 +50,8 @@ export type CatalogQueryTier =
   | 'trigram'
   /** `searchLibraryByTrigramBoth`, alias flag ON — the `alias_hits` CTE + UNION ALL. */
   | 'alias'
+  /** `searchLibraryAliasHitsAfterTsvector`, the alias-only probe after a stage-1 hit (BS#3552). */
+  | 'aliasAppend'
   /** `searchLibraryByCTARaw` — the compilation-track arm, windowed on `library_rank`. */
   | 'cta'
   /** `checkLibraryArtistNameHealth`'s two denormalization probes. */
@@ -60,13 +62,17 @@ export type CatalogQueryTier =
 /**
  * Classify a rendered catalog query by a literal only that tier emits.
  *
- * Order matters in two places. `alias` is tested before `trigram` because the
+ * Order matters in three places. `aliasAppend` is tested before `alias`, since
+ * both read the `alias_hits` CTE. `alias` is tested before `trigram` because the
  * alias path contains the same `GREATEST(similarity(...))` ranking as the
  * alias-off path — the `alias_hits` CTE is what distinguishes them. And `cta` is
  * tested before the rankers because its window alias (`library_rank`) is
  * deliberately different from theirs (`album_rank`).
  */
 export function classifyCatalogQuery(rendered: string): CatalogQueryTier {
+  // `aliasAppend` first: it joins the same `alias_hits` CTE as `alias`, and
+  // only its derived-table name (`alias_only`) tells the two apart.
+  if (rendered.includes('alias_hits') && rendered.includes(') alias_only')) return 'aliasAppend';
   if (rendered.includes('alias_hits')) return 'alias';
   if (rendered.includes('library_rank')) return 'cta';
   if (rendered.includes('ts_rank(')) return 'tsvector';

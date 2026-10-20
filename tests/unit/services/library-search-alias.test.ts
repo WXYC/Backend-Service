@@ -3,6 +3,7 @@ import { db, createMockQueryChain } from '../../mocks/database.mock';
 import {
   mockCatalogTiers,
   catalogTierCallLog,
+  lastCatalogQuerySql,
   mockAliasTierRows,
   resetCatalogTierRows,
 } from '../../utils/catalog-search-sql-mock';
@@ -61,6 +62,7 @@ jest.mock('@sentry/node', () => ({
 import {
   searchLibrary,
   searchByArtist,
+  fuzzySearchLibrary,
   __resetTrackSearchCacheForTests,
 } from '../../../apps/backend/services/library.service';
 import {
@@ -213,6 +215,195 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       // The tsvector tier now goes through `db.execute` too, so "the alias SQL
       // never ran" is asserted by naming the tiers rather than by no call at all.
       expect(catalogTierCallLog(db.execute)).toEqual(['tsvector']);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // BS#3552 — a stage-1 tsvector hit hid every alias match on `GET /library/`.
+  //
+  // `searchLibraryBothMode` returned as soon as the tsvector tier found
+  // anything, and only the trigram tier (stage 2) consults the alias
+  // substrate. So `Giddens` matched Jerry Giddens in stage 1 and the
+  // Carolina Chocolate Drops card, filed with the alternate name
+  // "Rhiannon Giddens", never surfaced. The fix appends the alias-only rows
+  // after the stage-1 rows on the catalog route (`fuzzySearchLibrary` with
+  // the same string in both fields), and only there: the request-line
+  // `searchLibrary` keeps returning stage 1 alone (pinned above by
+  // "flag on: tsvector hit short-circuits").
+  // -----------------------------------------------------------------------
+  describe('fuzzySearchLibrary Both-mode — alias hits after a stage-1 tsvector hit (BS#3552)', () => {
+    const directRow = {
+      ...baseViewRow,
+      id: 1301,
+      artist_id: 1301,
+      code_letters: 'GI',
+      code_artist_number: 13,
+      artist_name: 'Jerry Giddens',
+      alphabetical_name: 'Giddens, Jerry',
+      album_title: "Livin' Ain't Easy",
+    };
+    const aliasFields = {
+      alias_max_sim: 0.47,
+      alias_matched_variant: 'Rhiannon Giddens',
+      alias_matched_source: 'wxyc_library_alt',
+    };
+    const aliasRows = [
+      {
+        ...baseViewRow,
+        id: 4908,
+        artist_id: 4900,
+        code_letters: 'CA',
+        code_artist_number: 49,
+        code_number: 8,
+        artist_name: 'Carolina Chocolate Drops',
+        alphabetical_name: 'Carolina Chocolate Drops',
+        album_title: 'Songs of our Native Daughters',
+        ...aliasFields,
+      },
+      {
+        ...baseViewRow,
+        id: 4904,
+        artist_id: 4900,
+        code_letters: 'CA',
+        code_artist_number: 49,
+        code_number: 4,
+        artist_name: 'Carolina Chocolate Drops',
+        alphabetical_name: 'Carolina Chocolate Drops',
+        album_title: 'Genuine Negro Jig',
+        ...aliasFields,
+      },
+    ];
+    const aliasHint = [{ matched_variant: 'Rhiannon Giddens', source: 'wxyc_library_alt' }];
+
+    function setAliasFlag(enabled: boolean): void {
+      if (enabled) {
+        process.env.CATALOG_SEARCH_ALIAS_ENABLED = 'true';
+      } else {
+        delete process.env.CATALOG_SEARCH_ALIAS_ENABLED;
+      }
+      resetCatalogSearchAliasConfig();
+    }
+
+    it.each([
+      {
+        label: 'surname query, stage 1 hits a different artist: alias rows follow the direct row',
+        flag: true,
+        query: 'Giddens',
+        tiers: { tsvector: [directRow], aliasAppend: aliasRows },
+        expectedIds: [1301, 4908, 4904],
+        expectedTiers: ['tsvector', 'aliasAppend'],
+      },
+      {
+        label: 'full-name query falls through to stage 2 (existing alias-aware trigram path, unchanged)',
+        flag: true,
+        query: 'Rhiannon Giddens',
+        tiers: { tsvector: [], alias: aliasRows },
+        expectedIds: [4908, 4904],
+        expectedTiers: ['tsvector', 'alias'],
+      },
+      {
+        label: 'flag off: stage 1 returns alone and the alias probe never runs',
+        flag: false,
+        query: 'Giddens',
+        tiers: { tsvector: [directRow], aliasAppend: aliasRows },
+        expectedIds: [1301],
+        expectedTiers: ['tsvector'],
+      },
+    ])('$label', async ({ flag, query, tiers, expectedIds, expectedTiers }) => {
+      setAliasFlag(flag);
+      mockCatalogTiers(db.execute, tiers);
+
+      const results = await fuzzySearchLibrary(query, query, 50);
+
+      expect(catalogTierCallLog(db.execute)).toEqual(expectedTiers);
+      expect(results.map((r) => r.id)).toEqual(expectedIds);
+      for (const row of results) {
+        if (row.id === directRow.id) {
+          expect(row.matched_via_alias).toBeUndefined();
+        } else {
+          expect(row.matched_via_alias).toEqual(aliasHint);
+        }
+        // The CTE's helper columns never reach the wire shape.
+        expect(row).not.toHaveProperty('alias_max_sim');
+      }
+    });
+
+    it('flag off: the stage-1 result is returned as-is (byte-identical to before)', async () => {
+      setAliasFlag(false);
+      mockCatalogTiers(db.execute, { tsvector: [directRow] });
+
+      const results = await fuzzySearchLibrary('Giddens', 'Giddens', 50);
+
+      expect(results).toEqual([directRow]);
+    });
+
+    it('BS#2020: an exact-variant alias row still never outranks a stage-1 row', async () => {
+      // The trigram tier exempts exact variants (`alias_max_sim = 1`) from the
+      // fuzzy-alias tier and lets them rank on score. Appending is structural,
+      // so even a perfect alias hit stays behind every stage-1 row.
+      setAliasFlag(true);
+      const secondDirect = { ...directRow, id: 1302, album_title: 'Giddens Blues' };
+      const exactAlias = { ...aliasRows[0], alias_max_sim: 1, alias_matched_variant: 'Giddens' };
+      mockCatalogTiers(db.execute, { tsvector: [directRow, secondDirect], aliasAppend: [exactAlias] });
+
+      const results = await fuzzySearchLibrary('Giddens', 'Giddens', 50);
+
+      expect(results.map((r) => r.id)).toEqual([1301, 1302, 4908]);
+    });
+
+    it('stage 1 already filled the page: the probe is skipped', async () => {
+      setAliasFlag(true);
+      mockCatalogTiers(db.execute, { tsvector: [directRow], aliasAppend: aliasRows });
+
+      const results = await fuzzySearchLibrary('Giddens', 'Giddens', 1);
+
+      expect(catalogTierCallLog(db.execute)).toEqual(['tsvector']);
+      expect(results.map((r) => r.id)).toEqual([1301]);
+    });
+
+    it('caps at n, asks the probe for only the albums left, and dedupes by id', async () => {
+      setAliasFlag(true);
+      // The probe's SQL excludes stage-1 rows itself; the id dedupe is the
+      // belt to that brace, so feed it a duplicate to prove it holds.
+      const duplicate = { ...directRow, ...aliasFields };
+      mockCatalogTiers(db.execute, { tsvector: [directRow], aliasAppend: [duplicate, ...aliasRows] });
+
+      const results = await fuzzySearchLibrary('Giddens', 'Giddens', 3);
+
+      expect(results.map((r) => r.id)).toEqual([1301, 4908, 4904]);
+      expect(results[0].matched_via_alias).toBeUndefined();
+      expect(lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ')).toContain('album_rank <= 2');
+    });
+
+    it('the probe reuses the shared alias definition and excludes every stage-1 match in SQL', async () => {
+      setAliasFlag(true);
+      mockCatalogTiers(db.execute, { tsvector: [directRow] });
+
+      await fuzzySearchLibrary('Giddens', 'Giddens', 50, true);
+
+      const rendered = lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ');
+      // `buildAliasHitsCte`, floor included: one definition of an alias match.
+      expect(rendered).toContain('WITH alias_hits AS');
+      expect(rendered).toContain('similarity(asa.variant, Giddens) >= 0.4');
+      expect(rendered).toContain('INNER JOIN alias_hits ON alias_hits.artist_id = library.artist_id');
+      // Rows the tsvector tier matched are direct hits, whether or not they
+      // made stage 1's page, so they must never come back tagged as alias
+      // rows. NULL-safe for the same reason as BS#2031.
+      expect(rendered).toMatch(/\(library\.search_doc @@ .*\) IS NOT TRUE/);
+      expect(rendered).toContain('library.on_streaming = true');
+      // Same relevance ordering as the stage-2 alias path.
+      expect(rendered).toContain('ORDER BY (alias_max_sim IS NOT NULL AND alias_max_sim < 1) ASC, GREATEST(');
+      expect(rendered).not.toContain('UNION ALL');
+    });
+
+    it('a one-character query never runs the probe (mirrors the stage-2 length gate)', async () => {
+      setAliasFlag(true);
+      mockCatalogTiers(db.execute, { tsvector: [directRow], aliasAppend: aliasRows });
+
+      const results = await fuzzySearchLibrary('G', 'G', 50);
+
+      expect(catalogTierCallLog(db.execute)).toEqual(['tsvector']);
+      expect(results.map((r) => r.id)).toEqual([1301]);
     });
   });
 
