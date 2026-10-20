@@ -57,8 +57,8 @@ describe('flowsheet.service', () => {
 
       const { changeOrder } = await import('../../../apps/backend/services/flowsheet.service');
 
-      await expect(changeOrder(999999, 1)).rejects.toThrow(WxycError);
-      await expect(changeOrder(999999, 1)).rejects.toMatchObject({
+      await expect(changeOrder(999999, 1, null)).rejects.toThrow(WxycError);
+      await expect(changeOrder(999999, 1, null)).rejects.toMatchObject({
         statusCode: 404,
       });
     });
