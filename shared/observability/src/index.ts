@@ -8,5 +8,11 @@ export {
 } from './redact-query-params.js';
 export { installConsoleRedaction } from './console-redaction.js';
 export { CompositeReporter, logCounter } from './error-reporter.js';
-export { getErrorReporter, setErrorReporter } from './current-reporter.js';
+export {
+  getErrorReporter,
+  setErrorReporter,
+  getExpressErrorReporter,
+  setExpressErrorReporter,
+} from './current-reporter.js';
+export { createExpressErrorMiddleware, requestScopeMiddleware } from './express-middleware.js';
 export type { CounterFields, ErrorReporter, ReportBreadcrumb, ReportContext, ReportLevel } from './error-reporter.js';

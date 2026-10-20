@@ -8,9 +8,12 @@ import {
   SENTRY_DATA_COLLECTION,
   redactSentryBreadcrumb,
   redactSentryEventQueryParams,
+  CompositeReporter,
   setErrorReporter,
+  setExpressErrorReporter,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
+import { PostHogReporter } from '@wxyc/observability/posthog';
 import { SentryReporter } from '@wxyc/observability/sentry';
 import { shouldCaptureAuthExpressError } from './sentry-error-filter.js';
 
@@ -54,5 +57,15 @@ Sentry.init({
 });
 
 // Every capture and breadcrumb in this container goes through the ErrorReporter
-// seam (BS#3396); Sentry is its only backend for now.
-setErrorReporter(new SentryReporter());
+// seam (BS#3396), to Sentry and PostHog for the parity window (BS#3409).
+// PostHog is a no-op without POSTHOG_ERRORS_API_KEY. Budget: 100 a day (error-tracking contract).
+const postHog = new PostHogReporter({
+  service: 'auth',
+  environment: process.env.NODE_ENV,
+  release: process.env.SENTRY_RELEASE,
+  budget: { kind: 'daily', ceiling: 100 },
+});
+setErrorReporter(new CompositeReporter([new SentryReporter(), postHog]));
+// Sentry's expressIntegration captures Express errors itself; PostHog has no such integration, so the
+// Express error middleware in app.ts reports to PostHog alone.
+setExpressErrorReporter(postHog);

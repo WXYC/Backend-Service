@@ -1,0 +1,100 @@
+import { PostHog } from 'posthog-node';
+import { getErrorReporter, getExpressErrorReporter } from '@wxyc/observability';
+
+jest.mock('dotenv/config', () => ({}));
+jest.mock('dotenv', () => ({ config: jest.fn() }));
+jest.mock('@sentry/node', () => ({
+  init: jest.fn(),
+  expressIntegration: jest.fn(),
+  captureException: jest.fn(),
+  captureMessage: jest.fn(),
+  addBreadcrumb: jest.fn(),
+  getCurrentScope: jest.fn(),
+  flush: jest.fn().mockResolvedValue(true),
+}));
+const mockClient = { captureException: jest.fn(), capture: jest.fn(), flush: jest.fn() };
+jest.mock('posthog-node', () => ({ PostHog: jest.fn(() => mockClient) }));
+
+const PostHogMock = jest.mocked(PostHog);
+
+const sentProperties = (): Array<Record<string, unknown>> => [
+  ...mockClient.captureException.mock.calls.map((c) => c[2]),
+  ...mockClient.capture.mock.calls.map((c) => c[0].properties),
+];
+
+/** Loads an app's preload as node does, once, in a fresh module registry. */
+const loadInstrument = (path: string): void => {
+  jest.isolateModules(() => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require(path);
+  });
+};
+
+describe('app instrument.ts dual-run wiring (BS#3409)', () => {
+  const names = ['POSTHOG_ERRORS_API_KEY', 'SENTRY_RELEASE', 'NODE_ENV'] as const;
+  const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+  let warn: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // The Express slot is process-wide and survives across tests; an app that never sets it must read the default.
+    Reflect.deleteProperty(globalThis, Symbol.for('@wxyc/observability/express-error-reporter'));
+    process.env.POSTHOG_ERRORS_API_KEY = 'phc_test';
+    delete process.env.SENTRY_RELEASE;
+    warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+    for (const name of names) {
+      if (saved[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = saved[name];
+      }
+    }
+  });
+
+  describe.each([
+    ['backend', '../../../apps/backend/instrument', true],
+    ['auth', '../../../apps/auth/instrument', true],
+    ['enrichment-worker', '../../../apps/enrichment-worker/instrument', false],
+  ])('%s', (service, path, hasExpress) => {
+    it('registers a reporter that sends service, environment and release to PostHog', () => {
+      process.env.SENTRY_RELEASE = `${service}@v1`;
+      process.env.NODE_ENV = 'production';
+      loadInstrument(path);
+      getErrorReporter().captureMessage('hello');
+      expect(sentProperties()).toEqual([
+        expect.objectContaining({ service, environment: 'production', release: `${service}@v1` }),
+      ]);
+    });
+
+    it('sends no release when SENTRY_RELEASE is unset', () => {
+      loadInstrument(path);
+      getErrorReporter().captureMessage('hello');
+      expect(sentProperties()[0]).not.toHaveProperty('release');
+    });
+
+    it('drops the 21st distinct event: a bucket of 20 that refills slowly', () => {
+      loadInstrument(path);
+      for (let i = 1; i <= 21; i++) {
+        getErrorReporter().captureMessage(`distinct ${i}`);
+      }
+      expect(sentProperties()).toHaveLength(20);
+    });
+
+    it('constructs no PostHog client without POSTHOG_ERRORS_API_KEY', () => {
+      delete process.env.POSTHOG_ERRORS_API_KEY;
+      loadInstrument(path);
+      getErrorReporter().captureMessage('hello');
+      expect(PostHogMock).not.toHaveBeenCalled();
+    });
+
+    it(`${hasExpress ? 'shares' : 'does not register'} its PostHog reporter for the Express error middleware`, () => {
+      loadInstrument(path);
+      getExpressErrorReporter().captureMessage('from express');
+      expect(sentProperties()).toHaveLength(hasExpress ? 1 : 0);
+    });
+  });
+});

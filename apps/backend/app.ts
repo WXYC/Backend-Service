@@ -1,7 +1,7 @@
 // `instrument.ts` is loaded via `node --import` (see package.json `start`
 // script), not statically imported here, so Sentry's auto-instrumentation
 // runs before `express` is loaded into the module graph.
-import { getErrorReporter } from '@wxyc/observability';
+import { createExpressErrorMiddleware, getErrorReporter, requestScopeMiddleware } from '@wxyc/observability';
 import express from 'express';
 import swaggerUi from 'swagger-ui-express';
 import { parse as parse_yaml } from 'yaml';
@@ -46,6 +46,8 @@ import { drainInFlightEnrichments } from './services/metadata/enrichment.service
 import { checkDatabase } from './services/health/database-check.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
+import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
+import { isWxycError } from './utils/error.js';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { responseMetricsMiddleware } from './middleware/responseMetrics.js';
 import { requirePermissions } from '@wxyc/authentication';
@@ -59,6 +61,10 @@ app.set('trust proxy', true);
 
 //Interpret parse json into js objects
 app.use(express.json());
+
+// Gives each request its own reporter scope, so request_id and breadcrumbs stay with their request (BS#3409).
+// After the body parser (its stream callbacks run outside the scope) and before requestIdMiddleware, which tags.
+app.use(requestScopeMiddleware);
 
 // Cross-service request correlation
 app.use(requestIdMiddleware);
@@ -198,6 +204,15 @@ app.use('/internal/banned-fingerprints', internalBansRoute);
 // carrying its own key.
 app.use('/internal/slack-ban-moderators', internalSlackModeratorsRoute);
 
+// PostHog's copy of what Sentry's expressIntegration captures, under the same predicate (BS#3409).
+// errorHandler renders a WxycError at its own status and everything else as a 500.
+app.use(
+  createExpressErrorMiddleware({
+    shouldCapture: shouldCaptureExpressError,
+    statusOf: (error) => (isWxycError(error) ? error.statusCode : 500),
+  })
+);
+
 app.use(errorHandler);
 
 const server = app.listen(port, () => {
@@ -278,7 +293,7 @@ function shutdown(signal: string): void {
   // fires only when at least one promise is still pending after the deadline,
   // so a clean shutdown stays silent. Drain happens in parallel with
   // server.close() — they don't depend on each other.
-  void drainInFlightEnrichments(ENRICHMENT_DRAIN_DEADLINE_MS).then((remaining) => {
+  const drained = drainInFlightEnrichments(ENRICHMENT_DRAIN_DEADLINE_MS).then((remaining) => {
     if (remaining > 0) {
       getErrorReporter().captureMessage(`Backend exiting with ${remaining} in-flight enrichment promise(s)`, {
         level: 'warning',
@@ -288,7 +303,11 @@ function shutdown(signal: string): void {
     }
   });
   server.close(() => {
-    closeDatabaseConnection()
+    // Flush after the drain, so its captureMessage is delivered too; bounded, and never rejects (BS#3409).
+    drained
+      .catch(() => undefined)
+      .then(() => getErrorReporter().flush(2_000))
+      .then(() => closeDatabaseConnection())
       .then(() => process.exit(0))
       .catch(() => process.exit(1));
   });
