@@ -20,6 +20,11 @@ export interface StoreAllowlist {
 }
 
 export function defineStoreAllowlist(config: StoreAllowlistConfig): StoreAllowlist {
+  for (const prefix of config.keyPrefixes) {
+    if (!prefix.endsWith('/')) {
+      throw new Error('S3 key prefix must be non-empty and end with "/"');
+    }
+  }
   return {
     assertAllowed(command) {
       const name = command.constructor.name;

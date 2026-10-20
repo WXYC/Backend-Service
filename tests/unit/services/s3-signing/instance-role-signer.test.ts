@@ -17,6 +17,11 @@ import {
   undeclaredS3Imports,
 } from '../../../../apps/backend/services/s3-signing/command-allowlist';
 
+const mockFromInstanceMetadata = jest.fn();
+jest.mock('@aws-sdk/credential-providers', () => ({
+  fromInstanceMetadata: (...args: unknown[]) => mockFromInstanceMetadata(...args),
+}));
+
 const T0 = Date.parse('2026-10-20T12:00:00Z');
 const MIN = 60_000;
 
@@ -81,6 +86,33 @@ describe('createInstanceRoleSigner', () => {
     expect(parse(url)).toEqual({ expires, signer: signedBy });
   });
 
+  it('sizes links against originalExpiration when the SDK static-stability fallback rewrote expiration', async () => {
+    // Shape from @smithy/credential-provider-imds after a failed refresh: expiration is now + 5-10 min, the real value is kept.
+    const provider = jest.fn(() =>
+      Promise.resolve({
+        ...fakeCredentials('A', 8 * MIN, clock),
+        originalExpiration: new Date(clock + 3 * MIN),
+      })
+    );
+    const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+    expect(parse(await signer.presign(command(), 600)).expires).toBe(120);
+  });
+
+  it('uses the default provider fromInstanceMetadata with the IMDS budget, not the default chain', async () => {
+    mockFromInstanceMetadata.mockReturnValue(() => Promise.resolve(fakeCredentials('IMDS', 60 * MIN)));
+    const signer = createInstanceRoleSigner({ now });
+    expect(parse(await signer.presign(command(), 300)).signer).toBe('IMDS');
+    expect(mockFromInstanceMetadata).toHaveBeenCalledWith({ timeout: 1000, maxRetries: 0 });
+  });
+
+  it.each([[NaN], [0], [-5], [1.5], [Infinity]])('rejects expiresInSeconds %p', async (ttl) => {
+    const signer = createInstanceRoleSigner({
+      credentialProvider: () => Promise.resolve(fakeCredentials('A', 60 * MIN)),
+      now,
+    });
+    await expect(signer.presign(command(), ttl)).rejects.toThrow(/expiresInSeconds/);
+  });
+
   it('fetches at most once a minute, however many near-expiry signs arrive', async () => {
     const provider = jest.fn(() => Promise.resolve(fakeCredentials('A', 3 * MIN, clock)));
     const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
@@ -129,6 +161,10 @@ describe('defineStoreAllowlist', () => {
 
   it('accepts a declared command on a declared prefix', () => {
     expect(() => allowlist.assertAllowed(command())).not.toThrow();
+  });
+
+  it.each([[''], ['posters']])('refuses to define a store with key prefix %j', (prefix) => {
+    expect(() => defineStoreAllowlist({ commands: ['GetObjectCommand'], keyPrefixes: [prefix] })).toThrow(/prefix/);
   });
 
   it.each([
