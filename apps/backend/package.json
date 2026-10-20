@@ -52,5 +52,8 @@
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/types": "^3.974.6"
   }
 }

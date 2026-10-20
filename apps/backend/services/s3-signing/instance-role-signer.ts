@@ -50,8 +50,12 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
 
   let cached: { credentials: AwsCredentialIdentity; fetchedAt: number; client: S3Client } | undefined;
 
-  const msLeft = (credentials: AwsCredentialIdentity): number =>
-    credentials.expiration ? credentials.expiration.getTime() - now() : Infinity;
+  // The SDK's static-stability fallback rewrites `expiration` to now + 5-10 min after a failed refresh and
+  // keeps the real value in `originalExpiration`; a link must never outlive the real one.
+  const msLeft = (credentials: AwsCredentialIdentity): number => {
+    const expiry = (credentials as { originalExpiration?: Date }).originalExpiration ?? credentials.expiration;
+    return expiry ? expiry.getTime() - now() : Infinity;
+  };
 
   async function fetchCredentials(): Promise<void> {
     const credentials = await provider();
@@ -61,6 +65,9 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
 
   return {
     async presign(command, expiresInSeconds) {
+      if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 1) {
+        throw new Error('expiresInSeconds must be a positive integer');
+      }
       if (!cached) {
         await fetchCredentials();
       } else if (msLeft(cached.credentials) < expiresInSeconds * 1000 + HEADROOM_MS) {
