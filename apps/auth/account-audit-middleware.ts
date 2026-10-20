@@ -191,7 +191,9 @@ function subjectStrategyFor(
  * the real handler or the audit row, so a NULL on either side skips the diff.
  */
 const readCapabilities = async (userId: string | null): Promise<string[] | null> => {
-  if (userId === null) return null;
+  if (userId === null) {
+    return null;
+  }
   try {
     const rows = await db.select({ capabilities: user.capabilities }).from(user).where(eq(user.id, userId)).limit(1);
     return rows[0]?.capabilities ?? null;
