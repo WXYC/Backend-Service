@@ -4,9 +4,10 @@
  * When enabled, the three trigram read paths
  * (`searchLibraryByTrigramBoth`, `searchByArtist`, `/library/query`) extend
  * their SQL with a `WITH alias_hits` CTE over `artist_search_alias` joined on
- * `library.artist_id` (BS#1318 ALT1). The flag is strict-`true` gated so an
- * accidental `CATALOG_SEARCH_ALIAS_ENABLED=1` does not silently widen the
- * search path.
+ * `library.artist_id` (BS#1318 ALT1), and `GET /library/` Both-mode also runs
+ * that CTE as an alias-only probe after a non-empty tsvector stage (BS#3552).
+ * The flag is strict-`true` gated so an accidental
+ * `CATALOG_SEARCH_ALIAS_ENABLED=1` does not silently widen the search path.
  *
  * Defaults to `false` so production behavior is unchanged until an operator
  * opts in. See: `Backend-Service/plans/artist-search-alias.md` §PR 5.

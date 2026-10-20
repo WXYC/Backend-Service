@@ -24,10 +24,11 @@ import { artist_search_alias } from '@wxyc/database';
  * discography — so the floor re-tightens it. See
  * `apps/backend/config/catalogSearchAlias.ts` for how 0.40 was calibrated.
  *
- * This lives in `utils/` rather than beside any one caller because all three
- * alias-aware read paths use it (`/library/query` in
- * `library-search.service.ts`, plus Both-mode trigram and request-line
- * `searchByArtist` in `library.service.ts`). Keeping one definition is what
+ * This lives in `utils/` rather than beside any one caller because every
+ * alias-aware read path uses it: `/library/query` in
+ * `library-search.service.ts`, and in `library.service.ts` the Both-mode
+ * trigram tier, its alias-only probe after a stage-1 hit (BS#3552), and
+ * request-line `searchByArtist`. Keeping one definition is what
  * stops the floor and the match semantics from drifting between them — which
  * is exactly the class of bug BS#2018 was.
  *
@@ -67,7 +68,8 @@ export function buildAliasHitsCte(query: string, minSimilarity: number) {
  * rows have a NULL `alias_max_sim`, so the predicate is FALSE for them.
  *
  * Used by `/library/query` only. See `buildFuzzyAliasTier` for the narrowed
- * form the two relevance-ranked paths use, and why the two deliberately differ
+ * form the relevance-ranked paths in `library.service.ts` use, and why the
+ * two deliberately differ
  * rather than being unified.
  */
 export function buildAliasOnlyTier() {
@@ -141,7 +143,9 @@ export function buildFuzzyAliasTier() {
  * query the member's name and the band's whole discography ties with the
  * member's own, resolved by whichever ids are lower.
  *
- * On both current callers this is unreachable, and deliberately kept anyway.
+ * On every current caller this is unreachable, and deliberately kept anyway.
+ * The BS#3552 alias-only probe projects alias rows only, so the term is
+ * constant there; it rides along in the ordering the probe shares with stage 2.
  * `searchLibraryByTrigramBoth` runs only after the tsvector tier returns zero
  * rows, and a row scoring 1.0 on trigram usually matches the tier's tsquery
  * too, so the tsvector tier normally short-circuits before this SQL is
@@ -165,8 +169,9 @@ export function buildDirectMatchTieBreak() {
  * catalog projection, and the shape they arrive in.
  *
  * Named here, beside the CTE that produces them, rather than in either service
- * (BS#2231). Both alias-aware read paths — `library.service.ts`'s two raw
- * UNION ALL sites and `library-search.service.ts`'s `/library/query` branches —
+ * (BS#2231). Every alias-aware read path — `library.service.ts`'s two raw
+ * UNION ALL sites and its Both-mode alias-only probe (BS#3552), and
+ * `library-search.service.ts`'s `/library/query` branches —
  * used to carry their own copy of the same three-column tail, which is the
  * drift channel BS#2231 closed for the catalog columns and left open for
  * these. Adding a fourth alias column is now one edit here plus the row types

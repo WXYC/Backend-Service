@@ -261,8 +261,11 @@ type AlbumQueryParams = {
  * (`artist_name % :artist OR album_title % :album`, `<->` distance order);
  * either field alone is a single-column trigram search. Cascade fallback
  * stages are gated by `CATALOG_TRACK_SEARCH_CTA_ENABLED` /
- * `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED`; alias-aware trigram matching is
- * gated by `CATALOG_SEARCH_ALIAS_ENABLED`.
+ * `CATALOG_TRACK_SEARCH_DISCOGS_ENABLED`. `CATALOG_SEARCH_ALIAS_ENABLED`
+ * gates alias matching on `artist_search_alias` in both Both-mode stages: the
+ * trigram tier, and, after a non-empty tsvector stage, an alias-only probe
+ * whose rows follow the direct matches (BS#3552; only this route runs it,
+ * see `searchLibraryBothMode`).
  *
  * Artwork enrichment (`enrichWithArtwork`) runs fire-and-forget after the
  * response is computed — a slow/rate-limited LML artwork lookup never adds
