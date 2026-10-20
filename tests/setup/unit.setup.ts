@@ -12,6 +12,10 @@ process.env.NODE_ENV = process.env.NODE_ENV ?? 'test';
 // it. See shared/authentication/src/email.ts `isEmailSendingEnabled`.
 process.env.EMAIL_ENABLED = process.env.EMAIL_ENABLED ?? 'false';
 
+// withHeartbeat (createJobLogger) publishes to CloudWatch via the EC2 instance role; keep the unit
+// suite off the network (real IMDS calls). The heartbeat's own test clears this per test.
+process.env.CRON_HEARTBEAT_METRICS_DISABLED = process.env.CRON_HEARTBEAT_METRICS_DISABLED ?? 'true';
+
 jest.setTimeout(10000);
 
 // apps/backend registers its SentryReporter in instrument.ts, which no unit test loads. Register one

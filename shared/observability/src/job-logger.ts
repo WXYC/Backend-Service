@@ -42,6 +42,9 @@ export const resolveTracesSampleRate = (raw: string | undefined = process.env.SE
  */
 export const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/** Upper bound on the awaited `PutMetricData`, so a stalled CloudWatch connection cannot hang a one-shot job after its work succeeded. */
+export const HEARTBEAT_PUBLISH_TIMEOUT_MS = 5000;
+
 export const createJobLogger = ({
   jobName,
   tracesSampler,
@@ -120,13 +123,15 @@ export const createJobLogger = ({
    * Run `fn`, then publish `HeartbeatSuccess` (namespace `WXYC/Cron`, dimension `job`=`jobName`) and
    * wait for CloudWatch to accept it, since a one-shot job can exit before a buffered emitter flushes.
    * A throw from `fn` publishes nothing. The SDK loads here, not at module load, so jobs that never
-   * heartbeat do not pay for it. A failed publish is logged, not thrown: the run itself succeeded.
+   * heartbeat do not pay for it. A failed or timed-out (HEARTBEAT_PUBLISH_TIMEOUT_MS) publish is logged, not thrown: the run itself succeeded.
    */
   const withHeartbeat = async <T>(fn: () => Promise<T>): Promise<T> => {
     const result = await fn();
     if (process.env.CRON_HEARTBEAT_METRICS_DISABLED === 'true') {
       return result;
     }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HEARTBEAT_PUBLISH_TIMEOUT_MS);
     try {
       const { PutMetricDataCommand } = await import('@aws-sdk/client-cloudwatch');
       const { createCloudWatchClient } = await import('./metrics.js');
@@ -142,10 +147,13 @@ export const createJobLogger = ({
               Timestamp: new Date(),
             },
           ],
-        })
+        }),
+        { abortSignal: controller.signal }
       );
     } catch (err) {
       console.warn(`logger: failed to publish HeartbeatSuccess for "${jobName}"`, err);
+    } finally {
+      clearTimeout(timer);
     }
     return result;
   };
