@@ -1,5 +1,5 @@
 import * as Sentry from '@sentry/node';
-import { createJobLogger, resolveTracesSampleRate } from '@wxyc/observability/job-logger';
+import { createJobLogger, errorMessageWithCause, resolveTracesSampleRate } from '@wxyc/observability/job-logger';
 import { getErrorReporter } from '@wxyc/observability';
 
 jest.mock('@sentry/node', () => ({
@@ -224,5 +224,20 @@ describe('resolveTracesSampleRate', () => {
     ['abc', 1],
   ])('%s -> %s', (raw, expected) => {
     expect(resolveTracesSampleRate(raw)).toBe(expected);
+  });
+});
+
+describe('errorMessageWithCause', () => {
+  it.each([
+    ['an Error with no cause', new Error('boom'), 'boom'],
+    ['an Error cause', new Error('outer', { cause: new Error('inner') }), 'outer [cause: inner]'],
+    ['a string cause', new Error('outer', { cause: 'inner text' }), 'outer [cause: inner text]'],
+    ['a cause equal to the message', new Error('same', { cause: new Error('same') }), 'same'],
+    ['an empty string cause', new Error('outer', { cause: '' }), 'outer'],
+    ['an object cause', new Error('outer', { cause: { code: 42 } }), 'outer'],
+    ['a non-Error string', 'just a string', 'just a string'],
+    ['a non-Error object', { code: 42 }, '[object Object]'],
+  ])('%s', (_label, input, expected) => {
+    expect(errorMessageWithCause(input)).toBe(expected);
   });
 });

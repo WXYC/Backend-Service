@@ -42,6 +42,20 @@ export const resolveTracesSampleRate = (raw: string | undefined = process.env.SE
  */
 export const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/**
+ * `errorMessage` plus `error.cause.message` when present and distinct: Drizzle wraps driver errors as
+ * `DrizzleQueryError: Failed query: <sql>` and hides the real failure on `.cause`. Only `Error` and
+ * string causes are surfaced; an object cause is left off rather than emit `[object Object]`.
+ */
+export const errorMessageWithCause = (error: unknown): string => {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const cause: unknown = (error as { cause?: unknown }).cause;
+  const causeText = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : undefined;
+  return causeText && causeText !== error.message ? `${error.message} [cause: ${causeText}]` : error.message;
+};
+
 /** Upper bound on the awaited `PutMetricData`, so a stalled CloudWatch connection cannot hang a one-shot job after its work succeeded. */
 export const HEARTBEAT_PUBLISH_TIMEOUT_MS = 5000;
 
