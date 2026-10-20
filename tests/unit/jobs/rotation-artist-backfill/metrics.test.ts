@@ -3,6 +3,7 @@ import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals
 import type { BulkCacheRefreshResponse } from '@wxyc/lml-client';
 
 import type { FetchOutcome } from '../../../../jobs/rotation-artist-backfill/lml-fetch';
+import { expectPending, heldPromise } from '../../../utils/held-promise';
 
 // BS#3401: the BS#1402 not_found / lml_error signals move off Sentry spans to
 // two dimensionless CloudWatch counters in WXYC/RotationArtistBackfill. The
@@ -44,13 +45,20 @@ describe('rotation-artist-backfill CloudWatch counters (BS#3401)', () => {
   });
 
   it('sends NotFound and LmlError, dimensionless, before runBackfill resolves on success', async () => {
+    const send = heldPromise();
+    mockSend.mockImplementation(send.hold);
+
     // An empty response is tallied as a batch error: 2 ids -> lml_error 2.
-    await runBackfill({
+    const run = runBackfill({
       loadIdentityIds: jest.fn<() => Promise<number[]>>().mockResolvedValue([1, 2]),
       fetchFn: okFetch({} as BulkCacheRefreshResponse),
     });
+    await expectPending(run);
 
     expect(mockSend).toHaveBeenCalledTimes(1);
+    send.release({});
+    await run;
+
     const [call] = putCalls();
     expect(call.Namespace).toBe('WXYC/RotationArtistBackfill');
     const byName = Object.fromEntries(call.MetricData.map((d) => [d.MetricName, d]));
@@ -61,18 +69,21 @@ describe('rotation-artist-backfill CloudWatch counters (BS#3401)', () => {
   });
 
   it('sends the counters before runBackfill rejects when the fan-out throws', async () => {
+    const send = heldPromise();
+    mockSend.mockImplementation(send.hold);
     const fetchFn = jest
       .fn<(batch: number[]) => Promise<FetchOutcome<BulkCacheRefreshResponse>>>()
       .mockRejectedValue(new Error('boom'));
 
-    await expect(
-      runBackfill({
-        loadIdentityIds: jest.fn<() => Promise<number[]>>().mockResolvedValue([1]),
-        fetchFn,
-      })
-    ).rejects.toThrow();
+    const run = runBackfill({
+      loadIdentityIds: jest.fn<() => Promise<number[]>>().mockResolvedValue([1]),
+      fetchFn,
+    });
+    await expectPending(run);
 
     expect(mockSend).toHaveBeenCalledTimes(1);
+    send.release({});
+    await expect(run).rejects.toThrow();
     expect(putCalls()[0].Namespace).toBe('WXYC/RotationArtistBackfill');
   });
 
