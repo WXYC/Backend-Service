@@ -79,5 +79,7 @@ const envRate = resolveTracesSampleRate();
 
 export const { initLogger, log, captureError, closeLogger } = createJobLogger({
   jobName: 'flowsheet-metadata-backfill',
+  // Runs hourly, so its PostHog budget is 2 a run rather than 10 (BS#3409).
+  errorBudget: 2,
   tracesSampler: (samplingContext) => tracesSampler(samplingContext, envRate),
 });

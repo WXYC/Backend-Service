@@ -101,6 +101,8 @@ export const JOB_NAME = 'legacy-linkage-resolve';
 
 const { initLogger, log, captureError, captureWarning, errorMessage, closeLogger, withHeartbeat } = createJobLogger({
   jobName: JOB_NAME,
+  // Runs every 30 minutes, so its PostHog budget is 2 a run rather than 10 (BS#3409).
+  errorBudget: 2,
 });
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');

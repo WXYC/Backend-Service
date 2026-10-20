@@ -227,8 +227,9 @@ const main = async (): Promise<void> => {
         'close_health_server',
         () => new Promise<void>((resolve) => healthServer.close(() => resolve()))
       );
-      // Sentry.close has its own bound; mirror the pattern in every
-      // `jobs/*/logger.ts` shutdown path.
+      // Flushes Sentry and PostHog (bounded, never rejects), then Sentry.close has its own bound;
+      // mirror the pattern in every `jobs/*/logger.ts` shutdown path.
+      await getErrorReporter().flush(2000);
       await Sentry.close(2000);
     } finally {
       process.exit(0);

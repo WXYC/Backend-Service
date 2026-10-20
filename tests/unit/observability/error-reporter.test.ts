@@ -167,4 +167,31 @@ describe('CompositeReporter', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(b.flush).toHaveBeenCalledWith(100);
   });
+  describe('runInScope', () => {
+    const scoped = (order: string[], name: string): jest.Mocked<ErrorReporter> => {
+      const r = fake();
+      r.runInScope = jest.fn(<T>(fn: () => T): T => {
+        order.push(`enter ${name}`);
+        const out = fn();
+        order.push(`exit ${name}`);
+        return out;
+      }) as jest.Mocked<ErrorReporter>['runInScope'];
+      return r;
+    };
+
+    it('nests the call through each child that implements it and returns the result', () => {
+      const order: string[] = [];
+      const composite = new CompositeReporter([scoped(order, 'a'), fake(), scoped(order, 'b')]);
+      const result = composite.runInScope(() => {
+        order.push('fn');
+        return 42;
+      });
+      expect(result).toBe(42);
+      expect(order).toEqual(['enter a', 'enter b', 'fn', 'exit b', 'exit a']);
+    });
+
+    it('just calls fn when no child implements it', () => {
+      expect(new CompositeReporter([fake(), fake()]).runInScope(() => 'ran')).toBe('ran');
+    });
+  });
 });

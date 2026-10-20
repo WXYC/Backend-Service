@@ -8,10 +8,13 @@ import {
   SENTRY_DATA_COLLECTION,
   redactSentryBreadcrumb,
   redactSentryEventQueryParams,
+  CompositeReporter,
   logCounter,
   setErrorReporter,
+  setExpressErrorReporter,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
+import { PostHogReporter } from '@wxyc/observability/posthog';
 import { SentryReporter } from '@wxyc/observability/sentry';
 import { setLmlCounterSink } from '@wxyc/lml-client';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
@@ -59,8 +62,18 @@ Sentry.init({
 });
 
 // Every capture, breadcrumb and request tag in apps/backend goes through the
-// ErrorReporter seam (BS#3395); Sentry is its only backend for now.
-setErrorReporter(new SentryReporter());
+// ErrorReporter seam (BS#3395), to Sentry and PostHog for the parity window (BS#3409).
+// PostHog is a no-op without POSTHOG_ERRORS_API_KEY. Budget: 300 a day (error-tracking contract).
+const postHog = new PostHogReporter({
+  service: 'backend',
+  environment: process.env.NODE_ENV,
+  release: process.env.SENTRY_RELEASE,
+  budget: { kind: 'daily', ceiling: 300 },
+});
+setErrorReporter(new CompositeReporter([new SentryReporter(), postHog]));
+// Sentry's expressIntegration captures Express errors itself; PostHog has no such integration, so the
+// Express error middleware in app.ts reports to PostHog alone.
+setExpressErrorReporter(postHog);
 
 // LML cache_stats counter lines (BS#3508); lml-client takes the sink by injection so it needs no @wxyc/observability.
 setLmlCounterSink(logCounter);

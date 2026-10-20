@@ -28,7 +28,12 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
-import { getErrorReporter, redactQueryParams } from '@wxyc/observability';
+import {
+  createExpressErrorMiddleware,
+  getErrorReporter,
+  redactQueryParams,
+  requestScopeMiddleware,
+} from '@wxyc/observability';
 import { installAuthLogRedaction } from './log-redaction';
 import {
   adminPrefixAuditMiddleware,
@@ -41,6 +46,7 @@ import { checkRequestBanHandler } from './check-request-ban-handler';
 import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
 import { UpdateIdentityError, updateIdentityFromRequest } from './update-identity';
 import { fallbackErrorHandler } from './fallback-error-handler';
+import { shouldCaptureAuthExpressError } from './sentry-error-filter';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { stationSignupFromRequest, StationSignupError, isStationSignupEnabled } from './station-signup';
@@ -136,6 +142,9 @@ app.set('trust proxy', true);
 // be wasted work on every single request through this service.
 const jsonBodyParser = express.json({ type: isBetterCallJsonRequest });
 app.use((req, res, next) => jsonBodyParser(req, res, () => next()));
+
+// Gives each request its own reporter scope (BS#3409). After the body parser: its stream callbacks run outside the scope.
+app.use(requestScopeMiddleware);
 
 // Apply CORS globally to all routes (must be before auth handler).
 // Fail closed when neither FRONTEND_SOURCE nor BETTER_AUTH_TRUSTED_ORIGINS is
@@ -1339,6 +1348,10 @@ app.get('/healthcheck', async (req, res) => {
 // `instrument.ts` with `shouldCaptureAuthExpressError` (BS#1387, BS#2949) — no
 // handler is registered here.
 
+// PostHog's copy of what Sentry's expressIntegration captures, under the same predicate (BS#3409).
+// fallbackErrorHandler always answers 500.
+app.use(createExpressErrorMiddleware({ shouldCapture: shouldCaptureAuthExpressError, statusOf: () => 500 }));
+
 // Fallback error handler — sanitises response body, forwards full error to
 // Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).
 app.use(fallbackErrorHandler);
@@ -1479,6 +1492,8 @@ void (async () => {
       // call is internally bounded and never rejects, so it cannot delay or
       // wedge shutdown — see flushRateLimitMetrics.
       flushRateLimitMetrics()
+        // Bounded, and never rejects: flushes Sentry and PostHog (BS#3409).
+        .then(() => getErrorReporter().flush(2_000))
         .then(() => closeDatabaseConnection())
         .then(() => process.exit(0))
         .catch(() => process.exit(1));

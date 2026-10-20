@@ -151,7 +151,7 @@ The wireup is per-job: see `jobs/flowsheet-etl/logger.ts` for the canonical patt
 
 ## PostHog error tracking
 
-- `POSTHOG_ERRORS_API_KEY` (optional; `POSTHOG_HOST` default `https://us.i.posthog.com`) — `rotation-release-id-pollution-check` also reports its alerts and failures to PostHog error tracking (BS#3410). Unset = Sentry-only, exactly as before. `@wxyc/observability/posthog`'s `PostHogReporter` (BS#3407) reads the same two vars; with no key it is a no-op.
+- `POSTHOG_ERRORS_API_KEY` (optional; `POSTHOG_HOST` default `https://us.i.posthog.com`) — `rotation-release-id-pollution-check` also reports its alerts and failures to PostHog error tracking (BS#3410). Unset = Sentry-only, exactly as before. `@wxyc/observability/posthog`'s `PostHogReporter` (BS#3407) reads the same two vars; with no key it is a no-op. Since BS#3409 `apps/backend`, `apps/auth`, `apps/enrichment-worker` and every `createJobLogger` job read them too and report to Sentry and PostHog; unset = Sentry-only.
 
 ## Flowsheet Go-Live Intent
 

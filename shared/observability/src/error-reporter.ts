@@ -41,6 +41,13 @@ export interface ErrorReporter {
   setRequestTag(key: string, value: string): void;
   /** Resolves once buffered reports are delivered or `timeoutMs` passes; resolves `false` on timeout. */
   flush(timeoutMs?: number): Promise<boolean>;
+  /**
+   * Optional: runs `fn` with its own request scope, so `setRequestTag` and breadcrumbs made inside it stay
+   * with that request (a reporter that keeps them in an AsyncLocalStorage implements it). A reporter whose
+   * backend scopes requests itself, as `SentryReporter` does, leaves it out. An HTTP app calls it as
+   * `getErrorReporter().runInScope?.(...)` and falls back to calling `fn` directly (see `requestScopeMiddleware`).
+   */
+  runInScope?<T>(fn: () => T): T;
 }
 
 /**
@@ -84,6 +91,11 @@ export class CompositeReporter implements ErrorReporter {
 
   setRequestTag(key: string, value: string): void {
     this.each((r) => r.setRequestTag(key, value));
+  }
+
+  /** Nests `fn` inside the scope of each reporter that has `runInScope`, in order; a reporter without it is skipped. */
+  runInScope<T>(fn: () => T): T {
+    return this.reporters.reduceRight<() => T>((inner, r) => (r.runInScope ? () => r.runInScope!(inner) : inner), fn)();
   }
 
   /**

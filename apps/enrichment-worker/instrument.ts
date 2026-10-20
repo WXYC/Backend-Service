@@ -3,7 +3,13 @@
 
 import { config } from 'dotenv';
 import * as Sentry from '@sentry/node';
-import { SENTRY_DATA_COLLECTION, setErrorReporter, warnIfReservedAwsCredentialsPresent } from '@wxyc/observability';
+import {
+  CompositeReporter,
+  SENTRY_DATA_COLLECTION,
+  setErrorReporter,
+  warnIfReservedAwsCredentialsPresent,
+} from '@wxyc/observability';
+import { PostHogReporter } from '@wxyc/observability/posthog';
 import { SentryReporter } from '@wxyc/observability/sentry';
 
 config();
@@ -33,5 +39,16 @@ Sentry.init({
 });
 
 // Every capture and breadcrumb in this container goes through the ErrorReporter
-// seam (BS#3396); Sentry is its only backend for now.
-setErrorReporter(new SentryReporter());
+// seam (BS#3396), to Sentry and PostHog for the parity window (BS#3409).
+// PostHog is a no-op without POSTHOG_ERRORS_API_KEY. Budget: 100 a day (error-tracking contract).
+setErrorReporter(
+  new CompositeReporter([
+    new SentryReporter(),
+    new PostHogReporter({
+      service: 'enrichment-worker',
+      environment: process.env.NODE_ENV,
+      release: process.env.SENTRY_RELEASE,
+      budget: { kind: 'daily', ceiling: 100 },
+    }),
+  ])
+);

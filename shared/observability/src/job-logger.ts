@@ -4,15 +4,17 @@
  * `createJobLogger({ jobName })` at module load and re-exports what it needs.
  *
  * `Sentry.init` and the run-wide `repo` / `tool` / `run_id` tags stay here, imported from
- * `@sentry/node`, until B9; the reporter seam has no method for them.
+ * `@sentry/node`, until B9; the reporter seam has no method for them. PostHog gets the same three
+ * as static properties (BS#3409).
  */
 
 import * as Sentry from '@sentry/node';
 import type { NodeOptions } from '@sentry/node';
 import { randomUUID } from 'crypto';
 import { SentryReporter } from './sentry-reporter.js';
+import { PostHogReporter } from './posthog-reporter.js';
 import { setErrorReporter } from './current-reporter.js';
-import { logCounter } from './error-reporter.js';
+import { CompositeReporter, logCounter } from './error-reporter.js';
 import type { CounterFields, ErrorReporter } from './error-reporter.js';
 
 export type LoggerConfig = {
@@ -59,20 +61,38 @@ export const errorMessageWithCause = (error: unknown): string => {
 /** Upper bound on the awaited `PutMetricData`, so a stalled CloudWatch connection cannot hang a one-shot job after its work succeeded. */
 export const HEARTBEAT_PUBLISH_TIMEOUT_MS = 5000;
 
+/** PostHog events one run may send (WXYC/wiki `patterns/error-tracking.md` section 5). */
+const DEFAULT_ERROR_BUDGET = 10;
+
 export const createJobLogger = ({
   jobName,
   tracesSampler,
+  errorBudget = DEFAULT_ERROR_BUDGET,
 }: {
   jobName: string;
   /** Per-span sampling decision; Sentry gives it precedence over `tracesSampleRate`. */
   tracesSampler?: NodeOptions['tracesSampler'];
+  /** PostHog events one run may send, with no refill: 10, or 2 for a job that runs more than 4 times a day. */
+  errorBudget?: number;
 }) => {
   let baseTags: BaseTags | null = null;
-  const reporter: ErrorReporter = new SentryReporter();
+  // `repo`, `tool` and `run_id` are filled in by `initLogger`; the PostHog reporter reads this object on every event.
+  const runProperties: Record<string, string> = {};
+  const reporter: ErrorReporter = new CompositeReporter([
+    new SentryReporter(),
+    new PostHogReporter({
+      service: jobName,
+      environment: process.env.NODE_ENV,
+      release: process.env.SENTRY_RELEASE,
+      budget: { kind: 'run', ceiling: errorBudget },
+      properties: runProperties,
+    }),
+  ]);
 
   const initLogger = (config: LoggerConfig): string => {
     const runId = config.runId ?? randomUUID();
     baseTags = { repo: config.repo, tool: config.tool, run_id: runId };
+    Object.assign(runProperties, baseTags);
 
     Sentry.init({
       // Sentry 11 turned this on by default, which titles captureMessage events

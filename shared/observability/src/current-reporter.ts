@@ -30,3 +30,21 @@ export function setErrorReporter(reporter: ErrorReporter): void {
 export function getErrorReporter(): ErrorReporter {
   return (globalThis as GlobalWithReporter)[SLOT] ?? noopReporter;
 }
+
+/**
+ * Reporter for errors that reach the Express error pipeline, kept apart from the process-wide reporter. Sentry's
+ * `expressIntegration` already captures those (with its own predicate), so sending them through the process-wide
+ * composite would count each error twice in Sentry. It is the vendor reporter that has no Express integration of
+ * its own, and goes away with the Sentry exit (BS#3393). Same `globalThis` slot reasoning as above.
+ */
+const EXPRESS_SLOT = Symbol.for('@wxyc/observability/express-error-reporter');
+type GlobalWithExpressReporter = typeof globalThis & { [EXPRESS_SLOT]?: ErrorReporter };
+
+export function setExpressErrorReporter(reporter: ErrorReporter): void {
+  (globalThis as GlobalWithExpressReporter)[EXPRESS_SLOT] = reporter;
+}
+
+/** The Express-pipeline reporter; a no-op until `setExpressErrorReporter` is called. */
+export function getExpressErrorReporter(): ErrorReporter {
+  return (globalThis as GlobalWithExpressReporter)[EXPRESS_SLOT] ?? noopReporter;
+}
