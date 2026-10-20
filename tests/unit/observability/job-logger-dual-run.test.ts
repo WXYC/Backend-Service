@@ -84,6 +84,19 @@ describe('createJobLogger dual-run to PostHog (BS#3409)', () => {
     expect(processOn.mock.calls.map((c) => c[0])).toEqual(installed);
   });
 
+  it('removes the previous crash handlers when initLogger runs again, so they never stack (BS#3517)', () => {
+    const processOff = jest.spyOn(process, 'off').mockImplementation((() => process) as never);
+    spies.push(processOff);
+    const { initLogger } = createJobLogger({ jobName: 'demo-job' });
+    initLogger({ repo: 'r', tool: 't' });
+    expect(processOff).not.toHaveBeenCalled();
+    const first = processOn.mock.calls.map((c) => [c[0], c[1]]);
+    expect(first.map(([event]) => event)).toEqual(['uncaughtException', 'unhandledRejection']);
+    initLogger({ repo: 'r', tool: 't' });
+    expect(processOff.mock.calls.map((c) => [c[0], c[1]])).toEqual(first);
+    expect(processOn).toHaveBeenCalledTimes(4);
+  });
+
   it('registers the composite, so a capture through the holder reaches PostHog', () => {
     const { reporter, initLogger } = createJobLogger({ jobName: 'demo-job' });
     initLogger({ repo: 'r', tool: 't' });
