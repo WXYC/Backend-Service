@@ -6,6 +6,7 @@
 import sharp from 'sharp';
 import {
   MAX_POSTER_BYTES,
+  POSTER_RULES,
   renderPoster,
   type PosterFailureCode,
   type PosterRenderResult,
@@ -36,6 +37,33 @@ const animatedWebp = async (): Promise<Fixture> => {
       .webp({ delay: [100, 100], loop: 0 })
       .toBuffer(),
     contentType: 'image/webp',
+  };
+};
+
+// An APNG is a PNG with an acTL chunk ahead of the first IDAT; sharp reports no `pages` for it.
+const crc32 = (buf: Buffer): number => {
+  let crc = 0xffffffff;
+  for (const byte of buf) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i += 1) {
+      crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+const animatedPng = async (): Promise<Fixture> => {
+  const still = (await png(1080, 1350)).bytes;
+  const data = Buffer.alloc(8);
+  data.writeUInt32BE(2, 0); // num_frames
+  const type = Buffer.from('acTL');
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([type, data])), 0);
+  const idat = still.indexOf('IDAT') - 4;
+  return {
+    bytes: Buffer.concat([still.subarray(0, idat), length, type, data, crc, still.subarray(idat)]),
+    contentType: 'image/png',
   };
 };
 
@@ -77,10 +105,10 @@ describe('renderPoster', () => {
         'decode_failed',
       ],
       ['an animated WebP', animatedWebp, 'animated'],
+      ['an animated PNG', animatedPng, 'animated'],
       ['a 900 px short edge', () => jpeg(900, 1200), 'too_small'],
-      ['a 1000 px wide image under the short edge once rotated', () => jpeg(1000, 999), 'too_small'],
+      ['a 1000x999 image', () => jpeg(1000, 999), 'too_small'],
       ['a long edge over 6000 px', () => jpeg(1000, 6001), 'too_large'],
-      ['an image over 40 megapixels', () => png(8000, 6000), 'too_large'],
       [
         'a file over 10 MB',
         async () => ({
@@ -99,10 +127,44 @@ describe('renderPoster', () => {
       expect(await renderPoster(bytes, contentType)).toEqual({ ok: false, failure_code: failureCode });
     });
 
-    it('checks type before decode, decode before animation, and size before aspect', async () => {
-      // 900x1920 is both too small and a bad aspect: size is reported first.
+    it('reports too_small before bad_aspect', async () => {
+      // 900x1920 is both too small and a bad aspect.
       const { bytes, contentType } = await jpeg(900, 1920);
       expect(await renderPoster(bytes, contentType)).toEqual({ ok: false, failure_code: 'too_small' });
+    });
+
+    it('reports too_large before too_small', async () => {
+      // 500x6001 is both over the long edge and under the short edge.
+      const { bytes, contentType } = await jpeg(500, 6001);
+      expect(await renderPoster(bytes, contentType)).toEqual({ ok: false, failure_code: 'too_large' });
+    });
+
+    it('reports animated before size', async () => {
+      const frames = await Promise.all(['#f00', '#00f'].map((c) => solid(500, 500, c).png().toBuffer()));
+      const bytes = await sharp(frames, { join: { animated: true } })
+        .webp({ delay: [100, 100], loop: 0 })
+        .toBuffer();
+      expect(await renderPoster(bytes, 'image/webp')).toEqual({ ok: false, failure_code: 'animated' });
+    });
+
+    it('reports the declared type before decoding the bytes', async () => {
+      expect(await renderPoster(Buffer.from('not an image'), 'image/gif')).toEqual({
+        ok: false,
+        failure_code: 'unsupported_type',
+      });
+    });
+
+    it('judges size and aspect after EXIF rotation', async () => {
+      // Stored 1200x900 (landscape) with orientation 6 displays as 900x1200: too_small, not bad_aspect.
+      const bytes = await solid(1200, 900).jpeg().withMetadata({ orientation: 6 }).toBuffer();
+      expect(await renderPoster(bytes, 'image/jpeg')).toEqual({ ok: false, failure_code: 'too_small' });
+    });
+
+    it('refuses an over-40-megapixel image on the pixel cap alone', async () => {
+      // POSTER_RULES cannot reach the cap (6000x6000 is 36 MP), so loosen the edge limit: 10000x5000 is 50 MP.
+      const { bytes, contentType } = await png(10000, 5000);
+      const rules = { ...POSTER_RULES, maxLongEdge: 12000 };
+      expect(await renderPoster(bytes, contentType, rules)).toEqual({ ok: false, failure_code: 'too_large' });
     });
   });
 
@@ -134,7 +196,28 @@ describe('renderPoster', () => {
     );
   });
 
+  describe('declared content type', () => {
+    it.each(['IMAGE/JPEG', 'image/jpeg; charset=binary', ' Image/Jpeg ;q=1'])('accepts %s', async (declared) => {
+      const { bytes } = await jpeg(1080, 1350);
+      await renderOk(bytes, declared);
+    });
+  });
+
   describe('normalization', () => {
+    it('flattens transparency onto white, not black', async () => {
+      const bytes = await sharp({
+        create: { width: 1080, height: 1350, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+      })
+        .png()
+        .toBuffer();
+      const result = await renderOk(bytes, 'image/png');
+      for (const rendition of result.renditions) {
+        const { data, info } = await sharp(rendition.bytes).raw().toBuffer({ resolveWithObject: true });
+        const mid = (Math.floor(info.height / 2) * info.width + Math.floor(info.width / 2)) * info.channels;
+        expect([...data.subarray(mid, mid + 3)].every((v) => v >= 250)).toBe(true);
+      }
+    });
+
     it('applies EXIF orientation and strips all metadata', async () => {
       // Stored landscape (red left, blue right) with orientation 6 (rotate 90 deg CW): upright is portrait, red on top.
       const left = await solid(675, 1080, '#f00').png().toBuffer();

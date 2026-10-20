@@ -4,7 +4,8 @@
  * access, so callers own storage and the mapping of `failure_code` to a response.
  *
  * Renditions are JPEG (q85, sRGB, EXIF-rotated, all metadata stripped) at the
- * poster's own aspect ratio: never upscaled, cropped, or padded.
+ * poster's own aspect ratio: never upscaled, cropped, or padded. Transparency is
+ * flattened onto white.
  */
 
 import sharp from 'sharp';
@@ -19,6 +20,9 @@ const MAX_INPUT_PIXELS = 40_000_000;
 const RENDER_BUDGET_MS = 30_000;
 
 const JPEG_QUALITY = 85;
+
+/** Transparent PNG/WebP pixels are flattened onto white; JPEG has no alpha and libvips would fill black. */
+const FLATTEN_BACKGROUND = '#ffffff';
 
 /** Declared content type -> the format sharp must detect in the bytes. */
 const ACCEPTED_FORMATS: Record<string, string> = { 'image/jpeg': 'jpeg', 'image/png': 'png', 'image/webp': 'webp' };
@@ -65,6 +69,22 @@ function withLock<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** True when a PNG carries an acTL (animation control) chunk before its first IDAT, i.e. it is an APNG. */
+function isAnimatedPng(bytes: Buffer): boolean {
+  let offset = 8; // past the PNG signature
+  while (offset + 8 <= bytes.length) {
+    const type = bytes.toString('latin1', offset + 4, offset + 8);
+    if (type === 'acTL') {
+      return true;
+    }
+    if (type === 'IDAT') {
+      return false;
+    }
+    offset += 12 + bytes.readUInt32BE(offset);
+  }
+  return false;
+}
+
 const fail = (failure_code: PosterFailureCode): PosterRenderResult => ({ ok: false, failure_code });
 
 /**
@@ -77,7 +97,8 @@ const fail = (failure_code: PosterFailureCode): PosterRenderResult => ({ ok: fal
  * edge and aspect checks, so a phone photo is judged as it displays.
  *
  * @param bytes - The uploaded file.
- * @param contentType - The declared content type (image/jpeg, image/png, image/webp).
+ * @param contentType - The declared content type (image/jpeg, image/png, image/webp); matched
+ *   case-insensitively with parameters (`; charset=...`) ignored. `image/jpg` is not accepted.
  * @param rules - Dimension rules and rendition widths; defaults to the poster rules.
  */
 export function renderPoster(
@@ -85,7 +106,7 @@ export function renderPoster(
   contentType: string,
   rules: RenderRules = POSTER_RULES
 ): Promise<PosterRenderResult> {
-  const declared = ACCEPTED_FORMATS[contentType];
+  const declared = ACCEPTED_FORMATS[contentType.split(';')[0].trim().toLowerCase()];
   if (!declared) {
     return Promise.resolve(fail('unsupported_type'));
   }
@@ -102,7 +123,7 @@ export function renderPoster(
       if (meta.format !== declared) {
         return fail('decode_failed');
       }
-      if ((meta.pages ?? 1) > 1) {
+      if ((meta.pages ?? 1) > 1 || (meta.format === 'png' && isAnimatedPng(bytes))) {
         return fail('animated');
       }
 
@@ -130,6 +151,7 @@ export function renderPoster(
           .timeout({ seconds })
           .rotate()
           .resize({ width: target, withoutEnlargement: true })
+          .flatten({ background: FLATTEN_BACKGROUND })
           .toColourspace('srgb')
           .jpeg({ quality: JPEG_QUALITY })
           .toBuffer({ resolveWithObject: true });
