@@ -11,8 +11,22 @@ For every distinct `library.artist_name` whose name group either has no `artist_
 1. Group by name → `{artist_name, artist_ids[]}` (multiple `artists.id` rows can share an `artist_name`; there's no UNIQUE constraint).
 2. Filter V/A names client-side (`isCompilationArtist` substring match).
 3. Batch ≤ 500 names into one `POST /api/v1/artists/search-aliases/bulk` call (LML caps at 1000).
-4. For each resolved name: build the variant list (LML variants + `library.alternate_artist_name` values as `wxyc_library_alt` rows, confidence 0.85) and UPSERT one row per `(artist_id, source, variant)` for every artist_id in the name group.
-5. Reconcile semantics: DELETE is scoped to `sources_present + 'wxyc_library_alt'` (the consumer always ran the local SELECT, so the alt leg is unambiguously "attempted"). An empty `sources_present` from LML is a no-op — the writer cannot distinguish "deleted upstream" from "leg didn't fire", so it leaves the cache untouched.
+4. For each resolved name: build the variant list (LML variants + `library.alternate_artist_name` values as `wxyc_library_alt` rows, confidence 0.85, + the names inside each comma-joined alternate artist name as `wxyc_library_credit` rows, confidence 0.70) and UPSERT one row per `(artist_id, source, variant)` for every artist_id in the name group.
+5. Reconcile semantics: DELETE is scoped to `sources_present + 'wxyc_library_alt' + 'wxyc_library_credit'` (the consumer always ran the local SELECT, so both local legs are unambiguously "attempted"). An empty `sources_present` from LML is a no-op — the writer cannot distinguish "deleted upstream" from "leg didn't fire", so it leaves the cache untouched.
+
+## Library credits (`wxyc_library_credit`, BS#3554)
+
+The librarian files a member's solo or side-project record under the band's card and names the member in `alternate_artist_name`, often as a multi-name credit (`Rhiannon Giddens, Our Native Daughters` on the Carolina Chocolate Drops card). Catalog search scores the whole joined `wxyc_library_alt` string with trigram similarity, so a name inside a long credit falls under the BS#2018 0.40 floor. `credit-split.ts` splits each value into single names, and each name gets its own `wxyc_library_credit` row. The joined `wxyc_library_alt` row is written as before.
+
+The source is **relational**: a member or collaborator credit, not a spelling variant. Catalog search reads it like every other source. `jobs/concerts-artist-resolver/query.ts` lists it in `RELATIONAL_ALIAS_SOURCES`, so it never resolves a concert headliner.
+
+Splitting rules (conservative, from a survey of the 2026-09-14 `library.db` snapshot): split on `,` only, never on `&`, `and` or `/`. Leave a value with brackets or parentheses whole. Rejoin `Jr.`/`Sr.`/`Inc.`/`Ltd.`/`The`/`II`/`III` to the piece before it. Strip a leading `and ` from the last piece. Skip a value with fewer than two pieces, or two one-word pieces (an inverted `Last, First` name). Drop `et al`/`etc`, the owner's own name and duplicates.
+
+Rows fill in on the rolling `STALE_THRESHOLD_DAYS` refresh, so the first full set exists about 7 daily runs after a deploy. To check:
+
+```sql
+SELECT count(*) FROM wxyc_schema.artist_search_alias WHERE source = 'wxyc_library_credit';
+```
 
 On a batch-level LML error, every input is counted as `names_missing` and the loop continues; the next run re-picks those names via the SELECT predicate (idempotent).
 

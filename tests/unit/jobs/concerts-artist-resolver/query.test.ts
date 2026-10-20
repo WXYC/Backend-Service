@@ -138,6 +138,14 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       expect(RELATIONAL_ALIAS_SOURCES.length).toBeGreaterThan(0);
     });
 
+    // BS#3554: a library credit names a member or collaborator filed under
+    // the band's card, so it must never resolve a concert headliner as a
+    // synonym (Rhiannon Giddens is not Carolina Chocolate Drops).
+    it.each(['discogs_member', 'wxyc_library_credit'])('%s is relational, not synonym', (source) => {
+      expect(RELATIONAL_ALIAS_SOURCES as readonly string[]).toContain(source);
+      expect(SYNONYM_ALIAS_SOURCES as readonly string[]).not.toContain(source);
+    });
+
     it('the two classes do not overlap', () => {
       const overlap = SYNONYM_ALIAS_SOURCES.filter((s) => (RELATIONAL_ALIAS_SOURCES as readonly string[]).includes(s));
       expect(overlap).toEqual([]);

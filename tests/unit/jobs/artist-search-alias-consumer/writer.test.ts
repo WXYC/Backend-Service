@@ -338,6 +338,40 @@ describe('writeArtistVariants', () => {
     expect(outcome.variants_written).toBe(3);
   });
 
+  it('BS#3554: writes the credit pieces under wxyc_library_credit and leaves the joined wxyc_library_alt row as it is', async () => {
+    const joined = 'Rhiannon Giddens, Our Native Daughters';
+    const variants = [
+      variant({ source: 'wxyc_library_alt', variant: joined, method: 'alt_curated', confidence: 0.85 }),
+      variant({ source: 'wxyc_library_credit', variant: 'Rhiannon Giddens', method: 'alt_curated', confidence: 0.7 }),
+      variant({
+        source: 'wxyc_library_credit',
+        variant: 'Our Native Daughters',
+        method: 'alt_curated',
+        confidence: 0.7,
+      }),
+    ];
+    const outcome = await writeArtistVariants(4901, 'Carolina Chocolate Drops', variants, [
+      'wxyc_library_alt',
+      'wxyc_library_credit',
+    ]);
+
+    expect(outcome.variants_written).toBe(3);
+    // Each INSERT binds (table, artist_id, source, variant, …); read the
+    // (source, variant) pairs back off the captured template calls.
+    const inserted = sqlTagCalls
+      .filter((c) => (c.strings ?? []).join('').includes('INSERT INTO'))
+      .map((c) => [c.values[2], c.values[3]]);
+    expect(inserted).toEqual([
+      ['wxyc_library_alt', joined],
+      ['wxyc_library_credit', 'Rhiannon Giddens'],
+      ['wxyc_library_credit', 'Our Native Daughters'],
+    ]);
+    // The reconcile DELETE is scoped to both local sources, so a stale
+    // credit piece is removed on the next run like a stale alt value.
+    const sourceBinds = sqlTagCalls.filter((c) => (c.strings ?? []).join('') === '(::text)').map((c) => c.values[0]);
+    expect(sourceBinds).toEqual(['wxyc_library_alt', 'wxyc_library_credit']);
+  });
+
   it('BS#1382: falls back to DELETE-only when the only variant is a no-op `discogs_name_variation`', async () => {
     // If the only variant for an artist is the no-op row, the writer
     // should reconcile away any stale row but emit no INSERT.
