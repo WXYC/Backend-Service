@@ -843,7 +843,17 @@ export const account_audit_event = {
   ipHash: 'account_audit_event.ip_hash',
   source: 'account_audit_event.source',
 };
-export const specialty_shows = {};
+export const specialty_shows = {
+  slug: 'specialty_shows.slug',
+  short_name: 'specialty_shows.short_name',
+  tagline: 'specialty_shows.tagline',
+  logs_playcuts: 'specialty_shows.logs_playcuts',
+  default_spotlight_role: 'specialty_shows.default_spotlight_role',
+  artwork: 'specialty_shows.artwork',
+  accent_color: 'specialty_shows.accent_color',
+  slots: 'specialty_shows.slots',
+  active: 'specialty_shows.active',
+};
 export const schedule = {};
 export const artist_crossreference = {
   source_artist_id: 'artist_crossreference.source_artist_id',

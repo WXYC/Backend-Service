@@ -3644,13 +3644,42 @@ export const show_djs = wxyc_schema.table(
 //create entry w/ ID 0 for regular shows
 export type NewSpecialtyShow = InferInsertModel<typeof specialty_shows>;
 export type SpecialtyShows = InferSelectModel<typeof specialty_shows>;
-export const specialty_shows = wxyc_schema.table('specialty_shows', {
-  id: serial('id').primaryKey(),
-  specialty_name: varchar('specialty_name', { length: 64 }).notNull(),
-  description: text('description'),
-  add_date: date('add_date').defaultNow().notNull(),
-  last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
-});
+// The role a who's-on entry carries on air. Created with all five values in one CREATE TYPE (migration 0201) so the
+// seed rows can use it in the same transaction; the flowsheet's spotlight column (BS#3458) reuses the type.
+export const spotlightRoleEnum = wxyc_schema.enum('spotlight_role', ['performer', 'dj', 'reader', 'guest', 'host']);
+
+export type SpecialtyShowArtwork = { square_url: string; master_url: string; wide_url: string };
+// `day` 0 = Monday; `start_time` is an America/New_York wall-clock HH:MM.
+export type SpecialtyShowSlot = {
+  day: number;
+  start_time: string;
+  duration_minutes: number;
+  cadence: 'weekly' | 'some_weeks' | 'last_of_month';
+};
+
+export const specialty_shows = wxyc_schema.table(
+  'specialty_shows',
+  {
+    id: serial('id').primaryKey(),
+    specialty_name: varchar('specialty_name', { length: 64 }).notNull(),
+    description: text('description'),
+    add_date: date('add_date').defaultNow().notNull(),
+    // Moved by the BEFORE UPDATE trigger from migration 0201; the catalog's ETag derives from max(last_modified).
+    last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
+    // Stable public id (URLs, analytics, artwork paths). Never reused, so the index covers retired rows too.
+    slug: varchar('slug', { length: 64 }).notNull(),
+    short_name: varchar('short_name', { length: 32 }).notNull(),
+    tagline: varchar('tagline', { length: 120 }),
+    logs_playcuts: boolean('logs_playcuts').default(true).notNull(),
+    default_spotlight_role: spotlightRoleEnum('default_spotlight_role'),
+    artwork: jsonb('artwork').$type<SpecialtyShowArtwork>(),
+    accent_color: char('accent_color', { length: 7 }),
+    slots: jsonb('slots').$type<SpecialtyShowSlot[]>().default([]).notNull(),
+    // Retired programs stay so old shows still resolve.
+    active: boolean('active').default(true).notNull(),
+  },
+  (table) => [uniqueIndex('specialty_shows_slug_unique').on(table.slug)]
+);
 
 export const library_artist_view = wxyc_schema.view('library_artist_view').as((qb) => {
   return (
