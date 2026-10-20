@@ -83,22 +83,21 @@ docker run --rm --env-file .env -e DRY_RUN=true <ecr-image-uri>:<tag>
 
 ## Environment variables
 
-| Variable                    | Default       | Purpose                                                                              |
-| --------------------------- | ------------- | ------------------------------------------------------------------------------------ |
-| `DATABASE_URL`              | —             | Backend PostgreSQL connection string (required)                                      |
-| `LIBRARY_METADATA_URL`      | —             | LML base URL (required); trailing `/api/v1` is stripped                              |
-| `LML_API_KEY`               | unset         | Bearer token; sent as `Authorization: Bearer …` when set (LML enforces auth in prod) |
-| `BATCH_SIZE`                | `500`         | Names per `artists/search-aliases/bulk` call; LML caps at 1000                       |
-| `THROTTLE_MS`               | `100`         | Inter-batch sleep, ms (DB + LML pacing)                                              |
-| `STALE_THRESHOLD_DAYS`      | `7`           | Days before an `artist_search_alias` row is re-fetched                               |
-| `PARTITION_INDEX`           | `0`           | Index of this partition (0-based)                                                    |
-| `PARTITION_COUNT`           | `1`           | Total partition count; `1` skips the modulo at the SQL level                         |
-| `DRY_RUN`                   | unset         | Locked truthy `true`/`1`/`TRUE`: call LML, suppress writes, emit JSON                |
-| `SENTRY_DSN`                | unset         | Optional; Sentry no-ops when unset                                                   |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0`           | Sampling rate for the run span (0–1)                                                 |
-| `WXYC_SCHEMA_NAME`          | `wxyc_schema` | Override only for parallel Jest workers / integration harnesses                      |
-| `DB_STATEMENT_TIMEOUT_MS`   | `60000`       | Set by `Dockerfile.artist-search-alias-consumer`; honored by `@wxyc/database`        |
-| `DB_APPLICATION_NAME`       | (see Docker)  | Set by Dockerfile to `wxyc-artist-search-alias-consumer` for `pg_stat_activity` tags |
+| Variable                  | Default       | Purpose                                                                              |
+| ------------------------- | ------------- | ------------------------------------------------------------------------------------ |
+| `DATABASE_URL`            | —             | Backend PostgreSQL connection string (required)                                      |
+| `LIBRARY_METADATA_URL`    | —             | LML base URL (required); trailing `/api/v1` is stripped                              |
+| `LML_API_KEY`             | unset         | Bearer token; sent as `Authorization: Bearer …` when set (LML enforces auth in prod) |
+| `BATCH_SIZE`              | `500`         | Names per `artists/search-aliases/bulk` call; LML caps at 1000                       |
+| `THROTTLE_MS`             | `100`         | Inter-batch sleep, ms (DB + LML pacing)                                              |
+| `STALE_THRESHOLD_DAYS`    | `7`           | Days before an `artist_search_alias` row is re-fetched                               |
+| `PARTITION_INDEX`         | `0`           | Index of this partition (0-based)                                                    |
+| `PARTITION_COUNT`         | `1`           | Total partition count; `1` skips the modulo at the SQL level                         |
+| `DRY_RUN`                 | unset         | Locked truthy `true`/`1`/`TRUE`: call LML, suppress writes, emit JSON                |
+| `SENTRY_DSN`              | unset         | Optional; Sentry no-ops when unset                                                   |
+| `WXYC_SCHEMA_NAME`        | `wxyc_schema` | Override only for parallel Jest workers / integration harnesses                      |
+| `DB_STATEMENT_TIMEOUT_MS` | `60000`       | Set by `Dockerfile.artist-search-alias-consumer`; honored by `@wxyc/database`        |
+| `DB_APPLICATION_NAME`     | (see Docker)  | Set by Dockerfile to `wxyc-artist-search-alias-consumer` for `pg_stat_activity` tags |
 
 ## Sentry metrics
 

@@ -100,7 +100,6 @@
  * trigger `bump_flowsheet_updated_at` owns that column (`0084:81-83`).
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import {
   db,
@@ -1938,36 +1937,6 @@ export const runScrub = async (opts: {
   }
 
   result.failed = failure !== null;
-
-  Sentry.startSpan(
-    {
-      name: 'flowsheet_dj_name_scrub.run.summary',
-      attributes: {
-        'scrub.dry_run': dryRun,
-        'scrub.pii_name_count': result.piiNameCount,
-        'scrub.legacy_dj_name_pii_count': result.legacyDjNamePiiCount,
-        'scrub.main.scanned': result.main.scanned,
-        'scrub.main.changed': result.main.changed,
-        'scrub.main.written': result.main.written,
-        'scrub.main.last_id': result.main.last_id,
-        'scrub.message.scanned': result.message.scanned,
-        'scrub.message.changed': result.message.changed,
-        'scrub.message.written': result.message.written,
-        'scrub.message.last_id': result.message.last_id,
-        'scrub.orphan.scanned': result.orphan.scanned,
-        'scrub.orphan.changed': result.orphan.changed,
-        'scrub.orphan.written': result.orphan.written,
-        'scrub.orphan.last_id': result.orphan.last_id,
-        'scrub.high_water_mark': result.highWaterMark,
-        'scrub.remaining': result.remaining,
-        'scrub.stopped': result.stopped,
-        'scrub.failed': result.failed,
-      },
-    },
-    () => {
-      /* attributes set at creation */
-    }
-  );
 
   const step = failure ? 'failed' : result.stopped ? 'stopped' : 'finished';
   log(failure ? 'error' : 'info', step, `${JOB_NAME} ${step}`, {

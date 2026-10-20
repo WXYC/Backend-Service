@@ -56,7 +56,6 @@
  * doesn't mis-report partial totals as a completed run.
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import {
   db,
@@ -836,34 +835,6 @@ export const runReenrichment = async (opts: {
     failed = { error };
     throw error;
   } finally {
-    // Summary span carrying numeric attributes (BS#1081 typing-trap workaround).
-    // Always emitted — even on stop/fail — so partial-run telemetry is
-    // available in Sentry trace explorer.
-    Sentry.startSpan(
-      {
-        name: 'reenrichment.run.summary',
-        attributes: {
-          'reenrichment.flipped_count': flipped(),
-          'reenrichment.still_no_match_count': totals.still_no_match,
-          'reenrichment.upstream_unavailable_skipped_count': totals.upstream_unavailable_skipped,
-          // Without this a dry run's span is byte-identical to a live run
-          // that matched nothing — the catastrophic outcome the span exists
-          // to surface (review round 1).
-          'reenrichment.dry_run': dryRun,
-          'reenrichment.match_raced_count': totals.match_raced,
-          'reenrichment.lml_error_count': totals.lml_error,
-          'reenrichment.db_error_count': totals.db_error,
-          'reenrichment.scanned_count': totals.scanned,
-          'reenrichment.last_id': lastId,
-          'reenrichment.stopped': stopped,
-          'reenrichment.failed': failed !== null,
-        },
-      },
-      () => {
-        /* attributes set at creation */
-      }
-    );
-
     if (totals.match_raced > 0) {
       log(
         'warn',

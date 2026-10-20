@@ -46,10 +46,8 @@
  * Required env: DB_* (postgres connection).
  *
  * Optional env:
- *   SENTRY_DSN, SENTRY_RELEASE, SENTRY_TRACES_SAMPLE_RATE — observability.
+ *   SENTRY_DSN, SENTRY_RELEASE — observability.
  */
-
-import * as Sentry from '@sentry/node';
 
 import { closeDatabaseConnection } from '@wxyc/database';
 
@@ -61,7 +59,7 @@ import { loadSyncCandidates, applySyncDiff } from './sync-db.js';
 import { runSupportResolver } from './support.js';
 import { loadSupportCandidates, writeSupportArtistId } from './support-db.js';
 import { recomputeHasResolvedSupport } from './recompute.js';
-import { initLogger, log, captureError, closeLogger } from './logger.js';
+import { initLogger, log, captureError, captureCounter, closeLogger } from './logger.js';
 
 const JOB_NAME = 'concerts-artist-resolver';
 
@@ -122,170 +120,80 @@ const safeFinalize = async (step: string, fn: () => Promise<void>): Promise<void
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   try {
-    await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
-      try {
-        log('info', 'init', `${JOB_NAME} initialized`);
+    try {
+      log('info', 'init', `${JOB_NAME} initialized`);
 
-        // Step 1: sync concert_performers (role='support') from
-        // supporting_artists_raw. Must run before step 3 so this same
-        // cycle's newly-synced rows are visible to the support resolver.
-        const { totals: syncTotals } = await runSync({
-          loadCandidates: loadSyncCandidates,
-          applyDiff: applySyncDiff,
-          onError: (candidate, error) => {
-            log('warn', 'sync_row_error', `sync failed for concert ${candidate.concert_id}`, {
-              concert_id: candidate.concert_id,
-              error_message: errorMessage(error),
-              error_name: errorName(error),
-            });
-            captureError(error, 'sync_row_error', { concert_id: candidate.concert_id });
-          },
-        });
+      // Step 1: sync concert_performers (role='support') from
+      // supporting_artists_raw. Must run before step 3 so this same
+      // cycle's newly-synced rows are visible to the support resolver.
+      const { totals: syncTotals } = await runSync({
+        loadCandidates: loadSyncCandidates,
+        applyDiff: applySyncDiff,
+        onError: (candidate, error) => {
+          log('warn', 'sync_row_error', `sync failed for concert ${candidate.concert_id}`, {
+            concert_id: candidate.concert_id,
+            error_message: errorMessage(error),
+            error_name: errorName(error),
+          });
+          captureError(error, 'sync_row_error', { concert_id: candidate.concert_id });
+        },
+      });
 
-        log('info', 'sync_finished', `${JOB_NAME} sync done`, { ...syncTotals });
+      log('info', 'sync_finished', `${JOB_NAME} sync done`, { ...syncTotals });
 
-        Sentry.startSpan(
-          {
-            name: `${JOB_NAME}.run.sync_totals`,
-            attributes: {
-              'sync.concerts_scanned': syncTotals.concerts_scanned,
-              'sync.concerts_changed': syncTotals.concerts_changed,
-              'sync.inserted': syncTotals.inserted,
-              'sync.untombstoned': syncTotals.untombstoned,
-              'sync.tombstoned': syncTotals.tombstoned,
-              'sync.error': syncTotals.error,
-            },
-          },
-          () => {
-            /* attributes set at creation; nothing else to do */
-          }
-        );
+      // Step 2: headliner resolve — UNCHANGED from BS#1372.
+      const { totals } = await runResolver({
+        loadCandidates,
+        resolve: resolveArtistId,
+        write: writeArtistId,
+        onError: (candidate, error) => {
+          log('warn', 'row_error', `resolver row failed for concert ${candidate.id}`, {
+            concert_id: candidate.id,
+            error_message: errorMessage(error),
+            error_name: errorName(error),
+          });
+          captureError(error, 'row_error', { concert_id: candidate.id });
+        },
+      });
 
-        // Step 2: headliner resolve — UNCHANGED from BS#1372.
-        const { totals } = await runResolver({
-          loadCandidates,
-          resolve: resolveArtistId,
-          write: writeArtistId,
-          onError: (candidate, error) => {
-            log('warn', 'row_error', `resolver row failed for concert ${candidate.id}`, {
-              concert_id: candidate.id,
-              error_message: errorMessage(error),
-              error_name: errorName(error),
-            });
-            captureError(error, 'row_error', { concert_id: candidate.id });
-          },
-        });
+      log('info', 'finished', `${JOB_NAME} done`, { ...totals });
 
-        log('info', 'finished', `${JOB_NAME} done`, { ...totals });
+      // Step 3: support resolve arm. Reuses resolveArtistId verbatim
+      // (query.js) through the bespoke support.ts loop + support-db.ts
+      // junction writer.
+      const { totals: supportTotals } = await runSupportResolver({
+        loadCandidates: loadSupportCandidates,
+        resolve: resolveArtistId,
+        write: writeSupportArtistId,
+        onError: (candidate, error) => {
+          log('warn', 'support_row_error', `support resolver failed for performer ${candidate.id}`, {
+            performer_id: candidate.id,
+            error_message: errorMessage(error),
+            error_name: errorName(error),
+          });
+          captureError(error, 'support_row_error', { performer_id: candidate.id });
+        },
+      });
 
-        // Surface run totals as a CHILD span whose numeric attributes are
-        // set at creation time (per BS#1081 / memory
-        // `feedback_sentry_attribute_typing_trap`: numeric values passed
-        // via `setAttribute(name, number)` AFTER the span has already
-        // started get indexed as strings, which breaks avg/p50/p95/sum
-        // aggregation on Sentry dashboards).
-        Sentry.startSpan(
-          {
-            name: `${JOB_NAME}.run.totals`,
-            attributes: {
-              'resolver.scanned': totals.scanned,
-              'resolver.resolved': totals.resolved,
-              'resolver.resolved_strict': totals.resolved_strict,
-              'resolver.resolved_alias': totals.resolved_alias,
-              'resolver.ambiguous': totals.ambiguous,
-              'resolver.unmatched': totals.unmatched,
-              'resolver.null_raw_skipped': totals.null_raw_skipped,
-              'resolver.error': totals.error,
-              'resolver.raced': totals.raced,
-            },
-          },
-          () => {
-            /* attributes set at creation; nothing else to do */
-          }
-        );
+      log('info', 'support_finished', `${JOB_NAME} support resolve done`, { ...supportTotals });
 
-        // Step 3: support resolve arm. Reuses resolveArtistId verbatim
-        // (query.js) through the bespoke support.ts loop + support-db.ts
-        // junction writer.
-        const { totals: supportTotals } = await runSupportResolver({
-          loadCandidates: loadSupportCandidates,
-          resolve: resolveArtistId,
-          write: writeSupportArtistId,
-          onError: (candidate, error) => {
-            log('warn', 'support_row_error', `support resolver failed for performer ${candidate.id}`, {
-              performer_id: candidate.id,
-              error_message: errorMessage(error),
-              error_name: errorName(error),
-            });
-            captureError(error, 'support_row_error', { performer_id: candidate.id });
-          },
-        });
+      // Step 4: recompute has_resolved_support from truth over the
+      // active window. Must run after step 3 so this cycle's fresh
+      // support resolutions (and step 1's tombstones/untombstones) are
+      // reflected.
+      const recomputeOutcome = await recomputeHasResolvedSupport();
 
-        log('info', 'support_finished', `${JOB_NAME} support resolve done`, { ...supportTotals });
-
-        Sentry.startSpan(
-          {
-            name: `${JOB_NAME}.run.support_totals`,
-            attributes: {
-              'support.scanned': supportTotals.scanned,
-              'support.resolved': supportTotals.resolved,
-              'support.resolved_strict': supportTotals.resolved_strict,
-              'support.resolved_alias': supportTotals.resolved_alias,
-              'support.ambiguous': supportTotals.ambiguous,
-              'support.unmatched': supportTotals.unmatched,
-              'support.error': supportTotals.error,
-              'support.raced': supportTotals.raced,
-            },
-          },
-          () => {
-            /* attributes set at creation; nothing else to do */
-          }
-        );
-
-        // Step 4: recompute has_resolved_support from truth over the
-        // active window. Must run after step 3 so this cycle's fresh
-        // support resolutions (and step 1's tombstones/untombstones) are
-        // reflected.
-        const recomputeOutcome = await recomputeHasResolvedSupport();
-
-        log('info', 'recompute_finished', `${JOB_NAME} has_resolved_support recompute done`, { ...recomputeOutcome });
-
-        Sentry.startSpan(
-          {
-            name: `${JOB_NAME}.run.recompute_totals`,
-            attributes: {
-              'recompute.updated': recomputeOutcome.updated,
-              'recompute.updated_true': recomputeOutcome.updated_true,
-              'recompute.updated_false': recomputeOutcome.updated_false,
-            },
-          },
-          () => {
-            /* attributes set at creation; nothing else to do */
-          }
-        );
-      } catch (error) {
-        log('error', 'failed', `${JOB_NAME} failed`, {
-          error_message: errorMessage(error),
-          error_name: errorName(error),
-        });
-        captureError(error, 'failed');
-        // Mark the wrapping `${JOB_NAME}.run` span as failed (Sentry
-        // span-status code 2 = ERROR) so OTLP / Sentry alerts keyed on
-        // `op:job.run` error rate actually fire. Without this the span
-        // resolves with status:OK and the failure stays invisible to
-        // alerting even though captureError has logged the exception.
-        Sentry.getActiveSpan()?.setStatus({ code: 2, message: 'failed' });
-        process.exitCode = 1;
-      }
-    });
+      log('info', 'recompute_finished', `${JOB_NAME} has_resolved_support recompute done`, { ...recomputeOutcome });
+    } catch (error) {
+      log('error', 'failed', `${JOB_NAME} failed`, {
+        error_message: errorMessage(error),
+        error_name: errorName(error),
+      });
+      captureError(error, 'failed');
+      captureCounter(`${JOB_NAME}.failed`, 1);
+      process.exitCode = 1;
+    }
   } finally {
-    // Cleanup runs OUTSIDE the `Sentry.startSpan` callback so the parent
-    // `${JOB_NAME}.run` span's end event fires through a live transport.
-    // `closeLogger` calls `Sentry.close(2000)`, which disables the SDK —
-    // if we ran it in the span callback's finally, the parent span's
-    // terminal event would land on an already-disabled client and the
-    // whole transaction (including the child totals spans) would be
-    // dropped silently.
     await safeFinalize('teardown_db', closeDatabaseConnection);
     await safeFinalize('teardown_logger', closeLogger);
   }

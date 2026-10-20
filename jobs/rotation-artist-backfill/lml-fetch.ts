@@ -28,8 +28,6 @@
  * work in the background, doubling Discogs egress on the next day's run.
  */
 
-import * as Sentry from '@sentry/node';
-
 import { envInt, type BulkCacheRefreshResponse, LmlClientError, refreshForIdentities } from '@wxyc/lml-client';
 
 import { defaultLmlLimiter } from './lml-limiter.js';
@@ -64,58 +62,11 @@ const classifyError = (e: unknown): FetchOutcome<never> => {
   return { kind: 'error', error: err, retryable };
 };
 
-/**
- * Mark the active Sentry span with an explicit OK or ERROR status. Per OTLP
- * semantic conventions, span status is the queryable signal for error-rate
- * dashboards. `@sentry/core`'s `spanToJSON` defaults the status to `ok`
- * when nothing is set, so a successful batch without this call still
- * surfaces as OK in standard Sentry views — the explicit `code: 1` set
- * is defense against custom alert filters of the shape
- * `span.status_code != 1` or query backends that surface `unset`
- * separately, AND it makes the OK case symmetric with the explicit
- * `code: 2` set on failure (so reviewers don't have to grep the SDK to
- * confirm the OK branch is wired).
- *
- * Per-id failures inside a successful batch (`status: 'error'` items)
- * do NOT promote to span-level error here — the orchestrator's tally
- * surfaces them via the `backfill.lml_error` counter on the totals span.
- * Promoting them would inflate `op:http.client` error-rate alerts on
- * steady-state runs where a single stale-identity row would fire an alert.
- *
- * Status codes: 0 = unset, 1 = OK, 2 = ERROR (OTLP / @sentry/core).
- */
-const markSpanOutcome = <T>(outcome: FetchOutcome<T>): void => {
-  const span = Sentry.getActiveSpan();
-  if (!span) return;
-  if (outcome.kind === 'ok') {
-    span.setStatus({ code: 1, message: 'ok' });
-    return;
-  }
-  span.setStatus({ code: 2, message: outcome.retryable ? 'retryable_error' : 'permanent_error' });
-};
-
 export const fetchIdentityRefresh = async (identityIds: number[]): Promise<FetchOutcome<BulkCacheRefreshResponse>> => {
-  return Sentry.startSpan(
-    {
-      name: 'lml.refresh_for_identities',
-      op: 'http.client',
-      attributes: {
-        'lml.batch_size': identityIds.length,
-        'lml.batch_timeout_ms': BATCH_TIMEOUT_MS,
-      },
-    },
-    async () => {
-      let outcome: FetchOutcome<BulkCacheRefreshResponse>;
-      try {
-        const value = await defaultLmlLimiter.run(() =>
-          refreshForIdentities(identityIds, { timeoutMs: BATCH_TIMEOUT_MS })
-        );
-        outcome = { kind: 'ok', value };
-      } catch (e) {
-        outcome = classifyError(e);
-      }
-      markSpanOutcome(outcome);
-      return outcome;
-    }
-  );
+  try {
+    const value = await defaultLmlLimiter.run(() => refreshForIdentities(identityIds, { timeoutMs: BATCH_TIMEOUT_MS }));
+    return { kind: 'ok', value };
+  } catch (e) {
+    return classifyError(e);
+  }
 };

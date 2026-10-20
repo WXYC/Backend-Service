@@ -117,7 +117,7 @@ docker run --rm --env-file .env <image>
 
 Required env: `DB_*` (postgres connection).
 
-Optional env: `SENTRY_DSN`, `SENTRY_RELEASE`, `SENTRY_TRACES_SAMPLE_RATE`.
+Optional env: `SENTRY_DSN`, `SENTRY_RELEASE`.
 
 No job-specific env vars beyond the shared observability ones above — neither the sync step nor the support arm has a TTL/budget knob (that concept belongs to the Phase D LML arm in `jobs/concerts-artist-lml-resolver`, which spends an external API budget; this job's SQL arms are free local queries).
 

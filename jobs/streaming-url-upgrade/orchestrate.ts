@@ -40,7 +40,6 @@
  * `jobs/apple-music-url-backfill/orchestrate.ts`.
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import {
   db,
@@ -686,35 +685,6 @@ export const runUpgrade = async (opts: {
     failure = { error };
   } finally {
     result.failed = failure !== null;
-
-    // Summary span carrying numeric attributes (BS#1081 typing-trap
-    // workaround) — emitted even on stop/fail so partial-run telemetry is
-    // queryable in Sentry's trace explorer.
-    Sentry.startSpan(
-      {
-        name: 'streaming_url_upgrade.run.summary',
-        attributes: {
-          'upgrade.dry_run': dryRun,
-          'upgrade.album.candidates': result.album_metadata.candidates,
-          'upgrade.album.spotify_upgraded': result.album_metadata.spotify.upgraded,
-          'upgrade.album.spotify_would_upgrade': result.album_metadata.spotify.would_upgrade,
-          'upgrade.album.bandcamp_upgraded': result.album_metadata.bandcamp.upgraded,
-          'upgrade.album.bandcamp_would_upgrade': result.album_metadata.bandcamp.would_upgrade,
-          'upgrade.album.last_id': result.album_metadata.last_id,
-          'upgrade.flowsheet.candidates': result.flowsheet.candidates,
-          'upgrade.flowsheet.spotify_upgraded': result.flowsheet.spotify.upgraded,
-          'upgrade.flowsheet.spotify_would_upgrade': result.flowsheet.spotify.would_upgrade,
-          'upgrade.flowsheet.bandcamp_upgraded': result.flowsheet.bandcamp.upgraded,
-          'upgrade.flowsheet.bandcamp_would_upgrade': result.flowsheet.bandcamp.would_upgrade,
-          'upgrade.flowsheet.last_id': result.flowsheet.last_id,
-          'upgrade.stopped': result.stopped,
-          'upgrade.failed': result.failed,
-        },
-      },
-      () => {
-        /* attributes set at creation */
-      }
-    );
 
     // Distinct steps so a runbook jq filter can differentiate:
     //   'finished' — both phases drained (or capped) cleanly

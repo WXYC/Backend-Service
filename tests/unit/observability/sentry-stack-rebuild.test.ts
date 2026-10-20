@@ -36,7 +36,7 @@ const heldBy = (event: ErrorEvent) =>
 /** Everything @sentry/node sends for one captured error, through its default integrations and this repo's hooks. */
 async function captureThroughSentry(
   error: unknown,
-  options: Partial<SentryNode.NodeOptions> = {},
+  options: Partial<NonNullable<Parameters<typeof SentryNode.init>[0]>> = {},
   beforeSend: (event: ErrorEvent, hint: EventHint) => ErrorEvent = redactSentryEventQueryParams
 ): Promise<ErrorEvent> {
   const sent: ErrorEvent[] = [];
@@ -364,7 +364,10 @@ describe('an error that never held a params marker', () => {
   };
 
   /** The event for the same error made twice at one call site, without the hook and with it. */
-  async function eventsWithAndWithoutHook(make: () => Error, options: Partial<SentryNode.NodeOptions> = {}) {
+  async function eventsWithAndWithoutHook(
+    make: () => Error,
+    options: Partial<NonNullable<Parameters<typeof SentryNode.init>[0]>> = {}
+  ) {
     const [first, second] = [0, 1].map(() => make());
     const without = await captureThroughSentry(first, options, (event) => event);
     const withHook = await captureThroughSentry(second, options);

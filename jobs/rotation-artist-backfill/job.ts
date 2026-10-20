@@ -27,7 +27,6 @@
  * Resumable + idempotent — see orchestrate.ts header.
  */
 
-import * as Sentry from '@sentry/node';
 import { envInt } from '@wxyc/lml-client';
 
 import { closeDatabaseConnection } from '@wxyc/database';
@@ -115,52 +114,39 @@ const safeFinalize = async (step: string, fn: () => Promise<void>): Promise<void
 
 const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
-  // The wrapping Sentry span MUST end before `closeLogger` runs — that
-  // call invokes `Sentry.close(2000)`, which shuts down the transport.
-  // If the close fires from inside the startSpan callback, the
-  // wrapping span itself gets dropped by the now-closed transport.
   try {
-    await Sentry.startSpan({ name: `${JOB_NAME}.run`, op: 'job.run' }, async () => {
-      try {
-        requireLmlConfigured();
-        log('info', 'init', `${JOB_NAME} initialized`);
+    try {
+      requireLmlConfigured();
+      log('info', 'init', `${JOB_NAME} initialized`);
 
-        const guard = await enforceDeployGuard();
-        log('info', 'deploy_guard', 'LML deploy gate passed', {
-          commit_sha: guard.commit_sha,
-          reason: guard.reason,
-        });
+      const guard = await enforceDeployGuard();
+      log('info', 'deploy_guard', 'LML deploy gate passed', {
+        commit_sha: guard.commit_sha,
+        reason: guard.reason,
+      });
 
-        const concurrency = envInt('BACKFILL_LML_MAX_CONCURRENT', 3);
-        const dryRun = envBool('DRY_RUN');
+      const concurrency = envInt('BACKFILL_LML_MAX_CONCURRENT', 3);
+      const dryRun = envBool('DRY_RUN');
 
-        const result = await runBackfill({
-          loadIdentityIds: loadActiveRotationIdentityIds,
-          concurrency,
-          dryRun,
-        });
+      const result = await runBackfill({
+        loadIdentityIds: loadActiveRotationIdentityIds,
+        concurrency,
+        dryRun,
+      });
 
-        log('info', 'done', `${JOB_NAME} completed`, {
-          ...result.totals,
-          dry_run: dryRun,
-        });
-      } catch (error) {
-        const step = error instanceof DeployGuardError ? 'deploy_guard' : 'failed';
-        log('error', step, `${JOB_NAME} failed`, {
-          error_message: errorMessage(error),
-          error_name: errorName(error),
-        });
-        captureError(error, step);
-        // Mark the wrapping `${JOB_NAME}.run` span as failed so OTLP /
-        // Sentry error-rate alerts keyed on `op:job.run` actually fire.
-        // The catch swallows the throw (we set process.exitCode = 1 and
-        // let the cron exit cleanly so safeFinalize still runs), which
-        // would otherwise leave the parent span resolving OK and hide
-        // the failure from dashboards. Codes: 0 = unset, 1 = OK, 2 = ERROR.
-        Sentry.getActiveSpan()?.setStatus({ code: 2, message: step });
-        process.exitCode = 1;
-      }
-    });
+      log('info', 'done', `${JOB_NAME} completed`, {
+        ...result.totals,
+        dry_run: dryRun,
+      });
+    } catch (error) {
+      const step = error instanceof DeployGuardError ? 'deploy_guard' : 'failed';
+      log('error', step, `${JOB_NAME} failed`, {
+        error_message: errorMessage(error),
+        error_name: errorName(error),
+      });
+      captureError(error, step);
+      process.exitCode = 1;
+    }
   } finally {
     await safeFinalize('teardown_db', closeDatabaseConnection);
     await safeFinalize('teardown_logger', closeLogger);

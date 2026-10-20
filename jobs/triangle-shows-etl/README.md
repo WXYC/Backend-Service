@@ -8,10 +8,10 @@ Nightly pull ETL (BS#1589, Phase 1 of the [BS#1570](https://github.com/WXYC/Back
 
 ## Environment
 
-| Var                                                           | Required | Purpose                                                                                                                                                                                                            |
-| ------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `TRIANGLE_SHOWS_URL`                                          | yes      | Base URL of the triangle-shows API (no trailing slash). The job fails fast at startup when unset.                                                                                                                  |
-| `SENTRY_DSN` / `SENTRY_RELEASE` / `SENTRY_TRACES_SAMPLE_RATE` | no       | Org-standard observability (issue #538 logger contract). The staleness signal is message-based (`Sentry.captureMessage`), so it works with tracing off — BS crons default `SENTRY_TRACES_SAMPLE_RATE=0` (BS#1457). |
+| Var                             | Required | Purpose                                                                                                                                                 |
+| ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TRIANGLE_SHOWS_URL`            | yes      | Base URL of the triangle-shows API (no trailing slash). The job fails fast at startup when unset.                                                       |
+| `SENTRY_DSN` / `SENTRY_RELEASE` | no       | Org-standard observability (issue #538 logger contract). The staleness signal is message-based (`Sentry.captureMessage`), so it works with tracing off. |
 
 Plus the standard `@wxyc/database` connection vars. See [`docs/env-vars.md`](../../docs/env-vars.md).
 

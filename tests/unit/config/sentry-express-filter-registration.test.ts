@@ -107,8 +107,7 @@ describe('tracing configuration', () => {
       }
     }
     const initOptions = mockInit.mock.calls[0][0] as Record<string, unknown>;
-    expect(initOptions).not.toHaveProperty('tracesSampleRate');
-    expect(initOptions).not.toHaveProperty('tracesSampler');
+    expect(Object.keys(initOptions).filter((key) => key.startsWith('tracesSampl'))).toEqual([]);
     expect(envAtInit).toBeUndefined();
   });
 });

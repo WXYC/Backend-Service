@@ -34,7 +34,6 @@
  * `jobs/flowsheet-reenrichment/orchestrate.ts`.
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import {
   db,
@@ -574,33 +573,6 @@ export const runBackfill = async (opts: {
     failure = { error };
   } finally {
     result.failed = failure !== null;
-
-    // Summary span carrying numeric attributes (BS#1081 typing-trap
-    // workaround) — emitted even on stop/fail so partial-run telemetry is
-    // queryable in Sentry's trace explorer.
-    Sentry.startSpan(
-      {
-        name: 'apple_music_url_backfill.run.summary',
-        attributes: {
-          'backfill.dry_run': dryRun,
-          'backfill.album.candidates': result.album_metadata.candidates,
-          'backfill.album.resolved': result.album_metadata.resolved,
-          'backfill.album.would_resolve': result.album_metadata.would_resolve,
-          'backfill.album.still_null': result.album_metadata.still_null,
-          'backfill.album.last_id': result.album_metadata.last_id,
-          'backfill.flowsheet.candidates': result.flowsheet.candidates,
-          'backfill.flowsheet.resolved': result.flowsheet.resolved,
-          'backfill.flowsheet.would_resolve': result.flowsheet.would_resolve,
-          'backfill.flowsheet.still_null': result.flowsheet.still_null,
-          'backfill.flowsheet.last_id': result.flowsheet.last_id,
-          'backfill.stopped': result.stopped,
-          'backfill.failed': result.failed,
-        },
-      },
-      () => {
-        /* attributes set at creation */
-      }
-    );
 
     // Distinct steps so a runbook jq filter can differentiate:
     //   'finished' — both phases drained (or capped) cleanly

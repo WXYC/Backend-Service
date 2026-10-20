@@ -23,12 +23,11 @@ The architecture is single-source-uniqueness, not cross-source dedup: re-scrapes
 
 ## Environment variables
 
-| Variable                    | Default | Purpose                                                 |
-| --------------------------- | ------- | ------------------------------------------------------- |
-| `VENUE_SCRAPER_CONCURRENCY` | `8`     | Per-site in-flight event-page fetch cap (1..32).        |
-| `DB_STATEMENT_TIMEOUT_MS`   | `60000` | Inherited from `Dockerfile.venue-events-scraper`.       |
-| `SENTRY_DSN`                | unset   | Optional. When unset the SDK no-ops.                    |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0`     | Optional. Per `resolveTracesSampleRate` in `logger.ts`. |
+| Variable                    | Default | Purpose                                           |
+| --------------------------- | ------- | ------------------------------------------------- |
+| `VENUE_SCRAPER_CONCURRENCY` | `8`     | Per-site in-flight event-page fetch cap (1..32).  |
+| `DB_STATEMENT_TIMEOUT_MS`   | `60000` | Inherited from `Dockerfile.venue-events-scraper`. |
+| `SENTRY_DSN`                | unset   | Optional. When unset the SDK no-ops.              |
 
 ## Adding a new venue
 

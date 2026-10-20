@@ -43,7 +43,6 @@
  * totals span fires in both modes.
  */
 
-import * as Sentry from '@sentry/node';
 import {
   type BulkCacheRefreshResponse,
   type CacheRefreshResultItem,
@@ -271,41 +270,6 @@ const tallyBatchError = (totals: Totals, batchSize: number): void => {
   totals.lml_error += batchSize;
 };
 
-/**
- * Project the run totals onto a Sentry child span with numeric attributes
- * set at creation time (per the BS#1081 convention — late `setAttribute`
- * calls index numbers as strings and break sum/avg/p95 aggregation).
- *
- * The span carries an explicit `op` of `rotation-artist-backfill.totals` so
- * the BS#1402 alert rules (439423 / 439424) — which filter
- * `span.op:rotation-artist-backfill.*` — actually match it. Without an `op`
- * the span lands under a generic default op, that wildcard matches nothing,
- * and the alerts' `sum(backfill.*)` aggregate resolves over zero rows: they
- * sit at "no data" forever (the BS#1428 finding). The name keeps the sibling
- * `${JOB_NAME}.run.totals` shape for name-pattern dashboard grouping.
- */
-const projectTotalsSpan = (totals: Totals, dryRun: boolean): void => {
-  Sentry.startSpan(
-    {
-      name: 'rotation-artist-backfill.run.totals',
-      op: 'rotation-artist-backfill.totals',
-      attributes: {
-        'backfill.dry_run': dryRun ? 1 : 0,
-        'backfill.identities_scanned': totals.identities_scanned,
-        'backfill.identities_resolved': totals.identities_resolved,
-        'backfill.warmed_releases': totals.warmed_releases,
-        'backfill.warmed_artists': totals.warmed_artists,
-        'backfill.not_found': totals.not_found,
-        'backfill.not_implemented': totals.not_implemented,
-        'backfill.lml_error': totals.lml_error,
-      },
-    },
-    () => {
-      /* observability-only span; attributes set at creation */
-    }
-  );
-};
-
 export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => {
   const fetchFn = deps.fetchFn ?? fetchIdentityRefresh;
   const concurrency = deps.concurrency ?? 3;
@@ -361,17 +325,6 @@ export const runBackfill = async (deps: RunBackfillDeps): Promise<RunResult> => 
     return { totals };
   } finally {
     if (didLoadIds) {
-      // Wrap in its own try/catch so a Sentry SDK fault here can't
-      // shadow the original error from the try block — the orchestrator
-      // paid AggregateError-construction cost specifically so failures
-      // surface, and finally-clause swallowing would undo that.
-      try {
-        projectTotalsSpan(totals, dryRun);
-      } catch (e) {
-        log('warn', 'totals_span_failed', 'projectTotalsSpan threw; original error preserved', {
-          error_message: e instanceof Error ? e.message : String(e),
-        });
-      }
       // Awaited here so the CloudWatch counters are sent before the job
       // closes the logger, on the success and failure paths alike (BS#3401).
       if (!dryRun) {

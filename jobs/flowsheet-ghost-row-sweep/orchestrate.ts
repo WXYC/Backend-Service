@@ -94,7 +94,6 @@
  * `jobs/streaming-url-remediation/orchestrate.ts`.
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import {
   db,
@@ -786,33 +785,6 @@ export const runSweep = async (opts: {
   }
 
   result.failed = failure !== null;
-
-  // Summary span carrying numeric attributes (BS#1081 typing-trap
-  // workaround, mirrored from streaming-url-remediation) — emitted even on
-  // stop/fail so partial-run telemetry is queryable.
-  Sentry.startSpan(
-    {
-      name: 'flowsheet_ghost_row_sweep.run.summary',
-      attributes: {
-        'sweep.dry_run': dryRun,
-        'sweep.flowsheet.scanned': result.flowsheet.scanned,
-        'sweep.flowsheet.ghosts': result.flowsheet.ghosts,
-        'sweep.flowsheet.removed': result.flowsheet.removed,
-        'sweep.flowsheet.last_id': result.flowsheet.last_id,
-        'sweep.flowsheet.remaining': result.flowsheet.remaining,
-        'sweep.rotation.scanned': result.rotation.scanned,
-        'sweep.rotation.ghosts': result.rotation.ghosts,
-        'sweep.rotation.removed': result.rotation.removed,
-        'sweep.rotation.last_id': result.rotation.last_id,
-        'sweep.rotation.remaining': result.rotation.remaining,
-        'sweep.stopped': result.stopped,
-        'sweep.failed': result.failed,
-      },
-    },
-    () => {
-      /* attributes set at creation */
-    }
-  );
 
   const step = failure ? 'failed' : result.stopped ? 'stopped' : 'finished';
   const level = failure ? 'error' : 'info';
