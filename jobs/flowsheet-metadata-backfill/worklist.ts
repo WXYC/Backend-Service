@@ -282,10 +282,15 @@ export const buildWorkList: BuildWorkListFn = async ({
   // only widens floor *eligibility*, and a row exempted via a member-alias
   // still enriches under its own artist name — no mislabel is possible,
   // and member-of-library-band names are typically cacheable anyway.
-  // CHOKEPOINT: if LML ever emits a broader relational source (collaborator
-  // / label-roster class), the alias consumer ingests it automatically and
-  // this CTE silently widens the exemption — revisit against
-  // SYNONYM_ALIAS_SOURCES then.
+  // CHOKEPOINT: any broader relational source widens this exemption with no
+  // change here, so revisit against SYNONYM_ALIAS_SOURCES when one lands.
+  // BS#3554's `wxyc_library_credit` is the first such source, and it was
+  // reviewed and accepted: each row is one name from a comma-joined
+  // `library.alternate_artist_name` credit (a member or collaborator filed
+  // under the band's card). It makes free-text plays under that name exempt
+  // from the floor. They still enrich under their own artist name, so there
+  // is no mislabel, and the person is one the library already files.
+  // A label-roster class would need the same review.
   const rows = unwrapRows<WorkListRow>(
     await db.execute(sql`
     WITH plays AS (

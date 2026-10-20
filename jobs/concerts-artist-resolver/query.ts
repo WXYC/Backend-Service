@@ -55,7 +55,7 @@ const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
  *     mislabels like the Geordie Greep → black midi case from the
  *     BS#1368 audit.
  *
- * Adding a 5th LML source requires a deliberate choice here. The
+ * Adding a new source (LML's or this repo's own) requires a deliberate choice here. The
  * resolver's SQL IN-list is built from SYNONYM_ALIAS_SOURCES, so a
  * source the partition does not name is silently excluded (safe-by-
  * default: FK stays NULL, row drops to manual review). The catalog-
@@ -71,7 +71,11 @@ const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
  * RelationalAliasSource types will be exported from here at that time.
  */
 export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias', 'wxyc_library_alt'] as const;
-export const RELATIONAL_ALIAS_SOURCES = ['discogs_member'] as const;
+// `wxyc_library_credit` (BS#3554) is one name from a comma-joined
+// `library.alternate_artist_name` credit: a member or collaborator filed
+// under the band's card, so it would make Rhiannon Giddens' concerts
+// resolve to Carolina Chocolate Drops.
+export const RELATIONAL_ALIAS_SOURCES = ['discogs_member', 'wxyc_library_credit'] as const;
 
 /**
  * Frozen IN-list for the alias arm, built once at module load. Safe-

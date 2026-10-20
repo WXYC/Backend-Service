@@ -13,9 +13,13 @@
  * may return are tolerated by TypeScript's structural typing and ignored.
  */
 
-/** `artist_search_alias.source` enum values that LML emits. */
+/**
+ * `artist_search_alias.source` enum values: the ones LML emits, plus
+ * `wxyc_library_credit`, which only this job composes (BS#3554;
+ * wxyc-shared#727 adds it to the contract).
+ */
 export type ArtistSearchAliasSource =
-  'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt';
+  'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt' | 'wxyc_library_credit';
 
 /** `artist_search_alias.method` enum values that LML emits. */
 export type ArtistSearchAliasMethod = 'name_variation' | 'alias_curated' | 'member_group' | 'alt_curated';

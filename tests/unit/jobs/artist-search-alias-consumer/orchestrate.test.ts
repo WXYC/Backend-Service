@@ -13,7 +13,11 @@
  *   - Name-group fan-out: one name → multiple `artist_id` writes; the
  *     `fanout_writes` counter increments per artist_id beyond the first.
  *   - Reconcile semantics: `sources_present` from LML has
- *     `'wxyc_library_alt'` appended unconditionally.
+ *     `'wxyc_library_alt'` and `'wxyc_library_credit'` appended
+ *     unconditionally.
+ *   - BS#3554 credit split: each comma-joined alt value also yields one
+ *     `wxyc_library_credit` row per name, next to the unchanged joined
+ *     `wxyc_library_alt` row.
  *   - LML error: the entire batch is counted as `names_missing`; loop
  *     continues with the next batch; cursor still advances.
  */
@@ -37,9 +41,9 @@ type WriteFn = (
 const makeLmlResult = (
   name: string,
   variantCount: number,
-  sources_present: ('discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt')[] = [
-    'discogs_name_variation',
-  ]
+  sources_present: (
+    'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt' | 'wxyc_library_credit'
+  )[] = ['discogs_name_variation']
 ): ArtistSearchAliasesResult => ({
   name,
   variants: Array.from({ length: variantCount }, (_, i) => ({
@@ -103,8 +107,9 @@ describe('runConsumer — happy path', () => {
     expect(fetchBulk).toHaveBeenCalledTimes(1);
     expect(fetchBulk.mock.calls[0][0]).toEqual(['Stereolab', 'Juana Molina', 'Nobody Knows']);
     // Writer is called for every eligible artist_id — including the
-    // missing one (with variants=[] and sourcesPresent=['wxyc_library_alt'])
-    // so any stale wxyc_library_alt rows reconcile away.
+    // missing one (with variants=[] and sourcesPresent naming the two local
+    // legs) so any stale wxyc_library_alt / wxyc_library_credit rows
+    // reconcile away.
     expect(writeArtistVariants).toHaveBeenCalledTimes(3);
 
     // For the missing name, sourcesPresent must NOT include any Discogs
@@ -115,7 +120,7 @@ describe('runConsumer — happy path', () => {
     expect(missingCall).toBeDefined();
     // missingCall: [artist_id, canonicalName, variants, sourcesPresent]
     expect(missingCall?.[2]).toEqual([]);
-    expect(missingCall?.[3]).toEqual(['wxyc_library_alt']);
+    expect(missingCall?.[3]).toEqual(['wxyc_library_alt', 'wxyc_library_credit']);
 
     expect(result.totals.names_scanned).toBe(3);
     expect(result.totals.names_resolved).toBe(2);
@@ -235,6 +240,76 @@ describe('runConsumer — happy path', () => {
     )[3];
     expect(sourcesPresentArg).toContain('discogs_name_variation');
     expect(sourcesPresentArg).toContain('wxyc_library_alt');
+    expect(sourcesPresentArg).toContain('wxyc_library_credit');
+  });
+
+  // The two BS#3554 cases build their doubles from plain functions plus an
+  // inferred `jest.fn(impl)`, so they add nothing to this file's
+  // typecheck:tests baseline (the explicit `jest.fn<Fn>()` form above is
+  // what the baseline counts).
+  const runOnce = (
+    group: NameGroup,
+    lml: ArtistSearchAliasesBulkResponse,
+    alts: Map<number, string[]>,
+    dryRun: boolean
+  ) => {
+    let served = false;
+    const writeArtistVariants = jest.fn((..._args: Parameters<WriteFn>) => Promise.resolve({ variants_written: 0 }));
+    const run = runConsumer({
+      loadNameGroups: () => {
+        const batch = served ? [] : [group];
+        served = true;
+        return Promise.resolve(batch);
+      },
+      fetchBulk: () => Promise.resolve(lml),
+      fetchAlts: () => Promise.resolve(alts),
+      writeArtistVariants,
+      batchSize: 500,
+      throttleMs: 0,
+      staleDays: 7,
+      partition: { index: 0, count: 1, description: 'partition=none' },
+      dryRun,
+    });
+    return { run, writeArtistVariants };
+  };
+
+  it('BS#3554: splits a comma-joined alt value into wxyc_library_credit rows and keeps the joined wxyc_library_alt row', async () => {
+    // Two alt values. The first is the CA 49 credit; the second is a
+    // single name, which already has its own wxyc_library_alt row, so it
+    // adds no credit row. The same name in both must not produce a
+    // duplicate credit row.
+    const { run, writeArtistVariants } = runOnce(
+      { artist_name: 'Carolina Chocolate Drops', artist_ids: [4901] },
+      { artists: [makeLmlResult('Carolina Chocolate Drops', 0, ['discogs_name_variation'])], missing: [] },
+      new Map([[4901, ['Rhiannon Giddens, Our Native Daughters', 'Rhiannon Giddens']]]),
+      false
+    );
+    await run;
+
+    const variants = writeArtistVariants.mock.calls[0][2] as Array<Record<string, unknown>>;
+    const bySource = (source: string) => variants.filter((v) => v.source === source).map((v) => v.variant);
+    expect(bySource('wxyc_library_alt')).toEqual(['Rhiannon Giddens, Our Native Daughters', 'Rhiannon Giddens']);
+    expect(bySource('wxyc_library_credit')).toEqual(['Rhiannon Giddens', 'Our Native Daughters']);
+    variants
+      .filter((v) => v.source === 'wxyc_library_credit')
+      .forEach((v) => {
+        expect(v.method).toBe('alt_curated');
+        expect(v.confidence).toBe(0.7);
+      });
+  });
+
+  it('BS#3554: drops a credit piece equal to the owning artist and counts credit rows in DRY_RUN', async () => {
+    const { run, writeArtistVariants } = runOnce(
+      { artist_name: 'Mike Bloomfield', artist_ids: [11] },
+      { artists: [], missing: ['Mike Bloomfield'] },
+      new Map([[11, ['Mike Bloomfield, Al Kooper, and Steve Stills']]]),
+      true
+    );
+    const result = await run;
+
+    expect(writeArtistVariants).not.toHaveBeenCalled();
+    // 1 joined wxyc_library_alt row + 2 credit rows (Al Kooper, Steve Stills).
+    expect(result.totals.would_write_rows).toBe(3);
   });
 
   it('includes wxyc_library_alt variants with confidence 0.85 and method alt_curated', async () => {

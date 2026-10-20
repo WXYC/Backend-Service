@@ -11,11 +11,17 @@ import type { ReconciledIdentity, TrackMatchHint } from '@wxyc/shared/dtos';
  * Opaque source tag for an `artist_search_alias` row. Defined as an open string
  * union so search-side code stays tolerant of new sources LML may add without
  * a wire-format break (artist-search-alias plan §"Out of scope" / Source
- * agnostic). The closed cases here are the four sources composed by
- * `artist-search-alias-consumer` (PR 4).
+ * agnostic). The closed cases here are the five sources composed by
+ * `artist-search-alias-consumer` (PR 4; `wxyc_library_credit` is BS#3554's
+ * relational member/collaborator credit, wxyc-shared#727).
  */
 export type ArtistSearchAliasSource =
-  'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt' | (string & {});
+  | 'discogs_name_variation'
+  | 'discogs_alias'
+  | 'discogs_member'
+  | 'wxyc_library_alt'
+  | 'wxyc_library_credit'
+  | (string & {});
 
 /**
  * Surfaced on a search result when the row matched via the alias cache

@@ -16,10 +16,11 @@
  *   4. `fetchAlts(allArtistIds)` reads `library.alternate_artist_name` for
  *      the union of artist_ids in the batch.
  *   5. For each `(group, lml_result)` pair: build the variant list
- *      (LML variants + alt variants), append `'wxyc_library_alt'` to
- *      `sources_present`, then `writeArtistVariants(artist_id, …)` once
- *      per artist_id in the group. `fanout_writes` increments per
- *      artist_id beyond the first.
+ *      (LML variants + alt variants + the BS#3554 credit pieces split out
+ *      of comma-joined alt values), append `'wxyc_library_alt'` and
+ *      `'wxyc_library_credit'` to `sources_present`, then
+ *      `writeArtistVariants(artist_id, …)` once per artist_id in the
+ *      group. `fanout_writes` increments per artist_id beyond the first.
  *
  * DRY_RUN: still calls LML so resolved/missing/source counts are honest,
  * but suppresses every DB write. Emits a single locked-schema JSON object
@@ -33,9 +34,15 @@ import type { ArtistSearchAliasesBulkResponse, ArtistSearchAliasVariant } from '
 import type { NameGroup, Partition } from './select.js';
 import { captureError, log } from './logger.js';
 import { isCompilationArtist } from './compilation.js';
+import { splitLibraryCredit } from './credit-split.js';
 
 const JOB_NAME = 'artist-search-alias-consumer';
 const WXYC_LIBRARY_ALT_CONFIDENCE = 0.85;
+// Parity with `discogs_member`, the other relational source (BS#3554).
+const WXYC_LIBRARY_CREDIT_CONFIDENCE = 0.7;
+// The two composer legs this job runs locally, against `library`. Both are
+// always "attempted", so the writer's reconcile DELETE covers both.
+const LOCAL_SOURCES = ['wxyc_library_alt', 'wxyc_library_credit'] as const;
 
 export type LoadNameGroupsFn = (cursor: string) => Promise<NameGroup[]>;
 export type FetchBulkFn = (names: string[]) => Promise<ArtistSearchAliasesBulkResponse>;
@@ -112,6 +119,32 @@ const buildAltVariants = (alts: string[]): ArtistSearchAliasVariant[] =>
     external_object_id: null,
     active: null,
   }));
+
+/**
+ * BS#3554: one `wxyc_library_credit` row per name inside each comma-joined
+ * alt value (see `credit-split.ts` for the rules). The joined value keeps
+ * its own `wxyc_library_alt` row from `buildAltVariants`. A name credited
+ * in more than one alt value for the same artist is written once, since
+ * `(artist_id, source, variant)` is the substrate's primary key.
+ */
+const buildCreditVariants = (alts: string[], canonicalName: string): ArtistSearchAliasVariant[] => {
+  const names = new Set<string>();
+  for (const alt of alts) {
+    for (const name of splitLibraryCredit(alt, canonicalName)) {
+      names.add(name);
+    }
+  }
+  return [...names].map((variant) => ({
+    source: 'wxyc_library_credit' as const,
+    variant,
+    method: 'alt_curated' as const,
+    confidence: WXYC_LIBRARY_CREDIT_CONFIDENCE,
+    related_artist_id: null,
+    external_subject_id: null,
+    external_object_id: null,
+    active: null,
+  }));
+};
 
 export const runConsumer = async (opts: {
   loadNameGroups: LoadNameGroupsFn;
@@ -206,10 +239,11 @@ export const runConsumer = async (opts: {
 
       const lmlVariants = lmlResult?.variants ?? [];
       // `sources_present` records which legs the composer ran. We always
-      // append `wxyc_library_alt` because the orchestrator just ran the
-      // local SELECT — the leg is unambiguously "attempted" regardless of
-      // whether it returned anything.
-      const sourcesPresent: string[] = [...(lmlResult?.sources_present ?? []), 'wxyc_library_alt'];
+      // append both local sources because the orchestrator just ran the
+      // local SELECT — each leg is unambiguously "attempted" regardless of
+      // whether it returned anything, so a credit piece removed from
+      // `alternate_artist_name` reconciles away like a removed alt value.
+      const sourcesPresent: string[] = [...(lmlResult?.sources_present ?? []), ...LOCAL_SOURCES];
 
       // Fan variants out across every artist_id in the group.
       const isFanoutGroup = group.artist_ids.length > 1;
@@ -220,7 +254,8 @@ export const runConsumer = async (opts: {
         if (isFanoutGroup) totals.fanout_writes += 1;
         const altNames = altsByArtist.get(artist_id) ?? [];
         const altVariants = buildAltVariants(altNames);
-        const allVariants = [...lmlVariants, ...altVariants];
+        const creditVariants = buildCreditVariants(altNames, group.artist_name);
+        const allVariants = [...lmlVariants, ...altVariants, ...creditVariants];
 
         if (opts.dryRun) {
           totals.would_write_rows += allVariants.length;

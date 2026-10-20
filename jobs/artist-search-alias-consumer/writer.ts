@@ -56,8 +56,10 @@
  *     of the normalization key (case-only, accent-only, etc.). Scoped to
  *     `discogs_name_variation` because it is the only source LML emits as a
  *     pure name-shape synonym — `discogs_alias` / `discogs_member` /
- *     `wxyc_library_alt` carry relational or curatorial signal even when
- *     their text normalizes to the canonical. The one-shot cleanup of
+ *     `wxyc_library_alt` / `wxyc_library_credit` carry relational or
+ *     curatorial signal even when their text normalizes to the canonical
+ *     (the orchestrator already drops a credit piece equal to the owner,
+ *     BS#3554). The one-shot cleanup of
  *     existing rows lives at `scripts/cleanup-no-op-name-variations.sql`.
  */
 
@@ -103,8 +105,8 @@ export const writeArtistVariants = async (
   // weight — and it actively introduces FPs by colliding the de-normalized
   // form against same-named distinct library artists. Scoped to
   // `discogs_name_variation` because `discogs_alias` / `discogs_member` /
-  // `wxyc_library_alt` carry relational or curatorial signal that doesn't
-  // collapse on normalization.
+  // `wxyc_library_alt` / `wxyc_library_credit` carry relational or
+  // curatorial signal that doesn't collapse on normalization.
   const normalizedCanonical = normalizeArtistName(canonicalName);
   const nonNoopVariants = variants.filter(
     (v) => v.source !== 'discogs_name_variation' || normalizeArtistName(v.variant) !== normalizedCanonical
