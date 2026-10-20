@@ -89,6 +89,14 @@ const stationStatement = {
   // key rather than `album_reviews` (the Google Form archive) — see that
   // comment for why the two must not share a grant.
   reviews: ['read', 'write', 'manage'],
+  // `specialty_shows: manage` gates writes to the specialty-show catalog
+  // (BS#3445). Held implicitly by stationManager alone; the programming manager
+  // reaches the same routes through the `programming` capability instead
+  // (role-or-capability in `requirePermissions`), so no other role holds it.
+  // Its own key rather than `flowsheet: manage` or `catalog: write`, which
+  // would hand the catalog to every music director — a key belongs to the
+  // resource it names.
+  specialty_shows: ['manage'],
 } as const;
 
 /**
@@ -271,6 +279,8 @@ const WXYC_GRANTS = {
     // Explicit denial, same reasoning again: `member` is the pre-DJ tier, and
     // the in-app review workflow opens at `dj`.
     reviews: [],
+    // Explicit denial: only the station manager manages specialty shows.
+    specialty_shows: [],
   },
   dj: {
     bin: ['read', 'write'],
@@ -279,6 +289,8 @@ const WXYC_GRANTS = {
     album_reviews: ['read'],
     digital_archive: ['listen'],
     reviews: ['read', 'write'],
+    // Explicit denial, same reasoning as `member` above.
+    specialty_shows: [],
   },
   musicDirector: {
     bin: ['read', 'write'],
@@ -287,6 +299,8 @@ const WXYC_GRANTS = {
     album_reviews: ['read'],
     digital_archive: ['listen'],
     reviews: ['read', 'write', 'manage'],
+    // Explicit denial: music directors do not manage specialty shows.
+    specialty_shows: [],
   },
   stationManager: {
     bin: ['read', 'write'],
@@ -295,6 +309,7 @@ const WXYC_GRANTS = {
     album_reviews: ['read'],
     digital_archive: ['listen'],
     reviews: ['read', 'write', 'manage'],
+    specialty_shows: ['manage'],
   },
 } as const satisfies Record<WXYCRole, StationGrants>;
 

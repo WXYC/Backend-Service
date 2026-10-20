@@ -843,3 +843,42 @@ describe('await sessionPromise inside finishOnce (L3, code review BS#2537 PR #25
     expectAudited({ actorUserId: 'late-actor' });
   });
 });
+
+// L53 (BS#3473): `admin.update-user` is followed by one `capability.grant.<name>`
+// / `capability.revoke.<name>` row per change in the subject's `capabilities`,
+// diffed generically (a placeholder name here, so the table does not depend on
+// which capabilities exist). The before-read must finish before the handler
+// runs, so each case queues the before/after reads on `limit` in that order.
+describe('capability diff on admin/update-user (BS#3473)', () => {
+  const grant = (name: string) => `capability.grant.${name}`;
+  const revoke = (name: string) => `capability.revoke.${name}`;
+
+  it.each([
+    ['grants one', ['a'], ['a', 'x'], 200, [grant('x')]],
+    ['revokes one', ['a', 'x'], ['a'], 200, [revoke('x')]],
+    ['grants one and revokes another', ['a', 'y'], ['a', 'x'], 200, [grant('x'), revoke('y')]],
+    ['leaves the array unchanged', ['a', 'x'], ['a', 'x'], 200, []],
+    ['only reorders the array', ['a', 'x'], ['x', 'a'], 200, []],
+    ['fails', ['a'], ['a', 'x'], 400, []],
+  ])('%s', async (_name, before, after, status, expectedActions) => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    db._chain.limit.mockResolvedValueOnce([{ capabilities: before }] as never);
+    if (status < 300) {
+      db._chain.limit.mockResolvedValueOnce([{ capabilities: after }] as never);
+    }
+    const { res, next } = await start(
+      adminPrefixAuditMiddleware(),
+      mockAdminReq({ path: '/update-user', body: { userId: 'dj-1', data: {} } })
+    );
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(db._chain.limit).toHaveBeenCalledTimes(1);
+    res.statusCode = status;
+    await settle(res);
+
+    const actions = recordAccountAuditEvent.mock.calls.map(([event]) => (event as { action: string }).action);
+    expect(actions).toEqual(['admin.update-user', ...expectedActions]);
+    for (const action of expectedActions) {
+      expectAudited({ action, actorUserId: 'manager-1', subjectUserId: 'dj-1', outcome: status });
+    }
+  });
+});

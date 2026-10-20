@@ -96,7 +96,7 @@ describe('WXYCRoles', () => {
  * guards library drift. Both are needed; neither alone means what it looks like.
  */
 describe('role statements (pinned)', () => {
-  // `member` has no `album_reviews`, `digital_archive` or `reviews` entry here
+  // `member` has no `album_reviews`, `digital_archive`, `reviews` or `specialty_shows` entry here
   // on purpose: it decides each as `[]` in the matrix, and `stripEmpty` drops
   // an explicitly-denied key before
   // better-auth ever sees it. That is what keeps an `[]` denial byte-identical
@@ -137,6 +137,7 @@ describe('role statements (pinned)', () => {
       album_reviews: ['read'],
       digital_archive: ['listen'],
       reviews: ['read', 'write', 'manage'],
+      specialty_shows: ['manage'],
     });
   });
 
