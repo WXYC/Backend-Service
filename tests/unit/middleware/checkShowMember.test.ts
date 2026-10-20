@@ -172,10 +172,13 @@ describe('rowWriteCaller (BS#3438)', () => {
     ['no bypass, id on req.auth', undefined, 'production', { auth: { id: 'dj-alice' } }, 'dj-alice'],
     ['no bypass, no identity at all', undefined, 'production', {}, ''],
   ])('%s', (_name, bypass, nodeEnv, reqFields, expected) => {
-    if (bypass === undefined) delete process.env.AUTH_BYPASS;
-    else process.env.AUTH_BYPASS = bypass;
+    if (bypass === undefined) {
+      delete process.env.AUTH_BYPASS;
+    } else {
+      process.env.AUTH_BYPASS = bypass;
+    }
     process.env.NODE_ENV = nodeEnv;
 
-    expect(rowWriteCaller(reqFields as unknown as Request, { locals: {} } as unknown as Response)).toBe(expected);
+    expect(rowWriteCaller(reqFields as Request, { locals: {} } as Response)).toBe(expected);
   });
 });
