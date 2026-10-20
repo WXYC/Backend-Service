@@ -396,15 +396,29 @@ describe('shared workspace dependency graph (BS#3518)', () => {
   });
 
   it.each(nodeTargetDockerfiles())(
-    '%s ships the transitive @wxyc/* dependencies of every shared workspace it ships',
+    '%s ships the transitive @wxyc/* dependencies of its app or job and of every shared workspace it ships',
     (name) => {
       const text = readDockerfile(name);
       const problems: string[] = [];
-      for (const w of shared) {
-        if (!text.includes(`./shared/${w.dir}/package*`)) {
+      const shipped: { name: string; deps: string[] }[] = shared
+        .filter((w) => text.includes(`./shared/${w.dir}/package*`))
+        .map((w) => ({ name: w.name, deps: transitiveDeps(w.name, graph) }));
+      // The app or job the image is built for: its own @wxyc/* shared dependencies must ship too, so a job that
+      // starts importing @wxyc/observability fails here when its Dockerfile lacks the COPY lines.
+      for (const [, target] of text.matchAll(/COPY \.\/((?:apps|jobs)\/[^/\s]+)\/package\*/g)) {
+        const manifest = path.join(repoRoot, target, 'package.json');
+        if (!fs.existsSync(manifest)) {
           continue;
         }
-        for (const dep of transitiveDeps(w.name, graph)) {
+        const pkg = JSON.parse(fs.readFileSync(manifest, 'utf-8'));
+        const direct = [pkg.dependencies, pkg.peerDependencies, pkg.optionalDependencies]
+          .flatMap((group) => Object.keys(group ?? {}))
+          .filter((dep) => graph.has(dep));
+        const deps = [...new Set(direct.flatMap((dep) => [dep, ...transitiveDeps(dep, graph)]))].sort();
+        shipped.push({ name: target, deps });
+      }
+      for (const w of shipped) {
+        for (const dep of w.deps) {
           const depDir = graph.get(dep)?.dir;
           if (!text.includes(`COPY ./shared/${depDir}/package* ./shared/${depDir}/`)) {
             problems.push(
