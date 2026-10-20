@@ -1,76 +1,12 @@
 /**
- * Observability for metadata-no-match-digest: Sentry init + JSON logs.
- *
- * Mirrors jobs/flowsheet-ghost-row-sweep/logger.ts verbatim -- the contract
- * is identical, the duplication keeps this job's build graph independent of
- * the sibling job packages.
+ * The one logger instance for metadata-no-match-digest (BS#3400). `log()` is silent until this instance's
+ * `initLogger` runs, so every file in the job imports from here; a second `createJobLogger`
+ * call elsewhere would drop that file's log lines with no error.
  */
 
-import * as Sentry from '@sentry/node';
-import { randomUUID } from 'crypto';
+import { createJobLogger } from '@wxyc/observability/job-logger';
 
-export type LoggerConfig = {
-  repo: string;
-  tool: string;
-  runId?: string;
-};
-
-export type LogLevel = 'info' | 'warn' | 'error';
-
-type BaseTags = { repo: string; tool: string; run_id: string };
-
-let baseTags: BaseTags | null = null;
-
-export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) return 1;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 1;
-  return parsed;
-};
-
-export const initLogger = (config: LoggerConfig): string => {
-  const runId = config.runId ?? randomUUID();
-  baseTags = { repo: config.repo, tool: config.tool, run_id: runId };
-
-  Sentry.init({
-    // Sentry 11 turned this on by default, which titles captureMessage events
-    // with a minified function name (BS#3002).
-    attachStacktrace: false,
-    // Sentry 11 installs Dedupe by default, which drops repeated identical events (BS#3005).
-    integrations: (defaults) => defaults.filter((i) => i.name !== 'Dedupe'),
-    dsn: process.env.SENTRY_DSN,
-    release: process.env.SENTRY_RELEASE,
-    environment: process.env.NODE_ENV || 'production',
-    tracesSampleRate: resolveTracesSampleRate(),
-  });
-  Sentry.setTag('repo', config.repo);
-  Sentry.setTag('tool', config.tool);
-  Sentry.setTag('run_id', runId);
-
-  return runId;
-};
-
-export const log = (level: LogLevel, step: string, message: string, fields: Record<string, unknown> = {}): void => {
-  if (!baseTags) return;
-  const line =
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level,
-      step,
-      message,
-      ...baseTags,
-      ...fields,
-    }) + '\n';
-  if (level === 'error') {
-    process.stderr.write(line);
-  } else {
-    process.stdout.write(line);
-  }
-};
-
-export const captureError = (error: unknown, step: string, extra: Record<string, unknown> = {}): void => {
-  Sentry.captureException(error, { tags: { step }, extra });
-};
+export const { initLogger, log, captureError, closeLogger } = createJobLogger({ jobName: 'metadata-no-match-digest' });
 
 /**
  * Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) --
@@ -94,9 +30,4 @@ export const errorMessage = (error: unknown): string => {
   const cause: unknown = (error as { cause?: unknown }).cause;
   const causeText = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : undefined;
   return causeText && causeText !== error.message ? `${error.message} [cause: ${causeText}]` : error.message;
-};
-
-export const closeLogger = async (): Promise<void> => {
-  await Sentry.close(2000);
-  baseTags = null;
 };

@@ -38,11 +38,13 @@ import { runRecheck } from './orchestrate.js';
 import { loadCandidates, BATCH_SIZE_ENV, BATCH_SIZE_DEFAULT } from './query.js';
 import { lookupRecheck } from './lml-fetch.js';
 import { writeMatch, stampRecheckTimestamp } from './writer.js';
-import { initLogger, log, captureError, captureCounter, closeLogger } from './logger.js';
+import { createJobLogger } from '@wxyc/observability/job-logger';
 
 const JOB_NAME = 'library-discogs-unavailable-recheck';
 
-/** Sentry counter incremented when LML finds a match on a flagged release, but the match's confidence falls below the 0.95 floor — see `orchestrate.ts`'s module doc for why this never auto-writes. */
+const { initLogger, log, captureError, captureCounter, closeLogger } = createJobLogger({ jobName: JOB_NAME });
+
+/** Counter line emitted when LML finds a match on a flagged release, but the match's confidence falls below the 0.95 floor — see `orchestrate.ts`'s module doc for why this never auto-writes. */
 export const LOW_CONFIDENCE_METRIC = 'lml.lookup.recheck.match_found_on_flagged';
 
 const requireLmlConfigured = (): void => {

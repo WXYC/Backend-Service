@@ -15,6 +15,7 @@ COPY ./package* ./
 COPY ./jobs/streaming-url-upgrade/package* ./jobs/streaming-url-upgrade/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/observability/package* ./shared/observability/
 
 # `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
 # (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
@@ -24,6 +25,7 @@ RUN npm install --omit=dev && rm -f .npmrc
 COPY --link --from=builder /jobs/streaming-url-upgrade/dist ./jobs/streaming-url-upgrade/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
 COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # The candidate SELECTs walk `flowsheet` (2.6M rows) with no covering
 # index; the API's tight 5s default statement timeout is too aggressive

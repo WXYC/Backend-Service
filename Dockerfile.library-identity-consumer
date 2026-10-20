@@ -12,10 +12,12 @@ WORKDIR /library-identity-consumer
 COPY ./package* ./
 COPY ./jobs/library-identity-consumer/package* ./jobs/library-identity-consumer/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev
 
 COPY --link --from=builder /jobs/library-identity-consumer/dist ./jobs/library-identity-consumer/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/library-identity-consumer"]

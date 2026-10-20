@@ -45,7 +45,7 @@
  * pending, not a "what's new since last time" feed. There is no partial-window
  * state to reconcile.
  */
-import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { db, recordAccountAuditEvent } from '@wxyc/database';
 import { applyDowngrades, isDowngradeEnabled, planDowngrades } from './downgrade.js';
 import { buildStationSignupDigestEmail } from './format.js';
@@ -148,7 +148,7 @@ export const run = async (): Promise<void> => {
       for (const row of applied.downgraded) {
         void recordAccountAuditEvent(
           { action: 'job.self-signup-downgrade', subjectUserId: row.userId, outcome: 200, source: 'job' },
-          { onError: (error) => Sentry.captureException(error, { tags: { subsystem: 'account-audit' } }) }
+          { onError: (error) => getErrorReporter().captureException(error, { tags: { subsystem: 'account-audit' } }) }
         );
       }
     }

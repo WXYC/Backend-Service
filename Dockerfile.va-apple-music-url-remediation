@@ -15,6 +15,7 @@ COPY ./package* ./
 COPY ./jobs/va-apple-music-url-remediation/package* ./jobs/va-apple-music-url-remediation/
 COPY ./shared/database/package* ./shared/database/
 COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/observability/package* ./shared/observability/
 
 # `@wxyc/lml-client` declares `@wxyc/shared` as a registry dependency
 # (GitHub Packages, `@wxyc:registry` in `.npmrc`). Without NPM_TOKEN +
@@ -24,6 +25,7 @@ RUN npm install --omit=dev && rm -f .npmrc
 COPY --link --from=builder /jobs/va-apple-music-url-remediation/dist ./jobs/va-apple-music-url-remediation/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
 COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # The candidate SELECTs walk `flowsheet` (~1.9M rows) through
 # `fold_artist_name(artist_name)`, which no index covers (the trigram GIN is on

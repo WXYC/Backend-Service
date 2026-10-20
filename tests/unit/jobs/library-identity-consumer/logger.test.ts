@@ -8,15 +8,10 @@
  * the catch sites depend on: a wrapped driver error yields its diagnostics, and
  * anything else yields an object that spreads to nothing.
  *
- * The init / JSON-line behavior is shared verbatim with the sibling job loggers
- * and is exercised by `tests/unit/jobs/flowsheet-etl/logger.test.ts`.
+ * The init / JSON-line behavior lives in `createJobLogger` (`@wxyc/observability/job-logger`).
  */
 
-import {
-  errorMessage,
-  pgDiagnostics,
-  resolveTracesSampleRate,
-} from '../../../../jobs/library-identity-consumer/logger';
+import { errorMessage, pgDiagnostics } from '../../../../jobs/library-identity-consumer/logger';
 
 /** Shaped like a real DrizzleQueryError wrapping a postgres-js error. */
 const drizzleError = (cause: Record<string, unknown>): Error => {
@@ -24,24 +19,6 @@ const drizzleError = (cause: Record<string, unknown>): Error => {
   (err as Error & { cause?: unknown }).cause = cause;
   return err;
 };
-
-describe('resolveTracesSampleRate', () => {
-  it('defaults to 1 when env var is unset', () => {
-    expect(resolveTracesSampleRate(undefined)).toBe(1);
-  });
-
-  it('parses valid values in [0, 1]', () => {
-    expect(resolveTracesSampleRate('0')).toBe(0);
-    expect(resolveTracesSampleRate('0.5')).toBe(0.5);
-    expect(resolveTracesSampleRate('1')).toBe(1);
-  });
-
-  it('falls back to 1 on malformed or out-of-range values', () => {
-    expect(resolveTracesSampleRate('abc')).toBe(1);
-    expect(resolveTracesSampleRate('-0.5')).toBe(1);
-    expect(resolveTracesSampleRate('1.5')).toBe(1);
-  });
-});
 
 describe('pgDiagnostics', () => {
   it('lifts the PG fields off a wrapped driver error', () => {

@@ -71,7 +71,7 @@ describe('Sentry.init call sites', () => {
     );
     // Jobs migrated to createJobLogger (@wxyc/observability) no longer call Sentry.init
     // themselves, so this floor drops as each migration batch lands (BS#3399).
-    expect(files.filter((f) => f.startsWith('jobs/')).length).toBeGreaterThanOrEqual(28);
+    expect(files.filter((f) => f.startsWith('jobs/')).length).toBeGreaterThanOrEqual(14);
   });
 
   it('turns attachStacktrace off at every site', () => {
