@@ -94,6 +94,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   removeTrack: mockRemoveTrack,
   changeOrder: mockChangeOrder,
   startShow: mockStartShow,
+  isSpecialtyShowTaggable: jest.fn().mockResolvedValue(true),
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
   leaveShow: mockServiceLeaveShow,

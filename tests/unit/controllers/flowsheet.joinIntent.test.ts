@@ -34,6 +34,7 @@ import type { Request, Response, NextFunction } from 'express';
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockIsSpecialtyShowTaggable = jest.fn<(id: number) => Promise<boolean>>();
 const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>();
 const mockCloseShowFromTerminalShowEndMarker = jest.fn<() => Promise<number>>();
@@ -47,6 +48,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   startShow: mockStartShow,
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
+  isSpecialtyShowTaggable: mockIsSpecialtyShowTaggable,
   isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
   resolveShowEndInstant: mockResolveShowEndInstant,
@@ -127,6 +129,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGetLatestShow.mockResolvedValue(OPEN_SHOW);
   mockIsLatestEntryShowEnd.mockResolvedValue(false);
+  mockIsSpecialtyShowTaggable.mockResolvedValue(true);
   mockCloseShowFromTerminalShowEndMarker.mockResolvedValue(0);
   mockResolveShowEndInstant.mockResolvedValue(LAST_LOGGED);
   mockResolveDjNameForShow.mockResolvedValue('dj sue');
@@ -635,5 +638,58 @@ describe('joinShow — go-live handoff signal', () => {
       open_show_id: OPEN_SHOW.id,
       dj_id: 'dj-eureka',
     });
+  });
+});
+
+// BS#3454: `specialty_id` is validated at the door, before any write.
+describe('POST /flowsheet/join specialty_id validation', () => {
+  const CLOSED_SHOW = { ...OPEN_SHOW, end_time: LAST_LOGGED };
+
+  type Path = 'new-show' | 'takeover' | 'co-host';
+  const arrange = (path: Path): Record<string, unknown> => {
+    if (path === 'new-show') {
+      mockGetLatestShow.mockResolvedValue(CLOSED_SHOW);
+      return {};
+    }
+    if (path === 'takeover') {
+      return { intent: 'takeover', expected_show_id: OPEN_SHOW.id };
+    }
+    return { intent: 'join' };
+  };
+
+  it.each([
+    ['new-show', undefined, true, 200],
+    ['new-show', 7, true, 200],
+    ['new-show', 999, false, 400],
+    ['takeover', undefined, true, 200],
+    ['takeover', 7, true, 200],
+    ['takeover', 999, false, 400],
+  ] as const)('%s with specialty_id %s (taggable=%s) -> %s', async (path, specialty_id, taggable, status) => {
+    const extra = arrange(path);
+    mockIsSpecialtyShowTaggable.mockResolvedValue(taggable);
+    const res = createMockRes();
+
+    const outcome = joinShow(makeReq({ ...extra, specialty_id }), res as Response, next);
+
+    if (status === 400) {
+      await expect(outcome).rejects.toMatchObject({ statusCode: 400 });
+      expect(mockStartShow).not.toHaveBeenCalled();
+      expect(mockEndShow).not.toHaveBeenCalled();
+    } else {
+      await outcome;
+      expect(mockStartShow).toHaveBeenCalledWith('dj-eureka', undefined, specialty_id, undefined);
+    }
+    expect(mockIsSpecialtyShowTaggable).toHaveBeenCalledTimes(specialty_id === undefined ? 0 : 1);
+  });
+
+  it('ignores specialty_id on the co-host path', async () => {
+    const extra = arrange('co-host');
+    const res = createMockRes();
+
+    await joinShow(makeReq({ ...extra, specialty_id: 999 }), res as Response, next);
+
+    expect(mockIsSpecialtyShowTaggable).not.toHaveBeenCalled();
+    expect(mockAddDJToShow).toHaveBeenCalled();
+    expect(mockStartShow).not.toHaveBeenCalled();
   });
 });

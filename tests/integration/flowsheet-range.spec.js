@@ -259,7 +259,15 @@ describe('GET /flowsheet/range (BS#2062)', () => {
     const res = await fetchWindow();
     const show = res.body.shows.find((s) => s.id === showIds.inside);
 
-    expect(Object.keys(show).sort()).toEqual(['dj_name', 'end_time', 'id', 'show_name', 'specialty_id', 'start_time']);
+    expect(Object.keys(show).sort()).toEqual([
+      'dj_name',
+      'end_time',
+      'id',
+      'show_name',
+      'specialty',
+      'specialty_id',
+      'start_time',
+    ]);
     expect(show.dj_name).toBe(`${MARKER} inside`); // legacy handle, the last chain link
   });
 

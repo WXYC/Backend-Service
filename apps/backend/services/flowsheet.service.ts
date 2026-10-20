@@ -40,6 +40,7 @@ import { generateMissingBreakpoints, nearestStationHour, MAX_AUTO_BREAKPOINTS } 
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
+import { SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelect, PgSelectKind, PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -636,6 +637,7 @@ export type FlowsheetRangeShow = {
   show_name: string | null;
   dj_name: string | null;
   specialty_id: number | null;
+  specialty: SpecialtyShowRef | null;
   start_time: Date;
   end_time: Date | null;
 };
@@ -707,6 +709,7 @@ export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<Flow
       id: shows.id,
       show_name: shows.show_name,
       specialty_id: shows.specialty_id,
+      specialty: specialty_shows,
       start_time: shows.start_time,
       end_time: shows.end_time,
       dj_name_override: shows.dj_name_override,
@@ -717,6 +720,7 @@ export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<Flow
     })
     .from(shows)
     .leftJoin(user, eq(user.id, shows.primary_dj_id))
+    .leftJoin(specialty_shows, eq(specialty_shows.id, shows.specialty_id))
     .where(
       or(
         // Strict `>`: two half-open intervals [a,b) and [c,d) intersect iff
@@ -754,6 +758,7 @@ export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<Flow
       user: row.user_id == null ? null : { djName: row.user_dj_name ?? null },
     }),
     specialty_id: row.specialty_id ?? null,
+    specialty: toSpecialtyShowRef(row.specialty),
     start_time: row.start_time,
     end_time: row.end_time ?? null,
   }));
@@ -2672,6 +2677,16 @@ export const changeOrder = async (
   return response[0];
 };
 
+/** Whether `id` names a catalog program that may still be tagged onto a new show (known and not retired). */
+export const isSpecialtyShowTaggable = async (id: number): Promise<boolean> => {
+  const rows = await db
+    .select({ id: specialty_shows.id })
+    .from(specialty_shows)
+    .where(and(eq(specialty_shows.id, id), eq(specialty_shows.active, true)))
+    .limit(1);
+  return rows.length > 0;
+};
+
 /**
  * Gets show metadata (DJs, specialty show name) without fetching entries.
  * Returns `undefined` when `show_id` doesn't exist (BS#1113) — mirrors the
@@ -2689,14 +2704,17 @@ export const getShowMetadata = async (show_id: number): Promise<ShowMetadata | u
   }));
 
   let specialty_show_name = '';
+  let specialty: SpecialtyShowRef | null = null;
   if (show[0].specialty_id != null) {
     const specialty_show = await db.select().from(specialty_shows).where(eq(specialty_shows.id, show[0].specialty_id));
     specialty_show_name = specialty_show[0].specialty_name;
+    specialty = toSpecialtyShowRef(specialty_show[0]);
   }
 
   return {
     ...show[0],
     specialty_show_name: specialty_show_name,
+    specialty,
     show_djs: showDJs,
   };
 };
