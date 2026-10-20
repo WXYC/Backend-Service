@@ -3426,6 +3426,27 @@ async function searchLibraryByTsvector(
 }
 
 /**
+ * The relevance ordering for a Both-mode query that can return alias rows,
+ * named once. It is both the window's ranking (so the album-scoped limit
+ * selects the same albums the page leads with) and the final page order. Every
+ * term references a bare column the derived table exposes, so it is legal in
+ * the window and in both outer scopes of `albumScopedQuery`.
+ *
+ * Shared by the stage-2 alias UNION ALL (`searchLibraryByTrigramBoth`) and the
+ * alias-only probe that follows a stage-1 hit
+ * (`searchLibraryAliasHitsAfterTsvector`, BS#3552), so the two cannot rank
+ * alias rows differently. See `searchLibraryByTrigramBoth` for why each term
+ * is here.
+ */
+function buildAliasRelevanceOrdering(query: string): SQL {
+  return sql`${buildFuzzyAliasTier()}, GREATEST(
+      similarity(artist_name, ${query}),
+      similarity(album_title, ${query}),
+      COALESCE(alias_max_sim, 0)
+    ) DESC, ${buildDirectMatchTieBreak()}, id ASC`;
+}
+
+/**
  * Trigram fallback for Both-mode: typos and weird casing that the prefix
  * tsquery won't match. Operates on the denormalized `library.artist_name`
  * (backfilled in A.2) so the predicate is single-table and reachable by the
@@ -3529,15 +3550,7 @@ async function searchLibraryByTrigramBoth(
   // emits.
   const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
   const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
-  // The full ordering, named once. It is both the window's ranking (so the
-  // album-scoped limit selects the same albums the old row-scoped LIMIT would
-  // have led with) and the final page order. Every term references a bare column
-  // the union exposes, so it is legal in all three scopes below.
-  const aliasOrdering = sql`${buildFuzzyAliasTier()}, GREATEST(
-      similarity(artist_name, ${query}),
-      similarity(album_title, ${query}),
-      COALESCE(alias_max_sim, 0)
-    ) DESC, ${buildDirectMatchTieBreak()}, id ASC`;
+  const aliasOrdering = buildAliasRelevanceOrdering(query);
 
   // `DENSE_RANK` sits in a layer ABOVE the union rather than inside either
   // branch: the ordering reads `alias_max_sim`, which only branch (b) projects
@@ -3568,6 +3581,74 @@ async function searchLibraryByTrigramBoth(
         ) alias_search
       `,
       limit: n,
+      outerOrderBy: aliasOrdering,
+    })}
+  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields & AlbumRankHelperColumns)[];
+
+  return rows.map(toLibraryViewRow).map(attachAliasHint);
+}
+
+/**
+ * Alias-only probe that runs after a non-empty stage 1 on the catalog route
+ * (BS#3552): the releases of every artist whose `artist_search_alias` variant
+ * matches `query`, minus every release the tsvector tier itself matches.
+ *
+ * Before this, Both-mode returned as soon as the tsvector tier found anything,
+ * and only stage 2 consults the alias substrate. `search_doc` indexes only
+ * `artist_name` and `album_title`, so a surname query such as `Giddens`
+ * matched Jerry Giddens in stage 1 and never reached the Carolina Chocolate
+ * Drops card, which is filed with the alternate name "Rhiannon Giddens".
+ * Measured on LML's 2026-09-14 `library.db` snapshot, a stage-1 hit hid 76%
+ * of alternate names typed by surname.
+ *
+ * This is branch (b) of the stage-2 UNION ALL with a different exclusion
+ * predicate, and nothing else: the same `buildAliasHitsCte` (the BS#2018
+ * floor included), the same artist join, the same projection and the same
+ * ordering. `(search_doc @@ tsquery) IS NOT TRUE` excludes every stage-1
+ * match, not only the ones that made stage 1's page, so a direct match past
+ * the stage-1 cap never comes back tagged as an alias row. It is NULL-safe
+ * for the reason branch (b) uses `IS NOT TRUE` (BS#2031). Branch (a) has no
+ * counterpart here because the caller already holds the stage-1 rows; the
+ * caller appends these after them, which is what keeps BS#2020 structural.
+ *
+ * @param query The trimmed query, already gated on `hasAlphanumeric` and a
+ *   length of at least 2 by the caller.
+ * @param limit Albums still free on the page (`n` minus the stage-1 count).
+ * @param minSimilarity The BS#2018 floor, read once by the caller.
+ * @returns Rows tagged with `matched_via_alias`, best match first, or `[]`
+ *   when the query yields no tsquery.
+ */
+async function searchLibraryAliasHitsAfterTsvector(
+  query: string,
+  limit: number,
+  minSimilarity: number,
+  on_streaming?: boolean
+): Promise<TaggedLibraryViewEntry[]> {
+  const built = buildPrefixTsquery(query);
+  if (!built) {
+    return [];
+  }
+  const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
+  const aliasOrdering = buildAliasRelevanceOrdering(query);
+
+  // The derived table (`alias_only`) is what lets the window and the outer
+  // ORDER BY name `alias_max_sim`, which only exists once the CTE columns are
+  // projected; same reason the stage-2 union sits inside `alias_search`.
+  const rows = (await db.execute(sql`
+    ${buildAliasHitsCte(query, minSimilarity)}
+    ${albumScopedQuery({
+      inner: sql`
+        SELECT *, DENSE_RANK() OVER (ORDER BY ${aliasOrdering}) AS album_rank
+        FROM (
+          SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+          FROM ${library}
+          ${LIBRARY_VIEW_JOINS_RAW}
+          INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+          WHERE (${library.search_doc} @@ ${built.tsquery}) IS NOT TRUE
+          ${streamingClause}
+        ) alias_only
+      `,
+      limit,
       outerOrderBy: aliasOrdering,
     })}
   `)) as unknown as (LibraryArtistViewEntry & AliasHitFields & AlbumRankHelperColumns)[];
@@ -3634,17 +3715,55 @@ export async function runCatalogTrackSearchCascade(
  *
  * Both feature flags default off, so for any deployment that hasn't opted in,
  * behavior is byte-identical to the pre-#972 baseline (tsvector → trigram → []).
+ *
+ * With `appendAliasHits` set and `CATALOG_SEARCH_ALIAS_ENABLED` on, a non-empty
+ * stage 1 no longer returns alone: the alias-only probe
+ * ({@link searchLibraryAliasHitsAfterTsvector}) fills whatever room stage 1
+ * left on the page, after every stage-1 row (BS#3552). The stage-1 → stage-2 →
+ * cascade short-circuit is otherwise unchanged (BS#1885): a stage-1 hit still
+ * skips stage 2 and the cascade. With the flag off, or without the option,
+ * stage 1's rows are returned untouched.
+ *
+ * Only the catalog route (`fuzzySearchLibrary`, `GET /library/`) passes the
+ * option. The request-line `searchLibrary` does not: every request-line
+ * strategy runs its results through `filterResultsByArtist`, which drops any
+ * row whose artist does not start with the parsed artist, so appended alias
+ * rows would cost one more query per strategy call and never be kept.
+ *
+ * @param query Raw query text; trimmed here.
+ * @param n Maximum albums returned.
+ * @param on_streaming Optional streaming-availability filter, applied by every
+ *   stage.
+ * @param options.appendAliasHits Append alias-only rows after a stage-1 hit.
  */
 async function searchLibraryBothMode(
   query: string,
   n: number,
-  on_streaming?: boolean
+  on_streaming?: boolean,
+  { appendAliasHits = false }: { appendAliasHits?: boolean } = {}
 ): Promise<TaggedLibraryViewEntry[]> {
   const trimmed = query.trim();
   if (trimmed.length === 0 || !hasAlphanumeric(trimmed)) return [];
 
   const tsvectorResults = await searchLibraryByTsvector(trimmed, n, on_streaming);
-  if (tsvectorResults.length > 0) return tsvectorResults;
+  if (tsvectorResults.length > 0) {
+    if (!appendAliasHits) {
+      return tsvectorResults;
+    }
+    const { enabled: aliasEnabled, minSimilarity: aliasMinSimilarity } = getCatalogSearchAliasConfig();
+    const room = n - tsvectorResults.length;
+    // `trimmed.length >= 2` mirrors stage 2's own gate below. With no room
+    // left the probe could only add rows the cap then cuts, so skip the query.
+    if (!aliasEnabled || room <= 0 || trimmed.length < 2) {
+      return tsvectorResults;
+    }
+    const aliasRows = await searchLibraryAliasHitsAfterTsvector(trimmed, room, aliasMinSimilarity, on_streaming);
+    // The probe's SQL already excludes every stage-1 match; dedupe by id
+    // anyway so a future change to either predicate cannot show one release
+    // twice.
+    const stage1Ids = new Set(tsvectorResults.map((r) => r.id));
+    return [...tsvectorResults, ...aliasRows.filter((r) => !stage1Ids.has(r.id))].slice(0, n);
+  }
 
   if (trimmed.length >= 2) {
     const trigramResults = await searchLibraryByTrigramBoth(trimmed, n, on_streaming);
@@ -3692,8 +3811,10 @@ export const fuzzySearchLibrary = async (
   // Both-mode default (dj-site sends the same string as artist and title).
   // Route through tsvector → trigram → CTA → LML cascade so catalog clients
   // see `matched_via` for fallback-sourced hits (BS#972, plan §4.1 / §5.1).
+  // BS#3552: this is the classic catalog search, so alias hits ride along
+  // after a stage-1 hit here (see `searchLibraryBothMode`).
   if (artist_name && album_title && artist_name === album_title) {
-    return searchLibraryBothMode(artist_name, n, on_streaming);
+    return searchLibraryBothMode(artist_name, n, on_streaming, { appendAliasHits: true });
   }
 
   const streamingPredicate = on_streaming !== undefined ? eq(library.on_streaming, on_streaming) : undefined;
