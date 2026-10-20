@@ -66,7 +66,7 @@
 import { sql } from 'drizzle-orm';
 import { db, normalizeArtistName } from '@wxyc/database';
 
-import type { ArtistSearchAliasVariant } from './lml-types.js';
+import type { StoredAliasVariant } from './lml-types.js';
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 const ARTIST_SEARCH_ALIAS_TABLE = sql.raw(`"${SCHEMA}"."artist_search_alias"`);
@@ -90,7 +90,7 @@ export type WriteOutcome = {
 export const writeArtistVariants = async (
   artist_id: number,
   canonicalName: string,
-  variants: ArtistSearchAliasVariant[],
+  variants: StoredAliasVariant[],
   sourcesPresent: string[]
 ): Promise<WriteOutcome> => {
   if (sourcesPresent.length === 0) {

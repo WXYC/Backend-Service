@@ -13,13 +13,9 @@
  * may return are tolerated by TypeScript's structural typing and ignored.
  */
 
-/**
- * `artist_search_alias.source` enum values: the ones LML emits, plus
- * `wxyc_library_credit`, which only this job composes (BS#3554;
- * wxyc-shared#727 adds it to the contract).
- */
+/** `artist_search_alias.source` enum values that LML emits. */
 export type ArtistSearchAliasSource =
-  'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt' | 'wxyc_library_credit';
+  'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt';
 
 /** `artist_search_alias.method` enum values that LML emits. */
 export type ArtistSearchAliasMethod = 'name_variation' | 'alias_curated' | 'member_group' | 'alt_curated';
@@ -60,6 +56,25 @@ export type ArtistSearchAliasesBulkRequest = {
 };
 
 export type CacheStats = Record<string, number>;
+
+// ---------------------------------------------------------------------------
+// Local sources: not part of the LML contract.
+// ---------------------------------------------------------------------------
+
+/**
+ * Sources this job composes itself from `library.alternate_artist_name`.
+ * `wxyc_library_alt` is also in LML's set (LML emits it, for example in
+ * LML#1444's lookup hints), so it appears in both types.
+ * `wxyc_library_credit` (BS#3554, wxyc-shared#727) is local only: LML never
+ * emits it, so it stays out of `ArtistSearchAliasSource` and LML's
+ * `sources_present` type cannot admit it.
+ */
+export type LocalAliasSource = 'wxyc_library_alt' | 'wxyc_library_credit';
+
+/** One row as the writer stores it: an LML variant or a locally composed one. */
+export type StoredAliasVariant = Omit<ArtistSearchAliasVariant, 'source'> & {
+  source: ArtistSearchAliasSource | LocalAliasSource;
+};
 
 export type ArtistSearchAliasesBulkResponse = {
   artists: ArtistSearchAliasesResult[];

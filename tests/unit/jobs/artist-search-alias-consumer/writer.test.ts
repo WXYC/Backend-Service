@@ -72,10 +72,10 @@ jest.mock('@wxyc/database', () => ({
   },
 }));
 
-import type { ArtistSearchAliasVariant } from '../../../../jobs/artist-search-alias-consumer/lml-types';
+import type { StoredAliasVariant } from '../../../../jobs/artist-search-alias-consumer/lml-types';
 import { writeArtistVariants } from '../../../../jobs/artist-search-alias-consumer/writer';
 
-const variant = (overrides: Partial<ArtistSearchAliasVariant> = {}): ArtistSearchAliasVariant => ({
+const variant = (overrides: Partial<StoredAliasVariant> = {}): StoredAliasVariant => ({
   source: 'discogs_name_variation',
   variant: 'Thee Oh Sees',
   method: 'name_variation',
@@ -241,7 +241,7 @@ describe('writeArtistVariants', () => {
       confidence: 0.95,
       // related_artist_id / external_subject_id / external_object_id / active
       // are absent — `v.x` is `undefined` at runtime.
-    } as unknown as ArtistSearchAliasVariant;
+    } as unknown as StoredAliasVariant;
 
     await writeArtistVariants(42, 'Sonic Youth', [sparseVariant], ['discogs_name_variation']);
 

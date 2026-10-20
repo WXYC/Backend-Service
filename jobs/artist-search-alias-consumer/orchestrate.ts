@@ -30,11 +30,11 @@
  * without touching PG or the network. Production wires them via job.ts.
  */
 
-import type { ArtistSearchAliasesBulkResponse, ArtistSearchAliasVariant } from './lml-types.js';
+import type { ArtistSearchAliasesBulkResponse, LocalAliasSource, StoredAliasVariant } from './lml-types.js';
 import type { NameGroup, Partition } from './select.js';
 import { captureError, log } from './logger.js';
 import { isCompilationArtist } from './compilation.js';
-import { splitLibraryCredit } from './credit-split.js';
+import { splitLibraryCredits } from './credit-split.js';
 
 const JOB_NAME = 'artist-search-alias-consumer';
 const WXYC_LIBRARY_ALT_CONFIDENCE = 0.85;
@@ -42,7 +42,7 @@ const WXYC_LIBRARY_ALT_CONFIDENCE = 0.85;
 const WXYC_LIBRARY_CREDIT_CONFIDENCE = 0.7;
 // The two composer legs this job runs locally, against `library`. Both are
 // always "attempted", so the writer's reconcile DELETE covers both.
-const LOCAL_SOURCES = ['wxyc_library_alt', 'wxyc_library_credit'] as const;
+const LOCAL_SOURCES: readonly LocalAliasSource[] = ['wxyc_library_alt', 'wxyc_library_credit'];
 
 export type LoadNameGroupsFn = (cursor: string) => Promise<NameGroup[]>;
 export type FetchBulkFn = (names: string[]) => Promise<ArtistSearchAliasesBulkResponse>;
@@ -50,7 +50,7 @@ export type FetchAltsFn = (artistIds: number[]) => Promise<Map<number, string[]>
 export type WriteArtistVariantsFn = (
   artist_id: number,
   canonicalName: string,
-  variants: ArtistSearchAliasVariant[],
+  variants: StoredAliasVariant[],
   sourcesPresent: string[]
 ) => Promise<{ variants_written: number }>;
 
@@ -108,43 +108,18 @@ const emptyTotals = (): Totals => ({
   lml_total_latency_ms: 0,
 });
 
-const buildAltVariants = (alts: string[]): ArtistSearchAliasVariant[] =>
-  alts.map((variant) => ({
-    source: 'wxyc_library_alt' as const,
+/** Rows for one local source; both come from `alternate_artist_name`, so both are `alt_curated`. */
+const localVariants = (source: LocalAliasSource, confidence: number, names: string[]): StoredAliasVariant[] =>
+  names.map((variant) => ({
+    source,
     variant,
     method: 'alt_curated' as const,
-    confidence: WXYC_LIBRARY_ALT_CONFIDENCE,
+    confidence,
     related_artist_id: null,
     external_subject_id: null,
     external_object_id: null,
     active: null,
   }));
-
-/**
- * BS#3554: one `wxyc_library_credit` row per name inside each comma-joined
- * alt value (see `credit-split.ts` for the rules). The joined value keeps
- * its own `wxyc_library_alt` row from `buildAltVariants`. A name credited
- * in more than one alt value for the same artist is written once, since
- * `(artist_id, source, variant)` is the substrate's primary key.
- */
-const buildCreditVariants = (alts: string[], canonicalName: string): ArtistSearchAliasVariant[] => {
-  const names = new Set<string>();
-  for (const alt of alts) {
-    for (const name of splitLibraryCredit(alt, canonicalName)) {
-      names.add(name);
-    }
-  }
-  return [...names].map((variant) => ({
-    source: 'wxyc_library_credit' as const,
-    variant,
-    method: 'alt_curated' as const,
-    confidence: WXYC_LIBRARY_CREDIT_CONFIDENCE,
-    related_artist_id: null,
-    external_subject_id: null,
-    external_object_id: null,
-    active: null,
-  }));
-};
 
 export const runConsumer = async (opts: {
   loadNameGroups: LoadNameGroupsFn;
@@ -238,11 +213,9 @@ export const runConsumer = async (opts: {
       }
 
       const lmlVariants = lmlResult?.variants ?? [];
-      // `sources_present` records which legs the composer ran. We always
-      // append both local sources because the orchestrator just ran the
-      // local SELECT — each leg is unambiguously "attempted" regardless of
-      // whether it returned anything, so a credit piece removed from
-      // `alternate_artist_name` reconciles away like a removed alt value.
+      // `sources_present` records which legs ran; both local legs always do
+      // (see LOCAL_SOURCES), so a removed alt value or credit piece
+      // reconciles away.
       const sourcesPresent: string[] = [...(lmlResult?.sources_present ?? []), ...LOCAL_SOURCES];
 
       // Fan variants out across every artist_id in the group.
@@ -253,9 +226,15 @@ export const runConsumer = async (opts: {
         // regressions (sudden surge of duplicate-named artists).
         if (isFanoutGroup) totals.fanout_writes += 1;
         const altNames = altsByArtist.get(artist_id) ?? [];
-        const altVariants = buildAltVariants(altNames);
-        const creditVariants = buildCreditVariants(altNames, group.artist_name);
-        const allVariants = [...lmlVariants, ...altVariants, ...creditVariants];
+        const allVariants = [
+          ...lmlVariants,
+          ...localVariants('wxyc_library_alt', WXYC_LIBRARY_ALT_CONFIDENCE, altNames),
+          ...localVariants(
+            'wxyc_library_credit',
+            WXYC_LIBRARY_CREDIT_CONFIDENCE,
+            splitLibraryCredits(altNames, group.artist_name)
+          ),
+        ];
 
         if (opts.dryRun) {
           totals.would_write_rows += allVariants.length;
