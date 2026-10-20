@@ -77,7 +77,9 @@ describe('Sentry.init call sites', () => {
         'apps/enrichment-worker/instrument.ts',
       ])
     );
-    expect(files.filter((f) => f.startsWith('jobs/')).length).toBeGreaterThanOrEqual(30);
+    // Jobs migrated to createJobLogger (@wxyc/observability) no longer call Sentry.init
+    // themselves, so this floor drops as each migration batch lands (BS#3399).
+    expect(files.filter((f) => f.startsWith('jobs/')).length).toBeGreaterThanOrEqual(28);
   });
 
   it('filters Dedupe out of the default integrations at every site', () => {
