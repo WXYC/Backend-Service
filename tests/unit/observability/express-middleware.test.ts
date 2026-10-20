@@ -231,6 +231,20 @@ describe('Express request scope and PostHog error middleware', () => {
       expect(sentProperties().map((e) => e.route)).toEqual(['/flowsheet/:id', '/flowsheet']);
     });
 
+    it('tags errors from a nested router with the whole mount chain', async () => {
+      const inner = express.Router();
+      inner.get('/:id', (_req, _res, next) => next(new Error('boom')));
+      const outer = express.Router();
+      outer.use('/b', inner);
+      const app = express();
+      app.use(requestScopeMiddleware);
+      app.use('/a', outer);
+      app.use(createExpressErrorMiddleware({ shouldCapture: () => true, statusOf: () => 500 }));
+      app.use((_err: unknown, _req: unknown, res: express.Response, _next: unknown) => res.sendStatus(500));
+      await request(app).get('/a/b/9');
+      expect(sentProperties()[0]).toMatchObject({ route: '/a/b/:id' });
+    });
+
     it('names the route "unmatched" when the error came from outside any route', async () => {
       const app = express();
       app.use((_req, _res, next) => next(new Error('boom')));

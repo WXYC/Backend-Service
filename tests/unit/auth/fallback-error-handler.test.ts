@@ -111,13 +111,16 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
   });
 });
 
-// BS#3409: fallbackErrorHandler already reports every pipeline error through the composite reporter (Sentry and
-// PostHog), so apps/auth must not also register the PostHog-only Express error middleware, or each error reaches
-// PostHog twice. Booting app.ts needs a database, so pin the wiring at the source.
+// BS#3409: apps/auth registers the PostHog Express error middleware (with the BS#3004 allowlist predicate) just
+// before fallbackErrorHandler. An Error then reaches PostHog twice; the reporter's 60 s dedupe collapses the pair.
+// Booting app.ts needs a database, so pin the wiring at the source.
 describe('auth app wiring (BS#3409)', () => {
-  it('registers no PostHog Express error middleware beside fallbackErrorHandler', () => {
+  it('registers the PostHog Express error middleware with the auth predicate before fallbackErrorHandler', () => {
     const source = readFileSync(join(__dirname, '../../../apps/auth/app.ts'), 'utf8');
-    expect(source).not.toMatch(/createExpressErrorMiddleware\s*\(/);
+    expect(source).toMatch(/createExpressErrorMiddleware\(\{\s*shouldCapture: shouldCaptureAuthExpressError/);
+    expect(source.indexOf('createExpressErrorMiddleware({')).toBeLessThan(
+      source.indexOf('app.use(fallbackErrorHandler)')
+    );
     expect(source).toMatch(/app\.use\(fallbackErrorHandler\)/);
   });
 });
