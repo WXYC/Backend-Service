@@ -24,11 +24,18 @@ function makeSql() {
  * the air could edit, delete or reorder any row in the table by id.
  *
  * The rows on other shows are inserted directly: there is no API path that writes to a closed show, which is the
- * point. Their shows start in 2000 so the live show the fixtures open stays the latest one.
+ * point. `showMemberMiddleware` checks the caller against the LATEST show (highest `shows.id`, not latest start_time),
+ * so the other shows are inserted in `beforeEach` BEFORE the live show is opened: the live show keeps the highest id,
+ * the middleware passes, and every rejection below can only come from the row-scoped gate. Both seeded shows start
+ * ended, so `join_show` does not co-host onto them; the foreign-open case reopens its show after the live show exists.
+ * Without the gate each case would return 200 (the caller is a legitimate member of the live show).
  */
 describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)', () => {
   let sql;
   let liveShowId;
+  let endedShowId;
+  let foreignShowId;
+  const rowIds = [];
 
   const routes = [
     [
@@ -53,14 +60,15 @@ describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)
        VALUES ($1, 'track', 'Cat Power', $2, $3) RETURNING id`,
       [showId, ORIGINAL_TITLE, playOrder]
     );
+    rowIds.push(row.id);
     return row.id;
   };
 
-  const insertShow = async (suffix, endTime) => {
+  const insertEndedShow = async (suffix) => {
     const [row] = await sql.unsafe(
       `INSERT INTO ${SCHEMA}.shows (show_name, start_time, end_time)
-       VALUES ($1, '2000-01-01 00:00:00+00', $2) RETURNING id`,
-      [NAME_PREFIX + suffix, endTime]
+       VALUES ($1, '2000-01-01 00:00:00+00', '2000-01-01 02:00:00+00') RETURNING id`,
+      [NAME_PREFIX + suffix]
     );
     return row.id;
   };
@@ -73,6 +81,9 @@ describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)
   });
 
   beforeEach(async () => {
+    rowIds.length = 0;
+    endedShowId = await insertEndedShow('ended');
+    foreignShowId = await insertEndedShow('foreign-open');
     const res = await fls_util.join_show(global.primary_dj_id, global.access_token, {
       show_name: `${NAME_PREFIX}live`,
     });
@@ -83,10 +94,17 @@ describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)
   afterEach(async () => {
     await fls_util.leave_show(global.secondary_dj_id, global.secondary_access_token);
     await fls_util.leave_show(global.primary_dj_id, global.access_token);
-    await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE track_title = $1 AND artist_name = 'Cat Power'`, [
-      ORIGINAL_TITLE,
-    ]);
-    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE show_name LIKE $1`, [`${NAME_PREFIX}%`]);
+    const prefixed = `${NAME_PREFIX}%`;
+    await sql.unsafe(
+      `DELETE FROM ${SCHEMA}.flowsheet
+       WHERE id = ANY($1::int[]) OR show_id IN (SELECT id FROM ${SCHEMA}.shows WHERE show_name LIKE $2)`,
+      [rowIds, prefixed]
+    );
+    await sql.unsafe(
+      `DELETE FROM ${SCHEMA}.show_djs WHERE show_id IN (SELECT id FROM ${SCHEMA}.shows WHERE show_name LIKE $1)`,
+      [prefixed]
+    );
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE show_name LIKE $1`, [prefixed]);
   });
 
   afterAll(async () => {
@@ -95,8 +113,14 @@ describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)
 
   describe.each(routes)('%s', (_name, send) => {
     test.each([
-      ['an ended show', async () => insertRow(await insertShow('ended', '2000-01-01 02:00:00+00'), 2)],
-      ['an open show the caller is not a member of', async () => insertRow(await insertShow('foreign-open', null), 2)],
+      ['an ended show', async () => insertRow(endedShowId, 2)],
+      [
+        'an open show the caller is not a member of',
+        async () => {
+          await sql.unsafe(`UPDATE ${SCHEMA}.shows SET end_time = NULL WHERE id = $1`, [foreignShowId]);
+          return insertRow(foreignShowId, 2);
+        },
+      ],
       ['no show at all (NULL show_id)', async () => insertRow(null, 2)],
     ])('rejects a row on %s with a 400 and leaves it unchanged', async (_case, seed) => {
       const id = await seed();
