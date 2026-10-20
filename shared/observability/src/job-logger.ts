@@ -116,6 +116,40 @@ export const createJobLogger = ({
     baseTags = null;
   };
 
+  /**
+   * Run `fn`, then publish `HeartbeatSuccess` (namespace `WXYC/Cron`, dimension `job`=`jobName`) and
+   * wait for CloudWatch to accept it, since a one-shot job can exit before a buffered emitter flushes.
+   * A throw from `fn` publishes nothing. The SDK loads here, not at module load, so jobs that never
+   * heartbeat do not pay for it. A failed publish is logged, not thrown: the run itself succeeded.
+   */
+  const withHeartbeat = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const result = await fn();
+    if (process.env.CRON_HEARTBEAT_METRICS_DISABLED === 'true') {
+      return result;
+    }
+    try {
+      const { PutMetricDataCommand } = await import('@aws-sdk/client-cloudwatch');
+      const { createCloudWatchClient } = await import('./metrics.js');
+      await createCloudWatchClient().send(
+        new PutMetricDataCommand({
+          Namespace: 'WXYC/Cron',
+          MetricData: [
+            {
+              MetricName: 'HeartbeatSuccess',
+              Dimensions: [{ Name: 'job', Value: jobName }],
+              Value: 1,
+              Unit: 'Count',
+              Timestamp: new Date(),
+            },
+          ],
+        })
+      );
+    } catch (err) {
+      console.warn(`logger: failed to publish HeartbeatSuccess for "${jobName}"`, err);
+    }
+    return result;
+  };
+
   return {
     initLogger,
     log,
@@ -127,5 +161,6 @@ export const createJobLogger = ({
     errorMessage,
     resolveTracesSampleRate,
     reporter,
+    withHeartbeat,
   };
 };

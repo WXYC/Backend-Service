@@ -762,6 +762,7 @@ jobs:
           SSE_METRICS_DISABLED: 'true'
           AUTH_RATE_LIMIT_METRICS_DISABLED: 'true'
           ROTATION_ARTIST_BACKFILL_METRICS_DISABLED: 'true'
+          CRON_HEARTBEAT_METRICS_DISABLED: 'true'
         run: |
           node dev_env/mock-api-server/dist/server.js > /tmp/mock-api.log 2>&1 &
           node apps/auth/dist/app.js > /tmp/auth.log 2>&1 &

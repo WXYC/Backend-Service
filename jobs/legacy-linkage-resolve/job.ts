@@ -99,7 +99,7 @@ import { isRetiredLinkageCandidateError } from './retired-candidate.js';
 
 export const JOB_NAME = 'legacy-linkage-resolve';
 
-const { initLogger, log, captureError, captureWarning, errorMessage, closeLogger } = createJobLogger({
+const { initLogger, log, captureError, captureWarning, errorMessage, closeLogger, withHeartbeat } = createJobLogger({
   jobName: JOB_NAME,
 });
 
@@ -1036,14 +1036,18 @@ export const runOnce = async (dryRun: boolean): Promise<RunResult> => {
   // advanced — `reportLockContention`/`reportRetiredLinkageCandidates`'s
   // warnings are what distinguish them, and which of the two fired.
   let deferred = false;
+  // The CloudWatch heartbeat (BS#3404) wraps the same callback, so a thrown run publishes
+  // nothing. Like the `ok` check-in it claims only that the run happened, so a stand-down
+  // still publishes. It runs alongside `withMonitor` until the alarms replace the check-in.
   const result = await Sentry.withMonitor(
     JOB_NAME,
-    async () => {
-      const passes = await runResolve(false);
-      deferred = hasStandDown(passes);
-      if (!deferred) await updateLastRun(JOB_NAME, startedAt);
-      return passes;
-    },
+    () =>
+      withHeartbeat(async () => {
+        const passes = await runResolve(false);
+        deferred = hasStandDown(passes);
+        if (!deferred) await updateLastRun(JOB_NAME, startedAt);
+        return passes;
+      }),
     MONITOR_CONFIG
   );
 
