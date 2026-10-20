@@ -95,7 +95,6 @@
   "tests/unit/jobs/album-metadata-bio-fill/orchestrate.test.ts": 1,
   "tests/unit/jobs/album-metadata-bio-fill/run-batch.test.ts": 1,
   "tests/unit/jobs/album-metadata-reask/dry-run-statements.test.ts": 1,
-  "tests/unit/jobs/album-metadata-reask/dry-run.test.ts": 1,
   "tests/unit/jobs/album-metadata-reask/inputs.test.ts": 1,
   "tests/unit/jobs/album-metadata-reask/preview-statements.test.ts": 1,
   "tests/unit/jobs/album-metadata-reask/run-batch.test.ts": 3,

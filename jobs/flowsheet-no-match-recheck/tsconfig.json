@@ -3,7 +3,8 @@
   "references": [
     { "path": "../../shared/database" },
     { "path": "../../shared/lml-client" },
-    { "path": "../../shared/metadata" }
+    { "path": "../../shared/metadata" },
+    { "path": "../../shared/observability" }
   ],
   "include": ["."],
   "compilerOptions": {

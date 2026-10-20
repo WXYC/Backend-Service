@@ -29,7 +29,7 @@ import {
   type HoldReason,
   type InputFile,
 } from './inputs.js';
-import { captureError, closeLogger, emitCounter, initLogger, log } from './logger.js';
+import { captureCounter, captureError, closeLogger, initLogger, log } from './logger.js';
 import { previewLine, readStored, sampleStratified } from './preview.js';
 import { runBatch, type AdmittedRow, type BatchTotals } from './run-batch.js';
 
@@ -487,7 +487,7 @@ export const runPreview = async (options: ReaskOptions): Promise<PreviewSummary>
 export const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
   // Discogs-calls-per-album signal for the canary (BS#3508).
-  setLmlCounterSink(emitCounter);
+  setLmlCounterSink(captureCounter);
   try {
     // The summary is already on the `dry_run_plan`, `preview_done`, `catalog_pass`, `restore_plan` or `restore` line.
     const mode = resolveMode();

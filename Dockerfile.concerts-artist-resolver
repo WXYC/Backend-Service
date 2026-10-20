@@ -15,10 +15,12 @@ ENV DB_APPLICATION_NAME=wxyc-concerts-artist-resolver
 COPY ./package* ./
 COPY ./jobs/concerts-artist-resolver/package* ./jobs/concerts-artist-resolver/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev
 
 COPY --link --from=builder /jobs/concerts-artist-resolver/dist ./jobs/concerts-artist-resolver/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 CMD ["npm", "start", "--workspace=@wxyc/concerts-artist-resolver"]
