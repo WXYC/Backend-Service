@@ -6,6 +6,14 @@
 
 import { createJobLogger } from '@wxyc/observability/job-logger';
 
-export const { initLogger, log, captureError, captureWarning, closeLogger } = createJobLogger({
+// `captureWarning` is the shared `captureMessage` (warning level, no fingerprint), not the shared
+// `captureWarning`: this job's warnings have always grouped by message text in Sentry.
+export const {
+  initLogger,
+  log,
+  captureError,
+  captureMessage: captureWarning,
+  closeLogger,
+} = createJobLogger({
   jobName: 'album-critic-reviews-etl',
 });
