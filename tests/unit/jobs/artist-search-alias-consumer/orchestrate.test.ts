@@ -41,9 +41,9 @@ type WriteFn = (
 const makeLmlResult = (
   name: string,
   variantCount: number,
-  sources_present: (
-    'discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt' | 'wxyc_library_credit'
-  )[] = ['discogs_name_variation']
+  sources_present: ('discogs_name_variation' | 'discogs_alias' | 'discogs_member' | 'wxyc_library_alt')[] = [
+    'discogs_name_variation',
+  ]
 ): ArtistSearchAliasesResult => ({
   name,
   variants: Array.from({ length: variantCount }, (_, i) => ({
@@ -275,9 +275,9 @@ describe('runConsumer — happy path', () => {
 
   it('BS#3554: splits a comma-joined alt value into wxyc_library_credit rows and keeps the joined wxyc_library_alt row', async () => {
     // Two alt values. The first is the CA 49 credit; the second is a
-    // single name, which already has its own wxyc_library_alt row, so it
-    // adds no credit row. The same name in both must not produce a
-    // duplicate credit row.
+    // single name, which already has its own wxyc_library_alt row. A credit
+    // row for that same name would tie with the alt row on similarity and
+    // flap `matched_source`, so only `Our Native Daughters` gets one.
     const { run, writeArtistVariants } = runOnce(
       { artist_name: 'Carolina Chocolate Drops', artist_ids: [4901] },
       { artists: [makeLmlResult('Carolina Chocolate Drops', 0, ['discogs_name_variation'])], missing: [] },
@@ -289,7 +289,7 @@ describe('runConsumer — happy path', () => {
     const variants = writeArtistVariants.mock.calls[0][2] as Array<Record<string, unknown>>;
     const bySource = (source: string) => variants.filter((v) => v.source === source).map((v) => v.variant);
     expect(bySource('wxyc_library_alt')).toEqual(['Rhiannon Giddens, Our Native Daughters', 'Rhiannon Giddens']);
-    expect(bySource('wxyc_library_credit')).toEqual(['Rhiannon Giddens', 'Our Native Daughters']);
+    expect(bySource('wxyc_library_credit')).toEqual(['Our Native Daughters']);
     variants
       .filter((v) => v.source === 'wxyc_library_credit')
       .forEach((v) => {

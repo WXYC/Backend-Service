@@ -20,7 +20,7 @@ The librarian files a member's solo or side-project record under the band's card
 
 The source is **relational**: a member or collaborator credit, not a spelling variant. Catalog search reads it like every other source. `jobs/concerts-artist-resolver/query.ts` lists it in `RELATIONAL_ALIAS_SOURCES`, so it never resolves a concert headliner.
 
-Splitting rules (conservative, from a survey of the 2026-09-14 `library.db` snapshot): split on `,` only, never on `&`, `and` or `/`. Leave a value with brackets or parentheses whole. Rejoin `Jr.`/`Sr.`/`Inc.`/`Ltd.`/`The`/`II`/`III` to the piece before it. Strip a leading `and ` from the last piece. Skip a value with fewer than two pieces, or two one-word pieces (an inverted `Last, First` name). Drop `et al`/`etc`, the owner's own name and duplicates.
+Splitting rules (conservative, from a survey of the 2026-09-14 `library.db` snapshot and the PR #3560 review): split on `,` only, never on `&`, `and` or `/`. Leave a value with brackets or parentheses whole. Rejoin `Jr.`/`Sr.`/`IV`/`II`/`III`/`Inc.`/`Ltd.`/`LLC`/`Co`/`Bros.`/`Esq.`/`The` to the piece before it. Strip a leading `and ` or `& ` from the last piece; an `&` or `and` left inside the last piece marks a comma band name (`Earth, Wind & Fire`), which is left whole. Drop `et al`/`etc`, then skip a value with fewer than two distinct names. Never write a one-word name (a bare `Miller` would match a whole discography at similarity 1.0), the owner's own name, or a name the artist already has as a `wxyc_library_alt` value.
 
 Rows fill in on the rolling `STALE_THRESHOLD_DAYS` refresh, so the first full set exists about 7 daily runs after a deploy. To check:
 
