@@ -284,11 +284,20 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       resetCatalogSearchAliasConfig();
     }
 
+    // A release in several active rotation bins fans out to rows that share
+    // one id. `albumScopedQuery`'s `DISTINCT ON (id)` collapses them today,
+    // but `n` counts albums, so the probe's room and the page must be counted
+    // in distinct ids and never cut an album's rows (PR #3558 review).
+    const secondDirect = { ...directRow, id: 1302, album_title: 'Giddens Blues' };
+    const fanOutRotationRow = { ...directRow, rotation_bin: 'H' };
+    const fanOutAliasRow = { ...aliasRows[0], rotation_bin: 'M' };
+
     it.each([
       {
         label: 'surname query, stage 1 hits a different artist: alias rows follow the direct row',
         flag: true,
         query: 'Giddens',
+        n: 50,
         tiers: { tsvector: [directRow], aliasAppend: aliasRows },
         expectedIds: [1301, 4908, 4904],
         expectedTiers: ['tsvector', 'aliasAppend'],
@@ -297,6 +306,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         label: 'full-name query falls through to stage 2 (existing alias-aware trigram path, unchanged)',
         flag: true,
         query: 'Rhiannon Giddens',
+        n: 50,
         tiers: { tsvector: [], alias: aliasRows },
         expectedIds: [4908, 4904],
         expectedTiers: ['tsvector', 'alias'],
@@ -305,23 +315,43 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         label: 'flag off: stage 1 returns alone and the alias probe never runs',
         flag: false,
         query: 'Giddens',
+        n: 50,
         tiers: { tsvector: [directRow], aliasAppend: aliasRows },
         expectedIds: [1301],
         expectedTiers: ['tsvector'],
       },
-    ])('$label', async ({ flag, query, tiers, expectedIds, expectedTiers }) => {
+      {
+        label: 'rotation fan-out: 2 stage-1 albums as 3 rows leave room for 2 alias albums, all rows kept',
+        flag: true,
+        query: 'Giddens',
+        n: 4,
+        tiers: {
+          tsvector: [directRow, fanOutRotationRow, secondDirect],
+          aliasAppend: [aliasRows[0], fanOutAliasRow, aliasRows[1]],
+        },
+        expectedIds: [1301, 1301, 1302, 4908, 4908, 4904],
+        expectedTiers: ['tsvector', 'aliasAppend'],
+        expectedRoom: 2,
+      },
+    ])('$label', async ({ flag, query, n, tiers, expectedIds, expectedTiers, expectedRoom }) => {
       setAliasFlag(flag);
       mockCatalogTiers(db.execute, tiers);
 
-      const results = await fuzzySearchLibrary(query, query, 50);
+      const results = await fuzzySearchLibrary(query, query, n);
 
       expect(catalogTierCallLog(db.execute)).toEqual(expectedTiers);
       expect(results.map((r) => r.id)).toEqual(expectedIds);
+      if (expectedRoom !== undefined) {
+        expect(lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ')).toContain(
+          `album_rank <= ${expectedRoom}`
+        );
+      }
+      const aliasIds = new Set(aliasRows.map((r) => r.id));
       for (const row of results) {
-        if (row.id === directRow.id) {
-          expect(row.matched_via_alias).toBeUndefined();
-        } else {
+        if (aliasIds.has(row.id)) {
           expect(row.matched_via_alias).toEqual(aliasHint);
+        } else {
+          expect(row.matched_via_alias).toBeUndefined();
         }
         // The CTE's helper columns never reach the wire shape.
         expect(row).not.toHaveProperty('alias_max_sim');
@@ -342,7 +372,6 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       // fuzzy-alias tier and lets them rank on score. Appending is structural,
       // so even a perfect alias hit stays behind every stage-1 row.
       setAliasFlag(true);
-      const secondDirect = { ...directRow, id: 1302, album_title: 'Giddens Blues' };
       const exactAlias = { ...aliasRows[0], alias_max_sim: 1, alias_matched_variant: 'Giddens' };
       mockCatalogTiers(db.execute, { tsvector: [directRow, secondDirect], aliasAppend: [exactAlias] });
 
