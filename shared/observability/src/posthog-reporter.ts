@@ -324,6 +324,13 @@ export class PostHogReporter implements ErrorReporter {
   }
 }
 
+/** The `--unhandled-rejections` mode the process runs with (`process.execArgv` first, then `NODE_OPTIONS`); Node's default is `throw`. */
+function unhandledRejectionsMode(): string {
+  const args = [...process.execArgv, ...(process.env.NODE_OPTIONS ?? '').split(/\s+/)];
+  const flag = args.reverse().find((arg) => arg.startsWith('--unhandled-rejections='));
+  return flag ? flag.slice('--unhandled-rejections='.length) : 'throw';
+}
+
 /**
  * Installs the `uncaughtException` and `unhandledRejection` handlers that report crashes to PostHog, and returns a
  * function that removes them. Installs nothing (returns a no-op) when the reporter has no key.
@@ -331,8 +338,12 @@ export class PostHogReporter implements ErrorReporter {
  * Exit ownership: @sentry/node 11.4's `onUncaughtExceptionIntegration` exits only when no other `uncaughtException`
  * listener is registered (`exitEvenIfOtherHandlersAreRegistered` defaults to false), so once this one is installed
  * it owns the non-zero exit. It flushes PostHog and `beforeExit` (the apps pass `Sentry.close`, so Sentry's own
- * crash event is not cut short), each bounded to 2 s, then exits 1. Sentry's `onUnhandledRejection` default mode
- * only warns, so a rejection is reported and the process carries on, as before.
+ * crash event is not cut short), each bounded to 2 s, then exits 1.
+ *
+ * Registering an `unhandledRejection` listener switches off Node's default (print the stack, exit 1), so the handler
+ * puts it back: when another listener exists at the moment the event fires (Sentry's integration, which only warns),
+ * it reports and leaves the behaviour to that listener; when it is the only listener, it flushes, prints the
+ * rejection and exits 1, unless `--unhandled-rejections` selects `none`, `warn` or `warn-with-error-code`.
  */
 export function installCrashHandlers(
   reporter: PostHogReporter,
@@ -353,7 +364,30 @@ export function installCrashHandlers(
   };
   const onRejection = (reason: unknown): void => {
     reporter.captureCrash(reason, 'onunhandledrejection');
-    void reporter.flush(CRASH_FLUSH_MS);
+    const flushed = reporter.flush(CRASH_FLUSH_MS);
+    // Decided when the event fires: Sentry may register its listener after this one. With another listener present,
+    // that listener owns the printing and the exit, and this one only reports.
+    if (process.listeners('unhandledRejection').some((listener) => listener !== onRejection)) {
+      return;
+    }
+    // Registering a listener switched off Node's default, so reproduce it (or the explicit mode) here.
+    const mode = unhandledRejectionsMode();
+    if (mode === 'none') {
+      return;
+    }
+    console.error(reason);
+    if (mode === 'warn') {
+      return;
+    }
+    if (mode === 'warn-with-error-code') {
+      process.exitCode = 1;
+      return;
+    }
+    if (exiting) {
+      return;
+    }
+    exiting = true;
+    void Promise.allSettled([flushed, beforeExit()]).then(() => process.exit(1));
   };
   process.on('uncaughtException', onException);
   process.on('unhandledRejection', onRejection);

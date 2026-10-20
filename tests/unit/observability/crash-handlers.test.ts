@@ -84,14 +84,107 @@ describe('installCrashHandlers (BS#3517)', () => {
     expect(exit).toHaveBeenCalledTimes(1);
   });
 
-  it('reports an unhandled rejection the same way, flushes, and leaves the exit to the process', async () => {
-    installCrashHandlers(build());
-    handlers['unhandledRejection'](new Error('rejected'), Promise.resolve());
-    await settle();
-    expect(mockClient.captureException).toHaveBeenCalledTimes(1);
-    expect(mockClient.captureException.mock.calls[0][2]['$wxyc_crash_mechanism']).toBe('onunhandledrejection');
-    expect(mockClient.flush).toHaveBeenCalled();
-    expect(exit).not.toHaveBeenCalled();
+  /** Makes `process.listeners('unhandledRejection')` report our handler plus `others` other listeners. */
+  const withListeners = (others: number) => {
+    jest
+      .spyOn(process, 'listeners')
+      .mockImplementation(((event: string) =>
+        event === 'unhandledRejection'
+          ? [handlers['unhandledRejection'], ...Array.from({ length: others }, () => () => undefined)]
+          : []) as never);
+  };
+
+  describe('unhandled rejections', () => {
+    const originalExecArgv = process.execArgv;
+    const originalNodeOptions = process.env.NODE_OPTIONS;
+    let stderr: jest.SpyInstance;
+
+    beforeEach(() => {
+      stderr = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      process.execArgv = originalExecArgv;
+      if (originalNodeOptions === undefined) {
+        delete process.env.NODE_OPTIONS;
+      } else {
+        process.env.NODE_OPTIONS = originalNodeOptions;
+      }
+    });
+
+    it('reports, prints the rejection and exits 1 when no other listener exists, as Node does by default', async () => {
+      installCrashHandlers(build());
+      withListeners(0);
+      const reason = new Error('rejected');
+      handlers['unhandledRejection'](reason, Promise.resolve());
+      await settle();
+      expect(mockClient.captureException).toHaveBeenCalledTimes(1);
+      expect(mockClient.captureException.mock.calls[0][2]['$wxyc_crash_mechanism']).toBe('onunhandledrejection');
+      expect(mockClient.flush).toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(reason);
+      expect(exit).toHaveBeenCalledWith(1);
+    });
+
+    it('waits for the flush before it exits', async () => {
+      const flush = heldPromise<void>();
+      mockClient.flush.mockImplementation(flush.hold);
+      const exited = new Promise<void>((resolve) => {
+        exit.mockImplementation((() => resolve()) as never);
+      });
+      installCrashHandlers(build());
+      withListeners(0);
+      handlers['unhandledRejection'](new Error('rejected'), Promise.resolve());
+      await expectPending(exited);
+      flush.release();
+      await exited;
+      expect(exit).toHaveBeenCalledWith(1);
+    });
+
+    it('only reports when another listener (such as Sentry) is present: no print, no exit', async () => {
+      installCrashHandlers(build());
+      withListeners(1);
+      handlers['unhandledRejection'](new Error('rejected'), Promise.resolve());
+      await settle();
+      expect(mockClient.captureException).toHaveBeenCalledTimes(1);
+      expect(mockClient.flush).toHaveBeenCalled();
+      expect(stderr).not.toHaveBeenCalled();
+      expect(exit).not.toHaveBeenCalled();
+    });
+
+    it('decides about other listeners when the event fires, not at install time', async () => {
+      installCrashHandlers(build());
+      withListeners(0);
+      handlers['unhandledRejection'](new Error('first'), Promise.resolve());
+      await settle();
+      expect(exit).toHaveBeenCalledTimes(1);
+      exit.mockClear();
+      withListeners(1);
+      handlers['unhandledRejection'](new Error('second (distinct)'), Promise.resolve());
+      await settle();
+      expect(exit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['--unhandled-rejections=none', undefined, false, false],
+      ['--unhandled-rejections=warn', undefined, true, false],
+      ['--unhandled-rejections=strict', undefined, true, true],
+      [undefined, '--unhandled-rejections=none', false, false],
+    ])(
+      'honours the explicit mode %s / NODE_OPTIONS %s (prints: %s, exits: %s)',
+      async (flag, nodeOptions, prints, exits) => {
+        process.execArgv = flag ? [flag] : [];
+        if (nodeOptions) {
+          process.env.NODE_OPTIONS = nodeOptions;
+        }
+        installCrashHandlers(build());
+        withListeners(0);
+        handlers['unhandledRejection'](new Error('rejected'), Promise.resolve());
+        await settle();
+        expect(mockClient.captureException).toHaveBeenCalledTimes(1);
+        expect(stderr.mock.calls.length > 0).toBe(prints);
+        expect(exit.mock.calls.length > 0).toBe(exits);
+      }
+    );
   });
 
   it('does not send a crash for an exception a call site already captured', async () => {
