@@ -12,17 +12,11 @@
  *   - Aborts on a 30s per-call timeout.
  *   - Sends `Authorization: Bearer ${LML_API_KEY}` when the env var is set
  *     (LML enforces auth in production per LML#272).
- *   - Wraps the fetch in `Sentry.startSpan({name: 'lml.bulk_resolve_libraries',
- *     op: 'http.client'})` so undici auto-instrumentation has a parent
- *     transaction, and LML's `cache_stats` projects onto the span as
- *     `lml.cache.*` attributes (#646 / LML#229 pattern).
  *   - Throws a plain Error on non-2xx, abort, or network failure. The
  *     orchestrator catches and counts the batch as `lml_error` /
  *     `rows_skipped`; the failed batch is retried on the next run via the
  *     SELECT predicate (idempotent).
  */
-
-import * as Sentry from '@sentry/node';
 
 import type { BulkResolveInput, BulkResolveResponse } from './lml-types.js';
 
@@ -57,79 +51,53 @@ const baseUrl = (): string => {
 };
 
 export const bulkResolveLibraries = async (inputs: BulkResolveInput[]): Promise<BulkResolveResponse> => {
-  return Sentry.startSpan({ name: 'lml.bulk_resolve_libraries', op: 'http.client' }, async (span) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
-    const apiKey = process.env.LML_API_KEY;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
+  const apiKey = process.env.LML_API_KEY;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  try {
+    const response = await fetch(`${baseUrl()}/api/v1/identity/bulk-resolve-libraries`, {
+      method: 'POST',
+      headers,
+      // BS#1991: always request tracks. `include_tracks` is a per-batch
+      // caller flag, not per-input (WXYC/wxyc-shared#297) — this job
+      // classifies va/non_va cohorts locally (select.ts's
+      // VA_COHORT_CONDITION) and pages the va cohort small, rather than
+      // asking LML to gate the payload per input.
+      body: JSON.stringify({ inputs, include_tracks: true }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new LmlFetchError(`LML responded ${response.status} ${response.statusText}`, {
+        status: response.status,
+        retryable: response.status >= 500,
+      });
     }
 
-    try {
-      span.setAttribute('lml.batch_size', inputs.length);
-
-      const response = await fetch(`${baseUrl()}/api/v1/identity/bulk-resolve-libraries`, {
-        method: 'POST',
-        headers,
-        // BS#1991: always request tracks. `include_tracks` is a per-batch
-        // caller flag, not per-input (WXYC/wxyc-shared#297) — this job
-        // classifies va/non_va cohorts locally (select.ts's
-        // VA_COHORT_CONDITION) and pages the va cohort small, rather than
-        // asking LML to gate the payload per input.
-        body: JSON.stringify({ inputs, include_tracks: true }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        throw new LmlFetchError(`LML responded ${response.status} ${response.statusText}`, {
-          status: response.status,
-          retryable: response.status >= 500,
-        });
-      }
-
-      const parsed = (await response.json()) as BulkResolveResponse;
-
-      // Project LML's cache_stats onto the span (LML#229 pattern). Defensive
-      // narrow to a real plain object so Object.entries can't traverse junk
-      // attributes.
-      const stats = (parsed as { cache_stats?: unknown }).cache_stats;
-      if (stats && typeof stats === 'object' && !Array.isArray(stats)) {
-        const attrs: Record<string, number> = {};
-        for (const [key, value] of Object.entries(stats)) {
-          if (typeof value === 'number' && Number.isFinite(value)) {
-            attrs[`lml.cache.${key}`] = value;
-          }
-        }
-        if (Object.keys(attrs).length > 0) {
-          try {
-            span.setAttributes(attrs);
-          } catch {
-            /* swallowed: observability must never break the contract */
-          }
-        }
-      }
-
-      return parsed;
-    } catch (error) {
-      if ((error as Error).name === 'AbortError') {
-        throw new LmlFetchError('LML bulk-resolve request timed out', {
-          status: null,
-          retryable: true,
-          cause: error,
-        });
-      }
-      // Already-classified LML errors fly through; everything else is a
-      // network/transport failure — treat as retryable.
-      if (error instanceof LmlFetchError) throw error;
-      throw new LmlFetchError(`LML bulk-resolve network error: ${(error as Error).message}`, {
+    return (await response.json()) as BulkResolveResponse;
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') {
+      throw new LmlFetchError('LML bulk-resolve request timed out', {
         status: null,
         retryable: true,
         cause: error,
       });
-    } finally {
-      clearTimeout(timeout);
     }
-  });
+    // Already-classified LML errors fly through; everything else is a
+    // network/transport failure — treat as retryable.
+    if (error instanceof LmlFetchError) throw error;
+    throw new LmlFetchError(`LML bulk-resolve network error: ${(error as Error).message}`, {
+      status: null,
+      retryable: true,
+      cause: error,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 };

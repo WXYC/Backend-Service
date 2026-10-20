@@ -22,13 +22,8 @@
  *
  * Deps are injected so tests can drive the orchestrator without a live
  * LML or DB.
- *
- * Sentry span attributes on numeric counters are set at span creation,
- * not via late `setAttribute` (BS#1081 — late `setAttribute` calls index
- * numbers as strings and break sum/avg/p95).
  */
 
-import * as Sentry from '@sentry/node';
 import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
   LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
@@ -139,8 +134,7 @@ export const runBackfill = async (deps: {
   // file's own `logger.ts` (imported below) and treated as "no activity"
   // for that iteration, matching every sibling job. Review round 2 finding
   // 3 corrected an earlier version of this comment, which claimed no
-  // logger was available at this layer — this file already imports Sentry
-  // for `Sentry.startSpan` below, and its own `logger.ts` simply went
+  // logger was available at this layer — its own `logger.ts` simply went
   // unimported. `liveActivityMaxPauseMs` (finding 5) is wired so
   // `LIVE_ACTIVITY_MAX_PAUSE_MS` actually reaches `maxTotalPauseMs`; on
   // exhaustion the closure throws (findings 1+2) and this job's own
@@ -168,61 +162,45 @@ export const runBackfill = async (deps: {
     },
   });
 
-  // BS#1081: numeric attributes are projected at span creation so they
-  // index as numbers (not strings) in Sentry's trace explorer.
-  return await Sentry.startSpan(
-    {
-      name: 'rotation-lml-identity-backfill.run',
-      op: 'function',
-      attributes: {
-        'wxyc.backfill.dry_run': Boolean(deps.dryRun),
-        'wxyc.backfill.live_activity_lookback_seconds': liveActivityLookbackSeconds,
-        'wxyc.backfill.live_activity_pause_ms': liveActivityPauseMs,
-        'wxyc.backfill.live_activity_max_pause_ms': liveActivityMaxPauseMs,
-      },
-    },
-    async () => {
-      const candidates = await deps.loadCandidates();
+  const candidates = await deps.loadCandidates();
 
-      for (const candidate of candidates) {
-        await waitForQuietPeriod();
+  for (const candidate of candidates) {
+    await waitForQuietPeriod();
 
-        totals.scanned += 1;
-        let identityId: number | null;
-        try {
-          identityId = await deps.lookup(candidate.discogs_release_id);
-        } catch {
-          // The row stays `lml_identity_id IS NULL` so it's picked up on
-          // the next daily run when LML's cache is warmer. The job entry
-          // wraps the orchestrator's loop in Sentry's run-scope so
-          // captureException is unnecessary here at the unit boundary.
-          totals.lml_error += 1;
-          continue;
-        }
-        if (identityId !== null) {
-          if (deps.dryRun) {
-            totals.resolved_dry += 1;
-            continue;
-          }
-          const { written } = await deps.write(candidate.id, candidate.discogs_release_id, identityId);
-          if (written) {
-            totals.resolved += 1;
-          } else {
-            // The writer's WHERE clause requires `lml_identity_id IS NULL`
-            // AND `discogs_release_id` still matches the value we resolved
-            // against. 0 rows updated means either (a) another concurrent
-            // backfill (cron + manual) beat us, or (b) rotation-etl
-            // cleared the row mid-run after a paste-correction. Surface on
-            // a dedicated counter so the dashboard distinguishes write
-            // success from "lost the race".
-            totals.raced += 1;
-          }
-        } else {
-          totals.unresolved += 1;
-        }
-      }
-
-      return { totals };
+    totals.scanned += 1;
+    let identityId: number | null;
+    try {
+      identityId = await deps.lookup(candidate.discogs_release_id);
+    } catch {
+      // The row stays `lml_identity_id IS NULL` so it's picked up on
+      // the next daily run when LML's cache is warmer. The job entry
+      // wraps the orchestrator's loop in Sentry's run-scope so
+      // captureException is unnecessary here at the unit boundary.
+      totals.lml_error += 1;
+      continue;
     }
-  );
+    if (identityId !== null) {
+      if (deps.dryRun) {
+        totals.resolved_dry += 1;
+        continue;
+      }
+      const { written } = await deps.write(candidate.id, candidate.discogs_release_id, identityId);
+      if (written) {
+        totals.resolved += 1;
+      } else {
+        // The writer's WHERE clause requires `lml_identity_id IS NULL`
+        // AND `discogs_release_id` still matches the value we resolved
+        // against. 0 rows updated means either (a) another concurrent
+        // backfill (cron + manual) beat us, or (b) rotation-etl
+        // cleared the row mid-run after a paste-correction. Surface on
+        // a dedicated counter so the dashboard distinguishes write
+        // success from "lost the race".
+        totals.raced += 1;
+      }
+    } else {
+      totals.unresolved += 1;
+    }
+  }
+
+  return { totals };
 };

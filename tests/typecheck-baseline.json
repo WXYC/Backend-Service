@@ -129,7 +129,6 @@
   "tests/unit/jobs/flowsheet-metadata-backfill/lml-health.test.ts": 4,
   "tests/unit/jobs/flowsheet-metadata-backfill/orchestrate.test.ts": 41,
   "tests/unit/jobs/flowsheet-metadata-backfill/synthesize-search-urls-parity.test.ts": 1,
-  "tests/unit/jobs/flowsheet-metadata-backfill/totals-span.test.ts": 3,
   "tests/unit/jobs/flowsheet-metadata-backfill/worklist.test.ts": 39,
   "tests/unit/jobs/flowsheet-no-match-recheck/liveness.test.ts": 1,
   "tests/unit/jobs/flowsheet-no-match-recheck/query.test.ts": 11,

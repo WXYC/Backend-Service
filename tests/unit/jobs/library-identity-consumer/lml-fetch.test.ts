@@ -1,36 +1,19 @@
 /**
  * Unit tests for jobs/library-identity-consumer/lml-fetch.ts.
  *
- * Covers the four non-trivial behaviors:
+ * Covers the three non-trivial behaviors:
  *   1. URL construction: trailing `/api/v1` is stripped from
  *      `LIBRARY_METADATA_URL`, and the canonical endpoint suffix
  *      (`/api/v1/identity/bulk-resolve-libraries`) is appended.
  *   2. Conditional `Authorization: Bearer …` header: sent only when
  *      `LML_API_KEY` is set (LML enforces auth in prod).
- *   3. Sentry span wrapping (`lml.bulk_resolve_libraries`, op=http.client)
- *      with `cache_stats` projection onto the span as `lml.cache.*`.
- *   4. Non-2xx and timeout error paths translate to a thrown Error so the
+ *   3. Non-2xx and timeout error paths translate to a thrown Error so the
  *      orchestrator can count the batch as `lml_error`.
  */
 import { jest } from '@jest/globals';
 
 const mockFetch = jest.fn<typeof global.fetch>();
 global.fetch = mockFetch;
-
-const mockSpanSetAttributes = jest.fn();
-const mockSpanSetAttribute = jest.fn();
-type SpanLike = {
-  setAttributes: typeof mockSpanSetAttributes;
-  setAttribute: typeof mockSpanSetAttribute;
-};
-const mockStartSpan = jest.fn(
-  async (_opts: { name: string; op: string }, callback: (span: SpanLike) => unknown) =>
-    await callback({ setAttributes: mockSpanSetAttributes, setAttribute: mockSpanSetAttribute })
-);
-jest.mock('@sentry/node', () => ({
-  startSpan: (opts: { name: string; op: string }, callback: (span: SpanLike) => unknown) =>
-    mockStartSpan(opts, callback),
-}));
 
 import { bulkResolveLibraries, LmlFetchError } from '../../../../jobs/library-identity-consumer/lml-fetch';
 
@@ -133,54 +116,10 @@ describe('jobs/library-identity-consumer/lml-fetch', () => {
     });
   });
 
-  describe('Sentry instrumentation', () => {
-    it('wraps the call in a Sentry span (name=lml.bulk_resolve_libraries, op=http.client)', async () => {
-      mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
-      expect(mockStartSpan).toHaveBeenCalledTimes(1);
-      expect(mockStartSpan.mock.calls[0][0]).toEqual({
-        name: 'lml.bulk_resolve_libraries',
-        op: 'http.client',
-      });
-    });
-
-    it('sets the batch size as a span attribute', async () => {
-      mockFetch.mockResolvedValue(okResponse({ results: [] }));
-      await bulkResolveLibraries([
-        { library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 },
-        { library_id: 2, artist_name: 'B', album_title: 'b', legacy_release_id: 2 },
-        { library_id: 3, artist_name: 'C', album_title: 'c', legacy_release_id: 3 },
-      ]);
-      expect(mockSpanSetAttribute).toHaveBeenCalledWith('lml.batch_size', 3);
-    });
-
-    it('projects numeric cache_stats fields onto the span as lml.cache.<key>', async () => {
-      const cache_stats = {
-        memory_hits: 1,
-        pg_hits: 4,
-        api_calls: 3,
-      };
-      mockFetch.mockResolvedValue(okResponse({ results: [], cache_stats }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
-      expect(mockSpanSetAttributes).toHaveBeenCalledWith({
-        'lml.cache.memory_hits': 1,
-        'lml.cache.pg_hits': 4,
-        'lml.cache.api_calls': 3,
-      });
-    });
-
-    it('does not project cache_stats when it is an array (defensive narrowing)', async () => {
-      mockFetch.mockResolvedValue(okResponse({ results: [], cache_stats: [1, 2, 3] }));
-      await bulkResolveLibraries([{ library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 }]);
-      expect(mockSpanSetAttributes).not.toHaveBeenCalled();
-    });
-
-    it('resolves successfully even when span.setAttributes throws (observability never breaks the contract)', async () => {
+  describe('Response', () => {
+    it('returns the parsed body untouched', async () => {
       const body = { results: [], cache_stats: { memory_hits: 1 } };
       mockFetch.mockResolvedValue(okResponse(body));
-      mockSpanSetAttributes.mockImplementation(() => {
-        throw new Error('sentry boom');
-      });
       const result = await bulkResolveLibraries([
         { library_id: 1, artist_name: 'A', album_title: 'a', legacy_release_id: 1 },
       ]);

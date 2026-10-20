@@ -6,6 +6,6 @@
 
 import { createJobLogger } from '@wxyc/observability/job-logger';
 
-export const { initLogger, log, captureError, closeLogger } = createJobLogger({
+export const { initLogger, log, captureError, captureCounter, closeLogger } = createJobLogger({
   jobName: 'concerts-artist-resolver',
 });

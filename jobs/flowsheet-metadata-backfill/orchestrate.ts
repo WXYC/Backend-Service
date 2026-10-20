@@ -103,7 +103,6 @@
  * `lml-fetch.ts:lookupMetadata` and `enrich.ts:applyEnrichment`.
  */
 
-import * as Sentry from '@sentry/node';
 import { getErrorReporter } from '@wxyc/observability';
 import { sql, type SQL } from 'drizzle-orm';
 import {
@@ -134,7 +133,7 @@ import {
   type BreakerProbeResult,
   type CheckDiscogsBreakerFn,
 } from './lml-health.js';
-import { captureError, log } from './logger.js';
+import { captureCounter, captureError, log } from './logger.js';
 import {
   buildWorkList as defaultBuildWorkList,
   FLOWSHEET_TABLE,
@@ -843,79 +842,14 @@ const formatTotals = (totals: Totals): string =>
   `breaker_probes=${totals.breaker_probes} breaker_pauses=${totals.breaker_pauses}`;
 
 /**
- * Project the run totals onto a Sentry span with numeric attributes set at
- * creation time (per the BS#1081 convention — late `setAttribute` calls index
- * numbers as strings and break sum/avg/p95 aggregation).
- *
- * The span carries an explicit `op` of `flowsheet-metadata-backfill.totals` so
- * a Sentry alert filtering `span.op:flowsheet-metadata-backfill.*` actually
- * matches it — without an `op` the span lands under a generic default op and
- * the wildcard matches nothing (the BS#1428 finding, fixed in PR #1459 for the
- * sibling rotation-artist-backfill). Every totals bucket is exposed as an
- * attribute, including `enrich_error` — the per-row DB-write-failure count
- * (#1561) that is the corruption tell the #1560 wedge needed. Before this the
- * buckets surfaced only in the structured `finished` log; now they are
- * queryable and alertable in Sentry. The name keeps the sibling
- * `${JOB_NAME}.run.totals` shape for name-pattern dashboard grouping.
- *
- * Gated on tracing being enabled (`SENTRY_TRACES_SAMPLE_RATE`, which this cron
- * defaults to 1.0 — see `logger.ts:resolveTracesSampleRate`) and on
- * `SENTRY_DSN`, so dev/CI runs emit nothing.
+ * Emit each run-totals bucket (including `enrich_error`, the per-row DB-write-failure count
+ * from #1561) as a `logCounter` line named `${JOB_NAME}.<bucket>`. Replaces the BS#1563 totals
+ * span (BS#3393); `captureCounter` never throws, so a logging fault cannot fail a drain.
  */
-const projectTotalsSpan = (totals: Totals): void => {
-  Sentry.startSpan(
-    {
-      name: `${JOB_NAME}.run.totals`,
-      op: `${JOB_NAME}.totals`,
-      attributes: {
-        'backfill.scanned': totals.scanned,
-        'backfill.enriched_match': totals.enriched_match,
-        'backfill.enriched_match_raced': totals.enriched_match_raced,
-        'backfill.enriched_no_match': totals.enriched_no_match,
-        'backfill.enriched_no_match_raced': totals.enriched_no_match_raced,
-        'backfill.lml_error': totals.lml_error,
-        'backfill.enrich_error': totals.enrich_error,
-        'backfill.upstream_unavailable_skipped': totals.upstream_unavailable_skipped,
-        // BS#1591: the deliberate below-floor residual (dashboards subtract
-        // it from the pending cohort — approximate, see Totals doc), the
-        // vanished-mid-run count (deletes / out-of-band stamps), and the two
-        // worker-lifecycle buckets (reconciled = true worker overlap;
-        // inflight = claims left untouched).
-        'backfill.below_floor_skipped': totals.below_floor_skipped,
-        'backfill.stale_skipped': totals.stale_skipped,
-        'backfill.worker_reconciled': totals.worker_reconciled,
-        'backfill.worker_inflight_skipped': totals.worker_inflight_skipped,
-        // BS#895 review follow-up (finding #4): rows the recovery-window
-        // ceiling has permanently excluded from the sweep. Read this as a
-        // time series in Sentry (e.g. an anomaly-detection alert on the
-        // attribute's trend, mirroring the org's CloudWatch
-        // ANOMALY_DETECTION_BAND convention) — a single run can't tell
-        // "non-zero" from "non-zero and growing" on its own.
-        'backfill.stranded_past_recovery_window': totals.stranded_past_recovery_window,
-        // BS#895 / epic #1810 W4: self-heal's OWN counters, deliberately
-        // separate from the shared scanned/enriched_match/enriched_no_match/
-        // lml_error/enrich_error buckets above (review finding #5b) so a
-        // self-heal catch-up burst can't silently inflate the main sweep's
-        // "< 100 rows median" signal.
-        'backfill.self_heal_candidates': totals.self_heal_candidates,
-        'backfill.self_heal_skipped': totals.self_heal_skipped,
-        'backfill.self_heal_scanned': totals.self_heal_scanned,
-        'backfill.self_heal_resolved': totals.self_heal_resolved,
-        'backfill.self_heal_no_match': totals.self_heal_no_match,
-        'backfill.self_heal_lml_error': totals.self_heal_lml_error,
-        'backfill.self_heal_enrich_error': totals.self_heal_enrich_error,
-        'backfill.self_heal_upstream_unavailable_skipped': totals.self_heal_upstream_unavailable_skipped,
-        // BS#1995 Arm 2: breaker-gate activity this run — how many times
-        // the drain checked LML's `/health` Discogs breaker and how many
-        // of those checks found it non-`closed` and paused.
-        'backfill.breaker_probes': totals.breaker_probes,
-        'backfill.breaker_pauses': totals.breaker_pauses,
-      },
-    },
-    () => {
-      /* observability-only span; attributes set at creation */
-    }
-  );
+const emitTotalsCounters = (totals: Totals): void => {
+  for (const [bucket, value] of Object.entries(totals)) {
+    captureCounter(`${JOB_NAME}.${bucket}`, value);
+  }
 };
 
 export const runBackfill = async (opts: {
@@ -1522,17 +1456,7 @@ export const runBackfill = async (opts: {
     ...finalBreakerFields,
   });
 
-  // Emit the run-level totals span carrying every bucket (incl. enrich_error)
-  // as a numeric attribute, so the drain's health is queryable/alertable in
-  // Sentry — not just in the log line above (BS#1563). Wrapped so a Sentry SDK
-  // fault can never turn a successful drain into a non-zero exit.
-  try {
-    projectTotalsSpan(totals);
-  } catch (error) {
-    log('warn', 'totals_span_failed', 'projectTotalsSpan threw; totals already logged', {
-      error_message: error instanceof Error ? error.message : String(error),
-    });
-  }
+  emitTotalsCounters(totals);
 
   return { totals };
 };

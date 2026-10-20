@@ -42,7 +42,6 @@
  * `jobs/streaming-url-upgrade/orchestrate.ts`.
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import {
   db,
@@ -631,32 +630,6 @@ export const runRemediation = async (opts: {
     failure = { error };
   } finally {
     result.failed = failure !== null;
-
-    // Summary span carrying numeric attributes (BS#1081 typing-trap workaround)
-    // — emitted even on stop/fail so partial-run telemetry is queryable.
-    Sentry.startSpan(
-      {
-        name: 'streaming_url_remediation.run.summary',
-        attributes: {
-          'remediation.dry_run': dryRun,
-          'remediation.album.candidates': result.album_metadata.candidates,
-          'remediation.album.changed': result.album_metadata.changed,
-          'remediation.album.written': result.album_metadata.written,
-          'remediation.album.remaining': result.album_metadata.remaining,
-          'remediation.album.last_id': result.album_metadata.last_id,
-          'remediation.flowsheet.candidates': result.flowsheet.candidates,
-          'remediation.flowsheet.changed': result.flowsheet.changed,
-          'remediation.flowsheet.written': result.flowsheet.written,
-          'remediation.flowsheet.remaining': result.flowsheet.remaining,
-          'remediation.flowsheet.last_id': result.flowsheet.last_id,
-          'remediation.stopped': result.stopped,
-          'remediation.failed': result.failed,
-        },
-      },
-      () => {
-        /* attributes set at creation */
-      }
-    );
 
     const step = failure ? 'failed' : result.stopped ? 'stopped' : 'finished';
     const level = failure ? 'error' : 'info';

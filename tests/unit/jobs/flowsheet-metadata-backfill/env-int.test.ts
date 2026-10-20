@@ -2,10 +2,7 @@
  * Unit tests for jobs/flowsheet-metadata-backfill/env-int.ts (BS#1995 review
  * follow-up S1+S2): the shared `Number()`-based, warn-and-fallback env-int
  * parser extracted out of the four near-duplicate copies that used to live
- * in lml-fetch.ts, lml-limiter.ts, and lml-health.ts (logger.ts's
- * `resolveTracesSampleRate` is a different beast — a bounded float parser,
- * not an integer parser — and is deliberately NOT folded in here; see the
- * PR discussion).
+ * in lml-fetch.ts, lml-limiter.ts, and lml-health.ts.
  *
  * S1's bug: the pre-extraction copies accepted whitespace-only ('
  * '), decimals (2.5), and hex (0x10) despite being named `envInt`. A stray

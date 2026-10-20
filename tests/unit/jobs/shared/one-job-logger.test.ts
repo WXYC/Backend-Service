@@ -105,13 +105,11 @@ const BATCH_1_JOBS = [
   'concerts-artist-lml-resolver',
   'concerts-artist-resolver',
   'flowsheet-no-match-recheck',
+  'flowsheet-metadata-backfill',
 ];
 
-// BS#3537: this job keeps `Sentry.startSpan` and `Sentry.withMonitor`, which the reporter seam has no method for.
-const SAMPLER_JOBS = ['flowsheet-metadata-backfill'];
-
 describe('no direct Sentry captures in the migrated jobs', () => {
-  it.each([...BATCH_1_JOBS, ...SAMPLER_JOBS])('%s has no Sentry.capture* or Sentry.addBreadcrumb call', (job) => {
+  it.each(BATCH_1_JOBS)('%s has no Sentry.capture* or Sentry.addBreadcrumb call', (job) => {
     const offenders = readdirSync(join(JOBS_DIR, job))
       .filter((f) => f.endsWith('.ts'))
       .filter((f) => /Sentry\.(capture\w+|addBreadcrumb)\(/.test(readFileSync(join(JOBS_DIR, job, f), 'utf8')));

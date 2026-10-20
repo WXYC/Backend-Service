@@ -43,7 +43,6 @@
  * process-wide, not per-caller).
  */
 
-import * as Sentry from '@sentry/node';
 import { sql } from 'drizzle-orm';
 import {
   db,
@@ -850,25 +849,6 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
   }
 
   result.failed = failure !== null;
-
-  Sentry.startSpan(
-    {
-      name: 'flowsheet_april_gap_import.run.summary',
-      attributes: {
-        'gap_import.dry_run': result.dryRun,
-        'gap_import.candidate_count': result.candidateCount,
-        'gap_import.missing_count': result.missingCount,
-        'gap_import.excluded_unmapped_show_count': result.excludedUnmappedShowCount,
-        'gap_import.inserted_count': result.insertedCount,
-        'gap_import.refused': result.refused,
-        'gap_import.stopped': result.stopped,
-        'gap_import.failed': result.failed,
-      },
-    },
-    () => {
-      /* attributes set at creation */
-    }
-  );
 
   const step = result.failed ? 'failed' : result.refused ? 'refused' : result.stopped ? 'stopped' : 'finished';
   const level = result.failed || result.refused ? 'error' : 'info';

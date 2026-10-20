@@ -9,7 +9,6 @@
  */
 
 import * as Sentry from '@sentry/node';
-import type { NodeOptions } from '@sentry/node';
 import { randomUUID } from 'crypto';
 import { SentryReporter } from './sentry-reporter.js';
 import { PostHogReporter } from './posthog-reporter.js';
@@ -26,17 +25,6 @@ export type LoggerConfig = {
 export type LogLevel = 'info' | 'warn' | 'error';
 
 type BaseTags = { repo: string; tool: string; run_id: string };
-
-export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) {
-    return 1;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-    return 1;
-  }
-  return parsed;
-};
 
 /**
  * Defend against non-Error throws (`throw 'string'`, `throw { code: x }`) —
@@ -66,12 +54,9 @@ const DEFAULT_ERROR_BUDGET = 10;
 
 export const createJobLogger = ({
   jobName,
-  tracesSampler,
   errorBudget = DEFAULT_ERROR_BUDGET,
 }: {
   jobName: string;
-  /** Per-span sampling decision; Sentry gives it precedence over `tracesSampleRate`. */
-  tracesSampler?: NodeOptions['tracesSampler'];
   /** PostHog events one run may send, with no refill: 10, or 2 for a job that runs more than 4 times a day. */
   errorBudget?: number;
 }) => {
@@ -94,6 +79,8 @@ export const createJobLogger = ({
     baseTags = { repo: config.repo, tool: config.tool, run_id: runId };
     Object.assign(runProperties, baseTags);
 
+    // Tracing stays off by construction: with no `tracesSampleRate` option the SDK falls back to this variable.
+    delete process.env.SENTRY_TRACES_SAMPLE_RATE;
     Sentry.init({
       // Sentry 11 turned this on by default, which titles captureMessage events
       // with a minified function name (BS#3002).
@@ -103,8 +90,6 @@ export const createJobLogger = ({
       dsn: process.env.SENTRY_DSN,
       release: process.env.SENTRY_RELEASE,
       environment: process.env.NODE_ENV || 'production',
-      tracesSampleRate: resolveTracesSampleRate(),
-      ...(tracesSampler && { tracesSampler }),
     });
     // Register next to the SDK init, as each app does, so captures from shared libraries
     // that resolve `getErrorReporter()` per call reach this job's reporter.
@@ -201,7 +186,6 @@ export const createJobLogger = ({
     captureCounter,
     closeLogger,
     errorMessage,
-    resolveTracesSampleRate,
     reporter,
     withHeartbeat,
   };

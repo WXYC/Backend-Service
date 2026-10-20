@@ -12,12 +12,6 @@
  * decimals (`2.5`), hex (`0x10`), and scientific notation (`1e3`) despite
  * every call site being named `envInt`.
  *
- * `logger.ts`'s `resolveTracesSampleRate` is NOT one of the four — it's a
- * bounded-float parser (0–1, for `SENTRY_TRACES_SAMPLE_RATE`) with its own
- * silent-fallback-to-1-on-invalid contract, not an integer parser, and
- * folding it in here would either warp this module's semantics or bolt an
- * unrelated float path onto it. Left alone.
- *
  * Each call site keeps its own exact warning-message wording (they differed
  * slightly before this extraction — "must be positive number" vs "must be a
  * positive number" — preserved verbatim via the `buildWarning` callback
