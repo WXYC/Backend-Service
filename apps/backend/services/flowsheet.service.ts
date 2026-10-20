@@ -897,10 +897,14 @@ const assertCallerMayWriteRow = async (
   show_id: number | null,
   caller: string | null
 ): Promise<void> => {
-  if (caller === null) return;
+  if (caller === null) {
+    return;
+  }
   if (show_id !== null) {
     const [show] = await trx.select({ end_time: shows.end_time }).from(shows).where(eq(shows.id, show_id));
-    if (show?.end_time === null && (await getDJsInShow(show_id, true, trx)).some((dj) => dj.id === caller)) return;
+    if (show?.end_time === null && (await getDJsInShow(show_id, true, trx)).some((dj) => dj.id === caller)) {
+      return;
+    }
   }
   throw new WxycError('Bad Request: DJ not a member of the show this entry belongs to', 400);
 };
@@ -945,7 +949,9 @@ export const removeTrack = async (entry_id: number, caller: string | null): Prom
       .from(flowsheet)
       .where(eq(flowsheet.id, entry_id))
       .for('update');
-    if (!row) return undefined;
+    if (!row) {
+      return undefined;
+    }
     await assertCallerMayWriteRow(trx, row.show_id, caller);
     const response = await trx.delete(flowsheet).where(eq(flowsheet.id, entry_id)).returning();
     return response[0];
@@ -1274,7 +1280,9 @@ export const updateEntry = async (
       .where(eq(flowsheet.id, entry_id))
       .for('update')
       .limit(1);
-    if (!current) return undefined;
+    if (!current) {
+      return undefined;
+    }
     await assertCallerMayWriteRow(trx, current.show_id, caller);
 
     let linkSet: PgUpdateSetSource<typeof flowsheet> = {};
