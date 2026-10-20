@@ -3648,8 +3648,9 @@ export type SpecialtyShows = InferSelectModel<typeof specialty_shows>;
 // seed rows can use it in the same transaction; the flowsheet's spotlight column (BS#3458) reuses the type.
 export const spotlightRoleEnum = wxyc_schema.enum('spotlight_role', ['performer', 'dj', 'reader', 'guest', 'host']);
 
-export type SpecialtyShowArtwork = { square_url: string; master_url: string; wide_url: string };
-// `day` 0 = Monday; `start_time` is an America/New_York wall-clock HH:MM.
+// Mirrors api.yaml `SpecialtyShowArtwork`: master (>= 3000 px) and wide (3:1 banner) are optional, so they are nullable.
+export type SpecialtyShowArtwork = { square_url: string; master_url: string | null; wide_url: string | null };
+// Mirrors api.yaml `SpecialtyShowSlot`. `day` 0 = Monday; `start_time` is an America/New_York wall-clock HH:MM.
 export type SpecialtyShowSlot = {
   day: number;
   start_time: string;
