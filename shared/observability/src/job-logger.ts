@@ -8,6 +8,7 @@
  */
 
 import * as Sentry from '@sentry/node';
+import type { NodeOptions } from '@sentry/node';
 import { randomUUID } from 'crypto';
 import { SentryReporter } from './sentry-reporter.js';
 import { setErrorReporter } from './current-reporter.js';
@@ -41,7 +42,14 @@ export const resolveTracesSampleRate = (raw: string | undefined = process.env.SE
  */
 export const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-export const createJobLogger = ({ jobName }: { jobName: string }) => {
+export const createJobLogger = ({
+  jobName,
+  tracesSampler,
+}: {
+  jobName: string;
+  /** Per-span sampling decision; Sentry gives it precedence over `tracesSampleRate`. */
+  tracesSampler?: NodeOptions['tracesSampler'];
+}) => {
   let baseTags: BaseTags | null = null;
   const reporter: ErrorReporter = new SentryReporter();
 
@@ -59,6 +67,7 @@ export const createJobLogger = ({ jobName }: { jobName: string }) => {
       release: process.env.SENTRY_RELEASE,
       environment: process.env.NODE_ENV || 'production',
       tracesSampleRate: resolveTracesSampleRate(),
+      ...(tracesSampler && { tracesSampler }),
     });
     // Register next to the SDK init, as each app does, so captures from shared libraries
     // that resolve `getErrorReporter()` per call reach this job's reporter.

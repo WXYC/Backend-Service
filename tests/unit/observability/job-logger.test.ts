@@ -56,6 +56,15 @@ describe('createJobLogger', () => {
     expect(sentry.setTag).toHaveBeenCalledWith('run_id', 'run-1');
   });
 
+  it('passes a job-supplied tracesSampler to Sentry.init, and none when the job supplies none', () => {
+    createJobLogger({ jobName: 'demo-job' }).initLogger({ repo: 'r', tool: 't' });
+    expect(sentry.init.mock.calls[0][0]).not.toHaveProperty('tracesSampler');
+
+    const tracesSampler = jest.fn().mockReturnValue(0.25);
+    createJobLogger({ jobName: 'demo-job', tracesSampler }).initLogger({ repo: 'r', tool: 't' });
+    expect(sentry.init).toHaveBeenLastCalledWith(expect.objectContaining({ tracesSampler, tracesSampleRate: 1 }));
+  });
+
   it('generates a run id when none is given', () => {
     const { initLogger } = createJobLogger({ jobName: 'demo-job' });
     expect(initLogger({ repo: 'r', tool: 't' })).toMatch(/^[0-9a-f-]{36}$/);

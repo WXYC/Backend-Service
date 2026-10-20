@@ -28,6 +28,7 @@ const MULTI_FILE_JOBS = [
   'flowsheet-artwork-repair',
   'flowsheet-dj-name-scrub',
   'flowsheet-ghost-row-sweep',
+  'flowsheet-metadata-backfill',
   'flowsheet-no-match-recheck',
   'flowsheet-reenrichment',
   'library-artwork-url-backfill',
@@ -106,8 +107,11 @@ const BATCH_1_JOBS = [
   'flowsheet-no-match-recheck',
 ];
 
-describe('no direct Sentry captures in the batch-1 jobs', () => {
-  it.each(BATCH_1_JOBS)('%s has no Sentry.capture* or Sentry.addBreadcrumb call', (job) => {
+// BS#3537: this job keeps `Sentry.startSpan` and `Sentry.withMonitor`, which the reporter seam has no method for.
+const SAMPLER_JOBS = ['flowsheet-metadata-backfill'];
+
+describe('no direct Sentry captures in the migrated jobs', () => {
+  it.each([...BATCH_1_JOBS, ...SAMPLER_JOBS])('%s has no Sentry.capture* or Sentry.addBreadcrumb call', (job) => {
     const offenders = readdirSync(join(JOBS_DIR, job))
       .filter((f) => f.endsWith('.ts'))
       .filter((f) => /Sentry\.(capture\w+|addBreadcrumb)\(/.test(readFileSync(join(JOBS_DIR, job, f), 'utf8')));

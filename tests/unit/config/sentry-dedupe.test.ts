@@ -68,7 +68,7 @@ describe('Sentry.init call sites', () => {
     }
   }
 
-  it('finds the three app preloads and the job loggers', () => {
+  it('finds the three app preloads and the shared job logger', () => {
     const files = sites.map((s) => s.file);
     expect(files).toEqual(
       expect.arrayContaining([
@@ -77,9 +77,8 @@ describe('Sentry.init call sites', () => {
         'apps/enrichment-worker/instrument.ts',
       ])
     );
-    // Jobs migrated to createJobLogger (@wxyc/observability) no longer call Sentry.init
-    // themselves, so this floor drops as each migration batch lands (BS#3399).
-    expect(files.filter((f) => f.startsWith('jobs/')).length).toBeGreaterThanOrEqual(1);
+    // Jobs get their Sentry.init from createJobLogger, so one site covers every job.
+    expect(files).toContain('shared/observability/src/job-logger.ts');
   });
 
   it('filters Dedupe out of the default integrations at every site', () => {
