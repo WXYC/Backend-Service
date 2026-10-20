@@ -19,7 +19,15 @@
  * the bulk per-row spans to `NON_TOTALS_SAMPLE_RATE`. These tests pin that
  * scoping so the totals span can't become probabilistic and the per-row flood
  * can't return.
+ *
+ * BS#3537: the job's logger is `createJobLogger`'s instance, which hands this
+ * sampler to `Sentry.init`; the last describe block pins that wiring.
  */
+
+import * as Sentry from '@sentry/node';
+
+// `Sentry.init` is not configurable on the real module, so `jest.spyOn` cannot wrap it.
+jest.mock('@sentry/node', () => ({ ...jest.requireActual('@sentry/node'), init: jest.fn() }));
 
 import {
   resolveTracesSampleRate,
@@ -110,5 +118,47 @@ describe('tracesSampler (flowsheet-metadata-backfill) — BS#1566 sampling scope
       if (prev === undefined) delete process.env.SENTRY_TRACES_SAMPLE_RATE;
       else process.env.SENTRY_TRACES_SAMPLE_RATE = prev;
     }
+  });
+});
+
+describe('tracesSampler wiring through createJobLogger (BS#3537)', () => {
+  // Load the logger fresh so its module-level env rate reflects `rate`, init it against a mocked
+  // Sentry, and return the sampler `Sentry.init` was handed.
+  const samplerPassedToInit = async (rate: string | undefined) => {
+    const prev = process.env.SENTRY_TRACES_SAMPLE_RATE;
+    if (rate === undefined) {
+      delete process.env.SENTRY_TRACES_SAMPLE_RATE;
+    } else {
+      process.env.SENTRY_TRACES_SAMPLE_RATE = rate;
+    }
+    const init = jest.mocked(Sentry.init);
+    init.mockClear();
+    try {
+      const captured: Array<(ctx: { name?: string; attributes?: Record<string, unknown> }) => number> = [];
+      await jest.isolateModulesAsync(async () => {
+        const { initLogger, closeLogger } = await import('../../../../jobs/flowsheet-metadata-backfill/logger');
+        initLogger({ repo: 'Backend-Service', tool: 'test' });
+        captured.push((init.mock.calls[0][0] as { tracesSampler: (typeof captured)[number] }).tracesSampler);
+        await closeLogger();
+      });
+      return captured[0];
+    } finally {
+      if (prev === undefined) {
+        delete process.env.SENTRY_TRACES_SAMPLE_RATE;
+      } else {
+        process.env.SENTRY_TRACES_SAMPLE_RATE = prev;
+      }
+    }
+  };
+
+  it('samples the totals span at 1 and every other span at NON_TOTALS_SAMPLE_RATE', async () => {
+    const sampler = await samplerPassedToInit(undefined);
+    expect(sampler({ name: TOTALS_SPAN_NAME, attributes: { 'sentry.op': TOTALS_SPAN_OP } })).toBe(1);
+    expect(sampler({ name: 'lml.lookup', attributes: { 'sentry.op': 'http.client' } })).toBe(NON_TOTALS_SAMPLE_RATE);
+  });
+
+  it('a kill-switch rate of 0 samples the totals span at 0', async () => {
+    const sampler = await samplerPassedToInit('0');
+    expect(sampler({ name: TOTALS_SPAN_NAME, attributes: { 'sentry.op': TOTALS_SPAN_OP } })).toBe(0);
   });
 });

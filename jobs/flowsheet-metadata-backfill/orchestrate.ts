@@ -104,6 +104,7 @@
  */
 
 import * as Sentry from '@sentry/node';
+import { getErrorReporter } from '@wxyc/observability';
 import { sql, type SQL } from 'drizzle-orm';
 import {
   db,
@@ -623,7 +624,7 @@ export const processRow = async (
   } catch (error) {
     if (error instanceof LmlAuthError) {
       const bearerFingerprint = lmlApiKeyFingerprint() ?? 'unset';
-      Sentry.addBreadcrumb({
+      getErrorReporter().addBreadcrumb({
         category: 'lml.auth',
         message: `LML rejected the shared bearer with ${error.statusCode}`,
         level: 'error',
@@ -1187,7 +1188,7 @@ export const runBackfill = async (opts: {
           breaker_max_pause_ms: breakerMaxPauseMs,
           breaker_state: result.outcome,
         });
-        Sentry.captureMessage(`${JOB_NAME}.breaker_pause_ceiling_exceeded`, {
+        getErrorReporter().captureMessage(`${JOB_NAME}.breaker_pause_ceiling_exceeded`, {
           level: 'error',
           tags: { step: 'breaker_pause_ceiling_exceeded' },
           extra: {
@@ -1251,7 +1252,7 @@ export const runBackfill = async (opts: {
         // non-zero run so the alert itself can apply anomaly-detection /
         // rate-of-change rules against the numeric span attribute rather
         // than this stateless cron trying to remember the last run's count.
-        Sentry.captureMessage(`${JOB_NAME}.stranded_past_recovery_window`, {
+        getErrorReporter().captureMessage(`${JOB_NAME}.stranded_past_recovery_window`, {
           level: 'warning',
           tags: { step: 'stranded_past_recovery_window' },
           extra: {
