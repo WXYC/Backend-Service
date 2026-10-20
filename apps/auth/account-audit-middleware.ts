@@ -185,6 +185,28 @@ function subjectStrategyFor(
   }
 }
 
+/**
+ * The subject's `capabilities` right now, or NULL when the id is unresolvable
+ * or the read fails (BS#3473). Never rejects: a failed read must not hold up
+ * the real handler or the audit row, so a NULL on either side skips the diff.
+ */
+const readCapabilities = async (userId: string | null): Promise<string[] | null> => {
+  if (userId === null) return null;
+  try {
+    const rows = await db.select({ capabilities: user.capabilities }).from(user).where(eq(user.id, userId)).limit(1);
+    return rows[0]?.capabilities ?? null;
+  } catch (error) {
+    onAccountAuditError(error);
+    return null;
+  }
+};
+
+/** One `capability.grant.<name>` / `capability.revoke.<name>` action per set difference; a reorder is no change. */
+const capabilityChangeActions = (before: readonly string[], after: readonly string[]): string[] => [
+  ...after.filter((name) => !before.includes(name)).map((name) => `capability.grant.${name}`),
+  ...before.filter((name) => !after.includes(name)).map((name) => `capability.revoke.${name}`),
+];
+
 const ipHashOf = (req: Request): string | null => deriveStationSignupIpHash(realIpFromRequest(req));
 
 /**
@@ -228,6 +250,8 @@ interface ClassifiedRequest {
    * lookup unremarkable.
    */
   gateSubjectTo2xx: boolean;
+  /** BS#3473: read the body-supplied subject's `capabilities` before the handler runs and diff after a 2xx. */
+  diffCapabilities?: boolean;
 }
 
 interface ResolvedMount {
@@ -342,6 +366,10 @@ function auditMiddleware(resolve: ResolvedMount) {
     // in audit-coverage.ts) restores the PRE-REFACTOR shape — next() gated
     // on the session read — for exactly those actions, and only those;
     // every other action keeps the concurrent, lower-latency path.
+    // BS#3473: the before-read must land before the handler can change the row,
+    // so for a diffing action it (not the session read) gates next().
+    const capabilitiesBefore = classified.diffCapabilities ? readCapabilities(extractBodyUserId(req)) : null;
+
     const sessionPromise: Promise<void> | null = resolve.resolveActor
       ? auth.api
           .getSession({ headers: fromNodeHeaders(req.headers) })
@@ -400,19 +428,24 @@ function auditMiddleware(resolve: ResolvedMount) {
         const subjectGateOpen = res.statusCode < 300 || (resolve.resolveActor && !classified.gateSubjectTo2xx);
         const subjectUserId = subjectGateOpen ? await classified.subjectFrom(req, actorId, capturedBody) : null;
 
-        await recordAccountAuditEvent(
-          {
-            action,
-            actorUserId: actorId,
-            impersonatorUserId: impersonatorId,
-            subjectUserId,
-            outcome: res.statusCode,
-            errorCode,
-            ipHash,
-            source: 'http',
-          },
-          { onError: onAccountAuditError }
-        );
+        const event = {
+          action,
+          actorUserId: actorId,
+          impersonatorUserId: impersonatorId,
+          subjectUserId,
+          outcome: res.statusCode,
+          errorCode,
+          ipHash,
+          source: 'http',
+        } as const;
+        await recordAccountAuditEvent(event, { onError: onAccountAuditError });
+
+        if (capabilitiesBefore && res.statusCode < 300) {
+          const [before, after] = [await capabilitiesBefore, await readCapabilities(subjectUserId)];
+          for (const changeAction of before && after ? capabilityChangeActions(before, after) : []) {
+            await recordAccountAuditEvent({ ...event, action: changeAction }, { onError: onAccountAuditError });
+          }
+        }
       } catch (error) {
         onAccountAuditError(error);
       }
@@ -423,8 +456,9 @@ function auditMiddleware(resolve: ResolvedMount) {
     res.on('finish', () => void finishOnce());
     res.on('close', () => void finishOnce());
 
-    if (sessionPromise && classified.serializeSessionRead) {
-      void sessionPromise.finally(() => next());
+    const gate = capabilitiesBefore ?? (classified.serializeSessionRead ? sessionPromise : null);
+    if (gate) {
+      void gate.finally(() => next());
     } else {
       next();
     }
@@ -460,6 +494,7 @@ export function adminPrefixAuditMiddleware() {
         action: known.action,
         includeGet: known.includeGet === true,
         serializeSessionRead: known.serializeSessionRead === true,
+        diffCapabilities: known.diffCapabilities === true,
         subjectFrom: subjectStrategyFor(subject, known.responsePath),
         ...subjectPolicyFor(subject),
       };
