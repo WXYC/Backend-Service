@@ -11,7 +11,7 @@
 import * as Sentry from '@sentry/node';
 import { randomUUID } from 'crypto';
 import { SentryReporter } from './sentry-reporter.js';
-import { PostHogReporter } from './posthog-reporter.js';
+import { PostHogReporter, installCrashHandlers } from './posthog-reporter.js';
 import { setErrorReporter } from './current-reporter.js';
 import { CompositeReporter, logCounter } from './error-reporter.js';
 import type { CounterFields, ErrorReporter } from './error-reporter.js';
@@ -63,16 +63,15 @@ export const createJobLogger = ({
   let baseTags: BaseTags | null = null;
   // `repo`, `tool` and `run_id` are filled in by `initLogger`; the PostHog reporter reads this object on every event.
   const runProperties: Record<string, string> = {};
-  const reporter: ErrorReporter = new CompositeReporter([
-    new SentryReporter(),
-    new PostHogReporter({
-      service: jobName,
-      environment: process.env.NODE_ENV,
-      release: process.env.SENTRY_RELEASE,
-      budget: { kind: 'run', ceiling: errorBudget },
-      properties: runProperties,
-    }),
-  ]);
+  const postHog = new PostHogReporter({
+    service: jobName,
+    environment: process.env.NODE_ENV,
+    release: process.env.SENTRY_RELEASE,
+    budget: { kind: 'run', ceiling: errorBudget },
+    properties: runProperties,
+  });
+  const reporter: ErrorReporter = new CompositeReporter([new SentryReporter(), postHog]);
+  let uninstallCrashHandlers = (): void => undefined;
 
   const initLogger = (config: LoggerConfig): string => {
     const runId = config.runId ?? randomUUID();
@@ -94,6 +93,9 @@ export const createJobLogger = ({
     // Register next to the SDK init, as each app does, so captures from shared libraries
     // that resolve `getErrorReporter()` per call reach this job's reporter.
     setErrorReporter(reporter);
+    // A crash goes to PostHog alone: Sentry's own integration reports it, and the composite would double-count (BS#3517).
+    uninstallCrashHandlers();
+    uninstallCrashHandlers = installCrashHandlers(postHog, () => Sentry.close(2000));
     Sentry.setTag('repo', config.repo);
     Sentry.setTag('tool', config.tool);
     Sentry.setTag('run_id', runId);

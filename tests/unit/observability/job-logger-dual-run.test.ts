@@ -31,15 +31,19 @@ describe('createJobLogger dual-run to PostHog (BS#3409)', () => {
   };
   let spies: jest.SpyInstance[];
   let log: jest.SpyInstance;
+  /** Spied so `initLogger` registers no crash handler on the test process; it also records what was registered. */
+  let processOn: jest.SpyInstance;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    processOn = jest.spyOn(process, 'on').mockImplementation((() => process) as never);
     mockClient.flush.mockResolvedValue(undefined);
     process.env.POSTHOG_ERRORS_API_KEY = 'phc_test';
     delete process.env.SENTRY_RELEASE;
     log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
     spies = [
       log,
+      processOn,
       jest.spyOn(process.stdout, 'write').mockImplementation(() => true),
       jest.spyOn(console, 'warn').mockImplementation(() => undefined),
     ];
@@ -66,6 +70,18 @@ describe('createJobLogger dual-run to PostHog (BS#3409)', () => {
     initLogger({ repo: 'r', tool: 't' });
     captureError(new Error('boom'), 'step');
     expect(PostHogMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['with', 'phc_test', ['uncaughtException', 'unhandledRejection']],
+    ['without', undefined, []],
+  ])('%s POSTHOG_ERRORS_API_KEY installs the PostHog crash handlers: %j (BS#3517)', (_label, key, installed) => {
+    if (key === undefined) {
+      delete process.env.POSTHOG_ERRORS_API_KEY;
+    }
+    const { initLogger } = createJobLogger({ jobName: 'demo-job' });
+    initLogger({ repo: 'r', tool: 't' });
+    expect(processOn.mock.calls.map((c) => c[0])).toEqual(installed);
   });
 
   it('registers the composite, so a capture through the holder reaches PostHog', () => {

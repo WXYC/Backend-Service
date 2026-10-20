@@ -11,6 +11,7 @@ jest.mock('@sentry/node', () => ({
   addBreadcrumb: jest.fn(),
   getCurrentScope: jest.fn(),
   flush: jest.fn().mockResolvedValue(true),
+  close: jest.fn().mockResolvedValue(true),
 }));
 const mockClient = { captureException: jest.fn(), capture: jest.fn(), flush: jest.fn() };
 jest.mock('posthog-node', () => ({ PostHog: jest.fn(() => mockClient) }));
@@ -34,9 +35,12 @@ describe('app instrument.ts dual-run wiring (BS#3409)', () => {
   const names = ['POSTHOG_ERRORS_API_KEY', 'SENTRY_RELEASE', 'NODE_ENV'] as const;
   const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
   let warn: jest.SpyInstance;
+  /** `process.on` is spied so loading a preload registers no crash handler on the test process. */
+  let processOn: jest.SpyInstance;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    processOn = jest.spyOn(process, 'on').mockImplementation((() => process) as never);
     // The Express slot is process-wide and survives across tests; an app that never sets it must read the default.
     Reflect.deleteProperty(globalThis, Symbol.for('@wxyc/observability/express-error-reporter'));
     process.env.POSTHOG_ERRORS_API_KEY = 'phc_test';
@@ -46,6 +50,7 @@ describe('app instrument.ts dual-run wiring (BS#3409)', () => {
 
   afterEach(() => {
     warn.mockRestore();
+    processOn.mockRestore();
     for (const name of names) {
       if (saved[name] === undefined) {
         delete process.env[name];
@@ -109,6 +114,17 @@ describe('app instrument.ts dual-run wiring (BS#3409)', () => {
       loadInstrument(path);
       getErrorReporter().captureMessage('hello');
       expect(PostHogMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['with', 'phc_test', ['uncaughtException', 'unhandledRejection']],
+      ['without', undefined, []],
+    ])('%s POSTHOG_ERRORS_API_KEY installs the PostHog crash handlers: %j', (_label, key, installed) => {
+      if (key === undefined) {
+        delete process.env.POSTHOG_ERRORS_API_KEY;
+      }
+      loadInstrument(path);
+      expect(processOn.mock.calls.map((c) => c[0])).toEqual(installed);
     });
 
     it(`${hasExpress ? 'shares' : 'does not register'} its PostHog reporter for the Express error middleware`, () => {

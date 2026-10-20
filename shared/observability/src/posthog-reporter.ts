@@ -43,6 +43,18 @@ const BREADCRUMB_RING_SIZE = 50;
 /** The outside-scope ring is smaller: a job needs the lead-up, and a missing wrapper should leak little. */
 const PROCESS_RING_SIZE = 20;
 
+/** Mechanism types for a process crash (error-tracking contract, section 4); both are sent `handled: false`. */
+export type CrashMechanism = 'onuncaughtexception' | 'onunhandledrejection';
+
+/**
+ * posthog-node's public `captureException` always stamps `handled: true` and takes no mechanism hint, so a crash
+ * carries its mechanism in this property and `redactPostHogEvent` rewrites the first `$exception_list` entry from it.
+ */
+const CRASH_MARKER = '$wxyc_crash_mechanism';
+
+/** Upper bound on the PostHog flush a crash handler waits for before it exits. */
+const CRASH_FLUSH_MS = 2000;
+
 interface Scope {
   crumbs: Array<Record<string, unknown>>;
   tags: Record<string, string>;
@@ -93,6 +105,12 @@ const redactPostHogEvent: BeforeSendFn = (event) => {
   }
   try {
     const list: unknown = event.properties?.['$exception_list'];
+    const crash: unknown = event.properties?.[CRASH_MARKER];
+    const first = Array.isArray(list) ? (list[0] as { mechanism?: object } | undefined) : undefined;
+    if (typeof crash === 'string' && first) {
+      first.mechanism = { ...first.mechanism, type: crash, handled: false };
+    }
+    delete event.properties?.[CRASH_MARKER];
     scrubEventStrings(event, Array.isArray(list) ? list : []);
     return event;
   } catch {
@@ -107,6 +125,8 @@ export class PostHogReporter implements ErrorReporter {
   /** Breadcrumbs outside `runInScope` (a job's one run). Request tags are never kept here. */
   private readonly processCrumbs: Array<Record<string, unknown>> = [];
   private warnedNoScope = false;
+  /** Errors a call site already reported, so a rethrow that reaches the crash handler is not sent twice. */
+  private readonly captured = new WeakSet<object>();
   private readonly recentKeys = new Map<string, number>();
   private readonly capacity: number;
   private readonly refillPerMs: number;
@@ -141,7 +161,15 @@ export class PostHogReporter implements ErrorReporter {
     return this.requestScopes.run(newScope(), fn);
   }
 
+  /** True when a key is configured and the client built; crash handlers install only then. */
+  get enabled(): boolean {
+    return this.client !== null;
+  }
+
   captureException(err: unknown, context?: ReportContext): void {
+    if (typeof err === 'object' && err !== null) {
+      this.captured.add(err);
+    }
     const fingerprint = context?.fingerprint?.join(':');
     const key = fingerprint ?? fingerprintOf(err);
     this.send(key, () => {
@@ -152,6 +180,23 @@ export class PostHogReporter implements ErrorReporter {
         ...this.properties(context),
         ...(fingerprint === undefined ? {} : { $exception_fingerprint: fingerprint }),
         ...level,
+      });
+    });
+  }
+
+  /**
+   * Reports a process crash with `handled: false`, through the same dedupe window and token bucket as handled events.
+   * PostHog-only on purpose: Sentry gets the crash from its own integration, so routing this through the composite
+   * would count it twice there. An error a call site already captured is skipped.
+   */
+  captureCrash(err: unknown, mechanism: CrashMechanism): void {
+    if (typeof err === 'object' && err !== null && this.captured.has(err)) {
+      return;
+    }
+    this.send(fingerprintOf(err), () => {
+      this.client?.captureException(redactQueryParams(err), this.options.service, {
+        ...this.properties(),
+        [CRASH_MARKER]: mechanism,
       });
     });
   }
@@ -277,4 +322,43 @@ export class PostHogReporter implements ErrorReporter {
     }
     return false;
   }
+}
+
+/**
+ * Installs the `uncaughtException` and `unhandledRejection` handlers that report crashes to PostHog, and returns a
+ * function that removes them. Installs nothing (returns a no-op) when the reporter has no key.
+ *
+ * Exit ownership: @sentry/node 11.4's `onUncaughtExceptionIntegration` exits only when no other `uncaughtException`
+ * listener is registered (`exitEvenIfOtherHandlersAreRegistered` defaults to false), so once this one is installed
+ * it owns the non-zero exit. It flushes PostHog and `beforeExit` (the apps pass `Sentry.close`, so Sentry's own
+ * crash event is not cut short), each bounded to 2 s, then exits 1. Sentry's `onUnhandledRejection` default mode
+ * only warns, so a rejection is reported and the process carries on, as before.
+ */
+export function installCrashHandlers(
+  reporter: PostHogReporter,
+  beforeExit: () => Promise<unknown> = () => Promise.resolve()
+): () => void {
+  if (!reporter.enabled) {
+    return () => undefined;
+  }
+  let exiting = false;
+  const onException = (err: unknown): void => {
+    reporter.captureCrash(err, 'onuncaughtexception');
+    if (exiting) {
+      return;
+    }
+    exiting = true;
+    console.error(err);
+    void Promise.allSettled([reporter.flush(CRASH_FLUSH_MS), beforeExit()]).then(() => process.exit(1));
+  };
+  const onRejection = (reason: unknown): void => {
+    reporter.captureCrash(reason, 'onunhandledrejection');
+    void reporter.flush(CRASH_FLUSH_MS);
+  };
+  process.on('uncaughtException', onException);
+  process.on('unhandledRejection', onRejection);
+  return () => {
+    process.off('uncaughtException', onException);
+    process.off('unhandledRejection', onRejection);
+  };
 }

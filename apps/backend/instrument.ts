@@ -14,7 +14,7 @@ import {
   setExpressErrorReporter,
   warnIfReservedAwsCredentialsPresent,
 } from '@wxyc/observability';
-import { PostHogReporter } from '@wxyc/observability/posthog';
+import { PostHogReporter, installCrashHandlers } from '@wxyc/observability/posthog';
 import { SentryReporter } from '@wxyc/observability/sentry';
 import { setLmlCounterSink } from '@wxyc/lml-client';
 import { shouldCaptureExpressError } from './middleware/sentryErrorFilter.js';
@@ -74,6 +74,8 @@ setErrorReporter(new CompositeReporter([new SentryReporter(), postHog]));
 // Sentry's expressIntegration captures Express errors itself; PostHog has no such integration, so the
 // Express error middleware in app.ts reports to PostHog alone.
 setExpressErrorReporter(postHog);
+// Crashes go to PostHog alone (Sentry's integration reports its own); the handler owns the exit and closes Sentry first (BS#3517).
+installCrashHandlers(postHog, () => Sentry.close(2000));
 
 // LML cache_stats counter lines (BS#3508); lml-client takes the sink by injection so it needs no @wxyc/observability.
 setLmlCounterSink(logCounter);
