@@ -28,12 +28,7 @@ import rateLimit from 'express-rate-limit';
 import { rateLimitKeyFromRequest, sessionRateLimitKeyFromRequest } from './rate-limit-key';
 import { makeHandler as makeRateLimitMetricsHandler, flushRateLimitMetrics } from './auth-rate-limit-metrics';
 import { closeDatabaseConnection } from '@wxyc/database';
-import {
-  createExpressErrorMiddleware,
-  getErrorReporter,
-  redactQueryParams,
-  requestScopeMiddleware,
-} from '@wxyc/observability';
+import { getErrorReporter, redactQueryParams, requestScopeMiddleware } from '@wxyc/observability';
 import { installAuthLogRedaction } from './log-redaction';
 import {
   adminPrefixAuditMiddleware,
@@ -46,7 +41,6 @@ import { checkRequestBanHandler } from './check-request-ban-handler';
 import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
 import { UpdateIdentityError, updateIdentityFromRequest } from './update-identity';
 import { fallbackErrorHandler } from './fallback-error-handler';
-import { shouldCaptureAuthExpressError } from './sentry-error-filter';
 import { lookupEmailByIdentifier } from './lookup-email';
 import { provisionUser, ProvisionError } from './provision-user';
 import { stationSignupFromRequest, StationSignupError, isStationSignupEnabled } from './station-signup';
@@ -1348,9 +1342,8 @@ app.get('/healthcheck', async (req, res) => {
 // `instrument.ts` with `shouldCaptureAuthExpressError` (BS#1387, BS#2949) — no
 // handler is registered here.
 
-// PostHog's copy of what Sentry's expressIntegration captures, under the same predicate (BS#3409).
-// fallbackErrorHandler always answers 500.
-app.use(createExpressErrorMiddleware({ shouldCapture: shouldCaptureAuthExpressError, statusOf: () => 500 }));
+// No PostHog Express error middleware here (BS#3409): fallbackErrorHandler below captures every pipeline error
+// through the composite reporter, which already reaches PostHog, so a second capture would send each error twice.
 
 // Fallback error handler — sanitises response body, forwards full error to
 // Sentry. See `./fallback-error-handler.ts` for rationale (BS#1109).

@@ -56,10 +56,10 @@ describe('app instrument.ts dual-run wiring (BS#3409)', () => {
   });
 
   describe.each([
-    ['backend', '../../../apps/backend/instrument', true],
-    ['auth', '../../../apps/auth/instrument', true],
-    ['enrichment-worker', '../../../apps/enrichment-worker/instrument', false],
-  ])('%s', (service, path, hasExpress) => {
+    ['backend', '../../../apps/backend/instrument', true, 300],
+    ['auth', '../../../apps/auth/instrument', true, 100],
+    ['enrichment-worker', '../../../apps/enrichment-worker/instrument', false, 100],
+  ])('%s', (service, path, hasExpress, dailyCeiling) => {
     it('registers a reporter that sends service, environment and release to PostHog', () => {
       process.env.SENTRY_RELEASE = `${service}@v1`;
       process.env.NODE_ENV = 'production';
@@ -82,6 +82,26 @@ describe('app instrument.ts dual-run wiring (BS#3409)', () => {
         getErrorReporter().captureMessage(`distinct ${i}`);
       }
       expect(sentProperties()).toHaveLength(20);
+    });
+
+    it(`refills at its daily ceiling of ${dailyCeiling} a day`, () => {
+      const start = Date.now();
+      const now = jest.spyOn(Date, 'now').mockReturnValue(start);
+      try {
+        loadInstrument(path);
+        for (let i = 1; i <= 20; i++) {
+          getErrorReporter().captureMessage(`drain ${i}`);
+        }
+        mockClient.capture.mockClear();
+        mockClient.captureException.mockClear();
+        now.mockReturnValue(start + 3_600_000);
+        for (let i = 1; i <= 30; i++) {
+          getErrorReporter().captureMessage(`after an hour ${i}`);
+        }
+        expect(sentProperties()).toHaveLength(Math.floor(dailyCeiling / 24));
+      } finally {
+        now.mockRestore();
+      }
     });
 
     it('constructs no PostHog client without POSTHOG_ERRORS_API_KEY', () => {
