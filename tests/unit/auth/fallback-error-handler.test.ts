@@ -107,7 +107,7 @@ describe('fallbackErrorHandler (BS#1109 sanitisation)', () => {
     fallbackErrorHandler('something broke', mockReq, res, mockNext);
 
     expect(jsonMock).toHaveBeenCalledWith({ error: 'Internal server error' });
-    expect(reporter.captureException).toHaveBeenCalledWith('something broke');
+    expect(reporter.captureException).toHaveBeenCalledWith(new Error('something broke'));
   });
 });
 

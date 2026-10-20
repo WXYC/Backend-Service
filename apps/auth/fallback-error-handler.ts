@@ -21,7 +21,9 @@ export function fallbackErrorHandler(err: unknown, _req: Request, res: Response,
   // distinct issue. This call is also load-bearing for
   // `tests/unit/auth/fallback-error-handler.test.ts` — do not remove it as
   // a "redundant Sentry call" cleanup without re-reading BS#1221.
-  getErrorReporter().captureException(err);
+  // A non-Error is wrapped the way the Express error middleware wraps it, so the PostHog reporter's 60 s
+  // dedupe sees one key for both captures and the throw reaches PostHog once (BS#3409).
+  getErrorReporter().captureException(err instanceof Error ? err : new Error(String(err)));
 
   if (process.env.NODE_ENV === 'production') {
     res.status(500).json({ error: 'Internal server error' });
