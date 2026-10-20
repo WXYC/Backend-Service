@@ -14,11 +14,13 @@ COPY ./.npmrc ./
 COPY ./package* ./
 COPY ./jobs/station-signup-review/package* ./jobs/station-signup-review/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev && rm -f .npmrc
 
 COPY --link --from=builder /jobs/station-signup-review/dist ./jobs/station-signup-review/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # Statement timeout left at the API's 5s default, deliberately.
 #

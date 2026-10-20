@@ -8,7 +8,8 @@ import { join, resolve } from 'node:path';
 
 const JOBS_DIR = resolve(__dirname, '../../../../jobs');
 
-// Jobs that keep a `logger.ts` because more than one of their files logs.
+// Jobs that keep a `logger.ts` because more than one of their files logs (streaming-columns-drain keeps one so
+// its tests can mock the logger module).
 const MULTI_FILE_JOBS = [
   'concerts-genre-enrichment',
   'concerts-poster-enrichment',
@@ -19,9 +20,27 @@ const MULTI_FILE_JOBS = [
   'flowsheet-ghost-row-sweep',
   'flowsheet-reenrichment',
   'library-artwork-url-backfill',
+  'library-identity-consumer',
+  'metadata-no-match-digest',
+  'rotation-artist-backfill',
+  'rotation-lml-identity-backfill',
+  'rotation-release-id-backfill',
+  'station-signup-review',
+  'streaming-columns-drain',
+  'streaming-url-remediation',
+  'streaming-url-upgrade',
+  'triangle-shows-etl',
+  'uncovered-release-list',
+  'va-apple-music-url-remediation',
+  'venue-events-scraper',
 ];
 
-const SINGLE_FILE_JOBS = ['digital-archive-bind', 'flowsheet-etl', 'flowsheet-linked-reenrichment'];
+const SINGLE_FILE_JOBS = [
+  'digital-archive-bind',
+  'flowsheet-etl',
+  'flowsheet-linked-reenrichment',
+  'library-discogs-unavailable-recheck',
+];
 
 const filesCallingCreateJobLogger = (job: string): string[] =>
   readdirSync(join(JOBS_DIR, job))

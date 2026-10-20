@@ -1,96 +1,11 @@
 /**
- * Observability for triangle-shows-etl: Sentry init + JSON logs.
- *
- * Copied from `jobs/venue-events-scraper/logger.ts` (the issue-#538
- * contract; per-job duplication keeps this job's build graph independent
- * of the long-running services) PLUS one deliberate addition this copy
- * carries that the siblings don't: `captureWarning`, the message-level
- * Sentry signal the source-staleness alert depends on. When propagating
- * logger fixes across the job fleet, do NOT "restore verbatim" by
- * deleting it — and note `jobs/flowsheet-metadata-backfill/logger.ts`
- * has separately diverged (tracesSampler work, BS#1457/#1566), so it is
- * not a sync source for cron jobs that default tracing off.
+ * The one logger instance for triangle-shows-etl (BS#3400). `log()` is silent until this instance's
+ * `initLogger` runs, so every file in the job imports from here; a second `createJobLogger`
+ * call elsewhere would drop that file's log lines with no error.
  */
 
-import * as Sentry from '@sentry/node';
-import { randomUUID } from 'crypto';
+import { createJobLogger } from '@wxyc/observability/job-logger';
 
-export type LoggerConfig = {
-  repo: string;
-  tool: string;
-  /** Optional run id; a random UUID is generated when omitted. */
-  runId?: string;
-};
-
-export type LogLevel = 'info' | 'warn' | 'error';
-
-type BaseTags = { repo: string; tool: string; run_id: string };
-
-let baseTags: BaseTags | null = null;
-
-// `@sentry/node` v10 silently produces zero spans when tracesSampleRate is unset.
-export const resolveTracesSampleRate = (raw: string | undefined = process.env.SENTRY_TRACES_SAMPLE_RATE): number => {
-  if (raw === undefined) return 1;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) return 1;
-  return parsed;
-};
-
-export const initLogger = (config: LoggerConfig): string => {
-  const runId = config.runId ?? randomUUID();
-  baseTags = { repo: config.repo, tool: config.tool, run_id: runId };
-
-  Sentry.init({
-    // Sentry 11 turned this on by default, which titles captureMessage events
-    // with a minified function name (BS#3002).
-    attachStacktrace: false,
-    // Sentry 11 installs Dedupe by default, which drops repeated identical events (BS#3005).
-    integrations: (defaults) => defaults.filter((i) => i.name !== 'Dedupe'),
-    dsn: process.env.SENTRY_DSN,
-    release: process.env.SENTRY_RELEASE,
-    environment: process.env.NODE_ENV || 'production',
-    tracesSampleRate: resolveTracesSampleRate(),
-  });
-  Sentry.setTag('repo', config.repo);
-  Sentry.setTag('tool', config.tool);
-  Sentry.setTag('run_id', runId);
-
-  return runId;
-};
-
-export const log = (level: LogLevel, step: string, message: string, fields: Record<string, unknown> = {}): void => {
-  if (!baseTags) return;
-  const line =
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level,
-      step,
-      message,
-      ...baseTags,
-      ...fields,
-    }) + '\n';
-  if (level === 'error') {
-    process.stderr.write(line);
-  } else {
-    process.stdout.write(line);
-  }
-};
-
-export const captureError = (error: unknown, step: string, extra: Record<string, unknown> = {}): void => {
-  Sentry.captureException(error, { tags: { step }, extra });
-};
-
-/** Warning-level Sentry message (no exception object) — used for the
- *  source-staleness signal, which is a condition, not a thrown error.
- *  Message-based, so it needs no tracing either way — BS crons now
- *  default `SENTRY_TRACES_SAMPLE_RATE` to 1.0 (BS#1299/PR#1782 flipped
- *  the earlier 0 default); see BS#1457 for why span-attribute-only
- *  alerts needed explicit tracing before that flip. */
-export const captureWarning = (message: string, step: string, extra: Record<string, unknown> = {}): void => {
-  Sentry.captureMessage(message, { level: 'warning', tags: { step }, extra });
-};
-
-export const closeLogger = async (): Promise<void> => {
-  await Sentry.close(2000);
-  baseTags = null;
-};
+export const { initLogger, log, captureError, closeLogger, captureWarning } = createJobLogger({
+  jobName: 'triangle-shows-etl',
+});

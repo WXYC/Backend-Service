@@ -17,15 +17,6 @@ jest.mock('@aws-sdk/client-cloudwatch', () => ({
   PutMetricDataCommand: mockPutMetricDataCommand,
 }));
 
-jest.mock('@sentry/node', () => ({
-  startSpan: (_opts: unknown, callback: () => unknown): unknown => callback(),
-  getActiveSpan: () => undefined,
-  setTag: jest.fn(),
-  init: jest.fn(),
-  captureException: jest.fn(),
-  close: jest.fn(() => Promise.resolve(true)),
-}));
-
 import { runBackfill } from '../../../../jobs/rotation-artist-backfill/orchestrate';
 
 type PutCall = { Namespace: string; MetricData: Array<{ MetricName: string; Value: number; Dimensions?: unknown[] }> };

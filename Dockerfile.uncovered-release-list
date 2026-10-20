@@ -15,11 +15,13 @@ ENV DB_APPLICATION_NAME=wxyc-uncovered-release-list
 COPY ./package* ./
 COPY ./jobs/uncovered-release-list/package* ./jobs/uncovered-release-list/
 COPY ./shared/database/package* ./shared/database/
+COPY ./shared/observability/package* ./shared/observability/
 
 RUN npm install --omit=dev
 
 COPY --link --from=builder /jobs/uncovered-release-list/dist ./jobs/uncovered-release-list/dist
 COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
 
 # ENTRYPOINT + empty CMD so docker-level args (e.g. `--backfill`, `--dry-run`)
 # pass through to the job rather than replacing the launcher.
