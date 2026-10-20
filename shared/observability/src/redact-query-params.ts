@@ -344,7 +344,9 @@ export function scrubEventStrings(
   exceptions: ReadonlyArray<{ value?: unknown; stacktrace?: unknown }>
 ): void {
   for (const exception of exceptions) {
-    if (typeof exception?.value === 'string' && exception.value.includes(PARAMS_MARKER)) delete exception.stacktrace;
+    if (typeof exception?.value === 'string' && exception.value.includes(PARAMS_MARKER)) {
+      delete exception.stacktrace;
+    }
   }
   scrubStrings(event);
 }
