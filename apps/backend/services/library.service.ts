@@ -3432,11 +3432,36 @@ async function searchLibraryByTsvector(
  * term references a bare column the derived table exposes, so it is legal in
  * the window and in both outer scopes of `albumScopedQuery`.
  *
- * Shared by the stage-2 alias UNION ALL (`searchLibraryByTrigramBoth`) and the
- * alias-only probe that follows a stage-1 hit
- * (`searchLibraryAliasHitsAfterTsvector`, BS#3552), so the two cannot rank
- * alias rows differently. See `searchLibraryByTrigramBoth` for why each term
- * is here.
+ * BS#2020: fuzzy alias-only rows are tiered LAST, ahead of the relevance
+ * sort. Ranking both branches on one `GREATEST(...)` scale let a single
+ * mid-scoring variant displace real matches wholesale — branch (b) INNER
+ * JOINs on `artist_id`, so one hit admits an artist's entire discography at
+ * that score, and nothing in the sort separated "matched the query text"
+ * from "matched a fuzzy variant". `FALSE < TRUE` in Postgres, so ASC puts
+ * the non-demoted rows first; `GREATEST` is untouched, so the strongest hit
+ * still leads within each tier. Exact variants are exempt from the demotion
+ * — see `buildFuzzyAliasTier` for why, and why the guard belongs in the
+ * tier rather than in `GREATEST`.
+ *
+ * `GREATEST` deliberately keeps all three terms rather than collapsing to
+ * `alias_max_sim` for branch (b). It is tempting to argue the branch-(b)
+ * similarity is sub-threshold by construction (the rows are selected under
+ * `(trigramPredicate) IS NOT TRUE`, which also admits NULL-`artist_name`
+ * rows, whose artist-name similarity the predicate never constrained), but
+ * that predicate reads `library.artist_name` while the projection emits
+ * `artists.artist_name` — a denormalized pair that BS#1092's drift check
+ * exists precisely because it can diverge. `GREATEST` stays correct either
+ * way; a hand-collapsed form would not.
+ *
+ * `buildDirectMatchTieBreak` sits AFTER the score, not before it: at equal
+ * relevance a row that matched the query text outranks one that matched a
+ * variant. The guard above removed the only signal that distinguished them
+ * once both reach 1.0, which would otherwise leave `id ASC` — catalog age —
+ * to decide between an artist and a band that lists them as a member.
+ *
+ * `id ASC` breaks the remaining ties: every row of one artist shares an
+ * identical `alias_max_sim`, so without it their order is whatever the plan
+ * emits.
  */
 function buildAliasRelevanceOrdering(query: string): SQL {
   return sql`${buildFuzzyAliasTier()}, GREATEST(
@@ -3444,6 +3469,71 @@ function buildAliasRelevanceOrdering(query: string): SQL {
       similarity(album_title, ${query}),
       COALESCE(alias_max_sim, 0)
     ) DESC, ${buildDirectMatchTieBreak()}, id ASC`;
+}
+
+/** `AND library.on_streaming = …` when a streaming filter is set, else nothing. */
+function streamingAndClause(on_streaming?: boolean): SQL {
+  return on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
+}
+
+/**
+ * Branch (b) of an alias-aware Both-mode query: the releases of every artist
+ * the `alias_hits` CTE matched, minus the rows `excluded` already covers.
+ *
+ * `excluded IS NOT TRUE` is load-bearing rather than `NOT excluded`: a
+ * predicate over a nullable column (`library.artist_name`) is NULL, not
+ * FALSE, for a row it cannot judge, and plain `NOT` would drop that row from
+ * both branches (BS#2031; same class as BS#1557).
+ *
+ * Shared by the stage-2 UNION ALL and the BS#3552 probe so the two cannot
+ * drift on the join or the projection — the channel BS#2231 closed for the
+ * catalog columns.
+ */
+function buildAliasOnlyBranch(excluded: SQL, on_streaming?: boolean): SQL {
+  return sql`
+    SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
+    FROM ${library}
+    ${LIBRARY_VIEW_JOINS_RAW}
+    INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
+    WHERE ${excluded} IS NOT TRUE
+    ${streamingAndClause(on_streaming)}
+  `;
+}
+
+/**
+ * Run an alias-aware Both-mode query: the `alias_hits` CTE, then the
+ * album-scoped window over `derivedTable`, ranked by
+ * {@link buildAliasRelevanceOrdering}, mapped to tagged rows.
+ *
+ * `derivedTable` is a parenthesized SELECT with a table alias. `DENSE_RANK`
+ * sits in a layer ABOVE it rather than inside it: the ordering reads
+ * `alias_max_sim`, which only exists once the CTE columns are projected, and
+ * Postgres forbids expression-shaped ORDER BY directly on a UNION result.
+ *
+ * @param limit Albums, not rows (see `albumScopedQuery`).
+ */
+async function runAliasRankedQuery({
+  query,
+  minSimilarity,
+  limit,
+  derivedTable,
+}: {
+  query: string;
+  minSimilarity: number;
+  limit: number;
+  derivedTable: SQL;
+}): Promise<TaggedLibraryViewEntry[]> {
+  const aliasOrdering = buildAliasRelevanceOrdering(query);
+  const rows = (await db.execute(sql`
+    ${buildAliasHitsCte(query, minSimilarity)}
+    ${albumScopedQuery({
+      inner: sql`SELECT *, DENSE_RANK() OVER (ORDER BY ${aliasOrdering}) AS album_rank FROM ${derivedTable}`,
+      limit,
+      outerOrderBy: aliasOrdering,
+    })}
+  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields & AlbumRankHelperColumns)[];
+
+  return rows.map(toLibraryViewRow).map(attachAliasHint);
 }
 
 /**
@@ -3500,123 +3590,56 @@ async function searchLibraryByTrigramBoth(
   // Alias-enabled path: ALT1 UNION ALL (BS#1318). The CTE runs the trigram
   // bitmap scan once over `artist_search_alias`; branch (a) is the
   // byte-identical alias-OFF trigram predicate against `library`, branch (b)
-  // joins the CTE on `artist_id` and dedupes against branch (a) via
-  // `(trigramPredicate) IS NOT TRUE`. The NULL-safe form is load-bearing:
-  // `library.artist_name` is nullable, so the predicate is NULL (not FALSE)
-  // for a row with a NULL `artist_name` and a non-matching title, and plain
-  // `NOT` would drop that row from both branches. `IS NOT TRUE` sends it to
-  // (b), where the alias hit surfaces it (BS#2031; same class as BS#1557).
+  // (`buildAliasOnlyBranch`) joins the CTE on `artist_id` and dedupes against
+  // branch (a) via `(trigramPredicate) IS NOT TRUE`, which also sends a
+  // NULL-`artist_name` row with a non-matching title to (b), where the alias
+  // hit surfaces it (BS#2031).
   //
   // The trigram OR-predicate is evaluated twice — once positively in (a),
   // once as `IS NOT TRUE` in (b) — but each is bitmap-indexable on its own, so the
   // total cost is dominated by the substrate scan + LIMIT pushdown on the
   // outer LAV scan rather than the correlated LATERAL's per-row scan.
   //
-  // The UNION ALL is wrapped in a subquery so the outer ORDER BY can
-  // reference both the trigram similarity and the CTE-provided
-  // `alias_max_sim`. Postgres forbids expression-shaped ORDER BY directly on
-  // a UNION result (column names only); the subquery lifts the union's
-  // columns into a scope where `similarity(...)` is a legal ORDER BY term.
-  //
-  // BS#2020: fuzzy alias-only rows are tiered LAST, ahead of the relevance
-  // sort. Ranking both branches on one `GREATEST(...)` scale let a single
-  // mid-scoring variant displace real matches wholesale — branch (b) INNER
-  // JOINs on `artist_id`, so one hit admits an artist's entire discography at
-  // that score, and nothing in the sort separated "matched the query text"
-  // from "matched a fuzzy variant". `FALSE < TRUE` in Postgres, so ASC puts
-  // the non-demoted rows first; `GREATEST` is untouched, so the strongest hit
-  // still leads within each tier. Exact variants are exempt from the demotion
-  // — see `buildFuzzyAliasTier` for why, and why the guard belongs in the
-  // tier rather than in `GREATEST`.
-  //
-  // `GREATEST` deliberately keeps all three terms rather than collapsing to
-  // `alias_max_sim` for branch (b). It is tempting to argue the branch-(b)
-  // similarity is sub-threshold by construction (the rows are selected under
-  // `(trigramPredicate) IS NOT TRUE`, which also admits NULL-`artist_name`
-  // rows, whose artist-name similarity the predicate never constrained), but
-  // that predicate reads `library.artist_name` while the projection below
-  // emits `artists.artist_name` — a denormalized
-  // pair that BS#1092's drift check exists precisely because it can diverge.
-  // `GREATEST` stays correct either way; a hand-collapsed form would not.
-  //
-  // `buildDirectMatchTieBreak` sits AFTER the score, not before it: at equal
-  // relevance a row that matched the query text outranks one that matched a
-  // variant. The guard above removed the only signal that distinguished them
-  // once both reach 1.0, which would otherwise leave `id ASC` — catalog age —
-  // to decide between an artist and a band that lists them as a member.
-  //
-  // `id ASC` breaks the remaining ties: every row of one artist shares an
-  // identical `alias_max_sim`, so without it their order is whatever the plan
-  // emits.
-  const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
+  // The ordering, BS#2020's alias tier included, is `buildAliasRelevanceOrdering`.
   const trigramPredicate = sql`(${library.artist_name} % ${query} OR ${library.album_title} % ${query})`;
-  const aliasOrdering = buildAliasRelevanceOrdering(query);
-
-  // `DENSE_RANK` sits in a layer ABOVE the union rather than inside either
-  // branch: the ordering reads `alias_max_sim`, which only branch (b) projects
-  // non-null, so it is only in scope once the union has been lifted into
-  // `alias_search`.
-  const rows = (await db.execute(sql`
-    ${buildAliasHitsCte(query, aliasMinSimilarity)}
-    ${albumScopedQuery({
-      inner: sql`
-        SELECT *, DENSE_RANK() OVER (ORDER BY ${aliasOrdering}) AS album_rank
-        FROM (
-          (
-            SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
-            FROM ${library}
-            ${LIBRARY_VIEW_JOINS_RAW}
-            WHERE ${trigramPredicate}
-            ${streamingClause}
-          )
-          UNION ALL
-          (
-            SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
-            FROM ${library}
-            ${LIBRARY_VIEW_JOINS_RAW}
-            INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
-            WHERE ${trigramPredicate} IS NOT TRUE
-            ${streamingClause}
-          )
-        ) alias_search
-      `,
-      limit: n,
-      outerOrderBy: aliasOrdering,
-    })}
-  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields & AlbumRankHelperColumns)[];
-
-  return rows.map(toLibraryViewRow).map(attachAliasHint);
+  return runAliasRankedQuery({
+    query,
+    minSimilarity: aliasMinSimilarity,
+    limit: n,
+    derivedTable: sql`(
+      (
+        SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION_NULLS}
+        FROM ${library}
+        ${LIBRARY_VIEW_JOINS_RAW}
+        WHERE ${trigramPredicate}
+        ${streamingAndClause(on_streaming)}
+      )
+      UNION ALL
+      (${buildAliasOnlyBranch(trigramPredicate, on_streaming)})
+    ) alias_search`,
+  });
 }
 
 /**
  * Alias-only probe that runs after a non-empty stage 1 on the catalog route
  * (BS#3552): the releases of every artist whose `artist_search_alias` variant
  * matches `query`, minus every release the tsvector tier itself matches.
+ * `search_doc` indexes only `artist_name` and `album_title`, so without this
+ * a surname query such as `Giddens` stops at Jerry Giddens and never reaches
+ * the Carolina Chocolate Drops card filed as "Rhiannon Giddens".
  *
- * Before this, Both-mode returned as soon as the tsvector tier found anything,
- * and only stage 2 consults the alias substrate. `search_doc` indexes only
- * `artist_name` and `album_title`, so a surname query such as `Giddens`
- * matched Jerry Giddens in stage 1 and never reached the Carolina Chocolate
- * Drops card, which is filed with the alternate name "Rhiannon Giddens".
- * Measured on LML's 2026-09-14 `library.db` snapshot, a stage-1 hit hid 76%
- * of alternate names typed by surname.
- *
- * This is branch (b) of the stage-2 UNION ALL with a different exclusion
- * predicate, and nothing else: the same `buildAliasHitsCte` (the BS#2018
- * floor included), the same artist join, the same projection and the same
- * ordering. `(search_doc @@ tsquery) IS NOT TRUE` excludes every stage-1
- * match, not only the ones that made stage 1's page, so a direct match past
- * the stage-1 cap never comes back tagged as an alias row. It is NULL-safe
- * for the reason branch (b) uses `IS NOT TRUE` (BS#2031). Branch (a) has no
- * counterpart here because the caller already holds the stage-1 rows; the
- * caller appends these after them, which is what keeps BS#2020 structural.
+ * It is the stage-2 query without branch (a), excluding on
+ * `search_doc @@ tsquery` instead of the trigram predicate. That excludes
+ * every stage-1 match, not only the ones that made stage 1's page, so a
+ * direct match past the stage-1 cap never comes back tagged as an alias row.
+ * The caller appends these rows after the stage-1 rows, which is what keeps
+ * BS#2020 structural.
  *
  * @param query The trimmed query, already gated on `hasAlphanumeric` and a
  *   length of at least 2 by the caller.
- * @param limit Albums still free on the page (`n` minus the stage-1 count).
+ * @param limit Albums still free on the page.
  * @param minSimilarity The BS#2018 floor, read once by the caller.
- * @returns Rows tagged with `matched_via_alias`, best match first, or `[]`
- *   when the query yields no tsquery.
+ * @returns Rows tagged with `matched_via_alias`, best match first.
  */
 async function searchLibraryAliasHitsAfterTsvector(
   query: string,
@@ -3624,36 +3647,19 @@ async function searchLibraryAliasHitsAfterTsvector(
   minSimilarity: number,
   on_streaming?: boolean
 ): Promise<TaggedLibraryViewEntry[]> {
+  // Stage 1 returned rows, so this query has a tsquery; the guard is for
+  // the type, and for any caller that reaches here some other way.
   const built = buildPrefixTsquery(query);
   if (!built) {
     return [];
   }
-  const streamingClause = on_streaming !== undefined ? sql`AND ${library.on_streaming} = ${on_streaming}` : sql``;
-  const aliasOrdering = buildAliasRelevanceOrdering(query);
-
-  // The derived table (`alias_only`) is what lets the window and the outer
-  // ORDER BY name `alias_max_sim`, which only exists once the CTE columns are
-  // projected; same reason the stage-2 union sits inside `alias_search`.
-  const rows = (await db.execute(sql`
-    ${buildAliasHitsCte(query, minSimilarity)}
-    ${albumScopedQuery({
-      inner: sql`
-        SELECT *, DENSE_RANK() OVER (ORDER BY ${aliasOrdering}) AS album_rank
-        FROM (
-          SELECT ${LIBRARY_VIEW_PROJECTION_RAW}${ALIAS_HITS_PROJECTION}
-          FROM ${library}
-          ${LIBRARY_VIEW_JOINS_RAW}
-          INNER JOIN alias_hits ON alias_hits.artist_id = ${library.artist_id}
-          WHERE (${library.search_doc} @@ ${built.tsquery}) IS NOT TRUE
-          ${streamingClause}
-        ) alias_only
-      `,
-      limit,
-      outerOrderBy: aliasOrdering,
-    })}
-  `)) as unknown as (LibraryArtistViewEntry & AliasHitFields & AlbumRankHelperColumns)[];
-
-  return rows.map(toLibraryViewRow).map(attachAliasHint);
+  const stage1Match = sql`(${library.search_doc} @@ ${built.tsquery})`;
+  return runAliasRankedQuery({
+    query,
+    minSimilarity,
+    limit,
+    derivedTable: sql`(${buildAliasOnlyBranch(stage1Match, on_streaming)}) alias_only`,
+  });
 }
 
 /**
@@ -3713,8 +3719,8 @@ export async function runCatalogTrackSearchCascade(
  * `serializeLibraryArtistViewEntry`, so `matched_via` rides through to the
  * wire unchanged.
  *
- * Both feature flags default off, so for any deployment that hasn't opted in,
- * behavior is byte-identical to the pre-#972 baseline (tsvector → trigram → []).
+ * With both catalog-track-search flags off, stages 3-4 return `[]`, so the
+ * cascade ends at the trigram tier, as it did before BS#972.
  *
  * With `appendAliasHits` set and `CATALOG_SEARCH_ALIAS_ENABLED` on, a non-empty
  * stage 1 no longer returns alone: the alias-only probe
@@ -3726,9 +3732,12 @@ export async function runCatalogTrackSearchCascade(
  *
  * Only the catalog route (`fuzzySearchLibrary`, `GET /library/`) passes the
  * option. The request-line `searchLibrary` does not: every request-line
- * strategy runs its results through `filterResultsByArtist`, which drops any
- * row whose artist does not start with the parsed artist, so appended alias
- * rows would cost one more query per strategy call and never be kept.
+ * strategy keeps only rows whose artist starts with the parsed artist
+ * (`filterResultsByArtist`, or `trackOnCompilation`'s inline filter, which
+ * also keeps compilation rows), so appended alias rows would cost one more
+ * query per strategy call and never be kept. `GET /library/search?query=`
+ * shares that path; no DJ-facing client calls it (BS#3552 checked dj-site and
+ * both DJ apps, which use `GET /library/`).
  *
  * @param query Raw query text; trimmed here.
  * @param n Maximum albums returned.
@@ -3747,9 +3756,6 @@ async function searchLibraryBothMode(
 
   const tsvectorResults = await searchLibraryByTsvector(trimmed, n, on_streaming);
   if (tsvectorResults.length > 0) {
-    if (!appendAliasHits) {
-      return tsvectorResults;
-    }
     const { enabled: aliasEnabled, minSimilarity: aliasMinSimilarity } = getCatalogSearchAliasConfig();
     // `n` counts ALBUMS, not rows (see `albumScopedQuery`), so the room left
     // is measured in distinct ids. Today `albumScopedQuery`'s `DISTINCT ON
@@ -3760,7 +3766,7 @@ async function searchLibraryBothMode(
     const room = n - stage1Ids.size;
     // `trimmed.length >= 2` mirrors stage 2's own gate below. With no room
     // left the probe could only add albums past `n`, so skip the query.
-    if (!aliasEnabled || room <= 0 || trimmed.length < 2) {
+    if (!appendAliasHits || !aliasEnabled || room <= 0 || trimmed.length < 2) {
       return tsvectorResults;
     }
     const aliasRows = await searchLibraryAliasHitsAfterTsvector(trimmed, room, aliasMinSimilarity, on_streaming);

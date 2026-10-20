@@ -341,6 +341,8 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
 
       expect(catalogTierCallLog(db.execute)).toEqual(expectedTiers);
       expect(results.map((r) => r.id)).toEqual(expectedIds);
+      // `n` counts albums: the page never holds more than n distinct ids.
+      expect(new Set(results.map((r) => r.id)).size).toBeLessThanOrEqual(n);
       if (expectedRoom !== undefined) {
         expect(lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ')).toContain(
           `album_rank <= ${expectedRoom}`
@@ -390,7 +392,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(results.map((r) => r.id)).toEqual([1301]);
     });
 
-    it('caps at n, asks the probe for only the albums left, and dedupes by id', async () => {
+    it('asks the probe for only the albums left under n, and dedupes by id', async () => {
       setAliasFlag(true);
       // The probe's SQL excludes stage-1 rows itself; the id dedupe is the
       // belt to that brace, so feed it a duplicate to prove it holds.
@@ -400,6 +402,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       const results = await fuzzySearchLibrary('Giddens', 'Giddens', 3);
 
       expect(results.map((r) => r.id)).toEqual([1301, 4908, 4904]);
+      expect(new Set(results.map((r) => r.id)).size).toBeLessThanOrEqual(3);
       expect(results[0].matched_via_alias).toBeUndefined();
       expect(lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ')).toContain('album_rank <= 2');
     });

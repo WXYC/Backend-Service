@@ -1070,6 +1070,28 @@ describe('GET /library/ Both-mode — alias hits after a stage-1 tsvector hit (B
     }
   });
 
+  flagOnCase(
+    'small n: the probe fills only the room stage 1 left (n=2: one direct album, one alias album)',
+    async () => {
+      // Real Postgres runs the probe's `album_rank <= room` cap here: stage 1
+      // holds one album, so room is 1 although two alias albums match.
+      const res = await auth
+        .get('/library/')
+        .query({ artist_name: 'Giddens', album_title: 'Giddens', n: 2 })
+        .expect(200);
+
+      expect(new Set(res.body.map((r) => r.id)).size).toBeLessThanOrEqual(2);
+      expect(res.body[0].id).toBe(DIRECT_LIBRARY_ID);
+      const aliasIds = [...new Set(res.body.filter((r) => ALIAS_LIBRARY_IDS.includes(r.id)).map((r) => r.id))];
+      expect(aliasIds).toHaveLength(1);
+      res.body
+        .filter((r) => ALIAS_LIBRARY_IDS.includes(r.id))
+        .forEach((row) => {
+          expect(row.matched_via_alias).toEqual(aliasHint);
+        });
+    }
+  );
+
   flagOffCase('flag off: the surname query returns stage 1 alone, with no alias rows', async () => {
     const body = await bothMode('Giddens');
 
