@@ -18,7 +18,9 @@ const chain = (result: () => unknown, hooks: Record<string, (...args: any[]) => 
     {},
     {
       get: (_t, prop: string) => {
-        if (prop === 'then') return (resolve: any, reject: any) => Promise.resolve().then(result).then(resolve, reject);
+        if (prop === 'then') {
+          return (resolve: any, reject: any) => Promise.resolve().then(result).then(resolve, reject);
+        }
         return (...args: any[]) => {
           hooks[prop]?.(...args);
           return c;

@@ -1346,8 +1346,12 @@ export const updateEntry = async (
   if (entry.request_flag !== undefined) updateSet.request_flag = entry.request_flag;
   if (entry.segue !== undefined) updateSet.segue = entry.segue;
   if (entry.message !== undefined) updateSet.message = entry.message;
-  if (entry.spotlight_role !== undefined) updateSet.spotlight_role = entry.spotlight_role;
-  if (entry.spotlight_name !== undefined) updateSet.spotlight_name = entry.spotlight_name;
+  if (entry.spotlight_role !== undefined) {
+    updateSet.spotlight_role = entry.spotlight_role;
+  }
+  if (entry.spotlight_name !== undefined) {
+    updateSet.spotlight_name = entry.spotlight_name;
+  }
 
   // Provenance stamps are server-side only, through this internally-typed set merged into the one
   // UPDATE; `UpdateRequestBody` must never carry linkage columns (BS#1099). The pre-read is FOR UPDATE

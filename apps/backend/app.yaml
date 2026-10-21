@@ -2042,6 +2042,21 @@ paths:
                   properties:
                     message:
                       type: string
+                - type: object
+                  description: >-
+                    Adds a spotlight row to any open show, specialty or freeform. Rejected with 400 for an unknown
+                    `spotlight_role`, an empty or over-128 `spotlight_name`, or any track field present.
+                  required: ['entry_type', 'spotlight_role', 'spotlight_name']
+                  properties:
+                    entry_type:
+                      type: string
+                      enum: [spotlight]
+                    spotlight_role:
+                      $ref: '#/components/schemas/SpotlightRole'
+                    spotlight_name:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
       responses:
         '200':
           description: Successfully added entry
@@ -2060,6 +2075,26 @@ paths:
                         type: integer
                       message:
                         type: string
+        '400':
+          description: >-
+            The body is malformed. For a spotlight entry, that means an unknown `spotlight_role`, an empty or
+            over-128 `spotlight_name`, or any track field present. Clients should branch on the status, not on the
+            message text.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '401':
+          description: No bearer token
+        '403':
+          description: >-
+            `code: spotlight_disabled` — a spotlight entry was sent while the server flag is off. A 403 without that
+            `code` is a different denial: a caller missing the `flowsheet: write` permission gets a body of `{error}`,
+            and a banned caller gets `{message, reason}`. Clients should branch on `code`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
 
     patch:
       summary: Update flowsheet entry
@@ -2087,6 +2122,16 @@ paths:
                   type: string
                 message:
                   type: string
+                spotlight_role:
+                  $ref: '#/components/schemas/SpotlightRole'
+                spotlight_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  description: >-
+                    `spotlight_role` and `spotlight_name` each correct a spotlight row in place, alone or together,
+                    such as a misspelled band. They apply to spotlight rows only; on a track row they get a 400.
+                    `entry_type` is not client-writable.
       responses:
         '200':
           description: Successfully updated entry
@@ -2107,8 +2152,10 @@ paths:
                         type: string
         '400':
           description: >-
-            The caller is not a member of the show on the air that the entry belongs to, or the entry belongs to no show.
-            Clients should branch on the status, not on the message text.
+            The caller is not a member of the show on the air that the entry belongs to, the entry belongs to no show, or
+            the request is malformed. For a spotlight edit, malformed means an unknown `spotlight_role`, an empty or
+            over-128 `spotlight_name`, spotlight fields on a track row, or track fields on a spotlight row. Clients
+            should branch on the status, not on the message text.
           content:
             application/json:
               schema:
@@ -2117,9 +2164,12 @@ paths:
           description: No bearer token
         '403':
           description: >-
-            With `code: closed_show`, the entry's show has ended and the caller lacks `flowsheet: manage` (only music
-            directors and station managers edit an ended show). A 403 without a `code` is the permission denial
-            (`{error}`) or the ban denial (`{message, reason}`).
+            Two coded denials. `code: spotlight_disabled` — the request sets `spotlight_role` or `spotlight_name` while
+            the server flag is off. `code: closed_show` — the entry's show has ended and the caller lacks
+            `flowsheet: manage` (only music directors and station managers edit an ended show). When both apply, such
+            as a spotlight edit on an ended show by a non-manager while the flag is off, `spotlight_disabled` wins,
+            because the flag check needs no show read. A 403 with neither `code` is the permission denial (`{error}`)
+            or the ban denial (`{message, reason}`). Clients should branch on `code`.
           content:
             application/json:
               schema:
