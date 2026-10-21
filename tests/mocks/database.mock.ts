@@ -455,6 +455,8 @@ export const flowsheet = {
   request_flag: 'flowsheet.request_flag',
   segue: 'flowsheet.segue',
   message: 'flowsheet.message',
+  spotlight_role: 'flowsheet.spotlight_role',
+  spotlight_name: 'flowsheet.spotlight_name',
   add_time: 'flowsheet.add_time',
   updated_at: 'flowsheet.updated_at',
   artwork_url: 'flowsheet.artwork_url',

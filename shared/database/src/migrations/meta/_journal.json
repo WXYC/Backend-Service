@@ -1394,6 +1394,20 @@
       "when": 1792354834301,
       "tag": "0201_specialty-shows-catalog",
       "breakpoints": true
+    },
+    {
+      "idx": 202,
+      "version": "7",
+      "when": 1792354834302,
+      "tag": "0202_flowsheet-entry-type-spotlight",
+      "breakpoints": true
+    },
+    {
+      "idx": 203,
+      "version": "7",
+      "when": 1792354834303,
+      "tag": "0203_flowsheet-spotlight-columns",
+      "breakpoints": true
     }
   ]
 }
