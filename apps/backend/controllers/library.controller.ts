@@ -55,6 +55,7 @@ import {
 import { INT4_MAX } from '../utils/constants.js';
 import {
   parseCodeQueryInt,
+  parseCountQueryParam,
   parseInt4BodyId,
   parseInt4PathId,
   parseLimitOffset,
@@ -233,7 +234,7 @@ type AlbumQueryParams = {
   artist_name?: string;
   album_title?: string;
   code_number?: number;
-  n?: number;
+  n?: string;
   page?: number;
   on_streaming?: string;
 };
@@ -294,8 +295,10 @@ export const searchForAlbum: RequestHandler = async (req: Request<object, object
   }
 
   const onStreaming = query.on_streaming === 'true' ? true : query.on_streaming === 'false' ? false : undefined;
+  // Absent `n` stays `undefined` so `fuzzySearchLibrary`'s own default applies (BS#3587).
+  const n = parseCountQueryParam(query.n, 'n');
 
-  const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, query.n, onStreaming);
+  const response = await libraryService.fuzzySearchLibrary(query.artist_name, query.album_title, n, onStreaming);
   // BS#1828: artwork enrichment is fire-and-forget, off the response path
   // entirely — search returns local catalog rows immediately. A slow/rate-
   // limited LML can no longer show up as catalog-search latency. The detached

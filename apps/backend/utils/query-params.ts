@@ -77,6 +77,20 @@ export const parseInt4QueryParam = (raw: unknown, field: string): number | undef
 };
 
 /**
+ * Parse an optional result-count query param (`?n=`, `?limit=`) with `parseInt4QueryParam`'s rules, but name a
+ * repeated key (`?n=1&n=2`, which Express hands over as `string[]`) as its own 400, matching the `page`/`limit`
+ * rejection in `library.controller.ts` (#1553). `undefined` passes through so the caller's or service's default
+ * applies. The point is that the service gets a real number: a raw `"50"` only works through implicit coercion, and
+ * `"abc"` becomes NaN and a Postgres 500 (BS#3587).
+ */
+export const parseCountQueryParam = (raw: unknown, field: string): number | undefined => {
+  if (raw !== undefined && typeof raw !== 'string') {
+    throw new WxycError(`${field} must be a single string value`, 400);
+  }
+  return parseInt4QueryParam(raw, field);
+};
+
+/**
  * Parse a strict boolean query param: absent or `'false'` is false, `'true'` is true, and anything else — `'TRUE'`,
  * `'1'`, `''`, or a repeated key (which arrives as an array) — is a 400 naming the field.
  */
