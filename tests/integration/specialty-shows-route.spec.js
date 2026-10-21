@@ -51,4 +51,22 @@ describe('GET /specialty-shows (BS#3453)', () => {
     const second = await request.get('/specialty-shows').set('If-None-Match', etag).expect(200);
     expect(second.headers.etag).not.toBe(etag);
   });
+
+  it('omits a retired program and moves the ETag when it is retired', async () => {
+    const before = await request.get('/specialty-shows').expect(200);
+    const target = before.body.find((s) => s.slug === 'hyperlocal');
+    expect(target).toBeDefined();
+
+    try {
+      await sql`UPDATE wxyc_schema.specialty_shows SET active = false WHERE slug = 'hyperlocal'`;
+      const after = await request.get('/specialty-shows').set('If-None-Match', before.headers.etag).expect(200);
+
+      expect(after.body).toHaveLength(before.body.length - 1);
+      expect(after.body.map((s) => s.slug)).not.toContain('hyperlocal');
+      expect(after.body.every((s) => s.active === true)).toBe(true);
+      expect(after.headers.etag).not.toBe(before.headers.etag);
+    } finally {
+      await sql`UPDATE wxyc_schema.specialty_shows SET active = true WHERE slug = 'hyperlocal'`;
+    }
+  });
 });
