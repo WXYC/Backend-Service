@@ -9,6 +9,7 @@ import {
   intake_item_passes,
   intake_items,
   intakeItemStateEnum,
+  labels,
   library,
   member,
   NY_TIME_ZONE,
@@ -23,6 +24,7 @@ import {
   type NewIntakeItem,
 } from '@wxyc/database';
 import WxycError from '../utils/error.js';
+import { ilikeEscaped } from '../utils/sql-like.js';
 import { fileLibraryRelease, mapLibraryFilingError, type ValidatedFilingInput } from './library-filing.service.js';
 import { outerRef } from '../utils/sql-fragments.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
@@ -216,6 +218,21 @@ export const getIntakeItem = async (id: number, includePasses: boolean): Promise
 /** A `format_id`/`label_id` FK miss. A `logged_by` miss (the caller's own account is gone) is not the caller's input, so it stays a 500. */
 const isUnknownReference = (error: unknown) =>
   extractSqlState(error) === '23503' && !extractConstraintName(error)?.includes('logged_by');
+
+/**
+ * Whether label `labelId`'s name matches `recordLabel` (BS#3583), under the label search's own comparison: a case-insensitive `ILIKE`
+ * with the input matched literally (`ilikeEscaped`, here `exact`), on the trimmed name. One row, never a write. Built apart from
+ * `labelNameMatches` so a test can render it.
+ */
+export const buildLabelNameCheck = (labelId: number, recordLabel: string) =>
+  db
+    .select({ matches: sql<boolean>`${ilikeEscaped(sql`trim(${labels.label_name})`, recordLabel.trim(), 'exact')}` })
+    .from(labels)
+    .where(eq(labels.id, labelId));
+
+/** `true` or `false` for a label that exists; `undefined` when no label has the id, which the write then reports as `unknown_reference`. */
+export const labelNameMatches = async (labelId: number, recordLabel: string): Promise<boolean | undefined> =>
+  (await buildLabelNameCheck(labelId, recordLabel))[0]?.matches;
 
 /**
  * The CD-R format a digital album is stored under: the lowest id among the formats whose lower-cased `format_name` is `cdr`
