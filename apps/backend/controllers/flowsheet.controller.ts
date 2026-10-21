@@ -477,6 +477,26 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // the whole page. Independent attaches, so run concurrently.
   await Promise.all([flowsheet_service.attachUpcomingShows(entries), flowsheet_service.attachCriticReviews(entries)]);
 
+  // BS#3461: the shows behind the page's rows, plus the open show, from one batched read (the open show's id comes
+  // from `on_air`, so there is no second open-show lookup). Best-effort like `on_air`: on failure `shows` is omitted
+  // and clients draw no headers.
+  const showIds = new Set<number>();
+  for (const entry of entries) {
+    // `entry?.` because a nullish slot is dropped (and reported) by projectEntriesV2, not rejected here (BS#1864).
+    if (entry?.show_id != null) {
+      showIds.add(entry.show_id);
+    }
+  }
+  if (onAir) {
+    showIds.add(onAir.show_id);
+  }
+  const shows = showIds.size
+    ? await flowsheet_service.getRangeShowsByIds([...showIds]).catch((error: unknown) => {
+        getErrorReporter().captureException(error);
+        return undefined;
+      })
+    : [];
+
   // BS#1960 note: totalPages is derived from the full row estimate, so it can
   // advertise more pages than MAX_OFFSET actually permits (e.g. ~26k pages at
   // limit=100 against a ~2.6M-row table, while offset is capped at 20k / page
@@ -510,6 +530,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     limit,
     totalPages,
     ...(onAir !== undefined && { on_air: onAir }),
+    ...(shows !== undefined && { shows }),
   });
 };
 

@@ -49,6 +49,7 @@ const mockAddHourlyBreakpoint = jest.fn<() => Promise<{ entry: Record<string, un
 const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<number>>().mockResolvedValue(0);
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetOnAir = jest.fn<() => Promise<Record<string, unknown> | null>>();
+const mockGetRangeShowsByIds = jest.fn<(ids: number[]) => Promise<Record<string, unknown>[]>>();
 const mockGetOnAirDJs = jest.fn<() => Promise<Array<{ id: string | null; dj_name: string | null }>>>();
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
@@ -87,6 +88,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
   getLatestShow: mockGetLatestShow,
   getOnAir: mockGetOnAir,
+  getRangeShowsByIds: mockGetRangeShowsByIds,
   getOnAirDJs: mockGetOnAirDJs,
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
@@ -157,6 +159,7 @@ describe('flowsheet.controller', () => {
     // and keeps per-test overrides local. Without it, any test that merely
     // posts a breakpoint to exercise something else (entry-type inference,
     // `callerMarksCurrentHour`) would destructure `undefined`.
+    mockGetRangeShowsByIds.mockResolvedValue([]);
     mockAddHourlyBreakpoint.mockResolvedValue({
       entry: { id: 1, show_id: 1, entry_type: 'breakpoint', add_time: new Date() },
       created: true,
@@ -185,6 +188,7 @@ describe('flowsheet.controller', () => {
         limit: 30,
         totalPages: 1,
         on_air: null,
+        shows: [],
       });
     });
 
@@ -260,6 +264,92 @@ describe('flowsheet.controller', () => {
       expect(mockNext).not.toHaveBeenCalled();
       // the failure is reported, not silently swallowed
       expect(mockCaptureException).toHaveBeenCalled();
+    });
+
+    // BS#3461: the default branch carries `shows`, the FlowsheetRangeShow rows for the page's distinct show_ids plus
+    // the open show, from ONE batched read so a client can draw per-show headers without a second request.
+    describe('shows (BS#3461)', () => {
+      const rangeShow = (id: number, specialty: Record<string, unknown> | null) => ({
+        id,
+        show_name: specialty ? 'Boom Hour' : null,
+        dj_name: 'DJ HOUNDSTOOTH',
+        specialty_id: specialty ? 7 : null,
+        specialty,
+        start_time: new Date('2026-10-01T04:00:00Z'),
+        end_time: null,
+      });
+      const tagged = { id: 7, slug: 'sonic-boom', name: 'Sonic Boom', short_name: 'Sonic Boom', logs_playcuts: true };
+      const entryIn = (id: number, show_id: number) => ({ ...createMockEntry(id), show_id });
+      const idsRead = () => [...mockGetRangeShowsByIds.mock.calls[0][0]].sort((a, b) => a - b);
+
+      it('reads each referenced show once and returns the rows, tagged and freeform alike', async () => {
+        mockGetEntriesByPage.mockResolvedValue([entryIn(1, 3), entryIn(2, 3), entryIn(3, 4)]);
+        mockGetEntryCount.mockResolvedValue(3);
+        mockGetOnAir.mockResolvedValue(null);
+        const rows = [rangeShow(3, tagged), rangeShow(4, null)];
+        mockGetRangeShowsByIds.mockResolvedValue(rows);
+        const res = createMockRes();
+
+        await getEntries(createMockReq() as Request, res as Response, mockNext);
+
+        expect(mockGetRangeShowsByIds).toHaveBeenCalledTimes(1);
+        expect(idsRead()).toEqual([3, 4]);
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ shows: rows }));
+      });
+
+      it('adds the open show to the read, deduplicated, when none of its rows is on the page', async () => {
+        mockGetEntriesByPage.mockResolvedValue([entryIn(1, 3), entryIn(2, 4)]);
+        mockGetEntryCount.mockResolvedValue(2);
+        mockGetOnAir.mockResolvedValue({ dj_name: 'DJ HOUNDSTOOTH', show_id: 9, show_name: null, specialty: null });
+
+        await getEntries(createMockReq() as Request, createMockRes() as Response, mockNext);
+        expect(idsRead()).toEqual([3, 4, 9]);
+
+        mockGetRangeShowsByIds.mockClear();
+        mockGetOnAir.mockResolvedValue({ dj_name: 'DJ HOUNDSTOOTH', show_id: 4, show_name: null, specialty: null });
+
+        await getEntries(createMockReq() as Request, createMockRes() as Response, mockNext);
+        expect(idsRead()).toEqual([3, 4]);
+      });
+
+      it('reads only the page shows when on_air is absent because its lookup failed', async () => {
+        mockGetEntriesByPage.mockResolvedValue([entryIn(1, 3)]);
+        mockGetEntryCount.mockResolvedValue(1);
+        mockGetOnAir.mockRejectedValue(new Error('shows lookup failed'));
+
+        await getEntries(createMockReq() as Request, createMockRes() as Response, mockNext);
+
+        expect(idsRead()).toEqual([3]);
+      });
+
+      it('skips the read and returns an empty shows array when there is nothing to resolve', async () => {
+        mockGetEntriesByPage.mockResolvedValue([]);
+        mockGetEntryCount.mockResolvedValue(0);
+        mockGetOnAir.mockResolvedValue(null);
+        const res = createMockRes();
+
+        await getEntries(createMockReq() as Request, res as Response, mockNext);
+
+        expect(mockGetRangeShowsByIds).not.toHaveBeenCalled();
+        expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ shows: [] }));
+      });
+
+      it('omits shows, still returns entries, and reports the error when the read throws', async () => {
+        mockGetEntriesByPage.mockResolvedValue([entryIn(1, 3)]);
+        mockGetEntryCount.mockResolvedValue(1);
+        mockGetOnAir.mockResolvedValue(null);
+        mockGetRangeShowsByIds.mockRejectedValue(new Error('shows read failed'));
+        const res = createMockRes();
+
+        await getEntries(createMockReq() as Request, res as Response, mockNext);
+
+        expect(res.status).toHaveBeenCalledWith(200);
+        const body = (res.json as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+        expect(body).not.toHaveProperty('shows');
+        expect(body.entries).toHaveLength(1);
+        expect(mockCaptureException).toHaveBeenCalled();
+        expect(mockNext).not.toHaveBeenCalled();
+      });
     });
 
     // on_air rides only on the default paginated branch (the branch the iOS app

@@ -180,4 +180,40 @@ describe('specialty ref on range and playlist (BS#3454)', () => {
       });
     });
   });
+
+  describe('shows[] on the default GET /flowsheet branch (BS#3461)', () => {
+    const FAR_FUTURE = Date.UTC(2226, 0, 1);
+    const endShow = () =>
+      request.post('/flowsheet/end').set('Authorization', global.access_token).send({ dj_id: global.primary_dj_id });
+
+    beforeEach(endShow);
+    afterAll(endShow);
+
+    it('returns the tagged and freeform shows behind the page, plus the open show when none of its rows is on it', async () => {
+      // Two far-future rows sort ahead of everything else, so `limit=2` is exactly this pair.
+      await sql`
+        INSERT INTO ${sql(SCHEMA)}.flowsheet (show_id, add_time, entry_type, play_order, artist_name, album_title, track_title)
+        VALUES
+          (${showIds.active}, ${new Date(FAR_FUTURE).toISOString()}::timestamptz, 'track', 1, 'Juana Molina', 'DOGA', 'la paradoja'),
+          (${showIds.untagged}, ${new Date(FAR_FUTURE + 1000).toISOString()}::timestamptz, 'track', 1, 'Jessica Pratt', 'On Your Own Love Again', 'Back, Baby')`;
+      const joined = await request
+        .post('/flowsheet/join')
+        .set('Authorization', global.access_token)
+        .send({ dj_id: global.primary_dj_id, show_name: 'BS3461 open', specialty_id: specialtyIds.active })
+        .expect(200);
+
+      const res = await request.get('/flowsheet').query({ limit: 2 }).expect(200);
+
+      expect(res.body.entries.map((e) => e.show_id).sort()).toEqual([showIds.active, showIds.untagged].sort());
+      const byId = Object.fromEntries(res.body.shows.map((s) => [s.id, s]));
+      expect(Object.keys(byId).map(Number).sort()).toEqual([showIds.active, showIds.untagged, joined.body.id].sort());
+      expect(byId[showIds.active].specialty).toMatchObject(expectedRef('active', 'bs3454-active'));
+      expect(byId[showIds.untagged].specialty).toBeNull();
+      expect(byId[joined.body.id]).toMatchObject({
+        show_name: 'BS3461 open',
+        specialty: { slug: 'bs3454-active' },
+        end_time: null,
+      });
+    });
+  });
 });

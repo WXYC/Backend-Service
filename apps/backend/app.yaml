@@ -242,6 +242,41 @@ components:
           nullable: true
           description: >-
             The DJ currently on air, when known. An OnAirInfo object means a named DJ is live; JSON null means the station is confirmed on automation ("Auto DJ"); the field being absent means the server does not report on-air status and clients should treat it as unknown. Not in required so absence stays distinct from an explicit null.
+        shows:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlowsheetRangeShow'
+          description: >-
+            Every show referenced by a row in `entries`, plus the open show, each once, so a client can group scrollback under per-show headers without a second request. Order is unspecified; key by `id`. Absent when the server could not resolve the shows (clients draw no headers). Same shape as `GET /flowsheet/range`'s `shows[]`. Default paginated branch only. Canonical wire contract: FlowsheetV2PaginatedResponse.shows in wxyc-shared/api.yaml (the SSOT).
+
+    FlowsheetRangeShow:
+      type: object
+      required: [id, show_name, dj_name, specialty_id, specialty, start_time, end_time]
+      properties:
+        id:
+          type: integer
+        show_name:
+          type: string
+          nullable: true
+        dj_name:
+          type: string
+          nullable: true
+          description: The show's public handle, never `auth_user.name`.
+        specialty_id:
+          type: integer
+          nullable: true
+        specialty:
+          allOf:
+            - $ref: '#/components/schemas/SpecialtyShowRef'
+          nullable: true
+          description: The show's specialty program, null for a freeform show.
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+          nullable: true
 
     OnAirInfo:
       type: object
