@@ -238,7 +238,16 @@ describe('the missing-flag warning', () => {
 });
 
 describe('the stale-definitions warning', () => {
-  it('reports a poll failure after a successful load once, keeps the loaded value, and clears when definitions load again', async () => {
+  const POLL = 60 * 1000;
+
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date('2026-10-21T12:00:00-07:00') });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('reports a poll failure after a successful load once, and keeps the loaded value', async () => {
     setEnv('REVIEWS_AUDIENCE', 'off');
     givenPostHog({ returns: 'everyone' });
     await audience('reviews');
@@ -251,9 +260,25 @@ describe('the stale-definitions warning', () => {
       expect.stringContaining('stopped refreshing'),
       expect.objectContaining({ level: 'warning' })
     );
-    handlers.localEvaluationFlagsLoaded();
+    expect(mockCaptureMessage.mock.calls[0][0]).not.toMatch(/outage/);
+  });
+
+  it('stops reporting once quiet polls follow the error past the window, and reports again on a fresh error', async () => {
+    givenPostHog({ returns: 'everyone' });
     await audience('reviews');
     handlers.error();
+    await audience('reviews');
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+
+    jest.setSystemTime(Date.now() + 3 * POLL + 1);
+    await audience('reviews');
+    handlers.error();
+    await audience('reviews');
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(2);
+
+    jest.setSystemTime(Date.now() + 3 * POLL + 1);
+    await audience('reviews');
+    jest.setSystemTime(Date.now() + 60 * 60 * 1000);
     await audience('reviews');
     expect(mockCaptureMessage).toHaveBeenCalledTimes(2);
   });
