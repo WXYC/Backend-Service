@@ -430,7 +430,13 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
       const res = await request.get('/flowsheet');
       assertNoSentinel(res);
       expect(res.body.on_air.show_id).toBe(staffShowId);
-      expect(Object.keys(res.body.on_air).sort()).toEqual(['dj_name', 'show_id', 'show_name', 'specialty']);
+      expect(Object.keys(res.body.on_air).sort()).toEqual([
+        'dj_name',
+        'request_line',
+        'show_id',
+        'show_name',
+        'specialty',
+      ]);
     });
   });
 });
