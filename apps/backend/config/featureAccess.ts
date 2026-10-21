@@ -157,16 +157,17 @@ export const audience = async (feature: FeatureKey): Promise<Audience> => {
 };
 
 /**
- * Whether `account` may use `feature`. No account below DJ ever may, whatever the audience or capability: `staff` opens it
- * to music directors and above, or to an account holding the feature's capability; `everyone` to DJs and above.
+ * Whether `account` may use `feature` when it is open to `at`. No account below DJ ever may, whatever the audience or capability: `staff` opens it
+ * to music directors and above, or to an account holding the feature's capability; `everyone` to DJs and above. Pure, so a caller that
+ * already holds the audience (`GET /feature-access`) decides from that same read.
  */
-export const canAccess = async (feature: FeatureKey, account: FeatureAccount): Promise<boolean> => {
+export const accessAt = (at: Audience, feature: FeatureKey, account: FeatureAccount): boolean => {
   const level = roleToAuthorization(account.role ?? undefined);
   if (level < Authorization.DJ) {
     return false;
   }
   const { capability } = FEATURES[feature] as { capability?: string };
-  switch (await audience(feature)) {
+  switch (at) {
     case 'everyone':
       return true;
     case 'staff':
@@ -177,3 +178,7 @@ export const canAccess = async (feature: FeatureKey, account: FeatureAccount): P
       return false;
   }
 };
+
+/** Whether `account` may use `feature` now: `accessAt` over the audience read this once. */
+export const canAccess = async (feature: FeatureKey, account: FeatureAccount): Promise<boolean> =>
+  accessAt(await audience(feature), feature, account);

@@ -15,6 +15,7 @@ import { schedule_route } from './routes/schedule.route.js';
 import { events_route } from './routes/events.route.js';
 import { request_line_route } from './routes/requestLine.route.js';
 import { config_route } from './routes/config.route.js';
+import { feature_access_route } from './routes/feature-access.route.js';
 import { internal_route } from './routes/internal.route.js';
 import { internalBansRoute } from './routes/internal-bans.route.js';
 import { internalSlackModeratorsRoute } from './routes/internal-slack-moderators.route.js';
@@ -102,6 +103,9 @@ app.use('/playlists', playlist_route);
 
 // On Tour concerts feed (anonymous auth, pure DB read) — BS#1603
 app.use('/concerts', concerts_route);
+
+// The signed-in account's audience and access per feature (any verified token) — BS#3530. Gates: routes/feature-access.route.ts.
+app.use('/feature-access', feature_access_route);
 
 // Public specialty-show catalog (unauthenticated, five-minute cache)
 app.use('/specialty-shows', specialty_shows_route);

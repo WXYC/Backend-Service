@@ -28,7 +28,7 @@ jest.mock('@wxyc/observability', () => ({
 }));
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
 
-import { audience, canAccess, resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
+import { accessAt, audience, canAccess, resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
 
 const ENV_KEYS = ['POSTHOG_FLAGS_API_KEY', 'POSTHOG_SECRET_KEY', 'POSTHOG_API_KEY', 'REVIEWS_AUDIENCE'] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -156,6 +156,13 @@ describe('canAccess(reviews)', () => {
     async (a, { role, capabilities, ...expected }) => {
       givenPostHog({ returns: a });
       expect(await canAccess('reviews', { role, capabilities })).toBe(expected[a]);
+    }
+  );
+
+  it.each(cases.flatMap((c) => (['off', 'staff', 'everyone'] as const).map((a) => [a, c] as const)))(
+    'accessAt agrees at audience %s: %j',
+    (a, { role, capabilities, ...expected }) => {
+      expect(accessAt(a, 'reviews', { role, capabilities })).toBe(expected[a]);
     }
   );
 
