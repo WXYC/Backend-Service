@@ -7,13 +7,15 @@
  */
 import { readFileSync } from 'fs';
 import path from 'path';
-import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import {
+  CREDENTIAL_FAILURE_BACKOFF_MS,
   createInstanceRoleSigner,
   SIGNING_REFRESH_INTERVAL_MS,
 } from '../../../../apps/backend/services/s3-signing/instance-role-signer';
 import {
   defineStoreAllowlist,
+  undeclaredImports,
   undeclaredS3Imports,
 } from '../../../../apps/backend/services/s3-signing/command-allowlist';
 
@@ -154,10 +156,89 @@ describe('createInstanceRoleSigner', () => {
       }
     }
   });
+  it('shares one in-flight credential fetch between concurrent presigns on an empty cache', async () => {
+    let resolve!: (c: ReturnType<typeof fakeCredentials>) => void;
+    const provider = jest.fn(() => new Promise<ReturnType<typeof fakeCredentials>>((r) => (resolve = r)));
+    const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+    const both = Promise.all([signer.presign(command(), 300), signer.presign(command(), 300)]);
+    await Promise.resolve();
+    resolve(fakeCredentials('A', 60 * MIN));
+    await both;
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
+
+  it('backs off after a failed fetch, then retries', async () => {
+    const provider = jest
+      .fn<Promise<ReturnType<typeof fakeCredentials>>, []>()
+      .mockRejectedValueOnce(new Error('imds down'))
+      .mockResolvedValue(fakeCredentials('A', 60 * MIN));
+    const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+    await expect(signer.presign(command(), 300)).rejects.toThrow('imds down');
+    await expect(signer.presign(command(), 300)).rejects.toThrow('imds down');
+    expect(provider).toHaveBeenCalledTimes(1);
+    clock += CREDENTIAL_FAILURE_BACKOFF_MS;
+    await expect(signer.presign(command(), 300)).resolves.toContain('X-Amz-Signature');
+    expect(provider).toHaveBeenCalledTimes(2);
+  });
+
+  describe('send', () => {
+    it('signs server-side calls with the resolved instance-role credentials, never the default chain', async () => {
+      const saved = process.env.AWS_ACCESS_KEY_ID;
+      process.env.AWS_ACCESS_KEY_ID = 'SHADOW';
+      const { S3Client } = jest.requireActual('@aws-sdk/client-s3');
+      const spy = jest.spyOn(S3Client.prototype, 'send').mockImplementation(async function (this: {
+        config: { credentials: () => Promise<{ accessKeyId: string }> };
+      }) {
+        return { signedBy: (await this.config.credentials()).accessKeyId };
+      });
+      try {
+        const provider = jest.fn(() => Promise.resolve(fakeCredentials('ROLE', 60 * MIN)));
+        const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+        await expect(signer.send(new HeadObjectCommand({ Bucket: 'b', Key: 'posters/a.png' }))).resolves.toEqual({
+          signedBy: 'ROLE',
+        });
+      } finally {
+        spy.mockRestore();
+        if (saved === undefined) {
+          delete process.env.AWS_ACCESS_KEY_ID;
+        } else {
+          process.env.AWS_ACCESS_KEY_ID = saved;
+        }
+      }
+    });
+
+    it('reuses the cached credentials across sends and presigns, refreshing at most once a minute', async () => {
+      const { S3Client } = jest.requireActual('@aws-sdk/client-s3');
+      const spy = jest.spyOn(S3Client.prototype, 'send').mockResolvedValue({});
+      try {
+        const provider = jest.fn(() => Promise.resolve(fakeCredentials('A', 3 * MIN, clock)));
+        const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+        await signer.send(new HeadObjectCommand({ Bucket: 'b', Key: 'posters/a.png' }));
+        await signer.send(new HeadObjectCommand({ Bucket: 'b', Key: 'posters/a.png' }));
+        expect(provider).toHaveBeenCalledTimes(1);
+        clock += MIN;
+        await signer.send(new HeadObjectCommand({ Bucket: 'b', Key: 'posters/a.png' }));
+        expect(provider).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it('hands out the same cached credentials through credentials()', async () => {
+    const provider = jest.fn(() => Promise.resolve(fakeCredentials('A', 60 * MIN)));
+    const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+    await signer.presign(command(), 300);
+    await expect(signer.credentials()).resolves.toMatchObject({ accessKeyId: 'A' });
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('defineStoreAllowlist', () => {
-  const allowlist = defineStoreAllowlist({ commands: ['GetObjectCommand'], keyPrefixes: ['posters/'] });
+  const allowlist = defineStoreAllowlist({
+    commands: ['GetObjectCommand', 'CopyObjectCommand'],
+    keyPrefixes: ['posters/'],
+  });
 
   it('accepts a declared command on a declared prefix', () => {
     expect(() => allowlist.assertAllowed(command())).not.toThrow();
@@ -174,6 +255,45 @@ describe('defineStoreAllowlist', () => {
   ])('rejects %s without echoing the key', (_name, cmd, message) => {
     expect(() => allowlist.assertAllowed(cmd)).toThrow(message);
     expect(() => allowlist.assertAllowed(cmd)).not.toThrow(/logos|a\.png/);
+  });
+});
+
+describe('defineStoreAllowlist CopySource', () => {
+  const allowlist = defineStoreAllowlist({ commands: ['CopyObjectCommand'], keyPrefixes: ['posters/', 'held/'] });
+  const copy = (CopySource: string) => new CopyObjectCommand({ Bucket: 'b', Key: 'posters/dest.png', CopySource });
+
+  it.each([
+    ['an allowed prefix', 'b/held/a.png'],
+    ['an allowed prefix with a leading slash', '/b/held/a.png'],
+    ['an allowed prefix with a version id', 'b/held/a.png?versionId=3'],
+  ])('accepts %s', (_name, source) => {
+    expect(() => allowlist.assertAllowed(copy(source))).not.toThrow();
+  });
+
+  it.each([
+    ['another prefix', 'b/logos/a.png', /prefix/],
+    ['a path-traversal source', 'b/held/../logos/a.png', /prefix/],
+    ['an encoded path-traversal source', 'b/held/%2E%2E/logos/a.png', /prefix/],
+    ['a malformed encoding', 'b/held/%E0%A4%A.png', /prefix/],
+    ['another bucket', 'other/held/a.png', /bucket/],
+  ])('rejects %s without echoing the source', (_name, source, message) => {
+    expect(() => allowlist.assertAllowed(copy(source))).toThrow(message);
+    expect(() => allowlist.assertAllowed(copy(source))).not.toThrow(/logos|other|a\.png/);
+  });
+});
+
+describe('undeclaredImports', () => {
+  it('finds an undeclared client-cloudfront command and exempts its client', () => {
+    const source =
+      "import { CloudFrontClient, CreateInvalidationCommand, DeleteDistributionCommand } from '@aws-sdk/client-cloudfront';";
+    expect(undeclaredImports(source, '@aws-sdk/client-cloudfront', ['CreateInvalidationCommand'])).toEqual([
+      'DeleteDistributionCommand',
+    ]);
+  });
+
+  it('ignores imports from other packages', () => {
+    const source = "import { DeleteObjectCommand } from '@aws-sdk/client-s3';";
+    expect(undeclaredImports(source, '@aws-sdk/client-cloudfront', [])).toEqual([]);
   });
 });
 
