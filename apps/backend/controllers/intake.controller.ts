@@ -121,6 +121,27 @@ const parseOptionals = (body: Record<string, unknown>) => ({
   bandcamp_url: parseBandcampUrl(body.bandcamp_url),
 });
 
+/**
+ * BS#3583: a request that carries both a `label_id` and a non-blank `record_label` must name the same label, or the item would be
+ * linked to an unrelated label with no error (an id from another id space, as in BS#3577). A 400 `label_mismatch` before any write.
+ * A request with only one of the two, or that clears one, is not checked, on PATCH as on POST: the stored value of the other field
+ * is not consulted. An id that names no label passes here and gets the write's own `unknown_reference` 400.
+ */
+const refuseLabelMismatch = async ({
+  label_id,
+  record_label,
+}: {
+  label_id?: number | null;
+  record_label?: string | null;
+}) => {
+  if (label_id == null || !record_label) {
+    return;
+  }
+  if ((await intakeService.labelNameMatches(label_id, record_label)) === false) {
+    throw new WxycError('label_id names a label whose name is not record_label', 400, { code: 'label_mismatch' });
+  }
+};
+
 /** The `POST /intake` body: both names are required, and the kind rule is in the return type, so no cast is needed downstream. A new item starts uncited. */
 const parseNewFields = (body: Record<string, unknown>): NewIntakeFields => {
   const kind = parseKind(body);
@@ -187,6 +208,7 @@ export const getIntake: RequestHandler<{ id: string }> = async (req, res) => {
 
 export const logIntake: RequestHandler = async (req, res) => {
   const fields = parseNewFields(req.body ?? {});
+  await refuseLabelMismatch(fields);
   const result = await intakeService.logIntakeItem(fields, (req.auth?.id ?? req.auth?.sub) as string);
   if (result.outcome === 'no_cdr_format') {
     throw new WxycError('The format list has no CD-R format to store a digital album under', 409, {
@@ -206,6 +228,7 @@ export const patchIntake: RequestHandler<{ id: string }> = async (req, res) => {
     throw new WxycError('cited_album_id and cited_submission_id cannot both be set', 400);
   }
   if (Object.keys(patch).length === 0) throw new WxycError('No editable fields supplied', 400);
+  await refuseLabelMismatch(patch);
   const result = await intakeService.updateIntakeItem(parseId(req.params.id), patch);
   if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
   if (result.outcome === 'already_filed') return void conflict(res, 'already_filed');

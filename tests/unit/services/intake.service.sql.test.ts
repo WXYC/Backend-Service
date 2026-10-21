@@ -34,6 +34,7 @@ import {
   logIntakeItem,
   buildCdrFormatLookup,
   buildIntakePatch,
+  buildLabelNameCheck,
   buildIntakeSelect,
   buildTransition,
   deleteIntakeItem,
@@ -1144,5 +1145,20 @@ describe('writeAcceptance — a digital album has no disc, so choosing its revie
     expect(text).toMatch(
       /"checked_out_at" = case when (?:"[a-z_]+"\.)*"digital" then null else (?:"[a-z_]+"\.)*"checked_out_at" end/
     );
+  });
+});
+
+// BS#3583: the label-name check reuses the label search's comparison (`ilikeEscaped`), whole-value, on the trimmed name.
+describe('buildLabelNameCheck', () => {
+  const l = `"${SCHEMA}"."labels"`;
+
+  it.each([
+    ['a plain name', 'Drag City', 'Drag City'],
+    ['a name with LIKE metacharacters, matched literally', '100%_Pure\\', '100\\%\\_Pure\\\\'],
+    ['a name with outer whitespace, trimmed', '  Sonamos ', 'Sonamos'],
+  ])('compares %s case-insensitively against the one label row', (_name, recordLabel, pattern) => {
+    const { sql: text, params } = buildLabelNameCheck(7, recordLabel).toSQL();
+    expect(text).toBe(`select trim(${l}."label_name") ILIKE $1 ESCAPE '\\' from ${l} where ${l}."id" = $2`);
+    expect(params).toEqual([pattern, 7]);
   });
 });
