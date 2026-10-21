@@ -420,6 +420,7 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
           TURBO_TELEMETRY_DISABLED: '1',
           EVENT_BEFORE: before === 'zero' ? '0'.repeat(40) : sha[before],
           HEAD_SHA: sha[opts.head ?? 'c2'],
+          GITHUB_OUTPUT: path.join(root, 'github-output'),
         },
       })
     );
@@ -447,8 +448,14 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
       'source: tag:y/v0.1.10',
     ],
     [
-      'uses github.event.before when a target has no ref and no tag',
+      'always builds a new target (no ref and no tag), never diffing from github.event.before',
       { refs: { backend: 'c1', x: 'c1' } },
+      ['backend', 'y'],
+      '::warning title=Deploying unscoped targets::No usable base for y (new-target )',
+    ],
+    [
+      'uses github.event.before when the newest tag is not a strict ancestor',
+      { refs: { backend: 'c1', x: 'c1' }, tags: { 'y/v0.1.0': 'c2' } },
       ['backend'],
       'source: github.event.before',
     ],
@@ -460,9 +467,9 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
     ],
     [
       'builds a target with no usable base unscoped, and says so',
-      { refs: { backend: 'c1', x: 'c1' }, before: 'zero' as const },
+      { refs: { backend: 'c1', x: 'c1' }, tags: { 'y/v0.1.0': 'c2' }, before: 'zero' as const },
       ['backend', 'y'],
-      '::warning title=Deploying unscoped targets::No usable base for y',
+      '::warning title=Deploying unscoped targets::No usable base for y (no-usable-base )',
     ],
     [
       'skips targets deployed at or after HEAD (a re-run of an older run)',
@@ -506,7 +513,11 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
      * reports `status` for current...deployed. The version tag points at
      * the commit `new`.
      */
-    const record = async (current: string | undefined, status?: string) => {
+    const record = async (
+      current: string | undefined,
+      status?: string,
+      opts: { latest?: string; updateStatus?: number } = {}
+    ) => {
       const last = deployJob.steps[deployJob.steps.length - 1] as { with: { script: string } };
       const calls: string[] = [];
       const logs: string[] = [];
@@ -524,8 +535,15 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
               return Promise.reject(notFound);
             },
             createRef: (a: { ref: string; sha: string }) => Promise.resolve(calls.push(`create ${a.ref} ${a.sha}`)),
-            updateRef: (a: { ref: string; sha: string; force: boolean }) =>
-              Promise.resolve(calls.push(`update ${a.ref} ${a.sha} force=${a.force}`)),
+            updateRef: (a: { ref: string; sha: string; force: boolean }) => {
+              calls.push(`update ${a.ref} ${a.sha} force=${a.force}`);
+              if (opts.updateStatus !== undefined) {
+                return Promise.reject(
+                  Object.assign(new Error('Update is not a fast forward'), { status: opts.updateStatus })
+                );
+              }
+              return Promise.resolve();
+            },
           },
           repos: {
             compareCommitsWithBasehead: (a: { basehead: string }) => {
@@ -548,36 +566,71 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
         'process',
         `return (async () => {${last.with.script}})();`
       );
-      await body(github, { repo: { owner: 'o', repo: 'r' } }, core, { env: { TARGET: 'x', VERSION: 'v0.1.2' } });
+      await body(github, { repo: { owner: 'o', repo: 'r' } }, core, {
+        env: { TARGET: 'x', VERSION: 'v0.1.2', LATEST: opts.latest ?? 'x/v0.1.2' },
+      });
       return { calls, logs: logs.join('\n') };
     };
 
     it.each([
-      ['creates the ref when there is none', undefined, undefined, ['create refs/deployed/x new'], 'created at new'],
       [
-        'moves the ref forward to a descendant',
+        'creates the ref when there is none',
+        undefined,
+        undefined,
+        {},
+        ['create refs/deployed/x new'],
+        'created at new',
+      ],
+      [
+        'creates nothing for a rollback (an older version than the newest tag) when there is no ref',
+        undefined,
+        undefined,
+        { latest: 'x/v0.1.5' },
+        [],
+        'notice Not creating refs/deployed/x: x/v0.1.2 is older than x/v0.1.5',
+      ],
+      [
+        'fast-forwards the ref without force',
         'old',
         'ahead',
-        ['compare old...new', 'update deployed/x new force=true'],
+        {},
+        ['compare old...new', 'update deployed/x new force=false'],
         'notice refs/deployed/x -> new',
       ],
-      ['leaves the ref alone when it is already there', 'new', 'identical', ['compare new...new'], 'already at new'],
+      [
+        'leaves the ref as is when it moved meanwhile (non-forced update refused)',
+        'old',
+        'ahead',
+        { updateStatus: 422 },
+        ['compare old...new', 'update deployed/x new force=false'],
+        'notice refs/deployed/x moved while this leg ran',
+      ],
+      [
+        'leaves the ref alone when it is already there',
+        'new',
+        'identical',
+        {},
+        ['compare new...new'],
+        'already at new',
+      ],
       [
         'never moves the ref back, so a Manual rollback holds',
         'newer',
         'behind',
+        {},
         ['compare newer...new'],
         'notice Leaving refs/deployed/x at newer',
       ],
       [
-        'moves a diverged ref (force-push), with a warning',
+        'forces only a diverged ref (force-push), with a warning',
         'orphan',
         'diverged',
+        {},
         ['compare orphan...new', 'update deployed/x new force=true'],
         'warning refs/deployed/x (orphan) is not an ancestor',
       ],
-    ])('record step %s', async (_label, current, status, calls, log) => {
-      const r = await record(current, status);
+    ])('record step %s', async (_label, current, status, opts, calls, log) => {
+      const r = await record(current, status, opts);
       expect(r.calls).toEqual(calls);
       expect(r.logs).toContain(log);
     });
@@ -595,5 +648,68 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
       expect(deployJob.strategy.matrix.target).toBe('${{ fromJSON(needs.setup.outputs.targets) }}');
       expect(deployJob.steps.map((s) => s.name)).toContain('Deploy Cron Job');
     });
+  });
+});
+
+/**
+ * `Advance unaffected deployed refs` (BS#3564) fast-forwards every target
+ * outside the deploy matrix to `github.sha` in one plain push. Run it against
+ * a bare origin: a ref behind HEAD moves, a missing ref is created, a ref on
+ * other history is refused (and logged, not fatal), and a matrix target is
+ * not touched.
+ */
+describe('Advance unaffected deployed refs (BS#3564)', () => {
+  const step = findStep(loadWorkflow('deploy-base.yml').jobs.setup, 'Advance unaffected deployed refs');
+  let root: string;
+  let origin: string;
+  const sha = { c0: '', c1: '', orphan: '' };
+  beforeAll(() => {
+    origin = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-advance-origin-'));
+    git(origin, 'init', '-q', '--bare');
+    root = initRepo('deploy-advance-');
+    git(root, 'remote', 'add', 'origin', origin);
+    for (const name of ['c0', 'c1'] as const) {
+      git(root, 'commit', '-q', '--allow-empty', '-m', name);
+      sha[name] = git(root, 'rev-parse', 'HEAD');
+    }
+    git(root, 'checkout', '-q', '--orphan', 'side');
+    git(root, 'commit', '-q', '--allow-empty', '-m', 'orphan');
+    sha.orphan = git(root, 'rev-parse', 'HEAD');
+    git(root, 'checkout', '-q', 'trunk');
+    git(
+      root,
+      'push',
+      '-q',
+      'origin',
+      'trunk',
+      'side',
+      `${sha.c0}:refs/deployed/behind`,
+      `${sha.orphan}:refs/deployed/diverged`,
+      `${sha.c0}:refs/deployed/in-matrix`
+    );
+  });
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(origin, { recursive: true, force: true });
+  });
+
+  it('advances unaffected targets, refuses non-fast-forwards, and leaves matrix targets alone', () => {
+    const r = runBashScript(step.run, {
+      cwd: root,
+      env: {
+        ALL_TARGETS: JSON.stringify(['behind', 'diverged', 'in-matrix', 'new-target']),
+        TARGETS: JSON.stringify(['in-matrix']),
+        HEAD_SHA: sha.c1,
+      },
+    });
+    expect(r.status).toBe(0);
+    const refs = Object.fromEntries(
+      git(origin, 'for-each-ref', '--format=%(refname:strip=2) %(objectname)', 'refs/deployed')
+        .split('\n')
+        .map((l) => l.split(' '))
+    );
+    expect(refs).toEqual({ behind: sha.c1, diverged: sha.orphan, 'in-matrix': sha.c0, 'new-target': sha.c1 });
+    expect(r.stdout).toContain('::notice title=Deployed refs not advanced::');
+    expect(r.stdout).toContain('refs/deployed/diverged');
   });
 });

@@ -125,8 +125,10 @@ jobs:
       # diffs each target's last deployed commit (`refs/deployed/<target>`,
       # else its newest version tag, else `github.event.before`) against
       # `github.sha` (BS#3564), and git cannot compute a merge base across
-      # shallow grafts. Those bases can be far back in history, and the tag
-      # fallback needs the tags, so a shallow clone would break both. 9ea9846d removed the
+      # shallow grafts. Those bases can be far back in history, the tag
+      # fallback needs every tag, and `Advance unaffected deployed refs`
+      # pushes `github.sha`, so a shallow clone would break all three.
+      # 9ea9846d removed the
       # `fetch-depth: 2` that made the old `HEAD^..HEAD` range work and
       # replaced it with `git fetch origin <before> --depth=1`, which
       # fetches the base commit with no ancestry to HEAD -- so
@@ -138,7 +140,7 @@ jobs:
       # Cost of full history here: ~2.5k commits and ~18k deploy tags
       # pack to ~33 MiB. `fetch-depth: 0` pulls those tags whether or not
       # `fetch-tags` is set -- that input only applies at a non-zero depth
-      # -- and `setup` reads them only as a bootstrap fallback, but a few seconds once per run
+      # -- and `setup` reads them as a bootstrap fallback; a few seconds once per run
       # is not worth optimizing against the 266 billed minutes a silent
       # full fan-out costs. Measure before trading depth away.
       - name: Checkout code
@@ -225,6 +227,11 @@ jobs:
             # OPEN on a range it cannot diff, so the script exits 1 instead
             # when git can resolve the range, and builds unscoped (with a
             # warning) only a target that has no usable base at all.
+            # The full apps/+jobs/ universe, computed once: the script and
+            # `Detect Live Target Repos` both read it.
+            ALL_TARGETS=$(npx turbo ls --output=json 2>/dev/null | jq -c '[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort')
+            echo "ALL_TARGETS=$ALL_TARGETS" >> "$GITHUB_OUTPUT"
+            export ALL_TARGETS
             if ! git fetch --quiet --no-tags origin '+refs/deployed/*:refs/deployed/*'; then
               echo "::warning title=Could not fetch deployed refs::Falling back to each target's newest version tag."
             fi
@@ -300,9 +307,42 @@ jobs:
             fi
           fi
 
+      # BS#3564: a target this run does not build is unchanged since its
+      # base, so the code it runs is HEAD's. Fast-forward its deployed ref to
+      # `github.sha` so the bases converge (one or two distinct bases in
+      # steady state, not one per target) and the skipped one-shots
+      # (BS#2909) and retired jobs stop being re-diffed on every push. One
+      # plain push, no --force: a ref that would move backward or sideways is
+      # rejected on its own and logged. Matrix targets are left to their
+      # deploy legs. Best effort: a failed push only costs extra turbo calls.
+      - name: Advance unaffected deployed refs
+        if: inputs.target == ''
+        env:
+          ALL_TARGETS: ${{ steps.detect_targets.outputs.ALL_TARGETS }}
+          TARGETS: ${{ steps.detect_targets.outputs.TARGETS }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          REFSPECS=$(jq -rn --argjson all "$ALL_TARGETS" --argjson built "$TARGETS" --arg sha "$HEAD_SHA" \
+            '($all - $built)[] | "\($sha):refs/deployed/\(.)"')
+          if [ -z "$REFSPECS" ]; then
+            exit 0
+          fi
+          STATUS=0
+          # shellcheck disable=SC2086 # one refspec per word
+          OUT=$(git push --porcelain origin $REFSPECS 2>&1) || STATUS=$?
+          echo "$OUT"
+          REJECTED=$(echo "$OUT" | awk -F'\t' '$1 == "!" {print $2 " " $3}')
+          if [ -n "$REJECTED" ]; then
+            echo "::notice title=Deployed refs not advanced::$(echo "$REJECTED" | tr '\n' ';')"
+          elif [ "$STATUS" -ne 0 ]; then
+            echo "::warning title=Could not advance deployed refs::git push exited $STATUS"
+          fi
+
       - name: Detect Live Target Repos
         id: detect_live_targets
         if: inputs.target == ''
+        env:
+          ALL: ${{ steps.detect_targets.outputs.ALL_TARGETS }}
         run: |
           # The FULL current target universe, not the --affected subset
           # above -- a target this push didn't touch is still live, and
@@ -312,8 +352,7 @@ jobs:
           # station-signup-attempt-prune -> auth-log-prune). Same
           # Dockerfile-existence filter as the BUILDABLE loop above,
           # applied over every apps/+jobs/ workspace instead of just the
-          # affected ones.
-          ALL=$(npx turbo ls --output=json 2>/dev/null | jq -c '[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort')
+          # affected ones. The universe comes from `Detect Build Target`.
           LIVE='[]'
           for TARGET in $(echo "$ALL" | jq -r '.[]'); do
             if [ -f "Dockerfile.$TARGET" ]; then
@@ -1234,6 +1273,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          # `Get Latest Tag` reads the tags from the checkout (BS#2267).
+          fetch-tags: true
 
       - name: Download Target Tag
         id: download_deploy_tag
@@ -1454,15 +1496,22 @@ jobs:
       # holds until a push actually changes the target, as it did before.
       # The version tags cannot do this job: they are cut in
       # `handle-git-tags`, before build or deploy succeed.
+      - name: Get Latest Tag
+        id: latest_tag
+        uses: ./.github/actions/latest_tag
+        with:
+          target: ${{ matrix.target }}
+
       - name: Record deployed commit
         uses: actions/github-script@v9
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ steps.determine_version.outputs.deploy_version }}
+          LATEST: ${{ steps.latest_tag.outputs.latest_tag }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const { TARGET, VERSION } = process.env;
+            const { TARGET, VERSION, LATEST } = process.env;
             let { object } = (await github.rest.git.getRef({ owner, repo, ref: `tags/${TARGET}/${VERSION}` })).data;
             if (object.type === 'tag') {
               object = (await github.rest.git.getTag({ owner, repo, tag_sha: object.sha })).data.object;
@@ -1478,6 +1527,12 @@ jobs:
               }
             }
             if (current === undefined) {
+              // An older version than the newest tag is a Manual rollback;
+              // setup's tag fallback already makes it hold, so create nothing.
+              if (`${TARGET}/${VERSION}` !== LATEST) {
+                core.notice(`Not creating refs/${ref}: ${TARGET}/${VERSION} is older than ${LATEST}, e.g. a rollback.`);
+                return;
+              }
               await github.rest.git.createRef({ owner, repo, ref: `refs/${ref}`, sha });
               core.notice(`refs/${ref} created at ${sha} (${TARGET}/${VERSION})`);
               return;
@@ -1493,8 +1548,20 @@ jobs:
               core.notice(`Leaving refs/${ref} at ${current}: ${TARGET}/${VERSION} (${sha}) is older, e.g. a rollback. It holds until a push changes ${TARGET}.`);
               return;
             }
-            if (status === 'diverged') {
+            // Only a diverged ref is forced. A plain fast-forward is not, so a
+            // concurrent Manual and Auto leg can never move the ref backward:
+            // if the ref moved meanwhile, GitHub refuses with 422.
+            const force = status === 'diverged';
+            if (force) {
               core.warning(`refs/${ref} (${current}) is not an ancestor of ${sha} (force-push?); moving it anyway.`);
             }
-            await github.rest.git.updateRef({ owner, repo, ref, sha, force: true });
+            try {
+              await github.rest.git.updateRef({ owner, repo, ref, sha, force });
+            } catch (error) {
+              if (force || error.status !== 422) {
+                throw error;
+              }
+              core.notice(`refs/${ref} moved while this leg ran, so it was left as is.`);
+              return;
+            }
             core.notice(`refs/${ref} -> ${sha} (${TARGET}/${VERSION})`);
