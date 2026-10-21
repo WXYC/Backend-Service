@@ -290,6 +290,8 @@ export const buildWorkList: BuildWorkListFn = async ({
   // under the band's card). It makes free-text plays under that name exempt
   // from the floor. They still enrich under their own artist name, so there
   // is no mislabel, and the person is one the library already files.
+  // BS#3563 moved `wxyc_library_alt` to the relational class too. This
+  // read already included it, so the exemption did not change.
   // A label-roster class would need the same review.
   const rows = unwrapRows<WorkListRow>(
     await db.execute(sql`

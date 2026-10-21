@@ -166,7 +166,7 @@ beforeAll(async () => {
     )
     UNION ALL
     SELECT variant AS label, 'artist_search_alias' AS via FROM ${pg(SCHEMA)}.artist_search_alias
-    WHERE source IN ('discogs_name_variation', 'discogs_alias', 'wxyc_library_alt')
+    WHERE source IN ('discogs_name_variation', 'discogs_alias')
       AND ${pg(SCHEMA)}.normalize_artist_name(variant) IN (
         ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_A}),
         ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_B})

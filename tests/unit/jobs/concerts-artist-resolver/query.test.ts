@@ -110,6 +110,23 @@ const renderSql = (value: unknown): string => {
   return '';
 };
 
+/**
+ * Parses the alias arm's `source IN (...)` literals out of rendered SQL.
+ * Returns null when the SQL has no such IN-list. Assumes a flat list of
+ * single-quoted identifier-safe values, which `SYNONYM_ALIAS_SOURCES
+ * values are identifier-safe` pins below.
+ */
+const parseSourceInList = (renderedSql: string): string[] | null => {
+  const match = renderedSql.match(/"?source"?\s+IN\s*\(([^)]*)\)/i);
+  if (!match) {
+    return null;
+  }
+  return match[1]
+    .split(',')
+    .map((s) => s.trim().replace(/^'|'$/g, ''))
+    .filter((s) => s.length > 0);
+};
+
 describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
   beforeEach(() => {
     // `mockReset` matches the project convention used by 24 other
@@ -140,11 +157,16 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
 
     // BS#3554: a library credit names a member or collaborator filed under
     // the band's card, so it must never resolve a concert headliner as a
-    // synonym (Rhiannon Giddens is not Carolina Chocolate Drops).
-    it.each(['discogs_member', 'wxyc_library_credit'])('%s is relational, not synonym', (source) => {
-      expect(RELATIONAL_ALIAS_SOURCES as readonly string[]).toContain(source);
-      expect(SYNONYM_ALIAS_SOURCES as readonly string[]).not.toContain(source);
-    });
+    // synonym (Rhiannon Giddens is not Carolina Chocolate Drops). BS#3563:
+    // a single-name `library.alternate_artist_name` is the same mix of
+    // spelling variants and credits, so `wxyc_library_alt` is relational too.
+    it.each(['discogs_member', 'wxyc_library_credit', 'wxyc_library_alt'])(
+      '%s is relational, not synonym',
+      (source) => {
+        expect(RELATIONAL_ALIAS_SOURCES as readonly string[]).toContain(source);
+        expect(SYNONYM_ALIAS_SOURCES as readonly string[]).not.toContain(source);
+      }
+    );
 
     it('the two classes do not overlap', () => {
       const overlap = SYNONYM_ALIAS_SOURCES.filter((s) => (RELATIONAL_ALIAS_SOURCES as readonly string[]).includes(s));
@@ -189,13 +211,9 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       // identifier-safe` above. Sorted-array comparison rather than
       // Set so duplicates fail too (e.g., an assembly bug that emits
       // `('a','a','b')` for a 2-element tuple).
-      const inListMatch = aliasSql.match(/"?source"?\s+IN\s*\(([^)]*)\)/i);
-      expect(inListMatch).not.toBeNull();
-      const inListLiterals = (inListMatch?.[1] || '')
-        .split(',')
-        .map((s) => s.trim().replace(/^'|'$/g, ''))
-        .filter((s) => s.length > 0);
-      expect([...inListLiterals].sort()).toEqual([...SYNONYM_ALIAS_SOURCES].sort());
+      const inListLiterals = parseSourceInList(aliasSql);
+      expect(inListLiterals).not.toBeNull();
+      expect([...(inListLiterals ?? [])].sort()).toEqual([...SYNONYM_ALIAS_SOURCES].sort());
     });
 
     it('the alias arm does NOT name any relational-class source as a filter literal', async () => {
@@ -294,6 +312,110 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       expect(db.execute).toHaveBeenCalledTimes(1);
       expect(result).toEqual({ kind: 'strict', artist_id: 7 });
     });
+  });
+});
+
+/**
+ * BS#3563: library alternate names never resolve a headliner.
+ *
+ * A fake catalog stands in for Postgres. It answers the strict arm from
+ * `artists` and the alias arm from `artist_search_alias`, and it applies
+ * the source IN-list parsed from the SQL that `resolveArtistId` actually
+ * sent. So a row's source only reaches the result when query.ts names it.
+ * The fake normalizer is a stand-in for `normalize_artist_name` (lowercase,
+ * strip a leading `the `); the real function runs in
+ * tests/integration/concerts-artist-resolver-support.spec.js.
+ */
+describe('resolveArtistId — library alternate names are relational (BS#3563)', () => {
+  type FakeArtist = { id: number; artist_name: string };
+  type FakeAlias = { artist_id: number; source: string; variant: string };
+
+  const CAROLINA_CHOCOLATE_DROPS = 1;
+  const PAUL_WHITE = 2;
+  const THEE_OH_SEES = 3;
+
+  const ARTISTS: FakeArtist[] = [
+    { id: CAROLINA_CHOCOLATE_DROPS, artist_name: 'Carolina Chocolate Drops' },
+    { id: PAUL_WHITE, artist_name: 'Paul White' },
+    { id: THEE_OH_SEES, artist_name: 'Thee Oh Sees' },
+  ];
+
+  // Prod shapes from the 2026-10-21 measurement on BS#3563.
+  const ALIASES: FakeAlias[] = [
+    // A member credit (release 70585).
+    { artist_id: CAROLINA_CHOCOLATE_DROPS, source: 'wxyc_library_alt', variant: 'Rhiannon Giddens' },
+    // A collaborator credit; it mislabeled concert 19292.
+    { artist_id: PAUL_WHITE, source: 'wxyc_library_alt', variant: 'Open Mike Eagle' },
+    // A true spelling variant that the librarian typed. Option 2 accepts losing it.
+    { artist_id: THEE_OH_SEES, source: 'wxyc_library_alt', variant: 'ohsees' },
+    // A Discogs spelling variant.
+    { artist_id: THEE_OH_SEES, source: 'discogs_name_variation', variant: 'Oh Sees' },
+    // An alt value equal to the owner after normalization.
+    { artist_id: CAROLINA_CHOCOLATE_DROPS, source: 'wxyc_library_alt', variant: 'carolina chocolate drops' },
+  ];
+
+  const fakeNormalize = (name: string): string =>
+    name
+      .trim()
+      .toLowerCase()
+      .replace(/^the\s+/, '');
+
+  /** The rows the strict or alias arm would return for `raw`. */
+  const fakeRows = (renderedSql: string, raw: string): Array<{ artist_id: number }> => {
+    if (renderedSql.includes('artist_search_alias')) {
+      const allowed = parseSourceInList(renderedSql) ?? [];
+      const ids = new Set(
+        ALIASES.filter((a) => allowed.includes(a.source) && fakeNormalize(a.variant) === fakeNormalize(raw)).map(
+          (a) => a.artist_id
+        )
+      );
+      return [...ids].slice(0, 2).map((artist_id) => ({ artist_id }));
+    }
+    return ARTISTS.filter((a) => fakeNormalize(a.artist_name) === fakeNormalize(raw))
+      .slice(0, 2)
+      .map((a) => ({ artist_id: a.id }));
+  };
+
+  // The fake reads the raw name from here: renderSql hides bound params.
+  let currentRaw = '';
+
+  beforeEach(() => {
+    db.execute.mockReset();
+    db.execute.mockImplementation((query: unknown) => Promise.resolve(fakeRows(renderSql(query), currentRaw)));
+  });
+
+  it.each([
+    {
+      name: 'a member credit (Rhiannon Giddens on Carolina Chocolate Drops) does not resolve',
+      raw: 'Rhiannon Giddens',
+      expected: { kind: 'unmatched' },
+    },
+    {
+      name: 'a collaborator credit (Open Mike Eagle on Paul White, concert 19292) does not resolve',
+      raw: 'Open Mike Eagle',
+      expected: { kind: 'unmatched' },
+    },
+    {
+      name: 'a library spelling variant (ohsees on Thee Oh Sees) no longer resolves',
+      raw: 'ohsees',
+      expected: { kind: 'unmatched' },
+    },
+    {
+      name: 'a discogs_name_variation variant still resolves through the alias arm',
+      raw: 'Oh Sees',
+      expected: { kind: 'alias', artist_id: THEE_OH_SEES },
+    },
+    {
+      name: "an alt value equal to the owner's normalized name still resolves strict",
+      raw: 'The Carolina Chocolate Drops',
+      expected: { kind: 'strict', artist_id: CAROLINA_CHOCOLATE_DROPS },
+    },
+  ])('$name', async ({ raw, expected }) => {
+    currentRaw = raw;
+
+    const result = await resolveArtistId(raw);
+
+    expect(result).toEqual(expected);
   });
 });
 

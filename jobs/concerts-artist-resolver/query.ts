@@ -70,12 +70,33 @@ const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
  * around this partition; the matching SynonymAliasSource /
  * RelationalAliasSource types will be exported from here at that time.
  */
-export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias', 'wxyc_library_alt'] as const;
+export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias'] as const;
 // `wxyc_library_credit` (BS#3554) is one name from a comma-joined
 // `library.alternate_artist_name` credit: a member or collaborator filed
 // under the band's card, so it would make Rhiannon Giddens' concerts
 // resolve to Carolina Chocolate Drops.
-export const RELATIONAL_ALIAS_SOURCES = ['discogs_member', 'wxyc_library_credit'] as const;
+//
+// `wxyc_library_alt` (BS#3563) is the raw `library.alternate_artist_name`.
+// The station librarian uses that field both for spelling variants
+// (`ohsees, oh sees` on Thee Oh Sees) and for member and collaborator
+// credits (`Rhiannon Giddens` on Carolina Chocolate Drops, `Open Mike
+// Eagle` on Paul White). Similarity can't tell them apart. The prod
+// measurement on 2026-10-21 (BS#3563) scored all 3,969 rows against the
+// owner's name: credits for another act score high (`Zu & Nobukazu
+// Takemura` 0.90, `Paul & Linda McCartney` 0.71), true variants spread
+// through the middle (`Black Dog` 0.45, `Michael Turtle` 0.67), and
+// single-name member credits score near 0 (`Rhiannon Giddens` 0.00). No
+// threshold separates them. Of 101 resolved concerts, exactly one went
+// through a `wxyc_library_alt` match, and it was a mislabel: concert
+// 19292, Open Mike Eagle → Paul White.
+//
+// A value that is identical to the owner's name after normalization (the
+// 32 rows at similarity 1.0, such as `GZA/Genius`) still resolves, through
+// the strict arm. The cost is the sub-1.0 spelling variants (`Spellling`,
+// `Angel Wings Marmalade`), which today resolve zero concerts. If one comes
+// to matter, the narrow fix is a reviewed synonym allow-list, not a
+// similarity threshold.
+export const RELATIONAL_ALIAS_SOURCES = ['discogs_member', 'wxyc_library_credit', 'wxyc_library_alt'] as const;
 
 /**
  * Frozen IN-list for the alias arm, built once at module load. Safe-
@@ -96,7 +117,7 @@ export const RELATIONAL_ALIAS_SOURCES = ['discogs_member', 'wxyc_library_credit'
  * runtime usage with comma-bearing variant strings); the only reason
  * to prefer `sql.raw` for this site is that `sql.join` requires
  * mocking drizzle-orm in unit tests (the writer's test does this),
- * which is overkill for a 3-element identifier-safe tuple.
+ * which is overkill for a short identifier-safe tuple.
  */
 const SYNONYM_SOURCE_IN_LIST = sql.raw(SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', '));
 

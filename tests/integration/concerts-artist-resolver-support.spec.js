@@ -196,8 +196,8 @@ async function writeSupportArtistId(sql, performerId, artistId) {
 }
 
 /** Mirror of the strict arm of `resolveArtistId` (query.ts) — the only
- *  arm these tests need; alias-arm behavior is already pinned by
- *  query.test.ts and is not re-derived here. */
+ *  arm the support-arm tests need. The alias arm is mirrored separately
+ *  below (`resolveArtistId`) for the BS#3563 source-partition cases. */
 async function resolveStrict(sql, rawName) {
   const rows = await sql.unsafe(
     `SELECT a."id" AS artist_id
@@ -208,6 +208,35 @@ async function resolveStrict(sql, rawName) {
   );
   if (rows.length === 1) return { kind: 'strict', artist_id: Number(rows[0].artist_id) };
   if (rows.length > 1) return { kind: 'ambiguous' };
+  return { kind: 'unmatched' };
+}
+
+/** Mirror of `SYNONYM_ALIAS_SOURCES` in query.ts (BS#1383, BS#3563).
+ *  `wxyc_library_alt` is relational, so it is not here. */
+const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias'];
+
+/** Mirror of `resolveArtistId` in query.ts: strict, then the alias arm
+ *  restricted to the synonym-class sources. */
+async function resolveArtistId(sql, rawName) {
+  const strict = await resolveStrict(sql, rawName);
+  if (strict.kind !== 'unmatched') {
+    return strict;
+  }
+  const inList = SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', ');
+  const rows = await sql.unsafe(
+    `SELECT DISTINCT asa."artist_id"
+     FROM "${SCHEMA}".artist_search_alias asa
+     WHERE "${SCHEMA}".normalize_artist_name(asa."variant") = "${SCHEMA}".normalize_artist_name($1)
+       AND asa."source" IN (${inList})
+     LIMIT 2`,
+    [rawName]
+  );
+  if (rows.length === 1) {
+    return { kind: 'alias', artist_id: Number(rows[0].artist_id) };
+  }
+  if (rows.length > 1) {
+    return { kind: 'ambiguous' };
+  }
   return { kind: 'unmatched' };
 }
 
@@ -462,6 +491,52 @@ describe('concerts-artist-resolver support sync/resolve contract (BS#1760)', () 
 
       const rows = await readPerformerRows(concertId);
       expect(Number(rows[0].artist_id)).toBe(artistId);
+    });
+  });
+
+  describe('library alternate names are relational (BS#3563)', () => {
+    // Prod shapes from the 2026-10-21 measurement on BS#3563, under the
+    // suite's name prefix so cleanup can only touch the suite's own rows.
+    // Alias rows go with their artist (ON DELETE CASCADE).
+    const CCD = `${ARTIST_PREFIX} Carolina Chocolate Drops`;
+    const PAUL_WHITE = `${ARTIST_PREFIX} Paul White`;
+    const OH_SEES = `${ARTIST_PREFIX} Thee Oh Sees`;
+    const ids = {};
+
+    const seedAlias = async (artistId, source, variant) => {
+      await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".artist_search_alias
+           (artist_id, source, variant, related_artist_id, external_subject_id,
+            external_object_id, active, method, confidence, last_verified_at)
+         VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, 'alt_curated', 0.85, NOW())`,
+        [artistId, source, variant]
+      );
+    };
+
+    beforeAll(async () => {
+      ids[CCD] = await seedArtist(CCD);
+      ids[PAUL_WHITE] = await seedArtist(PAUL_WHITE);
+      ids[OH_SEES] = await seedArtist(OH_SEES);
+      await seedAlias(ids[CCD], 'wxyc_library_alt', `${ARTIST_PREFIX} Rhiannon Giddens`);
+      await seedAlias(ids[PAUL_WHITE], 'wxyc_library_alt', `${ARTIST_PREFIX} Open Mike Eagle`);
+      await seedAlias(ids[OH_SEES], 'discogs_name_variation', `${ARTIST_PREFIX} Oh Sees`);
+      await seedAlias(ids[CCD], 'wxyc_library_alt', CCD.toLowerCase());
+    });
+
+    it.each([
+      ['a member credit (Rhiannon Giddens on Carolina Chocolate Drops)', 'Rhiannon Giddens', 'unmatched', null],
+      ['a collaborator credit (Open Mike Eagle on Paul White, concert 19292)', 'Open Mike Eagle', 'unmatched', null],
+      ['a discogs_name_variation variant', 'Oh Sees', 'alias', OH_SEES],
+      ["the owner's name with a leading The", 'Carolina Chocolate Drops', 'strict', CCD],
+    ])('%s resolves as %s', async (_label, name, kind, owner) => {
+      const raw = kind === 'strict' ? `The ${ARTIST_PREFIX} ${name}` : `${ARTIST_PREFIX} ${name}`;
+
+      const result = await resolveArtistId(sql, raw);
+
+      expect(result.kind).toBe(kind);
+      if (owner !== null) {
+        expect(result.artist_id).toBe(ids[owner]);
+      }
     });
   });
 

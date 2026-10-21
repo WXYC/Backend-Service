@@ -20,7 +20,7 @@ Local-only. Both the headliner arm and the support arm use the canonical `wxyc_s
 Two arms, run per name:
 
 1. **Strict.** `normalize_artist_name(raw) = normalize_artist_name(a.artist_name)`. Backed by `artists_normalized_name_idx`.
-2. **Alias.** `normalize_artist_name(raw) = normalize_artist_name(asa.variant)` against `artist_search_alias`. Backed by `artist_search_alias_normalized_variant_idx`. Fires **only when strict returns zero matches** (strict-wins).
+2. **Alias.** `normalize_artist_name(raw) = normalize_artist_name(asa.variant)` against `artist_search_alias`. Backed by `artist_search_alias_normalized_variant_idx`. Fires **only when strict returns zero matches** (strict-wins). Reads only the synonym-class sources in `query.ts`'s `SYNONYM_ALIAS_SOURCES` (`discogs_name_variation`, `discogs_alias`). The relational sources in `RELATIONAL_ALIAS_SOURCES` (`discogs_member`, `wxyc_library_credit`, `wxyc_library_alt`) never drive an FK write (BS#1383). `wxyc_library_alt` is relational since BS#3563: the station librarian uses `library.alternate_artist_name` both for spelling variants and for member and collaborator credits (`Rhiannon Giddens` on Carolina Chocolate Drops), and the prod measurement on that issue found no similarity threshold that separates them. An alt value equal to the owner's name after normalization still resolves, through the strict arm.
 
 Each arm runs `LIMIT 2` against a `SELECT DISTINCT artist_id` so the caller can distinguish singleton vs. ambiguous in one round-trip. Multiple variants for the same canonical artist count as one match (the `DISTINCT` collapses them). Multiple distinct `artist_id`s → `ambiguous`, leaves the id NULL.
 
