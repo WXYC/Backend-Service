@@ -222,7 +222,7 @@ app.use(errorHandler);
 
 const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
-  // Start the feature-flag poller now, so the first request after a deploy does not wait on the definitions fetch.
+  // Start the feature-flag poller now. A request never waits on a definitions fetch: until definitions load, the seam answers from the env fallback.
   warmFeatureAccess();
   startAlbumPlaysRefresh();
   startAlbumPopularityRefresh();

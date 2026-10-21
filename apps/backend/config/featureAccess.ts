@@ -31,9 +31,15 @@ const POLL_INTERVAL_MS = 60_000;
 const LOAD_GRACE_MS = POLL_INTERVAL_MS;
 const REPORT_AGAIN_MS = 60 * 60 * 1000;
 
-type FlagState = 'present' | 'missing' | 'not_loaded' | 'error';
+type FlagState = 'present' | 'missing' | 'not_loaded' | 'error' | 'stale';
 
 let flagClient: { client: PostHog | null; builtAt: number; failed: boolean } | null = null;
+/**
+ * Set when a definitions poll fails after posthog-node holds definitions (a revoked key's 401 or 403, a 429 backoff): the
+ * library then keeps serving the last definitions and reports the failure only through its 'error' event. Cleared by its
+ * 'localEvaluationFlagsLoaded' event, which fires when a poll brings changed definitions (a 304 fires nothing).
+ */
+let pollFailing = false;
 const reported = new Map<string, { state: FlagState; at: number }>();
 
 /**
@@ -61,6 +67,12 @@ const getFlagClient = (): PostHog | null => {
     } catch {
       failed = true;
     }
+    client?.on('error', () => {
+      pollFailing = true;
+    });
+    client?.on('localEvaluationFlagsLoaded', () => {
+      pollFailing = false;
+    });
     flagClient = { client, builtAt: Date.now(), failed };
   }
   return flagClient.client;
@@ -75,6 +87,7 @@ export const warmFeatureAccess = (): void => {
 export const resetFeatureAccess = (): void => {
   void flagClient?.client?.shutdown();
   flagClient = null;
+  pollFailing = false;
   reported.clear();
 };
 
@@ -97,9 +110,11 @@ const reportFlagState = (flag: string, state: FlagState): void => {
     getErrorReporter().captureMessage(
       state === 'error'
         ? `PostHog flag client failed for "${flag}" (a bad POSTHOG_FLAGS_API_KEY or POSTHOG_SECRET_KEY, such as the two swapped, or an unexpected client error); it falls back to its env var`
-        : state === 'missing'
-          ? `PostHog flag "${flag}" is not usable from the loaded definitions: it may be absent, the keys may name a project that holds no flags, or the flag may not be locally evaluable; check POSTHOG_FLAGS_API_KEY and POSTHOG_SECRET_KEY, and that the flag has no experience continuity or unknown group type; it falls back to its env var`
-          : `PostHog flag definitions are not ready: they may not have loaded yet (network, a revoked key) or the project may hold no flags; "${flag}" falls back to its env var`,
+        : state === 'stale'
+          ? `PostHog flag definitions have stopped refreshing (a revoked or wrong key, rate limiting, or an outage); "${flag}" keeps the last value it loaded, so a flag change in PostHog is not taking effect; fix the keys, or recreate the backend container`
+          : state === 'missing'
+            ? `PostHog flag "${flag}" is not usable from the loaded definitions: it may be absent, the keys may name a project that holds no flags, or the flag may not be locally evaluable; check POSTHOG_FLAGS_API_KEY and POSTHOG_SECRET_KEY, and that the flag has no experience continuity or unknown group type; it falls back to its env var`
+            : `PostHog flag definitions are not ready: they may not have loaded yet (network, a revoked key) or the project may hold no flags; "${flag}" falls back to its env var`,
       { level: 'warning', tags: { subsystem: 'feature-access' } }
     );
   } catch {
@@ -120,8 +135,13 @@ const readFlag = async (flag: string): Promise<Audience | undefined> => {
     return undefined;
   }
   try {
+    if (!posthog.isLocalEvaluationReady()) {
+      // Straight to the env fallback: getAllFlags would wait on a definitions fetch (up to 10 s) before saying the same. The poller retries on its own timer.
+      reportFlagState(flag, 'not_loaded');
+      return undefined;
+    }
     const flags = await posthog.getAllFlags(FLAG_DISTINCT_ID, { flagKeys: [flag], onlyEvaluateLocally: true });
-    reportFlagState(flag, !posthog.isLocalEvaluationReady() ? 'not_loaded' : flag in flags ? 'present' : 'missing');
+    reportFlagState(flag, flag in flags ? (pollFailing ? 'stale' : 'present') : 'missing');
     const value = flags[flag];
     return AUDIENCES.includes(value) ? (value as Audience) : undefined;
   } catch {
