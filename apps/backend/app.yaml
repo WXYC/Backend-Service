@@ -20,29 +20,73 @@ components:
       description: JWT token from AWS Cognito
 
   schemas:
-    SpecialtyShowRef:
+    SpotlightRole:
+      type: string
+      enum: [performer, dj, reader, guest, host]
+      description: >-
+        Closed set. Clients must render an unrecognized value with a neutral
+        label rather than fail, so a role can be added without a coordinated
+        release. Generated enum decoders reject unknown values, so clients
+        decode this field as a string and map it themselves.
+    SpecialtyShowArtwork:
       type: object
-      description: Public projection of a specialty_shows catalog row.
-      required: [id, slug, name, short_name, tagline, logs_playcuts, default_spotlight_role, artwork, accent_color]
+      required: [square_url]
       properties:
-        id: { type: integer }
-        slug: { type: string }
-        name: { type: string }
-        short_name: { type: string }
-        tagline: { type: string, nullable: true }
-        logs_playcuts: { type: boolean }
-        default_spotlight_role:
+        square_url:
+          type: string
+          format: uri
+          description: 1024x1024 sRGB, immutable
+        master_url:
+          type: string
+          format: uri
+          nullable: true
+          description: 3000x3000
+        wide_url:
+          type: string
+          format: uri
+          nullable: true
+          description: 3:1 banner
+    SpecialtyShowRef:
+      description: The catalog fields a now-playing surface needs. Embedded; no extra request.
+      type: object
+      required: [id, slug, name, short_name, logs_playcuts]
+      properties:
+        id:
+          type: integer
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+        name:
+          type: string
+        short_name:
+          type: string
+        tagline:
           type: string
           nullable: true
-          enum: [performer, dj, reader, guest, host]
-        artwork:
-          type: object
+          description: One line for the show card
+        logs_playcuts:
+          type: boolean
+          description: >-
+            Whether this program normally logs tracks. When `false`, DJ clients
+            stop prompting for songs and history can say the show has no
+            tracklist.
+        default_spotlight_role:
+          allOf:
+            - $ref: '#/components/schemas/SpotlightRole'
           nullable: true
-          properties:
-            square_url: { type: string }
-            master_url: { type: string }
-            wide_url: { type: string }
-        accent_color: { type: string, nullable: true }
+          description: What to call the person in the spotlight, when the show has one.
+        artwork:
+          allOf:
+            - $ref: '#/components/schemas/SpecialtyShowArtwork'
+          nullable: true
+        accent_color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+          nullable: true
+          description: >-
+            One color serves light and dark mode. The catalog refuses a color
+            unless white text on it reaches 4.5:1 contrast and the color
+            reaches 3:1 against the app's darkest surface.
     # The one rotation-bin definition; tests/unit/apps/backend/app-yaml-rotation-bin.test.ts pins it to ROTATION_BINS.
     # The two bare `type: string` rotation_bin fields (AlbumView and CatalogExportRow) stay unreferenced: they are
     # nullable passthroughs of the stored freq_enum value (so already limited to these bins), and wxyc-shared's
@@ -2009,7 +2053,7 @@ paths:
 
       responses:
         '400':
-          description: specialty_id is unknown or names a retired specialty show (nothing is written)
+          description: specialty_id is unknown or names a retired specialty show (no show is started and no live show is taken over)
         '200':
           description: Successfully joined/started show
           content:
