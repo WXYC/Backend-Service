@@ -7,11 +7,12 @@
 import { jest } from '@jest/globals';
 import express from 'express';
 import request from 'supertest';
+import type { OnAirShow } from '../../../apps/backend/services/flowsheet.service';
 
 const mockGetLastModifiedAt = jest.fn<() => Promise<Date>>().mockResolvedValue(new Date('2026-01-01T00:00:00Z'));
 const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]);
 const mockGetEntryCount = jest.fn<() => Promise<number>>().mockResolvedValue(0);
-const mockGetOnAir = jest.fn<() => Promise<string | null>>().mockResolvedValue(null);
+const mockGetOnAir = jest.fn<() => Promise<OnAirShow | null>>().mockResolvedValue(null);
 const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 // BS#1870: getEntries/getLatest also call attachCriticReviews (batched
 // critic-review attach) alongside attachUpcomingShows — no-op passthrough

@@ -212,7 +212,7 @@ components:
 
     OnAirInfo:
       type: object
-      required: [dj_name, show_id]
+      required: [dj_name]
       properties:
         dj_name:
           type: string
@@ -2117,7 +2117,10 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [message]
                 properties:
+                  message:
+                    type: string
                   code:
                     type: string
                     enum: [show_already_open]
@@ -2130,9 +2133,11 @@ paths:
                         properties:
                           id:
                             type: integer
+                            description: The open show's id. A client takes the show over by echoing it back as `expected_show_id`.
                           dj_name:
                             type: string
                             nullable: true
+                            description: The owner's display name; null in the common case where the owner has none.
                           start_time:
                             type: string
                             format: date-time

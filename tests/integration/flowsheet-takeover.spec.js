@@ -200,7 +200,7 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
       // takeover, both endpoints are reading the SAME (new) show and must
       // agree.
       const flowsheetRes = await request.get('/flowsheet').query({ limit: 1 }).expect(200);
-      expect(flowsheetRes.body.on_air).toEqual({ dj_name: TAKER_DJ_NAME });
+      expect(flowsheetRes.body.on_air).toMatchObject({ dj_name: TAKER_DJ_NAME });
 
       const djsOnAirRes = await request.get('/flowsheet/djs-on-air').expect(200);
       expect(djsOnAirRes.body).toEqual([{ id: TAKER_DJ_ID, dj_name: TAKER_DJ_NAME }]);
