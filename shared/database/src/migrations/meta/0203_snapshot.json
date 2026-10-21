@@ -4029,7 +4029,7 @@
       "checkConstraints": {
         "flowsheet_spotlight_columns_check": {
           "name": "flowsheet_spotlight_columns_check",
-          "value": "(\"wxyc_schema\".\"flowsheet\".\"entry_type\"::text = 'spotlight') = (\"wxyc_schema\".\"flowsheet\".\"spotlight_role\" IS NOT NULL AND \"wxyc_schema\".\"flowsheet\".\"spotlight_name\" IS NOT NULL)"
+          "value": "CASE WHEN \"wxyc_schema\".\"flowsheet\".\"entry_type\"::text = 'spotlight' THEN \"wxyc_schema\".\"flowsheet\".\"spotlight_role\" IS NOT NULL AND \"wxyc_schema\".\"flowsheet\".\"spotlight_name\" IS NOT NULL ELSE \"wxyc_schema\".\"flowsheet\".\"spotlight_role\" IS NULL AND \"wxyc_schema\".\"flowsheet\".\"spotlight_name\" IS NULL END"
         }
       },
       "isRLSEnabled": false
