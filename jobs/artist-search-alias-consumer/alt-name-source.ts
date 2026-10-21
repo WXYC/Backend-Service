@@ -12,7 +12,8 @@
  * alias plan and re-rankable as v2 once observed precision data exists).
  *
  * The concerts resolver trusts these rows only when they spell the owner's
- * own name (`VARIANT_GATED_ALIAS_SOURCES` in
+ * own name, that is, the same `text_match_key` or the same words in another
+ * order (`VARIANT_GATED_ALIAS_SOURCES` in
  * `jobs/concerts-artist-resolver/query.ts`, BS#3563): the librarian uses the
  * field both for spelling variants and for member and collaborator credits
  * (`Rhiannon Giddens` on Carolina Chocolate Drops). Catalog search reads

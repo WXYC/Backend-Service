@@ -125,8 +125,7 @@ const parseSourceInLists = (renderedSql: string): string[][] =>
   );
 
 /** The variant gate's two predicates, as query.ts renders them (BS#3563). */
-const GATE_ALNUM_PREDICATE = `regexp_replace(lower(asa."variant"), '[^[:alnum:]]', '', 'g')`;
-const GATE_SIMILARITY_PREDICATE = 'similarity(';
+const GATE_PREDICATES = [`"text_match_key"(asa."variant")`, `<> ''`, 'similarity(', 'length('];
 
 describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
   beforeEach(() => {
@@ -229,12 +228,16 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       const inLists = parseSourceInLists(aliasSql).map((list) => [...list].sort());
       expect(inLists).toEqual([[...SYNONYM_ALIAS_SOURCES].sort(), [...VARIANT_GATED_ALIAS_SOURCES].sort()]);
 
-      // The variant-gated IN-list sits under both gate predicates, which
-      // read the owner's name through the JOIN (BS#3563).
+      // The gate sits after the variant-gated IN-list, and only that
+      // branch reads `artists` (an EXISTS, not a JOIN), so synonym-class
+      // rows never look up their owner (BS#3563).
       const gatedListAt = aliasSql.lastIndexOf('"source" IN');
-      expect(aliasSql).toContain('JOIN');
-      expect(aliasSql.indexOf(GATE_ALNUM_PREDICATE, gatedListAt)).toBeGreaterThan(gatedListAt);
-      expect(aliasSql.indexOf(GATE_SIMILARITY_PREDICATE, gatedListAt)).toBeGreaterThan(gatedListAt);
+      expect(aliasSql).not.toContain('JOIN');
+      expect(aliasSql.indexOf('EXISTS', gatedListAt)).toBeGreaterThan(gatedListAt);
+      expect(aliasSql.indexOf('"artists"')).toBeGreaterThan(gatedListAt);
+      for (const predicate of GATE_PREDICATES) {
+        expect(aliasSql.indexOf(predicate, gatedListAt)).toBeGreaterThan(gatedListAt);
+      }
     });
 
     it('the alias arm does NOT name any relational-class source as a filter literal', async () => {
@@ -344,10 +347,11 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
  * `artists` and the alias arm from `artist_search_alias`, and it applies
  * the source IN-lists parsed from the SQL that `resolveArtistId` actually
  * sent: rows from the first list pass, rows from the second list pass the
- * fake gate, and SQL with no IN-list lets every row pass. If the gate
- * predicates are missing from the SQL, gated rows pass ungated. The fake
- * normalizer and gate stand in for `normalize_artist_name`, the
- * alphanumeric comparison and pg_trgm's `similarity`; the real SQL runs in
+ * fake gate, and SQL with no IN-list lets every row pass. If any gate
+ * predicate is missing from the SQL, gated rows pass ungated. The fake
+ * folds the way `normalize_artist_name` and `text_match_key` (migration
+ * 0191) do, and it models pg_trgm's `similarity = 1` as "the same set of
+ * words" (both sides non-empty); the real SQL runs in
  * tests/integration/concerts-artist-resolver-support.spec.js.
  */
 describe('resolveArtistId — variant-gated library alternate names (BS#3563)', () => {
@@ -361,6 +365,9 @@ describe('resolveArtistId — variant-gated library alternate names (BS#3563)', 
   const ANDERSON_PAAK = 5;
   const GENIUS_GZA = 6;
   const THEE_OH_SEES = 7;
+  const NILUFER_YANYA = 8;
+  const DURAN_DURAN = 9;
+  const BANG_BANG_BANG = 10;
 
   const ARTISTS: FakeArtist[] = [
     { id: CAROLINA_CHOCOLATE_DROPS, artist_name: 'Carolina Chocolate Drops' },
@@ -370,6 +377,9 @@ describe('resolveArtistId — variant-gated library alternate names (BS#3563)', 
     { id: ANDERSON_PAAK, artist_name: 'Anderson.Paak' },
     { id: GENIUS_GZA, artist_name: 'Genius/GZA' },
     { id: THEE_OH_SEES, artist_name: 'Thee Oh Sees' },
+    { id: NILUFER_YANYA, artist_name: 'Nilüfer Yanya' },
+    { id: DURAN_DURAN, artist_name: 'Duran Duran' },
+    { id: BANG_BANG_BANG, artist_name: '!!!' },
   ];
 
   // Prod shapes from the 2026-10-21 measurements on BS#3563.
@@ -381,6 +391,9 @@ describe('resolveArtistId — variant-gated library alternate names (BS#3563)', 
     { artist_id: ANDERSON_PAAK, source: 'wxyc_library_alt', variant: 'Anderson Paak' },
     { artist_id: GENIUS_GZA, source: 'wxyc_library_alt', variant: 'GZA/Genius' },
     { artist_id: THEE_OH_SEES, source: 'discogs_name_variation', variant: 'Oh Sees' },
+    { artist_id: NILUFER_YANYA, source: 'wxyc_library_alt', variant: 'Nilufer Yanya' },
+    { artist_id: DURAN_DURAN, source: 'wxyc_library_alt', variant: 'Duran' },
+    { artist_id: BANG_BANG_BANG, source: 'wxyc_library_alt', variant: '+/-' },
   ];
 
   const fakeNormalize = (name: string): string =>
@@ -388,14 +401,24 @@ describe('resolveArtistId — variant-gated library alternate names (BS#3563)', 
       .trim()
       .toLowerCase()
       .replace(/^the\s+/, '');
-  const alnum = (name: string): string => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-  const words = (name: string): string =>
+  /** `text_match_key`: fold diacritics, lowercase, drop a leading "the", keep letters and digits. */
+  const textMatchKey = (name: string): string =>
+    name
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/^the\s+/, '')
+      .replace(/[^\p{L}\p{N}]/gu, '');
+  const wordSet = (name: string): string =>
     [...new Set(fakeNormalize(name).split(/[^\p{L}\p{N}]+/u))]
       .filter((w) => w.length > 0)
       .sort()
       .join(' ');
+  /** pg_trgm scores two names with no letters or digits 0, not 1. */
+  const similarityIsOne = (a: string, b: string): boolean => wordSet(a) !== '' && wordSet(a) === wordSet(b);
   const fakeGate = (variant: string, owner: string): boolean =>
-    alnum(variant) === alnum(owner) || words(variant) === words(owner);
+    (textMatchKey(variant) === textMatchKey(owner) && textMatchKey(variant) !== '') ||
+    (similarityIsOne(variant, owner) && textMatchKey(variant).length === textMatchKey(owner).length);
 
   const ownerName = (artistId: number): string => ARTISTS.find((a) => a.id === artistId)?.artist_name ?? '';
 
@@ -403,7 +426,7 @@ describe('resolveArtistId — variant-gated library alternate names (BS#3563)', 
   const fakeRows = (renderedSql: string, raw: string): Array<{ artist_id: number }> => {
     if (renderedSql.includes('artist_search_alias')) {
       const [ungated, gated] = parseSourceInLists(renderedSql);
-      const gateInSql = renderedSql.includes(GATE_ALNUM_PREDICATE) && renderedSql.includes(GATE_SIMILARITY_PREDICATE);
+      const gateInSql = GATE_PREDICATES.every((predicate) => renderedSql.includes(predicate));
       const passes = (a: FakeAlias): boolean => {
         if (ungated === undefined || ungated.includes(a.source)) {
           return true;
@@ -461,6 +484,21 @@ describe('resolveArtistId — variant-gated library alternate names (BS#3563)', 
       name: 'word order (GZA/Genius on Genius/GZA)',
       raw: 'GZA/Genius',
       expected: { kind: 'alias', artist_id: GENIUS_GZA },
+    },
+    {
+      name: 'diacritics only (Nilufer Yanya on Nilüfer Yanya)',
+      raw: 'Nilufer Yanya',
+      expected: { kind: 'alias', artist_id: NILUFER_YANYA },
+    },
+    {
+      name: 'a repeated word (Duran on Duran Duran)',
+      raw: 'Duran',
+      expected: { kind: 'unmatched' },
+    },
+    {
+      name: 'symbols only (+/- on !!!)',
+      raw: '+/-',
+      expected: { kind: 'unmatched' },
     },
     {
       name: 'a discogs_name_variation variant (Oh Sees on Thee Oh Sees)',

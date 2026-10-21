@@ -20,8 +20,8 @@
  */
 
 const path = require('path');
-const { execFileSync } = require('child_process');
 const { getTestDb } = require('../utils/db');
+const { runTsxDriver } = require('../utils/run-tsx-driver');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const FLAG = 'BS2334_PROBE_FLAG';
@@ -30,31 +30,13 @@ const DRIVER = path.join(__dirname, '..', 'utils', 'run-catalog-export-flag-reco
 // The child boots tsx and loads the built `@wxyc/database`; give it room (jest.parallel.config.json sets no timeout).
 const TEST_TIMEOUT_MS = 60000;
 
-const childEnv = (flagValue) => ({
-  ...process.env,
-  DB_HOST: process.env.DB_HOST || 'localhost',
-  DB_PORT: process.env.DB_PORT || process.env.CI_DB_PORT || '5433',
-  DB_NAME: process.env.DB_NAME || 'wxyc_db',
-  DB_USERNAME: process.env.DB_USERNAME || 'test-user',
-  DB_PASSWORD: process.env.DB_PASSWORD || 'test-pw',
-  WXYC_SCHEMA_NAME: SCHEMA,
-  SENTRY_DSN: '',
-  [FLAG]: flagValue,
-});
-
 /** Runs the real reconciler in a child; returns `{ ok: true }` or `{ ok: false, message }`. */
 function runReconciler(flagValue) {
-  const output = execFileSync('npx', ['tsx', DRIVER, FLAG], {
-    env: childEnv(flagValue),
-    cwd: path.join(__dirname, '..', '..'),
-    encoding: 'utf8',
-    timeout: TEST_TIMEOUT_MS - 5000,
+  return runTsxDriver(DRIVER, [FLAG], {
+    marker: 'RECONCILE_RESULT',
+    timeoutMs: TEST_TIMEOUT_MS - 5000,
+    env: { [FLAG]: flagValue },
   });
-  const match = output.match(/^RECONCILE_RESULT:(.*)$/m);
-  if (!match) {
-    throw new Error(`reconcile driver produced no result line:\n${output}`);
-  }
-  return JSON.parse(match[1]);
 }
 
 describe('reconcileCatalogExportFlag atomicity against real Postgres (BS#2334)', () => {
