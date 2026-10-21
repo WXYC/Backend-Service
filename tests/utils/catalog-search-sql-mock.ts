@@ -16,6 +16,8 @@
  * to new probes appearing elsewhere in the request.
  */
 
+import { keepLeadingAlbums } from '../../apps/backend/utils/album-trim.js';
+
 /**
  * Render a mocked `sql` fragment to text.
  *
@@ -119,17 +121,15 @@ export function mockCatalogTiers(
 
 /**
  * Keep the rows of the first N distinct ids, where N is the rendered
- * `album_rank <= N`. Every row of a kept album stays, so fan-out rows that
- * share an id are never split. No cap in the SQL means no cut.
+ * `album_rank <= N`, by the same album-trim rule the service uses, so fan-out
+ * rows that share an id are never split. No cap in the SQL means no cut.
  */
 function capAtAlbumRank(rendered: string, rows: unknown[]): unknown[] {
   const match = /album_rank <= (\d+)/.exec(rendered);
   if (!match) {
     return rows;
   }
-  const ids = [...new Set(rows.map((row) => (row as { id: number }).id))];
-  const admitted = new Set(ids.slice(0, Number(match[1])));
-  return rows.filter((row) => admitted.has((row as { id: number }).id));
+  return keepLeadingAlbums(rows as Array<{ id: number }>, Number(match[1]));
 }
 
 /**
