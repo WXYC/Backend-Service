@@ -252,7 +252,7 @@ const transition =
     if (action === 'pass' && result.outcome === 'updated' && result.answeredRequest) {
       void notifyPass({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);
     }
-    // The asked DJ is told, unless the review screens are not yet open to everyone (the notice checks `REVIEWS_AUDIENCE`).
+    // The asked DJ is told, unless the review screens are not yet open to everyone (the notice reads the feature-access `reviews` audience).
     if (djId !== undefined && result.outcome === 'updated') {
       void notifyAsked({ id, artist: result.item.artist_name, album: result.item.album_title }, djId, actor.id);
     }
