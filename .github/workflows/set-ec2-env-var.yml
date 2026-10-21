@@ -332,6 +332,11 @@ jobs:
           # behavior with no redeploy. Every 409-aware client tolerates the flag
           # in either position, so it can be flipped back mid-show.
           FLOWSHEET_TAKEOVER_ENABLED: ${{ secrets.FLOWSHEET_TAKEOVER_ENABLED }}
+          # FLOWSHEET_SPOTLIGHT_ENABLED (BS#3459) gates the flowsheet `spotlight`
+          # entry type: off (the default), POST/PATCH /flowsheet answer 403
+          # `spotlight_disabled`. Same strict-'true' parse and backend restart as
+          # FLOWSHEET_TAKEOVER_ENABLED; turning it on is BS#3479.
+          FLOWSHEET_SPOTLIGHT_ENABLED: ${{ secrets.FLOWSHEET_SPOTLIGHT_ENABLED }}
           SES_ACCESS_KEY_ID: ${{ secrets.SES_ACCESS_KEY_ID }}
           SES_SECRET_ACCESS_KEY: ${{ secrets.SES_SECRET_ACCESS_KEY }}
           # Album-review intake gate cutover date (epic WXYC/Backend-Service#2791,
@@ -407,6 +412,7 @@ jobs:
             STATION_SIGNUP_DOWNGRADE_ENABLED) VALUE="$STATION_SIGNUP_DOWNGRADE_ENABLED" ;;
             STATION_SIGNUP_ENABLED) VALUE="$STATION_SIGNUP_ENABLED" ;;
             FLOWSHEET_TAKEOVER_ENABLED) VALUE="$FLOWSHEET_TAKEOVER_ENABLED" ;;
+            FLOWSHEET_SPOTLIGHT_ENABLED) VALUE="$FLOWSHEET_SPOTLIGHT_ENABLED" ;;
             # BS#2518. The SES credential has never had a provisioning path —
             # neither spelling was on this allowlist — so rotating it was always a
             # hand edit on the host. Adding the new names here so the rename does

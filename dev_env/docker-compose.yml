@@ -330,6 +330,10 @@ services:
       # the flag-OFF production configuration locally; with it off the takeover
       # spec fails loudly at `.expect(409)` rather than passing vacuously.
       - FLOWSHEET_TAKEOVER_ENABLED=${FLOWSHEET_TAKEOVER_ENABLED:-true}
+      # Flowsheet spotlight (BS#3459). CI flips it on so the PATCH /flowsheet
+      # spotlight spec runs; test coverage, NOT a rollout: it ships OFF in
+      # production. Overridable to reproduce the flag-OFF configuration locally.
+      - FLOWSHEET_SPOTLIGHT_ENABLED=${FLOWSHEET_SPOTLIGHT_ENABLED:-true}
       # CloudWatch publishers, both off (BS#2533). Hardcoded, not
       # ${}-substituted: the credential provider is pinned to the EC2 instance
       # role, so nothing outside EC2 can publish a metric no matter what the

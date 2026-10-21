@@ -43,6 +43,7 @@ import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.j
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { effectiveRequestMode, RequestMode, RequestModeSource } from './flowsheet/request-mode.js';
 import { assertSpecialtyTaggable, SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
+import { composeSpotlightMessage } from './flowsheet/spotlight.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelect, PgSelectKind, PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -1345,6 +1346,8 @@ export const updateEntry = async (
   if (entry.request_flag !== undefined) updateSet.request_flag = entry.request_flag;
   if (entry.segue !== undefined) updateSet.segue = entry.segue;
   if (entry.message !== undefined) updateSet.message = entry.message;
+  if (entry.spotlight_role !== undefined) updateSet.spotlight_role = entry.spotlight_role;
+  if (entry.spotlight_name !== undefined) updateSet.spotlight_name = entry.spotlight_name;
 
   // Provenance stamps are server-side only, through this internally-typed set merged into the one
   // UPDATE; `UpdateRequestBody` must never carry linkage columns (BS#1099). The pre-read is FOR UPDATE
@@ -1358,6 +1361,8 @@ export const updateEntry = async (
         album_title: flowsheet.album_title,
         album_id: flowsheet.album_id,
         linkage_source: flowsheet.linkage_source,
+        spotlight_role: flowsheet.spotlight_role,
+        spotlight_name: flowsheet.spotlight_name,
       })
       .from(flowsheet)
       .where(eq(flowsheet.id, entry_id))
@@ -1367,6 +1372,24 @@ export const updateEntry = async (
       return undefined;
     }
     await assertCallerMayWriteRow(trx, current.show_id, caller);
+
+    // BS#3459: a spotlight is never a play, so the two row types do not share fields. Its `message` is always the
+    // server's composition of the merged role and name; a client-sent one is dropped.
+    if (current.entry_type === 'spotlight') {
+      if (
+        [entry.artist_name, entry.album_title, entry.track_title, entry.album_id, entry.rotation_id].some(
+          (v) => v !== undefined
+        )
+      ) {
+        throw new WxycError('Bad Request, a spotlight entry has no track fields', 400);
+      }
+      updateSet.message = composeSpotlightMessage(
+        updateSet.spotlight_role ?? current.spotlight_role!,
+        updateSet.spotlight_name ?? current.spotlight_name!
+      );
+    } else if (updateSet.spotlight_role !== undefined || updateSet.spotlight_name !== undefined) {
+      throw new WxycError('Bad Request, only a spotlight entry has spotlight_role or spotlight_name', 400);
+    }
 
     let linkSet: PgUpdateSetSource<typeof flowsheet> = {};
     if (entry.album_id != null) {

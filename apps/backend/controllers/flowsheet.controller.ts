@@ -13,6 +13,8 @@ import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/flowsheet-projection.js';
 import { getDiscogsUnavailableFlagsById } from '../services/library.service.js';
 import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
+import * as flowsheetSpotlightConfig from '../config/flowsheetSpotlight.js';
+import { validateSpotlightName, validateSpotlightRole, type SpotlightRole } from '../services/flowsheet/spotlight.js';
 import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
 import { rowWriteCaller } from '../middleware/checkShowMember.js';
 import WxycError from '../utils/error.js';
@@ -590,6 +592,13 @@ export type FSEntryRequestBody = {
   entry_type?: NewFSEntry['entry_type'];
 };
 
+/** 403 while `FLOWSHEET_SPOTLIGHT_ENABLED` is off (BS#3459); thrown before any service read so nothing is written. */
+const assertSpotlightEnabled = (): void => {
+  if (!flowsheetSpotlightConfig.getConfig().enabled) {
+    throw new WxycError('Spotlight entries are not enabled', 403, { code: 'spotlight_disabled' });
+  }
+};
+
 /**
  * Shared egress for the flowsheet mutation echoes (BS#1513 / PR #1532): send
  * the client-facing projection of a just-written row.
@@ -762,6 +771,9 @@ async function annotateTextLinkage(fsEntry: NewFSEntry, show_id: number): Promis
 // linked only when their text names one release (BS#3066)
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res) => {
   const { body } = req;
+  if (body.entry_type === 'spotlight') {
+    assertSpotlightEnabled();
+  }
   const latestShow = await flowsheet_service.getLatestShow();
   if (latestShow?.end_time !== null) {
     throw new WxycError('Bad Request, There are no active shows', 400);
@@ -1062,6 +1074,9 @@ export type UpdateRequestBody = {
   request_flag?: boolean;
   segue?: boolean;
   message?: string;
+  // Spotlight rows only (BS#3459); the service recomposes `message` from them.
+  spotlight_role?: SpotlightRole;
+  spotlight_name?: string;
 };
 
 /**
@@ -1085,6 +1100,11 @@ function pickUpdateEntryFields(data: UpdateRequestBody): UpdateRequestBody {
   if (data.request_flag !== undefined) picked.request_flag = data.request_flag;
   if (data.segue !== undefined) picked.segue = data.segue;
   if (data.message !== undefined) picked.message = data.message;
+  if (data.spotlight_role !== undefined || data.spotlight_name !== undefined) {
+    assertSpotlightEnabled();
+    if (data.spotlight_role !== undefined) picked.spotlight_role = validateSpotlightRole(data.spotlight_role);
+    if (data.spotlight_name !== undefined) picked.spotlight_name = validateSpotlightName(data.spotlight_name);
+  }
   return picked;
 }
 
