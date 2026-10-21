@@ -44,7 +44,7 @@ export function defineStoreAllowlist(config: StoreAllowlistConfig): StoreAllowli
       if (source !== undefined) {
         // `[/]bucket/key[?versionId=...]`, with the key percent-encoded.
         const [bucketAndKey, ...rest] = source.split('?')[0].replace(/^\//, '').split('/');
-        if (bucket !== undefined && bucketAndKey !== bucket) {
+        if (bucket === undefined || bucketAndKey !== bucket) {
           throw new Error("S3 copy source is outside this store's bucket");
         }
         let key: string;

@@ -173,10 +173,13 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
       const last = args[args.length - 1];
       if (typeof last === 'function') {
         const callback = last as (...cbArgs: unknown[]) => void;
-        sendOnClient(args.slice(0, -1)).then(
-          (output) => callback(null, output),
-          (error: unknown) => callback(error)
-        );
+        sendOnClient(args.slice(0, -1))
+          .then(
+            (output) => callback(null, output),
+            (error: unknown) => callback(error)
+          )
+          // A callback that throws must not become an unhandled rejection (matches the SDK's own send).
+          .catch(() => {});
         return undefined;
       }
       return sendOnClient(args);

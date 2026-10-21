@@ -302,6 +302,28 @@ describe('createInstanceRoleSigner', () => {
         }
       });
 
+      it('does not raise an unhandled rejection when the callback itself throws', async () => {
+        const rejections: unknown[] = [];
+        const onRejection = (reason: unknown) => rejections.push(reason);
+        process.on('unhandledRejection', onRejection);
+        try {
+          const signer = createInstanceRoleSigner({
+            credentialProvider: () => Promise.resolve(fakeCredentials('A', 3 * MIN, clock)),
+            now,
+          });
+          let called = false;
+          (signer.send as (c: unknown, cb: () => void) => void)(head(), () => {
+            called = true;
+            throw new Error('callback boom');
+          });
+          await new Promise((r) => setTimeout(r, 20));
+          expect(called).toBe(true);
+          expect(rejections).toEqual([]);
+        } finally {
+          process.off('unhandledRejection', onRejection);
+        }
+      });
+
       it('keeps using still-valid cached credentials when a refetch fails, through the back-off', async () => {
         const provider = jest
           .fn<Promise<ReturnType<typeof fakeCredentials>>, []>()
@@ -382,10 +404,11 @@ describe('defineStoreAllowlist CopySource', () => {
     expect(() => allowlist.assertAllowed(copy(source))).not.toThrow();
   });
 
-  it('still checks the key prefix when the command has no Bucket', () => {
+  it('refuses a copy source when the command has no Bucket', () => {
     const noBucket = (CopySource: string) => new CopyObjectCommand({ Key: 'posters/dest.png', CopySource } as never);
-    expect(() => allowlist.assertAllowed(noBucket('other/held/a.png'))).not.toThrow();
-    expect(() => allowlist.assertAllowed(noBucket('b/logos/a.png'))).toThrow(/prefix/);
+    expect(() => allowlist.assertAllowed(noBucket('other/held/a.png'))).toThrow(/bucket/);
+    expect(() => allowlist.assertAllowed(noBucket('b/held/a.png'))).toThrow(/bucket/);
+    expect(() => allowlist.assertAllowed(noBucket('b/logos/a.png'))).toThrow();
   });
 
   it.each([
