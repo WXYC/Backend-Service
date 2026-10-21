@@ -324,11 +324,29 @@ export class PostHogReporter implements ErrorReporter {
   }
 }
 
-/** The `--unhandled-rejections` mode the process runs with (`process.execArgv` first, then `NODE_OPTIONS`); Node's default is `throw`. */
+const UNHANDLED_REJECTIONS_FLAG = '--unhandled-rejections';
+
+/** The last `--unhandled-rejections` mode in `tokens`, in either the `=<mode>` or the `<mode>`-as-next-token form. */
+function lastRejectionsMode(tokens: string[]): string | undefined {
+  let mode: string | undefined;
+  tokens.forEach((token, i) => {
+    if (token.startsWith(`${UNHANDLED_REJECTIONS_FLAG}=`)) {
+      mode = token.slice(UNHANDLED_REJECTIONS_FLAG.length + 1);
+    } else if (token === UNHANDLED_REJECTIONS_FLAG && i + 1 < tokens.length) {
+      mode = tokens[i + 1];
+    }
+  });
+  return mode;
+}
+
+/**
+ * The `--unhandled-rejections` mode the process runs with, resolved as Node does: the command line (`process.execArgv`)
+ * takes precedence over `NODE_OPTIONS`, the last occurrence within a source wins, and both the `--unhandled-rejections=<mode>`
+ * and the `--unhandled-rejections <mode>` forms are accepted. Node's default is `throw`.
+ */
 function unhandledRejectionsMode(): string {
-  const args = [...process.execArgv, ...(process.env.NODE_OPTIONS ?? '').split(/\s+/)];
-  const flag = args.reverse().find((arg) => arg.startsWith('--unhandled-rejections='));
-  return flag ? flag.slice('--unhandled-rejections='.length) : 'throw';
+  const nodeOptions = (process.env.NODE_OPTIONS ?? '').split(/\s+/).filter(Boolean);
+  return lastRejectionsMode(process.execArgv) ?? lastRejectionsMode(nodeOptions) ?? 'throw';
 }
 
 /**
@@ -344,6 +362,12 @@ function unhandledRejectionsMode(): string {
  * puts it back: when another listener exists at the moment the event fires (Sentry's integration, which only warns),
  * it reports and leaves the behaviour to that listener; when it is the only listener, it flushes, prints the
  * rejection and exits 1, unless `--unhandled-rejections` selects `none`, `warn` or `warn-with-error-code`.
+ *
+ * The mode is read the way Node reads it: `process.execArgv` (the command line) beats `NODE_OPTIONS`, the last
+ * occurrence within a source wins, and both `--unhandled-rejections=<mode>` and `--unhandled-rejections <mode>` work.
+ * In `strict` mode Node first raises the rejection as an uncaught exception (the `uncaughtException` handler above
+ * prints it and owns the exit) and then still emits `unhandledRejection`, so there the rejection handler only
+ * reports and neither prints nor exits a second time.
  */
 export function installCrashHandlers(
   reporter: PostHogReporter,
@@ -372,7 +396,8 @@ export function installCrashHandlers(
     }
     // Registering a listener switched off Node's default, so reproduce it (or the explicit mode) here.
     const mode = unhandledRejectionsMode();
-    if (mode === 'none') {
+    // strict: Node already raised this as an uncaught exception, which onException prints and exits on.
+    if (mode === 'none' || mode === 'strict') {
       return;
     }
     console.error(reason);
