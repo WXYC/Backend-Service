@@ -918,7 +918,7 @@ const assertCallerMayWriteRow = async (
     }
   }
   const decision = mayEditShow(caller, target);
-  if (!decision.allowed) {
+  if (decision.allowed === false) {
     throw new WxycError(decision.message, decision.status, decision.code && { code: decision.code });
   }
 };
@@ -2050,6 +2050,8 @@ export const getShowById = async (show_id: number): Promise<Show | undefined> =>
  * function is self-safe. For a general recency check on a row a historical
  * import could touch, order by `add_time` instead (see `getEntriesByPage`'s
  * comment for why `add_time` needs an explicit `id` tie-break too).
+ *
+ * Callers: `joinShow` and `assertCallerMayWriteRow` (the row-write gate, BS#3455). Both guard on `end_time === null`.
  */
 export const isLatestEntryShowEnd = async (
   showId: number,
