@@ -3,6 +3,7 @@ import { processRequest, parseOnly, getConfig, isParsingEnabled } from '../servi
 import { postTextToSlack } from '../services/slack/index.js';
 import { searchLibrary } from '../services/library.service.js';
 import WxycError from '../utils/error.js';
+import { parseCountQueryParam } from '../utils/query-params.js';
 
 export type RequestLineBody = {
   message: string;
@@ -232,7 +233,8 @@ export const searchLibraryEndpoint: RequestHandler<object, unknown, unknown, Lib
   const startTime = Date.now();
 
   const { artist, title, query, limit } = req.query;
-  const limitNum = limit ? parseInt(limit, 10) : 5;
+  // A blank `?limit=` keeps the default, as before; anything else must be a positive integer (BS#3587).
+  const limitNum = parseCountQueryParam(limit === '' ? undefined : limit, 'limit') ?? 5;
 
   console.log(`[${logId}] Library search request:`, {
     method: req.method,

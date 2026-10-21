@@ -527,6 +527,39 @@ describe('library.controller', () => {
       expect(mockFuzzySearchLibrary).not.toHaveBeenCalled();
     });
 
+    // BS#3587: `n` arrives as a query-string value. The service must get a
+    // real number (or `undefined`, so its own default applies), never "50".
+    test.each([
+      [undefined, undefined],
+      ['50', 50],
+      ['1', 1],
+    ])('passes n=%j to the service as %j', async (n, expected) => {
+      mockFuzzySearchLibrary.mockResolvedValue([]);
+      mockEnrichWithArtwork.mockResolvedValue([]);
+      const req = { query: { artist_name: 'Autechre', album_title: 'Autechre', n } } as unknown as Request;
+      const res = mockResponse();
+
+      await searchForAlbum(req, res, next);
+
+      expect(mockFuzzySearchLibrary).toHaveBeenCalledWith('Autechre', 'Autechre', expected, undefined);
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+
+    test.each([
+      ['abc', 'n must be an integer from 1 to 2147483647'],
+      ['0', 'n must be an integer from 1 to 2147483647'],
+      ['-3', 'n must be an integer from 1 to 2147483647'],
+      ['2.5', 'n must be an integer from 1 to 2147483647'],
+      ['', 'n must be an integer from 1 to 2147483647'],
+      [['1', '2'], 'n must be a single string value'],
+    ])('rejects n=%j with a 400', async (n, message) => {
+      const req = { query: { artist_name: 'Autechre', n } } as unknown as Request;
+      const res = mockResponse();
+
+      await expect(searchForAlbum(req, res, next)).rejects.toMatchObject({ message, statusCode: 400 });
+      expect(mockFuzzySearchLibrary).not.toHaveBeenCalled();
+    });
+
     it('accepts on_streaming=false as a sufficient filter and returns 200', async () => {
       const searchResults = [{ id: 1, artist_name: 'Juana Molina', album_title: 'DOGA', on_streaming: false }];
       mockFuzzySearchLibrary.mockResolvedValue(searchResults);

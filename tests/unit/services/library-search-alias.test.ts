@@ -571,9 +571,9 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(rendered).not.toContain('UNION ALL');
     });
 
-    it('n as the query string sends it (a numeric string) still gets the reserve', async () => {
-      // `GET /library/` passes `n` through unparsed, so the service sees "50".
-      // The non-finite guard must not mistake that for a missing page size.
+    it('a full page of 50 still gets the reserve', async () => {
+      // `GET /library/` parses `n` in the controller (BS#3587), so the service
+      // sees the number 50, never the query-string "50".
       setAliasFlag(true);
       mockCatalogTiers(
         db.execute,
@@ -581,7 +581,7 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         { capAliasAppend: true }
       );
 
-      const results = await fuzzySearchLibrary('Giddens', 'Giddens', '50' as unknown as number);
+      const results = await fuzzySearchLibrary('Giddens', 'Giddens', 50);
 
       expect(catalogTierCallLog(db.execute)).toEqual(['tsvector', 'aliasAppend']);
       expect(results.map((r) => r.id)).toEqual([...idsOf(stage1Albums(47)), ...idsOf(aliasAlbums(3))]);

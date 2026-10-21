@@ -2934,8 +2934,11 @@ paths:
             type: string
         - name: n
           in: query
+          description: Maximum albums returned. Omit it for the service default (5).
           schema:
-            type: number
+            type: integer
+            minimum: 1
+            maximum: 2147483647
         - name: page
           in: query
           schema:
@@ -2943,6 +2946,10 @@ paths:
       responses:
         '200':
           description: List of matching albums
+        '400':
+          description: >-
+            No search parameter was given, or `n` is not a single integer from 1 to
+            2147483647 (`abc`, `0`, `2.5`, or a repeated key; BS#3587).
           content:
             application/json:
               schema:
