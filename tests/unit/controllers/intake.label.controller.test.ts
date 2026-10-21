@@ -4,9 +4,9 @@
  * the two (or that clears one with `null`) is not checked. The comparison itself (case-insensitive, trimmed) is SQL, so
  * `intake.service.sql.test.ts` pins its shape and `tests/integration/intake-label-match.spec.js` its behavior against real rows.
  */
-const mockLog = jest.fn<(...args: unknown[]) => Promise<unknown>>();
-const mockUpdate = jest.fn<(...args: unknown[]) => Promise<unknown>>();
-const mockLabelNameMatches = jest.fn<(...args: unknown[]) => Promise<boolean | undefined>>();
+const mockLog = jest.fn<Promise<unknown>, unknown[]>();
+const mockUpdate = jest.fn<Promise<unknown>, unknown[]>();
+const mockLabelNameMatches = jest.fn<Promise<boolean | undefined>, unknown[]>();
 
 jest.mock('../../../apps/backend/services/intake.service', () => ({
   logIntakeItem: mockLog,
