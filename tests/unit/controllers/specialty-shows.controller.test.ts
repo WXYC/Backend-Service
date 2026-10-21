@@ -24,10 +24,10 @@ const SHOWS = [{ id: 1, slug: 'orange-county-special', name: 'Orange County Spec
 
 const createMockRes = () => {
   const res: Partial<Response> = {};
-  res.status = jest.fn().mockReturnValue(res);
-  res.json = jest.fn().mockReturnValue(res);
-  res.set = jest.fn().mockReturnValue(res);
-  res.end = jest.fn().mockReturnValue(res);
+  res.status = jest.fn().mockReturnValue(res) as unknown as Response['status'];
+  res.json = jest.fn().mockReturnValue(res) as unknown as Response['json'];
+  res.set = jest.fn().mockReturnValue(res) as unknown as Response['set'];
+  res.end = jest.fn().mockReturnValue(res) as unknown as Response['end'];
   return res;
 };
 const createReq = (ifNoneMatch?: string) =>

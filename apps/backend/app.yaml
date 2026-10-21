@@ -87,6 +87,40 @@ components:
             One color serves light and dark mode. The catalog refuses a color
             unless white text on it reaches 4.5:1 contrast and the color
             reaches 3:1 against the app's darkest surface.
+    SpecialtyShowSlot:
+      type: object
+      required: [day, start_time, duration_minutes, cadence]
+      properties:
+        day:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: 0 = Monday, matching Schedule.day
+        start_time:
+          type: string
+          pattern: '^\d{2}:\d{2}$'
+          description: America/New_York wall clock
+        duration_minutes:
+          type: integer
+          minimum: 1
+        cadence:
+          type: string
+          enum: [weekly, some_weeks, last_of_month]
+    SpecialtyShow:
+      allOf:
+        - $ref: '#/components/schemas/SpecialtyShowRef'
+        - type: object
+          required: [slots, active]
+          properties:
+            description:
+              type: string
+              nullable: true
+            slots:
+              type: array
+              items:
+                $ref: '#/components/schemas/SpecialtyShowSlot'
+            active:
+              type: boolean
     # The one rotation-bin definition; tests/unit/apps/backend/app-yaml-rotation-bin.test.ts pins it to ROTATION_BINS.
     # The two bare `type: string` rotation_bin fields (AlbumView and CatalogExportRow) stay unreferenced: they are
     # nullable passthroughs of the stored freq_enum value (so already limited to these bins), and wxyc-shared's
@@ -5527,6 +5561,13 @@ paths:
         carries no `ETag`. The canonical wire contract is `/specialty-shows` in wxyc-shared/api.yaml (the SSOT);
         this app.yaml is Swagger display only.
       security: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: A previously returned `ETag`; a match answers 304.
       responses:
         '200':
           description: The active specialty shows
@@ -5542,7 +5583,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/SpecialtyShowRef'
+                  $ref: '#/components/schemas/SpecialtyShow'
         '304':
           description: The client's `If-None-Match` matches the current catalog
 
