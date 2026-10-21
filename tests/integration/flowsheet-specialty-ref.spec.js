@@ -55,7 +55,14 @@ describe('specialty ref on range and playlist (BS#3454)', () => {
 
   afterAll(async () => {
     if (!sql) return;
-    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE id = ANY($1::int[])`, [Object.values(showIds)]);
+    // The join tests start real shows tagged with the active program: clear them and their rows first.
+    const joined = await sql.unsafe(`SELECT id FROM ${SCHEMA}.shows WHERE specialty_id = ANY($1::int[])`, [
+      Object.values(specialtyIds),
+    ]);
+    const allShowIds = [...new Set([...joined.map((r) => r.id), ...Object.values(showIds)])];
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE show_id = ANY($1::int[])`, [allShowIds]);
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.show_djs WHERE show_id = ANY($1::int[])`, [allShowIds]);
+    await sql.unsafe(`DELETE FROM ${SCHEMA}.shows WHERE id = ANY($1::int[])`, [allShowIds]);
     await sql.unsafe(`DELETE FROM ${SCHEMA}.specialty_shows WHERE id = ANY($1::int[])`, [Object.values(specialtyIds)]);
     await sql.end();
   });

@@ -301,6 +301,7 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
         'end_time',
         'id',
         'show_name',
+        'specialty',
         'specialty_id',
         'start_time',
       ]);
