@@ -13,6 +13,10 @@
  * we refetch (at most once a minute), and failing that we shorten the link to
  * end one minute before the credentials do.
  *
+ * `send` runs server-side commands on the same client and refresh rule, and `credentials()` hands the same
+ * cached identity to a sibling client (CloudFront) as a provider, so no second client resolves its own chain.
+ * Concurrent fetches share one in-flight promise; a failed fetch is not retried for a few seconds.
+ *
  * Never logs a URL, a bucket/key pair, or a credential.
  */
 import { S3Client, type GetObjectCommand, type PutObjectCommand } from '@aws-sdk/client-s3';
@@ -27,6 +31,7 @@ const IMDS_MAX_RETRIES = 0;
 const HEADROOM_MS = 5 * 60_000;
 const END_BEFORE_EXPIRY_MS = 60_000;
 export const SIGNING_REFRESH_INTERVAL_MS = 60_000;
+export const CREDENTIAL_FAILURE_BACKOFF_MS = 5_000;
 
 type PresignableCommand = GetObjectCommand | PutObjectCommand;
 
@@ -40,6 +45,10 @@ export interface InstanceRoleSignerOptions {
 export interface InstanceRoleSigner {
   /** Presigns `command` for at most `expiresInSeconds`, shortened to end before the credentials do. */
   presign(command: PresignableCommand, expiresInSeconds: number): Promise<string>;
+  /** Sends a server-side command on the resolved instance-role credentials. */
+  send: S3Client['send'];
+  /** The cached instance-role credentials, refreshed by the same rule; for `new CloudFrontClient({ credentials })`. */
+  credentials(): Promise<AwsCredentialIdentity>;
 }
 
 export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}): InstanceRoleSigner {
@@ -57,10 +66,42 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
     return expiry ? expiry.getTime() - now() : Infinity;
   };
 
-  async function fetchCredentials(): Promise<void> {
-    const credentials = await provider();
-    // The client gets the resolved object, so it never consults the default chain.
-    cached = { credentials, fetchedAt: now(), client: new S3Client({ region, credentials }) };
+  let inFlight: Promise<void> | undefined;
+  let lastFailure: { error: Error; at: number } | undefined;
+
+  function fetchCredentials(): Promise<void> {
+    if (inFlight) {
+      return inFlight;
+    }
+    if (lastFailure && now() - lastFailure.at < CREDENTIAL_FAILURE_BACKOFF_MS) {
+      return Promise.reject(lastFailure.error);
+    }
+    inFlight = Promise.resolve()
+      .then(() => provider())
+      .then(
+        (credentials) => {
+          // The client gets the resolved object, so it never consults the default chain.
+          cached = { credentials, fetchedAt: now(), client: new S3Client({ region, credentials }) };
+          lastFailure = undefined;
+        },
+        (error: unknown) => {
+          const failure = error instanceof Error ? error : new Error(String(error));
+          lastFailure = { error: failure, at: now() };
+          throw failure;
+        }
+      )
+      .finally(() => {
+        inFlight = undefined;
+      });
+    return inFlight;
+  }
+
+  async function ensureCredentials(requiredMs: number): Promise<void> {
+    if (!cached) {
+      await fetchCredentials();
+    } else if (msLeft(cached.credentials) < requiredMs && now() - cached.fetchedAt >= SIGNING_REFRESH_INTERVAL_MS) {
+      await fetchCredentials();
+    }
   }
 
   return {
@@ -68,19 +109,21 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
       if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 1) {
         throw new Error('expiresInSeconds must be a positive integer');
       }
-      if (!cached) {
-        await fetchCredentials();
-      } else if (msLeft(cached.credentials) < expiresInSeconds * 1000 + HEADROOM_MS) {
-        if (now() - cached.fetchedAt >= SIGNING_REFRESH_INTERVAL_MS) {
-          await fetchCredentials();
-        }
-      }
+      await ensureCredentials(expiresInSeconds * 1000 + HEADROOM_MS);
       const usableMs = msLeft(cached!.credentials) - END_BEFORE_EXPIRY_MS;
       const expiresIn = Math.min(expiresInSeconds, Math.floor(usableMs / 1000));
       if (expiresIn < 1) {
         throw new Error('Instance-role credentials are too close to expiry to sign a link');
       }
       return getSignedUrl(cached!.client, command, { expiresIn });
+    },
+    send: (async (command: Parameters<S3Client['send']>[0]) => {
+      await ensureCredentials(HEADROOM_MS);
+      return cached!.client.send(command);
+    }) as S3Client['send'],
+    async credentials() {
+      await ensureCredentials(HEADROOM_MS);
+      return cached!.credentials;
     },
   };
 }
