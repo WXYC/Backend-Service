@@ -35,12 +35,17 @@
  * tier).
  */
 
+const path = require('path');
+const { execFileSync } = require('child_process');
 const postgres = require('postgres');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const SOURCE_ID_PREFIX = 'bs1760:';
 const VENUE_SLUG = 'bs1760-probe-room';
 const ARTIST_PREFIX = 'BS#1760 Probe';
+const RESOLVE_DRIVER = path.join(__dirname, '..', 'utils', 'run-concerts-resolve-artist-id.ts');
+// The child boots tsx and loads the built `@wxyc/database`; give it room.
+const CHILD_TIMEOUT_MS = 60000;
 
 function makeSql() {
   return postgres({
@@ -196,8 +201,8 @@ async function writeSupportArtistId(sql, performerId, artistId) {
 }
 
 /** Mirror of the strict arm of `resolveArtistId` (query.ts) — the only
- *  arm the support-arm tests need. The alias arm is mirrored separately
- *  below (`resolveArtistId`) for the BS#3563 source-partition cases. */
+ *  arm these tests need. The BS#3563 cases below run the REAL
+ *  `resolveArtistId` in a child process (`resolveWithRealResolver`). */
 async function resolveStrict(sql, rawName) {
   const rows = await sql.unsafe(
     `SELECT a."id" AS artist_id
@@ -211,33 +216,33 @@ async function resolveStrict(sql, rawName) {
   return { kind: 'unmatched' };
 }
 
-/** Mirror of `SYNONYM_ALIAS_SOURCES` in query.ts (BS#1383, BS#3563).
- *  `wxyc_library_alt` is relational, so it is not here. */
-const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias'];
-
-/** Mirror of `resolveArtistId` in query.ts: strict, then the alias arm
- *  restricted to the synonym-class sources. */
-async function resolveArtistId(sql, rawName) {
-  const strict = await resolveStrict(sql, rawName);
-  if (strict.kind !== 'unmatched') {
-    return strict;
+/**
+ * Runs the REAL `resolveArtistId` (jobs/concerts-artist-resolver/query.ts)
+ * for each raw name in a `tsx` child (this runner cannot import
+ * TypeScript; see tests/utils/run-concerts-resolve-artist-id.ts). Returns
+ * a map of raw name → outcome.
+ */
+function resolveWithRealResolver(rawNames) {
+  const output = execFileSync('npx', ['tsx', RESOLVE_DRIVER, JSON.stringify(rawNames)], {
+    env: {
+      ...process.env,
+      DB_HOST: process.env.DB_HOST || 'localhost',
+      DB_PORT: process.env.DB_PORT || process.env.CI_DB_PORT || '5433',
+      DB_NAME: process.env.DB_NAME || 'wxyc_db',
+      DB_USERNAME: process.env.DB_USERNAME || 'test-user',
+      DB_PASSWORD: process.env.DB_PASSWORD || 'test-pw',
+      WXYC_SCHEMA_NAME: SCHEMA,
+      SENTRY_DSN: '',
+    },
+    cwd: path.join(__dirname, '..', '..'),
+    encoding: 'utf8',
+    timeout: CHILD_TIMEOUT_MS - 5000,
+  });
+  const match = output.match(/^RESOLVE_RESULT:(.*)$/m);
+  if (!match) {
+    throw new Error(`resolve driver produced no result line:\n${output}`);
   }
-  const inList = SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', ');
-  const rows = await sql.unsafe(
-    `SELECT DISTINCT asa."artist_id"
-     FROM "${SCHEMA}".artist_search_alias asa
-     WHERE "${SCHEMA}".normalize_artist_name(asa."variant") = "${SCHEMA}".normalize_artist_name($1)
-       AND asa."source" IN (${inList})
-     LIMIT 2`,
-    [rawName]
-  );
-  if (rows.length === 1) {
-    return { kind: 'alias', artist_id: Number(rows[0].artist_id) };
-  }
-  if (rows.length > 1) {
-    return { kind: 'ambiguous' };
-  }
-  return { kind: 'unmatched' };
+  return JSON.parse(match[1]);
 }
 
 /** Runs the support resolve arm once over every current candidate. */
@@ -494,48 +499,46 @@ describe('concerts-artist-resolver support sync/resolve contract (BS#1760)', () 
     });
   });
 
-  describe('library alternate names are relational (BS#3563)', () => {
-    // Prod shapes from the 2026-10-21 measurement on BS#3563, under the
+  describe('library alternate names resolve only when they spell the owner (BS#3563)', () => {
+    // Prod shapes from the 2026-10-21 measurements on BS#3563, under the
     // suite's name prefix so cleanup can only touch the suite's own rows.
-    // Alias rows go with their artist (ON DELETE CASCADE).
-    const CCD = `${ARTIST_PREFIX} Carolina Chocolate Drops`;
-    const PAUL_WHITE = `${ARTIST_PREFIX} Paul White`;
-    const OH_SEES = `${ARTIST_PREFIX} Thee Oh Sees`;
-    const ids = {};
-
-    const seedAlias = async (artistId, source, variant) => {
-      await sql.unsafe(
-        `INSERT INTO "${SCHEMA}".artist_search_alias
-           (artist_id, source, variant, related_artist_id, external_subject_id,
-            external_object_id, active, method, confidence, last_verified_at)
-         VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, 'alt_curated', 0.85, NOW())`,
-        [artistId, source, variant]
-      );
-    };
+    // Alias rows go with their artist (ON DELETE CASCADE). The REAL
+    // resolver runs once, in a child process, for every case.
+    const P = ARTIST_PREFIX;
+    const ALT = { source: 'wxyc_library_alt', method: 'alt_curated', confidence: 0.85 };
+    const NAME_VARIATION = { source: 'discogs_name_variation', method: 'name_variation', confidence: 0.95 };
+    const CASES = [
+      // [label, owner artist_name, alias kind, variant (= the raw headliner), expected kind]
+      ['a member credit', `${P} Carolina Chocolate Drops`, ALT, `${P} Rhiannon Giddens`, 'unmatched'],
+      ['a collaborator credit', `${P} Paul White`, ALT, `${P} Open Mike Eagle`, 'unmatched'],
+      ['a solo act on the band card', `${P} Adam and the Ants`, ALT, `${P} Adam Ant`, 'unmatched'],
+      ['punctuation only', `${P} Me'Shell Ndegeocello`, ALT, `${P} Meshell Ndegeocello`, 'alias'],
+      ['spacing only', `${P} Anderson.Paak`, ALT, `${P} Anderson Paak`, 'alias'],
+      ['word order', `${P} Genius/GZA`, ALT, `${P} GZA/Genius`, 'alias'],
+      ['a discogs_name_variation variant', `${P} Thee Oh Sees`, NAME_VARIATION, `${P} Oh Sees`, 'alias'],
+    ];
+    const ownerIds = {};
+    let outcomes;
 
     beforeAll(async () => {
-      ids[CCD] = await seedArtist(CCD);
-      ids[PAUL_WHITE] = await seedArtist(PAUL_WHITE);
-      ids[OH_SEES] = await seedArtist(OH_SEES);
-      await seedAlias(ids[CCD], 'wxyc_library_alt', `${ARTIST_PREFIX} Rhiannon Giddens`);
-      await seedAlias(ids[PAUL_WHITE], 'wxyc_library_alt', `${ARTIST_PREFIX} Open Mike Eagle`);
-      await seedAlias(ids[OH_SEES], 'discogs_name_variation', `${ARTIST_PREFIX} Oh Sees`);
-      await seedAlias(ids[CCD], 'wxyc_library_alt', CCD.toLowerCase());
-    });
+      for (const [, owner, alias, variant] of CASES) {
+        ownerIds[owner] = await seedArtist(owner);
+        await sql.unsafe(
+          `INSERT INTO "${SCHEMA}".artist_search_alias
+             (artist_id, source, variant, related_artist_id, external_subject_id,
+              external_object_id, active, method, confidence, last_verified_at)
+           VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, $4, $5, NOW())`,
+          [ownerIds[owner], alias.source, variant, alias.method, alias.confidence]
+        );
+      }
+      outcomes = resolveWithRealResolver(CASES.map(([, , , variant]) => variant));
+    }, CHILD_TIMEOUT_MS);
 
-    it.each([
-      ['a member credit (Rhiannon Giddens on Carolina Chocolate Drops)', 'Rhiannon Giddens', 'unmatched', null],
-      ['a collaborator credit (Open Mike Eagle on Paul White, concert 19292)', 'Open Mike Eagle', 'unmatched', null],
-      ['a discogs_name_variation variant', 'Oh Sees', 'alias', OH_SEES],
-      ["the owner's name with a leading The", 'Carolina Chocolate Drops', 'strict', CCD],
-    ])('%s: %s resolves as %s', async (_label, name, kind, owner) => {
-      const raw = kind === 'strict' ? `The ${ARTIST_PREFIX} ${name}` : `${ARTIST_PREFIX} ${name}`;
-
-      const result = await resolveArtistId(sql, raw);
-
-      expect(result.kind).toBe(kind);
-      if (owner !== null) {
-        expect(result.artist_id).toBe(ids[owner]);
+    it.each(CASES)('%s: owner %s, %j, variant %s resolves as %s', (_label, owner, _alias, variant, kind) => {
+      const outcome = outcomes[variant];
+      expect(outcome.kind).toBe(kind);
+      if (kind === 'alias') {
+        expect(outcome.artist_id).toBe(ownerIds[owner]);
       }
     });
   });

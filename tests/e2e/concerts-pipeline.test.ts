@@ -153,9 +153,11 @@ beforeAll(async () => {
   // strict `artists` join AND the alias arm over `artist_search_alias` for the
   // synonym-class sources — a strict-only check would give false confidence,
   // since a synonym variant normalizing to a negative billing resolves too.
-  // (The synonym source list mirrors SYNONYM_ALIAS_SOURCES in
-  // jobs/concerts-artist-resolver/query.ts; imported inline rather than from
-  // that module to avoid dragging in its top-level `@wxyc/database` connection.)
+  // (The source list mirrors SYNONYM_ALIAS_SOURCES plus
+  // VARIANT_GATED_ALIAS_SOURCES in jobs/concerts-artist-resolver/query.ts;
+  // imported inline rather than from that module to avoid dragging in its
+  // top-level `@wxyc/database` connection. It skips the BS#3563 variant
+  // gate, which only makes this guard stricter.)
   // Holds on the small e2e seed; fails loudly if the DB was pointed at the prod
   // clone or a contaminated shared schema.
   const collisions = await pg<{ label: string; via: string }[]>`
@@ -166,7 +168,7 @@ beforeAll(async () => {
     )
     UNION ALL
     SELECT variant AS label, 'artist_search_alias' AS via FROM ${pg(SCHEMA)}.artist_search_alias
-    WHERE source IN ('discogs_name_variation', 'discogs_alias')
+    WHERE source IN ('discogs_name_variation', 'discogs_alias', 'wxyc_library_alt')
       AND ${pg(SCHEMA)}.normalize_artist_name(variant) IN (
         ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_A}),
         ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_B})

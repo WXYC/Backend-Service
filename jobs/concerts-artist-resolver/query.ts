@@ -42,26 +42,29 @@ const ARTIST_SEARCH_ALIAS_TABLE = sql.raw(`"${SCHEMA}"."artist_search_alias"`);
 const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
 
 /**
- * `artist_search_alias.source` partitions into two classes (BS#1383).
- * The resolver is the partition's owner: it decides which sources are
- * eligible to drive an FK write. Tests import these constants directly
- * so the SQL IN-list and the test fixtures cannot drift.
+ * `artist_search_alias.source` partitions into three classes (BS#1383,
+ * BS#3563). The resolver is the partition's owner: it decides which
+ * sources are eligible to drive an FK write. Tests import these constants
+ * directly so the SQL IN-lists and the test fixtures cannot drift.
  *
  *   - SYNONYM_ALIAS_SOURCES name the same artist by another spelling
  *     and are safe to fold into the FK-write path — that's the alias
  *     substrate's whole point.
+ *   - VARIANT_GATED_ALIAS_SOURCES mix spelling variants with credits for
+ *     other acts. A row drives an FK write only when it passes the
+ *     variant gate (see below).
  *   - RELATIONAL_ALIAS_SOURCES express "X is related to Y" (member
  *     of, collaborator, etc.) and are NOT safe — they produce
  *     mislabels like the Geordie Greep → black midi case from the
  *     BS#1368 audit.
  *
  * Adding a new source (LML's or this repo's own) requires a deliberate choice here. The
- * resolver's SQL IN-list is built from SYNONYM_ALIAS_SOURCES, so a
- * source the partition does not name is silently excluded (safe-by-
- * default: FK stays NULL, row drops to manual review). The catalog-
- * search sites do not consult these constants — they propagate
- * `source` to callers so iOS / dj-site can render relational hits
- * differently (e.g., "related artist") with full source context.
+ * resolver's SQL IN-lists are built from SYNONYM_ALIAS_SOURCES and
+ * VARIANT_GATED_ALIAS_SOURCES, so a source the partition does not name is
+ * silently excluded (safe-by-default: FK stays NULL, row drops to manual
+ * review). The catalog-search sites do not consult these constants — they
+ * propagate `source` to callers so iOS / dj-site can render relational
+ * hits differently (e.g., "related artist") with full source context.
  *
  * Drift hazard (tracked by BS#1390): the `ArtistSearchAliasSource`
  * type union lives in three other places — lml-types.ts,
@@ -71,40 +74,41 @@ const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
  * RelationalAliasSource types will be exported from here at that time.
  */
 export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias'] as const;
+
+/**
+ * `wxyc_library_alt` is the raw `library.alternate_artist_name`. The
+ * station librarian uses that field both for spelling variants and for
+ * member and collaborator credits (`Rhiannon Giddens` on Carolina
+ * Chocolate Drops). On prod (BS#3563, 2026-10-21), no similarity
+ * threshold separates the two kinds across the 3,969 rows.
+ *
+ * The variant gate: a gated row drives an FK write only when it is the
+ * owner's own name spelled differently. That is, the variant and the
+ * owner's `artist_name` are equal after lowercasing and dropping every
+ * non-alphanumeric character (`Meshell Ndegeocello` on Me'Shell
+ * Ndegeocello), or their normalized forms have trigram similarity 1, so
+ * the same words in another order (`GZA/Genius` on Genius/GZA). On prod
+ * the gate admits 47 rows beyond the ones strict already covers, and all
+ * 47 are spelling variants. It rejects every credit, for example
+ * Rhiannon Giddens → Carolina Chocolate Drops, Open Mike Eagle → Paul
+ * White, and Adam Ant → Adam and the Ants. Typo-level variants
+ * (`Spellling`) are left out.
+ */
+export const VARIANT_GATED_ALIAS_SOURCES = ['wxyc_library_alt'] as const;
+
 // `wxyc_library_credit` (BS#3554) is one name from a comma-joined
 // `library.alternate_artist_name` credit: a member or collaborator filed
 // under the band's card, so it would make Rhiannon Giddens' concerts
 // resolve to Carolina Chocolate Drops.
-//
-// `wxyc_library_alt` (BS#3563) is the raw `library.alternate_artist_name`.
-// The station librarian uses that field both for spelling variants
-// (`ohsees, oh sees` on Thee Oh Sees) and for member and collaborator
-// credits (`Rhiannon Giddens` on Carolina Chocolate Drops, `Open Mike
-// Eagle` on Paul White). Similarity can't tell them apart. The prod
-// measurement on 2026-10-21 (BS#3563) scored all 3,969 rows against the
-// owner's name: credits for another act score high (`Zu & Nobukazu
-// Takemura` 0.90, `Paul & Linda McCartney` 0.71), true variants spread
-// through the middle (`Black Dog` 0.45, `Michael Turtle` 0.67), and
-// single-name member credits score near 0 (`Rhiannon Giddens` 0.00). No
-// threshold separates them. Of 101 resolved concerts, exactly one went
-// through a `wxyc_library_alt` match, and it was a mislabel: concert
-// 19292, Open Mike Eagle → Paul White.
-//
-// A value that is identical to the owner's name after normalization (the
-// 32 rows at similarity 1.0, such as `GZA/Genius`) still resolves, through
-// the strict arm. The cost is the sub-1.0 spelling variants (`Spellling`,
-// `Angel Wings Marmalade`), which today resolve zero concerts. If one comes
-// to matter, the narrow fix is a reviewed synonym allow-list, not a
-// similarity threshold.
-export const RELATIONAL_ALIAS_SOURCES = ['discogs_member', 'wxyc_library_credit', 'wxyc_library_alt'] as const;
+export const RELATIONAL_ALIAS_SOURCES = ['discogs_member', 'wxyc_library_credit'] as const;
 
 /**
- * Frozen IN-list for the alias arm, built once at module load. Safe-
+ * Frozen IN-lists for the alias arm, built once at module load. Safe-
  * by-construction: the partition is immutable and the values are
  * compile-time constants we control. The identifier-charset assumption
  * (`[A-Za-z0-9_]+`, Postgres' own convention) that lets us inline-
  * quote without escaping is pinned by the unit test
- * `SYNONYM_ALIAS_SOURCES values are identifier-safe` in
+ * `inlined source values are identifier-safe` in
  * query.test.ts — runtime validation would just crash-loop the
  * container at deploy with a bare Node stack, before Sentry / logger /
  * safeFinalize get a chance to attribute the failure, so the
@@ -119,7 +123,9 @@ export const RELATIONAL_ALIAS_SOURCES = ['discogs_member', 'wxyc_library_credit'
  * mocking drizzle-orm in unit tests (the writer's test does this),
  * which is overkill for a short identifier-safe tuple.
  */
-const SYNONYM_SOURCE_IN_LIST = sql.raw(SYNONYM_ALIAS_SOURCES.map((s) => `'${s}'`).join(', '));
+const toInList = (sources: readonly string[]) => sql.raw(sources.map((s) => `'${s}'`).join(', '));
+const SYNONYM_SOURCE_IN_LIST = toInList(SYNONYM_ALIAS_SOURCES);
+const VARIANT_GATED_SOURCE_IN_LIST = toInList(VARIANT_GATED_ALIAS_SOURCES);
 
 type IdRow = { artist_id: number };
 
@@ -188,15 +194,27 @@ export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOu
     return { kind: 'ambiguous' };
   }
 
-  // Restrict to synonym-class sources (BS#1383). The IN-list is built
-  // at module load from SYNONYM_ALIAS_SOURCES — see the docstring on
-  // that constant for the partition rationale and the BS#1390 drift
-  // tracker.
+  // Synonym-class rows always count (BS#1383). Variant-gated rows count
+  // only when they spell the owner's own name (BS#3563), so the arm joins
+  // the owner's `artists` row. See the docstrings on the partition
+  // constants for the rationale and the BS#1390 drift tracker.
+  // `similarity` is pg_trgm's.
   const alias: unknown = await db.execute(sql`
     SELECT DISTINCT asa."artist_id"
     FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
+    JOIN ${ARTISTS_TABLE} owner ON owner."id" = asa."artist_id"
     WHERE ${NORMALIZE_FN}(asa."variant") = ${NORMALIZE_FN}(${raw})
-      AND asa."source" IN (${SYNONYM_SOURCE_IN_LIST})
+      AND (
+        asa."source" IN (${SYNONYM_SOURCE_IN_LIST})
+        OR (
+          asa."source" IN (${VARIANT_GATED_SOURCE_IN_LIST})
+          AND (
+            regexp_replace(lower(asa."variant"), '[^[:alnum:]]', '', 'g')
+              = regexp_replace(lower(owner."artist_name"), '[^[:alnum:]]', '', 'g')
+            OR similarity(${NORMALIZE_FN}(asa."variant"), ${NORMALIZE_FN}(owner."artist_name")) = 1
+          )
+        )
+      )
     LIMIT 2
   `);
   const aliasRows = unwrapRows<IdRow>(alias);
