@@ -3799,10 +3799,13 @@ async function searchLibraryBothMode(
     // BS#3578: ask for the reserve even when stage 1 left less room than it.
     // With neither room nor a reserve (a full page under 10), the probe could
     // only add albums past `n`, so skip the query. A non-finite `n` skips it
-    // too: there is no page size to reserve from. `trimmed.length >= 2`
-    // mirrors stage 2's own gate below.
+    // too: there is no page size to reserve from. The check reads
+    // `probeLimit`, not `n`: `GET /library/` passes `n` through from the
+    // query string unparsed, so `n` can be the string "50", which the
+    // arithmetic above coerces and `Number.isFinite(n)` would reject.
+    // `trimmed.length >= 2` mirrors stage 2's own gate below.
     const probeLimit = Math.max(room, Math.floor(n / ALIAS_RESERVE_PAGE_DIVISOR));
-    if (!appendAliasHits || !aliasEnabled || !Number.isFinite(n) || probeLimit <= 0 || trimmed.length < 2) {
+    if (!appendAliasHits || !aliasEnabled || !Number.isFinite(probeLimit) || probeLimit <= 0 || trimmed.length < 2) {
       return tsvectorResults;
     }
     // The probe's SQL already excludes every stage-1 match; dedupe by id
