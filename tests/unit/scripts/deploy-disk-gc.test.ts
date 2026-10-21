@@ -196,18 +196,18 @@ describe('setup computes the full live-target universe for the retired-repo swee
     expect(liveTargetsStep).toContain('if [ -f "Dockerfile.$TARGET" ]');
   });
 
-  it('uses the identical jq filter as the affected-target detection step', () => {
+  it('reads the same universe the affected-target detection step computed', () => {
     // Both steps must partition apps/+jobs/ workspaces the same way -- a
-    // divergence here (e.g. one step picking up a path turbo reports
-    // differently) would silently desync live_targets from targets.
-    // The affected-target filter lives in scripts/deploy-affected-targets.sh
-    // since BS#3564.
-    const script = fs.readFileSync(path.join(repoRoot, 'scripts/deploy-affected-targets.sh'), 'utf-8');
-    const liveFilter = [...setup.matchAll(/jq -c '([^']+)'/g)].map((m) => m[1]);
-    const affectedFilter = script.match(/^SELECT='([^']+)'$/m)?.[1];
-    expect(liveFilter).toHaveLength(1);
-    expect(liveFilter[0]).toBe(affectedFilter);
-    expect(liveFilter[0]).toContain('startswith("apps/")');
+    // divergence here would silently desync live_targets from targets. Since
+    // BS#3564 the universe is computed once, in Detect Build Target, and this
+    // step reads it from that step's output.
+    const jqFilters = [...setup.matchAll(/jq -c '([^']+)'/g)].map((m) => m[1]);
+    expect(jqFilters).toHaveLength(1);
+    expect(jqFilters[0]).toContain('startswith("apps/")');
+    expect(setup.slice(0, setup.indexOf('Detect Live Target Repos'))).toContain(
+      'ALL_TARGETS=$(npx turbo ls --output=json'
+    );
+    expect(liveTargetsStep).toContain('ALL: ${{ steps.detect_targets.outputs.ALL_TARGETS }}');
   });
 
   it('exposes the result as a job output', () => {

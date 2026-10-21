@@ -2,24 +2,28 @@
 # Picks the Auto Build & Deploy targets: every app/job workspace that changed
 # since the commit THAT TARGET was last deployed at (BS#3564).
 #
-# Each successful `deploy` leg in deploy-base.yml force-updates
-# `refs/deployed/<target>` to the commit it deployed. Diffing per target from
-# that ref, not from `github.event.before`, means a target changed by a push
-# whose run GitHub dropped from the concurrency queue still builds, and a
-# target whose deploy failed stays pending without holding back the others.
+# `refs/deployed/<target>` records that commit. A `deploy` leg moves it
+# forward when it ships the target, and `setup` fast-forwards it for targets
+# this run did not need to build. Diffing per target from that ref, not from
+# `github.event.before`, means a target changed by a push whose run GitHub
+# dropped from the concurrency queue still builds, and a target whose deploy
+# failed stays pending without holding back the others.
 #
 # Base for each target, in order:
 #   1. refs/deployed/<target>, if it is a strict ancestor of HEAD_SHA. If it is
 #      HEAD_SHA or a descendant (a re-run of an older run), the target is
 #      skipped: older code never goes out over newer. If it has diverged
 #      (force-push), warn and fall through.
-#   2. The commit of the newest <target>/v* tag, if a strict ancestor. Tags are
-#      cut before build and deploy, so this is only a bootstrap guess.
-#   3. EVENT_BEFORE, if a strict ancestor.
-#   4. None: the target is built unscoped (fail open), with a warning.
+#   2. The commit of the newest <target>/v* tag, chosen the way
+#      .github/actions/latest_tag chooses it, if a strict ancestor. Tags are
+#      cut before build and deploy, so this is only a bootstrap guess. If the
+#      tag exists but is not a strict ancestor, EVENT_BEFORE is used instead.
+#   3. None: a target with no ref and no tag is new, so it is built
+#      unscoped, with a warning (also the fail-open for an unusable base).
 # Targets that share a base share one `turbo ls --affected` call.
 #
-# Env: HEAD_SHA (required), EVENT_BEFORE. Needs full history and tags
+# Env: HEAD_SHA (required), ALL_TARGETS (required, JSON array of every
+# apps/+jobs/ target name), EVENT_BEFORE. Needs full history and tags
 # (`fetch-depth: 0`) plus the fetched refs/deployed/*.
 # Prints a JSON object {target: base} for the affected targets on stdout; the
 # base is "" for an unscoped target. Logs each base and its source on stderr.
@@ -30,8 +34,8 @@
 set -euo pipefail
 
 HEAD_SHA="${HEAD_SHA:?HEAD_SHA is required}"
+ALL_TARGETS="${ALL_TARGETS:?ALL_TARGETS is required}"
 EVENT_BEFORE="${EVENT_BEFORE:-}"
-SELECT='[.packages.items[] | select(.path | (startswith("apps/") or startswith("jobs/"))) | .path | split("/")[1]] | unique | sort'
 
 strict_ancestor() {
   [ -n "$1" ] && [ "$1" != "$HEAD_SHA" ] && git merge-base --is-ancestor "$1" "$HEAD_SHA" 2>/dev/null
@@ -51,24 +55,26 @@ resolve_base() {
       echo "skip refs/deployed/$target"
       return
     fi
-    echo "::warning title=Deployed ref diverged::refs/deployed/$target ($ref) is not an ancestor of $HEAD_SHA (force-push?); falling back to its tag or github.event.before." >&2
+    echo "::warning title=Deployed ref diverged::refs/deployed/$target ($ref) is not an ancestor of $HEAD_SHA (force-push?); falling back to its newest version tag." >&2
   fi
-  tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$target/v*")
+  tag=$(git tag -l "$target/v*" | sort -V | tail -n 1)
+  if [ -z "$tag" ]; then
+    echo "none new-target"
+    return
+  fi
   tag_sha=$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)
-  if [ -n "$tag" ] && strict_ancestor "$tag_sha"; then
+  if strict_ancestor "$tag_sha"; then
     echo "$tag_sha tag:$tag"
   elif strict_ancestor "$EVENT_BEFORE"; then
     echo "$EVENT_BEFORE github.event.before"
   else
-    echo "none none"
+    echo "none no-usable-base"
   fi
 }
 
 PLAN=$(mktemp)
 trap 'rm -f "$PLAN"' EXIT
-# An assignment, so a failing turbo stops the script instead of yielding none.
-ALL=$(npx turbo ls --output=json 2>/dev/null | jq -r "$SELECT | .[]")
-for TARGET in $ALL; do
+for TARGET in $(echo "$ALL_TARGETS" | jq -r '.[]'); do
   echo "$TARGET $(resolve_base "$TARGET")" >>"$PLAN"
 done
 
@@ -82,19 +88,20 @@ for BASE in $(awk '{print $2}' "$PLAN" | sort -u); do
     continue
   fi
   if [ "$BASE" = "none" ]; then
-    echo "::warning title=Deploying unscoped targets::No usable base for $GROUP; building them unscoped." >&2
+    echo "::warning title=Deploying unscoped targets::No usable base for $GROUP($SOURCES); building them unscoped." >&2
     AFFECTED="$GROUP"
     BASE=""
   else
     echo "Affected base $BASE (source: $SOURCES) for: $GROUP" >&2
     TURBO_STDERR=$(mktemp)
-    AFFECTED=$(TURBO_SCM_BASE="$BASE" TURBO_SCM_HEAD="$HEAD_SHA" npx turbo ls --affected --output=json 2>"$TURBO_STDERR" | jq -r "$SELECT | .[]")
+    PATHS=$(TURBO_SCM_BASE="$BASE" TURBO_SCM_HEAD="$HEAD_SHA" npx turbo ls --affected --output=json 2>"$TURBO_STDERR" | jq -r '.packages.items[].path')
     cat "$TURBO_STDERR" >&2
     if grep -q 'assuming all files have changed' "$TURBO_STDERR"; then
       echo "::error title=Affected-target detection is broken::turbo could not diff $BASE..$HEAD_SHA even though git resolves it. Refusing to deploy every target silently -- see BS#2264." >&2
       exit 1
     fi
     rm -f "$TURBO_STDERR"
+    AFFECTED=$(echo "$PATHS" | sed -nE 's#^(apps|jobs)/##p')
   fi
   for TARGET in $AFFECTED; do
     if [[ " $GROUP " == *" $TARGET "* ]]; then
