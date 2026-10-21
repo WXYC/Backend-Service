@@ -3226,6 +3226,33 @@ describe('proxy.controller', () => {
       expect(res.set).toHaveBeenCalledWith('Cache-Control', 'private, max-age=60');
     });
 
+    // BS#3587: `limit` is parsed, not `parseInt`-truncated; absent or blank
+    // leaves LML's own default in charge.
+    test.each([
+      [undefined, undefined],
+      ['', undefined],
+      ['100', 100],
+    ])('forwards limit=%j to LML as %j', async (limit, expected) => {
+      mockSearchLibrary.mockResolvedValue({ results: [], total: 0, query: 'Stereolab' });
+      const req = { query: { q: 'Stereolab', limit } } as unknown as Request;
+      const res = createMockRes();
+
+      await librarySearch(req, res as Response, mockNext);
+
+      expect(mockSearchLibrary).toHaveBeenCalledWith(expect.objectContaining({ limit: expected }));
+    });
+
+    test.each([['abc'], ['0'], ['7abc'], ['101'], [['1', '2']]])('rejects limit=%j with a 400', async (limit) => {
+      const req = { query: { q: 'Stereolab', limit } } as unknown as Request;
+      const res = createMockRes();
+
+      await expect(librarySearch(req, res as Response, mockNext)).rejects.toMatchObject({
+        message: 'limit must be an integer from 1 to 100',
+        statusCode: 400,
+      });
+      expect(mockSearchLibrary).not.toHaveBeenCalled();
+    });
+
     it('forwards q param for free text search', async () => {
       mockSearchLibrary.mockResolvedValue({ results: [], total: 0, query: null });
       const req = { query: { q: 'Cat Power' } } as unknown as Request;

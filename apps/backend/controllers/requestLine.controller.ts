@@ -233,8 +233,6 @@ export const searchLibraryEndpoint: RequestHandler<object, unknown, unknown, Lib
   const startTime = Date.now();
 
   const { artist, title, query, limit } = req.query;
-  // A blank `?limit=` keeps the default, as before; anything else must be a positive integer (BS#3587).
-  const limitNum = parseCountQueryParam(limit === '' ? undefined : limit, 'limit') ?? 5;
 
   console.log(`[${logId}] Library search request:`, {
     method: req.method,
@@ -243,7 +241,7 @@ export const searchLibraryEndpoint: RequestHandler<object, unknown, unknown, Lib
     artist,
     title,
     query,
-    limit: limitNum,
+    limit,
     timestamp: new Date().toISOString(),
   });
 
@@ -251,6 +249,9 @@ export const searchLibraryEndpoint: RequestHandler<object, unknown, unknown, Lib
     res.status(400).json({ message: 'At least one of artist, title, or query is required' });
     return;
   }
+
+  // Absent or blank keeps the default of 5 (BS#3587).
+  const limitNum = parseCountQueryParam(limit, 'limit') ?? 5;
 
   try {
     const results = await searchLibrary(query, artist, title, limitNum);
