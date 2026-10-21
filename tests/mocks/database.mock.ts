@@ -759,6 +759,7 @@ export const shows = {
   start_time: 'shows.start_time',
   end_time: 'shows.end_time',
   show_name: 'shows.show_name',
+  request_mode: 'shows.request_mode',
   specialty_id: 'shows.specialty_id',
 };
 export const show_djs = {
@@ -855,6 +856,7 @@ export const specialty_shows = {
   tagline: 'specialty_shows.tagline',
   logs_playcuts: 'specialty_shows.logs_playcuts',
   default_spotlight_role: 'specialty_shows.default_spotlight_role',
+  default_request_mode: 'specialty_shows.default_request_mode',
   artwork: 'specialty_shows.artwork',
   accent_color: 'specialty_shows.accent_color',
   slots: 'specialty_shows.slots',

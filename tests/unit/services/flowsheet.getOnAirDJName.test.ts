@@ -66,13 +66,33 @@ describe('getOnAir', () => {
       show_id: 41,
       show_name: 'Boom Hour',
       specialty: expect.objectContaining({ id: 7, slug: 'sonic-boom', name: 'Sonic Boom' }),
+      request_line: { mode: 'requests', source: 'default' },
     });
+  });
+
+  it.each([
+    ['the DJs chose a mode', 'closed', 'feedback', { mode: 'closed', source: 'dj' }],
+    ['the program defaults to messages', null, 'feedback', { mode: 'feedback', source: 'program' }],
+    ['neither chose', null, null, { mode: 'requests', source: 'default' }],
+  ])('carries request_line when %s', async (_name, request_mode, default_request_mode, request_line) => {
+    queueShow(
+      { id: 41, end_time: null, primary_dj_id: null, dj_name_override: 'DJ HOUNDSTOOTH', request_mode },
+      { ...PROGRAM_ROW, default_request_mode }
+    );
+
+    expect((await getOnAir())?.request_line).toEqual(request_line);
   });
 
   it('answers null specialty and null show_name for a freeform show', async () => {
     queueShow({ id: 42, end_time: null, primary_dj_id: null, dj_name_override: 'DJ HOUNDSTOOTH', show_name: null });
 
-    expect(await getOnAir()).toEqual({ dj_name: 'DJ HOUNDSTOOTH', show_id: 42, show_name: null, specialty: null });
+    expect(await getOnAir()).toEqual({
+      dj_name: 'DJ HOUNDSTOOTH',
+      show_id: 42,
+      show_name: null,
+      specialty: null,
+      request_line: { mode: 'requests', source: 'default' },
+    });
   });
 
   it('is null on automation (latest show ended)', async () => {

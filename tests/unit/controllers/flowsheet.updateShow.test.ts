@@ -81,9 +81,15 @@ const call = (body: unknown, { manage = false, id = '5' } = {}) => {
 describe('PATCH /flowsheet/shows/:id (BS#3456)', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  const successes: Array<
-    [string, Record<string, unknown>, unknown[][], boolean, Record<string, unknown>, Record<string, unknown>]
-  > = [
+  type SuccessCase = [
+    string,
+    Record<string, unknown>,
+    unknown[][],
+    boolean,
+    Record<string, unknown>,
+    Record<string, unknown>,
+  ];
+  const successes: SuccessCase[] = [
     [
       'tags an open show as a member',
       { specialty_id: 7 },
@@ -130,6 +136,17 @@ describe('PATCH /flowsheet/shows/:id (BS#3456)', () => {
       { specialty_id: 7 },
       { specialty_id: 7 },
     ],
+    ...(['requests', 'feedback', 'closed', null] as const).map(
+      (mode) =>
+        [
+          `sets request_mode to ${mode}`,
+          { request_mode: mode },
+          [...OPEN_MEMBER, rangeRow({})],
+          false,
+          { request_mode: mode },
+          {},
+        ] as SuccessCase
+    ),
     [
       'lets a manager edit an ended show',
       { show_name: 'Fixed' },
@@ -166,6 +183,8 @@ describe('PATCH /flowsheet/shows/:id (BS#3456)', () => {
     ],
     ['a non-integer specialty id', { specialty_id: '7' }, [...OPEN_MEMBER], 400, undefined],
     ['a title over 128 characters', { show_name: 'x'.repeat(129) }, [], 400, undefined],
+    ['an unknown request_mode', { request_mode: 'loud' }, [...OPEN_MEMBER], 400, undefined],
+    ['a request_mode that is not a string', { request_mode: 5 }, [...OPEN_MEMBER], 400, undefined],
     ['a title that is not a string', { show_name: 5 }, [], 400, undefined],
     [
       'a non-member on an open show',
