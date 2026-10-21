@@ -392,6 +392,45 @@ describe('defineStoreAllowlist', () => {
   });
 });
 
+describe('defineStoreAllowlist CreateInvalidationCommand', () => {
+  const allowlist = defineStoreAllowlist({ commands: ['CreateInvalidationCommand'], keyPrefixes: ['p/'] });
+  // Stands in for the CloudFront command class: the allowlist reads only its name and input.
+  class CreateInvalidationCommand {
+    constructor(public input: { InvalidationBatch: { Paths: { Items?: string[] } } }) {}
+  }
+  const invalidate = (Items?: string[]) => new CreateInvalidationCommand({ InvalidationBatch: { Paths: { Items } } });
+
+  it.each([
+    ['a path under the prefix', ['/p/abc.jpg']],
+    ['a wildcard at the prefix directory', ['/p/*']],
+    ['several allowed paths', ['/p/a.jpg', '/p/b/*']],
+  ])('allows %s', (_name, items) => {
+    expect(() => allowlist.assertAllowed(invalidate(items))).not.toThrow();
+  });
+
+  it.each([
+    ['a path outside the prefix', ['/held/x']],
+    ['a root wildcard', ['/*']],
+    ['a wildcard that widens the prefix', ['/p*']],
+    ['a path-traversal path', ['/p/../held/x']],
+    ['an empty path', ['']],
+    ['an empty Items list', []],
+    ['a missing Items list', undefined],
+    ['a mixed list with one bad path', ['/p/a.jpg', '/held/x']],
+  ])('refuses %s without echoing the path', (_name, items) => {
+    expect(() => allowlist.assertAllowed(invalidate(items))).toThrow(/invalidation/i);
+    expect(() => allowlist.assertAllowed(invalidate(items))).not.toThrow(/held|a\.jpg/);
+  });
+
+  it('fails closed for another keyless command', () => {
+    class ListObjectsV2Command {
+      input = {};
+    }
+    const open = defineStoreAllowlist({ commands: ['ListObjectsV2Command'], keyPrefixes: ['p/'] });
+    expect(() => open.assertAllowed(new ListObjectsV2Command())).toThrow(/prefix/);
+  });
+});
+
 describe('defineStoreAllowlist CopySource', () => {
   const allowlist = defineStoreAllowlist({ commands: ['CopyObjectCommand'], keyPrefixes: ['posters/', 'held/'] });
   const copy = (CopySource: string) => new CopyObjectCommand({ Bucket: 'b', Key: 'posters/dest.png', CopySource });

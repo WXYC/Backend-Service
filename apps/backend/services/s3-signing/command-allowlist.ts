@@ -19,7 +19,12 @@ export interface StoreAllowlistConfig {
 export interface StoreAllowlist {
   assertAllowed(command: {
     constructor: { name: string };
-    input: { Key?: string; CopySource?: string; Bucket?: string };
+    input: {
+      Key?: string;
+      CopySource?: string;
+      Bucket?: string;
+      InvalidationBatch?: { Paths?: { Items?: string[] } };
+    };
   }): void;
 }
 
@@ -37,6 +42,23 @@ export function defineStoreAllowlist(config: StoreAllowlistConfig): StoreAllowli
       }
       const outside = (key: string) =>
         key.split('/').includes('..') || !config.keyPrefixes.some((prefix) => key.startsWith(prefix));
+      if (name === 'CreateInvalidationCommand') {
+        // CloudFront paths start with "/" and may end in one "*"; map each onto a key prefix.
+        // A wildcard must keep the whole allowed prefix before it, so `/p/*` passes for `p/` but `/p*` and `/*` do not.
+        const items = command.input.InvalidationBatch?.Paths?.Items;
+        const insidePrefixes = (item: string) => {
+          if (!item.startsWith('/')) {
+            return false;
+          }
+          const rest = item.slice(1);
+          const base = rest.endsWith('*') ? rest.slice(0, -1) : rest;
+          return !base.includes('*') && !outside(base);
+        };
+        if (!Array.isArray(items) || items.length === 0 || !items.every(insidePrefixes)) {
+          throw new Error("CloudFront invalidation path is outside this store's allowed prefixes");
+        }
+        return;
+      }
       if (outside(command.input.Key ?? '')) {
         throw new Error("S3 key is outside this store's allowed prefixes");
       }
