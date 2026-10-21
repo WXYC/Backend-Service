@@ -39,6 +39,7 @@ jest.mock('@wxyc/database', () => {
   return jest.requireActual('../../utils/real-database-module').realDatabaseModule({ db: scriptedDb });
 });
 
+import type { UpdateRequestBody } from '../../../apps/backend/controllers/flowsheet.controller';
 import { updateEntry } from '../../../apps/backend/services/flowsheet.service';
 
 const spotlight = (over: Record<string, unknown> = {}) => ({
@@ -69,7 +70,7 @@ beforeEach(() => {
 });
 
 describe('updateEntry — spotlight rows', () => {
-  it.each([
+  it.each<[string, UpdateRequestBody, string]>([
     ['name only', { spotlight_name: 'Weirs' }, 'In the studio: Weirs'],
     ['role only', { spotlight_role: 'reader' }, 'Reading now: Weirz'],
     ['both', { spotlight_role: 'dj', spotlight_name: 'Weirs' }, 'Now mixing: Weirs'],
