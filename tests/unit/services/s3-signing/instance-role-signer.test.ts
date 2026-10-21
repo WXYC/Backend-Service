@@ -207,6 +207,23 @@ describe('createInstanceRoleSigner', () => {
       }
     });
 
+    it('forwards send options to the client', async () => {
+      const { S3Client } = jest.requireActual('@aws-sdk/client-s3');
+      const spy = jest.spyOn(S3Client.prototype, 'send').mockResolvedValue({});
+      try {
+        const signer = createInstanceRoleSigner({
+          credentialProvider: () => Promise.resolve(fakeCredentials('A', 60 * MIN)),
+          now,
+        });
+        const cmd = new HeadObjectCommand({ Bucket: 'b', Key: 'posters/a.png' });
+        const options = { abortSignal: new AbortController().signal };
+        await signer.send(cmd, options);
+        expect(spy).toHaveBeenCalledWith(cmd, options);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('reuses the cached credentials across sends and presigns, refreshing at most once a minute', async () => {
       const { S3Client } = jest.requireActual('@aws-sdk/client-s3');
       const spy = jest.spyOn(S3Client.prototype, 'send').mockResolvedValue({});

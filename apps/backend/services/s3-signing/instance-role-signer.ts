@@ -117,9 +117,10 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
       }
       return getSignedUrl(cached!.client, command, { expiresIn });
     },
-    send: (async (command: Parameters<S3Client['send']>[0]) => {
+    // Forwards every argument (options, callback form) so the declared overloads hold.
+    send: (async (...args: unknown[]) => {
       await ensureCredentials(HEADROOM_MS);
-      return cached!.client.send(command);
+      return (cached!.client as { send(...args: unknown[]): unknown }).send(...args);
     }) as S3Client['send'],
     async credentials() {
       await ensureCredentials(HEADROOM_MS);
