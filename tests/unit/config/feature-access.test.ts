@@ -8,6 +8,7 @@ const mockGetAllFlags = jest.fn();
 const mockIsReady = jest.fn();
 const mockPostHog = jest.fn();
 const mockCaptureMessage = jest.fn();
+const handlers: Record<string, () => void> = {};
 
 jest.mock('posthog-node', () => ({
   PostHog: class {
@@ -17,6 +18,9 @@ jest.mock('posthog-node', () => ({
     getAllFlags = mockGetAllFlags;
     isLocalEvaluationReady = mockIsReady;
     shutdown = jest.fn();
+    on = (event: string, handler: () => void) => {
+      handlers[event] = handler;
+    };
   },
 }));
 jest.mock('@wxyc/observability', () => ({
@@ -226,6 +230,28 @@ describe('the missing-flag warning', () => {
   );
 });
 
+describe('the stale-definitions warning', () => {
+  it('reports a poll failure after a successful load once, keeps the loaded value, and clears when definitions load again', async () => {
+    setEnv('REVIEWS_AUDIENCE', 'off');
+    givenPostHog({ returns: 'everyone' });
+    await audience('reviews');
+    handlers.error();
+    for (let i = 0; i < 3; i++) {
+      await expect(audience('reviews')).resolves.toBe('everyone');
+    }
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+    expect(mockCaptureMessage).toHaveBeenCalledWith(
+      expect.stringContaining('stopped refreshing'),
+      expect.objectContaining({ level: 'warning' })
+    );
+    handlers.localEvaluationFlagsLoaded();
+    await audience('reviews');
+    handlers.error();
+    await audience('reviews');
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('a PostHog failure fails closed', () => {
   beforeEach(() => {
     setEnv('REVIEWS_AUDIENCE', 'staff');
@@ -241,6 +267,12 @@ describe('a PostHog failure fails closed', () => {
     }
     expect(mockPostHog).toHaveBeenCalledTimes(1);
     expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('goes straight to the env value without calling getAllFlags while definitions are not ready', async () => {
+    givenPostHog('not loaded');
+    await expect(audience('reviews')).resolves.toBe('staff');
+    expect(mockGetAllFlags).not.toHaveBeenCalled();
   });
 
   it('falls back to the env value and reports once when getAllFlags throws', async () => {
