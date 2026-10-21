@@ -106,6 +106,7 @@ jobs:
           # apps/backend reads it (restart_target=backend, the default).
           REVIEWS_AUDIENCE: ${{ secrets.REVIEWS_AUDIENCE }}
           POSTHOG_SECRET_KEY: ${{ secrets.POSTHOG_SECRET_KEY }}
+          POSTHOG_FLAGS_API_KEY: ${{ secrets.POSTHOG_FLAGS_API_KEY }}
           # Digital-archive playback endpoint (BS#2320, epic
           # WXYC/wxyc-dj-ios#135). Carried through the same allowlist as
           # DONATE_* above — light-up is meant to be a variable-only change.
@@ -389,6 +390,7 @@ jobs:
             DONATE_ENABLED) VALUE="$DONATE_ENABLED" ;;
             REVIEWS_AUDIENCE) VALUE="$REVIEWS_AUDIENCE" ;;
             POSTHOG_SECRET_KEY) VALUE="$POSTHOG_SECRET_KEY" ;;
+            POSTHOG_FLAGS_API_KEY) VALUE="$POSTHOG_FLAGS_API_KEY" ;;
             DIGITAL_ARCHIVE_STREAMING_ENABLED) VALUE="$DIGITAL_ARCHIVE_STREAMING_ENABLED" ;;
             DIGITAL_ARCHIVE_SIGN_TTL_SECONDS) VALUE="$DIGITAL_ARCHIVE_SIGN_TTL_SECONDS" ;;
             DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT) VALUE="$DIGITAL_ARCHIVE_STORE_AZURACAST_ENDPOINT" ;;

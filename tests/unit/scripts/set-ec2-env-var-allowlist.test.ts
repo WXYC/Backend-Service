@@ -47,6 +47,7 @@ const ALLOWLISTED_KEYS = [
   'CORS_PREVIEW_ORIGINS',
   'REVIEWS_AUDIENCE',
   'POSTHOG_SECRET_KEY',
+  'POSTHOG_FLAGS_API_KEY',
 ] as const;
 
 describe('set-ec2-env-var.yml allowlist', () => {
