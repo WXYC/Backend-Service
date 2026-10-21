@@ -2150,8 +2150,44 @@ export const closeShowFromTerminalShowEndMarker = async (showId: number): Promis
 export const ANONYMOUS_ON_AIR_NAME = 'WXYC';
 
 /**
- * Resolve the display name of whoever is currently on air, or `null` when the
- * station is on automation.
+ * The display name of an active `show_djs` member of `showId`, or null when the
+ * show has no account members with a resolvable handle.
+ *
+ * Ordered by `auth_user.id` purely for determinism — `show_djs` carries no join
+ * timestamp and no serial id, so there is no "who arrived first" to read
+ * (BS#2237). With no `primary_dj_id` to prefer, any stable order beats a
+ * plan-dependent one.
+ *
+ * The comparison is a plain relational one, NOT `localeCompare`: the sort's
+ * only job is to be the same on every host, and `localeCompare` without an
+ * explicit locale is collation-dependent, so it would make the banner's choice
+ * of DJ depend on the container's ICU data — the one property this sort exists
+ * to guarantee.
+ *
+ * Scoped to the LIVE on-air read. Deliberately not folded into
+ * `resolveDjNameForShow`, which also feeds the archive and the write path:
+ * changing the shared chain would rewrite the names on historical shows.
+ */
+const activeMemberOnAirName = async (showId: number): Promise<string | null> => {
+  const members = await getDJsInShow(showId, true);
+  const named = members
+    .map((m) => ({ id: String(m.id), name: resolveDjDisplayName((m.djName as string | null | undefined) ?? null) }))
+    .filter((m): m is { id: string; name: string } => !!m.name && m.name.trim().length > 0)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return named[0]?.name ?? null;
+};
+
+/** The open show as `on_air` reports it: public handle, show id and title, and the program the DJ signed on as. */
+export type OnAirShow = {
+  dj_name: string;
+  show_id: number;
+  show_name: string | null;
+  specialty: SpecialtyShowRef | null;
+};
+
+/**
+ * Resolve the open show as `on_air` reports it (display name, show id, title and
+ * specialty), or `null` when the station is on automation.
  *
  * Backs the `on_air` field on the default paginated GET /flowsheet response.
  * A show is "on air" when the latest show (`MAX(shows.id)`) has no `end_time`;
@@ -2190,46 +2226,10 @@ export const ANONYMOUS_ON_AIR_NAME = 'WXYC';
  * false-"Auto DJ" bug, and it is the practical limit of the "`null` means
  * automation" guarantee.
  *
- * @returns the on-air display name — a resolved DJ handle, or
+ * @returns the {@link OnAirShow}: `dj_name` is a resolved DJ handle, or
  *   `ANONYMOUS_ON_AIR_NAME` when the open show has no resolvable name — or
  *   `null` only when no show is open (automation).
  */
-/**
- * The display name of an active `show_djs` member of `showId`, or null when the
- * show has no account members with a resolvable handle.
- *
- * Ordered by `auth_user.id` purely for determinism — `show_djs` carries no join
- * timestamp and no serial id, so there is no "who arrived first" to read
- * (BS#2237). With no `primary_dj_id` to prefer, any stable order beats a
- * plan-dependent one.
- *
- * The comparison is a plain relational one, NOT `localeCompare`: the sort's
- * only job is to be the same on every host, and `localeCompare` without an
- * explicit locale is collation-dependent, so it would make the banner's choice
- * of DJ depend on the container's ICU data — the one property this sort exists
- * to guarantee.
- *
- * Scoped to the LIVE on-air read. Deliberately not folded into
- * `resolveDjNameForShow`, which also feeds the archive and the write path:
- * changing the shared chain would rewrite the names on historical shows.
- */
-const activeMemberOnAirName = async (showId: number): Promise<string | null> => {
-  const members = await getDJsInShow(showId, true);
-  const named = members
-    .map((m) => ({ id: String(m.id), name: resolveDjDisplayName((m.djName as string | null | undefined) ?? null) }))
-    .filter((m): m is { id: string; name: string } => !!m.name && m.name.trim().length > 0)
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return named[0]?.name ?? null;
-};
-
-/** The open show as `on_air` reports it: public handle, show id and title, and the program the DJ signed on as. */
-export type OnAirShow = {
-  dj_name: string;
-  show_id: number;
-  show_name: string | null;
-  specialty: SpecialtyShowRef | null;
-};
-
 export const getOnAir = async (): Promise<OnAirShow | null> => {
   // One read: the latest show with its catalog row LEFT JOINed, so the program
   // comes from the show's own `specialty_id`, never from the catalog's slots.

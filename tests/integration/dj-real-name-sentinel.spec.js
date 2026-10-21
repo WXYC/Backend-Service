@@ -424,22 +424,12 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
   });
 
   describe('GET /flowsheet on_air (BS#3457)', () => {
-    const endShow = () =>
-      request.post('/flowsheet/end').set('Authorization', global.access_token).send({ dj_id: global.primary_dj_id });
-
-    beforeAll(endShow);
-    afterAll(endShow);
-
+    // The suite's seeded staff show is the open latest show, and its owner's real name is the sentinel, so it is the
+    // stronger control: no join (which would 409 against it) is needed.
     it('positive control: a live show carries on_air with exactly the public keys, and no real name', async () => {
-      const joined = await request
-        .post('/flowsheet/join')
-        .set('Authorization', global.access_token)
-        .send({ dj_id: global.primary_dj_id, show_name: 'Sentinel on-air probe' })
-        .expect(200);
-
       const res = await request.get('/flowsheet');
       assertNoSentinel(res);
-      expect(res.body.on_air.show_id).toBe(joined.body.id);
+      expect(res.body.on_air.show_id).toBe(staffShowId);
       expect(Object.keys(res.body.on_air).sort()).toEqual(['dj_name', 'show_id', 'show_name', 'specialty']);
     });
   });

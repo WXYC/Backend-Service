@@ -490,7 +490,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // page). Three states, matching wxyc-shared api.yaml FlowsheetV2PaginatedResponse:
   // an OnAirInfo object = a human is live (a resolved DJ handle, or the "WXYC"
   // station brand when the open show has no resolvable name — see
-  // getOnAirDJName — plus the open show's id, title and specialty); `null` =
+  // getOnAir — plus the open show's id, title and specialty); `null` =
   // confirmed automation; the field ABSENT = the banner
   // query failed (unknown). Only the default paginated branch carries it — the
   // iOS app polls this branch.
