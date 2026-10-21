@@ -1,4 +1,4 @@
--- BS#3458 (specialty shows in the flowsheet, epic BS#3445, leaf L16): the role and name a `spotlight` flowsheet row carries, and the CHECK that ties them to the entry type.
+-- BS#3458 (specialty shows in the flowsheet, epic BS#3445, leaf L16): the role and name a `spotlight` flowsheet row carries, and the CHECK that ties them to the entry type: a `spotlight` row carries both, every other row carries neither (a lone role or lone name is rejected).
 --
 -- `spotlight_role` reuses the enum 0201 created for `specialty_shows.default_spotlight_role`; `spotlight_name` is free text. Both are nullable, so the ADD COLUMNs rewrite nothing.
 --
@@ -13,4 +13,4 @@
 
 ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "spotlight_role" "wxyc_schema"."spotlight_role";--> statement-breakpoint
 ALTER TABLE "wxyc_schema"."flowsheet" ADD COLUMN "spotlight_name" varchar(128);--> statement-breakpoint
-ALTER TABLE "wxyc_schema"."flowsheet" ADD CONSTRAINT "flowsheet_spotlight_columns_check" CHECK ((entry_type::text = 'spotlight') = (spotlight_role IS NOT NULL AND spotlight_name IS NOT NULL)) NOT VALID;
+ALTER TABLE "wxyc_schema"."flowsheet" ADD CONSTRAINT "flowsheet_spotlight_columns_check" CHECK (CASE WHEN entry_type::text = 'spotlight' THEN spotlight_role IS NOT NULL AND spotlight_name IS NOT NULL ELSE spotlight_role IS NULL AND spotlight_name IS NULL END) NOT VALID;

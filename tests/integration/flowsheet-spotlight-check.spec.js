@@ -78,10 +78,13 @@ describe('flowsheet spotlight columns and CHECK (BS#3458)', () => {
     await expect(insertRow('spotlight', role, name)).rejects.toMatchObject({ code: '23514' });
   });
 
-  // The CHECK as specified ties the pair to the type only when both are set: a track row carrying just one column
-  // satisfies `false = false` and is not rejected. Only a track row carrying both is.
-  test('rejects a track row carrying both a role and a name', async () => {
-    await expect(insertRow('track', 'host', 'Test Host')).rejects.toMatchObject({ code: '23514' });
+  // A non-spotlight row must carry neither column: a lone name or a lone role is rejected, as is both.
+  test.each([
+    ['only a name', null, 'Test Host'],
+    ['only a role', 'host', null],
+    ['both a role and a name', 'host', 'Test Host'],
+  ])('rejects a track row carrying %s', async (_label, role, name) => {
+    await expect(insertRow('track', role, name)).rejects.toMatchObject({ code: '23514' });
   });
 
   test('accepts a track row with neither column', async () => {

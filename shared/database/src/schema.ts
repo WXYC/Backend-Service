@@ -1702,7 +1702,7 @@ export const flowsheet = wxyc_schema.table(
     // Added NOT VALID by migration 0203 and validated out of band (BS#3478), so the live constraint is unvalidated.
     check(
       'flowsheet_spotlight_columns_check',
-      sql`(${table.entry_type}::text = 'spotlight') = (${table.spotlight_role} IS NOT NULL AND ${table.spotlight_name} IS NOT NULL)`
+      sql`CASE WHEN ${table.entry_type}::text = 'spotlight' THEN ${table.spotlight_role} IS NOT NULL AND ${table.spotlight_name} IS NOT NULL ELSE ${table.spotlight_role} IS NULL AND ${table.spotlight_name} IS NULL END`
     ),
     // legacy_entry_id is the surrogate key tubafrenzy assigns each entry;
     // unique per row when present (NULL allowed for dj-site-originated rows
