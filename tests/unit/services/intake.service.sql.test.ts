@@ -34,7 +34,6 @@ import {
   logIntakeItem,
   buildCdrFormatLookup,
   buildIntakePatch,
-  buildLabelNameCheck,
   buildIntakeSelect,
   buildTransition,
   deleteIntakeItem,
@@ -48,6 +47,7 @@ import {
   memberAccount,
   sentLinkChanged,
   withBandcampEntered,
+  sameLabelName,
 } from '../../../apps/backend/services/intake.service';
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -1148,17 +1148,18 @@ describe('writeAcceptance — a digital album has no disc, so choosing its revie
   });
 });
 
-// BS#3583: the label-name check reuses the label search's comparison (`ilikeEscaped`), whole-value, on the trimmed name.
-describe('buildLabelNameCheck', () => {
-  const l = `"${SCHEMA}"."labels"`;
-
+// BS#3583: the label-name comparison is in JS, so it trims every Unicode whitespace the controller's `record_label` normalization does.
+describe('sameLabelName', () => {
   it.each([
-    ['a plain name', 'Drag City', 'Drag City'],
-    ['a name with LIKE metacharacters, matched literally', '100%_Pure\\', '100\\%\\_Pure\\\\'],
-    ['a name with outer whitespace, trimmed', '  Sonamos ', 'Sonamos'],
-  ])('compares %s case-insensitively against the one label row', (_name, recordLabel, pattern) => {
-    const { sql: text, params } = buildLabelNameCheck(7, recordLabel).toSQL();
-    expect(text).toBe(`select trim(${l}."label_name") ILIKE $1 ESCAPE '\\' from ${l} where ${l}."id" = $2`);
-    expect(params).toEqual([pattern, 7]);
+    ['the same name', 'Drag City', 'Drag City', true],
+    ['a name in another case', 'Drag City', 'drag city', true],
+    ['a stored name with a trailing NBSP', 'Drag City\u00a0', 'Drag City', true],
+    ['a stored name with a leading tab and a trailing newline', '\tDrag City\n', 'Drag City', true],
+    ['a sent name with outer spaces', 'Drag City', '  Drag City ', true],
+    ['another name', 'Drag City', 'Sonamos', false],
+    ['a prefix of the name', 'Drag City', 'Drag', false],
+    ['a LIKE wildcard, taken literally', 'Drag City', 'Drag%', false],
+  ])('%s', (_name, stored, sent, expected) => {
+    expect(sameLabelName(stored, sent)).toBe(expected);
   });
 });

@@ -1,8 +1,8 @@
 /**
  * `label_id` against `record_label` on `POST /intake` and `PATCH /intake/{id}` (BS#3583): a request that carries both is refused
  * with a 400 `label_mismatch`, before any write, unless the label row's name matches `record_label`. A request with only one of
- * the two (or that clears one with `null`) is not checked. The comparison itself (case-insensitive, trimmed) is SQL, so
- * `intake.service.sql.test.ts` pins its shape and `tests/integration/intake-label-match.spec.js` its behavior against real rows.
+ * the two (or that clears one with `null`) is not checked. The comparison itself (`sameLabelName`: case-insensitive, trimmed in JS) is
+ * pinned by `intake.service.sql.test.ts`, and `tests/integration/intake-label-match.spec.js` pins the behavior against real rows.
  */
 const mockLog = jest.fn<Promise<unknown>, unknown[]>();
 const mockUpdate = jest.fn<Promise<unknown>, unknown[]>();
@@ -48,7 +48,7 @@ describe.each([
   test.each([
     ['a matching name', { label_id: 7, record_label: 'Drag City' }, true, ['Drag City']],
     [
-      'a name that differs only in case and whitespace',
+      'a padded, lower-cased name, sent trimmed to the check',
       { label_id: 7, record_label: '  drag city ' },
       true,
       ['drag city'],

@@ -24,7 +24,6 @@ import {
   type NewIntakeItem,
 } from '@wxyc/database';
 import WxycError from '../utils/error.js';
-import { ilikeEscaped } from '../utils/sql-like.js';
 import { fileLibraryRelease, mapLibraryFilingError, type ValidatedFilingInput } from './library-filing.service.js';
 import { outerRef } from '../utils/sql-fragments.js';
 import type { ReviewsActor } from '../utils/review-grants.js';
@@ -220,19 +219,21 @@ const isUnknownReference = (error: unknown) =>
   extractSqlState(error) === '23503' && !extractConstraintName(error)?.includes('logged_by');
 
 /**
- * Whether label `labelId`'s name matches `recordLabel` (BS#3583), under the label search's own comparison: a case-insensitive `ILIKE`
- * with the input matched literally (`ilikeEscaped`, here `exact`), on the trimmed name. One row, never a write. Built apart from
- * `labelNameMatches` so a test can render it.
+ * Whether a stored label name and a sent `record_label` name the same label (BS#3583): case-insensitive, as the label search's `ILIKE` is,
+ * on text trimmed in JavaScript. JS `trim()` strips every Unicode whitespace (tab, newline, NBSP), as `normalizeOptionalText` does to
+ * `record_label`; Postgres `trim()` strips only spaces, so a name stored with a trailing NBSP would never match in SQL.
  */
-export const buildLabelNameCheck = (labelId: number, recordLabel: string) =>
-  db
-    .select({ matches: sql<boolean>`${ilikeEscaped(sql`trim(${labels.label_name})`, recordLabel.trim(), 'exact')}` })
-    .from(labels)
-    .where(eq(labels.id, labelId));
+export const sameLabelName = (stored: string, sent: string) =>
+  stored.trim().toLowerCase() === sent.trim().toLowerCase();
 
 /** `true` or `false` for a label that exists; `undefined` when no label has the id, which the write then reports as `unknown_reference`. */
-export const labelNameMatches = async (labelId: number, recordLabel: string): Promise<boolean | undefined> =>
-  (await buildLabelNameCheck(labelId, recordLabel))[0]?.matches;
+export const labelNameMatches = async (labelId: number, recordLabel: string): Promise<boolean | undefined> => {
+  const [row] = await db.select({ label_name: labels.label_name }).from(labels).where(eq(labels.id, labelId)).limit(1);
+  if (!row) {
+    return undefined;
+  }
+  return sameLabelName(row.label_name, recordLabel);
+};
 
 /**
  * The CD-R format a digital album is stored under: the lowest id among the formats whose lower-cased `format_name` is `cdr`
