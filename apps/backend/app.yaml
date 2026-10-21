@@ -38,6 +38,24 @@ components:
         label rather than fail, so a role can be added without a coordinated
         release. Generated enum decoders reject unknown values, so clients
         decode this field as a string and map it themselves.
+    RequestLineMode:
+      type: string
+      enum: [requests, feedback, closed]
+      description: >-
+        What the listener request line is for: song requests, messages only, or closed. Generated enum decoders reject
+        unknown values, so clients decode this field as a string and map it themselves.
+    RequestLine:
+      type: object
+      required: [mode, source]
+      properties:
+        mode:
+          $ref: '#/components/schemas/RequestLineMode'
+        source:
+          type: string
+          enum: [dj, program, default]
+          description: >-
+            Where `mode` came from: the show's DJs chose it (`dj`), the program's default (`program`), or neither
+            (`default`, which is `requests`). Lets the DJ site explain itself.
     SpecialtyShowArtwork:
       type: object
       required: [square_url]
@@ -85,6 +103,11 @@ components:
             - $ref: '#/components/schemas/SpotlightRole'
           nullable: true
           description: What to call the person in the spotlight, when the show has one.
+        default_request_mode:
+          allOf:
+            - $ref: '#/components/schemas/RequestLineMode'
+          nullable: true
+          description: The request-line mode a show of this program starts from; `null` means `requests`.
         artwork:
           allOf:
             - $ref: '#/components/schemas/SpecialtyShowArtwork'
@@ -239,6 +262,10 @@ components:
             - $ref: '#/components/schemas/SpecialtyShowRef'
           nullable: true
           description: The open show's specialty program, null for a freeform show. Read from the show's own `specialty_id`, never from the catalog's slots.
+        request_line:
+          allOf:
+            - $ref: '#/components/schemas/RequestLine'
+          description: What the request line is for, computed on the server from the show's choice and its program's default. Absent when computing it failed.
 
     FlowsheetEntryAdd:
       type: object
@@ -2408,7 +2435,7 @@ paths:
 
   /flowsheet/shows/{id}:
     patch:
-      summary: Update a show's specialty tag or title (BS#3456)
+      summary: Update a show's specialty tag, title or request mode (BS#3456, BS#3471)
       description: >
         Changes `specialty_id` and/or `show_name` after the show has opened, so a DJ can tag the show once it is on
         the air and Edit show details can fix a wrong answer. Omitted fields are unchanged. `specialty_id: null`
@@ -2443,6 +2470,11 @@ paths:
                   nullable: true
                   maxLength: 128
                   description: This airing's title; not the program name. Empty or whitespace-only is stored as `null`.
+                request_mode:
+                  allOf:
+                    - $ref: '#/components/schemas/RequestLineMode'
+                  nullable: true
+                  description: The DJs' choice for this show's request line (BS#3471), or `null` to defer to the program's default.
       responses:
         '200':
           description: The updated show
@@ -2475,7 +2507,7 @@ paths:
                     nullable: true
         '400':
           description: >-
-            A `specialty_id` that names no program, or that switches the show to a retired program (re-sending the
+            A `request_mode` outside the enum, a `specialty_id` that names no program, or that switches the show to a retired program (re-sending the
             show's current `specialty_id` is accepted even if that program has since been retired), a `show_name`
             over its `maxLength`, or a caller who is not on the show while it is on the air. Clients should branch on
             the status, not on the message text.

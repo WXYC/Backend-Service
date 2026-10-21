@@ -7,6 +7,7 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
 import type { ShowDetailsPatch } from '../services/flowsheet.service.js';
+import { REQUEST_MODES } from '../services/flowsheet/request-mode.js';
 import type { ConcertDTO } from '../services/concerts.service.js';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/flowsheet-projection.js';
@@ -1456,7 +1457,7 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
 const SHOW_NAME_MAX_LENGTH = 128;
 
 /**
- * Tags or corrects an existing show's specialty program and title (BS#3456). Writes no flowsheet row, so the
+ * Tags or corrects an existing show's specialty program, title and request-line mode (BS#3456, BS#3471). Writes no flowsheet row, so the
  * `shows` watermark trigger is what moves `GET /flowsheet`'s validator and the `show-transition` refetch is what
  * wakes connected clients.
  */
@@ -1473,6 +1474,13 @@ export const updateShow: RequestHandler<{ id: string }, unknown, ShowDetailsPatc
   }
   if (req.body?.specialty_id !== undefined) {
     patch.specialty_id = req.body.specialty_id;
+  }
+  const request_mode = req.body?.request_mode;
+  if (request_mode !== undefined) {
+    if (request_mode !== null && !(REQUEST_MODES as readonly unknown[]).includes(request_mode)) {
+      throw new WxycError(`Bad Request: request_mode must be one of ${REQUEST_MODES.join(', ')}, or null`, 400);
+    }
+    patch.request_mode = request_mode;
   }
 
   await flowsheet_service.updateShowDetails(show_id, rowWriteCaller(req, res), patch);

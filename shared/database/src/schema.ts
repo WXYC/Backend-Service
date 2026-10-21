@@ -954,6 +954,8 @@ export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
 // The role a who's-on entry carries on air. Created with all five values in one CREATE TYPE (migration 0201) so the
 // seed rows can use it in the same transaction; the flowsheet's spotlight column (BS#3458) reuses the type.
 export const spotlightRoleEnum = wxyc_schema.enum('spotlight_role', ['performer', 'dj', 'reader', 'guest', 'host']);
+// What the listener request line is for (BS#3471): song requests, messages only, or closed.
+export const requestLineModeEnum = wxyc_schema.enum('request_line_mode', ['requests', 'feedback', 'closed']);
 
 // Enrichment lifecycle for flowsheet track rows (BS#891). Replaces the
 // implicit two-column state machine ({metadata_attempt_at,
@@ -3595,6 +3597,8 @@ export const shows = wxyc_schema.table(
      */
     dj_name_override: varchar('dj_name_override', { length: 255 }),
     show_name: varchar('show_name', { length: 128 }),
+    // The DJs' choice for this show's request line; NULL defers to the program's default (BS#3471).
+    request_mode: requestLineModeEnum('request_mode'),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     start_time: timestamp('start_time', { withTimezone: true }).defaultNow().notNull(),
     end_time: timestamp('end_time', { withTimezone: true }),
@@ -3683,6 +3687,8 @@ export const specialty_shows = wxyc_schema.table(
     tagline: varchar('tagline', { length: 120 }),
     logs_playcuts: boolean('logs_playcuts').default(true).notNull(),
     default_spotlight_role: spotlightRoleEnum('default_spotlight_role'),
+    // The request-line mode a show of this program starts from; NULL means `requests` (BS#3471).
+    default_request_mode: requestLineModeEnum('default_request_mode'),
     artwork: jsonb('artwork').$type<SpecialtyShowArtwork>(),
     accent_color: char('accent_color', { length: 7 }),
     slots: jsonb('slots').$type<SpecialtyShowSlot[]>().default([]).notNull(),

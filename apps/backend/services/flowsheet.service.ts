@@ -41,6 +41,7 @@ import { generateMissingBreakpoints, nearestStationHour, MAX_AUTO_BREAKPOINTS } 
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
+import { effectiveRequestMode, RequestMode, RequestModeSource } from './flowsheet/request-mode.js';
 import { assertSpecialtyTaggable, SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelect, PgSelectKind, PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
@@ -960,7 +961,11 @@ const assertCallerMayWriteRow = async (
   assertMayEditShow(caller, target ?? { end_time: null, latest_entry_is_show_end: false, dj_ids: [] });
 };
 
-export type ShowDetailsPatch = { specialty_id?: number | null; show_name?: string | null };
+export type ShowDetailsPatch = {
+  specialty_id?: number | null;
+  show_name?: string | null;
+  request_mode?: RequestMode | null;
+};
 
 /**
  * Tags or corrects an existing show (BS#3456). The target is read and written in one transaction. Writes no flowsheet
@@ -2261,6 +2266,8 @@ export type OnAirShow = {
   show_id: number;
   show_name: string | null;
   specialty: SpecialtyShowRef | null;
+  /** What the request line is for (BS#3471); absent when computing it failed. */
+  request_line?: { mode: RequestMode; source: RequestModeSource };
 };
 
 /**
@@ -2347,11 +2354,19 @@ export const getOnAir = async (): Promise<OnAirShow | null> => {
       : null;
 
   const resolved = memberName ?? (await resolveDjNameForShow(latest_show))?.trim();
+  // Best-effort like `on_air` itself: a failure drops `request_line`, never the banner.
+  let request_line: OnAirShow['request_line'];
+  try {
+    request_line = effectiveRequestMode(latest_show, latest.specialty);
+  } catch (error) {
+    getErrorReporter().captureException(error);
+  }
   return {
     dj_name: resolved && resolved.length > 0 ? resolved : ANONYMOUS_ON_AIR_NAME,
     show_id: latest_show.id,
     show_name: latest_show.show_name ?? null,
     specialty: toSpecialtyShowRef(latest.specialty),
+    ...(request_line && { request_line }),
   };
 };
 

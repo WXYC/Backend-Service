@@ -12,6 +12,7 @@ const FIELDS = [
   'tagline',
   'logs_playcuts',
   'default_spotlight_role',
+  'default_request_mode',
   'artwork',
   'accent_color',
   'description',
