@@ -432,5 +432,22 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
       expect(res.body.on_air.show_id).toBe(staffShowId);
       expect(Object.keys(res.body.on_air).sort()).toEqual(['dj_name', 'show_id', 'show_name', 'specialty']);
     });
+
+    it('positive control: shows[] carries exactly the FlowsheetRangeShow keys, with the handle as dj_name (BS#3461)', async () => {
+      const res = await request.get('/flowsheet');
+      assertNoSentinel(res);
+      const open = res.body.shows.find((s) => s.id === staffShowId);
+      expect(open).toBeDefined();
+      expect(Object.keys(open).sort()).toEqual([
+        'dj_name',
+        'end_time',
+        'id',
+        'show_name',
+        'specialty',
+        'specialty_id',
+        'start_time',
+      ]);
+      expect(open.dj_name).toBe(STAFF_HANDLE);
+    });
   });
 });
