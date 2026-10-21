@@ -49,11 +49,24 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   startShow: mockStartShow,
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
-  isSpecialtyShowTaggable: mockIsSpecialtyShowTaggable,
   isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
   resolveShowEndInstant: mockResolveShowEndInstant,
   resolveDjNameForShow: mockResolveDjNameForShow,
+}));
+
+// `assertSpecialtyTaggable` lives in the same module as the lookup it calls, so a stub of the lookup cannot reach it:
+// this stand-in applies the same rules over `mockIsSpecialtyShowTaggable`.
+jest.mock('../../../apps/backend/services/specialty-shows.service', () => ({
+  assertSpecialtyTaggable: async (id: unknown) => {
+    if (id == null) return;
+    if (!Number.isInteger(id) || (id as number) <= 0 || (id as number) > 2147483647) {
+      throw Object.assign(new Error('Bad Request: specialty_id must be a positive integer'), { statusCode: 400 });
+    }
+    if (!(await mockIsSpecialtyShowTaggable(id as number))) {
+      throw Object.assign(new Error('Bad Request: specialty_id is unknown or retired'), { statusCode: 400 });
+    }
+  },
   getSpecialtyShowRef: mockGetSpecialtyShowRef,
 }));
 
