@@ -23,8 +23,6 @@ concurrency:
 # the run at startup with no jobs (#857).
 permissions:
   contents: write
-  # deploy-base.yml's `setup` job reads past runs to pick the affected base (BS#3564).
-  actions: read
 
 jobs:
   trigger-build-and-deploy:

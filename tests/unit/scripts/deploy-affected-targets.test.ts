@@ -4,7 +4,9 @@
  * # The failure this guards against
  *
  * `deploy-base.yml`'s `setup` job picks the deploy matrix with
- * `turbo ls --affected`, diffing `github.event.before..github.sha`. That
+ * `turbo ls --affected`, diffing each target's last deployed commit against
+ * `github.sha` (`scripts/deploy-affected-targets.sh`, BS#3564; it used to
+ * diff `github.event.before..github.sha`). That
  * matrix drives three jobs per target -- `handle-git-tags`, `build`,
  * `deploy` -- so its width is multiplied by three, and GitHub bills a
  * one-minute minimum per job. At 50 targets that is 155 jobs and ~266
@@ -55,6 +57,37 @@ import { findStep, loadWorkflow, makeYqShim, runBashScript, sliceScript } from '
 const repoRoot = path.resolve(__dirname, '../../..');
 const workflowDir = path.join(repoRoot, '.github/workflows');
 const deployBase = fs.readFileSync(path.join(workflowDir, 'deploy-base.yml'), 'utf-8');
+const affectedScript = fs.readFileSync(path.join(repoRoot, 'scripts/deploy-affected-targets.sh'), 'utf-8');
+const turboBin = path.join(repoRoot, 'node_modules/.bin');
+
+const git = (cwd: string, ...args: string[]) => {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
+  }
+  return r.stdout.trim();
+};
+
+const write = (root: string, rel: string, content: string, mode?: number) => {
+  fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+  fs.writeFileSync(path.join(root, rel), content, mode === undefined ? undefined : { mode });
+};
+
+/** A fresh git repo in a temp dir, with an identity and no signing. */
+const initRepo = (prefix: string) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  git(root, 'init', '-q', '-b', 'trunk');
+  git(root, 'config', 'user.email', 't@example.com');
+  git(root, 'config', 'user.name', 't');
+  git(root, 'config', 'commit.gpgsign', 'false');
+  return root;
+};
+
+/** Parse a step's stdout for the `RESULT=<json>` line the sliced scripts print. */
+const resultOf = (r: { status: number | null; stdout: string; stderr: string }) => {
+  const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT='));
+  return { status: r.status, out: r.stdout + r.stderr, targets: line ? JSON.parse(line.slice(7)) : null };
+};
 
 /** Drop comment-only lines: every check here must read YAML, not the prose above it. */
 function withoutComments(text: string): string {
@@ -92,12 +125,15 @@ function checkoutSteps(name: string): string[] {
 
 describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () => {
   const setup = jobBody('setup');
+  // The range logic lives in the script `Detect Build Target` calls.
+  const detection = `${setup}\n${withoutComments(affectedScript)}`;
 
   it('finds the setup job and its checkout', () => {
     // If the parser stops matching -- a rename, a re-indent -- every
     // assertion below passes vacuously, which is the shape of failure
     // this whole file exists to catch.
-    expect(setup).toContain('turbo ls --affected');
+    expect(setup).toContain('scripts/deploy-affected-targets.sh');
+    expect(detection).toContain('turbo ls --affected');
     expect(checkoutSteps('setup')).toHaveLength(1);
   });
 
@@ -120,8 +156,8 @@ describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () =
   it('refuses to fan out to every target without saying so', () => {
     // turbo's fail-open is only safe when it is loud. The guard has to
     // key on the warning turbo actually prints, so quote it exactly.
-    expect(setup).toContain('assuming all files have changed');
-    expect(setup).toMatch(/::(error|warning)/);
+    expect(detection).toContain('assuming all files have changed');
+    expect(detection).toMatch(/::(error|warning)/);
   });
 
   it('distinguishes an unresolvable range from a broken one', () => {
@@ -131,8 +167,8 @@ describe('the deploy matrix is scoped to what the merge changed (BS#2264)', () =
     // of this very bug, and must stop the run rather than quietly bill
     // 266 minutes. Without the `--is-ancestor` check there is no way to
     // tell them apart.
-    expect(setup).toContain('merge-base --is-ancestor');
-    expect(setup).toMatch(/exit 1/);
+    expect(detection).toContain('merge-base --is-ancestor');
+    expect(detection).toMatch(/exit 1/);
   });
 
   it('skips an affected target that has no root Dockerfile', () => {
@@ -206,24 +242,10 @@ describe('one-shot filter behavior', () => {
     sliceScript(stepRun, "BUILDABLE='[]'", 'if [ "$TARGETS" = "[]" ]') + '\necho "RESULT=$TARGETS"\n';
   const shimDir = makeYqShim();
 
-  const git = (cwd: string, ...args: string[]) => {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
-    if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
-    return r.stdout.trim();
-  };
-  const write = (root: string, rel: string, content: string) => {
-    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
-    fs.writeFileSync(path.join(root, rel), content);
-  };
-
   let root: string;
   let base: string;
   beforeAll(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-filter-'));
-    git(root, 'init', '-q');
-    git(root, 'config', 'user.email', 't@example.com');
-    git(root, 'config', 'user.name', 't');
-    git(root, 'config', 'commit.gpgsign', 'false');
+    root = initRepo('deploy-filter-');
     const oneShot = JSON.stringify({ 'job-type': 'one-shot' });
     for (const t of ['oneshot-own', 'oneshot-docker', 'oneshot-dep']) {
       write(root, `jobs/${t}/package.json`, oneShot);
@@ -248,19 +270,21 @@ describe('one-shot filter behavior', () => {
   });
 
   const ALL = ['oneshot-own', 'oneshot-docker', 'oneshot-dep', 'cron-explicit', 'cron-default', 'app-one'];
-  const run = (opts: { resolvable?: string; base?: string; targets?: string[] }) => {
-    const r = runBashScript(filterScript, {
-      cwd: root,
-      pathPrepend: shimDir(),
-      env: {
-        TARGETS: JSON.stringify(opts.targets ?? ALL),
-        BASE: opts.base ?? base,
-        HEAD_SHA: git(root, 'rev-parse', 'HEAD'),
-        RANGE_RESOLVABLE: opts.resolvable ?? 'true',
-      },
-    });
-    const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT='));
-    return { status: r.status, out: r.stdout + r.stderr, targets: line ? JSON.parse(line.slice(7)) : null };
+  // TARGET_BASES maps each target to its base; "" means it has none.
+  const run = (opts: { base?: string; targets?: string[] }) => {
+    const targets = opts.targets ?? ALL;
+    const bases = Object.fromEntries(targets.map((t) => [t, opts.base ?? base]));
+    return resultOf(
+      runBashScript(filterScript, {
+        cwd: root,
+        pathPrepend: shimDir(),
+        env: {
+          TARGETS: JSON.stringify(targets),
+          TARGET_BASES: JSON.stringify(bases),
+          HEAD_SHA: git(root, 'rev-parse', 'HEAD'),
+        },
+      })
+    );
   };
 
   it('skips only the one-shot touched solely through a shared dependency, and says so', () => {
@@ -289,8 +313,8 @@ describe('one-shot filter behavior', () => {
     expect(r.out).toContain('::notice title=Skipping one-shot jobs::');
   });
 
-  it.each(['false', ''])('keeps every one-shot when RANGE_RESOLVABLE is %j', (resolvable) => {
-    const r = run({ resolvable });
+  it('keeps every one-shot when no target has a base', () => {
+    const r = run({ base: '' });
     expect(r.targets).toEqual(ALL);
     expect(r.out).not.toContain('Skipping one-shot jobs');
   });
@@ -303,54 +327,34 @@ describe('one-shot filter behavior', () => {
 });
 
 /**
- * The affected base comes from deployed state, not the push event (BS#3564).
+ * Each target is diffed from the commit it was last deployed at (BS#3564).
  *
- * `deploy-auto.yml` runs under a concurrency group, and GitHub keeps only one
- * pending run per group: a newer push cancels the older pending run. When the
- * base was `github.event.before`, the surviving run diffed only its own push,
- * so a target changed only by a dropped push was never built (2026-10-20:
- * `artist-search-alias-consumer` and `concerts-artist-resolver`). The base is
- * now the head of the last successful Auto Build & Deploy run on main, chosen
- * by `scripts/resolve-deploy-base.sh`.
+ * `deploy-auto.yml` runs in a concurrency group, and GitHub keeps only one
+ * pending run per group: a newer push cancels the older pending run. When
+ * the base was `github.event.before`, the surviving run diffed only its own
+ * push, so a target changed only by a dropped push was never built
+ * (2026-10-20: `artist-search-alias-consumer` and `concerts-artist-resolver`).
+ * Now each `deploy` leg records `refs/deployed/<target>`, and
+ * `scripts/deploy-affected-targets.sh` diffs each target from its own ref.
  *
- * These tests run the real automatic arm of `Detect Build Target` -- the base
- * resolution, the real `turbo ls --affected`, and the filter loop -- against a
- * throwaway npm-workspaces repo. A `gh` shim stands in for the runs API.
+ * These tests run the real automatic arm of `Detect Build Target` -- the ref
+ * fetch, the script with the real `turbo ls --affected`, and the filter loop
+ * -- against a throwaway npm-workspaces repo. History: c0, then c1 (touches
+ * jobs/x and jobs/y), then c2 (touches apps/backend), plus an orphan commit
+ * standing in for history a force-push replaced.
  */
-describe('affected base survives dropped runs (BS#3564)', () => {
+describe('per-target deployed refs pick the affected base (BS#3564)', () => {
   const step = findStep(loadWorkflow('deploy-base.yml').jobs.setup, 'Detect Build Target');
   const autoArm =
     sliceScript(step.run, 'echo "Detecting affected app targets', 'if [ "$TARGETS" = "[]" ]') +
     '\necho "RESULT=$TARGETS"\n';
-  const turboBin = path.join(repoRoot, 'node_modules/.bin');
   const yqDir = makeYqShim();
-  const ZERO = '0'.repeat(40);
-
-  const git = (cwd: string, ...args: string[]) => {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
-    if (r.status !== 0) {
-      throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
-    }
-    return r.stdout.trim();
-  };
-  const write = (root: string, rel: string, content: string) => {
-    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
-    fs.writeFileSync(path.join(root, rel), content);
-  };
-
+  type Commit = 'c0' | 'c1' | 'c2' | 'orphan';
+  const sha = {} as Record<Commit, string>;
   let root: string;
-  let shims: string;
-  // deployed: head of the last successful run. dropped: a push whose run was
-  // cancelled while pending; it touched only jobs/x. head: the surviving
-  // push, which touched only apps/backend. orphan: a commit off to the side,
-  // as a force-push leaves behind.
-  const sha = { deployed: '', dropped: '', head: '', orphan: '' };
+
   beforeAll(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-base-'));
-    git(root, 'init', '-q', '-b', 'trunk');
-    git(root, 'config', 'user.email', 't@example.com');
-    git(root, 'config', 'user.name', 't');
-    git(root, 'config', 'commit.gpgsign', 'false');
+    root = initRepo('deploy-refs-');
     const workspaces = ['apps/*', 'jobs/*'];
     write(root, 'package.json', JSON.stringify({ name: 'r', private: true, packageManager: 'npm@10.0.0', workspaces }));
     write(
@@ -359,128 +363,157 @@ describe('affected base survives dropped runs (BS#3564)', () => {
       JSON.stringify({ name: 'r', lockfileVersion: 3, requires: true, packages: { '': { name: 'r', workspaces } } })
     );
     write(root, 'turbo.json', JSON.stringify({ tasks: {} }));
-    for (const [dir, name] of [
-      ['apps', 'backend'],
-      ['jobs', 'x'],
-    ]) {
-      write(root, `${dir}/${name}/package.json`, JSON.stringify({ name, version: '1.0.0' }));
-      write(root, `${dir}/${name}/index.ts`, 'v1');
+    for (const ws of ['apps/backend', 'jobs/x', 'jobs/y']) {
+      const name = path.basename(ws);
+      write(root, `${ws}/package.json`, JSON.stringify({ name, version: '1.0.0' }));
+      write(root, `${ws}/index.ts`, 'v1');
       write(root, `Dockerfile.${name}`, 'v1');
     }
-    // The step calls the script by its repo-relative path.
-    fs.mkdirSync(path.join(root, 'scripts'));
-    fs.copyFileSync(
-      path.join(repoRoot, 'scripts/resolve-deploy-base.sh'),
-      path.join(root, 'scripts/resolve-deploy-base.sh')
-    );
-    fs.chmodSync(path.join(root, 'scripts/resolve-deploy-base.sh'), 0o755);
-    git(root, 'add', '-A');
-    git(root, 'commit', '-qm', 'deployed');
-    sha.deployed = git(root, 'rev-parse', 'HEAD');
-    write(root, 'jobs/x/index.ts', 'v2');
-    git(root, 'commit', '-qam', 'dropped push');
-    sha.dropped = git(root, 'rev-parse', 'HEAD');
-    write(root, 'apps/backend/index.ts', 'v2');
-    git(root, 'commit', '-qam', 'surviving push');
-    sha.head = git(root, 'rev-parse', 'HEAD');
+    // `Detect Build Target` calls the script by its repo-relative path.
+    write(root, 'scripts/deploy-affected-targets.sh', affectedScript, 0o755);
+    // `npx turbo` would try to download turbo; run the repo's copy instead.
+    write(root, 'shims/npx', '#!/bin/sh\nexec "$@"\n', 0o755);
+    const commit = (name: Commit, files: string[]) => {
+      for (const f of files) {
+        write(root, f, name);
+      }
+      git(root, 'add', '-A');
+      git(root, 'commit', '-qm', name);
+      sha[name] = git(root, 'rev-parse', 'HEAD');
+    };
+    commit('c0', []);
+    commit('c1', ['jobs/x/index.ts', 'jobs/y/index.ts']);
+    commit('c2', ['apps/backend/index.ts']);
     git(root, 'checkout', '-q', '--orphan', 'side');
-    git(root, 'commit', '-qm', 'rewritten history');
-    sha.orphan = git(root, 'rev-parse', 'HEAD');
+    commit('orphan', []);
     git(root, 'checkout', '-q', 'trunk');
-
-    shims = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-base-shims-'));
-    // `gh run list ... --jq ...` prints FAKE_LAST_SUCCESS, or fails when unset.
-    write(
-      shims,
-      'gh',
-      '#!/bin/sh\nif [ -z "$FAKE_LAST_SUCCESS" ]; then echo "HTTP 403: Resource not accessible" >&2; exit 1; fi\necho "$FAKE_LAST_SUCCESS"\n'
-    );
-    write(shims, 'npx', '#!/bin/sh\nexec "$@"\n');
-    fs.chmodSync(path.join(shims, 'gh'), 0o755);
-    fs.chmodSync(path.join(shims, 'npx'), 0o755);
   });
   afterAll(() => {
     fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(shims, { recursive: true, force: true });
   });
 
-  const run = (lastSuccess: keyof typeof sha | 'none' | 'unknown', before: keyof typeof sha | 'zero') => {
-    const fake = { none: '', unknown: 'deadbeef'.repeat(5) } as Record<string, string>;
-    const r = runBashScript(autoArm, {
-      cwd: root,
-      pathPrepend: `${shims}:${yqDir()}:${turboBin}`,
-      env: {
-        HOME: root,
-        TURBO_TELEMETRY_DISABLED: '1',
-        EVENT_BEFORE: before === 'zero' ? ZERO : sha[before],
-        HEAD_SHA: sha.head,
-        FAKE_LAST_SUCCESS: lastSuccess in fake ? fake[lastSuccess] : sha[lastSuccess as keyof typeof sha],
-      },
-    });
-    const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT='));
-    return { status: r.status, out: r.stdout + r.stderr, targets: line ? JSON.parse(line.slice(7)) : null };
+  /** Reset refs/deployed/* and the version tags, set the given ones, and run the step. */
+  const run = (opts: {
+    refs?: Record<string, Commit>;
+    tags?: Record<string, Commit>;
+    head?: Commit;
+    before?: Commit | 'zero';
+  }) => {
+    for (const ref of git(root, 'for-each-ref', '--format=%(refname)', 'refs/deployed', 'refs/tags').split('\n')) {
+      if (ref) {
+        git(root, 'update-ref', '-d', ref);
+      }
+    }
+    for (const [target, commit] of Object.entries(opts.refs ?? {})) {
+      git(root, 'update-ref', `refs/deployed/${target}`, sha[commit]);
+    }
+    for (const [tag, commit] of Object.entries(opts.tags ?? {})) {
+      git(root, 'tag', tag, sha[commit]);
+    }
+    const before = opts.before ?? 'c1';
+    return resultOf(
+      runBashScript(autoArm, {
+        cwd: root,
+        pathPrepend: `${path.join(root, 'shims')}:${yqDir()}:${turboBin}`,
+        env: {
+          HOME: root,
+          TURBO_TELEMETRY_DISABLED: '1',
+          EVENT_BEFORE: before === 'zero' ? '0'.repeat(40) : sha[before],
+          HEAD_SHA: sha[opts.head ?? 'c2'],
+        },
+      })
+    );
   };
 
   it('builds a target that only a dropped push changed', () => {
-    const r = run('deployed', 'dropped');
+    // c1's run was dropped; the last deploy of every target was c0.
+    const r = run({ refs: { backend: 'c0', x: 'c0', y: 'c0' } });
     expect(r.status).toBe(0);
-    expect(r.targets).toEqual(['backend', 'x']);
-    expect(r.out).toContain(`Affected base: ${sha.deployed}`);
-    expect(r.out).toContain('last successful Auto Build & Deploy run');
+    expect(r.targets).toEqual(['backend', 'x', 'y']);
+    expect(r.out).toContain(`Affected base ${sha.c0} (source: refs/deployed/backend refs/deployed/x refs/deployed/y )`);
   });
 
   it.each([
-    ['the runs lookup fails', 'none'],
-    ['the last success is not an ancestor of HEAD (force-push)', 'orphan'],
-    ['the last success is not in the clone', 'unknown'],
-    ['the last success is HEAD itself (a re-run)', 'head'],
-  ] as const)('falls back to github.event.before when %s', (_label, lastSuccess) => {
-    const r = run(lastSuccess, 'dropped');
+    [
+      'keeps a target whose deploy failed, and drops one whose ref advanced',
+      { refs: { backend: 'c1', x: 'c1', y: 'c0' } },
+      ['backend', 'y'],
+      'source: refs/deployed/y',
+    ],
+    [
+      'uses the newest version tag (by version, not text) when a ref is missing',
+      { refs: { backend: 'c1', x: 'c1' }, tags: { 'y/v0.1.9': 'c1', 'y/v0.1.10': 'c0' } },
+      ['backend', 'y'],
+      'source: tag:y/v0.1.10',
+    ],
+    [
+      'uses github.event.before when a target has no ref and no tag',
+      { refs: { backend: 'c1', x: 'c1' } },
+      ['backend'],
+      'source: github.event.before',
+    ],
+    [
+      'falls back to the tag when a ref has diverged from HEAD (force-push)',
+      { refs: { backend: 'c1', x: 'orphan', y: 'c1' }, tags: { 'x/v0.1.0': 'c0' } },
+      ['backend', 'x'],
+      '::warning title=Deployed ref diverged::refs/deployed/x',
+    ],
+    [
+      'builds a target with no usable base unscoped, and says so',
+      { refs: { backend: 'c1', x: 'c1' }, before: 'zero' as const },
+      ['backend', 'y'],
+      '::warning title=Deploying unscoped targets::No usable base for y',
+    ],
+    [
+      'skips targets deployed at or after HEAD (a re-run of an older run)',
+      { refs: { backend: 'c2', x: 'c1', y: 'c2' }, head: 'c1' as const, before: 'c0' as const },
+      [],
+      '::notice title=Already deployed::Skipping backend x y',
+    ],
+  ] as const)('%s', (_label, opts, targets, log) => {
+    const r = run(opts);
     expect(r.status).toBe(0);
-    expect(r.targets).toEqual(['backend']);
-    expect(r.out).toContain(`Affected base: ${sha.dropped}`);
-    expect(r.out).toContain('github.event.before');
-  });
-
-  it('builds every target when no base resolves at all', () => {
-    const r = run('none', 'zero');
-    expect(r.status).toBe(0);
-    expect(r.targets).toEqual(['backend', 'x']);
-    expect(r.out).toContain('::warning title=Deploying all targets::');
+    expect(r.targets).toEqual(targets);
+    expect(r.out).toContain(log);
   });
 
   describe('wiring', () => {
-    const setupJob = loadWorkflow('deploy-base.yml').jobs.setup;
+    const deployJob = loadWorkflow('deploy-base.yml').jobs.deploy as unknown as {
+      strategy: { matrix: { target: string } };
+      steps: { name?: string; if?: string; env?: Record<string, string>; with?: { script?: string } }[];
+      'continue-on-error'?: unknown;
+    };
 
-    it('passes the push range and a token through env, never inline', () => {
-      expect(step.env).toMatchObject({
-        EVENT_BEFORE: '${{ github.event.before }}',
-        HEAD_SHA: '${{ github.sha }}',
-        GH_TOKEN: '${{ github.token }}',
-      });
+    it('passes the push range through env, never inline', () => {
+      expect(step.env).toMatchObject({ EVENT_BEFORE: '${{ github.event.before }}', HEAD_SHA: '${{ github.sha }}' });
       expect(step.run).not.toContain('${{');
     });
 
+    it('records the deployed commit as the last step of each deploy leg', () => {
+      // Last, unconditional, and not continue-on-error: the ref moves only
+      // when every earlier step of the leg succeeded, and a failure to move
+      // it is loud rather than a silent rebuild on every later push.
+      const last = deployJob.steps[deployJob.steps.length - 1] as Record<string, any>;
+      expect(last.name).toBe('Record deployed commit');
+      expect(last.if).toBeUndefined();
+      expect(last['continue-on-error']).toBeUndefined();
+      expect(last.env).toMatchObject({ VERSION: '${{ steps.determine_version.outputs.deploy_version }}' });
+      expect(last.with.script).toContain('deployed/${TARGET}');
+      expect(last.with.script).toContain('force: true');
+    });
+
     it.each(['deploy-base.yml', 'deploy-auto.yml', 'deploy-manual.yml'])(
-      'grants actions: read in %s, so `gh run list` works and the caller covers the callee',
+      'grants contents: write in %s, which pushing the ref needs on both sides of the call',
       (file) => {
-        // A callee asking for more than its caller grants fails at startup
-        // with no jobs (BS#857), so both callers grant it too.
-        const wf = loadWorkflow(file);
-        const perms = file === 'deploy-base.yml' ? setupJob.permissions : wf.permissions;
-        expect(perms).toMatchObject({ actions: 'read' });
+        expect(loadWorkflow(file).permissions).toMatchObject({ contents: 'write' });
       }
     );
 
     it('drives the deploy matrix (and its crontab install) from the same target list', () => {
       // `Deploy Cron Job` runs per `deploy` matrix entry, so a job picked up
       // from a dropped push gets its crontab entry with no extra wiring.
-      const deploy = loadWorkflow('deploy-base.yml').jobs.deploy as unknown as {
-        strategy: { matrix: { target: string } };
-        steps: { name?: string }[];
-      };
-      expect(deploy.strategy.matrix.target).toBe('${{ fromJSON(needs.setup.outputs.targets) }}');
-      expect(deploy.steps.map((s) => s.name)).toContain('Deploy Cron Job');
+      expect(deployJob.strategy.matrix.target).toBe('${{ fromJSON(needs.setup.outputs.targets) }}');
+      expect(deployJob.steps.map((s) => s.name)).toContain('Deploy Cron Job');
     });
   });
 });

@@ -200,10 +200,14 @@ describe('setup computes the full live-target universe for the retired-repo swee
     // Both steps must partition apps/+jobs/ workspaces the same way -- a
     // divergence here (e.g. one step picking up a path turbo reports
     // differently) would silently desync live_targets from targets.
-    const jqFilters = [...setup.matchAll(/jq -c '([^']+)'/g)].map((m) => m[1]);
-    expect(jqFilters).toHaveLength(2);
-    expect(jqFilters[0]).toBe(jqFilters[1]);
-    expect(jqFilters[0]).toContain('startswith("apps/")');
+    // The affected-target filter lives in scripts/deploy-affected-targets.sh
+    // since BS#3564.
+    const script = fs.readFileSync(path.join(repoRoot, 'scripts/deploy-affected-targets.sh'), 'utf-8');
+    const liveFilter = [...setup.matchAll(/jq -c '([^']+)'/g)].map((m) => m[1]);
+    const affectedFilter = script.match(/^SELECT='([^']+)'$/m)?.[1];
+    expect(liveFilter).toHaveLength(1);
+    expect(liveFilter[0]).toBe(affectedFilter);
+    expect(liveFilter[0]).toContain('startswith("apps/")');
   });
 
   it('exposes the result as a job output', () => {
