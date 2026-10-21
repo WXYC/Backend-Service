@@ -424,46 +424,84 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         expectedProbeLimit: 1,
         expectedAlbums: { stage1: 9, alias: 1 },
       },
-    ])('$label', async ({ flag, query, n, tiers, expectedIds, expectedTiers, expectedProbeLimit, expectedAlbums }) => {
-      setAliasFlag(flag);
-      // Cut the probe's rows at its own `album_rank <= N`, as Postgres would.
-      mockCatalogTiers(db.execute, tiers, { capAliasAppend: true });
+      {
+        // Real SQL caps the probe at `album_rank <= 1`; this probe ignores it.
+        label: 'probe returns more alias albums than n (cannot happen today): the page still holds n (9 + 1)',
+        flag: true,
+        query: 'Giddens',
+        n: 10,
+        tiers: { tsvector: fullTen, aliasAppend: aliasAlbums(12) },
+        uncappedProbe: true,
+        expectedIds: [...idsOf(fullTen.slice(0, 9)), aliasAlbums(1)[0].id],
+        expectedTiers: ['tsvector', 'aliasAppend'],
+        expectedProbeLimit: 1,
+        expectedAlbums: { stage1: 9, alias: 1 },
+      },
+      {
+        label: 'n = NaN: no page size to reserve from, so the probe is skipped and stage 1 is unchanged',
+        flag: true,
+        query: 'Giddens',
+        n: NaN,
+        tiers: { tsvector: stage1Albums(3), aliasAppend: aliasAlbums(3) },
+        expectedIds: idsOf(stage1Albums(3)),
+        expectedTiers: ['tsvector'],
+        expectedAlbums: { stage1: 3, alias: 0 },
+      },
+    ])(
+      '$label',
+      async ({
+        flag,
+        query,
+        n,
+        tiers,
+        uncappedProbe,
+        expectedIds,
+        expectedTiers,
+        expectedProbeLimit,
+        expectedAlbums,
+      }) => {
+        setAliasFlag(flag);
+        // Cut the probe's rows at its own `album_rank <= N`, as Postgres would.
+        mockCatalogTiers(db.execute, tiers, { capAliasAppend: !uncappedProbe });
 
-      const results = await fuzzySearchLibrary(query, query, n);
+        const results = await fuzzySearchLibrary(query, query, n);
 
-      expect(catalogTierCallLog(db.execute)).toEqual(expectedTiers);
-      expect(results.map((r) => r.id)).toEqual(expectedIds);
-      // `n` counts albums: the page never holds more than n distinct ids.
-      expect(new Set(results.map((r) => r.id)).size).toBeLessThanOrEqual(n);
-      if (expectedProbeLimit !== undefined) {
-        expect(lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ')).toContain(
-          `album_rank <= ${expectedProbeLimit}`
-        );
-      }
-      if (expectedAlbums !== undefined) {
-        const distinct = (rows: typeof results) => new Set(rows.map((r) => r.id)).size;
-        expect({
-          stage1: distinct(results.filter((r) => !r.matched_via_alias)),
-          alias: distinct(results.filter((r) => r.matched_via_alias)),
-        }).toEqual(expectedAlbums);
-      }
-      // BS#2020: every alias row comes after every stage-1 row.
-      const lastDirect = results.reduce((last, r, i) => (r.matched_via_alias ? last : i), -1);
-      const firstAlias = results.findIndex((r) => r.matched_via_alias);
-      if (firstAlias >= 0) {
-        expect(lastDirect).toBeLessThan(firstAlias);
-      }
-      const aliasIds = new Set([...(tiers.aliasAppend ?? []), ...(tiers.alias ?? [])].map((r) => r.id));
-      for (const row of results) {
-        if (aliasIds.has(row.id)) {
-          expect(row.matched_via_alias).toEqual(aliasHint);
-        } else {
-          expect(row.matched_via_alias).toBeUndefined();
+        expect(catalogTierCallLog(db.execute)).toEqual(expectedTiers);
+        expect(results.map((r) => r.id)).toEqual(expectedIds);
+        // `n` counts albums: the page never holds more than n distinct ids.
+        if (Number.isFinite(n)) {
+          expect(new Set(results.map((r) => r.id)).size).toBeLessThanOrEqual(n);
         }
-        // The CTE's helper columns never reach the wire shape.
-        expect(row).not.toHaveProperty('alias_max_sim');
+        if (expectedProbeLimit !== undefined) {
+          expect(lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ')).toContain(
+            `album_rank <= ${expectedProbeLimit}`
+          );
+        }
+        if (expectedAlbums !== undefined) {
+          const distinct = (rows: typeof results) => new Set(rows.map((r) => r.id)).size;
+          expect({
+            stage1: distinct(results.filter((r) => !r.matched_via_alias)),
+            alias: distinct(results.filter((r) => r.matched_via_alias)),
+          }).toEqual(expectedAlbums);
+        }
+        // BS#2020: every alias row comes after every stage-1 row.
+        const lastDirect = results.reduce((last, r, i) => (r.matched_via_alias ? last : i), -1);
+        const firstAlias = results.findIndex((r) => r.matched_via_alias);
+        if (firstAlias >= 0) {
+          expect(lastDirect).toBeLessThan(firstAlias);
+        }
+        const aliasIds = new Set([...(tiers.aliasAppend ?? []), ...(tiers.alias ?? [])].map((r) => r.id));
+        for (const row of results) {
+          if (aliasIds.has(row.id)) {
+            expect(row.matched_via_alias).toEqual(aliasHint);
+          } else {
+            expect(row.matched_via_alias).toBeUndefined();
+          }
+          // The CTE's helper columns never reach the wire shape.
+          expect(row).not.toHaveProperty('alias_max_sim');
+        }
       }
-    });
+    );
 
     it('flag off: the stage-1 result is returned as-is (byte-identical to before)', async () => {
       setAliasFlag(false);
