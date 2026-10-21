@@ -292,6 +292,32 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
     const fanOutRotationRow = { ...directRow, rotation_bin: 'H' };
     const fanOutAliasRow = { ...aliasRows[0], rotation_bin: 'M' };
 
+    // BS#3578: when stage 1 fills (or nearly fills) the page, `floor(n / 10)`
+    // albums are held for alias hits. Generated albums keep a 50-album page
+    // readable as counts. Stage-1 order is rank order, so the last albums are
+    // the weakest, and those are the ones that give way.
+    const stage1Albums = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        ...directRow,
+        id: 2001 + i,
+        code_number: i + 1,
+        album_title: `Giddens Session ${i + 1}`,
+      }));
+    const aliasAlbums = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({ ...aliasRows[0], id: 5001 + i, code_number: i + 1 }));
+    const idsOf = (rows: Array<{ id: number }>) => rows.map((r) => r.id);
+    // A full n=10 page whose 9th album (kept) and 10th album (dropped) each
+    // fan out to two rows, against an alias album that fans out too.
+    const fullTen = stage1Albums(10);
+    const fullTenWithFanOut = [
+      ...fullTen.slice(0, 9),
+      { ...fullTen[8], rotation_bin: 'H' },
+      fullTen[9],
+      { ...fullTen[9], rotation_bin: 'M' },
+    ];
+    const reserveAlias = aliasAlbums(2);
+    const reserveAliasWithFanOut = [reserveAlias[0], { ...reserveAlias[0], rotation_bin: 'M' }, reserveAlias[1]];
+
     it.each([
       {
         label: 'surname query, stage 1 hits a different artist: alias rows follow the direct row',
@@ -331,11 +357,77 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
         },
         expectedIds: [1301, 1301, 1302, 4908, 4908, 4904],
         expectedTiers: ['tsvector', 'aliasAppend'],
-        expectedRoom: 2,
+        expectedProbeLimit: 2,
       },
-    ])('$label', async ({ flag, query, n, tiers, expectedIds, expectedTiers, expectedRoom }) => {
+      {
+        label: 'full page n=50, 3 alias albums: the 3 weakest stage-1 albums give way (47 + 3)',
+        flag: true,
+        query: 'Giddens',
+        n: 50,
+        tiers: { tsvector: stage1Albums(50), aliasAppend: aliasAlbums(3) },
+        expectedIds: [...idsOf(stage1Albums(47)), ...idsOf(aliasAlbums(3))],
+        expectedTiers: ['tsvector', 'aliasAppend'],
+        expectedProbeLimit: 5,
+        expectedAlbums: { stage1: 47, alias: 3 },
+      },
+      {
+        label: 'full page n=50, 8 alias albums: the probe asks for the reserve only (45 + 5)',
+        flag: true,
+        query: 'Giddens',
+        n: 50,
+        tiers: { tsvector: stage1Albums(50), aliasAppend: aliasAlbums(8) },
+        expectedIds: [...idsOf(stage1Albums(45)), ...idsOf(aliasAlbums(5))],
+        expectedTiers: ['tsvector', 'aliasAppend'],
+        expectedProbeLimit: 5,
+        expectedAlbums: { stage1: 45, alias: 5 },
+      },
+      {
+        label: 'room 10 on n=50, 4 alias albums: every stage-1 album stays (40 + 4)',
+        flag: true,
+        query: 'Giddens',
+        n: 50,
+        tiers: { tsvector: stage1Albums(40), aliasAppend: aliasAlbums(4) },
+        expectedIds: [...idsOf(stage1Albums(40)), ...idsOf(aliasAlbums(4))],
+        expectedTiers: ['tsvector', 'aliasAppend'],
+        expectedProbeLimit: 10,
+        expectedAlbums: { stage1: 40, alias: 4 },
+      },
+      {
+        label: 'full page n=5: a page under 10 reserves nothing, so the probe is skipped',
+        flag: true,
+        query: 'Giddens',
+        n: 5,
+        tiers: { tsvector: stage1Albums(5), aliasAppend: aliasAlbums(3) },
+        expectedIds: idsOf(stage1Albums(5)),
+        expectedTiers: ['tsvector'],
+        expectedAlbums: { stage1: 5, alias: 0 },
+      },
+      {
+        label: 'full page n=50, no alias hits: stage 1 is returned unchanged',
+        flag: true,
+        query: 'Giddens',
+        n: 50,
+        tiers: { tsvector: stage1Albums(50), aliasAppend: [] },
+        expectedIds: idsOf(stage1Albums(50)),
+        expectedTiers: ['tsvector', 'aliasAppend'],
+        expectedProbeLimit: 5,
+        expectedAlbums: { stage1: 50, alias: 0 },
+      },
+      {
+        label: 'full page n=10 with fan-out: albums are trimmed whole, never mid-album (9 + 1)',
+        flag: true,
+        query: 'Giddens',
+        n: 10,
+        tiers: { tsvector: fullTenWithFanOut, aliasAppend: reserveAliasWithFanOut },
+        expectedIds: [...idsOf(fullTen.slice(0, 9)), fullTen[8].id, reserveAlias[0].id, reserveAlias[0].id],
+        expectedTiers: ['tsvector', 'aliasAppend'],
+        expectedProbeLimit: 1,
+        expectedAlbums: { stage1: 9, alias: 1 },
+      },
+    ])('$label', async ({ flag, query, n, tiers, expectedIds, expectedTiers, expectedProbeLimit, expectedAlbums }) => {
       setAliasFlag(flag);
-      mockCatalogTiers(db.execute, tiers);
+      // Cut the probe's rows at its own `album_rank <= N`, as Postgres would.
+      mockCatalogTiers(db.execute, tiers, { capAliasAppend: true });
 
       const results = await fuzzySearchLibrary(query, query, n);
 
@@ -343,12 +435,25 @@ describe('catalog search — alias-aware LATERAL JOIN (PR 5)', () => {
       expect(results.map((r) => r.id)).toEqual(expectedIds);
       // `n` counts albums: the page never holds more than n distinct ids.
       expect(new Set(results.map((r) => r.id)).size).toBeLessThanOrEqual(n);
-      if (expectedRoom !== undefined) {
+      if (expectedProbeLimit !== undefined) {
         expect(lastCatalogQuerySql(db.execute, 'aliasAppend').replace(/\s+/g, ' ')).toContain(
-          `album_rank <= ${expectedRoom}`
+          `album_rank <= ${expectedProbeLimit}`
         );
       }
-      const aliasIds = new Set(aliasRows.map((r) => r.id));
+      if (expectedAlbums !== undefined) {
+        const distinct = (rows: typeof results) => new Set(rows.map((r) => r.id)).size;
+        expect({
+          stage1: distinct(results.filter((r) => !r.matched_via_alias)),
+          alias: distinct(results.filter((r) => r.matched_via_alias)),
+        }).toEqual(expectedAlbums);
+      }
+      // BS#2020: every alias row comes after every stage-1 row.
+      const lastDirect = results.reduce((last, r, i) => (r.matched_via_alias ? last : i), -1);
+      const firstAlias = results.findIndex((r) => r.matched_via_alias);
+      if (firstAlias >= 0) {
+        expect(lastDirect).toBeLessThan(firstAlias);
+      }
+      const aliasIds = new Set([...(tiers.aliasAppend ?? []), ...(tiers.alias ?? [])].map((r) => r.id));
       for (const row of results) {
         if (aliasIds.has(row.id)) {
           expect(row.matched_via_alias).toEqual(aliasHint);

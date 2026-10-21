@@ -265,7 +265,12 @@ type AlbumQueryParams = {
  * gates alias matching on `artist_search_alias` in both Both-mode stages: the
  * trigram tier, and, after a non-empty tsvector stage, an alias-only probe
  * whose rows follow the direct matches (BS#3552; only this route runs it,
- * see `searchLibraryBothMode`).
+ * see `searchLibraryBothMode`). When direct matches fill the page, or leave
+ * less room than `floor(n / 10)` albums (5 of 50; none under n=10), the probe
+ * still gets that many, and the weakest direct albums give way (BS#3578).
+ * This route has no pagination, so an alias match left off the page could not
+ * be reached at all. BS#2020 holds: alias rows still follow every direct row,
+ * and only the lowest-ranked direct albums, on a full page, make room for them.
  *
  * Artwork enrichment (`enrichWithArtwork`) runs fire-and-forget after the
  * response is computed — a slow/rate-limited LML artwork lookup never adds
