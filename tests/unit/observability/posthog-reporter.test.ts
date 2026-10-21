@@ -250,6 +250,53 @@ describe('PostHogReporter', () => {
     });
   });
 
+  describe('setRequestTag reserved keys, bound and precedence', () => {
+    const tagged = (
+      reporter: PostHogReporter,
+      key: string,
+      value: string,
+      context?: Parameters<PostHogReporter['captureException']>[1]
+    ) =>
+      reporter.runInScope(() => {
+        reporter.setRequestTag(key, value);
+        reporter.captureException(new Error('boom'), context);
+      });
+
+    it.each([
+      ['release', 'spoofed'],
+      ['service', 'spoofed'],
+      ['environment', 'spoofed'],
+      ['$process_person_profile', 'true'],
+      ['$exception_fingerprint', 'x'],
+      ['$exception_level', 'fatal'],
+      ['$anything', 'x'],
+      ['breadcrumbs', 'x'],
+      ['extra', 'x'],
+    ])('ignores a request tag named %s', (key, value) => {
+      tagged(build(), key, value);
+      const sent = sentProperties();
+      expect(sent[key]).not.toBe(value);
+      if (key === 'release' || key === 'breadcrumbs' || key === 'extra' || key.startsWith('$exception')) {
+        expect(sent).not.toHaveProperty(key);
+      }
+    });
+
+    it('still sends request_id', () => {
+      tagged(build(), 'request_id', 'req-1');
+      expect(sentProperties()['request_id']).toBe('req-1');
+    });
+
+    it('cuts a tag value to 200 characters', () => {
+      tagged(build(), 'note', 'x'.repeat(300));
+      expect(sentProperties()['note']).toBe('x'.repeat(200));
+    });
+
+    it('lets the call own tags win over a request tag of the same name', () => {
+      tagged(build(), 'lml.route', 'request', { tags: { 'lml.route': 'call' } });
+      expect(sentProperties()['lml.route']).toBe('call');
+    });
+  });
+
   describe('breadcrumbs', () => {
     it('attaches the trail to an exception, keeping the last 50', () => {
       const reporter = build();

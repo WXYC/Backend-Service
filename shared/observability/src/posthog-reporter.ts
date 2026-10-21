@@ -16,6 +16,11 @@ import { redactLogValue, redactQueryParams, scrubEventStrings } from './redact-q
  * without it, `setRequestTag` is a no-op, because a tag kept process-wide would leak one request's
  * `request_id` onto another request's events. Outside a scope, breadcrumbs go to a small bounded
  * process-level ring, which is right for a job: one flow per process.
+ *
+ * Request tags (parity with wxyc-fastapi `set_error_tag`): `setRequestTag` ignores the contract fields
+ * (`service`, `environment`, `release`, `$process_person_profile`), `breadcrumbs`, `extra` and any `$`-prefixed
+ * key (`request_id` is fine), and cuts values to 200 characters. A call's own `context.tags` win over a request
+ * tag of the same name, because a call-site tag is the more specific one.
  */
 
 /** `daily`: a long-running process (capacity 20, refills `ceiling` a day). `run`: a scheduled run (capacity `ceiling`, no refill). */
@@ -38,6 +43,9 @@ const DAILY_CAPACITY = 20;
 const DEDUPE_WINDOW_MS = 60_000;
 const DEDUPE_MAX_KEYS = 1000;
 const DROP_LOG_INTERVAL_MS = 60_000;
+const REQUEST_TAG_MAX_LENGTH = 200;
+/** Event fields a request tag must not fill in; any `$`-prefixed key is ignored as well. */
+const RESERVED_TAG_KEYS = new Set(['service', 'environment', 'release', 'breadcrumbs', 'extra']);
 /** Breadcrumbs kept per scope: half of Sentry's default of 100, enough to show the lead-up without bloating an event. */
 const BREADCRUMB_RING_SIZE = 50;
 /** The outside-scope ring is smaller: a job needs the lead-up, and a missing wrapper should leak little. */
@@ -234,7 +242,10 @@ export class PostHogReporter implements ErrorReporter {
   setRequestTag(key: string, value: string): void {
     const scope = this.requestScopes.getStore();
     if (scope) {
-      scope.tags[key] = value;
+      if (RESERVED_TAG_KEYS.has(key) || key.startsWith('$')) {
+        return;
+      }
+      scope.tags[key] = value.slice(0, REQUEST_TAG_MAX_LENGTH);
     } else if (this.client && !this.warnedNoScope) {
       this.warnedNoScope = true;
       console.warn('PostHogReporter.setRequestTag ignored outside runInScope; wrap each request in runInScope');
@@ -266,9 +277,9 @@ export class PostHogReporter implements ErrorReporter {
     const crumbs = scope ? scope.crumbs : this.processCrumbs;
     const extra = context?.extra ? { extra: redactLogValue(context.extra) } : {};
     return {
-      ...context?.tags,
       ...this.options.properties,
       ...tags,
+      ...context?.tags,
       ...extra,
       ...(crumbs.length > 0 ? { breadcrumbs: [...crumbs] } : {}),
       service: this.options.service,

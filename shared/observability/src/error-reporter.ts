@@ -37,6 +37,8 @@ export interface ErrorReporter {
    * Tags every report made while handling the current request. In Sentry terms this is
    * the current scope, not the isolation scope: run-wide tags such as a job logger's
    * `Sentry.setTag` are a different thing and do not go through this method.
+   * `PostHogReporter` ignores the keys `service`, `environment`, `release`, `breadcrumbs`, `extra` and any
+   * `$`-prefixed key, cuts values to 200 characters, and lets a call's own `context.tags` win over a request tag.
    */
   setRequestTag(key: string, value: string): void;
   /** Resolves once buffered reports are delivered or `timeoutMs` passes; resolves `false` on timeout. */
