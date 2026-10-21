@@ -263,7 +263,8 @@ jobs:
             # target riding the same merge never ships. That is what happened
             # on 9fbbc636 (BS#2281): two retired jobs' guards were touched,
             # both builds died on `no such file or directory`, and the deploy
-            # job was skipped.
+            # job was skipped. (Since BS#3614 only that leg's deploy fails, but
+            # the run still ends red.)
             #
             # Drop those targets here instead, and WARN per target rather than
             # dropping silently -- deleting the Dockerfile of a job that
@@ -1097,16 +1098,46 @@ jobs:
     # "failure" if any leg fails, even with fail-fast: false) -- so this is
     # not a new blast-radius class, just closing the one job that didn't
     # already have it.
-    needs: [handle-git-tags, setup, reclaim-disk, build]
+    #
+    # BS#3614 narrowed that: one failed leg used to fail `build` as a whole
+    # and skip migrate and every deploy leg, backend included. Migrate now
+    # gates on the jobs it really needs -- the shared builder above all --
+    # plus, when backend is in this run, backend's own image existing in
+    # ECR (`Check backend image`). A failed backend build therefore still
+    # blocks migrate, and with it every deploy leg; any other failed leg
+    # blocks only itself. `build` stays in `needs` for ordering only.
+    needs: [handle-git-tags, setup, reclaim-disk, build-shared-builder, build]
     runs-on: ubuntu-latest
     # p100 1.20 min, capped well above it: this applies schema migrations
     # against prod, and being killed mid-migration is worse than being slow.
     timeout-minutes: 30
-    if: needs.setup.outputs.has_targets == 'true'
+    if: >-
+      ${{ !cancelled() && needs.setup.outputs.has_targets == 'true' && needs.setup.result == 'success'
+      && needs.handle-git-tags.result == 'success' && needs.reclaim-disk.result == 'success'
+      && needs.build-shared-builder.result == 'success' }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+
+      - name: Download backend version
+        if: contains(fromJSON(needs.setup.outputs.targets), 'backend')
+        uses: actions/download-artifact@v8
+        with:
+          name: version-backend-${{ needs.setup.outputs.build_id }}
+
+      - name: Check backend image
+        if: contains(fromJSON(needs.setup.outputs.targets), 'backend')
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          DEPLOY_TAG=$(cat deploy_version.txt)
+          if ! aws ecr describe-images --repository-name backend --image-ids "imageTag=$DEPLOY_TAG" --region "$AWS_REGION" > /dev/null; then
+            echo "::error title=Backend image missing::backend:$DEPLOY_TAG is not in ECR, so its build failed. Not migrating without the backend the migrations are for; deploy waits on migrate, so nothing deploys in this run."
+            exit 1
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1178,14 +1209,20 @@ jobs:
             docker image prune -f 2>/dev/null || true
 
   deploy:
-    needs: [setup, handle-git-tags, build, migrate, reclaim-disk]
+    needs: [setup, handle-git-tags, build-shared-builder, build, migrate, reclaim-disk]
     runs-on: ubuntu-latest
     # p100 4.27 min, capped at ~7x. The deploy script does
     # `docker stop` -> `docker rm` -> `docker run` over SSH, so a cap that
     # fires between stop and run leaves the service DOWN -- the same hazard
     # `fail-fast: false` below exists to avoid. Loose on purpose.
     timeout-minutes: 30
-    if: needs.setup.outputs.has_targets == 'true'
+    # Not gated on `build` as a whole (BS#3614): one failed build leg must not
+    # skip every target's deploy. `Check image exists in ECR` below fails just
+    # the leg whose image is missing, and the run still ends red.
+    if: >-
+      ${{ !cancelled() && needs.setup.outputs.has_targets == 'true' && needs.setup.result == 'success'
+      && needs.handle-git-tags.result == 'success' && needs.reclaim-disk.result == 'success'
+      && needs.build-shared-builder.result == 'success' && needs.migrate.result == 'success' }}
     strategy:
       # One target's deploy failure must not cancel sibling deploys mid-flight.
       # The deploy script does `docker stop && docker rm && docker run`, so a
@@ -1212,6 +1249,19 @@ jobs:
             echo "deploy_version=$DEPLOY_TAG" >> $GITHUB_OUTPUT
           else
             echo "Couldn't find deploy version for target ${{ matrix.target }}"
+            exit 1
+          fi
+
+      - name: Check image exists in ECR
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          TARGET_APP: ${{ matrix.target }}
+          DEPLOY_TAG: ${{ steps.determine_version.outputs.deploy_version }}
+        run: |
+          if ! aws ecr describe-images --repository-name "$TARGET_APP" --image-ids "imageTag=$DEPLOY_TAG" --region "$AWS_REGION" > /dev/null; then
+            echo "::error title=No image for $TARGET_APP::$TARGET_APP:$DEPLOY_TAG is not in ECR, so its build failed or was skipped. Not deploying $TARGET_APP; the other targets deploy on their own legs."
             exit 1
           fi
 
