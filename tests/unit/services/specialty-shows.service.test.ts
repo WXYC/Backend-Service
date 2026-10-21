@@ -21,14 +21,16 @@ const ROW = {
   default_spotlight_role: 'host',
   artwork: { square_url: 's', master_url: 'm', wide_url: 'w' },
   accent_color: '#112233',
+  default_request_mode: 'feedback',
   slots: [{ day: 1 }],
   active: false,
 } as unknown as SpecialtyShows;
 
 describe('toSpecialtyShow', () => {
-  it('is the ref plus description, slots and active', () => {
+  it('is the ref plus default_request_mode, description, slots and active', () => {
     expect(toSpecialtyShow(ROW)).toEqual({
       ...toSpecialtyShowRef(ROW),
+      default_request_mode: 'feedback',
       description: 'internal',
       slots: [{ day: 1 }],
       active: false,
