@@ -177,7 +177,7 @@ export const DB_MOCK_ALLOWLIST: DbMockAllowlist = {
     library_identity_source: ['method', 'confidence', 'last_verified_at', 'boost_sources', 'notes'],
     rotation: ['discogs_release_id_source', 'lml_identity_id'],
     schedule: ['id', 'day', 'start_time', 'show_duration', 'specialty_id', 'assigned_dj_id', 'assigned_dj_id2'],
-    specialty_shows: ['id', 'specialty_name', 'description', 'add_date', 'last_modified'],
+    specialty_shows: ['add_date'],
     user: [
       'hasCompletedOnboarding',
       'selfSignupAt',

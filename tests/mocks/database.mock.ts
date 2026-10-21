@@ -844,6 +844,10 @@ export const account_audit_event = {
   source: 'account_audit_event.source',
 };
 export const specialty_shows = {
+  id: 'specialty_shows.id',
+  specialty_name: 'specialty_shows.specialty_name',
+  description: 'specialty_shows.description',
+  last_modified: 'specialty_shows.last_modified',
   slug: 'specialty_shows.slug',
   short_name: 'specialty_shows.short_name',
   tagline: 'specialty_shows.tagline',

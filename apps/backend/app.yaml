@@ -5517,6 +5517,35 @@ paths:
         '200':
           description: Successfully added to schedule
 
+  /specialty-shows:
+    get:
+      summary: List the active specialty-show catalog
+      description: >-
+        Public (BS#3453). Active programs only, in `id` order (catalog order for the seeds); retired programs never
+        appear. Publicly cacheable (`Cache-Control: public, max-age=300`) with a strong `ETag` derived from
+        max(last_modified) over the whole table; a matching `If-None-Match` answers 304 with no body. An empty table
+        carries no `ETag`. The canonical wire contract is `/specialty-shows` in wxyc-shared/api.yaml (the SSOT);
+        this app.yaml is Swagger display only.
+      security: []
+      responses:
+        '200':
+          description: The active specialty shows
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SpecialtyShowRef'
+        '304':
+          description: The client's `If-None-Match` matches the current catalog
+
   /concerts:
     get:
       summary: List upcoming concerts (On Tour feed)
