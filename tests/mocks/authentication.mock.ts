@@ -46,3 +46,7 @@ export { deriveStationSignupIpHash } from '../../shared/authentication/src/signu
 
 // Real implementation, same convention: `isBanInForce` is a pure predicate with no auth/database dependency.
 export { isBanInForce } from '../../shared/authentication/src/ban-in-force';
+
+// Real implementation, same convention: `roleGrants` reads the one grant matrix in `auth.roles.ts`, and a stub would
+// let the flowsheet row-write gate's `canManageFlowsheet` pass tests against a matrix production does not have.
+export { roleGrants } from '../../shared/authentication/src/auth.roles';

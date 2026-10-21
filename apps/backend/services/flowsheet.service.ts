@@ -1,6 +1,7 @@
 import { sql, asc, desc, eq, and, or, isNull, isNotNull, gt, lt, lte, gte, inArray } from 'drizzle-orm';
 import { getErrorReporter } from '@wxyc/observability';
 import WxycError from '../utils/error.js';
+import { mayEditShow, ShowEditCaller, ShowEditTarget } from '../utils/may-edit-show.js';
 import {
   db,
   FSEntry,
@@ -892,31 +893,39 @@ export const addHourlyBreakpoint = async (
 };
 
 /**
- * Row-scoped write gate (BS#3438). `showMemberMiddleware` only proves the caller is on the show that is open NOW; the
- * row-keyed writes name a row by id, so each calls this against the row's own `show_id`, read inside the write's
- * transaction. The row's show must be open and the caller an active member of it. A NULL `show_id` belongs to no
- * open show. `caller` is the DJ id, or null under the development-only AUTH_BYPASS (see `rowWriteCaller`).
+ * Row-scoped write gate (BS#3438, BS#3455). The row-keyed writes name a row by id, so each calls this against the
+ * row's own `show_id`, read inside the write's transaction, and `mayEditShow` decides: a DJ on the open show, or a
+ * `flowsheet: manage` caller once it has ended. A NULL `show_id` or a missing show belongs to no show anyone is on.
+ * `caller` is null under the development-only AUTH_BYPASS (see `rowWriteCaller`).
  */
 const assertCallerMayWriteRow = async (
   trx: Pick<typeof db, 'select'>,
   show_id: number | null,
-  caller: string | null
+  caller: ShowEditCaller | null
 ): Promise<void> => {
   if (caller === null) {
     return;
   }
+  // No show to read: an open, empty one, so the decision is the non-member 400.
+  let target: ShowEditTarget = { end_time: null, latest_entry_is_show_end: false, dj_ids: [] };
   if (show_id !== null) {
     const [show] = await trx.select({ end_time: shows.end_time }).from(shows).where(eq(shows.id, show_id));
-    if (show?.end_time === null && (await getDJsInShow(show_id, true, trx)).some((dj) => dj.id === caller)) {
-      return;
+    if (show) {
+      const latest_entry_is_show_end = show.end_time === null && (await isLatestEntryShowEnd(show_id, trx));
+      const on_air = show.end_time === null && !latest_entry_is_show_end;
+      const dj_ids = on_air ? (await getDJsInShow(show_id, true, trx)).map((dj) => dj.id) : [];
+      target = { end_time: show.end_time, latest_entry_is_show_end, dj_ids };
     }
   }
-  throw new WxycError('Bad Request: DJ not a member of the show this entry belongs to', 400);
+  const decision = mayEditShow(caller, target);
+  if (!decision.allowed) {
+    throw new WxycError(decision.message, decision.status, decision.code && { code: decision.code });
+  }
 };
 
 // Returns undefined when no row matches entry_id (double delete / stale id);
 // the controller maps that to a 404 (PR #1532 review).
-export const removeTrack = async (entry_id: number, caller: string | null): Promise<FSEntry | undefined> => {
+export const removeTrack = async (entry_id: number, caller: ShowEditCaller | null): Promise<FSEntry | undefined> => {
   /*
     TODO: logic for updating album playcount
    */
@@ -1249,7 +1258,7 @@ export const findLibraryReleasesByText = async (
 export const updateEntry = async (
   entry_id: number,
   entry: UpdateRequestBody,
-  caller: string | null
+  caller: ShowEditCaller | null
 ): Promise<FSEntry | undefined> => {
   // Defense in depth (BS#1099): construct the update object from named
   // fields so even if a future controller starts passing the raw body,
@@ -2042,8 +2051,11 @@ export const getShowById = async (show_id: number): Promise<Show | undefined> =>
  * import could touch, order by `add_time` instead (see `getEntriesByPage`'s
  * comment for why `add_time` needs an explicit `id` tie-break too).
  */
-export const isLatestEntryShowEnd = async (showId: number): Promise<boolean> => {
-  const [latest] = await db
+export const isLatestEntryShowEnd = async (
+  showId: number,
+  executor: Pick<typeof db, 'select'> = db
+): Promise<boolean> => {
+  const [latest] = await executor
     .select({ entry_type: flowsheet.entry_type })
     .from(flowsheet)
     .where(eq(flowsheet.show_id, showId))
@@ -2631,7 +2643,7 @@ export const getAlbumFromDB = async (album_id: number) => {
 export const changeOrder = async (
   entry_id: number,
   position_new: number,
-  caller: string | null
+  caller: ShowEditCaller | null
 ): Promise<FSEntry | undefined> => {
   await db.transaction(
     async (trx) => {

@@ -1713,7 +1713,7 @@ describe('flowsheet.controller', () => {
       expect(mockUpdateEntry).toHaveBeenCalledWith(
         99,
         expect.objectContaining({ track_position: 'A2', track_title: 'la paradoja' }),
-        ''
+        { id: '', canManageFlowsheet: false }
       );
       expect(res.status).toHaveBeenCalledWith(200);
     });
@@ -1808,7 +1808,10 @@ describe('flowsheet.controller', () => {
       await updateEntry(req, res as Response, mockNext);
 
       expect(mockUpdateEntry).toHaveBeenCalledTimes(1);
-      expect(mockUpdateEntry).toHaveBeenCalledWith(99, expect.objectContaining({ album_id: 42, rotation_id: 7 }), '');
+      expect(mockUpdateEntry).toHaveBeenCalledWith(99, expect.objectContaining({ album_id: 42, rotation_id: 7 }), {
+        id: '',
+        canManageFlowsheet: false,
+      });
       expect(res.status).toHaveBeenCalledWith(200);
     });
 

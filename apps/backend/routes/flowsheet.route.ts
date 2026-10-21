@@ -48,26 +48,11 @@ flowsheet_route.post(
   flowsheetController.addEntry
 );
 
-flowsheet_route.patch(
-  '/',
-  requirePermissions({ flowsheet: ['write'] }),
-  showMemberMiddleware,
-  flowsheetController.updateEntry
-);
+flowsheet_route.patch('/', requirePermissions({ flowsheet: ['write'] }), flowsheetController.updateEntry);
 
-flowsheet_route.delete(
-  '/',
-  requirePermissions({ flowsheet: ['write'] }),
-  showMemberMiddleware,
-  flowsheetController.deleteEntry
-);
+flowsheet_route.delete('/', requirePermissions({ flowsheet: ['write'] }), flowsheetController.deleteEntry);
 
-flowsheet_route.patch(
-  '/play-order',
-  requirePermissions({ flowsheet: ['write'] }),
-  showMemberMiddleware,
-  flowsheetController.changeOrder
-);
+flowsheet_route.patch('/play-order', requirePermissions({ flowsheet: ['write'] }), flowsheetController.changeOrder);
 
 flowsheet_route.get('/latest', flowsheetConditionalGet, flowsheetController.getLatest);
 
