@@ -456,14 +456,14 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   if (offset > MAX_OFFSET) {
     throw new WxycError('Requested page depth too large', 400);
   }
-  const [entries, total, onAirDjName] = await Promise.all([
+  const [entries, total, onAir] = await Promise.all([
     flowsheet_service.getEntriesByPage(offset, limit),
     flowsheet_service.getEntryCount(),
     // Best-effort: the on-air banner is auxiliary, so a failure resolving it must
     // not fail the whole flowsheet read. On error we report to Sentry and return
     // `undefined`, which omits `on_air` below — clients decode an absent field as
     // "unknown" and hide the banner, rather than the endpoint 500ing the playlist.
-    flowsheet_service.getOnAirDJName().catch((error: unknown) => {
+    flowsheet_service.getOnAir().catch((error: unknown) => {
       getErrorReporter().captureException(error);
       return undefined;
     }),
@@ -490,7 +490,8 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // page). Three states, matching wxyc-shared api.yaml FlowsheetV2PaginatedResponse:
   // an OnAirInfo object = a human is live (a resolved DJ handle, or the "WXYC"
   // station brand when the open show has no resolvable name — see
-  // getOnAirDJName); `null` = confirmed automation; the field ABSENT = the banner
+  // getOnAirDJName — plus the open show's id, title and specialty); `null` =
+  // confirmed automation; the field ABSENT = the banner
   // query failed (unknown). Only the default paginated branch carries it — the
   // iOS app polls this branch.
   //
@@ -504,7 +505,7 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
     page,
     limit,
     totalPages,
-    ...(onAirDjName !== undefined && { on_air: onAirDjName ? { dj_name: onAirDjName } : null }),
+    ...(onAir !== undefined && { on_air: onAir }),
   });
 };
 
@@ -1189,6 +1190,8 @@ const showAlreadyOpenError = async (show: Show): Promise<WxycError> =>
         id: show.id,
         dj_name: await flowsheet_service.resolveDjNameForShow(show),
         start_time: show.start_time,
+        show_name: show.show_name ?? null,
+        specialty: show.specialty_id == null ? null : await flowsheet_service.getSpecialtyShowRef(show.specialty_id),
       },
     },
   });

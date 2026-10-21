@@ -128,4 +128,56 @@ describe('specialty ref on range and playlist (BS#3454)', () => {
       expect(res.body.specialty_id).toBe(specialtyIds.active);
     });
   });
+  describe('on_air and the Go Live 409 name the open show (BS#3457)', () => {
+    const endShow = () =>
+      request.post('/flowsheet/end').set('Authorization', global.access_token).send({ dj_id: global.primary_dj_id });
+
+    beforeEach(endShow);
+    afterAll(endShow);
+
+    it('GET /flowsheet carries show_id, show_name and the specialty slug for a tagged show, and nulls for a freeform one', async () => {
+      const joined = await request
+        .post('/flowsheet/join')
+        .set('Authorization', global.access_token)
+        .send({ dj_id: global.primary_dj_id, show_name: 'BS3457 tagged', specialty_id: specialtyIds.active })
+        .expect(200);
+
+      const tagged = await request.get('/flowsheet').expect(200);
+      expect(tagged.body.on_air).toMatchObject({
+        show_id: joined.body.id,
+        show_name: 'BS3457 tagged',
+        specialty: { slug: 'bs3454-active' },
+      });
+
+      await endShow();
+      const freeform = await request
+        .post('/flowsheet/join')
+        .set('Authorization', global.access_token)
+        .send({ dj_id: global.primary_dj_id })
+        .expect(200);
+
+      const untagged = await request.get('/flowsheet').expect(200);
+      expect(untagged.body.on_air).toMatchObject({ show_id: freeform.body.id, show_name: null, specialty: null });
+    });
+
+    it('the 409 for a second DJ names the tagged show and its program', async () => {
+      await request
+        .post('/flowsheet/join')
+        .set('Authorization', global.access_token)
+        .send({ dj_id: global.primary_dj_id, show_name: 'BS3457 tagged', specialty_id: specialtyIds.active })
+        .expect(200);
+
+      const conflict = await request
+        .post('/flowsheet/join')
+        .set('Authorization', global.secondary_access_token)
+        .send({ dj_id: global.secondary_dj_id })
+        .expect(409);
+
+      expect(conflict.body.code).toBe('show_already_open');
+      expect(conflict.body.details.show).toMatchObject({
+        show_name: 'BS3457 tagged',
+        specialty: { slug: 'bs3454-active' },
+      });
+    });
+  });
 });

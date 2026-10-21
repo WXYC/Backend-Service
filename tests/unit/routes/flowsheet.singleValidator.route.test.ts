@@ -11,7 +11,7 @@ import request from 'supertest';
 const mockGetLastModifiedAt = jest.fn<() => Promise<Date>>().mockResolvedValue(new Date('2026-01-01T00:00:00Z'));
 const mockGetEntriesByPage = jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]);
 const mockGetEntryCount = jest.fn<() => Promise<number>>().mockResolvedValue(0);
-const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>().mockResolvedValue(null);
+const mockGetOnAir = jest.fn<() => Promise<string | null>>().mockResolvedValue(null);
 const mockAttachUpcomingShows = jest.fn((entries: unknown[]) => Promise.resolve(entries));
 // BS#1870: getEntries/getLatest also call attachCriticReviews (batched
 // critic-review attach) alongside attachUpcomingShows — no-op passthrough
@@ -24,7 +24,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLastModifiedAt: mockGetLastModifiedAt,
   getEntriesByPage: mockGetEntriesByPage,
   getEntryCount: mockGetEntryCount,
-  getOnAirDJName: mockGetOnAirDJName,
+  getOnAir: mockGetOnAir,
   attachUpcomingShows: mockAttachUpcomingShows,
   attachCriticReviews: mockAttachCriticReviews,
   transformToV2: mockTransformToV2,
@@ -43,7 +43,7 @@ describe('flowsheet route single-validator headers (BS#1689)', () => {
     mockGetLastModifiedAt.mockClear().mockResolvedValue(new Date('2026-01-01T00:00:00Z'));
     mockGetEntriesByPage.mockClear().mockResolvedValue([]);
     mockGetEntryCount.mockClear().mockResolvedValue(0);
-    mockGetOnAirDJName.mockClear().mockResolvedValue(null);
+    mockGetOnAir.mockClear().mockResolvedValue(null);
   });
 
   it('GET /flowsheet/latest carries no ETag and Cache-Control: no-cache', async () => {
