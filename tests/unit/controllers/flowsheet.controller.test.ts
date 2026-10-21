@@ -96,12 +96,22 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   removeTrack: mockRemoveTrack,
   changeOrder: mockChangeOrder,
   startShow: mockStartShow,
-  isSpecialtyShowTaggable: jest.fn<(id: number) => Promise<boolean>>().mockResolvedValue(true),
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
   leaveShow: mockServiceLeaveShow,
   isLatestEntryShowEnd: mockIsLatestEntryShowEnd,
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
+}));
+
+jest.mock('../../../apps/backend/services/specialty-shows.service', () => ({
+  assertSpecialtyTaggable: jest
+    .fn<(id: unknown) => Promise<void>>()
+    .mockImplementation((id) =>
+      id != null && (!Number.isInteger(id) || (id as number) <= 0 || (id as number) > 2147483647)
+        ? Promise.reject(new WxycError('Bad Request: specialty_id must be a positive integer', 400))
+        : Promise.resolve()
+    ),
+  getSpecialtyShowRef: jest.fn(),
 }));
 
 // flowsheet-projection is intentionally NOT mocked — the controller boundary

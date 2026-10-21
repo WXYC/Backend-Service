@@ -42,7 +42,8 @@ import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
 import { effectiveRequestMode, RequestMode, RequestModeSource } from './flowsheet/request-mode.js';
-import { assertSpecialtyTaggable, SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
+import { type SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
+import { assertSpecialtyTaggable } from './specialty-shows.service.js';
 import { composeSpotlightMessage } from './flowsheet/spotlight.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelect, PgSelectKind, PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
@@ -2821,22 +2822,6 @@ export const changeOrder = async (
   const response = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
   return response[0];
-};
-
-/** The public ref for a catalog program (retired ones included), or `null` for an unknown id. */
-export const getSpecialtyShowRef = async (id: number): Promise<SpecialtyShowRef | null> => {
-  const [row] = await db.select().from(specialty_shows).where(eq(specialty_shows.id, id)).limit(1);
-  return toSpecialtyShowRef(row);
-};
-
-/** Whether `id` names a catalog program that may still be tagged onto a new show (known and not retired). */
-export const isSpecialtyShowTaggable = async (id: number): Promise<boolean> => {
-  const rows = await db
-    .select({ id: specialty_shows.id })
-    .from(specialty_shows)
-    .where(and(eq(specialty_shows.id, id), eq(specialty_shows.active, true)))
-    .limit(1);
-  return rows.length > 0;
 };
 
 /**

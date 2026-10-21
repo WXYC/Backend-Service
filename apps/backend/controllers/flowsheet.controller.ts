@@ -23,7 +23,8 @@ import { parseBoundedInt } from '../utils/query-params.js';
 import { codePointLength, normalizeOptionalText } from '../utils/text-fields.js';
 import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
 import { FsEvents, Topics, serverEventsMgr } from '../utils/serverEvents.js';
-import { assertSpecialtyTaggable, type SpecialtyShowRef } from '../services/flowsheet/specialty-ref.js';
+import type { SpecialtyShowRef } from '../services/flowsheet/specialty-ref.js';
+import { assertSpecialtyTaggable, getSpecialtyShowRef } from '../services/specialty-shows.service.js';
 
 export type QueryParams = {
   page?: string;
@@ -1240,7 +1241,7 @@ const showAlreadyOpenError = async (show: Show): Promise<WxycError> =>
         dj_name: await flowsheet_service.resolveDjNameForShow(show),
         start_time: show.start_time,
         show_name: show.show_name ?? null,
-        specialty: show.specialty_id == null ? null : await flowsheet_service.getSpecialtyShowRef(show.specialty_id),
+        specialty: show.specialty_id == null ? null : await getSpecialtyShowRef(show.specialty_id),
       },
     },
   });
