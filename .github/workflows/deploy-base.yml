@@ -1447,11 +1447,13 @@ jobs:
             fi
 
       # Last step, so it runs only when this leg deployed (BS#3564). It
-      # force-updates `refs/deployed/<target>` to the commit of the version
-      # this leg shipped: `github.sha` on Auto Build & Deploy, and the pinned
-      # tag's commit on a Manual Build & Deploy rollback. `setup` diffs each
-      # target from this ref. The version tags cannot do this job: they are
-      # cut in `handle-git-tags`, before build or deploy succeed.
+      # moves `refs/deployed/<target>` FORWARD to the commit of the version
+      # this leg shipped (`github.sha` on Auto Build & Deploy), and `setup`
+      # diffs each target from this ref. It never moves the ref back: a
+      # Manual rollback to an older version leaves it alone, so the rollback
+      # holds until a push actually changes the target, as it did before.
+      # The version tags cannot do this job: they are cut in
+      # `handle-git-tags`, before build or deploy succeed.
       - name: Record deployed commit
         uses: actions/github-script@v9
         env:
@@ -1466,12 +1468,33 @@ jobs:
               object = (await github.rest.git.getTag({ owner, repo, tag_sha: object.sha })).data.object;
             }
             const ref = `deployed/${TARGET}`;
+            const sha = object.sha;
+            let current;
             try {
-              await github.rest.git.updateRef({ owner, repo, ref, sha: object.sha, force: true });
+              current = (await github.rest.git.getRef({ owner, repo, ref })).data.object.sha;
             } catch (error) {
-              if (error.status !== 422) {
+              if (error.status !== 404) {
                 throw error;
               }
-              await github.rest.git.createRef({ owner, repo, ref: `refs/${ref}`, sha: object.sha });
             }
-            core.notice(`refs/${ref} -> ${object.sha} (${TARGET}/${VERSION})`);
+            if (current === undefined) {
+              await github.rest.git.createRef({ owner, repo, ref: `refs/${ref}`, sha });
+              core.notice(`refs/${ref} created at ${sha} (${TARGET}/${VERSION})`);
+              return;
+            }
+            // Forward only: one compare call says how `sha` relates to the ref.
+            const basehead = `${current}...${sha}`;
+            const { status } = (await github.rest.repos.compareCommitsWithBasehead({ owner, repo, basehead, per_page: 1 })).data;
+            if (status === 'identical') {
+              core.notice(`refs/${ref} is already at ${sha}`);
+              return;
+            }
+            if (status === 'behind') {
+              core.notice(`Leaving refs/${ref} at ${current}: ${TARGET}/${VERSION} (${sha}) is older, e.g. a rollback. It holds until a push changes ${TARGET}.`);
+              return;
+            }
+            if (status === 'diverged') {
+              core.warning(`refs/${ref} (${current}) is not an ancestor of ${sha} (force-push?); moving it anyway.`);
+            }
+            await github.rest.git.updateRef({ owner, repo, ref, sha, force: true });
+            core.notice(`refs/${ref} -> ${sha} (${TARGET}/${VERSION})`);

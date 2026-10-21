@@ -498,8 +498,88 @@ describe('per-target deployed refs pick the affected base (BS#3564)', () => {
       expect(last.if).toBeUndefined();
       expect(last['continue-on-error']).toBeUndefined();
       expect(last.env).toMatchObject({ VERSION: '${{ steps.determine_version.outputs.deploy_version }}' });
-      expect(last.with.script).toContain('deployed/${TARGET}');
-      expect(last.with.script).toContain('force: true');
+    });
+
+    /**
+     * Run the record step's github-script body against a fake Octokit. The
+     * ref sits at `current` (undefined: no ref yet), and the compare API
+     * reports `status` for current...deployed. The version tag points at
+     * the commit `new`.
+     */
+    const record = async (current: string | undefined, status?: string) => {
+      const last = deployJob.steps[deployJob.steps.length - 1] as { with: { script: string } };
+      const calls: string[] = [];
+      const logs: string[] = [];
+      const notFound = Object.assign(new Error('Not Found'), { status: 404 });
+      const github = {
+        rest: {
+          git: {
+            getRef: ({ ref }: { ref: string }) => {
+              if (ref === 'tags/x/v0.1.2') {
+                return Promise.resolve({ data: { object: { type: 'commit', sha: 'new' } } });
+              }
+              if (ref === 'deployed/x' && current !== undefined) {
+                return Promise.resolve({ data: { object: { type: 'commit', sha: current } } });
+              }
+              return Promise.reject(notFound);
+            },
+            createRef: (a: { ref: string; sha: string }) => Promise.resolve(calls.push(`create ${a.ref} ${a.sha}`)),
+            updateRef: (a: { ref: string; sha: string; force: boolean }) =>
+              Promise.resolve(calls.push(`update ${a.ref} ${a.sha} force=${a.force}`)),
+          },
+          repos: {
+            compareCommitsWithBasehead: (a: { basehead: string }) => {
+              calls.push(`compare ${a.basehead}`);
+              return Promise.resolve({ data: { status } });
+            },
+          },
+        },
+      };
+      const core = {
+        notice: (m: string) => logs.push(`notice ${m}`),
+        warning: (m: string) => logs.push(`warning ${m}`),
+      };
+      // github-script wraps the body in an async function; do the same.
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval
+      const body = new Function(
+        'github',
+        'context',
+        'core',
+        'process',
+        `return (async () => {${last.with.script}})();`
+      );
+      await body(github, { repo: { owner: 'o', repo: 'r' } }, core, { env: { TARGET: 'x', VERSION: 'v0.1.2' } });
+      return { calls, logs: logs.join('\n') };
+    };
+
+    it.each([
+      ['creates the ref when there is none', undefined, undefined, ['create refs/deployed/x new'], 'created at new'],
+      [
+        'moves the ref forward to a descendant',
+        'old',
+        'ahead',
+        ['compare old...new', 'update deployed/x new force=true'],
+        'notice refs/deployed/x -> new',
+      ],
+      ['leaves the ref alone when it is already there', 'new', 'identical', ['compare new...new'], 'already at new'],
+      [
+        'never moves the ref back, so a Manual rollback holds',
+        'newer',
+        'behind',
+        ['compare newer...new'],
+        'notice Leaving refs/deployed/x at newer',
+      ],
+      [
+        'moves a diverged ref (force-push), with a warning',
+        'orphan',
+        'diverged',
+        ['compare orphan...new', 'update deployed/x new force=true'],
+        'warning refs/deployed/x (orphan) is not an ancestor',
+      ],
+    ])('record step %s', async (_label, current, status, calls, log) => {
+      const r = await record(current, status);
+      expect(r.calls).toEqual(calls);
+      expect(r.logs).toContain(log);
     });
 
     it.each(['deploy-base.yml', 'deploy-auto.yml', 'deploy-manual.yml'])(
