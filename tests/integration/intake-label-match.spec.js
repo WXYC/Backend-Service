@@ -13,16 +13,20 @@ const { managerAccessToken } = require('../utils/intake_seed');
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE-LABEL';
 const LABEL_NAME = `${PREFIX} Drag City`;
+/** Stored with edge whitespace that Postgres `trim()` leaves alone (a tab, an NBSP): `record_label` arrives trimmed of it. */
+const PADDED_TRIMMED = `${PREFIX} Sonamos`;
+const PADDED_NAME = `\t${PADDED_TRIMMED}\u00a0`;
 
 describe('/intake label_id and record_label (BS#3583)', () => {
   let auth;
   let sql;
   let formatId;
   let labelId;
+  let paddedLabelId;
 
   const cleanup = async () => {
     await sql.unsafe(`DELETE FROM "${SCHEMA}".intake_items WHERE artist_name LIKE $1`, [`${PREFIX}%`]);
-    await sql.unsafe(`DELETE FROM "${SCHEMA}".labels WHERE label_name = $1`, [LABEL_NAME]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".labels WHERE label_name IN ($1, $2)`, [LABEL_NAME, PADDED_NAME]);
   };
 
   beforeAll(async () => {
@@ -32,6 +36,9 @@ describe('/intake label_id and record_label (BS#3583)', () => {
     [{ id: formatId }] = await sql.unsafe(`SELECT id FROM "${SCHEMA}".format ORDER BY id LIMIT 1`);
     [{ id: labelId }] = await sql.unsafe(`INSERT INTO "${SCHEMA}".labels (label_name) VALUES ($1) RETURNING id`, [
       LABEL_NAME,
+    ]);
+    [{ id: paddedLabelId }] = await sql.unsafe(`INSERT INTO "${SCHEMA}".labels (label_name) VALUES ($1) RETURNING id`, [
+      PADDED_NAME,
     ]);
   });
 
@@ -61,6 +68,10 @@ describe('/intake label_id and record_label (BS#3583)', () => {
       [
         'the name in other case with outer whitespace',
         () => ({ label_id: labelId, record_label: `  ${LABEL_NAME.toLowerCase()} ` }),
+      ],
+      [
+        'the trimmed name of a label stored with a leading tab and a trailing NBSP',
+        () => ({ label_id: paddedLabelId, record_label: PADDED_TRIMMED }),
       ],
       ['label_id only', () => ({ label_id: labelId })],
       ['record_label only', () => ({ record_label: 'Sonamos' })],
