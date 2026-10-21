@@ -104,6 +104,12 @@ jobs:
   setup:
     needs: validate_inputs
     runs-on: ubuntu-latest
+    # `actions: read` lets `scripts/resolve-deploy-base.sh` list past Auto
+    # Build & Deploy runs (BS#3564). Both callers grant it too: a callee that
+    # asks for more than its caller fails at startup with no jobs (#857).
+    permissions:
+      contents: read
+      actions: read
     # p100 1.08 min. Unshallow checkout plus `turbo ls --affected`; the
     # `fetch-depth: 0` clone is the only part that can grow with history.
     timeout-minutes: 15
@@ -204,6 +210,10 @@ jobs:
         id: detect_targets
         env:
           TARGET_INPUT: ${{ inputs.target }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if [ -n "$TARGET_INPUT" ]; then
             echo "Using provided target: $TARGET_INPUT"
@@ -212,8 +222,11 @@ jobs:
             echo "HAS_TARGETS=true" >> $GITHUB_OUTPUT
           else
             echo "Detecting affected app targets (Turborepo)..."
-            BASE="${{ github.event.before }}"
-            HEAD_SHA="${{ github.sha }}"
+            # Diff from the last fully deployed commit, not from this push's
+            # `before`: GitHub drops a pending run when a newer push queues
+            # behind it, and that push's targets would never build (BS#3564).
+            # The script falls back to EVENT_BEFORE and logs which it used.
+            BASE=$(scripts/resolve-deploy-base.sh)
 
             # `turbo --affected` fails OPEN: when it cannot resolve the SCM
             # range it prints a WARNING -- not an error -- and reports every
