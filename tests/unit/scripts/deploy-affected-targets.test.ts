@@ -712,4 +712,29 @@ describe('Advance unaffected deployed refs (BS#3564)', () => {
     expect(r.stdout).toContain('::notice title=Deployed refs not advanced::');
     expect(r.stdout).toContain('refs/deployed/diverged');
   });
+
+  // BS#3626: `npm ci` earlier in `setup` installs the husky hooks, so a plain
+  // push ran the repo's pre-push hook (full typecheck + lint) on the runner,
+  // failed, and advanced nothing. The push must skip local hooks.
+  it('pushes with --no-verify', () => {
+    expect(withoutComments(step.run)).toMatch(/git push --no-verify --porcelain origin \$REFSPECS/);
+  });
+
+  it('advances refs even when a pre-push hook would fail (BS#3626)', () => {
+    git(root, 'push', '-q', '--force', 'origin', `${sha.c0}:refs/deployed/behind`);
+    write(root, '.hooks/pre-push', '#!/bin/sh\necho "pre-push hook ran" >&2\nexit 1\n', 0o755);
+    git(root, 'config', 'core.hooksPath', '.hooks');
+    try {
+      const r = runBashScript(step.run, {
+        cwd: root,
+        env: { ALL_TARGETS: JSON.stringify(['behind']), TARGETS: '[]', HEAD_SHA: sha.c1 },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout + r.stderr).not.toContain('pre-push hook ran');
+      expect(r.stdout).not.toContain('::warning');
+      expect(git(origin, 'rev-parse', 'refs/deployed/behind')).toBe(sha.c1);
+    } finally {
+      git(root, 'config', '--unset', 'core.hooksPath');
+    }
+  });
 });
