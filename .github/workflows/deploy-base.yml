@@ -601,14 +601,15 @@ jobs:
 
       - name: Determine Target Version
         id: determine_version
+        env:
+          TARGET_APP: ${{ matrix.target }}
         run: |
           DEPLOY_TAG=$(cat deploy_version.txt)
-          if [[ -n DEPLOY_TAG ]]; then
-            echo "deploy_version=$DEPLOY_TAG" >> $GITHUB_OUTPUT
-          else
-            echo "Couldn't find deploy version for target ${{ matrix.target }}"
+          if [ -z "$DEPLOY_TAG" ]; then
+            echo "::error title=No deploy version::deploy_version.txt for $TARGET_APP is empty, so there is no version to build or deploy."
             exit 1
           fi
+          echo "deploy_version=$DEPLOY_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Checkout code
         uses: actions/checkout@v7
@@ -661,17 +662,23 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          TARGET_APP: ${{ matrix.target }}
+          DEPLOY_TAG: ${{ steps.determine_version.outputs.deploy_version }}
         run: |
-          TARGET_APP=${{ matrix.target }}
-          DEPLOY_TAG=${{ steps.determine_version.outputs.deploy_version }}
-          IMAGE_URI="${{ secrets.AWS_ECR_URI }}/$TARGET_APP:$DEPLOY_TAG"
-
-          if aws ecr describe-images --repository-name $TARGET_APP --image-ids imageTag=$DEPLOY_TAG --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1; then
-            echo "Image $IMAGE_URI already exists in ECR. Skipping build."
-            echo "image_exists=true" >> $GITHUB_OUTPUT
+          # A pinned version checks out an older tag, which may predate the
+          # script, so read it from this run's commit instead.
+          SCRIPT="$RUNNER_TEMP/ecr-image-exists.sh"
+          git fetch --quiet --depth=1 origin "$GITHUB_SHA"
+          git show FETCH_HEAD:scripts/ecr-image-exists.sh > "$SCRIPT"
+          STATUS=0
+          bash "$SCRIPT" "$TARGET_APP" "$DEPLOY_TAG" || STATUS=$?
+          if [ "$STATUS" -eq 0 ]; then
+            echo "Skipping build: $TARGET_APP:$DEPLOY_TAG is already in ECR."
+            echo "image_exists=true" >> "$GITHUB_OUTPUT"
+          elif [ "$STATUS" -eq 1 ]; then
+            echo "image_exists=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Image $IMAGE_URI not found in ECR. Proceeding with build."
-            echo "image_exists=false" >> $GITHUB_OUTPUT
+            exit 1
           fi
 
       - name: Compute Image Tags
@@ -1085,27 +1092,22 @@ jobs:
             tail -n 5 "$LOG_FILE"
 
   migrate:
-    # `build` added to `needs` (BS#2718): previously migrate ran independent
-    # of build's outcome (schema changes don't depend on which images built),
-    # a deliberate choice that let one target's isolated build failure leave
-    # schema migrations unblocked for everyone else. The shared-builder-image
-    # design introduces a NEW single point of failure upstream of the whole
-    # `build` matrix -- if build-shared-builder fails, every target's build is
-    # skipped, and without this dependency migrate would still apply schema
-    # changes with literally nothing deployed to run against them. This makes
-    # migrate's gating consistent with `deploy` below, which already requires
-    # `build`'s aggregate success (a matrixed job's overall conclusion is
-    # "failure" if any leg fails, even with fail-fast: false) -- so this is
-    # not a new blast-radius class, just closing the one job that didn't
-    # already have it.
+    # Gated on the jobs migrate really needs, not on `build` as a whole
+    # (BS#3614). `build`'s overall result is "failure" when any one leg fails,
+    # even with fail-fast: false, so gating on it let one broken job skip
+    # migrate and every deploy leg. `build` stays in `needs` for ordering.
     #
-    # BS#3614 narrowed that: one failed leg used to fail `build` as a whole
-    # and skip migrate and every deploy leg, backend included. Migrate now
-    # gates on the jobs it really needs -- the shared builder above all --
-    # plus, when backend is in this run, backend's own image existing in
-    # ECR (`Check backend image`). A failed backend build therefore still
-    # blocks migrate, and with it every deploy leg; any other failed leg
-    # blocks only itself. `build` stays in `needs` for ordering only.
+    # `build-shared-builder` must succeed (BS#2718): if it fails, every
+    # target's build is skipped, and migrating then would change the schema
+    # with nothing new deployed against it.
+    #
+    # `Check app images` must pass too: Dockerfile.migrate applies the whole
+    # shared schema, so every `apps/*` target in this run (backend, auth,
+    # enrichment-worker, ...) needs its new image before migrating. A failed
+    # app build therefore stops migrate and, through it, every deploy leg.
+    # Jobs are left out on purpose: an unaffected job already runs its old
+    # image against a new schema today, so a failed job build blocks only
+    # its own deploy leg.
     needs: [handle-git-tags, setup, reclaim-disk, build-shared-builder, build]
     runs-on: ubuntu-latest
     # p100 1.20 min, capped well above it: this applies schema migrations
@@ -1120,22 +1122,36 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Download backend version
-        if: contains(fromJSON(needs.setup.outputs.targets), 'backend')
+      - name: Download target versions
         uses: actions/download-artifact@v8
         with:
-          name: version-backend-${{ needs.setup.outputs.build_id }}
+          pattern: version-*-${{ needs.setup.outputs.build_id }}
+          path: versions
 
-      - name: Check backend image
-        if: contains(fromJSON(needs.setup.outputs.targets), 'backend')
+      - name: Check app images
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          TARGETS: ${{ needs.setup.outputs.targets }}
+          BUILD_ID: ${{ needs.setup.outputs.build_id }}
         run: |
-          DEPLOY_TAG=$(cat deploy_version.txt)
-          if ! aws ecr describe-images --repository-name backend --image-ids "imageTag=$DEPLOY_TAG" --region "$AWS_REGION" > /dev/null; then
-            echo "::error title=Backend image missing::backend:$DEPLOY_TAG is not in ECR, so its build failed. Not migrating without the backend the migrations are for; deploy waits on migrate, so nothing deploys in this run."
+          MISSING=''
+          for TARGET in $(echo "$TARGETS" | jq -r '.[]'); do
+            if [ ! -d "apps/$TARGET" ]; then
+              continue
+            fi
+            TAG=$(cat "versions/version-$TARGET-$BUILD_ID/deploy_version.txt")
+            STATUS=0
+            scripts/ecr-image-exists.sh "$TARGET" "$TAG" || STATUS=$?
+            if [ "$STATUS" -eq 1 ]; then
+              MISSING="$MISSING $TARGET:$TAG"
+            elif [ "$STATUS" -ne 0 ]; then
+              exit 1
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error title=App image missing::No image in ECR for$MISSING, so its build failed. Not migrating the shared schema without every app in this run; deploy waits on migrate, so nothing deploys."
             exit 1
           fi
 
@@ -1243,14 +1259,15 @@ jobs:
 
       - name: Determine Target Version
         id: determine_version
+        env:
+          TARGET_APP: ${{ matrix.target }}
         run: |
           DEPLOY_TAG=$(cat deploy_version.txt)
-          if [[ -n DEPLOY_TAG ]]; then
-            echo "deploy_version=$DEPLOY_TAG" >> $GITHUB_OUTPUT
-          else
-            echo "Couldn't find deploy version for target ${{ matrix.target }}"
+          if [ -z "$DEPLOY_TAG" ]; then
+            echo "::error title=No deploy version::deploy_version.txt for $TARGET_APP is empty, so there is no version to build or deploy."
             exit 1
           fi
+          echo "deploy_version=$DEPLOY_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Check image exists in ECR
         env:
@@ -1260,8 +1277,12 @@ jobs:
           TARGET_APP: ${{ matrix.target }}
           DEPLOY_TAG: ${{ steps.determine_version.outputs.deploy_version }}
         run: |
-          if ! aws ecr describe-images --repository-name "$TARGET_APP" --image-ids "imageTag=$DEPLOY_TAG" --region "$AWS_REGION" > /dev/null; then
+          STATUS=0
+          scripts/ecr-image-exists.sh "$TARGET_APP" "$DEPLOY_TAG" || STATUS=$?
+          if [ "$STATUS" -eq 1 ]; then
             echo "::error title=No image for $TARGET_APP::$TARGET_APP:$DEPLOY_TAG is not in ECR, so its build failed or was skipped. Not deploying $TARGET_APP; the other targets deploy on their own legs."
+            exit 1
+          elif [ "$STATUS" -ne 0 ]; then
             exit 1
           fi
 
