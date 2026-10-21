@@ -1,6 +1,11 @@
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
 
-import { canBeAskedToReview, canWriteReviews, reviewsActor } from '../../../apps/backend/utils/review-grants';
+import {
+  canBeAskedToReview,
+  canWriteReviews,
+  highestRole,
+  reviewsActor,
+} from '../../../apps/backend/utils/review-grants';
 
 describe('reviewsActor', () => {
   test.each([
@@ -39,5 +44,19 @@ describe('canBeAskedToReview (the one account rule behind /intake dj_id and GET 
     ['an email that merely contains the canary address', ['dj'], null, 'xcanary@wxyc.org', true],
   ])('%s is %s', (_label, roles, username, email, expected) => {
     expect(canBeAskedToReview({ roles, username, email })).toBe(expected);
+  });
+});
+
+describe('highestRole (the role a feature-access check judges an account by)', () => {
+  test.each([
+    [['dj'], 'dj'],
+    [['dj', 'musicDirector'], 'musicDirector'],
+    [['stationManager', 'member', 'dj'], 'stationManager'],
+    [['member', 'dj'], 'dj'],
+    [[null, 'dj', undefined], 'dj'],
+    [[], undefined],
+    [[null], undefined],
+  ])('%j is %s', (roles, expected) => {
+    expect(highestRole(roles)).toBe(expected);
   });
 });

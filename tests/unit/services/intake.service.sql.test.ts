@@ -1045,7 +1045,9 @@ describe('acceptReview (BS#2860)', () => {
 });
 
 describe('memberAccount (BS#3076) — the request path reads the username the shared review rule needs', () => {
-  const run = async (rows: Array<{ role: string; username: string | null; email: string | null }>) => {
+  const run = async (
+    rows: Array<{ role: string; username: string | null; email: string | null; capabilities: string[] }>
+  ) => {
     const calls: { fields?: unknown; from?: unknown; join?: unknown[]; where?: unknown } = {};
     const chain = {
       from: (t: unknown) => ((calls.from = t), chain),
@@ -1060,23 +1062,33 @@ describe('memberAccount (BS#3076) — the request path reads the username the sh
 
   it('selects the member role and the account username, from the membership joined to its user', async () => {
     const { calls } = await run([]);
-    expect(calls.fields).toEqual({ role: member.role, username: user.username, email: user.email });
+    expect(calls.fields).toEqual({
+      role: member.role,
+      username: user.username,
+      email: user.email,
+      capabilities: user.capabilities,
+    });
     expect(calls.from).toBe(member);
     expect(calls.join?.[0]).toBe(user);
     const join = new PgDialect().sqlToQuery(calls.join?.[1] as SQL);
     expect(join.sql).toBe(new PgDialect().sqlToQuery(eq(member.userId, user.id)).sql);
   });
 
-  it('answers every role and the username', async () => {
+  it('answers every role, the username and the capabilities', async () => {
     const { result } = await run([
-      { role: 'dj', username: 'autodj', email: 'autodj@example.org' },
-      { role: 'member', username: 'autodj', email: 'autodj@example.org' },
+      { role: 'dj', username: 'autodj', email: 'autodj@example.org', capabilities: ['reviews_beta'] },
+      { role: 'member', username: 'autodj', email: 'autodj@example.org', capabilities: ['reviews_beta'] },
     ]);
-    expect(result).toEqual({ roles: ['dj', 'member'], username: 'autodj', email: 'autodj@example.org' });
+    expect(result).toEqual({
+      roles: ['dj', 'member'],
+      username: 'autodj',
+      email: 'autodj@example.org',
+      capabilities: ['reviews_beta'],
+    });
   });
 
   it('answers no roles and a null username for an account with no membership', async () => {
-    expect((await run([])).result).toEqual({ roles: [], username: null, email: null });
+    expect((await run([])).result).toEqual({ roles: [], username: null, email: null, capabilities: [] });
   });
 });
 

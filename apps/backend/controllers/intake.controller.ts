@@ -1,6 +1,7 @@
 import { intakeItemStateEnum } from '@wxyc/database';
 import { hasUrlParserDifferentialChar } from '@wxyc/lml-client';
 import type { RequestHandler, Response } from 'express';
+import { canAccess } from '../config/featureAccess.js';
 import * as intakeService from '../services/intake.service.js';
 import { lookUpIntakeLinks } from '../services/intake-links.service.js';
 import type {
@@ -25,7 +26,7 @@ import {
   parseInt4PathId,
   parseInt4QueryParam,
 } from '../utils/query-params.js';
-import { canBeAskedToReview, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
+import { canBeAskedToReview, highestRole, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
 /**
@@ -248,13 +249,30 @@ export const deleteIntake: RequestHandler<{ id: string }> = async (req, res) => 
   res.json({ deleted_review_authors: result.authors });
 };
 
-/** `/request`'s `dj_id` must name an account whose membership role can accept and that is not a service account (the auto-DJ), or the request would sit in `requested` with nobody able to answer it. */
+/** Mirrors wxyc-shared's `IntakeRequestRefusedCode` and `IntakeRequestRefusedError` (api.yaml); `@wxyc/shared` 5.4.0 predates them. */
+type IntakeRequestRefusedCode = 'asked_dj_cannot_see_feature';
+export type IntakeRequestRefusedError = { message: string; code: IntakeRequestRefusedCode };
+const ASKED_DJ_CANNOT_SEE_FEATURE: IntakeRequestRefusedError = {
+  message: "This DJ can't see reviews yet. A station manager can add them to the reviews beta in the DJ Roster.",
+  code: 'asked_dj_cannot_see_feature',
+};
+
+/**
+ * `/request`'s `dj_id` must name an account whose membership role can accept and that is not a service account (the auto-DJ), or the
+ * request would sit in `requested` with nobody able to answer it; and the account must be able to see reviews now (`canAccess`, BS#3531),
+ * or the ask would be recorded for a DJ who never sees it. Returns the id with the account it loaded.
+ */
 const parseRequestedDj = async (raw: unknown) => {
   if (typeof raw !== 'string' || raw === '') throw new WxycError('dj_id is required', 400);
-  if (!canBeAskedToReview(await intakeService.memberAccount(raw))) {
+  const account = await intakeService.memberAccount(raw);
+  if (!canBeAskedToReview(account)) {
     throw new WxycError('dj_id must name an account that can review', 400);
   }
-  return raw;
+  if (!(await canAccess('reviews', { role: highestRole(account.roles), capabilities: account.capabilities }))) {
+    const { message, code } = ASKED_DJ_CANNOT_SEE_FEATURE;
+    throw new WxycError(message, 400, { code });
+  }
+  return { id: raw, account };
 };
 
 /** The six `/intake/:id/<action>` transitions. Route grants run first (403), then the UPDATE's own state precondition (409), then identity (403). */
@@ -262,7 +280,7 @@ const transition =
   (action: IntakeAction): RequestHandler<{ id: string }> =>
   async (req, res) => {
     const id = parseId(req.params.id);
-    const djId = action === 'request' ? await parseRequestedDj(req.body?.dj_id) : undefined;
+    const djId = action === 'request' ? (await parseRequestedDj(req.body?.dj_id)).id : undefined;
     const actor = reviewsActor(req);
     const result = await intakeService.transitionIntakeItem(action, id, actor, djId);
     if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);

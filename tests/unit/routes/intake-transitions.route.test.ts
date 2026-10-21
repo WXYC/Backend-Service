@@ -4,6 +4,10 @@ process.env.BETTER_AUTH_JWKS_URL = 'https://test.example.com/.well-known/jwks.js
 process.env.BETTER_AUTH_ISSUER = 'https://test.example.com';
 process.env.BETTER_AUTH_AUDIENCE = 'https://test.example.com';
 delete process.env.AUTH_BYPASS;
+// The request route refuses an ask to an account that cannot see reviews (BS#3531); the cases below that are not about it ask a DJ, so open reviews to everyone.
+process.env.REVIEWS_AUDIENCE = 'true';
+delete process.env.POSTHOG_FLAGS_API_KEY;
+delete process.env.POSTHOG_SECRET_KEY;
 
 jest.mock('jose', () => ({
   createRemoteJWKSet: jest.fn(() => jest.fn()),
@@ -30,7 +34,12 @@ const mockRole = (role?: string, sub = 'caller-id') =>
   });
 
 const mockTransition = jestGlobals.fn<(...args: any[]) => Promise<unknown>>();
-const mockMemberAccount = jestGlobals.fn<(...args: any[]) => Promise<{ roles: string[]; username: string | null }>>();
+const mockMemberAccount =
+  jestGlobals.fn<
+    (
+      ...args: any[]
+    ) => Promise<{ roles: string[]; username: string | null; email?: string | null; capabilities?: string[] }>
+  >();
 
 jest.mock('@wxyc/database', () => ({
   intakeItemStateEnum: jest.requireActual('../../../shared/database/src/schema').intakeItemStateEnum,
@@ -54,6 +63,8 @@ jest.mock('../../../apps/backend/services/library-filing.service', () => ({}));
 jest.mock('../../../apps/backend/services/review-print.service', () => ({}));
 
 import { intake_route } from '../../../apps/backend/routes/intake.route';
+import type { IntakeRequestRefusedError } from '../../../apps/backend/controllers/intake.controller';
+import { resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 
 const app = express();
@@ -274,5 +285,87 @@ describe('POST /intake/:id/request — dj_id', () => {
     mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
     expect((await post('request', { dj_id: 'dj-2' })).status).toBe(200);
     expect(mockMemberAccount).toHaveBeenCalledWith('dj-2');
+  });
+});
+
+// BS#3531: an ask is refused exactly when the asked account cannot see reviews now (`canAccess('reviews', asked)`).
+// Compile-time pin: the controller's `IntakeRequestRefusedError` mirror must equal wxyc-shared api.yaml's schema (`message`, and
+// `code` the one-value `IntakeRequestRefusedCode` enum); `@wxyc/shared` 5.4.0 predates it, so the SSOT shape is written out here.
+type ApiYamlIntakeRequestRefusedError = { message: string; code: 'asked_dj_cannot_see_feature' };
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Expect<T extends true> = T;
+type _RefusalMatchesSsot = Expect<Equal<IntakeRequestRefusedError, ApiYamlIntakeRequestRefusedError>>;
+const REFUSAL: ApiYamlIntakeRequestRefusedError = {
+  message: "This DJ can't see reviews yet. A station manager can add them to the reviews beta in the DJ Roster.",
+  code: 'asked_dj_cannot_see_feature',
+};
+
+describe('POST /intake/:id/request — the asked account must be able to see reviews', () => {
+  beforeEach(() => {
+    mockRole('musicDirector');
+    resetFeatureAccess();
+  });
+  afterAll(() => {
+    process.env.REVIEWS_AUDIENCE = 'true';
+    resetFeatureAccess();
+  });
+
+  const BETA = ['reviews_beta'];
+  test.each([
+    ['off', 'dj', [], true],
+    ['off', 'dj', BETA, true],
+    ['off', 'musicDirector', [], true],
+    ['off', 'musicDirector', BETA, true],
+    ['off', 'stationManager', [], true],
+    ['staff', 'dj', [], true],
+    ['staff', 'dj', BETA, false],
+    ['staff', 'musicDirector', [], false],
+    ['staff', 'stationManager', BETA, false],
+    ['everyone', 'dj', [], false],
+    ['everyone', 'dj', BETA, false],
+    ['everyone', 'musicDirector', [], false],
+    ['everyone', 'stationManager', [], false],
+  ])('audience %s, asked %s holding %j: refused %s', async (audience, role, capabilities, isRefused) => {
+    // `REVIEWS_AUDIENCE` spells everyone as `true`.
+    process.env.REVIEWS_AUDIENCE = audience === 'everyone' ? 'true' : audience;
+    mockMemberAccount.mockResolvedValue({
+      roles: [role],
+      username: 'test.dj',
+      email: 'test.dj@example.org',
+      capabilities,
+    });
+    const res = await post('request', { dj_id: 'dj-2' });
+    if (isRefused) {
+      expect([res.status, res.body]).toEqual([400, REFUSAL]);
+      expect(res.body).not.toHaveProperty('reason');
+      expect(mockTransition).not.toHaveBeenCalled();
+      expect(mockNotifyAsked).not.toHaveBeenCalled();
+    } else {
+      expect(res.status).toBe(200);
+      expect(mockTransition).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  test('judges the asked account by its highest role, not the first one listed', async () => {
+    process.env.REVIEWS_AUDIENCE = 'staff';
+    mockMemberAccount.mockResolvedValue({
+      roles: ['dj', 'musicDirector'],
+      username: 'test.md',
+      email: 'md@example.org',
+      capabilities: [],
+    });
+    expect((await post('request', { dj_id: 'dj-2' })).status).toBe(200);
+  });
+
+  test('an account that cannot review keeps the existing 400, ahead of the audience check', async () => {
+    process.env.REVIEWS_AUDIENCE = 'off';
+    mockMemberAccount.mockResolvedValue({
+      roles: ['member'],
+      username: 'test.member',
+      email: 'm@example.org',
+      capabilities: [],
+    });
+    const res = await post('request', { dj_id: 'm-1' });
+    expect(res.body).toEqual(expect.objectContaining({ message: 'dj_id must name an account that can review' }));
   });
 });

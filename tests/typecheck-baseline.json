@@ -167,7 +167,6 @@
   "tests/unit/middleware/responseMetrics.test.ts": 9,
   "tests/unit/observability/redact-query-params.test.ts": 18,
   "tests/unit/routes/intake-file.route.test.ts": 1,
-  "tests/unit/routes/intake-transitions.route.test.ts": 1,
   "tests/unit/routes/library-genres-permissions.route.test.ts": 1,
   "tests/unit/routes/library-rotation-route-order.route.test.ts": 1,
   "tests/unit/services/album-plays-refresh.service.test.ts": 8,
