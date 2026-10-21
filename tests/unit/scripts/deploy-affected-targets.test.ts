@@ -301,3 +301,186 @@ describe('one-shot filter behavior', () => {
     expect(r.targets).toEqual(['oneshot-dep']);
   });
 });
+
+/**
+ * The affected base comes from deployed state, not the push event (BS#3564).
+ *
+ * `deploy-auto.yml` runs under a concurrency group, and GitHub keeps only one
+ * pending run per group: a newer push cancels the older pending run. When the
+ * base was `github.event.before`, the surviving run diffed only its own push,
+ * so a target changed only by a dropped push was never built (2026-10-20:
+ * `artist-search-alias-consumer` and `concerts-artist-resolver`). The base is
+ * now the head of the last successful Auto Build & Deploy run on main, chosen
+ * by `scripts/resolve-deploy-base.sh`.
+ *
+ * These tests run the real automatic arm of `Detect Build Target` -- the base
+ * resolution, the real `turbo ls --affected`, and the filter loop -- against a
+ * throwaway npm-workspaces repo. A `gh` shim stands in for the runs API.
+ */
+describe('affected base survives dropped runs (BS#3564)', () => {
+  const step = findStep(loadWorkflow('deploy-base.yml').jobs.setup, 'Detect Build Target');
+  const autoArm =
+    sliceScript(step.run, 'echo "Detecting affected app targets', 'if [ "$TARGETS" = "[]" ]') +
+    '\necho "RESULT=$TARGETS"\n';
+  const turboBin = path.join(repoRoot, 'node_modules/.bin');
+  const yqDir = makeYqShim();
+  const ZERO = '0'.repeat(40);
+
+  const git = (cwd: string, ...args: string[]) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    if (r.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`);
+    }
+    return r.stdout.trim();
+  };
+  const write = (root: string, rel: string, content: string) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), content);
+  };
+
+  let root: string;
+  let shims: string;
+  // deployed: head of the last successful run. dropped: a push whose run was
+  // cancelled while pending; it touched only jobs/x. head: the surviving
+  // push, which touched only apps/backend. orphan: a commit off to the side,
+  // as a force-push leaves behind.
+  const sha = { deployed: '', dropped: '', head: '', orphan: '' };
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-base-'));
+    git(root, 'init', '-q', '-b', 'trunk');
+    git(root, 'config', 'user.email', 't@example.com');
+    git(root, 'config', 'user.name', 't');
+    git(root, 'config', 'commit.gpgsign', 'false');
+    const workspaces = ['apps/*', 'jobs/*'];
+    write(root, 'package.json', JSON.stringify({ name: 'r', private: true, packageManager: 'npm@10.0.0', workspaces }));
+    write(
+      root,
+      'package-lock.json',
+      JSON.stringify({ name: 'r', lockfileVersion: 3, requires: true, packages: { '': { name: 'r', workspaces } } })
+    );
+    write(root, 'turbo.json', JSON.stringify({ tasks: {} }));
+    for (const [dir, name] of [
+      ['apps', 'backend'],
+      ['jobs', 'x'],
+    ]) {
+      write(root, `${dir}/${name}/package.json`, JSON.stringify({ name, version: '1.0.0' }));
+      write(root, `${dir}/${name}/index.ts`, 'v1');
+      write(root, `Dockerfile.${name}`, 'v1');
+    }
+    // The step calls the script by its repo-relative path.
+    fs.mkdirSync(path.join(root, 'scripts'));
+    fs.copyFileSync(
+      path.join(repoRoot, 'scripts/resolve-deploy-base.sh'),
+      path.join(root, 'scripts/resolve-deploy-base.sh')
+    );
+    fs.chmodSync(path.join(root, 'scripts/resolve-deploy-base.sh'), 0o755);
+    git(root, 'add', '-A');
+    git(root, 'commit', '-qm', 'deployed');
+    sha.deployed = git(root, 'rev-parse', 'HEAD');
+    write(root, 'jobs/x/index.ts', 'v2');
+    git(root, 'commit', '-qam', 'dropped push');
+    sha.dropped = git(root, 'rev-parse', 'HEAD');
+    write(root, 'apps/backend/index.ts', 'v2');
+    git(root, 'commit', '-qam', 'surviving push');
+    sha.head = git(root, 'rev-parse', 'HEAD');
+    git(root, 'checkout', '-q', '--orphan', 'side');
+    git(root, 'commit', '-qm', 'rewritten history');
+    sha.orphan = git(root, 'rev-parse', 'HEAD');
+    git(root, 'checkout', '-q', 'trunk');
+
+    shims = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-base-shims-'));
+    // `gh run list ... --jq ...` prints FAKE_LAST_SUCCESS, or fails when unset.
+    write(
+      shims,
+      'gh',
+      '#!/bin/sh\nif [ -z "$FAKE_LAST_SUCCESS" ]; then echo "HTTP 403: Resource not accessible" >&2; exit 1; fi\necho "$FAKE_LAST_SUCCESS"\n'
+    );
+    write(shims, 'npx', '#!/bin/sh\nexec "$@"\n');
+    fs.chmodSync(path.join(shims, 'gh'), 0o755);
+    fs.chmodSync(path.join(shims, 'npx'), 0o755);
+  });
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(shims, { recursive: true, force: true });
+  });
+
+  const run = (lastSuccess: keyof typeof sha | 'none' | 'unknown', before: keyof typeof sha | 'zero') => {
+    const fake = { none: '', unknown: 'deadbeef'.repeat(5) } as Record<string, string>;
+    const r = runBashScript(autoArm, {
+      cwd: root,
+      pathPrepend: `${shims}:${yqDir()}:${turboBin}`,
+      env: {
+        HOME: root,
+        TURBO_TELEMETRY_DISABLED: '1',
+        EVENT_BEFORE: before === 'zero' ? ZERO : sha[before],
+        HEAD_SHA: sha.head,
+        FAKE_LAST_SUCCESS: lastSuccess in fake ? fake[lastSuccess] : sha[lastSuccess as keyof typeof sha],
+      },
+    });
+    const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT='));
+    return { status: r.status, out: r.stdout + r.stderr, targets: line ? JSON.parse(line.slice(7)) : null };
+  };
+
+  it('builds a target that only a dropped push changed', () => {
+    const r = run('deployed', 'dropped');
+    expect(r.status).toBe(0);
+    expect(r.targets).toEqual(['backend', 'x']);
+    expect(r.out).toContain(`Affected base: ${sha.deployed}`);
+    expect(r.out).toContain('last successful Auto Build & Deploy run');
+  });
+
+  it.each([
+    ['the runs lookup fails', 'none'],
+    ['the last success is not an ancestor of HEAD (force-push)', 'orphan'],
+    ['the last success is not in the clone', 'unknown'],
+    ['the last success is HEAD itself (a re-run)', 'head'],
+  ] as const)('falls back to github.event.before when %s', (_label, lastSuccess) => {
+    const r = run(lastSuccess, 'dropped');
+    expect(r.status).toBe(0);
+    expect(r.targets).toEqual(['backend']);
+    expect(r.out).toContain(`Affected base: ${sha.dropped}`);
+    expect(r.out).toContain('github.event.before');
+  });
+
+  it('builds every target when no base resolves at all', () => {
+    const r = run('none', 'zero');
+    expect(r.status).toBe(0);
+    expect(r.targets).toEqual(['backend', 'x']);
+    expect(r.out).toContain('::warning title=Deploying all targets::');
+  });
+
+  describe('wiring', () => {
+    const setupJob = loadWorkflow('deploy-base.yml').jobs.setup;
+
+    it('passes the push range and a token through env, never inline', () => {
+      expect(step.env).toMatchObject({
+        EVENT_BEFORE: '${{ github.event.before }}',
+        HEAD_SHA: '${{ github.sha }}',
+        GH_TOKEN: '${{ github.token }}',
+      });
+      expect(step.run).not.toContain('${{');
+    });
+
+    it.each(['deploy-base.yml', 'deploy-auto.yml', 'deploy-manual.yml'])(
+      'grants actions: read in %s, so `gh run list` works and the caller covers the callee',
+      (file) => {
+        // A callee asking for more than its caller grants fails at startup
+        // with no jobs (BS#857), so both callers grant it too.
+        const wf = loadWorkflow(file);
+        const perms = file === 'deploy-base.yml' ? setupJob.permissions : wf.permissions;
+        expect(perms).toMatchObject({ actions: 'read' });
+      }
+    );
+
+    it('drives the deploy matrix (and its crontab install) from the same target list', () => {
+      // `Deploy Cron Job` runs per `deploy` matrix entry, so a job picked up
+      // from a dropped push gets its crontab entry with no extra wiring.
+      const deploy = loadWorkflow('deploy-base.yml').jobs.deploy as unknown as {
+        strategy: { matrix: { target: string } };
+        steps: { name?: string }[];
+      };
+      expect(deploy.strategy.matrix.target).toBe('${{ fromJSON(needs.setup.outputs.targets) }}');
+      expect(deploy.steps.map((s) => s.name)).toContain('Deploy Cron Job');
+    });
+  });
+});
