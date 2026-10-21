@@ -948,7 +948,12 @@ export const flowsheetEntryTypeEnum = wxyc_schema.enum('flowsheet_entry_type', [
   'talkset',
   'breakpoint',
   'message',
+  'spotlight',
 ]);
+
+// The role a who's-on entry carries on air. Created with all five values in one CREATE TYPE (migration 0201) so the
+// seed rows can use it in the same transaction; the flowsheet's spotlight column (BS#3458) reuses the type.
+export const spotlightRoleEnum = wxyc_schema.enum('spotlight_role', ['performer', 'dj', 'reader', 'guest', 'host']);
 
 // Enrichment lifecycle for flowsheet track rows (BS#891). Replaces the
 // implicit two-column state machine ({metadata_attempt_at,
@@ -1537,6 +1542,9 @@ export const flowsheet = wxyc_schema.table(
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     segue: boolean('segue').default(false).notNull(),
     message: varchar('message', { length: 250 }),
+    // Who a `spotlight` row names (BS#3458): both set on spotlight rows, both NULL on every other type.
+    spotlight_role: spotlightRoleEnum('spotlight_role'),
+    spotlight_name: varchar('spotlight_name', { length: 128 }),
     // eslint-disable-next-line wxyc/source-tagged-constraint-confirmed
     add_time: timestamp('add_time', { withTimezone: true }).defaultNow().notNull(),
     // Exact top-of-hour a breakpoint marks (tubafrenzy RADIO_HOUR), distinct from
@@ -1691,6 +1699,11 @@ export const flowsheet = wxyc_schema.table(
     ),
   },
   (table) => [
+    // Added NOT VALID by migration 0203 and validated out of band (BS#3478), so the live constraint is unvalidated.
+    check(
+      'flowsheet_spotlight_columns_check',
+      sql`(${table.entry_type}::text = 'spotlight') = (${table.spotlight_role} IS NOT NULL AND ${table.spotlight_name} IS NOT NULL)`
+    ),
     // legacy_entry_id is the surrogate key tubafrenzy assigns each entry;
     // unique per row when present (NULL allowed for dj-site-originated rows
     // before the webhook round-trip).
@@ -3644,9 +3657,6 @@ export const show_djs = wxyc_schema.table(
 //create entry w/ ID 0 for regular shows
 export type NewSpecialtyShow = InferInsertModel<typeof specialty_shows>;
 export type SpecialtyShows = InferSelectModel<typeof specialty_shows>;
-// The role a who's-on entry carries on air. Created with all five values in one CREATE TYPE (migration 0201) so the
-// seed rows can use it in the same transaction; the flowsheet's spotlight column (BS#3458) reuses the type.
-export const spotlightRoleEnum = wxyc_schema.enum('spotlight_role', ['performer', 'dj', 'reader', 'guest', 'host']);
 
 // Mirrors api.yaml `SpecialtyShowArtwork`: master (>= 3000 px) and wide (3:1 banner) are optional, so they are nullable.
 export type SpecialtyShowArtwork = { square_url: string; master_url: string | null; wide_url: string | null };
