@@ -34,7 +34,6 @@ import type { Request, Response, NextFunction } from 'express';
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | undefined>>();
 const mockStartShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockAddDJToShow = jest.fn<() => Promise<Record<string, unknown>>>();
-const mockIsSpecialtyShowTaggable = jest.fn<(id: number) => Promise<boolean>>();
 const mockEndShow = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>();
 const mockCloseShowFromTerminalShowEndMarker = jest.fn<() => Promise<number>>();
@@ -55,18 +54,10 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   resolveDjNameForShow: mockResolveDjNameForShow,
 }));
 
-// `assertSpecialtyTaggable` lives in the same module as the lookup it calls, so a stub of the lookup cannot reach it:
-// this stand-in applies the same rules over `mockIsSpecialtyShowTaggable`.
+// The real `assertSpecialtyTaggable` runs; only the catalog lookup beneath it (the db `.limit()` terminal) is stubbed,
+// through `mockIsSpecialtyShowTaggable` below, so the bounds rules under test are the production ones.
 jest.mock('../../../apps/backend/services/specialty-shows.service', () => ({
-  assertSpecialtyTaggable: async (id: unknown) => {
-    if (id == null) return;
-    if (!Number.isInteger(id) || (id as number) <= 0 || (id as number) > 2147483647) {
-      throw Object.assign(new Error('Bad Request: specialty_id must be a positive integer'), { statusCode: 400 });
-    }
-    if (!(await mockIsSpecialtyShowTaggable(id as number))) {
-      throw Object.assign(new Error('Bad Request: specialty_id is unknown or retired'), { statusCode: 400 });
-    }
-  },
+  ...jest.requireActual<Record<string, unknown>>('../../../apps/backend/services/specialty-shows.service'),
   getSpecialtyShowRef: mockGetSpecialtyShowRef,
 }));
 
@@ -84,6 +75,7 @@ jest.mock('../../../apps/backend/utils/serverEvents', () => ({
   serverEventsMgr: { broadcast: mockBroadcast },
 }));
 
+import { db } from '@wxyc/database';
 import { joinShow } from '../../../apps/backend/controllers/flowsheet.controller';
 import { resetConfig } from '../../../apps/backend/config/flowsheetTakeover';
 import WxycError from '../../../apps/backend/utils/error';
@@ -138,6 +130,12 @@ const enableTakeover = (on: boolean) => {
     delete process.env.FLOWSHEET_TAKEOVER_ENABLED;
   }
   resetConfig();
+};
+
+const catalogLimit = (db as unknown as { _chain: { limit: jest.Mock<() => Promise<unknown>> } })._chain.limit;
+const mockIsSpecialtyShowTaggable = {
+  mockResolvedValue: (taggable: boolean) => catalogLimit.mockResolvedValue(taggable ? [{ id: 1 }] : []),
+  lookups: () => (db.select as unknown as jest.Mock).mock.calls.length,
 };
 
 beforeEach(() => {
@@ -713,7 +711,7 @@ describe('POST /flowsheet/join specialty_id validation', () => {
       await outcome;
       expect(mockStartShow).toHaveBeenCalledWith('dj-eureka', undefined, specialty_id, undefined);
     }
-    expect(mockIsSpecialtyShowTaggable).toHaveBeenCalledTimes(specialty_id === undefined ? 0 : 1);
+    expect(mockIsSpecialtyShowTaggable.lookups()).toBe(specialty_id === undefined ? 0 : 1);
   });
 
   it('ignores specialty_id on the co-host path', async () => {
@@ -722,7 +720,7 @@ describe('POST /flowsheet/join specialty_id validation', () => {
 
     await joinShow(makeReq({ ...extra, specialty_id: 999 }), res as Response, next);
 
-    expect(mockIsSpecialtyShowTaggable).not.toHaveBeenCalled();
+    expect(mockIsSpecialtyShowTaggable.lookups()).toBe(0);
     expect(mockAddDJToShow).toHaveBeenCalled();
     expect(mockStartShow).not.toHaveBeenCalled();
   });

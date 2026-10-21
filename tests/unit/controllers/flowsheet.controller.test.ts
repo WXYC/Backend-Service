@@ -103,14 +103,10 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
 }));
 
+// The real `assertSpecialtyTaggable` runs, so the bad-`specialty_id` tables below exercise the production guard; only
+// the public-ref read is stubbed, and the catalog lookup beneath the guard is the db mock's `.limit()` (see beforeEach).
 jest.mock('../../../apps/backend/services/specialty-shows.service', () => ({
-  assertSpecialtyTaggable: jest
-    .fn<(id: unknown) => Promise<void>>()
-    .mockImplementation((id) =>
-      id != null && (!Number.isInteger(id) || (id as number) <= 0 || (id as number) > 2147483647)
-        ? Promise.reject(new WxycError('Bad Request: specialty_id must be a positive integer', 400))
-        : Promise.resolve()
-    ),
+  ...jest.requireActual<Record<string, unknown>>('../../../apps/backend/services/specialty-shows.service'),
   getSpecialtyShowRef: jest.fn(),
 }));
 
@@ -130,6 +126,7 @@ import {
   joinShow,
   leaveShow,
 } from '../../../apps/backend/controllers/flowsheet.controller';
+import { db } from '@wxyc/database';
 import WxycError from '../../../apps/backend/utils/error';
 import { nearestStationHour } from '../../../apps/backend/utils/breakpoint-generator';
 import { INTERNAL_FLOWSHEET_COLUMNS, makeFullFlowsheetRow } from '../../fixtures/flowsheet-row.fixture';
@@ -162,6 +159,10 @@ describe('flowsheet.controller', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // The real `assertSpecialtyTaggable` finds every program taggable unless a test queues an empty catalog read.
+    (db as unknown as { _chain: { limit: jest.Mock<() => Promise<unknown>> } })._chain.limit.mockResolvedValue([
+      { id: 1 },
+    ]);
     mockNext = jest.fn();
     // `clearAllMocks` clears calls but keeps implementations, so a default set
     // at declaration would leak the last test's override forward. Re-arming it
