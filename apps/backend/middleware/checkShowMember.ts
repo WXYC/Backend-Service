@@ -1,5 +1,7 @@
 import { Request, RequestHandler, Response } from 'express';
+import { roleGrants } from '@wxyc/authentication';
 import { getDJsInCurrentShow } from '../services/flowsheet.service.js';
+import type { ShowEditCaller } from '../utils/may-edit-show.js';
 
 const isDevAuthBypass = () => process.env.AUTH_BYPASS === 'true' && process.env.NODE_ENV === 'development';
 
@@ -7,11 +9,17 @@ const callerId = (req: Pick<Request, 'auth'>, res: Pick<Response, 'locals'>) =>
   req.auth?.id || req.auth?.sub || res.locals.decodedJWT?.id || res.locals.decodedJWT?.userId;
 
 /**
- * The caller identity for the row-scoped write gate (BS#3438): the DJ id (empty when none resolves, which matches
- * no member), or null under the same development-only AUTH_BYPASS the middleware honors below.
+ * The caller for the row-scoped write gate (BS#3438, BS#3455): the DJ id (empty when none resolves, which matches no
+ * member) and whether the role holds `flowsheet: manage`, the grant `requirePermissions` checks. Null under the same
+ * development-only AUTH_BYPASS the middleware honors below.
  */
-export const rowWriteCaller = (req: Pick<Request, 'auth'>, res: Pick<Response, 'locals'>): string | null =>
-  isDevAuthBypass() ? null : (callerId(req, res) ?? '');
+export const rowWriteCaller = (req: Pick<Request, 'auth'>, res: Pick<Response, 'locals'>): ShowEditCaller | null =>
+  isDevAuthBypass()
+    ? null
+    : {
+        id: callerId(req, res) ?? '',
+        canManageFlowsheet: roleGrants(req.auth?.role ?? res.locals.decodedJWT?.role, { flowsheet: ['manage'] }),
+      };
 
 export const showMemberMiddleware: RequestHandler = async (req, res, next) => {
   // Positive-list gate (BS#1097): bypass requires explicit NODE_ENV=development.

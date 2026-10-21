@@ -166,11 +166,35 @@ describe('rowWriteCaller (BS#3438)', () => {
     else delete process.env.NODE_ENV;
   });
 
+  const caller = (canManageFlowsheet: boolean) => ({ id: 'dj-alice', canManageFlowsheet });
+
   it.each([
     ['AUTH_BYPASS=true under NODE_ENV=development', 'true', 'development', { auth: { id: 'dj-alice' } }, null],
-    ['AUTH_BYPASS=true under NODE_ENV=test', 'true', 'test', { auth: { id: 'dj-alice' } }, 'dj-alice'],
-    ['no bypass, id on req.auth', undefined, 'production', { auth: { id: 'dj-alice' } }, 'dj-alice'],
-    ['no bypass, no identity at all', undefined, 'production', {}, ''],
+    ['AUTH_BYPASS=true under NODE_ENV=test', 'true', 'test', { auth: { id: 'dj-alice' } }, caller(false)],
+    ['no bypass, id on req.auth', undefined, 'production', { auth: { id: 'dj-alice' } }, caller(false)],
+    ['no bypass, a dj role', undefined, 'production', { auth: { id: 'dj-alice', role: 'dj' } }, caller(false)],
+    [
+      'no bypass, a musicDirector role',
+      undefined,
+      'production',
+      { auth: { id: 'dj-alice', role: 'musicDirector' } },
+      caller(true),
+    ],
+    [
+      'no bypass, a stationManager role',
+      undefined,
+      'production',
+      { auth: { id: 'dj-alice', role: 'stationManager' } },
+      caller(true),
+    ],
+    [
+      'no bypass, an unrecognized role',
+      undefined,
+      'production',
+      { auth: { id: 'dj-alice', role: 'nope' } },
+      caller(false),
+    ],
+    ['no bypass, no identity at all', undefined, 'production', {}, { id: '', canManageFlowsheet: false }],
   ])('%s', (_name, bypass, nodeEnv, reqFields, expected) => {
     if (bypass === undefined) {
       delete process.env.AUTH_BYPASS;
@@ -179,6 +203,6 @@ describe('rowWriteCaller (BS#3438)', () => {
     }
     process.env.NODE_ENV = nodeEnv;
 
-    expect(rowWriteCaller(reqFields as Request, { locals: {} } as Response)).toBe(expected);
+    expect(rowWriteCaller(reqFields as Request, { locals: {} } as Response)).toEqual(expected);
   });
 });

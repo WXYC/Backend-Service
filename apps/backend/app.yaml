@@ -20,6 +20,16 @@ components:
       description: JWT token from AWS Cognito
 
   schemas:
+    ApiErrorResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+          description: Machine-readable discriminant a client can switch on instead of parsing `message`.
+          example: closed_show
     SpotlightRole:
       type: string
       enum: [performer, dj, reader, guest, host]
@@ -2033,6 +2043,25 @@ paths:
                         type: integer
                       message:
                         type: string
+        '400':
+          description: >-
+            The caller is not a member of the show on the air that the entry belongs to, or the entry belongs to no show.
+            Clients should branch on the status, not on the message text.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '401':
+          description: No bearer token
+        '403':
+          description: >-
+            With `code: closed_show`, the entry's show has ended and the caller lacks `flowsheet: manage` (only music
+            directors and station managers edit an ended show). A 403 without a `code` is the permission denial
+            (`{error}`) or the ban denial (`{message, reason}`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
 
     delete:
       summary: Delete flowsheet entry
@@ -2063,6 +2092,25 @@ paths:
                         type: integer
                       message:
                         type: string
+        '400':
+          description: >-
+            The caller is not a member of the show on the air that the entry belongs to, or the entry belongs to no show.
+            Clients should branch on the status, not on the message text.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '401':
+          description: No bearer token
+        '403':
+          description: >-
+            With `code: closed_show`, the entry's show has ended and the caller lacks `flowsheet: manage` (only music
+            directors and station managers edit an ended show). A 403 without a `code` is the permission denial
+            (`{error}`) or the ban denial (`{message, reason}`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
 
   /flowsheet/latest:
     get:
@@ -2512,6 +2560,25 @@ paths:
                         type: integer
                       message:
                         type: string
+        '400':
+          description: >-
+            The caller is not a member of the show on the air that the entry belongs to, or the entry belongs to no show.
+            Clients should branch on the status, not on the message text.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '401':
+          description: No bearer token
+        '403':
+          description: >-
+            With `code: closed_show`, the entry's show has ended and the caller lacks `flowsheet: manage` (only music
+            directors and station managers edit an ended show). A 403 without a `code` is the permission denial
+            (`{error}`) or the ban denial (`{message, reason}`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
 
   /flowsheet/playlist:
     get:

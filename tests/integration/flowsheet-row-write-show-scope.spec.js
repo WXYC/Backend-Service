@@ -4,6 +4,7 @@ const fls_util = require('../utils/flowsheet_util');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const NAME_PREFIX = 'bs3438:';
+const MANAGER_ID = 'bs3455-music-director';
 const ORIGINAL_TITLE = 'Cherokee';
 
 function makeSql() {
@@ -18,8 +19,13 @@ function makeSql() {
   });
 }
 
+// AUTH_BYPASS decodes a JWT-shaped Bearer without checking its signature, so a role claim is all it takes to act as a
+// music director (`flowsheet: manage`) without a better-auth sign-in.
+const b64url = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+const managerAuth = () => `Bearer ${b64url({ alg: 'none' })}.${b64url({ id: MANAGER_ID, role: 'musicDirector' })}.x`;
+
 /**
- * Integration tests for BS#3438: `PATCH /flowsheet`, `DELETE /flowsheet` and `PATCH /flowsheet/play-order` authorize
+ * Integration tests for BS#3438 and BS#3455: `PATCH /flowsheet`, `DELETE /flowsheet` and `PATCH /flowsheet/play-order` authorize
  * the caller against the show the TARGET ROW belongs to, not against whichever show is open. Before the fix the DJ on
  * the air could edit, delete or reorder any row in the table by id.
  *
@@ -29,8 +35,12 @@ function makeSql() {
  * the middleware passes, and every rejection below can only come from the row-scoped gate. Both seeded shows start
  * ended, so `join_show` does not co-host onto them; the foreign-open case reopens its show after the live show exists.
  * Without the gate each case would return 200 (the caller is a legitimate member of the live show).
+ *
+ * BS#3455 adds the managers' path: a row of an ENDED show (`end_time` set, or NULL with a `show_end` newest row, the
+ * dropped deliveries of BS#2065) refuses its own DJs with 403 `closed_show` and accepts a `flowsheet: manage` caller.
+ * The routes no longer sit behind `showMemberMiddleware`, so that manager succeeds with no show open at all.
  */
-describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)', () => {
+describe('flowsheet row writes are scoped to the row’s own show (BS#3438, BS#3455)', () => {
   let sql;
   let liveShowId;
   let endedShowId;
@@ -73,6 +83,16 @@ describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)
     return row.id;
   };
 
+  // The foreign show reopened (end_time NULL) with its newest row a `show_end` marker: ended by BS#2065's predicate.
+  const seedDroppedShowEnd = async () => {
+    await sql.unsafe(`UPDATE ${SCHEMA}.shows SET end_time = NULL WHERE id = $1`, [foreignShowId]);
+    const id = await insertRow(foreignShowId, 2);
+    await sql.unsafe(`INSERT INTO ${SCHEMA}.flowsheet (show_id, entry_type, play_order) VALUES ($1, 'show_end', 3)`, [
+      foreignShowId,
+    ]);
+    return id;
+  };
+
   const snapshot = async (id) =>
     (await sql.unsafe(`SELECT track_title, play_order FROM ${SCHEMA}.flowsheet WHERE id = $1`, [id]))[0];
 
@@ -113,22 +133,35 @@ describe('flowsheet row writes are scoped to the row’s own open show (BS#3438)
 
   describe.each(routes)('%s', (_name, send) => {
     test.each([
-      ['an ended show', async () => insertRow(endedShowId, 2)],
+      ['an ended show', async () => insertRow(endedShowId, 2), 403, 'closed_show'],
+      ['a dropped-delivery show (NULL end_time, newest row show_end)', seedDroppedShowEnd, 403, 'closed_show'],
       [
         'an open show the caller is not a member of',
         async () => {
           await sql.unsafe(`UPDATE ${SCHEMA}.shows SET end_time = NULL WHERE id = $1`, [foreignShowId]);
           return insertRow(foreignShowId, 2);
         },
+        400,
+        undefined,
       ],
-      ['no show at all (NULL show_id)', async () => insertRow(null, 2)],
-    ])('rejects a row on %s with a 400 and leaves it unchanged', async (_case, seed) => {
+      ['no show at all (NULL show_id)', async () => insertRow(null, 2), 400, undefined],
+    ])('rejects a row on %s with a %i and leaves it unchanged', async (_case, seed, status, code) => {
       const id = await seed();
       const before = await snapshot(id);
 
-      await send(id, global.access_token).expect(400);
+      const res = await send(id, global.access_token).expect(status);
 
+      expect(res.body.code).toBe(code);
       expect(await snapshot(id)).toEqual(before);
+    });
+
+    test.each([
+      ['an ended show', async () => insertRow(endedShowId, 2)],
+      ['a dropped-delivery show (NULL end_time, newest row show_end)', seedDroppedShowEnd],
+    ])('accepts a row on %s from a music director', async (_case, seed) => {
+      const id = await seed();
+
+      await send(id, managerAuth()).expect(200);
     });
 
     test.each([
