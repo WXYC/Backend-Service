@@ -164,27 +164,52 @@ describe('installCrashHandlers (BS#3517)', () => {
       expect(exit).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ['--unhandled-rejections=none', undefined, false, false],
-      ['--unhandled-rejections=warn', undefined, true, false],
-      ['--unhandled-rejections=strict', undefined, true, true],
-      [undefined, '--unhandled-rejections=none', false, false],
-    ])(
-      'honours the explicit mode %s / NODE_OPTIONS %s (prints: %s, exits: %s)',
-      async (flag, nodeOptions, prints, exits) => {
-        process.execArgv = flag ? [flag] : [];
-        if (nodeOptions) {
-          process.env.NODE_OPTIONS = nodeOptions;
-        }
-        installCrashHandlers(build());
-        withListeners(0);
-        handlers['unhandledRejection'](new Error('rejected'), Promise.resolve());
-        await settle();
-        expect(mockClient.captureException).toHaveBeenCalledTimes(1);
-        expect(stderr.mock.calls.length > 0).toBe(prints);
-        expect(exit.mock.calls.length > 0).toBe(exits);
+    const NONE = '--unhandled-rejections=none';
+    const WARN = '--unhandled-rejections=warn';
+    const STRICT = '--unhandled-rejections=strict';
+
+    it.each<[string, string[], string | undefined, boolean, boolean]>([
+      ['unset: Node default is throw', [], undefined, true, true],
+      ['equals form in execArgv (none)', [NONE], undefined, false, false],
+      ['equals form in execArgv (warn)', [WARN], undefined, true, false],
+      ['equals form in NODE_OPTIONS', [], NONE, false, false],
+      ['space form in execArgv', ['--unhandled-rejections', 'none'], undefined, false, false],
+      [
+        'space form in NODE_OPTIONS among other flags',
+        [],
+        '--max-old-space-size=512 --unhandled-rejections warn',
+        true,
+        false,
+      ],
+      ['execArgv beats NODE_OPTIONS (none over strict)', [NONE], STRICT, false, false],
+      ['execArgv beats NODE_OPTIONS (warn over none)', [WARN], NONE, true, false],
+      ['execArgv equals form beats NODE_OPTIONS space form', [NONE], '--unhandled-rejections strict', false, false],
+      ['last occurrence wins within execArgv', [NONE, WARN], undefined, true, false],
+      [
+        'last occurrence wins within execArgv (space form)',
+        [WARN, '--unhandled-rejections', 'none'],
+        undefined,
+        false,
+        false,
+      ],
+      ['last occurrence wins within NODE_OPTIONS', [], `${NONE} ${WARN}`, true, false],
+      ['strict: the uncaughtException handler owns the print and the exit', [STRICT], undefined, false, false],
+      ['strict in NODE_OPTIONS (space form)', [], '--unhandled-rejections strict', false, false],
+    ])('mode: %s', async (_label, execArgv, nodeOptions, prints, exits) => {
+      process.execArgv = execArgv;
+      if (nodeOptions === undefined) {
+        delete process.env.NODE_OPTIONS;
+      } else {
+        process.env.NODE_OPTIONS = nodeOptions;
       }
-    );
+      installCrashHandlers(build());
+      withListeners(0);
+      handlers['unhandledRejection'](new Error('rejected'), Promise.resolve());
+      await settle();
+      expect(mockClient.captureException).toHaveBeenCalledTimes(1);
+      expect(stderr.mock.calls.length > 0).toBe(prints);
+      expect(exit.mock.calls.length > 0).toBe(exits);
+    });
   });
 
   it('does not send a crash for an exception a call site already captured', async () => {
