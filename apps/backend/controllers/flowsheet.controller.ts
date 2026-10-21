@@ -1102,8 +1102,12 @@ function pickUpdateEntryFields(data: UpdateRequestBody): UpdateRequestBody {
   if (data.message !== undefined) picked.message = data.message;
   if (data.spotlight_role !== undefined || data.spotlight_name !== undefined) {
     assertSpotlightEnabled();
-    if (data.spotlight_role !== undefined) picked.spotlight_role = validateSpotlightRole(data.spotlight_role);
-    if (data.spotlight_name !== undefined) picked.spotlight_name = validateSpotlightName(data.spotlight_name);
+    if (data.spotlight_role !== undefined) {
+      picked.spotlight_role = validateSpotlightRole(data.spotlight_role);
+    }
+    if (data.spotlight_name !== undefined) {
+      picked.spotlight_name = validateSpotlightName(data.spotlight_name);
+    }
   }
   return picked;
 }
