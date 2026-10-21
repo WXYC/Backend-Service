@@ -909,16 +909,19 @@ export const addHourlyBreakpoint = async (
 
 /**
  * Reads what `mayEditShow` decides on, plus the show's current `specialty_id`, or `undefined` when no such show exists.
- * Callers read it inside the transaction of the write it authorizes.
+ * Callers read it inside the transaction of the write it authorizes. `lock` reads the show row FOR UPDATE, so a
+ * sign-off cannot commit between the decision and the write.
  */
 export const loadShowEditTarget = async (
   executor: Pick<typeof db, 'select'>,
-  show_id: number
+  show_id: number,
+  { lock = false }: { lock?: boolean } = {}
 ): Promise<(ShowEditTarget & { specialty_id: number | null }) | undefined> => {
-  const [show] = await executor
+  const query = executor
     .select({ end_time: shows.end_time, specialty_id: shows.specialty_id })
     .from(shows)
     .where(eq(shows.id, show_id));
+  const [show] = lock ? await query.for('update') : await query;
   if (!show) {
     return undefined;
   }
@@ -969,7 +972,7 @@ export const updateShowDetails = async (
   patch: ShowDetailsPatch
 ): Promise<void> => {
   await db.transaction(async (trx) => {
-    const target = await loadShowEditTarget(trx, show_id);
+    const target = await loadShowEditTarget(trx, show_id, { lock: true });
     if (!target) {
       throw new WxycError('Not Found: no show with that id', 404);
     }

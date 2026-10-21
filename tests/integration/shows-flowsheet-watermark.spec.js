@@ -61,7 +61,9 @@ describe('show edits and the flowsheet watermark (BS#3456)', () => {
   });
 
   afterAll(async () => {
-    if (!sql) return;
+    if (!sql) {
+      return;
+    }
     await endShow();
     await sql.unsafe(`DELETE FROM ${SCHEMA}.flowsheet WHERE show_id = $1`, [showId]);
     await sql.unsafe(`DELETE FROM ${SCHEMA}.show_djs WHERE show_id = $1`, [showId]);
@@ -93,8 +95,10 @@ describe('show edits and the flowsheet watermark (BS#3456)', () => {
     for (let i = 0; i < 20 && status !== 200; i++) {
       // eslint-disable-next-line no-await-in-loop
       status = (await feed(validator)).status;
-      // eslint-disable-next-line no-await-in-loop
-      if (status !== 200) await new Promise((r) => setTimeout(r, 100));
+      if (status !== 200) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 100));
+      }
     }
     expect(status).toBe(200);
   });

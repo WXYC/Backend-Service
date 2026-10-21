@@ -174,6 +174,13 @@ describe('PATCH /flowsheet/shows/:id (BS#3456)', () => {
       400,
       undefined,
     ],
+    [
+      'a non-manager on a show whose newest row is show_end and whose end_time is still null',
+      { show_name: 'Mine' },
+      [[{ end_time: null, specialty_id: null }], [{ entry_type: 'show_end' }]],
+      403,
+      'closed_show',
+    ],
     ['a non-manager on an ended show', { show_name: 'Mine' }, [...ENDED_SHOW], 403, 'closed_show'],
     ['an unknown show', { show_name: 'Mine' }, [[]], 404, undefined],
     ['a show id that is not a positive integer', { show_name: 'Mine' }, [], 400, undefined],
