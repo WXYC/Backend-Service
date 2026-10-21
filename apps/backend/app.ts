@@ -44,6 +44,7 @@ import { startPeriodicEmit, stopPeriodicEmit } from './services/observability/ca
 import { proxyCachesForPeriodicEmit } from './controllers/proxy.controller.js';
 import { libraryServiceCachesForPeriodicEmit } from './services/library.service.js';
 import { drainInFlightEnrichments } from './services/metadata/enrichment.service.js';
+import { warmFeatureAccess } from './config/featureAccess.js';
 import { checkDatabase } from './services/health/database-check.js';
 import { activeShow } from './middleware/checkActiveShow.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -221,6 +222,8 @@ app.use(errorHandler);
 
 const server = app.listen(port, () => {
   console.log(`listening on port: ${port}!`);
+  // Start the feature-flag poller now, so the first request after a deploy does not wait on the definitions fetch.
+  warmFeatureAccess();
   startAlbumPlaysRefresh();
   startAlbumPopularityRefresh();
   startSseMetrics(() => serverEventsMgr.getClientCountByTopic());

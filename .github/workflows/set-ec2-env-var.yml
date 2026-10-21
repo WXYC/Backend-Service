@@ -105,7 +105,11 @@ jobs:
           # value as the DJ site's NEXT_PUBLIC_REVIEWS_ENABLED. Only
           # apps/backend reads it (restart_target=backend, the default).
           REVIEWS_AUDIENCE: ${{ secrets.REVIEWS_AUDIENCE }}
+          # Project secret key (phs_, scope feature_flag:read); only
+          # apps/backend's feature-access poller reads it (BS#3533).
           POSTHOG_SECRET_KEY: ${{ secrets.POSTHOG_SECRET_KEY }}
+          # Public project token (phc_) of the dj-site project; only
+          # apps/backend's feature-access poller reads it (BS#3611).
           POSTHOG_FLAGS_API_KEY: ${{ secrets.POSTHOG_FLAGS_API_KEY }}
           # Digital-archive playback endpoint (BS#2320, epic
           # WXYC/wxyc-dj-ios#135). Carried through the same allowlist as

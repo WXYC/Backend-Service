@@ -41,7 +41,9 @@ const setEnv = (key: (typeof ENV_KEYS)[number], value: string | undefined) => {
 type PostHogState = 'no key' | 'not loaded' | 'flag missing' | { returns: unknown };
 
 const givenPostHog = (state: PostHogState) => {
-  if (state === 'no key') return;
+  if (state === 'no key') {
+    return;
+  }
   setEnv('POSTHOG_FLAGS_API_KEY', 'phc_flags');
   setEnv('POSTHOG_SECRET_KEY', 'phs_secret');
   mockIsReady.mockReturnValue(state !== 'not loaded');
@@ -51,12 +53,16 @@ const givenPostHog = (state: PostHogState) => {
 beforeEach(() => {
   jest.clearAllMocks();
   jest.useRealTimers();
-  for (const key of ENV_KEYS) setEnv(key, undefined);
+  for (const key of ENV_KEYS) {
+    setEnv(key, undefined);
+  }
   resetFeatureAccess();
 });
 
 afterAll(() => {
-  for (const key of ENV_KEYS) setEnv(key, saved[key]);
+  for (const key of ENV_KEYS) {
+    setEnv(key, saved[key]);
+  }
 });
 
 describe('audience(reviews)', () => {
@@ -168,7 +174,9 @@ describe('the missing-flag warning', () => {
 
   it('reports a flag missing from loaded definitions once, not on every check', async () => {
     givenPostHog('flag missing');
-    for (let i = 0; i < 5; i++) await audience('reviews');
+    for (let i = 0; i < 5; i++) {
+      await audience('reviews');
+    }
     expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
     expect(mockCaptureMessage).toHaveBeenCalledWith(
       expect.stringContaining('reviews-audience'),
@@ -216,4 +224,31 @@ describe('the missing-flag warning', () => {
       expect(mockCaptureMessage).not.toHaveBeenCalled();
     }
   );
+});
+
+describe('a PostHog failure fails closed', () => {
+  beforeEach(() => {
+    setEnv('REVIEWS_AUDIENCE', 'staff');
+  });
+
+  it('falls back to the env value and reports once when the client cannot be built', async () => {
+    givenPostHog({ returns: 'everyone' });
+    mockPostHog.mockImplementation(() => {
+      throw new Error('Your Personal API key is invalid');
+    });
+    for (let i = 0; i < 3; i++) {
+      await expect(audience('reviews')).resolves.toBe('staff');
+    }
+    expect(mockPostHog).toHaveBeenCalledTimes(1);
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the env value and reports once when getAllFlags throws', async () => {
+    givenPostHog({ returns: 'everyone' });
+    mockGetAllFlags.mockRejectedValue(new Error('boom'));
+    for (let i = 0; i < 3; i++) {
+      await expect(audience('reviews')).resolves.toBe('staff');
+    }
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+  });
 });

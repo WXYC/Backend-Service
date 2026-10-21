@@ -10,6 +10,14 @@ const mockQueue: (unknown[] | Error)[] = [];
 const mockSend = jest.fn<(email: unknown) => Promise<void>>();
 const mockCapture = jest.fn();
 
+// A PostHog client that cannot be built (a bad key): the feature-access seam must fall back to the env var, never reject.
+jest.mock('posthog-node', () => ({
+  PostHog: class {
+    constructor() {
+      throw new Error('Your Personal API key is invalid');
+    }
+  },
+}));
 jest.mock('@sentry/node', () => ({ captureException: (...args: unknown[]) => mockCapture(...args) }));
 jest.mock('@wxyc/authentication', () => ({
   ...jest.requireActual('../../../shared/authentication/src/auth.roles'),
@@ -50,7 +58,7 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, intake_items, staffNameSql, user } from '@wxyc/database';
-import { resetConfig as resetReviewsAudience } from '../../../apps/backend/config/reviewsAudience';
+import { resetFeatureAccess as resetReviewsAudience } from '../../../apps/backend/config/featureAccess';
 import {
   assignedLine,
   musicDirectorEmails,
@@ -822,6 +830,21 @@ describe('notifyAsked', () => {
     mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
     await notifyAsked(ASKED, 'dj-2', 'md-1');
     expect(mockSend).toHaveBeenCalledTimes(count);
+  });
+
+  test('a PostHog client that cannot be built falls back to the env var and does not reject', async () => {
+    process.env.POSTHOG_FLAGS_API_KEY = 'phs_swapped';
+    process.env.POSTHOG_SECRET_KEY = 'phc_swapped';
+    try {
+      resetReviewsAudience();
+      mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
+      await expect(notifyAsked(ASKED, 'dj-2', 'md-1')).resolves.toBeUndefined();
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.POSTHOG_FLAGS_API_KEY;
+      delete process.env.POSTHOG_SECRET_KEY;
+      resetReviewsAudience();
+    }
   });
 
   test.each([
