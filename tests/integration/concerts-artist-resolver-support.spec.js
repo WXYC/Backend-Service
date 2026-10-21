@@ -528,7 +528,7 @@ describe('concerts-artist-resolver support sync/resolve contract (BS#1760)', () 
       ['a collaborator credit (Open Mike Eagle on Paul White, concert 19292)', 'Open Mike Eagle', 'unmatched', null],
       ['a discogs_name_variation variant', 'Oh Sees', 'alias', OH_SEES],
       ["the owner's name with a leading The", 'Carolina Chocolate Drops', 'strict', CCD],
-    ])('%s resolves as %s', async (_label, name, kind, owner) => {
+    ])('%s: %s resolves as %s', async (_label, name, kind, owner) => {
       const raw = kind === 'strict' ? `The ${ARTIST_PREFIX} ${name}` : `${ARTIST_PREFIX} ${name}`;
 
       const result = await resolveArtistId(sql, raw);
