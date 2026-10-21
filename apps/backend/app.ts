@@ -22,6 +22,7 @@ import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
 import { concerts_route } from './routes/concerts.route.js';
+import { specialty_shows_route } from './routes/specialty-shows.route.js';
 import { album_reviews_route } from './routes/album-reviews.route.js';
 import { digital_archive_route } from './routes/digital-archive.route.js';
 import { intake_route } from './routes/intake.route.js';
@@ -100,6 +101,9 @@ app.use('/playlists', playlist_route);
 
 // On Tour concerts feed (anonymous auth, pure DB read) — BS#1603
 app.use('/concerts', concerts_route);
+
+// Public specialty-show catalog (unauthenticated, five-minute cache)
+app.use('/specialty-shows', specialty_shows_route);
 
 // Form-review archive read (role-gated `album_reviews:read`, pure DB read) — ADR 0011.
 // Gate and consent posture: routes/album-reviews.route.ts.
