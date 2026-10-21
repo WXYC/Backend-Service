@@ -58,6 +58,9 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
     options.credentialProvider ?? fromInstanceMetadata({ timeout: IMDS_TIMEOUT_MS, maxRetries: IMDS_MAX_RETRIES });
 
   let cached: { credentials: AwsCredentialIdentity; fetchedAt: number; client: S3Client } | undefined;
+  // In-flight sends per client; a replaced client is destroyed only once its own sends settle, so a refresh
+  // never cuts a request off mid-flight.
+  const active = new Map<S3Client, { inFlight: number; retired: boolean }>();
 
   // The SDK's static-stability fallback rewrites `expiration` to now + 5-10 min after a failed refresh and
   // keeps the real value in `originalExpiration`; a link must never outlive the real one.
@@ -68,6 +71,16 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
 
   let inFlight: Promise<void> | undefined;
   let lastFailure: { error: Error; at: number } | undefined;
+
+  function retire(client: S3Client): void {
+    const state = active.get(client);
+    if (state && state.inFlight > 0) {
+      state.retired = true;
+    } else {
+      active.delete(client);
+      client.destroy();
+    }
+  }
 
   function fetchCredentials(): Promise<void> {
     if (inFlight) {
@@ -81,7 +94,11 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
       .then(
         (credentials) => {
           // The client gets the resolved object, so it never consults the default chain.
+          const replaced = cached?.client;
           cached = { credentials, fetchedAt: now(), client: new S3Client({ region, credentials }) };
+          if (replaced) {
+            retire(replaced);
+          }
           lastFailure = undefined;
         },
         (error: unknown) => {
@@ -96,11 +113,44 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
     return inFlight;
   }
 
-  async function ensureCredentials(requiredMs: number): Promise<void> {
+  // `useStaleOnFailure` (send, credentials) keeps serving the cached identity while it is still valid if the
+  // refetch fails; presign keeps its stricter rule and surfaces the failure.
+  async function ensureCredentials(requiredMs: number, useStaleOnFailure = false): Promise<void> {
     if (!cached) {
       await fetchCredentials();
     } else if (msLeft(cached.credentials) < requiredMs && now() - cached.fetchedAt >= SIGNING_REFRESH_INTERVAL_MS) {
-      await fetchCredentials();
+      try {
+        await fetchCredentials();
+      } catch (error) {
+        if (!useStaleOnFailure || msLeft(cached.credentials) <= 0) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  // Credentials that are already past expiry are refused rather than sent; a failed fetch replays its own error.
+  async function ensureUsable(): Promise<void> {
+    await ensureCredentials(HEADROOM_MS, true);
+    if (msLeft(cached!.credentials) <= 0) {
+      throw new Error('Instance-role credentials have expired');
+    }
+  }
+
+  async function sendOnClient(args: unknown[]): Promise<unknown> {
+    await ensureUsable();
+    const client = cached!.client;
+    const state = active.get(client) ?? { inFlight: 0, retired: false };
+    active.set(client, state);
+    state.inFlight += 1;
+    try {
+      return await (client as { send(...args: unknown[]): unknown }).send(...args);
+    } finally {
+      state.inFlight -= 1;
+      if (state.inFlight === 0 && state.retired) {
+        active.delete(client);
+        client.destroy();
+      }
     }
   }
 
@@ -117,13 +167,22 @@ export function createInstanceRoleSigner(options: InstanceRoleSignerOptions = {}
       }
       return getSignedUrl(cached!.client, command, { expiresIn });
     },
-    // Forwards every argument (options, callback form) so the declared overloads hold.
-    send: (async (...args: unknown[]) => {
-      await ensureCredentials(HEADROOM_MS);
-      return (cached!.client as { send(...args: unknown[]): unknown }).send(...args);
+    // Forwards every argument (options, callback form) so the declared overloads hold. In the callback form
+    // a failure goes to the callback, as the SDK's own send does, never to an unobserved rejection.
+    send: ((...args: unknown[]) => {
+      const last = args[args.length - 1];
+      if (typeof last === 'function') {
+        const callback = last as (...cbArgs: unknown[]) => void;
+        sendOnClient(args.slice(0, -1)).then(
+          (output) => callback(null, output),
+          (error: unknown) => callback(error)
+        );
+        return undefined;
+      }
+      return sendOnClient(args);
     }) as S3Client['send'],
     async credentials() {
-      await ensureCredentials(HEADROOM_MS);
+      await ensureUsable();
       return cached!.credentials;
     },
   };

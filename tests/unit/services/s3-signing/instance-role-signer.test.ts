@@ -240,6 +240,101 @@ describe('createInstanceRoleSigner', () => {
         spy.mockRestore();
       }
     });
+
+    describe('client lifecycle and failures', () => {
+      const { S3Client } = jest.requireActual('@aws-sdk/client-s3');
+      const head = () => new HeadObjectCommand({ Bucket: 'b', Key: 'posters/a.png' });
+      let sendSpy: jest.SpyInstance;
+      let destroySpy: jest.SpyInstance;
+      beforeEach(() => {
+        sendSpy = jest.spyOn(S3Client.prototype, 'send').mockResolvedValue({});
+        destroySpy = jest.spyOn(S3Client.prototype, 'destroy').mockImplementation(() => undefined);
+      });
+      afterEach(() => {
+        sendSpy.mockRestore();
+        destroySpy.mockRestore();
+      });
+
+      it('destroys the replaced client when credentials are refetched', async () => {
+        const provider = jest.fn(() => Promise.resolve(fakeCredentials('A', 3 * MIN, clock)));
+        const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+        await signer.send(head());
+        expect(destroySpy).not.toHaveBeenCalled();
+        clock += MIN;
+        await signer.send(head());
+        expect(provider).toHaveBeenCalledTimes(2);
+        expect(destroySpy).toHaveBeenCalledTimes(1);
+        expect(destroySpy.mock.instances[0]).toBe(sendSpy.mock.instances[0]);
+      });
+
+      it('defers destroying the replaced client until its in-flight sends finish', async () => {
+        let finish!: () => void;
+        sendSpy.mockImplementationOnce(() => new Promise((r) => (finish = () => r({}))));
+        const provider = jest.fn(() => Promise.resolve(fakeCredentials('A', 3 * MIN, clock)));
+        const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+        const slow = signer.send(head());
+        await new Promise((r) => setImmediate(r));
+        clock += MIN;
+        await signer.send(head());
+        expect(destroySpy).not.toHaveBeenCalled();
+        finish();
+        await slow;
+        expect(destroySpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('delivers a credential-fetch failure to the callback form without an unhandled rejection', async () => {
+        const rejections: unknown[] = [];
+        const onRejection = (reason: unknown) => rejections.push(reason);
+        process.on('unhandledRejection', onRejection);
+        try {
+          const signer = createInstanceRoleSigner({
+            credentialProvider: () => Promise.reject(new Error('imds down')),
+            now,
+          });
+          const err = await new Promise<Error>((resolve) => {
+            (signer.send as (c: unknown, cb: (e: Error) => void) => void)(head(), resolve);
+          });
+          expect(err.message).toBe('imds down');
+          await new Promise((r) => setImmediate(r));
+          expect(rejections).toEqual([]);
+        } finally {
+          process.off('unhandledRejection', onRejection);
+        }
+      });
+
+      it('keeps using still-valid cached credentials when a refetch fails, through the back-off', async () => {
+        const provider = jest
+          .fn<Promise<ReturnType<typeof fakeCredentials>>, []>()
+          .mockResolvedValueOnce(fakeCredentials('A', 4 * MIN, clock))
+          .mockRejectedValue(new Error('imds down'));
+        const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+        await signer.send(head());
+        clock += MIN;
+        await expect(signer.send(head())).resolves.toEqual({});
+        await expect(signer.send(head())).resolves.toEqual({});
+        await expect(signer.credentials()).resolves.toMatchObject({ accessKeyId: 'A' });
+        expect(provider).toHaveBeenCalledTimes(2);
+      });
+
+      it('refuses to send with expired credentials, surfacing the fetch failure', async () => {
+        const provider = jest
+          .fn<Promise<ReturnType<typeof fakeCredentials>>, []>()
+          .mockResolvedValueOnce(fakeCredentials('A', 4 * MIN, clock))
+          .mockRejectedValue(new Error('imds down'));
+        const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+        await signer.send(head());
+        clock += 5 * MIN;
+        await expect(signer.send(head())).rejects.toThrow('imds down');
+        expect(sendSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('refuses to send with credentials that arrive already expired', async () => {
+        const provider = jest.fn(() => Promise.resolve(fakeCredentials('A', -1000, clock)));
+        const signer = createInstanceRoleSigner({ credentialProvider: provider, now });
+        await expect(signer.send(head())).rejects.toThrow(/expired/);
+        expect(sendSpy).not.toHaveBeenCalled();
+      });
+    });
   });
 
   it('hands out the same cached credentials through credentials()', async () => {
@@ -287,12 +382,20 @@ describe('defineStoreAllowlist CopySource', () => {
     expect(() => allowlist.assertAllowed(copy(source))).not.toThrow();
   });
 
+  it('still checks the key prefix when the command has no Bucket', () => {
+    const noBucket = (CopySource: string) => new CopyObjectCommand({ Key: 'posters/dest.png', CopySource } as never);
+    expect(() => allowlist.assertAllowed(noBucket('other/held/a.png'))).not.toThrow();
+    expect(() => allowlist.assertAllowed(noBucket('b/logos/a.png'))).toThrow(/prefix/);
+  });
+
   it.each([
     ['another prefix', 'b/logos/a.png', /prefix/],
     ['a path-traversal source', 'b/held/../logos/a.png', /prefix/],
     ['an encoded path-traversal source', 'b/held/%2E%2E/logos/a.png', /prefix/],
     ['a malformed encoding', 'b/held/%E0%A4%A.png', /prefix/],
     ['another bucket', 'other/held/a.png', /bucket/],
+    ['an encoded-slash traversal', 'b/held%2F..%2Flogos/a.png', /prefix/],
+    ['a double leading slash', '//b/held/a.png', /bucket/],
   ])('rejects %s without echoing the source', (_name, source, message) => {
     expect(() => allowlist.assertAllowed(copy(source))).toThrow(message);
     expect(() => allowlist.assertAllowed(copy(source))).not.toThrow(/logos|other|a\.png/);
