@@ -31,9 +31,9 @@ const POLL_INTERVAL_MS = 60_000;
 const LOAD_GRACE_MS = POLL_INTERVAL_MS;
 const REPORT_AGAIN_MS = 60 * 60 * 1000;
 
-type FlagState = 'present' | 'missing' | 'not_loaded';
+type FlagState = 'present' | 'missing' | 'not_loaded' | 'error';
 
-let flagClient: { client: PostHog | null; builtAt: number } | null = null;
+let flagClient: { client: PostHog | null; builtAt: number; failed: boolean } | null = null;
 const reported = new Map<string, { state: FlagState; at: number }>();
 
 /**
@@ -45,8 +45,11 @@ const reported = new Map<string, { state: FlagState; at: number }>();
 const getFlagClient = (): PostHog | null => {
   if (!flagClient) {
     const { POSTHOG_FLAGS_API_KEY: token, POSTHOG_SECRET_KEY: secretKey } = process.env;
-    flagClient = {
-      client:
+    let client: PostHog | null = null;
+    let failed = false;
+    try {
+      // posthog-node throws synchronously on a bad key (a `phc_` token in the secret slot, say); remember that rather than rebuild on every call.
+      client =
         token && secretKey
           ? new PostHog(token, {
               host: 'https://us.i.posthog.com',
@@ -54,11 +57,18 @@ const getFlagClient = (): PostHog | null => {
               featureFlagsPollingInterval: POLL_INTERVAL_MS,
               strictLocalEvaluation: true,
             })
-          : null,
-      builtAt: Date.now(),
-    };
+          : null;
+    } catch {
+      failed = true;
+    }
+    flagClient = { client, builtAt: Date.now(), failed };
   }
   return flagClient.client;
+};
+
+/** Builds the flag client now (apps/backend start-up), so the first poll is not on a request path. Never throws. */
+export const warmFeatureAccess = (): void => {
+  getFlagClient();
 };
 
 /** Tests only: drop the flag client and the warning state, so the next call re-reads the env. */
@@ -76,15 +86,25 @@ const reportFlagState = (flag: string, state: FlagState): void => {
     return;
   }
   const now = Date.now();
-  if (state === 'not_loaded' && now - (flagClient?.builtAt ?? now) < LOAD_GRACE_MS) return;
-  if (last?.state === state && now - last.at < REPORT_AGAIN_MS) return;
+  if (state === 'not_loaded' && now - (flagClient?.builtAt ?? now) < LOAD_GRACE_MS) {
+    return;
+  }
+  if (last?.state === state && now - last.at < REPORT_AGAIN_MS) {
+    return;
+  }
   reported.set(flag, { state, at: now });
-  getErrorReporter().captureMessage(
-    state === 'missing'
-      ? `PostHog flag "${flag}" is not in the loaded flag definitions; check that POSTHOG_FLAGS_API_KEY and POSTHOG_SECRET_KEY name the project that holds it`
-      : `PostHog flag definitions have not loaded; "${flag}" falls back to its env var`,
-    { level: 'warning', tags: { subsystem: 'feature-access' } }
-  );
+  try {
+    getErrorReporter().captureMessage(
+      state === 'error'
+        ? `PostHog flag client failed for "${flag}" (a bad POSTHOG_FLAGS_API_KEY or POSTHOG_SECRET_KEY, such as the two swapped, or an unexpected client error); it falls back to its env var`
+        : state === 'missing'
+          ? `PostHog flag "${flag}" is not usable from the loaded definitions: it may be absent, the keys may name a project that holds no flags, or the flag may not be locally evaluable; check POSTHOG_FLAGS_API_KEY and POSTHOG_SECRET_KEY, and that the flag has no experience continuity or unknown group type; it falls back to its env var`
+          : `PostHog flag definitions are not ready: they may not have loaded yet (network, a revoked key) or the project may hold no flags; "${flag}" falls back to its env var`,
+      { level: 'warning', tags: { subsystem: 'feature-access' } }
+    );
+  } catch {
+    // Reporting must never break an access check.
+  }
 };
 
 /**
@@ -93,11 +113,21 @@ const reportFlagState = (flag: string, state: FlagState): void => {
  */
 const readFlag = async (flag: string): Promise<Audience | undefined> => {
   const posthog = getFlagClient();
-  if (!posthog) return undefined;
-  const flags = await posthog.getAllFlags(FLAG_DISTINCT_ID, { flagKeys: [flag], onlyEvaluateLocally: true });
-  reportFlagState(flag, !posthog.isLocalEvaluationReady() ? 'not_loaded' : flag in flags ? 'present' : 'missing');
-  const value = flags[flag];
-  return AUDIENCES.includes(value) ? (value as Audience) : undefined;
+  if (!posthog) {
+    if (flagClient?.failed) {
+      reportFlagState(flag, 'error');
+    }
+    return undefined;
+  }
+  try {
+    const flags = await posthog.getAllFlags(FLAG_DISTINCT_ID, { flagKeys: [flag], onlyEvaluateLocally: true });
+    reportFlagState(flag, !posthog.isLocalEvaluationReady() ? 'not_loaded' : flag in flags ? 'present' : 'missing');
+    const value = flags[flag];
+    return AUDIENCES.includes(value) ? (value as Audience) : undefined;
+  } catch {
+    reportFlagState(flag, 'error');
+    return undefined;
+  }
 };
 
 /** Who a feature is open to: the PostHog flag's variant when local evaluation has one of the three, else the env fallback, else `off` (fails closed). */
@@ -112,7 +142,9 @@ export const audience = async (feature: FeatureKey): Promise<Audience> => {
  */
 export const canAccess = async (feature: FeatureKey, account: FeatureAccount): Promise<boolean> => {
   const level = roleToAuthorization(account.role ?? undefined);
-  if (level < Authorization.DJ) return false;
+  if (level < Authorization.DJ) {
+    return false;
+  }
   const { capability } = FEATURES[feature] as { capability?: string };
   switch (await audience(feature)) {
     case 'everyone':
