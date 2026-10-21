@@ -945,6 +945,9 @@ const BS3552 = {
   DIRECT_LIBRARY_ID: 9601,
   ALIAS_ARTIST_ID: 9602,
   ALIAS_LIBRARY_IDS: [9602, 9603],
+  // BS#3578: nine more Jerry Giddens releases, seeded only by the full-page
+  // case, so that ten direct albums fill an n=10 page.
+  FILL_LIBRARY_IDS: [9604, 9605, 9606, 9607, 9608, 9609, 9610, 9611, 9612],
   VARIANT: 'Rhiannon Giddens',
 };
 
@@ -1092,6 +1095,54 @@ describe('GET /library/ Both-mode — alias hits after a stage-1 tsvector hit (B
     }
   );
 
+  flagOnCase(
+    'full page: n=10 holds one album for the alias hits, and only the weakest direct album gives way (9 + 1)',
+    async () => {
+      // BS#3578: ten direct albums fill n=10, so before the reserve the probe
+      // never ran. `floor(10 / 10)` is 1, so real Postgres caps the probe at
+      // one of the two matching alias albums, and the tenth direct album
+      // makes room for it.
+      const { FILL_LIBRARY_IDS } = BS3552;
+      const values = FILL_LIBRARY_IDS.map(
+        (_, i) => `($${i + 4}, $1, $2, $3, 'Giddens Sessions, Vol. ${i + 1}', ${i + 2}, 'Jerry Giddens')`
+      );
+      await sql.unsafe(
+        `INSERT INTO ${wxycSchema}.library (id, artist_id, genre_id, format_id, album_title, code_number, artist_name)
+         VALUES ${values.join(', ')}
+         ON CONFLICT (id) DO NOTHING`,
+        [DIRECT_ARTIST_ID, TEST_GENRE_ID, TEST_FORMAT_ID, ...FILL_LIBRARY_IDS]
+      );
+      const page = { artist_name: 'Giddens', album_title: 'Giddens', n: 10 };
+      const albumIds = (rows) => [...new Set(rows.map((r) => r.id))];
+      try {
+        // Stage 1 alone (no alias row) gives the direct albums' own order.
+        await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = $1`, [ALIAS_ARTIST_ID]);
+        let baseline;
+        try {
+          baseline = (await auth.get('/library/').query(page).expect(200)).body;
+        } finally {
+          await seedAliasRow();
+        }
+        expect(albumIds(baseline)).toHaveLength(10);
+        expect(baseline.some((r) => r.matched_via_alias)).toBe(false);
+
+        const body = (await auth.get('/library/').query(page).expect(200)).body;
+
+        const direct = albumIds(body.filter((r) => !r.matched_via_alias));
+        const alias = albumIds(body.filter((r) => r.matched_via_alias));
+        expect(albumIds(body)).toHaveLength(10);
+        expect(direct).toEqual(albumIds(baseline).slice(0, 9));
+        expect(alias).toHaveLength(1);
+        expect(ALIAS_LIBRARY_IDS).toContain(alias[0]);
+        // BS#2020: the alias album still follows every direct row.
+        const lastDirect = body.reduce((last, r, i) => (r.matched_via_alias ? last : i), -1);
+        expect(lastDirect).toBeLessThan(body.findIndex((r) => r.matched_via_alias));
+      } finally {
+        await sql.unsafe(`DELETE FROM ${wxycSchema}.library WHERE id = ANY($1::int[])`, [FILL_LIBRARY_IDS]);
+      }
+    }
+  );
+
   flagOffCase('flag off: the surname query returns stage 1 alone, with no alias rows', async () => {
     const body = await bothMode('Giddens');
 
@@ -1107,7 +1158,7 @@ async function cleanupBs3552Rows(sql, wxycSchema) {
   const artistIds = [BS3552.DIRECT_ARTIST_ID, BS3552.ALIAS_ARTIST_ID];
   await sql.unsafe(`DELETE FROM ${wxycSchema}.artist_search_alias WHERE artist_id = ANY($1::int[])`, [artistIds]);
   await sql.unsafe(`DELETE FROM ${wxycSchema}.library WHERE id = ANY($1::int[])`, [
-    [BS3552.DIRECT_LIBRARY_ID, ...BS3552.ALIAS_LIBRARY_IDS],
+    [BS3552.DIRECT_LIBRARY_ID, ...BS3552.ALIAS_LIBRARY_IDS, ...BS3552.FILL_LIBRARY_IDS],
   ]);
   await sql.unsafe(`DELETE FROM ${wxycSchema}.genre_artist_crossreference WHERE artist_id = ANY($1::int[])`, [
     artistIds,

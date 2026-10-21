@@ -3637,7 +3637,8 @@ async function searchLibraryByTrigramBoth(
  *
  * @param query The trimmed query, already gated on `hasAlphanumeric` and a
  *   length of at least 2 by the caller.
- * @param limit Albums still free on the page.
+ * @param limit Albums to return: the room stage 1 left on the page, or the
+ *   BS#3578 reserve when that is larger.
  * @param minSimilarity The BS#2018 floor, read once by the caller.
  * @returns Rows tagged with `matched_via_alias`, best match first.
  */
@@ -3660,6 +3661,30 @@ async function searchLibraryAliasHitsAfterTsvector(
     limit,
     derivedTable: sql`(${buildAliasOnlyBranch(stage1Match, on_streaming)}) alias_only`,
   });
+}
+
+/**
+ * One album in this many on a Both-mode page is held for alias-only hits
+ * after a stage-1 tsvector hit (BS#3578): `floor(n / 10)`, so 5 of dj-site's
+ * 50. A divisor rather than a 0.1 fraction so `Math.floor` never sees a
+ * float that lands a hair under a whole number.
+ *
+ * Without it, a stage 1 that fills the page leaves no room for the BS#3552
+ * probe, and this surface has no pagination, so a skipped alias match is
+ * lost, not demoted: a member's records filed under another band's card stay
+ * unfindable by a common surname. A page under 10 reserves nothing.
+ */
+const ALIAS_RESERVE_PAGE_DIVISOR = 10;
+
+/**
+ * The rows of the first `albums` distinct ids in `rows`, in their order.
+ *
+ * Trims by album, never by row: an album's rotation fan-out rows share one
+ * id, so a row slice could cut an album in half.
+ */
+function keepLeadingAlbums<T extends { id: number }>(rows: T[], albums: number): T[] {
+  const kept = new Set([...new Set(rows.map((r) => r.id))].slice(0, albums));
+  return rows.filter((r) => kept.has(r.id));
 }
 
 /**
@@ -3730,6 +3755,18 @@ export async function runCatalogTrackSearchCascade(
  * skips stage 2 and the cascade. With the flag off, or without the option,
  * stage 1's rows are returned untouched.
  *
+ * When stage 1 fills the page, or leaves less room than `floor(n / 10)`
+ * ({@link ALIAS_RESERVE_PAGE_DIVISOR}), the probe asks for that reserve
+ * instead (BS#3578). With `k` alias albums back, the page keeps the top
+ * `min(stage-1 albums, n - k)` stage-1 albums in stage-1 order, then the `k`
+ * alias albums, trimmed by album id so no album loses its fan-out rows. The
+ * reason: this surface has no pagination, so an alias match the probe skips
+ * is lost, not demoted. BS#2020 still holds, because alias rows always come
+ * after every kept stage-1 row, and only the weakest stage-1 albums give way,
+ * only on a full or nearly full page, and only as many as there are alias
+ * albums. No alias hits, or a page under 10, returns stage 1 unchanged. The
+ * page never holds more than `n` albums.
+ *
  * Only the catalog route (`fuzzySearchLibrary`, `GET /library/`) passes the
  * option. The request-line `searchLibrary` does not: every request-line
  * strategy keeps only rows whose artist starts with the parsed artist
@@ -3764,18 +3801,29 @@ async function searchLibraryBothMode(
     // rotation fan-out rows, rather than borrowing that invariant.
     const stage1Ids = new Set(tsvectorResults.map((r) => r.id));
     const room = n - stage1Ids.size;
-    // `trimmed.length >= 2` mirrors stage 2's own gate below. With no room
-    // left the probe could only add albums past `n`, so skip the query.
-    if (!appendAliasHits || !aliasEnabled || room <= 0 || trimmed.length < 2) {
+    // BS#3578: ask for the reserve even when stage 1 left less room than it.
+    // With neither room nor a reserve (a full page under 10), the probe could
+    // only add albums past `n`, so skip the query. `trimmed.length >= 2`
+    // mirrors stage 2's own gate below.
+    const probeLimit = Math.max(room, Math.floor(n / ALIAS_RESERVE_PAGE_DIVISOR));
+    if (!appendAliasHits || !aliasEnabled || probeLimit <= 0 || trimmed.length < 2) {
       return tsvectorResults;
     }
-    const aliasRows = await searchLibraryAliasHitsAfterTsvector(trimmed, room, aliasMinSimilarity, on_streaming);
     // The probe's SQL already excludes every stage-1 match; dedupe by id
     // anyway so a future change to either predicate cannot show one release
-    // twice. No row-count slice: the probe is already album-capped at
-    // `room`, so the page holds at most `n` albums, and a row slice could
-    // cut an album's rows in half.
-    return [...tsvectorResults, ...aliasRows.filter((r) => !stage1Ids.has(r.id))];
+    // twice.
+    const aliasRows = (
+      await searchLibraryAliasHitsAfterTsvector(trimmed, probeLimit, aliasMinSimilarity, on_streaming)
+    ).filter((r) => !stage1Ids.has(r.id));
+    if (aliasRows.length === 0) {
+      return tsvectorResults;
+    }
+    // The probe is album-capped at `probeLimit` in SQL, so `aliasAlbums <=
+    // n`. Only the weakest stage-1 albums give way, and only as many as the
+    // alias albums need beyond the room; the rest keep stage-1 order. Both
+    // sides are counted and trimmed by id, never by row.
+    const aliasAlbums = new Set(aliasRows.map((r) => r.id)).size;
+    return [...keepLeadingAlbums(tsvectorResults, n - aliasAlbums), ...aliasRows];
   }
 
   if (trimmed.length >= 2) {

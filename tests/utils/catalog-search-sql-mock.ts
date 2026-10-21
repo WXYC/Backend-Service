@@ -90,16 +90,46 @@ export type CatalogTierRows = Partial<Record<CatalogQueryTier, unknown[]>>;
  * `alias` falls back to `trigram` when unset, so a test that only cares "the
  * trigram tier returned a row" does not have to know which of the two trigram
  * shapes the alias flag selected.
+ *
+ * With `capAliasAppend`, the `aliasAppend` rows are cut to the albums the
+ * probe's rendered `album_rank <= N` admits, as Postgres would cut them. That
+ * lets a test seed more alias albums than the probe asks for (BS#3578: eight
+ * matches against a reserve of five) and read back what the page really gets.
+ * Off by default, so a test that hands the probe rows real SQL could never
+ * return (a stage-1 duplicate, to pin the id dedupe) still gets them all.
  */
-export function mockCatalogTiers(execute: jest.Mock, rows: CatalogTierRows): void {
+export function mockCatalogTiers(
+  execute: jest.Mock,
+  rows: CatalogTierRows,
+  { capAliasAppend = false }: { capAliasAppend?: boolean } = {}
+): void {
   activeRows = { ...rows };
   execute.mockReset();
   execute.mockImplementation((query: unknown) => {
-    const tier = classifyCatalogQuery(renderSqlWithParams(query));
+    const rendered = renderSqlWithParams(query);
+    const tier = classifyCatalogQuery(rendered);
     const current = activeRows ?? {};
     const forTier = tier === 'alias' ? (current.alias ?? current.trigram) : current[tier];
+    if (capAliasAppend && tier === 'aliasAppend' && forTier) {
+      return Promise.resolve(capAtAlbumRank(rendered, forTier));
+    }
     return Promise.resolve(forTier ?? []);
   });
+}
+
+/**
+ * Keep the rows of the first N distinct ids, where N is the rendered
+ * `album_rank <= N`. Every row of a kept album stays, so fan-out rows that
+ * share an id are never split. No cap in the SQL means no cut.
+ */
+function capAtAlbumRank(rendered: string, rows: unknown[]): unknown[] {
+  const match = /album_rank <= (\d+)/.exec(rendered);
+  if (!match) {
+    return rows;
+  }
+  const ids = [...new Set(rows.map((row) => (row as { id: number }).id))];
+  const admitted = new Set(ids.slice(0, Number(match[1])));
+  return rows.filter((row) => admitted.has((row as { id: number }).id));
 }
 
 /**
