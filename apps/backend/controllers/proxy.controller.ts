@@ -53,6 +53,7 @@ import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js'
 import { getConfig as getWxycReviewsConfig } from '../config/wxycReviews.js';
 import { LRUCache } from 'lru-cache';
 import WxycError from '../utils/error.js';
+import { parseCountQueryParam } from '../utils/query-params.js';
 import { recordCacheLookup, recordCacheEviction, type RegisteredCache } from '../services/observability/cache-stats.js';
 
 // Shared instance — stateless, safe to reuse across requests. Centralizes
@@ -1160,7 +1161,8 @@ export const getSpotifyTrack: RequestHandler<SpotifyTrackParams> = async (req, r
  * Proxies to LML's GET /api/v1/library/search, providing auth, rate limiting,
  * and activity tracking. Used by dj-site for flowsheet autocomplete.
  *
- * Query params: artist, title, q (free text), limit (default 10)
+ * Query params: artist, title, q (free text), limit (1 to `SEARCH_COUNT_MAX`; absent or blank uses LML's default
+ * of 10). Any other `limit` is a 400.
  */
 type LibrarySearchQuery = {
   artist?: string;
@@ -1173,6 +1175,8 @@ export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySear
   const { artist, title, q, limit } = req.query;
 
   if (!artist && !title && !q) throw new WxycError('At least one of artist, title, or q is required', 400);
+  // Absent or blank leaves LML's own default in charge (BS#3587).
+  const parsedLimit = parseCountQueryParam(limit, 'limit');
 
   let results: LibrarySearchResponse;
   try {
@@ -1180,7 +1184,7 @@ export const librarySearch: RequestHandler<object, unknown, unknown, LibrarySear
       artist,
       title,
       q,
-      limit: limit ? parseInt(limit, 10) : undefined,
+      limit: parsedLimit,
       // BS#1826 PR 2: the PRD's protected-search win — class 1 (3s timeout,
       // no budget header), so local catalog search can't be starved by
       // enrichment/batch LML traffic sharing the same default.

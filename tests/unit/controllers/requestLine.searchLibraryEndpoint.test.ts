@@ -52,6 +52,7 @@ describe('searchLibraryEndpoint limit parsing (BS#3587)', () => {
     [undefined, 5],
     ['', 5],
     ['25', 25],
+    ['100', 100],
   ])('passes limit=%j to searchLibrary as %j', async (limit, expected) => {
     const res = createMockRes();
 
@@ -61,20 +62,28 @@ describe('searchLibraryEndpoint limit parsing (BS#3587)', () => {
     expect(res.status).toHaveBeenCalledWith(200);
   });
 
-  test.each([
-    ['abc', 'limit must be an integer from 1 to 2147483647'],
-    ['0', 'limit must be an integer from 1 to 2147483647'],
-    ['-3', 'limit must be an integer from 1 to 2147483647'],
-    ['2.5', 'limit must be an integer from 1 to 2147483647'],
-    ['7abc', 'limit must be an integer from 1 to 2147483647'],
-    [['1', '2'], 'limit must be a single string value'],
-  ])('rejects limit=%j with a 400', async (limit, message) => {
-    const res = createMockRes();
+  test.each([['abc'], ['0'], ['-3'], ['2.5'], ['7abc'], ['101'], [['1', '2']]])(
+    'rejects limit=%j with a 400',
+    async (limit) => {
+      const res = createMockRes();
 
-    await expect(searchLibraryEndpoint(createReq(limit), res as Response, mockNext)).rejects.toMatchObject({
-      message,
-      statusCode: 400,
-    });
+      await expect(searchLibraryEndpoint(createReq(limit), res as Response, mockNext)).rejects.toMatchObject({
+        message: 'limit must be an integer from 1 to 100',
+        statusCode: 400,
+      });
+      expect(mockSearchLibrary).not.toHaveBeenCalled();
+    }
+  );
+
+  it('checks for a search term before it parses limit', async () => {
+    const res = createMockRes();
+    const req = { query: { limit: 'abc' }, method: 'GET', originalUrl: '/library/search', ip: '127.0.0.1' };
+
+    await searchLibraryEndpoint(req as unknown as Request, res as Response, mockNext);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'At least one of artist, title, or query is required' });
+    expect(console.log).toHaveBeenCalled();
     expect(mockSearchLibrary).not.toHaveBeenCalled();
   });
 });

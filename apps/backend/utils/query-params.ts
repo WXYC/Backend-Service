@@ -77,17 +77,28 @@ export const parseInt4QueryParam = (raw: unknown, field: string): number | undef
 };
 
 /**
- * Parse an optional result-count query param (`?n=`, `?limit=`) with `parseInt4QueryParam`'s rules, but name a
- * repeated key (`?n=1&n=2`, which Express hands over as `string[]`) as its own 400, matching the `page`/`limit`
- * rejection in `library.controller.ts` (#1553). `undefined` passes through so the caller's or service's default
- * applies. The point is that the service gets a real number: a raw `"50"` only works through implicit coercion, and
- * `"abc"` becomes NaN and a Postgres 500 (BS#3587).
+ * Upper bound on a search page size (`?n=`, `?limit=`). These routes are open to anonymous sessions (`GET
+ * /library/search`, `GET /proxy/library/search`), so the count is capped. The largest value a client sends today is
+ * 50 (dj-site's catalog search); the DJ apps send 25.
+ */
+export const SEARCH_COUNT_MAX = 100;
+
+/**
+ * Parse an optional search page size (`?n=`, `?limit=`) to a real number, so the service never sees the raw string:
+ * `"50"` only worked through implicit coercion, and `"abc"` became NaN and a Postgres 500 (BS#3587). Absent or blank
+ * returns `undefined`, so the caller's or service's default applies. Anything else must be a single integer from 1 to
+ * `SEARCH_COUNT_MAX`. A malformed value, an out-of-range value and a repeated key (`string[]`) all get the same 400,
+ * as `intake.controller.ts`'s `LIST_LIMIT_MAX` does.
  */
 export const parseCountQueryParam = (raw: unknown, field: string): number | undefined => {
-  if (raw !== undefined && typeof raw !== 'string') {
-    throw new WxycError(`${field} must be a single string value`, 400);
+  if (raw === undefined || raw === '') {
+    return undefined;
   }
-  return parseInt4QueryParam(raw, field);
+  const count = parseNonNegativeInt(raw);
+  if (count == null || count < 1 || count > SEARCH_COUNT_MAX) {
+    throw new WxycError(`${field} must be an integer from 1 to ${SEARCH_COUNT_MAX}`, 400);
+  }
+  return count;
 };
 
 /**
