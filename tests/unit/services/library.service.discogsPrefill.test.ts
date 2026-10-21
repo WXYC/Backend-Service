@@ -85,13 +85,25 @@ describe('resolveDiscogsReleasePrefill', () => {
       artist_name: 'Juana Molina',
       album_title: 'DOGA',
       label: 'Sonamos',
-      label_id: 27182,
+      discogs_label_id: 27182,
       year: 2022,
       discogs_artist_id: 314159,
       genres: ['Rock'],
       styles: ['Folk, World, & Country'],
       artwork_url: 'https://img.discogs.com/doga.jpg',
     });
+  });
+
+  // BS#3577: LML's `label_id` is a Discogs label id, not a WXYC `labels.id`.
+  // Naming it `label_id` led the DJ site to send it to `POST /reviews/intake`,
+  // which failed the `intake_items.label_id -> labels.id` FK in production.
+  it('names the Discogs label id discogs_label_id and emits no label_id key', async () => {
+    mockGetRelease.mockResolvedValue(fullRelease);
+
+    const prefill = await resolveDiscogsReleasePrefill(249504);
+
+    expect(prefill?.discogs_label_id).toBe(27182);
+    expect(prefill).not.toHaveProperty('label_id');
   });
 
   it('coerces the Discogs "year unknown" sentinel (0) to null', async () => {
@@ -125,7 +137,7 @@ describe('resolveDiscogsReleasePrefill', () => {
       artist_name: 'Chuquimamani-Condori',
       album_title: 'Self-Released EP',
       label: null,
-      label_id: null,
+      discogs_label_id: null,
       year: null,
       discogs_artist_id: null,
       genres: [],

@@ -114,7 +114,7 @@ describe('getDiscogsReleasePrefill', () => {
     artist_name: 'Juana Molina',
     album_title: 'DOGA',
     label: 'Sonamos',
-    label_id: 27182,
+    discogs_label_id: 27182,
     year: 2022,
     discogs_artist_id: 314159,
     genres: ['Rock'],

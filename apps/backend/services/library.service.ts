@@ -2581,9 +2581,15 @@ export async function getRotationTracksFromRelease(releaseId: number): Promise<R
  *
  * Deliberately an internal shape, NOT a wxyc-shared contract type — the
  * contract ticket owns the wire schema; this endpoint stays internal and
- * reuses `DiscogsReleaseMetadata`'s field semantics verbatim. Field names
- * mirror `AlbumCreateFields` (`album_title`, `label`, `label_id`) plus the
- * artist name and the Discogs identifiers the bench carries onto the filing.
+ * reuses `DiscogsReleaseMetadata`'s field semantics verbatim. `album_title`
+ * and `label` mirror `AlbumCreateFields`; the rest are the artist name and the
+ * Discogs identifiers the bench carries onto the filing.
+ *
+ * `discogs_label_id` is the **Discogs** label id from LML, NOT a WXYC
+ * `labels.id`. Never send it as `label_id` to a WXYC write endpoint: the field
+ * was once named `label_id`, and the DJ site sent it to `POST /reviews/intake`,
+ * which failed the `intake_items.label_id -> labels.id` FK in production
+ * (BS#3577). A WXYC label id comes from the label picker, not from Discogs.
  */
 export type DiscogsReleasePrefill = {
   discogs_release_id: number;
@@ -2591,7 +2597,7 @@ export type DiscogsReleasePrefill = {
   artist_name: string;
   album_title: string;
   label: string | null;
-  label_id: number | null;
+  discogs_label_id: number | null;
   year: number | null;
   discogs_artist_id: number | null;
   genres: string[];
@@ -2625,7 +2631,7 @@ export async function resolveDiscogsReleasePrefill(releaseId: number): Promise<D
     artist_name: release.artist,
     album_title: release.title,
     label: release.label ?? null,
-    label_id: release.label_id ?? null,
+    discogs_label_id: release.label_id ?? null,
     // Discogs encodes "year unknown" as 0; coerce to null so the bench does
     // not prefill a literal "0" year (mirrors `populateReleaseMetadata`).
     year: release.year || null,
