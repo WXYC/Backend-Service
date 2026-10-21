@@ -94,7 +94,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   removeTrack: mockRemoveTrack,
   changeOrder: mockChangeOrder,
   startShow: mockStartShow,
-  isSpecialtyShowTaggable: jest.fn().mockResolvedValue(true),
+  isSpecialtyShowTaggable: jest.fn<(id: number) => Promise<boolean>>().mockResolvedValue(true),
   addDJToShow: mockAddDJToShow,
   endShow: mockEndShow,
   leaveShow: mockServiceLeaveShow,
@@ -1940,6 +1940,20 @@ describe('flowsheet.controller', () => {
       expect(mockStartShow).toHaveBeenCalledWith('caller-dj', 'My Show', 7, undefined);
       expect(res.status).toHaveBeenCalledWith(200);
     });
+
+    it.each([['abc'], [7.5], [0], [-3], [2 ** 31], [true]])(
+      'rejects the non-integer specialty_id %p with 400 before any query or write (BS#3454)',
+      async (bad) => {
+        mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+        const req = {
+          auth: { id: 'caller-dj' },
+          body: { dj_id: 'caller-dj', show_name: 'My Show', specialty_id: bad },
+        } as unknown as Request;
+
+        await expect(joinShow(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({ statusCode: 400 });
+        expect(mockStartShow).not.toHaveBeenCalled();
+      }
+    );
 
     it('adds the caller to the active show as a co-host', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });

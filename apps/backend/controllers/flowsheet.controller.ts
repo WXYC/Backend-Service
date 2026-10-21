@@ -1204,7 +1204,15 @@ const DJ_NAME_OVERRIDE_MAX_LENGTH = 255;
  * Only the new-show and takeover paths call it: a co-host inherits the open show's tag.
  */
 const assertSpecialtyTaggable = async (specialty_id: number | undefined): Promise<void> => {
-  if (specialty_id != null && !(await flowsheet_service.isSpecialtyShowTaggable(specialty_id))) {
+  if (specialty_id == null) {
+    return;
+  }
+  // The `number` type is compile-time only and no validator guards /join: a string, a fraction or an
+  // out-of-range integer would reach Postgres as 22P02/22003 and surface as a 500.
+  if (!Number.isInteger(specialty_id) || specialty_id <= 0 || specialty_id > 2147483647) {
+    throw new WxycError('Bad Request: specialty_id must be a positive integer', 400);
+  }
+  if (!(await flowsheet_service.isSpecialtyShowTaggable(specialty_id))) {
     throw new WxycError('Bad Request: specialty_id is unknown or names a retired specialty show', 400);
   }
 };

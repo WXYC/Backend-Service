@@ -91,4 +91,34 @@ describe('specialty ref on range and playlist (BS#3454)', () => {
 
     expect(res.body.specialty).toBeNull();
   });
+
+  describe('POST /flowsheet/join specialty_id validation', () => {
+    const endShow = () =>
+      request.post('/flowsheet/end').set('Authorization', global.access_token).send({ dj_id: global.primary_dj_id });
+    const join = (specialty_id) =>
+      request
+        .post('/flowsheet/join')
+        .set('Authorization', global.access_token)
+        .send({ dj_id: global.primary_dj_id, show_name: 'BS3454 join', specialty_id });
+
+    beforeEach(endShow);
+    afterAll(endShow);
+
+    it('refuses a retired (active = false) program with 400', async () => {
+      await join(specialtyIds.retired).expect(400);
+    });
+
+    it.each([['abc'], [7.5], [0], [-1]])(
+      'refuses the non-integer or non-positive id %p with 400, not 500',
+      async (bad) => {
+        await join(bad).expect(400);
+      }
+    );
+
+    it('accepts an active program', async () => {
+      const res = await join(specialtyIds.active).expect(200);
+
+      expect(res.body.specialty_id).toBe(specialtyIds.active);
+    });
+  });
 });
