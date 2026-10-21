@@ -2582,8 +2582,9 @@ export async function getRotationTracksFromRelease(releaseId: number): Promise<R
  * Deliberately an internal shape, NOT a wxyc-shared contract type — the
  * contract ticket owns the wire schema; this endpoint stays internal and
  * reuses `DiscogsReleaseMetadata`'s field semantics verbatim. `album_title`
- * and `label` mirror `AlbumCreateFields`; the rest are the artist name and the
- * Discogs identifiers the bench carries onto the filing.
+ * and `label` mirror `AlbumCreateFields`; the rest are the artist name, the
+ * release metadata (`year`, `genres`, `styles`, `artwork_url`), and the Discogs
+ * identifiers (`discogs_*`) the bench carries onto the filing.
  *
  * `discogs_label_id` is the **Discogs** label id from LML, NOT a WXYC
  * `labels.id`. Never send it as `label_id` to a WXYC write endpoint: the field

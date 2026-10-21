@@ -9,8 +9,9 @@
 import { jest } from '@jest/globals';
 import type { Request, Response, NextFunction } from 'express';
 import WxycError from '../../../apps/backend/utils/error';
+import type { DiscogsReleasePrefill } from '../../../apps/backend/services/library.service';
 
-const mockResolveDiscogsReleasePrefill = jest.fn<(releaseId: number) => Promise<Record<string, unknown> | null>>();
+const mockResolveDiscogsReleasePrefill = jest.fn<(releaseId: number) => Promise<DiscogsReleasePrefill | null>>();
 
 jest.mock('../../../apps/backend/services/library.service', () => ({
   resolveDiscogsReleasePrefill: mockResolveDiscogsReleasePrefill,
@@ -108,7 +109,7 @@ describe('getDiscogsReleasePrefill', () => {
     mockResolveDiscogsReleasePrefill.mockReset();
   });
 
-  const prefill = {
+  const prefill: DiscogsReleasePrefill = {
     discogs_release_id: 249504,
     discogs_master_id: 55123,
     artist_name: 'Juana Molina',

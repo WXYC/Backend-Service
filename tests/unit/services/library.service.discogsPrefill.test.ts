@@ -79,6 +79,9 @@ describe('resolveDiscogsReleasePrefill', () => {
     const prefill = await resolveDiscogsReleasePrefill(249504);
 
     expect(mockGetRelease).toHaveBeenCalledWith(249504);
+    // The exact shape also guards BS#3577: LML's `label_id` is a Discogs label
+    // id, not a WXYC `labels.id`, so it must surface as `discogs_label_id`. A
+    // stray `label_id: 27182` key fails this `toEqual`.
     expect(prefill).toEqual({
       discogs_release_id: 249504,
       discogs_master_id: 55123,
@@ -92,18 +95,6 @@ describe('resolveDiscogsReleasePrefill', () => {
       styles: ['Folk, World, & Country'],
       artwork_url: 'https://img.discogs.com/doga.jpg',
     });
-  });
-
-  // BS#3577: LML's `label_id` is a Discogs label id, not a WXYC `labels.id`.
-  // Naming it `label_id` led the DJ site to send it to `POST /reviews/intake`,
-  // which failed the `intake_items.label_id -> labels.id` FK in production.
-  it('names the Discogs label id discogs_label_id and emits no label_id key', async () => {
-    mockGetRelease.mockResolvedValue(fullRelease);
-
-    const prefill = await resolveDiscogsReleasePrefill(249504);
-
-    expect(prefill?.discogs_label_id).toBe(27182);
-    expect(prefill).not.toHaveProperty('label_id');
   });
 
   it('coerces the Discogs "year unknown" sentinel (0) to null', async () => {
