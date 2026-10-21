@@ -212,11 +212,23 @@ components:
 
     OnAirInfo:
       type: object
-      required: [dj_name]
+      required: [dj_name, show_id]
       properties:
         dj_name:
           type: string
           description: Display name of the DJ currently on air.
+        show_id:
+          type: integer
+          description: The open show's id. Never null while `on_air` is an object; a song whose show id differs is from the previous show.
+        show_name:
+          type: string
+          nullable: true
+          description: The open show's title, or null when it has none.
+        specialty:
+          allOf:
+            - $ref: '#/components/schemas/SpecialtyShowRef'
+          nullable: true
+          description: The open show's specialty program, null for a freeform show. Read from the show's own `specialty_id`, never from the catalog's slots.
 
     FlowsheetEntryAdd:
       type: object
@@ -2098,6 +2110,39 @@ paths:
                     description: 'Show started'
                   - $ref: '#/components/schemas/ShowDJ'
                     description: 'Show joined'
+        '409':
+          description: >
+            A show is already open (`code: show_already_open`). `details.show` names it, including its specialty program and title, so the Go Live prompt can say what the caller would take over.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code:
+                    type: string
+                    enum: [show_already_open]
+                  details:
+                    type: object
+                    properties:
+                      show:
+                        type: object
+                        required: [id, start_time]
+                        properties:
+                          id:
+                            type: integer
+                          dj_name:
+                            type: string
+                            nullable: true
+                          start_time:
+                            type: string
+                            format: date-time
+                          show_name:
+                            type: string
+                            nullable: true
+                          specialty:
+                            allOf:
+                              - $ref: '#/components/schemas/SpecialtyShowRef'
+                            nullable: true
 
   /flowsheet/end:
     post:

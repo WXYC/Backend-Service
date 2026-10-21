@@ -2222,8 +2222,26 @@ const activeMemberOnAirName = async (showId: number): Promise<string | null> => 
   return named[0]?.name ?? null;
 };
 
-export const getOnAirDJName = async (): Promise<string | null> => {
-  const latest_show = await getLatestShow();
+/** The open show as `on_air` reports it: public handle, show id and title, and the program the DJ signed on as. */
+export type OnAirShow = {
+  dj_name: string;
+  show_id: number;
+  show_name: string | null;
+  specialty: SpecialtyShowRef | null;
+};
+
+export const getOnAir = async (): Promise<OnAirShow | null> => {
+  // One read: the latest show with its catalog row LEFT JOINed, so the program
+  // comes from the show's own `specialty_id`, never from the catalog's slots.
+  const latest = (
+    await db
+      .select({ show: shows, specialty: specialty_shows })
+      .from(shows)
+      .leftJoin(specialty_shows, eq(specialty_shows.id, shows.specialty_id))
+      .orderBy(desc(shows.id))
+      .limit(1)
+  )[0];
+  const latest_show = latest?.show;
   if (!latest_show || latest_show.end_time !== null) {
     return null;
   }
@@ -2245,14 +2263,22 @@ export const getOnAirDJName = async (): Promise<string | null> => {
   // outranks everything, and a linked primary DJ is a real answer from the
   // chain. So a BS-native show pays no extra query.
   const hasOverride = showDjNameOverride((latest_show.dj_name_override as string | null | undefined) ?? null) !== null;
-  if (!hasOverride && (latest_show.primary_dj_id as string | null | undefined) == null) {
-    const memberName = await activeMemberOnAirName(latest_show.id);
-    if (memberName) return memberName;
-  }
+  const memberName =
+    !hasOverride && (latest_show.primary_dj_id as string | null | undefined) == null
+      ? await activeMemberOnAirName(latest_show.id)
+      : null;
 
-  const resolved = (await resolveDjNameForShow(latest_show))?.trim();
-  return resolved && resolved.length > 0 ? resolved : ANONYMOUS_ON_AIR_NAME;
+  const resolved = memberName ?? (await resolveDjNameForShow(latest_show))?.trim();
+  return {
+    dj_name: resolved && resolved.length > 0 ? resolved : ANONYMOUS_ON_AIR_NAME,
+    show_id: latest_show.id,
+    show_name: latest_show.show_name ?? null,
+    specialty: toSpecialtyShowRef(latest.specialty),
+  };
 };
+
+/** `getOnAir`'s display name alone: a handle (or `ANONYMOUS_ON_AIR_NAME`) while a show is open, `null` on automation. */
+export const getOnAirDJName = async (): Promise<string | null> => (await getOnAir())?.dj_name ?? null;
 
 /**
  * Whether the given user account is on air right now. Backs GET /flowsheet/on-air.
@@ -2675,6 +2701,12 @@ export const changeOrder = async (
   const response = await db.select().from(flowsheet).where(eq(flowsheet.id, entry_id)).limit(1);
 
   return response[0];
+};
+
+/** The public ref for a catalog program (retired ones included), or `null` for an unknown id. */
+export const getSpecialtyShowRef = async (id: number): Promise<SpecialtyShowRef | null> => {
+  const [row] = await db.select().from(specialty_shows).where(eq(specialty_shows.id, id)).limit(1);
+  return toSpecialtyShowRef(row);
 };
 
 /** Whether `id` names a catalog program that may still be tagged onto a new show (known and not retired). */

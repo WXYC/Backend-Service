@@ -40,6 +40,7 @@ const mockIsLatestEntryShowEnd = jest.fn<() => Promise<boolean>>();
 const mockCloseShowFromTerminalShowEndMarker = jest.fn<() => Promise<number>>();
 const mockResolveShowEndInstant = jest.fn<() => Promise<Date>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
+const mockGetSpecialtyShowRef = jest.fn<(id: number) => Promise<Record<string, unknown> | null>>();
 const mockRecordGoLiveHandoff =
   jest.fn<(intent: 'takeover' | 'join', handoff: { open_show_id: number; dj_id: string }) => void>();
 
@@ -53,6 +54,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   closeShowFromTerminalShowEndMarker: mockCloseShowFromTerminalShowEndMarker,
   resolveShowEndInstant: mockResolveShowEndInstant,
   resolveDjNameForShow: mockResolveDjNameForShow,
+  getSpecialtyShowRef: mockGetSpecialtyShowRef,
 }));
 
 jest.mock('../../../apps/backend/services/flowsheet/go-live-handoff-signal', () => ({
@@ -174,11 +176,24 @@ describe('joinShow — an open show the caller does not belong to', () => {
     expect((err as WxycError).statusCode).toBe(409);
     expect((err as WxycError).code).toBe('show_already_open');
     expect((err as WxycError).details).toEqual({
-      show: { id: OPEN_SHOW.id, dj_name: 'dj sue', start_time: OPEN_SHOW.start_time },
+      show: { id: OPEN_SHOW.id, dj_name: 'dj sue', start_time: OPEN_SHOW.start_time, show_name: null, specialty: null },
     });
+    expect(mockGetSpecialtyShowRef).not.toHaveBeenCalled();
     expect(mockAddDJToShow).not.toHaveBeenCalled();
     expect(mockEndShow).not.toHaveBeenCalled();
     expect(mockStartShow).not.toHaveBeenCalled();
+  });
+
+  it('names the program and title in the 409 for a tagged open show', async () => {
+    const specialty = { id: 7, slug: 'sonic-boom', name: 'Sonic Boom' };
+    mockGetLatestShow.mockResolvedValue({ ...OPEN_SHOW, show_name: 'Boom Hour', specialty_id: 7 });
+    mockGetSpecialtyShowRef.mockResolvedValue(specialty);
+
+    await expect(joinShow(makeReq({}), createMockRes() as Response, next)).rejects.toMatchObject({
+      details: { show: { show_name: 'Boom Hour', specialty } },
+    });
+
+    expect(mockGetSpecialtyShowRef).toHaveBeenCalledWith(7);
   });
 
   // Not a hand-joined `user` read: the prompt names the show the same way
@@ -355,7 +370,7 @@ describe('joinShow — takeover', () => {
 
     expect((err as WxycError).statusCode).toBe(409);
     expect((err as WxycError).details).toEqual({
-      show: { id: OPEN_SHOW.id, dj_name: 'dj sue', start_time: OPEN_SHOW.start_time },
+      show: { id: OPEN_SHOW.id, dj_name: 'dj sue', start_time: OPEN_SHOW.start_time, show_name: null, specialty: null },
     });
     expect(mockEndShow).not.toHaveBeenCalled();
     expect(mockStartShow).not.toHaveBeenCalled();
@@ -503,7 +518,13 @@ describe('joinShow — ownership is the only thing branch (c) reads (BS#2405)', 
     expect((err as WxycError).statusCode).toBe(409);
     expect((err as WxycError).code).toBe('show_already_open');
     expect((err as WxycError).details).toEqual({
-      show: { id: NATIVE_SHOW.id, dj_name: 'DJ Houndstooth', start_time: NATIVE_SHOW.start_time },
+      show: {
+        id: NATIVE_SHOW.id,
+        dj_name: 'DJ Houndstooth',
+        start_time: NATIVE_SHOW.start_time,
+        show_name: null,
+        specialty: null,
+      },
     });
     expect(mockAddDJToShow).not.toHaveBeenCalled();
     expect(mockStartShow).not.toHaveBeenCalled();
@@ -571,7 +592,7 @@ describe('joinShow — ownership is the only thing branch (c) reads (BS#2405)', 
     expect((err as WxycError).statusCode).toBe(409);
     expect((err as WxycError).code).toBe('show_already_open');
     expect((err as WxycError).details).toEqual({
-      show: { id: OPEN_SHOW.id, dj_name: 'dj sue', start_time: OPEN_SHOW.start_time },
+      show: { id: OPEN_SHOW.id, dj_name: 'dj sue', start_time: OPEN_SHOW.start_time, show_name: null, specialty: null },
     });
     expect(mockAddDJToShow).not.toHaveBeenCalled();
     expect(mockStartShow).not.toHaveBeenCalled();

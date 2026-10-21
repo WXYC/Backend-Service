@@ -48,7 +48,7 @@ const mockAddHourlyBreakpoint = jest.fn<() => Promise<{ entry: Record<string, un
 // shape — and, since BS#2621, no fill-triggered refetch broadcast.
 const mockFillMissingHourlyBreakpoints = jest.fn<() => Promise<number>>().mockResolvedValue(0);
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
-const mockGetOnAirDJName = jest.fn<() => Promise<string | null>>();
+const mockGetOnAir = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockGetOnAirDJs = jest.fn<() => Promise<Array<{ id: string | null; dj_name: string | null }>>>();
 const mockGetAlbumFromDB = jest.fn<() => Promise<Record<string, unknown>>>();
 const mockResolveDjNameForShow = jest.fn<() => Promise<string | null>>();
@@ -86,7 +86,7 @@ jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   addHourlyBreakpoint: mockAddHourlyBreakpoint,
   fillMissingHourlyBreakpoints: mockFillMissingHourlyBreakpoints,
   getLatestShow: mockGetLatestShow,
-  getOnAirDJName: mockGetOnAirDJName,
+  getOnAir: mockGetOnAir,
   getOnAirDJs: mockGetOnAirDJs,
   getAlbumFromDB: mockGetAlbumFromDB,
   resolveDjNameForShow: mockResolveDjNameForShow,
@@ -168,7 +168,7 @@ describe('flowsheet.controller', () => {
       const entries = [createMockEntry(1), createMockEntry(2)];
       mockGetEntriesByPage.mockResolvedValue(entries);
       mockGetEntryCount.mockResolvedValue(2);
-      mockGetOnAirDJName.mockResolvedValue(null);
+      mockGetOnAir.mockResolvedValue(null);
 
       const req = createMockReq();
       const res = createMockRes();
@@ -195,21 +195,41 @@ describe('flowsheet.controller', () => {
     it('includes on_air with the DJ name when a DJ is live', async () => {
       mockGetEntriesByPage.mockResolvedValue([createMockEntry(1)]);
       mockGetEntryCount.mockResolvedValue(1);
-      mockGetOnAirDJName.mockResolvedValue('DJ MONSTER');
+      mockGetOnAir.mockResolvedValue({ dj_name: 'DJ MONSTER', show_id: 9, show_name: null, specialty: null });
 
       const req = createMockReq();
       const res = createMockRes();
 
       await getEntries(req as Request, res as Response, mockNext);
 
-      expect(mockGetOnAirDJName).toHaveBeenCalled();
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ on_air: { dj_name: 'DJ MONSTER' } }));
+      expect(mockGetOnAir).toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ on_air: { dj_name: 'DJ MONSTER', show_id: 9, show_name: null, specialty: null } })
+      );
+    });
+
+    it('passes the open show id, title and specialty ref through for a tagged show', async () => {
+      const on_air = {
+        dj_name: 'DJ HOUNDSTOOTH',
+        show_id: 41,
+        show_name: 'Boom Hour',
+        specialty: { id: 7, slug: 'sonic-boom', name: 'Sonic Boom' },
+      };
+      mockGetEntriesByPage.mockResolvedValue([createMockEntry(1)]);
+      mockGetEntryCount.mockResolvedValue(1);
+      mockGetOnAir.mockResolvedValue(on_air);
+
+      const res = createMockRes();
+
+      await getEntries(createMockReq() as Request, res as Response, mockNext);
+
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ on_air }));
     });
 
     it('sets on_air to null when the station is on automation', async () => {
       mockGetEntriesByPage.mockResolvedValue([createMockEntry(1)]);
       mockGetEntryCount.mockResolvedValue(1);
-      mockGetOnAirDJName.mockResolvedValue(null);
+      mockGetOnAir.mockResolvedValue(null);
 
       const req = createMockReq();
       const res = createMockRes();
@@ -226,7 +246,7 @@ describe('flowsheet.controller', () => {
       const entries = [createMockEntry(1), createMockEntry(2)];
       mockGetEntriesByPage.mockResolvedValue(entries);
       mockGetEntryCount.mockResolvedValue(2);
-      mockGetOnAirDJName.mockRejectedValue(new Error('shows lookup failed'));
+      mockGetOnAir.mockRejectedValue(new Error('shows lookup failed'));
 
       const req = createMockReq();
       const res = createMockRes();
@@ -254,7 +274,7 @@ describe('flowsheet.controller', () => {
 
       await getEntries(req as Request, res as Response, mockNext);
 
-      expect(mockGetOnAirDJName).not.toHaveBeenCalled();
+      expect(mockGetOnAir).not.toHaveBeenCalled();
       const body = (res.json as jest.Mock).mock.calls[0][0];
       expect(Array.isArray(body)).toBe(true);
     });
@@ -517,7 +537,7 @@ describe('flowsheet.controller', () => {
       const entries = [createMockEntry(1)];
       mockGetEntriesByPage.mockResolvedValue(entries);
       mockGetEntryCount.mockResolvedValue(1);
-      mockGetOnAirDJName.mockResolvedValue(null);
+      mockGetOnAir.mockResolvedValue(null);
 
       const req = createMockReq();
       const res = createMockRes();
@@ -537,7 +557,7 @@ describe('flowsheet.controller', () => {
       const entries = [validEntry, undefined] as unknown[];
       mockGetEntriesByPage.mockResolvedValue(entries);
       mockGetEntryCount.mockResolvedValue(2);
-      mockGetOnAirDJName.mockResolvedValue(null);
+      mockGetOnAir.mockResolvedValue(null);
 
       const req = createMockReq();
       const res = createMockRes();
@@ -557,7 +577,7 @@ describe('flowsheet.controller', () => {
       const entries = [createMockEntry(1), createMockEntry(2)];
       mockGetEntriesByPage.mockResolvedValue(entries);
       mockGetEntryCount.mockResolvedValue(2);
-      mockGetOnAirDJName.mockResolvedValue(null);
+      mockGetOnAir.mockResolvedValue(null);
 
       const req = createMockReq();
       const res = createMockRes();
@@ -658,7 +678,7 @@ describe('flowsheet.controller', () => {
       it('accepts an offset exactly at MAX_OFFSET (page 200 * limit 100 = 20,000)', async () => {
         mockGetEntriesByPage.mockResolvedValue([]);
         mockGetEntryCount.mockResolvedValue(0);
-        mockGetOnAirDJName.mockResolvedValue(null);
+        mockGetOnAir.mockResolvedValue(null);
 
         const req = createMockReq({ page: '200', limit: '100' });
         const res = createMockRes();
@@ -675,7 +695,7 @@ describe('flowsheet.controller', () => {
         const entries = [createMockEntry(1)];
         mockGetEntriesByPage.mockResolvedValue(entries);
         mockGetEntryCount.mockResolvedValue(10000);
-        mockGetOnAirDJName.mockResolvedValue(null);
+        mockGetOnAir.mockResolvedValue(null);
 
         const req = createMockReq({ page: '50', limit: '100' });
         const res = createMockRes();

@@ -17,7 +17,7 @@
 import { jest } from '@jest/globals';
 
 import { db } from '@wxyc/database';
-import { ANONYMOUS_ON_AIR_NAME, getOnAirDJName } from '../../../apps/backend/services/flowsheet.service';
+import { ANONYMOUS_ON_AIR_NAME, getOnAir, getOnAirDJName } from '../../../apps/backend/services/flowsheet.service';
 
 const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
 const chain = mockDb._chain;
@@ -25,6 +25,10 @@ const chain = mockDb._chain;
 // Queue the next value the terminal `.limit()` resolves to. Left unqueued, the
 // default mock returns the chain itself, so getLatestShow() yields undefined.
 const queueLimit = (rows: unknown[]) => chain.limit.mockResolvedValueOnce(rows);
+// The latest-show read LEFT JOINs the catalog, so its rows are `{ show, specialty }`
+// (specialty null for an untagged show).
+const queueShow = (show: Record<string, unknown>, specialty: Record<string, unknown> | null = null) =>
+  queueLimit([{ show, specialty }]);
 // getDJsInShow's terminal `.where()` reads: the show_djs join, then — only if
 // that returned members — the user lookup. Both are consumed on the BS#2233
 // branch below; a show carrying an override or a linked primary DJ never
@@ -34,22 +38,70 @@ const queueWhere = (rows: unknown[]) => chain.where.mockResolvedValueOnce(rows);
 // lookup is never issued and only ONE value is needed here.
 const queueNoActiveMembers = () => queueWhere([]);
 
+const PROGRAM_ROW = {
+  id: 7,
+  slug: 'sonic-boom',
+  specialty_name: 'Sonic Boom',
+  short_name: 'Sonic Boom',
+  tagline: null,
+  logs_playcuts: true,
+  default_spotlight_role: null,
+  artwork: null,
+  accent_color: null,
+};
+
+describe('getOnAir', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('carries the open show id, title and specialty ref for a tagged show', async () => {
+    queueShow(
+      { id: 41, end_time: null, primary_dj_id: null, dj_name_override: 'DJ HOUNDSTOOTH', show_name: 'Boom Hour' },
+      PROGRAM_ROW
+    );
+
+    expect(await getOnAir()).toEqual({
+      dj_name: 'DJ HOUNDSTOOTH',
+      show_id: 41,
+      show_name: 'Boom Hour',
+      specialty: expect.objectContaining({ id: 7, slug: 'sonic-boom', name: 'Sonic Boom' }),
+    });
+  });
+
+  it('answers null specialty and null show_name for a freeform show', async () => {
+    queueShow({ id: 42, end_time: null, primary_dj_id: null, dj_name_override: 'DJ HOUNDSTOOTH', show_name: null });
+
+    expect(await getOnAir()).toEqual({ dj_name: 'DJ HOUNDSTOOTH', show_id: 42, show_name: null, specialty: null });
+  });
+
+  it('is null on automation (latest show ended)', async () => {
+    queueShow({ id: 43, end_time: new Date('2026-07-07T18:00:00Z'), show_name: 'Boom Hour' }, PROGRAM_ROW);
+
+    expect(await getOnAir()).toBeNull();
+  });
+});
+
 describe('getOnAirDJName', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   it('returns shows.legacy_dj_name for an open tubafrenzy-mirrored show — the DJ MONSTER production bug', async () => {
-    queueLimit([
-      { id: 1950003, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: 'DJ MONSTER' },
-    ]);
+    queueShow({
+      id: 1950003,
+      end_time: null,
+      primary_dj_id: null,
+      dj_name_override: null,
+      legacy_dj_name: 'DJ MONSTER',
+    });
     queueNoActiveMembers();
 
     expect(await getOnAirDJName()).toBe('DJ MONSTER');
   });
 
   it('resolves the primary DJ user.djName for an open show with a Backend-Service account', async () => {
-    queueLimit([{ id: 2, end_time: null, primary_dj_id: 'user-1', dj_name_override: null, legacy_dj_name: null }]);
+    queueShow({ id: 2, end_time: null, primary_dj_id: 'user-1', dj_name_override: null, legacy_dj_name: null });
     queueLimit([{ djName: 'DJ HOUNDSTOOTH' }]); // resolveDjNameForShow user lookup
 
     expect(await getOnAirDJName()).toBe('DJ HOUNDSTOOTH');
@@ -59,7 +111,7 @@ describe('getOnAirDJName', () => {
     // A tubafrenzy sign-on with a blank djHandle leaves legacy_dj_name null. A
     // human is still live, so the banner must read "WXYC", not falsely claim
     // automation (which is what a null return renders as "AUTO DJ" downstream).
-    queueLimit([{ id: 3, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: null }]);
+    queueShow({ id: 3, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: null });
     queueNoActiveMembers();
 
     expect(await getOnAirDJName()).toBe(ANONYMOUS_ON_AIR_NAME);
@@ -68,22 +120,20 @@ describe('getOnAirDJName', () => {
   it('returns the WXYC station brand for an open show whose legacy_dj_name is blank/whitespace', async () => {
     // resolveDjNameForShow can return an empty or whitespace legacy_dj_name
     // verbatim; that is still an anonymous human, not automation.
-    queueLimit([{ id: 6, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: '   ' }]);
+    queueShow({ id: 6, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: '   ' });
     queueNoActiveMembers();
 
     expect(await getOnAirDJName()).toBe(ANONYMOUS_ON_AIR_NAME);
   });
 
   it('returns null when the latest show has already ended (end_time set) — automation', async () => {
-    queueLimit([
-      {
-        id: 4,
-        end_time: new Date('2026-07-07T18:00:00Z'),
-        primary_dj_id: null,
-        dj_name_override: null,
-        legacy_dj_name: 'DJ MONSTER',
-      },
-    ]);
+    queueShow({
+      id: 4,
+      end_time: new Date('2026-07-07T18:00:00Z'),
+      primary_dj_id: null,
+      dj_name_override: null,
+      legacy_dj_name: 'DJ MONSTER',
+    });
 
     expect(await getOnAirDJName()).toBeNull();
   });
@@ -91,15 +141,13 @@ describe('getOnAirDJName', () => {
   it('honours dj_name_override precedence for an open show', async () => {
     // The override short-circuits resolveDjNameForShow ahead of the user lookup,
     // so only getLatestShow's terminal .limit() is consumed.
-    queueLimit([
-      {
-        id: 5,
-        end_time: null,
-        primary_dj_id: 'user-1',
-        dj_name_override: 'DJ HOUNDSTOOTH',
-        legacy_dj_name: 'DJ MONSTER',
-      },
-    ]);
+    queueShow({
+      id: 5,
+      end_time: null,
+      primary_dj_id: 'user-1',
+      dj_name_override: 'DJ HOUNDSTOOTH',
+      legacy_dj_name: 'DJ MONSTER',
+    });
 
     expect(await getOnAirDJName()).toBe('DJ HOUNDSTOOTH');
   });
@@ -119,9 +167,7 @@ describe('getOnAirDJName', () => {
    */
   describe('an ownerless show with an active account member', () => {
     it('names the active member, not the legacy handle the departed DJ left behind', async () => {
-      queueLimit([
-        { id: 1951224, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: 'dj sue' },
-      ]);
+      queueShow({ id: 1951224, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: 'dj sue' });
       queueWhere([{ dj_id: 'user-9', active: true }]);
       queueWhere([{ id: 'user-9', djName: 'eureka!' }]);
 
@@ -131,9 +177,7 @@ describe('getOnAirDJName', () => {
     it('falls back to legacy_dj_name when the only active member has no resolvable handle', async () => {
       // "Anonymous" is filtered by resolveDjDisplayName, so the member
       // contributes no name and the legacy identity is still the best answer.
-      queueLimit([
-        { id: 1951224, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: 'dj sue' },
-      ]);
+      queueShow({ id: 1951224, end_time: null, primary_dj_id: null, dj_name_override: null, legacy_dj_name: 'dj sue' });
       queueWhere([{ dj_id: 'user-9', active: true }]);
       queueWhere([{ id: 'user-9', djName: 'Anonymous' }]);
 
@@ -141,15 +185,13 @@ describe('getOnAirDJName', () => {
     });
 
     it('still lets an operator-supplied override win, without a join-table read', async () => {
-      queueLimit([
-        {
-          id: 1951224,
-          end_time: null,
-          primary_dj_id: null,
-          dj_name_override: 'Guest Host',
-          legacy_dj_name: 'dj sue',
-        },
-      ]);
+      queueShow({
+        id: 1951224,
+        end_time: null,
+        primary_dj_id: null,
+        dj_name_override: 'Guest Host',
+        legacy_dj_name: 'dj sue',
+      });
 
       expect(await getOnAirDJName()).toBe('Guest Host');
       expect(chain.where).not.toHaveBeenCalled();
