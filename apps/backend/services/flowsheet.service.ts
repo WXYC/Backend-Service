@@ -402,6 +402,10 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
     metadata_status: raw.metadata_status,
     enriching_since: raw.enriching_since,
     radio_hour: raw.radio_hour ?? null,
+    // BS#3458: nothing writes a 'spotlight' row yet, so the read paths do not select these; the writer ticket
+    // adds them to FSEntryFieldsRaw/FSEntryRaw and passes them through here.
+    spotlight_role: null,
+    spotlight_name: null,
     // Nested metadata view (used by transformToV2). genres/styles are
     // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
     // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
