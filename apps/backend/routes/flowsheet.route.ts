@@ -87,6 +87,10 @@ flowsheet_route.get('/open-shows', requirePermissions({ flowsheet: ['manage'] })
 // is a POST and carries a suffix, so `/shows/recent` cannot be shadowed by it.
 flowsheet_route.get('/shows/recent', requirePermissions({ flowsheet: ['read'] }), flowsheetController.getRecentShows);
 
+// Tag or correct a show's specialty program and title (BS#3456). No `showMemberMiddleware`: it pins the CURRENT
+// show, and this names one by id. `mayEditShow` decides membership against the target inside the controller.
+flowsheet_route.patch('/shows/:id', requirePermissions({ flowsheet: ['write'] }), flowsheetController.updateShow);
+
 // No `showMemberMiddleware`: the entire point is to act on a show the caller is
 // not a member of.
 flowsheet_route.post(

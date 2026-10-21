@@ -34,6 +34,10 @@ FCC notes on the record. `reviews:write` (dj+) to report, `reviews:read` to list
 
 The prefix was planned and never mounted. Mounting it now would mean maintaining two paths to one projection for zero callers, so `@wxyc/shared` deleted the two `/v2/flowsheet*` declarations from `api.yaml` in [WXYC/wxyc-shared#372](https://github.com/WXYC/wxyc-shared/issues/372) / [PR #378](https://github.com/WXYC/wxyc-shared/pull/378) and moved the explanation into `GET /flowsheet`'s description. This table was the second place the error was written down; correcting both together is the point.
 
+### `PATCH /flowsheet/shows/{id}`
+
+Tags or corrects a show's `specialty_id` and `show_name` (BS#3456). `requirePermissions({ flowsheet: ['write'] })`, then `mayEditShow` against the target loaded by `loadShowEditTarget` in the same transaction as the write: a DJ on the show while it is on the air, `flowsheet: manage` once it has ended (403 `closed_show`), a non-member of an open show gets 400. Writes no flowsheet row, so the `touch_flowsheet_watermark_from_shows` trigger (migration 0204) is what moves `GET /flowsheet`'s validator; every `UPDATE` on `shows` bumps it, including a sign-off's and `closeShowFromTerminalShowEndMarker`'s usually-empty one. `afterShowTagged` is the seam BS#3467's poster binding hangs on.
+
 ## Middleware notes
 
 - ~~Legacy mirror middleware~~ — Removed in BS#2403. It synced flowsheet writes out to tubafrenzy over HTTP REST (`deleteEntry` via raw SQL over SSH) and back-stamped `shows.legacy_show_id` / `flowsheet.legacy_entry_id`. Retired after Milestone 1 (WXYC/wiki#93) took `wxyc.info/playlists/*` to 410. The **inbound** direction is deliberately still live: `POST /internal/flowsheet-webhook` remains routed. The rotation webhook (`POST /internal/rotation-webhook`) is retired: it had one sender, tubafrenzy's `/wxycdb`, which went dark on 2026-09-16, and the route now returns 404.

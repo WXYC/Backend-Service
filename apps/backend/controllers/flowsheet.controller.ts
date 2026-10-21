@@ -6,6 +6,7 @@ import { NewFSEntry as FullNewFSEntry, FSEntry, Show, ShowDJ } from '@wxyc/datab
 // play_order is computed by the service layer, not provided by controllers
 type NewFSEntry = Omit<FullNewFSEntry, 'play_order'>;
 import * as flowsheet_service from '../services/flowsheet.service.js';
+import type { ShowDetailsPatch } from '../services/flowsheet.service.js';
 import type { ConcertDTO } from '../services/concerts.service.js';
 import type { CriticReviewItem } from '@wxyc/shared/dtos';
 import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/flowsheet-projection.js';
@@ -16,10 +17,10 @@ import { rowWriteCaller } from '../middleware/checkShowMember.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
 import { parseBoundedInt } from '../utils/query-params.js';
-import { codePointLength } from '../utils/text-fields.js';
+import { codePointLength, normalizeOptionalText } from '../utils/text-fields.js';
 import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
 import { FsEvents, Topics, serverEventsMgr } from '../utils/serverEvents.js';
-import type { SpecialtyShowRef } from '../services/flowsheet/specialty-ref.js';
+import { assertSpecialtyTaggable, type SpecialtyShowRef } from '../services/flowsheet/specialty-ref.js';
 
 export type QueryParams = {
   page?: string;
@@ -496,9 +497,11 @@ export const getEntries: RequestHandler<object, unknown, object, QueryParams> = 
   // iOS app polls this branch.
   //
   // Freshness note: this route is wrapped in conditionalGet(getLastModifiedAt),
-  // which 304s on the flowsheet watermark. A rare `on_air` change that writes no
-  // flowsheet row (e.g. a mid-show dj_name_override edit) can be masked behind a
-  // stale 304 until the next flowsheet mutation.
+  // which 304s on the flowsheet watermark. Show edits move it through the
+  // `touch_flowsheet_watermark_from_shows` trigger (BS#3456), so a retag or retitle
+  // is seen. A rare `on_air` change that writes neither a flowsheet row nor `shows`
+  // (e.g. a mid-show dj_name_override edit on another table) can still be masked
+  // behind a stale 304 until the next flowsheet mutation.
   res.status(200).json({
     entries: projectEntriesV2(entries),
     total,
@@ -1202,24 +1205,6 @@ const showAlreadyOpenError = async (show: Show): Promise<WxycError> =>
  */
 const DJ_NAME_OVERRIDE_MAX_LENGTH = 255;
 
-/**
- * 400 for a `specialty_id` that is unknown or retired, before any write (BS#3454).
- * Only the new-show and takeover paths call it: a co-host inherits the open show's tag.
- */
-const assertSpecialtyTaggable = async (specialty_id: number | undefined): Promise<void> => {
-  if (specialty_id == null) {
-    return;
-  }
-  // The `number` type is compile-time only and no validator guards /join: a string, a fraction or an
-  // out-of-range integer would reach Postgres as 22P02/22003 and surface as a 500.
-  if (!Number.isInteger(specialty_id) || specialty_id <= 0 || specialty_id > 2147483647) {
-    throw new WxycError('Bad Request: specialty_id must be a positive integer', 400);
-  }
-  if (!(await flowsheet_service.isSpecialtyShowTaggable(specialty_id))) {
-    throw new WxycError('Bad Request: specialty_id is unknown or names a retired specialty show', 400);
-  }
-};
-
 //POST
 export const joinShow: RequestHandler = async (req: Request<object, object, JoinRequestBody>, res) => {
   const current_show = await flowsheet_service.getLatestShow();
@@ -1465,6 +1450,39 @@ export const joinShow: RequestHandler = async (req: Request<object, object, Join
     broadcastFlowsheetRefetch('show-transition');
     res.status(200).json(show_session);
   }
+};
+
+/** `shows.show_name` is varchar(128). */
+const SHOW_NAME_MAX_LENGTH = 128;
+
+/**
+ * Tags or corrects an existing show's specialty program and title (BS#3456). Writes no flowsheet row, so the
+ * `shows` watermark trigger is what moves `GET /flowsheet`'s validator and the `show-transition` refetch is what
+ * wakes connected clients.
+ */
+export const updateShow: RequestHandler<{ id: string }, unknown, ShowDetailsPatch | undefined> = async (req, res) => {
+  if (!/^\d+$/.test(req.params.id) || Number.parseInt(req.params.id, 10) > INT4_MAX) {
+    throw new WxycError('Bad Request: show id must be a positive integer', 400);
+  }
+  const show_id = Number.parseInt(req.params.id, 10);
+
+  const patch: ShowDetailsPatch = {};
+  const show_name = normalizeOptionalText(req.body?.show_name, 'show_name', SHOW_NAME_MAX_LENGTH);
+  if (show_name !== undefined) {
+    patch.show_name = show_name;
+  }
+  if (req.body?.specialty_id !== undefined) {
+    patch.specialty_id = req.body.specialty_id;
+  }
+
+  await flowsheet_service.updateShowDetails(show_id, rowWriteCaller(req, res), patch);
+  if (patch.specialty_id !== undefined) {
+    await flowsheet_service.afterShowTagged(show_id, patch.specialty_id);
+  }
+  const [show] = await flowsheet_service.getRangeShowsByIds([show_id]);
+
+  broadcastFlowsheetRefetch('show-transition');
+  res.status(200).json(show);
 };
 
 export const leaveShow: RequestHandler<object, unknown, { dj_id: string }> = async (req, res) => {

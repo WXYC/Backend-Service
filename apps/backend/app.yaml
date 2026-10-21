@@ -2406,6 +2406,100 @@ paths:
         '403':
           description: 'Caller lacks the `flowsheet: read` permission'
 
+  /flowsheet/shows/{id}:
+    patch:
+      summary: Update a show's specialty tag or title (BS#3456)
+      description: >
+        Changes `specialty_id` and/or `show_name` after the show has opened, so a DJ can tag the show once it is on
+        the air and Edit show details can fix a wrong answer. Omitted fields are unchanged. `specialty_id: null`
+        clears the tag; an empty or whitespace-only `show_name` is stored as null. Writes no flowsheet row: the
+        `touch_flowsheet_watermark_from_shows` trigger moves the `GET /flowsheet` validator and a `show-transition`
+        `refetch` wakes connected clients.
+
+
+        Requires `flowsheet: write`. While the show is on the air, any DJ on it, co-hosts included, may call this.
+        Once it has ended, only a caller with `flowsheet: manage` (music directors and station managers) may. A show
+        has ended when its `end_time` is set or its newest row is a `show_end` marker.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Backend-Service `shows.id`, not the tubafrenzy `legacy_show_id`.
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                specialty_id:
+                  type: integer
+                  nullable: true
+                  description: Catalog id of the specialty program, or `null` to clear the tag (a freeform show).
+                show_name:
+                  type: string
+                  nullable: true
+                  maxLength: 128
+                  description: This airing's title; not the program name. Empty or whitespace-only is stored as `null`.
+      responses:
+        '200':
+          description: The updated show
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  show_name:
+                    type: string
+                    nullable: true
+                  dj_name:
+                    type: string
+                    nullable: true
+                  specialty_id:
+                    type: integer
+                    nullable: true
+                  specialty:
+                    allOf:
+                      - $ref: '#/components/schemas/SpecialtyShowRef'
+                    nullable: true
+                  start_time:
+                    type: string
+                    format: date-time
+                  end_time:
+                    type: string
+                    format: date-time
+                    nullable: true
+        '400':
+          description: >-
+            A `specialty_id` that names no program, or that switches the show to a retired program (re-sending the
+            show's current `specialty_id` is accepted even if that program has since been retired), a `show_name`
+            over its `maxLength`, or a caller who is not on the show while it is on the air. Clients should branch on
+            the status, not on the message text.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '401':
+          description: No bearer token
+        '403':
+          description: >-
+            `code: closed_show` — the show has ended and the caller lacks `flowsheet: manage`. A 403 without that
+            `code` is the permission denial (`{error}`) or the ban denial (`{message, reason}`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: No show with that id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
   /flowsheet/shows/{id}/force-end:
     post:
       summary: End a show the caller does not own (BS#2235)

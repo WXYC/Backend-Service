@@ -41,7 +41,7 @@ import { generateMissingBreakpoints, nearestStationHour, MAX_AUTO_BREAKPOINTS } 
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
-import { SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
+import { assertSpecialtyTaggable, SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelect, PgSelectKind, PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -672,6 +672,42 @@ export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IF
   return raw.map(transformToIFSEntry);
 };
 
+/** The `FlowsheetRangeShow` select shared by the window read and `getRangeShowsByIds`; callers add `where`/`orderBy`. */
+const selectRangeShows = () =>
+  db
+    .select({
+      id: shows.id,
+      show_name: shows.show_name,
+      specialty_id: shows.specialty_id,
+      specialty: specialty_shows,
+      start_time: shows.start_time,
+      end_time: shows.end_time,
+      dj_name_override: shows.dj_name_override,
+      legacy_dj_name: shows.legacy_dj_name,
+      primary_dj_id: shows.primary_dj_id,
+      user_id: user.id,
+      user_dj_name: user.djName,
+    })
+    .from(shows)
+    .leftJoin(user, eq(user.id, shows.primary_dj_id))
+    .leftJoin(specialty_shows, eq(specialty_shows.id, shows.specialty_id));
+
+const toRangeShows = (rows: Awaited<ReturnType<typeof selectRangeShows>>): FlowsheetRangeShow[] =>
+  rows.map((row) => ({
+    id: row.id,
+    show_name: row.show_name ?? null,
+    dj_name: resolveShowDjName({
+      dj_name_override: row.dj_name_override ?? null,
+      legacy_dj_name: row.legacy_dj_name ?? null,
+      primary_dj_id: row.primary_dj_id ?? null,
+      user: row.user_id == null ? null : { djName: row.user_dj_name ?? null },
+    }),
+    specialty_id: row.specialty_id ?? null,
+    specialty: toSpecialtyShowRef(row.specialty),
+    start_time: row.start_time,
+    end_time: row.end_time ?? null,
+  }));
+
 /**
  * Every show overlapping the window `[start, end)` (BS#2062), ordered by
  * `start_time` ASC.
@@ -709,23 +745,7 @@ export const getEntriesInTimeWindow = async (start: Date, end: Date): Promise<IF
  * differently.
  */
 export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<FlowsheetRangeShow[]> => {
-  const rows = await db
-    .select({
-      id: shows.id,
-      show_name: shows.show_name,
-      specialty_id: shows.specialty_id,
-      specialty: specialty_shows,
-      start_time: shows.start_time,
-      end_time: shows.end_time,
-      dj_name_override: shows.dj_name_override,
-      legacy_dj_name: shows.legacy_dj_name,
-      primary_dj_id: shows.primary_dj_id,
-      user_id: user.id,
-      user_dj_name: user.djName,
-    })
-    .from(shows)
-    .leftJoin(user, eq(user.id, shows.primary_dj_id))
-    .leftJoin(specialty_shows, eq(specialty_shows.id, shows.specialty_id))
+  const rows = await selectRangeShows()
     .where(
       or(
         // Strict `>`: two half-open intervals [a,b) and [c,d) intersect iff
@@ -753,21 +773,12 @@ export const getShowsInTimeWindow = async (start: Date, end: Date): Promise<Flow
     // order would reshuffle between identical requests.
     .orderBy(asc(shows.start_time), asc(shows.id));
 
-  return rows.map((row) => ({
-    id: row.id,
-    show_name: row.show_name ?? null,
-    dj_name: resolveShowDjName({
-      dj_name_override: row.dj_name_override ?? null,
-      legacy_dj_name: row.legacy_dj_name ?? null,
-      primary_dj_id: row.primary_dj_id ?? null,
-      user: row.user_id == null ? null : { djName: row.user_dj_name ?? null },
-    }),
-    specialty_id: row.specialty_id ?? null,
-    specialty: toSpecialtyShowRef(row.specialty),
-    start_time: row.start_time,
-    end_time: row.end_time ?? null,
-  }));
+  return toRangeShows(rows);
 };
+
+/** The `FlowsheetRangeShow` projection of the shows with these ids, ordered like the window read. */
+export const getRangeShowsByIds = async (ids: number[]): Promise<FlowsheetRangeShow[]> =>
+  toRangeShows(await selectRangeShows().where(inArray(shows.id, ids)).orderBy(asc(shows.start_time), asc(shows.id)));
 
 export const getEntriesByShow = async (...show_ids: number[]): Promise<IFSEntry[]> => {
   if (show_ids.length === 0) return [];
@@ -897,10 +908,42 @@ export const addHourlyBreakpoint = async (
 };
 
 /**
+ * Reads what `mayEditShow` decides on, plus the show's current `specialty_id`, or `undefined` when no such show exists.
+ * Callers read it inside the transaction of the write it authorizes.
+ */
+export const loadShowEditTarget = async (
+  executor: Pick<typeof db, 'select'>,
+  show_id: number
+): Promise<(ShowEditTarget & { specialty_id: number | null }) | undefined> => {
+  const [show] = await executor
+    .select({ end_time: shows.end_time, specialty_id: shows.specialty_id })
+    .from(shows)
+    .where(eq(shows.id, show_id));
+  if (!show) {
+    return undefined;
+  }
+  const latest_entry_is_show_end = show.end_time === null && (await isLatestEntryShowEnd(show_id, executor));
+  const on_air = show.end_time === null && !latest_entry_is_show_end;
+  const dj_ids = on_air ? (await getDJsInShow(show_id, true, executor)).map((dj) => dj.id) : [];
+  return { end_time: show.end_time, latest_entry_is_show_end, dj_ids, specialty_id: show.specialty_id ?? null };
+};
+
+/** Throws the denial `mayEditShow` returns. `caller` is null under the development-only AUTH_BYPASS. */
+const assertMayEditShow = (caller: ShowEditCaller | null, target: ShowEditTarget): void => {
+  if (caller === null) {
+    return;
+  }
+  const decision = mayEditShow(caller, target);
+  if (decision.allowed === false) {
+    throw new WxycError(decision.message, decision.status, decision.code && { code: decision.code });
+  }
+};
+
+/**
  * Row-scoped write gate (BS#3438, BS#3455). The row-keyed writes name a row by id, so each calls this against the
  * row's own `show_id`, read inside the write's transaction, and `mayEditShow` decides: a DJ on the open show, or a
- * `flowsheet: manage` caller once it has ended. A NULL `show_id` or a missing show belongs to no show anyone is on.
- * `caller` is null under the development-only AUTH_BYPASS (see `rowWriteCaller`).
+ * `flowsheet: manage` caller once it has ended. A NULL `show_id` or a missing show belongs to no show anyone is on:
+ * an open, empty one, so the decision is the non-member 400.
  */
 const assertCallerMayWriteRow = async (
   trx: Pick<typeof db, 'select'>,
@@ -910,22 +953,36 @@ const assertCallerMayWriteRow = async (
   if (caller === null) {
     return;
   }
-  // No show to read: an open, empty one, so the decision is the non-member 400.
-  let target: ShowEditTarget = { end_time: null, latest_entry_is_show_end: false, dj_ids: [] };
-  if (show_id !== null) {
-    const [show] = await trx.select({ end_time: shows.end_time }).from(shows).where(eq(shows.id, show_id));
-    if (show) {
-      const latest_entry_is_show_end = show.end_time === null && (await isLatestEntryShowEnd(show_id, trx));
-      const on_air = show.end_time === null && !latest_entry_is_show_end;
-      const dj_ids = on_air ? (await getDJsInShow(show_id, true, trx)).map((dj) => dj.id) : [];
-      target = { end_time: show.end_time, latest_entry_is_show_end, dj_ids };
-    }
-  }
-  const decision = mayEditShow(caller, target);
-  if (decision.allowed === false) {
-    throw new WxycError(decision.message, decision.status, decision.code && { code: decision.code });
-  }
+  const target = show_id === null ? undefined : await loadShowEditTarget(trx, show_id);
+  assertMayEditShow(caller, target ?? { end_time: null, latest_entry_is_show_end: false, dj_ids: [] });
 };
+
+export type ShowDetailsPatch = { specialty_id?: number | null; show_name?: string | null };
+
+/**
+ * Tags or corrects an existing show (BS#3456). The target is read and written in one transaction. Writes no flowsheet
+ * row; the `shows` statement trigger moves the watermark. The caller serializes the response with `getRangeShowsByIds`.
+ */
+export const updateShowDetails = async (
+  show_id: number,
+  caller: ShowEditCaller | null,
+  patch: ShowDetailsPatch
+): Promise<void> => {
+  await db.transaction(async (trx) => {
+    const target = await loadShowEditTarget(trx, show_id);
+    if (!target) {
+      throw new WxycError('Not Found: no show with that id', 404);
+    }
+    assertMayEditShow(caller, target);
+    await assertSpecialtyTaggable(patch.specialty_id, target.specialty_id);
+    if (Object.keys(patch).length > 0) {
+      await trx.update(shows).set(patch).where(eq(shows.id, show_id));
+    }
+  });
+};
+
+/** Seam for BS#3467: called once the tag change has committed, so the dated-poster binding lands here. */
+export const afterShowTagged = async (_show_id: number, _specialty_id: number | null): Promise<void> => {};
 
 // Returns undefined when no row matches entry_id (double delete / stale id);
 // the controller maps that to a 404 (PR #1532 review).
