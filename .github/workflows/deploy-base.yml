@@ -328,8 +328,9 @@ jobs:
             exit 0
           fi
           STATUS=0
+          # --no-verify: `npm ci` above installed husky, whose pre-push hook (full lint) fails on the runner (BS#3626).
           # shellcheck disable=SC2086 # one refspec per word
-          OUT=$(git push --porcelain origin $REFSPECS 2>&1) || STATUS=$?
+          OUT=$(git push --no-verify --porcelain origin $REFSPECS 2>&1) || STATUS=$?
           echo "$OUT"
           REJECTED=$(echo "$OUT" | awk -F'\t' '$1 == "!" {print $2 " " $3}')
           if [ -n "$REJECTED" ]; then
