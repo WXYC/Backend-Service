@@ -11,11 +11,12 @@
  * loose conventions; this calibration is documented in the artist-search-
  * alias plan and re-rankable as v2 once observed precision data exists).
  *
- * The source is RELATIONAL for the concerts resolver (BS#3563): the
- * librarian uses the field both for spelling variants and for member and
- * collaborator credits (`Rhiannon Giddens` on Carolina Chocolate Drops), so
- * `jobs/concerts-artist-resolver/query.ts` never resolves a headliner
- * through it. Catalog search still reads it.
+ * The concerts resolver trusts these rows only when they spell the owner's
+ * own name (`VARIANT_GATED_ALIAS_SOURCES` in
+ * `jobs/concerts-artist-resolver/query.ts`, BS#3563): the librarian uses the
+ * field both for spelling variants and for member and collaborator credits
+ * (`Rhiannon Giddens` on Carolina Chocolate Drops). Catalog search reads
+ * every row.
  */
 
 import { sql } from 'drizzle-orm';

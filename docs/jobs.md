@@ -104,7 +104,7 @@ Recurring cron (BS#2176): cause-agnostic re-ask of `flowsheet.metadata_status = 
 
 Path: `jobs/artist-search-alias-consumer/`
 
-Daily cron ETL (BS#1266 / artist-search-alias plan PR 4): consume LML's `POST /api/v1/artists/search-aliases/bulk` and UPSERT composed alias variants into `artist_search_alias` (migration 0089), with a shadow-ingest of `library.alternate_artist_name` tagged as `wxyc_library_alt`, plus each name inside a comma-joined value as a `wxyc_library_credit` row (BS#3554). Both local sources are relational, never a concerts-resolver synonym (BS#3563). Reconcile is scoped to `sources_present` so a partial-composer response can't wipe rows from other sources. Populates the substrate that PR 5's alias-aware catalog LATERAL JOIN reads. Default schedule `15 4 * * *` UTC.
+Daily cron ETL (BS#1266 / artist-search-alias plan PR 4): consume LML's `POST /api/v1/artists/search-aliases/bulk` and UPSERT composed alias variants into `artist_search_alias` (migration 0089), with a shadow-ingest of `library.alternate_artist_name` tagged as `wxyc_library_alt`, plus each name inside a comma-joined value as a relational `wxyc_library_credit` row (BS#3554; never a concerts-resolver synonym). The concerts resolver trusts a `wxyc_library_alt` row only when it spells the owner's own name (BS#3563). Reconcile is scoped to `sources_present` so a partial-composer response can't wipe rows from other sources. Populates the substrate that PR 5's alias-aware catalog LATERAL JOIN reads. Default schedule `15 4 * * *` UTC.
 
 ### `@wxyc/venue-events-scraper`
 

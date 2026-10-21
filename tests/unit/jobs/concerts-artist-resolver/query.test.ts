@@ -24,6 +24,7 @@ import {
   loadCandidates,
   resolveArtistId,
   SYNONYM_ALIAS_SOURCES,
+  VARIANT_GATED_ALIAS_SOURCES,
   RELATIONAL_ALIAS_SOURCES,
 } from '../../../../jobs/concerts-artist-resolver/query';
 
@@ -111,21 +112,21 @@ const renderSql = (value: unknown): string => {
 };
 
 /**
- * Parses the alias arm's `source IN (...)` literals out of rendered SQL.
- * Returns null when the SQL has no such IN-list. Assumes a flat list of
- * single-quoted identifier-safe values, which `SYNONYM_ALIAS_SOURCES
- * values are identifier-safe` pins below.
+ * Parses every `source IN (...)` literal list out of rendered SQL, in the
+ * order they appear. Assumes flat lists of single-quoted identifier-safe
+ * values, which `inlined source values are identifier-safe` pins below.
  */
-const parseSourceInList = (renderedSql: string): string[] | null => {
-  const match = renderedSql.match(/"?source"?\s+IN\s*\(([^)]*)\)/i);
-  if (!match) {
-    return null;
-  }
-  return match[1]
-    .split(',')
-    .map((s) => s.trim().replace(/^'|'$/g, ''))
-    .filter((s) => s.length > 0);
-};
+const parseSourceInLists = (renderedSql: string): string[][] =>
+  [...renderedSql.matchAll(/"?source"?\s+IN\s*\(([^)]*)\)/gi)].map((match) =>
+    match[1]
+      .split(',')
+      .map((s) => s.trim().replace(/^'|'$/g, ''))
+      .filter((s) => s.length > 0)
+  );
+
+/** The variant gate's two predicates, as query.ts renders them (BS#3563). */
+const GATE_ALNUM_PREDICATE = `regexp_replace(lower(asa."variant"), '[^[:alnum:]]', '', 'g')`;
+const GATE_SIMILARITY_PREDICATE = 'similarity(';
 
 describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
   beforeEach(() => {
@@ -147,38 +148,56 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
     // returns `[]` due to a renamed classifier) would silently produce
     // zero parameterised tests below. These assertions ensure that
     // dead-suite case fails noisily instead of reporting green.
-    it('SYNONYM_ALIAS_SOURCES is non-empty', () => {
-      expect(SYNONYM_ALIAS_SOURCES.length).toBeGreaterThan(0);
+    it.each([
+      ['SYNONYM_ALIAS_SOURCES', SYNONYM_ALIAS_SOURCES],
+      ['VARIANT_GATED_ALIAS_SOURCES', VARIANT_GATED_ALIAS_SOURCES],
+      ['RELATIONAL_ALIAS_SOURCES', RELATIONAL_ALIAS_SOURCES],
+    ])('%s is non-empty', (_name, sources) => {
+      expect(sources.length).toBeGreaterThan(0);
     });
 
-    it('RELATIONAL_ALIAS_SOURCES is non-empty', () => {
-      expect(RELATIONAL_ALIAS_SOURCES.length).toBeGreaterThan(0);
-    });
-
+    // Every known `artist_search_alias.source` sits in exactly one class.
     // BS#3554: a library credit names a member or collaborator filed under
-    // the band's card, so it must never resolve a concert headliner as a
-    // synonym (Rhiannon Giddens is not Carolina Chocolate Drops). BS#3563:
-    // a single-name `library.alternate_artist_name` is the same mix of
-    // spelling variants and credits, so `wxyc_library_alt` is relational too.
-    it.each(['discogs_member', 'wxyc_library_credit', 'wxyc_library_alt'])(
-      '%s is relational, not synonym',
-      (source) => {
-        expect(RELATIONAL_ALIAS_SOURCES as readonly string[]).toContain(source);
-        expect(SYNONYM_ALIAS_SOURCES as readonly string[]).not.toContain(source);
-      }
-    );
-
-    it('the two classes do not overlap', () => {
-      const overlap = SYNONYM_ALIAS_SOURCES.filter((s) => (RELATIONAL_ALIAS_SOURCES as readonly string[]).includes(s));
-      expect(overlap).toEqual([]);
+    // the band's card (Rhiannon Giddens is not Carolina Chocolate Drops).
+    // BS#3563: a single-name `library.alternate_artist_name` mixes spelling
+    // variants and credits, so it is variant-gated.
+    it.each([
+      ['discogs_name_variation', 'synonym'],
+      ['discogs_alias', 'synonym'],
+      ['wxyc_library_alt', 'variant-gated'],
+      ['discogs_member', 'relational'],
+      ['wxyc_library_credit', 'relational'],
+    ])('%s is %s, and in no other class', (source, expected) => {
+      const classes = [
+        ['synonym', SYNONYM_ALIAS_SOURCES],
+        ['variant-gated', VARIANT_GATED_ALIAS_SOURCES],
+        ['relational', RELATIONAL_ALIAS_SOURCES],
+      ] as const;
+      const memberOf = classes
+        .filter(([, sources]) => (sources as readonly string[]).includes(source))
+        .map(([name]) => name);
+      expect(memberOf).toEqual([expected]);
     });
 
-    it('SYNONYM_ALIAS_SOURCES values are identifier-safe', () => {
-      // The production resolver inline-quotes these values into a
-      // `sql.raw` IN-list (jobs/concerts-artist-resolver/query.ts).
-      // That's safe-by-construction only as long as the values stay
-      // within Postgres' identifier charset — anything outside `[A-Za-
-      // z0-9_]` (apostrophe, backslash, NUL, etc.) would inject. The
+    it('the classes name no source outside the known set', () => {
+      const known = [
+        'discogs_name_variation',
+        'discogs_alias',
+        'wxyc_library_alt',
+        'discogs_member',
+        'wxyc_library_credit',
+      ];
+      const all = [...SYNONYM_ALIAS_SOURCES, ...VARIANT_GATED_ALIAS_SOURCES, ...RELATIONAL_ALIAS_SOURCES];
+      expect([...all].sort()).toEqual([...known].sort());
+    });
+
+    it('inlined source values are identifier-safe', () => {
+      // The production resolver inline-quotes the synonym and
+      // variant-gated values into `sql.raw` IN-lists
+      // (jobs/concerts-artist-resolver/query.ts). That's safe-by-
+      // construction only as long as the values stay within Postgres'
+      // identifier charset — anything outside `[A-Za-z0-9_]`
+      // (apostrophe, backslash, NUL, etc.) would inject. The
       // check used to live at module-load in query.ts as a thrown Error,
       // but that path runs before Sentry / the structured logger / the
       // safeFinalize teardown initialise — a bad value would crash-loop
@@ -187,13 +206,13 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       // unit-test step and never deploys; production gets the cheaper,
       // unguarded `sql.raw` call.
       const nonIdentifier = /[^A-Za-z0-9_]/;
-      const offenders = SYNONYM_ALIAS_SOURCES.filter((s) => nonIdentifier.test(s));
+      const offenders = [...SYNONYM_ALIAS_SOURCES, ...VARIANT_GATED_ALIAS_SOURCES].filter((s) => nonIdentifier.test(s));
       expect(offenders).toEqual([]);
     });
   });
 
   describe('SQL contract', () => {
-    it('the alias arm allowlists exactly the synonym-class sources as SQL literals', async () => {
+    it('the alias arm allowlists the synonym-class sources, then the gated variant-gated sources', async () => {
       db.execute.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
 
       await resolveArtistId('Geordie Greep');
@@ -201,19 +220,21 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
       expect(db.execute).toHaveBeenCalledTimes(2);
       const aliasSql = renderSql(db.execute.mock.calls[1][0]);
 
-      // Parses the IN-list literals out of the rendered SQL and
-      // asserts the alias arm names EXACTLY the synonym-class sources
-      // — no extras, no missing, no duplicates. A negative-form
+      // Parses the IN-list literals out of the rendered SQL and asserts
+      // the alias arm names EXACTLY the two allowlisted classes, in
+      // order — no extras, no missing, no duplicates. A negative-form
       // predicate (`<>`) or a hotfix that hardcodes an extra source
-      // outside the const would fail this. The parser assumes a flat
-      // IN-list with single-quoted identifier-safe values; that
-      // shape is pinned by `SYNONYM_ALIAS_SOURCES values are
-      // identifier-safe` above. Sorted-array comparison rather than
-      // Set so duplicates fail too (e.g., an assembly bug that emits
-      // `('a','a','b')` for a 2-element tuple).
-      const inListLiterals = parseSourceInList(aliasSql);
-      expect(inListLiterals).not.toBeNull();
-      expect([...(inListLiterals ?? [])].sort()).toEqual([...SYNONYM_ALIAS_SOURCES].sort());
+      // outside the consts would fail this. Sorted-array comparison
+      // rather than Set so duplicates fail too.
+      const inLists = parseSourceInLists(aliasSql).map((list) => [...list].sort());
+      expect(inLists).toEqual([[...SYNONYM_ALIAS_SOURCES].sort(), [...VARIANT_GATED_ALIAS_SOURCES].sort()]);
+
+      // The variant-gated IN-list sits under both gate predicates, which
+      // read the owner's name through the JOIN (BS#3563).
+      const gatedListAt = aliasSql.lastIndexOf('"source" IN');
+      expect(aliasSql).toContain('JOIN');
+      expect(aliasSql.indexOf(GATE_ALNUM_PREDICATE, gatedListAt)).toBeGreaterThan(gatedListAt);
+      expect(aliasSql.indexOf(GATE_SIMILARITY_PREDICATE, gatedListAt)).toBeGreaterThan(gatedListAt);
     });
 
     it('the alias arm does NOT name any relational-class source as a filter literal', async () => {
@@ -316,42 +337,50 @@ describe('resolveArtistId — synonym-class allowlist (BS#1383)', () => {
 });
 
 /**
- * BS#3563: library alternate names never resolve a headliner.
+ * BS#3563: a library alternate name resolves a headliner only when it
+ * spells the owner's own name.
  *
  * A fake catalog stands in for Postgres. It answers the strict arm from
  * `artists` and the alias arm from `artist_search_alias`, and it applies
- * the source IN-list parsed from the SQL that `resolveArtistId` actually
- * sent. So a row's source only reaches the result when query.ts names it.
- * The fake normalizer is a stand-in for `normalize_artist_name` (lowercase,
- * strip a leading `the `); the real function runs in
+ * the source IN-lists parsed from the SQL that `resolveArtistId` actually
+ * sent: rows from the first list pass, rows from the second list pass the
+ * fake gate, and SQL with no IN-list lets every row pass. If the gate
+ * predicates are missing from the SQL, gated rows pass ungated. The fake
+ * normalizer and gate stand in for `normalize_artist_name`, the
+ * alphanumeric comparison and pg_trgm's `similarity`; the real SQL runs in
  * tests/integration/concerts-artist-resolver-support.spec.js.
  */
-describe('resolveArtistId — library alternate names are relational (BS#3563)', () => {
+describe('resolveArtistId — variant-gated library alternate names (BS#3563)', () => {
   type FakeArtist = { id: number; artist_name: string };
   type FakeAlias = { artist_id: number; source: string; variant: string };
 
   const CAROLINA_CHOCOLATE_DROPS = 1;
   const PAUL_WHITE = 2;
-  const THEE_OH_SEES = 3;
+  const ADAM_AND_THE_ANTS = 3;
+  const MESHELL = 4;
+  const ANDERSON_PAAK = 5;
+  const GENIUS_GZA = 6;
+  const THEE_OH_SEES = 7;
 
   const ARTISTS: FakeArtist[] = [
     { id: CAROLINA_CHOCOLATE_DROPS, artist_name: 'Carolina Chocolate Drops' },
     { id: PAUL_WHITE, artist_name: 'Paul White' },
+    { id: ADAM_AND_THE_ANTS, artist_name: 'Adam and the Ants' },
+    { id: MESHELL, artist_name: "Me'Shell Ndegeocello" },
+    { id: ANDERSON_PAAK, artist_name: 'Anderson.Paak' },
+    { id: GENIUS_GZA, artist_name: 'Genius/GZA' },
     { id: THEE_OH_SEES, artist_name: 'Thee Oh Sees' },
   ];
 
-  // Prod shapes from the 2026-10-21 measurement on BS#3563.
+  // Prod shapes from the 2026-10-21 measurements on BS#3563.
   const ALIASES: FakeAlias[] = [
-    // A member credit (release 70585).
     { artist_id: CAROLINA_CHOCOLATE_DROPS, source: 'wxyc_library_alt', variant: 'Rhiannon Giddens' },
-    // A collaborator credit; it mislabeled concert 19292.
     { artist_id: PAUL_WHITE, source: 'wxyc_library_alt', variant: 'Open Mike Eagle' },
-    // A true spelling variant that the librarian typed. Option 2 accepts losing it.
-    { artist_id: THEE_OH_SEES, source: 'wxyc_library_alt', variant: 'ohsees' },
-    // A Discogs spelling variant.
+    { artist_id: ADAM_AND_THE_ANTS, source: 'wxyc_library_alt', variant: 'Adam Ant' },
+    { artist_id: MESHELL, source: 'wxyc_library_alt', variant: 'Meshell Ndegeocello' },
+    { artist_id: ANDERSON_PAAK, source: 'wxyc_library_alt', variant: 'Anderson Paak' },
+    { artist_id: GENIUS_GZA, source: 'wxyc_library_alt', variant: 'GZA/Genius' },
     { artist_id: THEE_OH_SEES, source: 'discogs_name_variation', variant: 'Oh Sees' },
-    // An alt value equal to the owner after normalization.
-    { artist_id: CAROLINA_CHOCOLATE_DROPS, source: 'wxyc_library_alt', variant: 'carolina chocolate drops' },
   ];
 
   const fakeNormalize = (name: string): string =>
@@ -359,15 +388,33 @@ describe('resolveArtistId — library alternate names are relational (BS#3563)',
       .trim()
       .toLowerCase()
       .replace(/^the\s+/, '');
+  const alnum = (name: string): string => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const words = (name: string): string =>
+    [...new Set(fakeNormalize(name).split(/[^\p{L}\p{N}]+/u))]
+      .filter((w) => w.length > 0)
+      .sort()
+      .join(' ');
+  const fakeGate = (variant: string, owner: string): boolean =>
+    alnum(variant) === alnum(owner) || words(variant) === words(owner);
+
+  const ownerName = (artistId: number): string => ARTISTS.find((a) => a.id === artistId)?.artist_name ?? '';
 
   /** The rows the strict or alias arm would return for `raw`. */
   const fakeRows = (renderedSql: string, raw: string): Array<{ artist_id: number }> => {
     if (renderedSql.includes('artist_search_alias')) {
-      const allowed = parseSourceInList(renderedSql) ?? [];
+      const [ungated, gated] = parseSourceInLists(renderedSql);
+      const gateInSql = renderedSql.includes(GATE_ALNUM_PREDICATE) && renderedSql.includes(GATE_SIMILARITY_PREDICATE);
+      const passes = (a: FakeAlias): boolean => {
+        if (ungated === undefined || ungated.includes(a.source)) {
+          return true;
+        }
+        if (gated === undefined || !gated.includes(a.source)) {
+          return false;
+        }
+        return !gateInSql || fakeGate(a.variant, ownerName(a.artist_id));
+      };
       const ids = new Set(
-        ALIASES.filter((a) => allowed.includes(a.source) && fakeNormalize(a.variant) === fakeNormalize(raw)).map(
-          (a) => a.artist_id
-        )
+        ALIASES.filter((a) => fakeNormalize(a.variant) === fakeNormalize(raw) && passes(a)).map((a) => a.artist_id)
       );
       return [...ids].slice(0, 2).map((artist_id) => ({ artist_id }));
     }
@@ -386,29 +433,39 @@ describe('resolveArtistId — library alternate names are relational (BS#3563)',
 
   it.each([
     {
-      name: 'a member credit (Rhiannon Giddens on Carolina Chocolate Drops) does not resolve',
+      name: 'a member credit (Rhiannon Giddens on Carolina Chocolate Drops)',
       raw: 'Rhiannon Giddens',
       expected: { kind: 'unmatched' },
     },
     {
-      name: 'a collaborator credit (Open Mike Eagle on Paul White, concert 19292) does not resolve',
+      name: 'a collaborator credit (Open Mike Eagle on Paul White)',
       raw: 'Open Mike Eagle',
       expected: { kind: 'unmatched' },
     },
     {
-      name: 'a library spelling variant (ohsees on Thee Oh Sees) no longer resolves',
-      raw: 'ohsees',
+      name: 'a solo act on the band card (Adam Ant on Adam and the Ants)',
+      raw: 'Adam Ant',
       expected: { kind: 'unmatched' },
     },
     {
-      name: 'a discogs_name_variation variant still resolves through the alias arm',
-      raw: 'Oh Sees',
-      expected: { kind: 'alias', artist_id: THEE_OH_SEES },
+      name: "punctuation only (Meshell Ndegeocello on Me'Shell Ndegeocello)",
+      raw: 'Meshell Ndegeocello',
+      expected: { kind: 'alias', artist_id: MESHELL },
     },
     {
-      name: "an alt value equal to the owner's normalized name still resolves strict",
-      raw: 'The Carolina Chocolate Drops',
-      expected: { kind: 'strict', artist_id: CAROLINA_CHOCOLATE_DROPS },
+      name: 'spacing only (Anderson Paak on Anderson.Paak)',
+      raw: 'Anderson Paak',
+      expected: { kind: 'alias', artist_id: ANDERSON_PAAK },
+    },
+    {
+      name: 'word order (GZA/Genius on Genius/GZA)',
+      raw: 'GZA/Genius',
+      expected: { kind: 'alias', artist_id: GENIUS_GZA },
+    },
+    {
+      name: 'a discogs_name_variation variant (Oh Sees on Thee Oh Sees)',
+      raw: 'Oh Sees',
+      expected: { kind: 'alias', artist_id: THEE_OH_SEES },
     },
   ])('$name', async ({ raw, expected }) => {
     currentRaw = raw;
