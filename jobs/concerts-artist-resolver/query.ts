@@ -40,6 +40,7 @@ const CONCERTS_TABLE = sql.raw(`"${SCHEMA}"."concerts"`);
 const ARTISTS_TABLE = sql.raw(`"${SCHEMA}"."artists"`);
 const ARTIST_SEARCH_ALIAS_TABLE = sql.raw(`"${SCHEMA}"."artist_search_alias"`);
 const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
+const TEXT_MATCH_KEY_FN = sql.raw(`"${SCHEMA}"."text_match_key"`);
 
 /**
  * `artist_search_alias.source` partitions into three classes (BS#1383,
@@ -71,7 +72,8 @@ const NORMALIZE_FN = sql.raw(`"${SCHEMA}"."normalize_artist_name"`);
  * requestLine/types.ts, orchestrate.test.ts — none of which import
  * from each other or from these constants. BS#1390 consolidates them
  * around this partition; the matching SynonymAliasSource /
- * RelationalAliasSource types will be exported from here at that time.
+ * VariantGatedAliasSource / RelationalAliasSource types will be exported
+ * from here at that time.
  */
 export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias'] as const;
 
@@ -83,16 +85,23 @@ export const SYNONYM_ALIAS_SOURCES = ['discogs_name_variation', 'discogs_alias']
  * threshold separates the two kinds across the 3,969 rows.
  *
  * The variant gate: a gated row drives an FK write only when it is the
- * owner's own name spelled differently. That is, the variant and the
- * owner's `artist_name` are equal after lowercasing and dropping every
- * non-alphanumeric character (`Meshell Ndegeocello` on Me'Shell
- * Ndegeocello), or their normalized forms have trigram similarity 1, so
- * the same words in another order (`GZA/Genius` on Genius/GZA). On prod
- * the gate admits 47 rows beyond the ones strict already covers, and all
- * 47 are spelling variants. It rejects every credit, for example
- * Rhiannon Giddens → Carolina Chocolate Drops, Open Mike Eagle → Paul
- * White, and Adam Ant → Adam and the Ants. Typo-level variants
- * (`Spellling`) are left out.
+ * owner's own name spelled differently. Either the variant and the
+ * owner's `artist_name` have the same non-empty `text_match_key`
+ * (migration 0191: diacritics folded, lowercased, leading "the" and every
+ * non-alphanumeric dropped; `Meshell Ndegeocello` on Me'Shell Ndegeocello,
+ * `Nilufer Yanya` on Nilüfer Yanya), or their normalized forms have
+ * pg_trgm similarity 1 and their keys have the same length, which admits a
+ * reordering of the same words (`GZA/Genius` on Genius/GZA). The length
+ * check is needed because pg_trgm compares trigram sets, so a repeated
+ * word also scores 1 (`Duran` on Duran Duran). The `<> ''` guard keeps
+ * two symbols-only names (`!!!`, `+/-`) from matching each other.
+ *
+ * On prod the gate admits 47 rows beyond normalized-equal, all of them
+ * spelling variants. It rejects every credit, for example Rhiannon
+ * Giddens → Carolina Chocolate Drops, Open Mike Eagle → Paul White, and
+ * Adam Ant → Adam and the Ants. By design it also rejects typos
+ * (`Spellling`), acronyms (`OMD`) and a performer's other names. That
+ * costs zero concert resolutions on prod today.
  */
 export const VARIANT_GATED_ALIAS_SOURCES = ['wxyc_library_alt'] as const;
 
@@ -195,23 +204,32 @@ export const resolveArtistId: ResolveFn = async (raw: string): Promise<ResolveOu
   }
 
   // Synonym-class rows always count (BS#1383). Variant-gated rows count
-  // only when they spell the owner's own name (BS#3563), so the arm joins
-  // the owner's `artists` row. See the docstrings on the partition
-  // constants for the rationale and the BS#1390 drift tracker.
+  // only when they spell the owner's own name (BS#3563), so only that
+  // branch looks up the owner's `artists` row. See the docstrings on the
+  // partition constants for the rationale and the BS#1390 drift tracker.
   // `similarity` is pg_trgm's.
   const alias: unknown = await db.execute(sql`
     SELECT DISTINCT asa."artist_id"
     FROM ${ARTIST_SEARCH_ALIAS_TABLE} asa
-    JOIN ${ARTISTS_TABLE} owner ON owner."id" = asa."artist_id"
     WHERE ${NORMALIZE_FN}(asa."variant") = ${NORMALIZE_FN}(${raw})
       AND (
         asa."source" IN (${SYNONYM_SOURCE_IN_LIST})
         OR (
           asa."source" IN (${VARIANT_GATED_SOURCE_IN_LIST})
-          AND (
-            regexp_replace(lower(asa."variant"), '[^[:alnum:]]', '', 'g')
-              = regexp_replace(lower(owner."artist_name"), '[^[:alnum:]]', '', 'g')
-            OR similarity(${NORMALIZE_FN}(asa."variant"), ${NORMALIZE_FN}(owner."artist_name")) = 1
+          AND EXISTS (
+            SELECT 1
+            FROM ${ARTISTS_TABLE} owner
+            WHERE owner."id" = asa."artist_id"
+              AND (
+                (
+                  ${TEXT_MATCH_KEY_FN}(asa."variant") = ${TEXT_MATCH_KEY_FN}(owner."artist_name")
+                  AND ${TEXT_MATCH_KEY_FN}(asa."variant") <> ''
+                )
+                OR (
+                  similarity(${NORMALIZE_FN}(asa."variant"), ${NORMALIZE_FN}(owner."artist_name")) = 1
+                  AND length(${TEXT_MATCH_KEY_FN}(asa."variant")) = length(${TEXT_MATCH_KEY_FN}(owner."artist_name"))
+                )
+              )
           )
         )
       )

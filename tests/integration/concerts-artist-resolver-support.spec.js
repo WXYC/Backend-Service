@@ -36,13 +36,16 @@
  */
 
 const path = require('path');
-const { execFileSync } = require('child_process');
 const postgres = require('postgres');
+const { runTsxDriver } = require('../utils/run-tsx-driver');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const SOURCE_ID_PREFIX = 'bs1760:';
 const VENUE_SLUG = 'bs1760-probe-room';
 const ARTIST_PREFIX = 'BS#1760 Probe';
+// BS#3563: two symbols-only names, so both `text_match_key`s are ''.
+const SYMBOLS_ONLY_OWNER = '!!! ~~~';
+const SYMBOLS_ONLY_VARIANT = '+/- ~~~';
 const RESOLVE_DRIVER = path.join(__dirname, '..', 'utils', 'run-concerts-resolve-artist-id.ts');
 // The child boots tsx and loads the built `@wxyc/database`; give it room.
 const CHILD_TIMEOUT_MS = 60000;
@@ -223,26 +226,10 @@ async function resolveStrict(sql, rawName) {
  * a map of raw name → outcome.
  */
 function resolveWithRealResolver(rawNames) {
-  const output = execFileSync('npx', ['tsx', RESOLVE_DRIVER, JSON.stringify(rawNames)], {
-    env: {
-      ...process.env,
-      DB_HOST: process.env.DB_HOST || 'localhost',
-      DB_PORT: process.env.DB_PORT || process.env.CI_DB_PORT || '5433',
-      DB_NAME: process.env.DB_NAME || 'wxyc_db',
-      DB_USERNAME: process.env.DB_USERNAME || 'test-user',
-      DB_PASSWORD: process.env.DB_PASSWORD || 'test-pw',
-      WXYC_SCHEMA_NAME: SCHEMA,
-      SENTRY_DSN: '',
-    },
-    cwd: path.join(__dirname, '..', '..'),
-    encoding: 'utf8',
-    timeout: CHILD_TIMEOUT_MS - 5000,
+  return runTsxDriver(RESOLVE_DRIVER, [JSON.stringify(rawNames)], {
+    marker: 'RESOLVE_RESULT',
+    timeoutMs: CHILD_TIMEOUT_MS - 5000,
   });
-  const match = output.match(/^RESOLVE_RESULT:(.*)$/m);
-  if (!match) {
-    throw new Error(`resolve driver produced no result line:\n${output}`);
-  }
-  return JSON.parse(match[1]);
 }
 
 /** Runs the support resolve arm once over every current candidate. */
@@ -362,6 +349,9 @@ describe('concerts-artist-resolver support sync/resolve contract (BS#1760)', () 
     await sql.unsafe(`DELETE FROM "${SCHEMA}".concerts WHERE source_id LIKE $1`, [`${SOURCE_ID_PREFIX}%`]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".venues WHERE slug = $1`, [VENUE_SLUG]);
     await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name LIKE $1`, [`${ARTIST_PREFIX}%`]);
+    await sql.unsafe(`DELETE FROM "${SCHEMA}".artists WHERE artist_name = $1 AND code_letters = 'ZZ'`, [
+      SYMBOLS_ONLY_OWNER,
+    ]);
   };
 
   beforeAll(async () => {
@@ -502,8 +492,11 @@ describe('concerts-artist-resolver support sync/resolve contract (BS#1760)', () 
   describe('library alternate names resolve only when they spell the owner (BS#3563)', () => {
     // Prod shapes from the 2026-10-21 measurements on BS#3563, under the
     // suite's name prefix so cleanup can only touch the suite's own rows.
-    // Alias rows go with their artist (ON DELETE CASCADE). The REAL
-    // resolver runs once, in a child process, for every case.
+    // The symbols-only pair cannot carry the prefix (its letters would make
+    // the keys non-empty), so `cleanup` deletes those two names by exact
+    // match plus the suite's `ZZ` filing code. Alias rows go with their
+    // artist (ON DELETE CASCADE). The REAL resolver runs once, in a child
+    // process, for every case.
     const P = ARTIST_PREFIX;
     const ALT = { source: 'wxyc_library_alt', method: 'alt_curated', confidence: 0.85 };
     const NAME_VARIATION = { source: 'discogs_name_variation', method: 'name_variation', confidence: 0.95 };
@@ -515,6 +508,9 @@ describe('concerts-artist-resolver support sync/resolve contract (BS#1760)', () 
       ['punctuation only', `${P} Me'Shell Ndegeocello`, ALT, `${P} Meshell Ndegeocello`, 'alias'],
       ['spacing only', `${P} Anderson.Paak`, ALT, `${P} Anderson Paak`, 'alias'],
       ['word order', `${P} Genius/GZA`, ALT, `${P} GZA/Genius`, 'alias'],
+      ['diacritics only', `${P} Nilüfer Yanya`, ALT, `${P} Nilufer Yanya`, 'alias'],
+      ['a repeated word', `${P} Duran Duran`, ALT, `${P} Duran`, 'unmatched'],
+      ['symbols only', SYMBOLS_ONLY_OWNER, ALT, SYMBOLS_ONLY_VARIANT, 'unmatched'],
       ['a discogs_name_variation variant', `${P} Thee Oh Sees`, NAME_VARIATION, `${P} Oh Sees`, 'alias'],
     ];
     const ownerIds = {};

@@ -149,35 +149,26 @@ beforeAll(async () => {
 
   // The negative-path billings must have NO resolver match, or the resolver
   // would stamp them and the "leaves unmatched unresolved" assertion would be
-  // silently wrong. This mirrors BOTH arms of the resolver (query.ts): the
-  // strict `artists` join AND the alias arm over `artist_search_alias` for the
-  // synonym-class sources — a strict-only check would give false confidence,
-  // since a synonym variant normalizing to a negative billing resolves too.
-  // (The source list mirrors SYNONYM_ALIAS_SOURCES plus
-  // VARIANT_GATED_ALIAS_SOURCES in jobs/concerts-artist-resolver/query.ts;
-  // imported inline rather than from that module to avoid dragging in its
-  // top-level `@wxyc/database` connection. It skips the BS#3563 variant
-  // gate, which only makes this guard stricter.)
-  // Holds on the small e2e seed; fails loudly if the DB was pointed at the prod
-  // clone or a contaminated shared schema.
-  const collisions = await pg<{ label: string; via: string }[]>`
-    SELECT artist_name AS label, 'artists' AS via FROM ${pg(SCHEMA)}.artists
-    WHERE ${pg(SCHEMA)}.normalize_artist_name(artist_name) IN (
-      ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_A}),
-      ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_B})
-    )
-    UNION ALL
-    SELECT variant AS label, 'artist_search_alias' AS via FROM ${pg(SCHEMA)}.artist_search_alias
-    WHERE source IN ('discogs_name_variation', 'discogs_alias', 'wxyc_library_alt')
-      AND ${pg(SCHEMA)}.normalize_artist_name(variant) IN (
-        ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_A}),
-        ${pg(SCHEMA)}.normalize_artist_name(${HEADLINER_UNRESOLVED_B})
-      )
-  `;
+  // silently wrong. This asks the REAL `resolveArtistId`
+  // (jobs/concerts-artist-resolver/query.ts) in a child process, so the
+  // guard follows both arms, the source partition and the BS#3563 variant
+  // gate without copying any of them. A strict-only check would give false
+  // confidence, since an alias variant normalizing to a negative billing
+  // resolves too. Holds on the small e2e seed; fails loudly if the DB was
+  // pointed at the prod clone or a contaminated shared schema.
+  const negativeBillings = [HEADLINER_UNRESOLVED_A, HEADLINER_UNRESOLVED_B];
+  const resolveOutput = runNode(`tests/utils/run-concerts-resolve-artist-id.ts '${JSON.stringify(negativeBillings)}'`);
+  const resolveMatch = resolveOutput.match(/^RESOLVE_RESULT:(.*)$/m);
+  if (!resolveMatch) {
+    throw new Error(`resolve driver produced no RESOLVE_RESULT line:\n${resolveOutput}`);
+  }
+  const verdicts = new Map(Object.entries(JSON.parse(resolveMatch[1]) as Record<string, { kind: string }>));
+  const collisions = negativeBillings.filter((name) => verdicts.get(name)?.kind !== 'unmatched');
   if (collisions.length > 0) {
     throw new Error(
       `e2e DB already contains a resolver match for a negative-path billing ` +
-        `(${collisions.map((r) => `${r.label} via ${r.via}`).join(', ')}); this suite requires the small seed`
+        `(${collisions.map((name) => `${name}: ${JSON.stringify(verdicts.get(name))}`).join(', ')}); ` +
+        `this suite requires the small seed`
     );
   }
 
