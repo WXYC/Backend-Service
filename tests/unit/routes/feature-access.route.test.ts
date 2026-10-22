@@ -21,12 +21,8 @@ import express from 'express';
 import { jwtVerify } from 'jose';
 import request from 'supertest';
 import { resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
-import type { FeatureKey } from '../../../apps/backend/config/featureAccess';
-import type {
-  FeatureAccessEntry,
-  FeatureAccessResponse,
-  FeatureAudience,
-} from '../../../apps/backend/controllers/feature-access.controller';
+import type { Audience } from '../../../apps/backend/config/featureAccess';
+import type { FeatureAudience } from '@wxyc/shared/dtos';
 import { feature_access_route } from '../../../apps/backend/routes/feature-access.route';
 
 const mockedJwtVerify = jwtVerify as jest.MockedFunction<typeof jwtVerify>;
@@ -134,20 +130,10 @@ describe('GET /feature-access', () => {
   });
 });
 
-/**
- * Compile-time pin: the mirrors must match the SSOT schemas in `wxyc-shared/api.yaml` (wxyc-shared#731, `FeatureAudience`,
- * `FeatureAccessEntry`, `FeatureAccessResponse`), which `@wxyc/shared` 5.4.0 does not export. When it does, import them
- * and keep these assertions. `FeatureAccessEntry` is closed at exactly these two keys, and `reviews` is required.
- */
+/** Compile-time pin: the registry's `Audience` is the contract's `FeatureAudience`. */
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
-type ApiYamlFeatureAudience = 'off' | 'staff' | 'everyone';
-type ApiYamlFeatureAccessEntry = { audience: ApiYamlFeatureAudience; can_see: boolean };
-type ApiYamlFeatureAccessResponse = { reviews: ApiYamlFeatureAccessEntry };
-const audiencePin: Equal<FeatureAudience, ApiYamlFeatureAudience> = true;
-const entryPin: Equal<FeatureAccessEntry, ApiYamlFeatureAccessEntry> = true;
-const responsePin: Equal<FeatureAccessResponse, ApiYamlFeatureAccessResponse> = true;
-const everyKeyIsAProperty: FeatureKey extends keyof ApiYamlFeatureAccessResponse ? true : false = true;
+const audiencePin: Equal<Audience, FeatureAudience> = true;
 
-it('mirrors the contract schemas', () => {
-  expect([audiencePin, entryPin, responsePin, everyKeyIsAProperty]).toEqual([true, true, true, true]);
+it("uses the contract's FeatureAudience as the registry Audience", () => {
+  expect(audiencePin).toBe(true);
 });

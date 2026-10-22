@@ -1,19 +1,14 @@
 import { db, user } from '@wxyc/database';
 import { eq } from 'drizzle-orm';
+import type { FeatureAccessResponse } from '@wxyc/shared/dtos';
 import { RequestHandler } from 'express';
-import { accessAt, audience, FEATURES, type Audience, type FeatureKey } from '../config/featureAccess.js';
+import { accessAt, audience, FEATURES, type FeatureKey } from '../config/featureAccess.js';
 
-/**
- * Mirror of the contract's `FeatureAudience`, `FeatureAccessEntry` and `FeatureAccessResponse` (`wxyc-shared/api.yaml`,
- * wxyc-shared#731); private because Backend-Service stays on `@wxyc/shared` 5.4.0. `FeatureAudience` is the registry's
- * own `Audience`, pinned both ways in `tests/unit/routes/feature-access.route.test.ts`.
- */
-export type FeatureAudience = Audience;
-export interface FeatureAccessEntry {
-  audience: FeatureAudience;
-  can_see: boolean;
-}
-export type FeatureAccessResponse = Record<FeatureKey, FeatureAccessEntry>;
+/** Compile-time check, both ways: every registry feature is a key of the contract's response, and every response key is a feature. */
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Expect<T extends true> = T;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- a compile-time assertion; nothing reads it
+type _ResponseKeysAreFeatureKeys = Expect<Equal<FeatureKey, keyof FeatureAccessResponse>>;
 
 /**
  * GET /feature-access (BS#3530, epic BS#3528)
@@ -38,5 +33,6 @@ export const getFeatureAccess: RequestHandler = async (req, res) => {
   );
 
   res.set('Cache-Control', 'private, no-store');
-  res.status(200).json(Object.fromEntries(entries));
+  const body: FeatureAccessResponse = Object.fromEntries(entries) as FeatureAccessResponse;
+  res.status(200).json(body);
 };

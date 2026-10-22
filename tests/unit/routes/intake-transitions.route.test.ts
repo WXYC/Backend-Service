@@ -63,7 +63,7 @@ jest.mock('../../../apps/backend/services/library-filing.service', () => ({}));
 jest.mock('../../../apps/backend/services/review-print.service', () => ({}));
 
 import { intake_route } from '../../../apps/backend/routes/intake.route';
-import type { IntakeRequestRefusedError } from '../../../apps/backend/controllers/intake.controller';
+import type { IntakeRequestRefusedError } from '@wxyc/shared/dtos';
 import { resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
 
@@ -290,13 +290,7 @@ describe('POST /intake/:id/request — dj_id', () => {
 });
 
 // BS#3531: an ask is refused exactly when the asked account cannot see reviews now (`canAccess('reviews', asked)`).
-// Compile-time pin: the controller's `IntakeRequestRefusedError` mirror must equal wxyc-shared api.yaml's schema (`message`, and
-// `code` the one-value `IntakeRequestRefusedCode` enum); `@wxyc/shared` 5.4.0 predates it, so the SSOT shape is written out here.
-type ApiYamlIntakeRequestRefusedError = { message: string; code: 'asked_dj_cannot_see_feature' };
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
-type Expect<T extends true> = T;
-type _RefusalMatchesSsot = Expect<Equal<IntakeRequestRefusedError, ApiYamlIntakeRequestRefusedError>>;
-const REFUSAL: ApiYamlIntakeRequestRefusedError = {
+const REFUSAL: IntakeRequestRefusedError = {
   message: "This DJ can't see reviews yet. A station manager can add them to the reviews beta in the DJ Roster.",
   code: 'asked_dj_cannot_see_feature',
 };
