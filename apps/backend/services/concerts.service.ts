@@ -5,6 +5,7 @@ import {
   artist_station_plays,
   artists,
   concertPerformers,
+  CO_BILL_DELIMITER,
   concerts,
   db,
   discogs_artist_similar_artists,
@@ -637,10 +638,11 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *     (so a free-text play typed with the current name matches even when the
  *     concert resolved via an alias of an older name), else the scraped
  *     `headlining_artist_raw`. Both sides of the match run this one function, so
- *     the two keys are provably drift-free. A billing/co-bill raw normalizes to
- *     its ENTIRE string — an inert key no one-artist-per-entry flowsheet play
- *     equals — so it is stored but never matched (see the BS#1613 ticket's "no
- *     clean-name filter" rationale). RESIDUAL (accepted; #1614 is the real
+ *     the two keys are provably drift-free. A billing raw normalizes to its
+ *     ENTIRE string — an inert key no one-artist-per-entry flowsheet play
+ *     equals (see the BS#1613 ticket's "no clean-name filter" rationale). A
+ *     ` + ` / ` / ` co-bill also gets one key per act from the co-bill pass
+ *     below (BS#3635); other billings (`,`, `&`, ` with `) stay whole. RESIDUAL (accepted; #1614 is the real
  *     lever): two DISTINCT artists sharing a normalized name (homonyms, e.g. two
  *     bands named `Wire`) collapse to one key — the soonest wins and can attach
  *     to a play of the other. Low-harm for a "On Tour" CTA, not engineered
@@ -649,9 +651,17 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  * The venue-embedding join and DTO mapping reuse `getConcertsPage`'s projection
  * so the wire shape can't drift.
  *
- * Two-pass construction (BS#1761, parent #1618): the above is PASS 1
- * (headliners) — unchanged since BS#1613. PASS 2 (support acts) runs after
- * Pass 1 has fully populated both maps, and reads `concert_performers`
+ * Three-pass construction (BS#1761, parent #1618; BS#3635): the above is
+ * PASS 1 (headliners) — unchanged since BS#1613. The CO-BILL pass (BS#3635)
+ * then walks Pass 1's rows again (no extra query): for each
+ * `headlining_artist_raw` that matches `CO_BILL_DELIMITER` (` + ` or ` / `,
+ * whitespace on both sides — NOT the ETL's `HARD_BILLING_DELIMITERS`, which
+ * also splits on `,` and ` with `), it adds `normalizeFreetextArtist(part)`
+ * per act to `byNormName` when the key is free. So a real headline of any
+ * date beats a co-bill part, and the soonest co-bill wins within the pass
+ * (e.g. concert 67401, "The Onlies + Tatiana Hargreaves", now matches a play
+ * of "The Onlies"). The co-bill pass never touches `byArtistId`. PASS 2
+ * (support acts) runs after both have populated the maps, and reads `concert_performers`
  * (`role = 'support'`, `removed_at IS NULL`, i.e. "active") INNER JOINed to
  * the SAME `buildWhere({ from: today, curated: false })`-windowed `concerts`
  * — an upcoming, non-tombstoned concert with no active support rows
@@ -679,8 +689,8 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *     needed to compute it, and a resolved support's raw billing text is used
  *     even though its canonical catalog name may differ.
  *
- * Both arms add a key ONLY when Pass 1 — or an earlier (soonest) Pass-2 row —
- * hasn't already claimed it (`!byArtistId.has(...)` / `!byNormName.has(...)`).
+ * Both arms add a key ONLY when Pass 1, the co-bill pass, or an earlier
+ * (soonest) Pass-2 row hasn't already claimed it (`!byArtistId.has(...)` / `!byNormName.has(...)`).
  * Because Pass 1 runs to completion first, EVERY headliner key of ANY
  * upcoming date is already in the map before Pass 2 evaluates a single support
  * row, so a headliner CTA beats a support CTA for the same key REGARDLESS of
@@ -733,6 +743,19 @@ export const getUpcomingShowsMaps = async (
     }
     if (needsName) {
       byNormName.set(nameKey, dto);
+    }
+  }
+
+  // Co-bill pass (BS#3635) — each act of a ` + ` / ` / ` headliner billing,
+  // over Pass 1's rows (no extra query). Runs after Pass 1 and before Pass 2,
+  // so a real headliner beats a co-bill part, which beats a support act.
+  for (const row of rows as UpcomingShowJoinRow[]) {
+    if (!CO_BILL_DELIMITER.test(row.headlining_artist_raw)) continue;
+    for (const part of row.headlining_artist_raw.split(CO_BILL_DELIMITER)) {
+      const partKey = normalizeFreetextArtist(part);
+      if (partKey !== '' && !byNormName.has(partKey)) {
+        byNormName.set(partKey, toConcertDTO(row));
+      }
     }
   }
 

@@ -37,3 +37,14 @@ export const freetextPairKey = (
   norm_artist: normalizeFreetextArtist(artist),
   norm_album: normalizeAlbumTitle(album),
 });
+
+/**
+ * Splits a co-bill headliner billing into its acts (BS#3635), e.g.
+ * `"The Onlies + Tatiana Hargreaves"` or `"Wednesday 13 / Dead on a Sunday"`.
+ * Only ` + ` and ` / ` with whitespace on both sides: a comma or ` with `
+ * would split single acts, and a bare `/` (`AC/DC`) or `&` is part of many
+ * band names. Must agree with `BILLING_DELIMITER_PATTERNS.plus`/`.slash` in
+ * `jobs/triangle-shows-etl/headliner.ts` (pinned by
+ * `tests/unit/database/freetext-norm.test.ts`).
+ */
+export const CO_BILL_DELIMITER = /\s\+\s|\s\/\s/;
