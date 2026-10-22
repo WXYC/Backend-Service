@@ -50,7 +50,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockNotifyDigital.mockResolvedValue(undefined);
   mockNotifyAsked.mockResolvedValue(undefined);
-  mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'test.dj' });
+  mockMemberAccount.mockResolvedValue({ roles: ['dj'], username: 'test.dj', capabilities: ['reviews_beta'] });
 });
 
 describe.each([
@@ -129,7 +129,12 @@ describe('POST /intake/{id}/request', () => {
 
   test('starts the asked notice with the asked DJ and the requester, and answers the item', async () => {
     const res = await callRequest({ outcome: 'updated', item: item(false) });
-    expect(mockNotifyAsked).toHaveBeenCalledWith({ id: 4, artist: 'Juana Molina', album: 'DOGA' }, 'dj-2', 'dj-1');
+    expect(mockNotifyAsked).toHaveBeenCalledWith(
+      { id: 4, artist: 'Juana Molina', album: 'DOGA' },
+      'dj-2',
+      { role: 'dj', capabilities: ['reviews_beta'] },
+      'dj-1'
+    );
     expect(res.json).toHaveBeenCalledWith(item(false));
   });
 

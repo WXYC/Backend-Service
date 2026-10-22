@@ -159,6 +159,7 @@ describe.each(ROUTES)('POST /intake/:id/%s', (path, action, allowed) => {
       expect(mockNotifyAsked).toHaveBeenCalledWith(
         { id: 7, artist: 'Juana Molina', album: 'DOGA' },
         'dj-2',
+        expect.objectContaining({ role: 'dj' }),
         'caller-id'
       );
     }, 2000);
