@@ -927,7 +927,34 @@ describe('getUpcomingShowsMaps co-bill pass (BS#3635)', () => {
     expect(byNormName.get('tatiana hargreaves')).toEqual(toConcertDTO(onlies));
   });
 
-  it('a co-bill part wins over a support row, regardless of date', async () => {
+  it('trims each act, so extra spacing around the delimiter still strips a leading "The"', async () => {
+    const row = coBill(908, 'Tobacco Road  /  The Cannons', '2026-11-20');
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([row])).mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('cannons')).toEqual(toConcertDTO(row));
+    expect(byNormName.has(' the cannons')).toBe(false);
+  });
+
+  it.each([
+    ['Chapel Probe + Friends', 'friends'],
+    ['Chapel Probe + Special Guests', 'special guests'],
+    ['Chapel Probe + Special Guest', 'special guest'],
+    ['Chapel Probe + Guests', 'guests'],
+    ['Chapel Probe + More', 'more'],
+    ['Chapel Probe / TBA', 'tba'],
+    ['Chapel Probe / TBD', 'tbd'],
+  ])('does not key the placeholder act in %j', async (raw, placeholder) => {
+    const row = coBill(909, raw, '2026-11-21');
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([row])).mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.has(placeholder)).toBe(false);
+    expect(byNormName.get('chapel probe')).toEqual(toConcertDTO(row));
+  });
+
+  // The precedence below is within the NAME arm. `attachUpcomingShows` tries
+  // the id arm first, so a catalog play whose artist_id a resolved support row
+  // claimed still gets that support concert: the id match is the precise one.
+  it('a co-bill part wins over a support row on the name arm, regardless of date', async () => {
     const earlierSupport: SupportRow = {
       ...timedRow,
       id: 903,

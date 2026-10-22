@@ -595,6 +595,13 @@ const upcomingShowJoinFields = {
   artist_name: artists.artist_name,
 };
 
+/**
+ * A co-bill "act" that is filler, not a performer (`+ Friends`, `/ TBA`,
+ * `+ Special Guests`). Keying it would attach the concert to any play of a
+ * band that happens to be called that. Matched against the normalized key.
+ */
+const CO_BILL_PLACEHOLDER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|guests?|friends|more|tba|tbd)$/;
+
 /** `ConcertJoinRow` plus the LEFT-joined canonical artist name (null when unresolved). */
 type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
 
@@ -640,10 +647,9 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *     `headlining_artist_raw`. Both sides of the match run this one function, so
  *     the two keys are provably drift-free. A billing raw normalizes to its
  *     ENTIRE string — an inert key no one-artist-per-entry flowsheet play
- *     equals (see the BS#1613 ticket's "no clean-name filter" rationale). A
- *     ` + ` / ` / ` co-bill also gets one key per act from the co-bill pass
- *     below (BS#3635); other billings (`,`, `&`, ` with `) stay whole. RESIDUAL (accepted; #1614 is the real
- *     lever): two DISTINCT artists sharing a normalized name (homonyms, e.g. two
+ *     equals (see the BS#1613 ticket's "no clean-name filter" rationale); a
+ *     ` + ` / ` / ` co-bill also gets a key per act from the co-bill pass
+ *     below (BS#3635). RESIDUAL (accepted; #1614 is the real lever): two DISTINCT artists sharing a normalized name (homonyms, e.g. two
  *     bands named `Wire`) collapse to one key — the soonest wins and can attach
  *     to a play of the other. Low-harm for a "On Tour" CTA, not engineered
  *     around here.
@@ -652,16 +658,16 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  * so the wire shape can't drift.
  *
  * Three-pass construction (BS#1761, parent #1618; BS#3635): the above is
- * PASS 1 (headliners) — unchanged since BS#1613. The CO-BILL pass (BS#3635)
- * then walks Pass 1's rows again (no extra query): for each
- * `headlining_artist_raw` that matches `CO_BILL_DELIMITER` (` + ` or ` / `,
- * whitespace on both sides — NOT the ETL's `HARD_BILLING_DELIMITERS`, which
- * also splits on `,` and ` with `), it adds `normalizeFreetextArtist(part)`
- * per act to `byNormName` when the key is free. So a real headline of any
- * date beats a co-bill part, and the soonest co-bill wins within the pass
- * (e.g. concert 67401, "The Onlies + Tatiana Hargreaves", now matches a play
- * of "The Onlies"). The co-bill pass never touches `byArtistId`. PASS 2
- * (support acts) runs after both have populated the maps, and reads `concert_performers`
+ * PASS 1 (headliners). The CO-BILL pass (BS#3635) then keys each act of a
+ * ` + ` / ` / ` headliner billing on the name arm only, so concert 67401
+ * ("The Onlies + Tatiana Hargreaves") matches a play of "The Onlies". On the
+ * name arm a real headline of any date beats a co-bill part, which beats a
+ * support act. `attachUpcomingShows` tries the id arm first, so a catalog play
+ * whose artist_id a resolved support row claimed still gets that support
+ * concert: the id match is the precise one. A co-bill part is keyed by its raw
+ * spelling, so it can take a key a resolved headliner's canonical spelling
+ * left free (`Nilufer` vs `Nilüfer`); accepted, like the homonym RESIDUAL
+ * above. PASS 2 (support acts) runs last, and reads `concert_performers`
  * (`role = 'support'`, `removed_at IS NULL`, i.e. "active") INNER JOINed to
  * the SAME `buildWhere({ from: today, curated: false })`-windowed `concerts`
  * — an upcoming, non-tombstoned concert with no active support rows
@@ -689,8 +695,8 @@ type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
  *     needed to compute it, and a resolved support's raw billing text is used
  *     even though its canonical catalog name may differ.
  *
- * Both arms add a key ONLY when Pass 1, the co-bill pass, or an earlier
- * (soonest) Pass-2 row hasn't already claimed it (`!byArtistId.has(...)` / `!byNormName.has(...)`).
+ * Every pass adds a key ONLY when no earlier pass or earlier (soonest) row
+ * claimed it (`claim` below).
  * Because Pass 1 runs to completion first, EVERY headliner key of ANY
  * upcoming date is already in the map before Pass 2 evaluates a single support
  * row, so a headliner CTA beats a support CTA for the same key REGARDLESS of
@@ -711,7 +717,22 @@ export const getUpcomingShowsMaps = async (
   const byArtistId = new Map<number, ConcertDTO>();
   const byNormName = new Map<string, ConcertDTO>();
 
-  // Pass 1 — headliners (BS#1607, widened BS#1613). Unchanged.
+  // First write wins per key, and every pass's rows arrive soonest-first, so
+  // the first claim is the soonest concert. The DTO is built only when some key
+  // is still free. The id arm is resolved rows only; the empty name key is inert.
+  const claim = (row: ConcertJoinRow, artistId: number | null, nameKeys: readonly string[]): void => {
+    let dto: ConcertDTO | undefined;
+    if (artistId !== null && !byArtistId.has(artistId)) {
+      byArtistId.set(artistId, (dto ??= toConcertDTO(row)));
+    }
+    for (const key of nameKeys) {
+      if (key !== '' && !byNormName.has(key)) {
+        byNormName.set(key, (dto ??= toConcertDTO(row)));
+      }
+    }
+  };
+
+  // Pass 1 — headliners (BS#1607, widened BS#1613).
   const rows = await db
     .select(upcomingShowJoinFields)
     .from(concerts)
@@ -722,46 +743,29 @@ export const getUpcomingShowsMaps = async (
 
   for (const row of rows as UpcomingShowJoinRow[]) {
     const artistId = row.headlining_artist_id;
-
     // name arm — canonical name for resolved rows (falling back to the raw only
     // on the impossible dangling-FK miss, since `artists.artist_name` is NOT
     // NULL), the scraped raw for unresolved rows.
     const nameSource = artistId !== null && row.artist_name !== null ? row.artist_name : row.headlining_artist_raw;
-    const nameKey = normalizeFreetextArtist(nameSource);
-
-    // First write wins per key → the soonest date (rows arrive starts_on ASC).
-    // id arm is resolved rows only; name arm skips the inert empty key.
-    const needsId = artistId !== null && !byArtistId.has(artistId);
-    const needsName = nameKey !== '' && !byNormName.has(nameKey);
-    if (!needsId && !needsName) {
-      continue; // a later date for an already-seen artist AND name — build no DTO
-    }
-
-    const dto = toConcertDTO(row);
-    if (needsId && artistId !== null) {
-      byArtistId.set(artistId, dto);
-    }
-    if (needsName) {
-      byNormName.set(nameKey, dto);
-    }
+    claim(row, artistId, [normalizeFreetextArtist(nameSource)]);
   }
 
   // Co-bill pass (BS#3635) — each act of a ` + ` / ` / ` headliner billing,
-  // over Pass 1's rows (no extra query). Runs after Pass 1 and before Pass 2,
-  // so a real headliner beats a co-bill part, which beats a support act.
+  // over Pass 1's rows (no extra query), name arm only. Parts are trimmed
+  // first: normalizeArtistName's leading-"The" strip is anchored, so
+  // ` The Cannons` would otherwise keep its "the". Filler parts are skipped.
   for (const row of rows as UpcomingShowJoinRow[]) {
-    if (!CO_BILL_DELIMITER.test(row.headlining_artist_raw)) continue;
-    for (const part of row.headlining_artist_raw.split(CO_BILL_DELIMITER)) {
-      const partKey = normalizeFreetextArtist(part);
-      if (partKey !== '' && !byNormName.has(partKey)) {
-        byNormName.set(partKey, toConcertDTO(row));
-      }
-    }
+    const parts = row.headlining_artist_raw.split(CO_BILL_DELIMITER);
+    if (parts.length < 2) continue;
+    const keys = parts
+      .map((part) => normalizeFreetextArtist(part.trim()))
+      .filter((key) => !CO_BILL_PLACEHOLDER.test(key));
+    claim(row, null, keys);
   }
 
-  // Pass 2 (BS#1761) — support acts. See the doc comment above for the full
-  // precedence proof: a `.has()` miss below can only mean no headliner (of any
-  // date) claimed this key, since Pass 1 has already fully run.
+  // Pass 2 (BS#1761) — support acts. See the doc comment above for the
+  // precedence proof: a key still free here was claimed by no headliner and no
+  // co-bill part, of any date.
   type SupportRow = ConcertJoinRow & { raw_name: string; support_artist_id: number | null };
 
   const supportRows = await db
@@ -786,21 +790,7 @@ export const getUpcomingShowsMaps = async (
     // name arm — ALWAYS the raw junction name, resolved or not (see the doc
     // comment above for why this deliberately skips Pass 1's canonical-or-raw
     // preference).
-    const nameKey = normalizeFreetextArtist(row.raw_name);
-
-    const needsId = row.support_artist_id !== null && !byArtistId.has(row.support_artist_id);
-    const needsName = nameKey !== '' && !byNormName.has(nameKey);
-    if (!needsId && !needsName) {
-      continue; // a headliner (or an earlier, soonest support) already claimed both arms
-    }
-
-    const dto = toConcertDTO(row);
-    if (needsId && row.support_artist_id !== null) {
-      byArtistId.set(row.support_artist_id, dto);
-    }
-    if (needsName) {
-      byNormName.set(nameKey, dto);
-    }
+    claim(row, row.support_artist_id, [normalizeFreetextArtist(row.raw_name)]);
   }
 
   return { byArtistId, byNormName };
