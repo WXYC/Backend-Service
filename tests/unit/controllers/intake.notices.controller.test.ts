@@ -24,7 +24,7 @@ jest.mock('../../../apps/backend/services/library-filing.service', () => ({}));
 jest.mock('../../../apps/backend/utils/review-grants', () => ({
   reviewsActor: () => ({ id: 'dj-1', manage: false }),
   canBeAskedToReview: () => true,
-  highestRole: () => 'dj',
+  featureAccountOf: () => ({ role: 'dj', capabilities: ['reviews_beta'] }),
 }));
 // The request route refuses an ask to an account that cannot see reviews (BS#3531); these cases are about the notices, so the feature is open.
 jest.mock('../../../apps/backend/config/featureAccess', () => ({ canAccess: () => Promise.resolve(true) }));
