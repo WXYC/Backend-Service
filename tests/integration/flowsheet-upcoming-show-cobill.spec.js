@@ -118,18 +118,26 @@ describe('V2 flowsheet upcoming_show enrichment — co-bill pass (BS#3635)', () 
     showId = show.id;
 
     await seedConcert({ key: 'plus', startsOn: PLUS_DATE, raw: `The ${ONLIES} + ${HARGREAVES}` });
-    await seedConcert({ key: 'slash', startsOn: SLASH_DATE, raw: `BS3635 Wednesday 13 / ${SLASH_ACT} / Above Snakes` });
+    await seedConcert({
+      key: 'slash',
+      startsOn: SLASH_DATE,
+      raw: `BS3635 Wednesday 13 / ${SLASH_ACT} / BS3635 Above Snakes Probe`,
+    });
 
     // A real headline (LATER) beats a co-bill (SOONER).
     await seedConcert({
       key: 'precedence-cobill',
       startsOn: PRECEDENCE_COBILL_SOON,
-      raw: `${PRECEDENCE_ACT} + Someone`,
+      raw: `${PRECEDENCE_ACT} + BS3635 Someone Probe`,
     });
     await seedConcert({ key: 'precedence-headline', startsOn: PRECEDENCE_HEADLINE_LATER, raw: PRECEDENCE_ACT });
 
     // A co-bill part (LATER) beats a support row (SOONER).
-    await seedConcert({ key: 'support-cobill', startsOn: SUPPORT_COBILL_LATER, raw: `${SUPPORT_ACT} / Someone Else` });
+    await seedConcert({
+      key: 'support-cobill',
+      startsOn: SUPPORT_COBILL_LATER,
+      raw: `${SUPPORT_ACT} / BS3635 Someone Else Probe`,
+    });
     const supportConcertId = await seedConcert({
       key: 'support-row',
       startsOn: SUPPORT_SOON,

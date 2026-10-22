@@ -105,4 +105,12 @@ describe('CO_BILL_DELIMITER', () => {
     const etl = BILLING_DELIMITER_PATTERNS.plus.test(input) || BILLING_DELIMITER_PATTERNS.slash.test(input);
     expect(CO_BILL_DELIMITER.test(input)).toBe(etl);
   });
+
+  // The table above can't catch every drift, so also pin the sources.
+  test('is exactly the ETL plus and slash patterns joined', () => {
+    expect(CO_BILL_DELIMITER.source).toBe(
+      `${BILLING_DELIMITER_PATTERNS.plus.source}|${BILLING_DELIMITER_PATTERNS.slash.source}`
+    );
+    expect(CO_BILL_DELIMITER.flags).toBe('');
+  });
 });
