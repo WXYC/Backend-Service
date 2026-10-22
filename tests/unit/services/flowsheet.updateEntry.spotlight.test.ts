@@ -94,17 +94,25 @@ describe('updateEntry — spotlight rows', () => {
     expect(setArg().message).toBe('In the studio: Weirs');
   });
 
-  it.each([['artist_name'], ['album_title'], ['track_title'], ['album_id'], ['rotation_id']])(
-    'rejects %s on a spotlight row with 400 and writes nothing',
-    async (field) => {
-      mockPreRead.mockReturnValue([spotlight()]);
+  it.each([
+    ['artist_name', 'x'],
+    ['album_title', 'x'],
+    ['track_title', 'x'],
+    ['album_id', 3],
+    ['rotation_id', 3],
+    ['record_label', 'Sonamos'],
+    ['label_id', 3],
+    ['track_position', 'A1'],
+    ['request_flag', false],
+    ['segue', false],
+  ])('rejects %s on a spotlight row with 400 and writes nothing', async (field, value) => {
+    mockPreRead.mockReturnValue([spotlight()]);
 
-      await expect(updateEntry(7, { [field]: field.endsWith('id') ? 3 : 'x' }, null)).rejects.toMatchObject({
-        statusCode: 400,
-      });
-      expect(mockUpdateSet).not.toHaveBeenCalled();
-    }
-  );
+    await expect(updateEntry(7, { [field]: value }, null)).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    expect(mockUpdateSet).not.toHaveBeenCalled();
+  });
 
   it.each([
     ['spotlight_role', 'guest'],

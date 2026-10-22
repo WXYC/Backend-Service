@@ -14,7 +14,13 @@ import { projectFlowsheetEntry, toDiscogsUnavailableWireFields } from '../utils/
 import { getDiscogsUnavailableFlagsById } from '../services/library.service.js';
 import * as flowsheetTakeoverConfig from '../config/flowsheetTakeover.js';
 import * as flowsheetSpotlightConfig from '../config/flowsheetSpotlight.js';
-import { validateSpotlightName, validateSpotlightRole, type SpotlightRole } from '../services/flowsheet/spotlight.js';
+import {
+  assertNoTrackFields,
+  composeSpotlightMessage,
+  validateSpotlightName,
+  validateSpotlightRole,
+  type SpotlightRole,
+} from '../services/flowsheet/spotlight.js';
 import { recordGoLiveHandoff } from '../services/flowsheet/go-live-handoff-signal.js';
 import { rowWriteCaller } from '../middleware/checkShowMember.js';
 import WxycError from '../utils/error.js';
@@ -591,6 +597,9 @@ export type FSEntryRequestBody = {
   segue?: boolean;
   message?: string;
   entry_type?: NewFSEntry['entry_type'];
+  // Spotlight rows only (BS#3460); validated before use.
+  spotlight_role?: unknown;
+  spotlight_name?: unknown;
 };
 
 /** 403 while `FLOWSHEET_SPOTLIGHT_ENABLED` is off (BS#3459); thrown before any service read so nothing is written. */
@@ -772,8 +781,12 @@ async function annotateTextLinkage(fsEntry: NewFSEntry, show_id: number): Promis
 // linked only when their text names one release (BS#3066)
 export const addEntry: RequestHandler = async (req: Request<object, object, FSEntryRequestBody>, res) => {
   const { body } = req;
+  // BS#3460: validated before any read or fill, so a refused spotlight writes nothing.
+  let spotlight: { role: SpotlightRole; name: string } | undefined;
   if (body.entry_type === 'spotlight') {
     assertSpotlightEnabled();
+    spotlight = { role: validateSpotlightRole(body.spotlight_role), name: validateSpotlightName(body.spotlight_name) };
+    assertNoTrackFields(body);
   }
   const latestShow = await flowsheet_service.getLatestShow();
   if (latestShow?.end_time !== null) {
@@ -869,6 +882,25 @@ export const addEntry: RequestHandler = async (req: Request<object, object, FSEn
       throw err;
     }
   };
+
+  if (spotlight) {
+    // Its own row type, never routed through `inferMessageEntryType`; the server composes `message` and a client-sent
+    // one is ignored. Any DJ on the open show may write one, specialty or freeform.
+    const completedEntry = await flowsheet_service.addTrack({
+      artist_name: '',
+      album_title: '',
+      track_title: '',
+      entry_type: 'spotlight',
+      spotlight_role: spotlight.role,
+      spotlight_name: spotlight.name,
+      message: composeSpotlightMessage(spotlight.role, spotlight.name),
+      show_id: latestShow.id,
+      dj_name,
+    });
+    pushRefetchForCommittedRow(completedEntry);
+    await sendProjectedEntry(res, 201, completedEntry);
+    return;
+  }
 
   if (body.message !== undefined) {
     //we're just throwing the message in there (whatever it may be): dj join event, psa event, talk set event, break-point

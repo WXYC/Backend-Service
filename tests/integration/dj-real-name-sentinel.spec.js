@@ -214,6 +214,17 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
       album_id: staffAlbumId,
     });
 
+    // A `dj` spotlight in the staff (open) show, named by the handle a DJ would type (BS#3460): the public reads must
+    // carry it and never the real name.
+    // The flowsheet CHECK wants role and name together with the type, so this row skips insertEntry.
+    const spotlightRows = await sql`
+      INSERT INTO ${sql(SCHEMA)}.flowsheet
+        (show_id, add_time, entry_type, dj_name, artist_name, album_title, track_title, message, play_order, spotlight_role, spotlight_name)
+      VALUES (${staffShowId}, ${at(5 * 60 * 60 * 1000)}::timestamptz, 'spotlight', ${STAFF_HANDLE}, '', '', '',
+        ${`Now mixing: ${STAFF_HANDLE}`}, 1, 'dj', ${STAFF_HANDLE})
+      RETURNING id`;
+    entryIds.spotlight = spotlightRows[0].id;
+
     // Far-future row — GET /flowsheet and GET /flowsheet/latest order by
     // (add_time DESC, id DESC) with no content filter available, so this is
     // the only way to make inclusion deterministic without depending on
@@ -436,7 +447,18 @@ describe('DJ real-name PII sentinel (DJ real-name PII safeguards plan, Track 3b)
         'show_id',
         'show_name',
         'specialty',
+        'spotlight',
       ]);
+    });
+
+    it('a dj spotlight in the open show reaches on_air.spotlight as the handle, never the real name (BS#3460)', async () => {
+      const res = await request.get('/flowsheet');
+      assertNoSentinel(res);
+      expect(res.body.on_air.spotlight).toMatchObject({
+        id: entryIds.spotlight,
+        spotlight_role: 'dj',
+        spotlight_name: STAFF_HANDLE,
+      });
     });
 
     it('positive control: shows[] carries exactly the FlowsheetRangeShow keys, with the handle as dj_name (BS#3461)', async () => {

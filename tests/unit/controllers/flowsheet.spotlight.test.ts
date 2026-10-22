@@ -10,18 +10,23 @@ import type { Request, Response } from 'express';
 
 const mockGetLatestShow = jest.fn<() => Promise<Record<string, unknown> | null>>();
 const mockUpdateEntry = jest.fn<(...args: unknown[]) => Promise<Record<string, unknown>>>();
-const mockAddTrack = jest.fn<() => Promise<Record<string, unknown>>>();
+const mockAddTrack = jest.fn<(entry: Record<string, unknown>) => Promise<Record<string, unknown>>>();
+const mockFill = jest.fn<() => Promise<number>>();
+const mockResolveDjName = jest.fn<() => Promise<string | null>>();
+const mockBroadcast = jest.fn();
 
 jest.mock('../../../apps/backend/services/flowsheet.service', () => ({
   getLatestShow: mockGetLatestShow,
   updateEntry: mockUpdateEntry,
   addTrack: mockAddTrack,
+  fillMissingHourlyBreakpoints: mockFill,
+  resolveDjNameForShow: mockResolveDjName,
 }));
 
 jest.mock('../../../apps/backend/utils/serverEvents', () => ({
   Topics: { liveFs: 'live-fs-topic' },
   FsEvents: { refetch: 'refetch' },
-  serverEventsMgr: { broadcast: jest.fn() },
+  serverEventsMgr: { broadcast: mockBroadcast },
 }));
 
 import { addEntry, updateEntry } from '../../../apps/backend/controllers/flowsheet.controller';
@@ -117,7 +122,7 @@ describe('flag on: PATCH /flowsheet spotlight fields', () => {
     expect(mockUpdateEntry).toHaveBeenCalledWith(7, forwarded, expect.anything());
   });
 
-  it.each([
+  it.each<[string, Record<string, unknown>]>([
     ['an unknown role', { spotlight_role: 'emcee' }],
     ['a non-string role', { spotlight_role: 3 }],
     ['an empty name', { spotlight_name: '' }],
@@ -126,5 +131,87 @@ describe('flag on: PATCH /flowsheet spotlight fields', () => {
   ])('rejects %s with 400', async (_label, data) => {
     await expect(patch(data)).rejects.toMatchObject({ statusCode: 400 });
     expect(mockUpdateEntry).not.toHaveBeenCalled();
+  });
+});
+
+describe('flag on: POST /flowsheet with entry_type spotlight', () => {
+  const OPEN_SHOW = { id: 31, end_time: null };
+  const post = async (body: Record<string, unknown>) => {
+    const res = createMockRes();
+    await addEntry({ body } as unknown as Request, res as Response, jest.fn());
+    return res;
+  };
+  const valid = { entry_type: 'spotlight', spotlight_role: 'guest', spotlight_name: 'Weirs' };
+
+  beforeEach(() => {
+    process.env.FLOWSHEET_SPOTLIGHT_ENABLED = 'true';
+    resetConfig();
+    mockGetLatestShow.mockResolvedValue(OPEN_SHOW);
+    mockResolveDjName.mockResolvedValue('DJ HOUNDSTOOTH');
+    mockFill.mockResolvedValue(0);
+    mockAddTrack.mockImplementation((entry) => Promise.resolve({ id: 90, play_order: 3, ...entry }));
+  });
+
+  it.each([
+    ['performer', 'Live in the studio: Weirs'],
+    ['dj', 'Now mixing: Weirs'],
+    ['reader', 'Reading now: Weirs'],
+    ['guest', 'In the studio: Weirs'],
+    ['host', 'Live in the studio: Weirs'],
+  ])('stores a %s row with the composed message, replacing a client-sent one', async (role, message) => {
+    const res = await post({ ...valid, spotlight_role: role, message: 'Talkset' });
+
+    expect(mockAddTrack).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entry_type: 'spotlight',
+        spotlight_role: role,
+        spotlight_name: 'Weirs',
+        message,
+        show_id: 31,
+        dj_name: 'DJ HOUNDSTOOTH',
+      })
+    );
+    expect(res.status).toHaveBeenCalledWith(201);
+  });
+
+  it('trims the name and broadcasts the marker refetch like any non-track row', async () => {
+    await post({ ...valid, spotlight_name: '  Weirs  ' });
+
+    expect(mockAddTrack).toHaveBeenCalledWith(expect.objectContaining({ spotlight_name: 'Weirs' }));
+    expect(mockBroadcast).toHaveBeenCalledWith('live-fs-topic', { type: 'refetch', payload: { source: 'marker-add' } });
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an unknown role', { spotlight_role: 'emcee' }],
+    ['no role', { spotlight_role: undefined }],
+    ['an empty name', { spotlight_name: '' }],
+    ['no name', { spotlight_name: undefined }],
+    ['a 129-character name', { spotlight_name: 'a'.repeat(129) }],
+    ...[
+      'artist_name',
+      'album_title',
+      'track_title',
+      'album_id',
+      'rotation_id',
+      'record_label',
+      'label_id',
+      'track_position',
+      'request_flag',
+      'segue',
+    ].map((field): [string, Record<string, unknown>] => [
+      `${field} present`,
+      { [field]: field === 'request_flag' || field === 'segue' ? false : 1 },
+    ]),
+  ])('answers 400 for %s and writes nothing', async (_label, over) => {
+    await expect(post({ ...valid, ...over })).rejects.toMatchObject({ statusCode: 400 });
+    expect(mockAddTrack).not.toHaveBeenCalled();
+    expect(mockBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('answers 400 when no show is open', async () => {
+    mockGetLatestShow.mockResolvedValue({ id: 31, end_time: new Date() });
+
+    await expect(post(valid)).rejects.toMatchObject({ statusCode: 400 });
+    expect(mockAddTrack).not.toHaveBeenCalled();
   });
 });

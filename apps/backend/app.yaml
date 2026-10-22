@@ -301,6 +301,32 @@ components:
           allOf:
             - $ref: '#/components/schemas/RequestLine'
           description: What the request line is for, computed on the server from the show's choice and its program's default. Absent when computing it failed.
+        spotlight:
+          type: object
+          nullable: true
+          required: [id, show_id, play_order, add_time, entry_type, spotlight_role, spotlight_name, message]
+          description: >-
+            The current spotlight: the newest spotlight row in the open show, computed by the server so a client never searches a window of entries for it. `null` when the show has none; absent while spotlights are off or when reading it failed. Same shape as a spotlight entry in `entries`. Canonical wire contract: FlowsheetV2SpotlightEntry in wxyc-shared/api.yaml (the SSOT).
+          properties:
+            id:
+              type: integer
+            show_id:
+              type: integer
+            play_order:
+              type: integer
+            add_time:
+              type: string
+              format: date-time
+            entry_type:
+              type: string
+              enum: [spotlight]
+            spotlight_role:
+              $ref: '#/components/schemas/SpotlightRole'
+            spotlight_name:
+              type: string
+            message:
+              type: string
+              description: Server-composed fallback label.
 
     FlowsheetEntryAdd:
       type: object
