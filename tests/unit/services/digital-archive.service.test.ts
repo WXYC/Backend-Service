@@ -67,9 +67,9 @@ describe('digital-archive.service getPlaybackManifest', () => {
     ]);
     const manifest = await getPlaybackManifest(42);
     expect(manifest).not.toBeNull();
-    expect(manifest!.library_id).toBe(42);
-    expect(manifest!.tracks).toHaveLength(1);
-    expect(manifest!.tracks[0]).toEqual({
+    expect(manifest.library_id).toBe(42);
+    expect(manifest.tracks).toHaveLength(1);
+    expect(manifest.tracks[0]).toEqual({
       file_id: 1,
       provenance: 'rotation_upload',
       disc_number: 1,
@@ -87,7 +87,7 @@ describe('digital-archive.service getPlaybackManifest', () => {
     db.execute.mockResolvedValueOnce([row({ file_id: 1, asset_id: 10, title: 'T' })]);
     const before = Date.now();
     const manifest = await getPlaybackManifest(1);
-    const expiresAtMs = new Date(manifest!.expires_at).getTime();
+    const expiresAtMs = new Date(manifest.expires_at).getTime();
     expect(expiresAtMs).toBeGreaterThanOrEqual(before + 60_000 - 1000);
     expect(expiresAtMs).toBeLessThanOrEqual(Date.now() + 60_000 + 1000);
     expect(getConfig().signTTLSeconds).toBe(60);
@@ -99,7 +99,7 @@ describe('digital-archive.service getPlaybackManifest', () => {
       row({ file_id: 2, asset_id: 11, disc_number: 2, track_number: 1, title: 'Disc 2 Track 1' }),
     ]);
     const manifest = await getPlaybackManifest(1);
-    expect(manifest!.tracks.map((t) => [t.disc_number, t.track_number, t.title])).toEqual([
+    expect(manifest.tracks.map((t) => [t.disc_number, t.track_number, t.title])).toEqual([
       [1, 1, 'Disc 1 Track 1'],
       [2, 1, 'Disc 2 Track 1'],
     ]);
@@ -111,7 +111,7 @@ describe('digital-archive.service getPlaybackManifest', () => {
       row({ file_id: 2, asset_id: 12, provenance: 'cd_rip', disc_number: 1, track_number: 1, title: 'B' }),
     ]);
     const manifest = await getPlaybackManifest(1);
-    const provenanceByTitle = new Map(manifest!.tracks.map((t) => [t.title, t.provenance]));
+    const provenanceByTitle = new Map(manifest.tracks.map((t) => [t.title, t.provenance]));
     expect(provenanceByTitle.get('A')).toBe('rotation_upload');
     expect(provenanceByTitle.get('B')).toBe('cd_rip');
   });
@@ -122,8 +122,8 @@ describe('digital-archive.service getPlaybackManifest', () => {
       row({ file_id: 2, asset_id: 10, track_number: 1, title: 'Same Track', codec: 'flac', md5: 'secondary-md5' }),
     ]);
     const manifest = await getPlaybackManifest(1);
-    expect(manifest!.tracks).toHaveLength(1);
-    const track = manifest!.tracks[0];
+    expect(manifest.tracks).toHaveLength(1);
+    const track = manifest.tracks[0];
     // Canonical track-level fields come from the lowest-id file (the SQL's
     // id ASC tiebreak), not the second rendition.
     expect(track.file_id).toBe(1);
@@ -139,7 +139,7 @@ describe('digital-archive.service getPlaybackManifest', () => {
       row({ file_id: 1, asset_id: 10, track_number: 1, title: 'Lossless', codec: 'flac' }),
     ]);
     const manifest = await getPlaybackManifest(1);
-    expect(manifest!.tracks[0].renditions[0].codec).toBe('flac');
+    expect(manifest.tracks[0].renditions[0].codec).toBe('flac');
   });
 
   it('preserves the SQL-provided ordering (disc_number, track_number NULLS LAST, title) rather than re-sorting', async () => {
@@ -152,7 +152,7 @@ describe('digital-archive.service getPlaybackManifest', () => {
       row({ file_id: 3, asset_id: 12, disc_number: 1, track_number: null, title: 'Untagged Bonus Track' }),
     ]);
     const manifest = await getPlaybackManifest(1);
-    expect(manifest!.tracks.map((t) => t.title)).toEqual(['First', 'Second', 'Untagged Bonus Track']);
-    expect(manifest!.tracks[2].track_number).toBeNull();
+    expect(manifest.tracks.map((t) => t.title)).toEqual(['First', 'Second', 'Untagged Bonus Track']);
+    expect(manifest.tracks[2].track_number).toBeNull();
   });
 });

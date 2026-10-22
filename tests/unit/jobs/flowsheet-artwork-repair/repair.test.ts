@@ -169,7 +169,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
         {
           library_item: { id: 1 },
           artwork: {
-            ...matchedResponse.results[0].artwork!,
+            ...matchedResponse.results[0].artwork,
             spotify_url: null,
             youtube_music_url: null,
             bandcamp_url: null,
@@ -197,7 +197,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, artwork_url: 'https://s.discogs.com/images/spacer.gif' },
+          artwork: { ...matchedResponse.results[0].artwork, artwork_url: 'https://s.discogs.com/images/spacer.gif' },
         },
       ],
     };
@@ -213,7 +213,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, release_year: 0 },
+          artwork: { ...matchedResponse.results[0].artwork, release_year: 0 },
         },
       ],
     };
@@ -260,7 +260,7 @@ describe('repairFreeFormRow (BS#1209) — free-form UPDATE shape', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, artwork_url: null },
+          artwork: { ...matchedResponse.results[0].artwork, artwork_url: null },
         },
       ],
     };
@@ -316,7 +316,7 @@ describe('repairLinkedAlbum (BS#1209) — linked UPSERT shape', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, artwork_url: 'https://s.discogs.com/images/spacer.gif' },
+          artwork: { ...matchedResponse.results[0].artwork, artwork_url: 'https://s.discogs.com/images/spacer.gif' },
         },
       ],
     };
@@ -333,7 +333,7 @@ describe('repairLinkedAlbum (BS#1209) — linked UPSERT shape', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, release_year: 0 },
+          artwork: { ...matchedResponse.results[0].artwork, release_year: 0 },
         },
       ],
     };
@@ -362,7 +362,7 @@ describe('repairLinkedAlbum (BS#1209) — linked UPSERT shape', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, artwork_url: null },
+          artwork: { ...matchedResponse.results[0].artwork, artwork_url: null },
         },
       ],
     };
@@ -390,7 +390,7 @@ describe('repairLinkedAlbum (BS#3127) — a degraded reply keeps the stored albu
     mockDb._chain.returning.mockResolvedValue([{ album_id: linkedAlbum.album_id }]);
   });
 
-  const BASE_ARTWORK = matchedResponse.results[0]!.artwork!;
+  const BASE_ARTWORK = matchedResponse.results[0].artwork;
   const mockConflict = mockDb._chain.onConflictDoUpdate;
   const mockValues = mockDb._chain.values;
   const WRITE = (response: LookupResponse) => repairLinkedAlbum(linkedAlbum, response);
@@ -486,7 +486,7 @@ describe('repairLinkedAlbum (BS#3127) — a degraded reply keeps the stored albu
     { label: 'no release url', url: null, guard: 'TRUE' },
   ])('degraded free-form reply with $label: release_year and the bio keep the stored value', async ({ url, guard }) => {
     const response = shed(true);
-    (response.results![0]!.artwork as Record<string, unknown>).release_url = url;
+    (response.results[0].artwork as Record<string, unknown>).release_url = url;
     const set = await freeFormSet(response);
 
     expect(renderDeep(set.discogs_url)).toBe(`COALESCE(${url ?? 'null'}, flowsheet.discogs_url)`);

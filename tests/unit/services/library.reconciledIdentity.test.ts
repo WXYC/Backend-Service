@@ -85,14 +85,14 @@ describe('toReconciledIdentity', () => {
     );
 
     expect(identity).not.toBeNull();
-    expect(identity!.discogs_artist_id).toBe(388);
-    expect(identity!.wikidata_qid).toBe('Q650826');
+    expect(identity.discogs_artist_id).toBe(388);
+    expect(identity.wikidata_qid).toBe('Q650826');
     // Unset fields are explicitly null on the nested object so consumers can
     // rely on key presence.
-    expect(identity!.musicbrainz_artist_id).toBeNull();
-    expect(identity!.spotify_artist_id).toBeNull();
-    expect(identity!.apple_music_artist_id).toBeNull();
-    expect(identity!.bandcamp_id).toBeNull();
+    expect(identity.musicbrainz_artist_id).toBeNull();
+    expect(identity.spotify_artist_id).toBeNull();
+    expect(identity.apple_music_artist_id).toBeNull();
+    expect(identity.bandcamp_id).toBeNull();
   });
 
   test('returns all six fields when fully reconciled', () => {

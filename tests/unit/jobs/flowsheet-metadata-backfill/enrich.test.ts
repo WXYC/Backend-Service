@@ -238,7 +238,7 @@ describe('applyEnrichment', () => {
     // overwrite any prior value on the flowsheet row's column —
     // unlikely to matter on first-attempt rows (typically NULL already)
     // but a real loss if an out-of-band path had stamped a value.
-    const artworkSansApple = { ...matchedResponse.results[0].artwork! };
+    const artworkSansApple = { ...matchedResponse.results[0].artwork };
     delete artworkSansApple.apple_music_url;
     const responseFromCache: LookupResponse = {
       ...matchedResponse,
@@ -255,7 +255,7 @@ describe('applyEnrichment', () => {
     // `apple_music_url: null`, meaning "no verified Apple match". The
     // `in` witness fires (key present), so the conditional spread
     // records the decision rather than omitting the field.
-    const artworkAppleNull = { ...matchedResponse.results[0].artwork!, apple_music_url: null };
+    const artworkAppleNull = { ...matchedResponse.results[0].artwork, apple_music_url: null };
     const responseAppleNull: LookupResponse = {
       ...matchedResponse,
       results: [{ ...matchedResponse.results[0], artwork: artworkAppleNull }],
@@ -278,7 +278,7 @@ describe('applyEnrichment', () => {
     'cache-hit conditional spread on %s',
     (field) => {
       it(`cache-hit shape (${field} key absent on artwork): inline UPDATE omits ${field} so the row preserves any prior value`, async () => {
-        const artworkSansField = { ...matchedResponse.results[0].artwork! };
+        const artworkSansField = { ...matchedResponse.results[0].artwork };
         delete artworkSansField[field];
         const responseFromCache: LookupResponse = {
           ...matchedResponse,
@@ -295,7 +295,7 @@ describe('applyEnrichment', () => {
         // null. The conditional-spread witness fires, the `??` fallback then
         // chooses the synthesized search URL — matches the pre-cache shape
         // and the unlinked-no-match path's fallback for the same field.
-        const artworkFieldNull = { ...matchedResponse.results[0].artwork!, [field]: null };
+        const artworkFieldNull = { ...matchedResponse.results[0].artwork, [field]: null };
         const responseFieldNull: LookupResponse = {
           ...matchedResponse,
           results: [{ ...matchedResponse.results[0], artwork: artworkFieldNull }],
@@ -640,7 +640,7 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     // would overwrite R1's '/song/123' with null. The conditional spread
     // means R2's set clause omits the column entirely, preserving R1's
     // verified URL on album_metadata. Mirror to BS#1192.
-    const artworkSansApple = { ...matchedResponse.results[0].artwork! };
+    const artworkSansApple = { ...matchedResponse.results[0].artwork };
     delete artworkSansApple.apple_music_url;
     const responseFromCache: LookupResponse = {
       ...matchedResponse,
@@ -675,7 +675,7 @@ describe('applyEnrichment (BS#1027) — linked row UPSERTs album_metadata', () =
     'on cache-hit (linked path) — %s',
     (field) => {
       it(`album_metadata UPSERT omits ${field} from INSERT and onConflictDoUpdate.set so a prior verified URL is preserved`, async () => {
-        const artworkSansField = { ...matchedResponse.results[0].artwork! };
+        const artworkSansField = { ...matchedResponse.results[0].artwork };
         delete artworkSansField[field];
         const responseFromCache: LookupResponse = {
           ...matchedResponse,
@@ -832,7 +832,7 @@ describe('applyEnrichment (BS#3126) — a degraded linked match keeps the stored
     mockDb._chain.returning.mockResolvedValue([{ id: linkedRow.id }]);
   });
 
-  const BASE_ARTWORK = matchedResponse.results[0]!.artwork!;
+  const BASE_ARTWORK = matchedResponse.results[0].artwork;
   const mockConflict = mockDb._chain.onConflictDoUpdate;
   const mockValues = mockDb._chain.values;
   const WRITE = (response: LookupResponse) => applyEnrichment(linkedRow, response);

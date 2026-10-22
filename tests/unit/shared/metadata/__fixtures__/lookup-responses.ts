@@ -20,7 +20,7 @@ const wrap = (artwork: DiscogsMatchResult): LookupResponse => ({
         album_title: artwork.album ?? '',
       } as never,
       artwork,
-    } as never,
+    },
   ],
 });
 
@@ -35,7 +35,7 @@ export const NO_ARTWORK: LookupResponse = {
         artist_name: 'Jessica Pratt',
         album_title: 'On Your Own Love Again',
       } as never,
-    } as never,
+    },
   ],
 };
 
