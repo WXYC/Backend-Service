@@ -1940,7 +1940,7 @@ export const changeOrder: RequestHandler<object, unknown, { entry_id: number; ne
 export interface ShowMetadata extends Show {
   specialty_show_name: string;
   specialty: SpecialtyShowRef | null;
-  show_djs: { id: string | null; dj_name: string | null }[];
+  show_djs: { id: string | null; dj_name: string | null; active: boolean }[];
 }
 
 export const getShowInfo: RequestHandler<object, unknown, object, { show_id: string }> = async (req, res) => {

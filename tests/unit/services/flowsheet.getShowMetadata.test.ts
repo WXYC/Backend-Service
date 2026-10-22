@@ -35,7 +35,7 @@ describe('getShowMetadata', () => {
 
     // getDJsInShow(show_id, false): show_djs select, then user select
     const showDjsSelect = createMockQueryChain();
-    showDjsSelect.where.mockResolvedValue([{ dj_id: 'user-1' }]);
+    showDjsSelect.where.mockResolvedValue([{ dj_id: 'user-1', active: true }]);
     db.select.mockReturnValueOnce(showDjsSelect);
 
     const userSelect = createMockQueryChain();
@@ -58,8 +58,56 @@ describe('getShowMetadata', () => {
         show_name: 'Test Show',
         specialty_show_name: 'Jazz Hour',
         specialty: expect.objectContaining({ id: 7, slug: 'jazz-hour', name: 'Jazz Hour', short_name: 'Jazz' }),
-        show_djs: [{ id: 'user-1', dj_name: 'DJ Test' }],
+        show_djs: [{ id: 'user-1', dj_name: 'DJ Test', active: true }],
       })
     );
+  });
+
+  // BS#3612: each show_djs item carries the membership flag; rows and order are the user query's.
+  it.each([
+    [
+      'an active member',
+      [{ dj_id: 'u1', active: true }],
+      [{ id: 'u1', djName: 'A' }],
+      [{ id: 'u1', dj_name: 'A', active: true }],
+    ],
+    [
+      'a departed member',
+      [{ dj_id: 'u1', active: false }],
+      [{ id: 'u1', djName: 'A' }],
+      [{ id: 'u1', dj_name: 'A', active: false }],
+    ],
+    [
+      'a mix, in the user query order',
+      [
+        { dj_id: 'u1', active: true },
+        { dj_id: 'u2', active: false },
+      ],
+      [
+        { id: 'u2', djName: 'B' },
+        { id: 'u1', djName: 'A' },
+      ],
+      [
+        { id: 'u2', dj_name: 'B', active: false },
+        { id: 'u1', dj_name: 'A', active: true },
+      ],
+    ],
+    ['no membership rows', [], [], []],
+  ])('emits active for %s', async (_label, memberships, users, expected) => {
+    const showSelect = createMockQueryChain();
+    showSelect.where.mockResolvedValue([{ id: 42, specialty_id: null, show_name: 'S' }]);
+    db.select.mockReturnValueOnce(showSelect);
+    const showDjsSelect = createMockQueryChain();
+    showDjsSelect.where.mockResolvedValue(memberships);
+    db.select.mockReturnValueOnce(showDjsSelect);
+    if (users.length > 0) {
+      const userSelect = createMockQueryChain();
+      userSelect.where.mockResolvedValue(users);
+      db.select.mockReturnValueOnce(userSelect);
+    }
+
+    const result = await getShowMetadata(42);
+
+    expect(result?.show_djs).toEqual(expected);
   });
 });
