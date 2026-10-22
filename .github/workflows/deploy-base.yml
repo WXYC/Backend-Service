@@ -1160,12 +1160,15 @@ jobs:
           TARGETS: ${{ needs.setup.outputs.targets }}
           BUILD_ID: ${{ needs.setup.outputs.build_id }}
         run: |
+          TARGET_COUNT=$(echo "$TARGETS" | jq 'length')
           MISSING=''
           for TARGET in $(echo "$TARGETS" | jq -r '.[]'); do
             if [ ! -d "apps/$TARGET" ]; then
               continue
             fi
-            TAG=$(cat "versions/version-$TARGET-$BUILD_ID/deploy_version.txt")
+            # One matching artifact extracts flat, several into subfolders
+            # (BS#3640); the script reads both and names the target on failure.
+            TAG=$(scripts/read-deploy-version.sh versions "$TARGET" "$BUILD_ID" "$TARGET_COUNT") || exit 1
             STATUS=0
             scripts/ecr-image-exists.sh "$TARGET" "$TAG" || STATUS=$?
             if [ "$STATUS" -eq 1 ]; then
