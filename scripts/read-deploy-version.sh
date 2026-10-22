@@ -11,8 +11,8 @@
 #
 # A flat file carries no target name, so it is accepted only when the run has
 # exactly one target and no subfolder exists. Otherwise it could belong to a
-# different target (say, one whose build never uploaded its artifact), and
-# guessing would check the wrong image.
+# different target (say, one whose `version-<target>-<build_id>` artifact was
+# not downloaded), and guessing would check the wrong image.
 #
 # Used by `migrate` in `.github/workflows/deploy-base.yml` (`Check app images`).
 #
@@ -50,9 +50,9 @@ if [ -f "$SUBFOLDER_FILE" ]; then
 elif [ -f "$FLAT_FILE" ] && [ "$COUNT" = "1" ] && ! compgen -G "$DIR/version-*-$BUILD_ID" > /dev/null; then
   FILE="$FLAT_FILE"
 elif [ -f "$FLAT_FILE" ]; then
-  fail "Found $FLAT_FILE but cannot tell which target it belongs to: the run has $COUNT targets and there is no $SUBFOLDER_FILE. The target's version artifact is probably missing because its build failed before uploading it."
+  fail "Found $FLAT_FILE but cannot tell which target it belongs to: the run has $COUNT targets and there is no $SUBFOLDER_FILE. Check that the `handle-git-tags` job uploaded `version-$TARGET-$BUILD_ID` for this run and that the download step fetched it."
 else
-  fail "Expected $SUBFOLDER_FILE (or $FLAT_FILE when the run has one target); neither exists. The target's version artifact is probably missing because its build failed before uploading it."
+  fail "Expected $SUBFOLDER_FILE (or $FLAT_FILE when the run has one target); neither exists. Check that the `handle-git-tags` job uploaded `version-$TARGET-$BUILD_ID` for this run and that the download step fetched it."
 fi
 
 TAG=$(tr -d '[:space:]' < "$FILE")

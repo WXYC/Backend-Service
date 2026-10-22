@@ -1160,6 +1160,10 @@ jobs:
           TARGETS: ${{ needs.setup.outputs.targets }}
           BUILD_ID: ${{ needs.setup.outputs.build_id }}
         run: |
+          # Stands in for the number of downloaded `version-*-$BUILD_ID`
+          # artifacts: `handle-git-tags` uploads one per target and `migrate`
+          # needs that job to succeed, so the two match. If they ever differ,
+          # read-deploy-version.sh fails closed instead of guessing a target.
           TARGET_COUNT=$(echo "$TARGETS" | jq 'length')
           MISSING=''
           for TARGET in $(echo "$TARGETS" | jq -r '.[]'); do
