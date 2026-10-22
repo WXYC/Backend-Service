@@ -84,12 +84,8 @@ import type { CatalogExportRow as SharedRow, CatalogCompilationTrackRow as Share
 // exact same key union, `never` otherwise. (optional-vs-required does not change
 // `keyof`, so this tolerates the `?` differences the SSOT carries.)
 //
-// `code_volume_letters` and `code_comp_letter` are excluded from the private side
-// while they are pending (see PENDING_SSOT_RELEASE_KEYS below): the installed
-// @wxyc/shared 5.4.0 lacks them. Remove the `Omit` with the allowlist in
-// WXYC/Backend-Service#2884.
 type KeysEqual<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
-const _keysAgree: KeysEqual<Omit<PrivateRow, 'code_volume_letters' | 'code_comp_letter'>, SharedRow> = true;
+const _keysAgree: KeysEqual<PrivateRow, SharedRow> = true;
 void _keysAgree;
 
 // `rotation_bin` must stay assignable from a raw string on BOTH sides. If
@@ -119,11 +115,10 @@ void _ctaKeysAgree;
  * Keys Backend emits that are already on wxyc-shared `main`'s `CatalogExportRow`
  * contract but are missing from the INSTALLED `@wxyc/shared`, because no release
  * carries them yet. One-directional: tolerated only as present-private /
- * absent-SSOT. Keep it minimal; WXYC/Backend-Service#2884 empties and removes it.
- * `code_volume_letters`: WXYC/wxyc-shared#548, WXYC/Backend-Service#2826.
- * `code_comp_letter`: WXYC/wxyc-shared#549, WXYC/Backend-Service#2835.
+ * absent-SSOT. Empty since the 12.11.0 pin (it carries `code_volume_letters` and
+ * `code_comp_letter`); WXYC/Backend-Service#2884 removes the allowlist.
  */
-const PENDING_SSOT_RELEASE_KEYS: readonly string[] = ['code_volume_letters', 'code_comp_letter'];
+const PENDING_SSOT_RELEASE_KEYS: readonly string[] = [];
 
 /**
  * Compare key sets, tolerating only `pending` keys that the private side has and
