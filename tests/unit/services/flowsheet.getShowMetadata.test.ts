@@ -95,14 +95,14 @@ describe('getShowMetadata', () => {
     ['no membership rows', [], [], []],
   ])('emits active for %s', async (_label, memberships, users, expected) => {
     const showSelect = createMockQueryChain();
-    showSelect.where.mockResolvedValue([{ id: 42, specialty_id: null, show_name: 'S' }]);
+    showSelect.where.mockResolvedValue([{ id: 42, specialty_id: null, show_name: 'S' }] as never);
     db.select.mockReturnValueOnce(showSelect);
     const showDjsSelect = createMockQueryChain();
-    showDjsSelect.where.mockResolvedValue(memberships);
+    showDjsSelect.where.mockResolvedValue(memberships as never);
     db.select.mockReturnValueOnce(showDjsSelect);
     if (users.length > 0) {
       const userSelect = createMockQueryChain();
-      userSelect.where.mockResolvedValue(users);
+      userSelect.where.mockResolvedValue(users as never);
       db.select.mockReturnValueOnce(userSelect);
     }
 
