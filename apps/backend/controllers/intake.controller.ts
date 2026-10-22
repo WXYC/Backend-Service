@@ -260,7 +260,7 @@ const ASKED_DJ_CANNOT_SEE_FEATURE: IntakeRequestRefusedError = {
 /**
  * `/request`'s `dj_id` must name an account whose membership role can accept and that is not a service account (the auto-DJ), or the
  * request would sit in `requested` with nobody able to answer it; and the account must be able to see reviews now (`canAccess`, BS#3531),
- * or the ask would be recorded for a DJ who never sees it. Returns the id with the account it loaded.
+ * or the ask would be recorded for a DJ who never sees it. Returns the id with the asked account's feature access.
  */
 const parseRequestedDj = async (raw: unknown) => {
   if (typeof raw !== 'string' || raw === '') throw new WxycError('dj_id is required', 400);
@@ -268,11 +268,12 @@ const parseRequestedDj = async (raw: unknown) => {
   if (!canBeAskedToReview(account)) {
     throw new WxycError('dj_id must name an account that can review', 400);
   }
-  if (!(await canAccess('reviews', { role: highestRole(account.roles), capabilities: account.capabilities }))) {
+  const asked = { role: highestRole(account.roles), capabilities: account.capabilities };
+  if (!(await canAccess('reviews', asked))) {
     const { message, code } = ASKED_DJ_CANNOT_SEE_FEATURE;
     throw new WxycError(message, 400, { code });
   }
-  return { id: raw, account };
+  return { id: raw, asked };
 };
 
 /** The six `/intake/:id/<action>` transitions. Route grants run first (403), then the UPDATE's own state precondition (409), then identity (403). */
@@ -280,7 +281,8 @@ const transition =
   (action: IntakeAction): RequestHandler<{ id: string }> =>
   async (req, res) => {
     const id = parseId(req.params.id);
-    const djId = action === 'request' ? (await parseRequestedDj(req.body?.dj_id)).id : undefined;
+    const requested = action === 'request' ? await parseRequestedDj(req.body?.dj_id) : undefined;
+    const djId = requested?.id;
     const actor = reviewsActor(req);
     const result = await intakeService.transitionIntakeItem(action, id, actor, djId);
     if (result.outcome === 'not_found') throw new WxycError('Intake item not found', 404);
@@ -293,9 +295,14 @@ const transition =
     if (action === 'pass' && result.outcome === 'updated' && result.answeredRequest) {
       void notifyPass({ id, artist: result.item.artist_name, album: result.item.album_title }, actor.id);
     }
-    // The asked DJ is told, unless the review screens are not yet open to everyone (the notice reads the feature-access `reviews` audience).
-    if (djId !== undefined && result.outcome === 'updated') {
-      void notifyAsked({ id, artist: result.item.artist_name, album: result.item.album_title }, djId, actor.id);
+    // The asked DJ is told when they can see the review screens now (the notice checks `canAccess('reviews', asked)` again).
+    if (requested && result.outcome === 'updated') {
+      void notifyAsked(
+        { id, artist: result.item.artist_name, album: result.item.album_title },
+        requested.id,
+        requested.asked,
+        actor.id
+      );
     }
     // A digital album's files travel by email, so taking one (checkout, or a DJ accepting a request) tells the music directors.
     if ((action === 'checkout' || action === 'accept') && result.outcome === 'updated' && result.item.digital)

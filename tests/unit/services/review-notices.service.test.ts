@@ -58,7 +58,7 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, intake_items, staffNameSql, user } from '@wxyc/database';
-import { resetFeatureAccess as resetReviewsAudience } from '../../../apps/backend/config/featureAccess';
+import { canAccess, resetFeatureAccess as resetReviewsAudience } from '../../../apps/backend/config/featureAccess';
 import {
   assignedLine,
   musicDirectorEmails,
@@ -790,6 +790,7 @@ describe('notices', () => {
 // BS#3385: the asked DJ is told, only once the review screens are open to everyone (REVIEWS_AUDIENCE).
 describe('notifyAsked', () => {
   const ASKED = { id: 4, artist: 'Juana Molina', album: 'DOGA' };
+  const DJ = { role: 'dj', capabilities: [] as string[] };
   const ACCOUNT = [{ email: 'dj@example.org', banned: false, banExpires: null }];
   const savedAudience = process.env.REVIEWS_AUDIENCE;
   const savedFrontend = process.env.FRONTEND_SOURCE;
@@ -818,17 +819,38 @@ describe('notifyAsked', () => {
     }
   });
 
+  // `REVIEWS_AUDIENCE` spells `everyone` as `true`.
+  const ENV_AUDIENCE = { off: 'false', staff: 'staff', everyone: 'true' };
+  test.each(
+    (['off', 'staff', 'everyone'] as const).flatMap((at) =>
+      (['dj', 'musicDirector', 'stationManager'] as const).flatMap((role) =>
+        ([[], ['reviews_beta'], ['editor']] as string[][]).map((capabilities) => [at, role, capabilities] as const)
+      )
+    )
+  )(
+    'with the audience %s, an asked %s holding %j sends exactly when canAccess says so',
+    async (at, role, capabilities) => {
+      audience(ENV_AUDIENCE[at]);
+      const asked = { role, capabilities };
+      mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
+      await notifyAsked(ASKED, 'dj-2', asked, 'md-1');
+      const allowed = await canAccess('reviews', asked);
+      expect(mockSend).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      // No role or capabilities query: the queue holds only the requester's name row and the account row.
+      expect(mockQueue).toHaveLength(allowed ? 0 : 2);
+    }
+  );
+
   test.each([
-    ['true', 1],
-    ['1', 1],
-    ['staff', 0],
-    [undefined, 0],
-    ['TRUE', 0],
-    ['yes', 0],
-  ])('with the audience %p it sends %i email', async (value, count) => {
-    audience(value);
+    ['off', 'musicDirector', ['reviews_beta'], 0],
+    ['staff', 'dj', [], 0],
+    ['staff', 'dj', ['reviews_beta'], 1],
+    ['staff', 'musicDirector', [], 1],
+    ['everyone', 'dj', [], 1],
+  ] as const)('pins the table: audience %s, %s holding %j sends %i', async (at, role, capabilities, count) => {
+    audience(ENV_AUDIENCE[at]);
     mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
-    await notifyAsked(ASKED, 'dj-2', 'md-1');
+    await notifyAsked(ASKED, 'dj-2', { role, capabilities: [...capabilities] }, 'md-1');
     expect(mockSend).toHaveBeenCalledTimes(count);
   });
 
@@ -838,7 +860,7 @@ describe('notifyAsked', () => {
     try {
       resetReviewsAudience();
       mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
-      await expect(notifyAsked(ASKED, 'dj-2', 'md-1')).resolves.toBeUndefined();
+      await expect(notifyAsked(ASKED, 'dj-2', DJ, 'md-1')).resolves.toBeUndefined();
       expect(mockSend).toHaveBeenCalledTimes(1);
     } finally {
       delete process.env.POSTHOG_FLAGS_API_KEY;
@@ -854,7 +876,7 @@ describe('notifyAsked', () => {
     ['"A music director" when the name lookup fails', new Error('db down'), 'A music director'],
   ])('the email names %s, in the decided copy', async (_name, lookup, who) => {
     mockQueue.push(lookup, ACCOUNT);
-    await notifyAsked(ASKED, 'dj-2', 'md-1');
+    await notifyAsked(ASKED, 'dj-2', DJ, 'md-1');
     const line = `${who} asked you to review Juana Molina – DOGA. It's under Requests for me on your reviews page, where you can write a review or pass. After 7 days, the record goes back to the review shelf.`;
     const url = 'https://dj.example.org/dashboard/reviews/mine';
     expect(mockSend).toHaveBeenCalledTimes(1);
@@ -871,7 +893,7 @@ describe('notifyAsked', () => {
     ['banned', [{ email: 'dj@example.org', banned: true, banExpires: null }]],
   ])('sends nothing to an account that is %s (or not a member)', async (_name, account) => {
     mockQueue.push([{ name: 'Test MD' }], account);
-    await notifyAsked(ASKED, 'dj-2', 'md-1');
+    await notifyAsked(ASKED, 'dj-2', DJ, 'md-1');
     expect(mockSend).not.toHaveBeenCalled();
   });
 
@@ -879,7 +901,7 @@ describe('notifyAsked', () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
     mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
     mockSend.mockRejectedValueOnce(new Error('ses down'));
-    await expect(notifyAsked(ASKED, 'dj-2', 'md-1')).resolves.toBeUndefined();
+    await expect(notifyAsked(ASKED, 'dj-2', DJ, 'md-1')).resolves.toBeUndefined();
     expect(mockCapture).toHaveBeenCalledTimes(1);
     jest.restoreAllMocks();
   });

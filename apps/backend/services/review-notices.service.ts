@@ -2,7 +2,7 @@ import { getErrorReporter } from '@wxyc/observability';
 import { eq, sql, type SQL } from 'drizzle-orm';
 import { db, intake_items, member, readStaffName, snapshotAuthor, staffNameSql, user } from '@wxyc/database';
 import { isBanInForce, normalizeRole, sendNotificationEmail } from '@wxyc/authentication';
-import { audience } from '../config/featureAccess.js';
+import { canAccess, type FeatureAccount } from '../config/featureAccess.js';
 import type { FccNoteResponse } from './fcc-notes.service.js';
 import { effectiveState, type IntakeItemState } from './intake.service.js';
 
@@ -216,16 +216,18 @@ export const notifyReviewSubmitted = (n: ReviewNotice) =>
 
 /**
  * A music director asked a DJ to review a record (BS#3385): the asked account is told, with a link to their reviews and not
- * the record's page, which only music directors can open. Sent only when the review screens are open to everyone
- * (the feature-access `reviews` audience, BS#3529): until then the DJ would get a link to a page they cannot open. The requester is named by staff
+ * the record's page, which only music directors can open. Sent only when the asked account can see the review screens now
+ * (`canAccess('reviews', asked)`, BS#3529): otherwise the DJ would get a link to a page they cannot open. The flag is read again here on purpose,
+ * so a flag that moved to `off` since the refusal check sends nothing. The requester is named by staff
  * name, and a failed lookup sends the notice without it.
  */
 export const notifyAsked = async (
   item: { id: number; artist: string; album: string },
   askedUserId: string,
+  asked: FeatureAccount,
   requesterUserId: string
 ) => {
-  if ((await audience('reviews')) !== 'everyone') {
+  if (!(await canAccess('reviews', asked))) {
     return;
   }
   const requester = await Promise.resolve()
