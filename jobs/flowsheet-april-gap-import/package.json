@@ -14,7 +14,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@sentry/node": "^11.4.0",
+    "@sentry/node": "^11.8.0",
     "@wxyc/database": "^1.0.0",
     "@wxyc/observability": "^1.0.0"
   },

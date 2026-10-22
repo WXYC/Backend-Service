@@ -118,8 +118,8 @@
     "yaml": "^2.9.1"
   },
   "dependencies": {
-    "@sentry/node": "^11.4.0",
-    "eventsource": "^5.1.2",
+    "@sentry/node": "^11.8.0",
+    "eventsource": "^5.1.3",
     "jose": "^6.2.12"
   },
   "overrides": {
