@@ -17,6 +17,7 @@
  * tests/integration/concerts-by-id.spec.js.
  */
 import { db } from '@wxyc/database';
+import type { Equal, Expect } from '../../utils/type-equal';
 import {
   ConcertDTO,
   ConcertJoinRow,
@@ -89,9 +90,6 @@ type ApiYamlConcert = {
   // non-null boolean.
   station_recommended_rank?: number | null;
 };
-
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
-type Expect<T extends true> = T;
 
 // Fails to compile if ConcertDTO and the api.yaml-derived shape diverge in
 // either direction (extra key, missing key, or type mismatch).

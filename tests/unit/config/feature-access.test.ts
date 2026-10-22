@@ -29,6 +29,7 @@ jest.mock('@wxyc/observability', () => ({
 jest.mock('@wxyc/authentication', () => jest.requireActual('../../../shared/authentication/src/auth.roles'));
 
 import { accessAt, audience, canAccess, resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
+import { expectedReviewsAccess } from '../../utils/feature-access';
 
 const ENV_KEYS = ['POSTHOG_FLAGS_API_KEY', 'POSTHOG_SECRET_KEY', 'POSTHOG_API_KEY', 'REVIEWS_AUDIENCE'] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -135,18 +136,16 @@ describe('audience(reviews)', () => {
 describe('canAccess(reviews)', () => {
   const ROLES = ['member', 'dj', 'musicDirector', 'stationManager', undefined, 'editor'] as const;
   const CAPABILITIES = [[], ['reviews_beta'], ['editor']] as const;
-  const open = (role: string | undefined) => role === 'dj' || role === 'musicDirector' || role === 'stationManager';
-  const atLeastMusicDirector = (role: string | undefined) => role === 'musicDirector' || role === 'stationManager';
 
   const cases = ROLES.flatMap((role) =>
     CAPABILITIES.map((capabilities) => {
-      const holdsCapability = capabilities.some((c) => c === 'reviews_beta');
+      const account = { role, capabilities: [...capabilities] };
       return {
         role,
         capabilities,
-        off: false,
-        staff: open(role) && (atLeastMusicDirector(role) || holdsCapability),
-        everyone: open(role),
+        off: expectedReviewsAccess('off', account),
+        staff: expectedReviewsAccess('staff', account),
+        everyone: expectedReviewsAccess('everyone', account),
       };
     })
   );

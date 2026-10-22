@@ -58,7 +58,8 @@ jest.mock('../../../apps/backend/services/intake.service', () => ({
 import { sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { db, intake_items, staffNameSql, user } from '@wxyc/database';
-import { canAccess, resetFeatureAccess as resetReviewsAudience } from '../../../apps/backend/config/featureAccess';
+import { resetFeatureAccess as resetReviewsAudience } from '../../../apps/backend/config/featureAccess';
+import { ACCESS_CASES, givenAudience, restoreAudience } from '../../utils/feature-access';
 import {
   assignedLine,
   musicDirectorEmails,
@@ -787,31 +788,22 @@ describe('notices', () => {
   });
 });
 
-// BS#3385: the asked DJ is told, only once the review screens are open to everyone (REVIEWS_AUDIENCE).
+// BS#3385, BS#3532: the asked DJ is told exactly when they can see reviews now (REVIEWS_AUDIENCE: off nobody, staff music directors and the reviews beta, everyone every DJ).
 describe('notifyAsked', () => {
   const ASKED = { id: 4, artist: 'Juana Molina', album: 'DOGA' };
   const DJ = { role: 'dj', capabilities: [] as string[] };
   const ACCOUNT = [{ email: 'dj@example.org', banned: false, banExpires: null }];
-  const savedAudience = process.env.REVIEWS_AUDIENCE;
   const savedFrontend = process.env.FRONTEND_SOURCE;
-  const audience = (value: string | undefined) => {
-    if (value === undefined) {
-      delete process.env.REVIEWS_AUDIENCE;
-    } else {
-      process.env.REVIEWS_AUDIENCE = value;
-    }
-    resetReviewsAudience();
-  };
   beforeEach(() => {
     process.env.FRONTEND_SOURCE = 'https://dj.example.org, http://localhost:3000';
     mockQueue.length = 0;
     mockSend.mockReset();
     mockSend.mockResolvedValue(undefined);
     mockCapture.mockReset();
-    audience('true');
+    givenAudience('everyone');
   });
   afterAll(() => {
-    audience(savedAudience);
+    restoreAudience();
     if (savedFrontend === undefined) {
       delete process.env.FRONTEND_SOURCE;
     } else {
@@ -819,40 +811,18 @@ describe('notifyAsked', () => {
     }
   });
 
-  // `REVIEWS_AUDIENCE` spells `everyone` as `true`.
-  const ENV_AUDIENCE = { off: 'false', staff: 'staff', everyone: 'true' };
-  test.each(
-    (['off', 'staff', 'everyone'] as const).flatMap((at) =>
-      (['dj', 'musicDirector', 'stationManager'] as const).flatMap((role) =>
-        ([[], ['reviews_beta'], ['editor']] as string[][]).map((capabilities) => [at, role, capabilities] as const)
-      )
-    )
-  )(
-    'with the audience %s, an asked %s holding %j sends exactly when canAccess says so',
-    async (at, role, capabilities) => {
-      audience(ENV_AUDIENCE[at]);
-      const asked = { role, capabilities };
+  // Every audience x asked role x capabilities row; the expectation is the oracle's, not `canAccess`.
+  test.each(ACCESS_CASES.filter(([, role]) => role !== 'member'))(
+    'with the audience %s, an asked %s holding %j sends: %s',
+    async (at, role, capabilities, allowed) => {
+      givenAudience(at);
       mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
-      await notifyAsked(ASKED, 'dj-2', asked, 'md-1');
-      const allowed = await canAccess('reviews', asked);
+      await notifyAsked(ASKED, 'dj-2', { role, capabilities }, 'md-1');
       expect(mockSend).toHaveBeenCalledTimes(allowed ? 1 : 0);
       // No role or capabilities query: the queue holds only the requester's name row and the account row.
       expect(mockQueue).toHaveLength(allowed ? 0 : 2);
     }
   );
-
-  test.each([
-    ['off', 'musicDirector', ['reviews_beta'], 0],
-    ['staff', 'dj', [], 0],
-    ['staff', 'dj', ['reviews_beta'], 1],
-    ['staff', 'musicDirector', [], 1],
-    ['everyone', 'dj', [], 1],
-  ] as const)('pins the table: audience %s, %s holding %j sends %i', async (at, role, capabilities, count) => {
-    audience(ENV_AUDIENCE[at]);
-    mockQueue.push([{ name: 'Test MD' }], ACCOUNT);
-    await notifyAsked(ASKED, 'dj-2', { role, capabilities: [...capabilities] }, 'md-1');
-    expect(mockSend).toHaveBeenCalledTimes(count);
-  });
 
   test('a PostHog client that cannot be built falls back to the env var and does not reject', async () => {
     process.env.POSTHOG_FLAGS_API_KEY = 'phs_swapped';

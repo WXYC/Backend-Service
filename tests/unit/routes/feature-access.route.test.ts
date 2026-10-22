@@ -20,10 +20,11 @@ import { db } from '@wxyc/database';
 import express from 'express';
 import { jwtVerify } from 'jose';
 import request from 'supertest';
-import { resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
 import type { Audience } from '../../../apps/backend/config/featureAccess';
 import type { FeatureAudience } from '@wxyc/shared/dtos';
 import { feature_access_route } from '../../../apps/backend/routes/feature-access.route';
+import { ACCESS_CASES, givenAudience, restoreAudience } from '../../utils/feature-access';
+import type { Equal } from '../../utils/type-equal';
 
 const mockedJwtVerify = jwtVerify as jest.MockedFunction<typeof jwtVerify>;
 const mockLimit = jest.fn();
@@ -42,38 +43,19 @@ const signIn = (role: string | undefined, claimed: string[] = []) =>
   });
 const get = () => request(app).get('/feature-access').set('Authorization', 'Bearer test-token');
 
-const ENV_AUDIENCE = { off: undefined, staff: 'staff', everyone: 'true' } as const;
-
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env.POSTHOG_FLAGS_API_KEY;
-  delete process.env.POSTHOG_SECRET_KEY;
-  delete process.env.REVIEWS_AUDIENCE;
-  resetFeatureAccess();
+  givenAudience(undefined);
   mockLimit.mockResolvedValue([{ capabilities: [] }]);
 });
 
-describe('GET /feature-access', () => {
-  const cases = (['off', 'staff', 'everyone'] as const).flatMap((audience) =>
-    (['member', 'dj', 'musicDirector', 'stationManager'] as const).flatMap((role) =>
-      ([[], ['reviews_beta']] as string[][]).map((capabilities) => {
-        const staffLevel = role === 'musicDirector' || role === 'stationManager';
-        const djLevel = staffLevel || role === 'dj';
-        const canSee =
-          audience === 'everyone'
-            ? djLevel
-            : audience === 'staff' && djLevel && (staffLevel || capabilities.length > 0);
-        return [audience, role, capabilities, canSee] as const;
-      })
-    )
-  );
+afterAll(restoreAudience);
 
-  it.each(cases)(
+describe('GET /feature-access', () => {
+  it.each(ACCESS_CASES)(
     'at audience %s, role %s, capabilities %j answers can_see %s',
     async (audience, role, capabilities, canSee) => {
-      if (ENV_AUDIENCE[audience]) {
-        process.env.REVIEWS_AUDIENCE = ENV_AUDIENCE[audience];
-      }
+      givenAudience(audience);
       signIn(role);
       mockLimit.mockResolvedValue([{ capabilities }]);
 
@@ -85,7 +67,7 @@ describe('GET /feature-access', () => {
   );
 
   it('reads capabilities from the column, so a grant made after the token was minted shows at once', async () => {
-    process.env.REVIEWS_AUDIENCE = 'staff';
+    givenAudience('staff');
     signIn('dj', []);
     expect((await get()).body.reviews.can_see).toBe(false);
 
@@ -94,19 +76,19 @@ describe('GET /feature-access', () => {
   });
 
   it('ignores a capability the token claims but the column no longer holds', async () => {
-    process.env.REVIEWS_AUDIENCE = 'staff';
+    givenAudience('staff');
     signIn('dj', ['reviews_beta']);
     expect((await get()).body.reviews.can_see).toBe(false);
   });
 
   it('answers can_see false for an anonymous session, which carries no role', async () => {
-    process.env.REVIEWS_AUDIENCE = 'true';
+    givenAudience('everyone');
     signIn(undefined);
     expect((await get()).body).toEqual({ reviews: { audience: 'everyone', can_see: false } });
   });
 
   it('treats an account with no auth_user row as holding no capabilities', async () => {
-    process.env.REVIEWS_AUDIENCE = 'staff';
+    givenAudience('staff');
     signIn('dj');
     mockLimit.mockResolvedValue([]);
     expect((await get()).body.reviews.can_see).toBe(false);
@@ -131,7 +113,6 @@ describe('GET /feature-access', () => {
 });
 
 /** Compile-time pin: the registry's `Audience` is the contract's `FeatureAudience`. */
-type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 const audiencePin: Equal<Audience, FeatureAudience> = true;
 
 it("uses the contract's FeatureAudience as the registry Audience", () => {

@@ -4,10 +4,6 @@ process.env.BETTER_AUTH_JWKS_URL = 'https://test.example.com/.well-known/jwks.js
 process.env.BETTER_AUTH_ISSUER = 'https://test.example.com';
 process.env.BETTER_AUTH_AUDIENCE = 'https://test.example.com';
 delete process.env.AUTH_BYPASS;
-// The request route refuses an ask to an account that cannot see reviews (BS#3531); the cases below that are not about it ask a DJ, so open reviews to everyone.
-process.env.REVIEWS_AUDIENCE = 'true';
-delete process.env.POSTHOG_FLAGS_API_KEY;
-delete process.env.POSTHOG_SECRET_KEY;
 
 jest.mock('jose', () => ({
   createRemoteJWKSet: jest.fn(() => jest.fn()),
@@ -64,8 +60,12 @@ jest.mock('../../../apps/backend/services/review-print.service', () => ({}));
 
 import { intake_route } from '../../../apps/backend/routes/intake.route';
 import type { IntakeRequestRefusedError } from '@wxyc/shared/dtos';
-import { resetFeatureAccess } from '../../../apps/backend/config/featureAccess';
 import errorHandler from '../../../apps/backend/middleware/errorHandler';
+import { ACCESS_CASES, givenAudience, restoreAudience } from '../../utils/feature-access';
+
+// The request route refuses an ask to an account that cannot see reviews (BS#3531); the cases below that are not about it ask a DJ, so open reviews to everyone.
+givenAudience('everyone');
+afterAll(restoreAudience);
 
 const app = express();
 app.use(express.json());
@@ -298,33 +298,17 @@ const REFUSAL: IntakeRequestRefusedError = {
 describe('POST /intake/:id/request — the asked account must be able to see reviews', () => {
   beforeEach(() => {
     mockRole('musicDirector');
-    resetFeatureAccess();
+    givenAudience(undefined);
   });
-  afterAll(() => {
-    process.env.REVIEWS_AUDIENCE = 'true';
-    resetFeatureAccess();
-  });
+  afterAll(() => givenAudience('everyone'));
 
-  // All 18 rows: audience x role x capabilities. The rule is written out here, not read from `canAccess`: off refuses
-  // everyone; staff refuses a DJ without the beta; everyone refuses nobody who can review.
-  const AUDIENCES = ['off', 'staff', 'everyone'];
-  const ROLES = ['dj', 'musicDirector', 'stationManager'];
-  const CAPABILITIES: string[][] = [[], ['reviews_beta']];
-  const refusedAt = (audience: string, role: string, capabilities: string[]) =>
-    audience === 'off' || (audience === 'staff' && role === 'dj' && !capabilities.includes('reviews_beta'));
-  const CASES: [string, string, string[], boolean][] = AUDIENCES.flatMap((audience) =>
-    ROLES.flatMap((role) =>
-      CAPABILITIES.map((capabilities): [string, string, string[], boolean] => [
-        audience,
-        role,
-        capabilities,
-        refusedAt(audience, role, capabilities),
-      ])
-    )
+  // Every audience x asked role x capabilities row, refused exactly when the oracle says the asked account cannot see reviews.
+  // A member is left out: it keeps the existing 400, ahead of the audience check (below).
+  const CASES = ACCESS_CASES.filter(([, role]) => role !== 'member').map(
+    ([audience, role, capabilities, allowed]) => [audience, role, capabilities, !allowed] as const
   );
   test.each(CASES)('audience %s, asked %s holding %j: refused %s', async (audience, role, capabilities, isRefused) => {
-    // `REVIEWS_AUDIENCE` spells everyone as `true`.
-    process.env.REVIEWS_AUDIENCE = audience === 'everyone' ? 'true' : audience;
+    givenAudience(audience);
     mockMemberAccount.mockResolvedValue({
       roles: [role],
       username: 'test.dj',
@@ -344,7 +328,7 @@ describe('POST /intake/:id/request — the asked account must be able to see rev
   });
 
   test('judges the asked account by its highest role, not the first one listed', async () => {
-    process.env.REVIEWS_AUDIENCE = 'staff';
+    givenAudience('staff');
     mockMemberAccount.mockResolvedValue({
       roles: ['dj', 'musicDirector'],
       username: 'test.md',
@@ -355,7 +339,7 @@ describe('POST /intake/:id/request — the asked account must be able to see rev
   });
 
   test('an account that cannot review keeps the existing 400, ahead of the audience check', async () => {
-    process.env.REVIEWS_AUDIENCE = 'off';
+    givenAudience('off');
     mockMemberAccount.mockResolvedValue({
       roles: ['member'],
       username: 'test.member',
