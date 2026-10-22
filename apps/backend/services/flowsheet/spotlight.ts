@@ -1,11 +1,10 @@
-import type { FSEntry } from '@wxyc/database';
-import WxycError from '../../utils/error.js';
-import { validateTextField } from '../../utils/text-fields.js';
+import { spotlightRoleEnum, type FSEntry } from '@wxyc/database';
+import { validateEnumField, validateTextField } from '../../utils/text-fields.js';
 
 export type SpotlightRole = NonNullable<FSEntry['spotlight_role']>;
 
-/** Mirrors the `spotlight_role` enum (migration 0201). */
-export const SPOTLIGHT_ROLES: readonly SpotlightRole[] = ['performer', 'dj', 'reader', 'guest', 'host'];
+/** The `spotlight_role` enum's values (migration 0201). */
+export const SPOTLIGHT_ROLES: readonly SpotlightRole[] = spotlightRoleEnum.enumValues;
 
 /** Width of `flowsheet.spotlight_name`. */
 export const SPOTLIGHT_NAME_MAX_LENGTH = 128;
@@ -23,12 +22,8 @@ export const composeSpotlightMessage = (role: SpotlightRole, name: string): stri
   `${MESSAGE_PREFIX[role]}: ${name}`;
 
 /** 400 for a role outside the enum. */
-export const validateSpotlightRole = (value: unknown): SpotlightRole => {
-  if (!SPOTLIGHT_ROLES.includes(value as SpotlightRole)) {
-    throw new WxycError(`spotlight_role must be one of ${SPOTLIGHT_ROLES.join(', ')}`, 400);
-  }
-  return value as SpotlightRole;
-};
+export const validateSpotlightRole = (value: unknown): SpotlightRole =>
+  validateEnumField(value, 'spotlight_role', SPOTLIGHT_ROLES);
 
 /** 400 for a blank or over-long name; returns it trimmed. */
 export const validateSpotlightName = (value: unknown): string =>
