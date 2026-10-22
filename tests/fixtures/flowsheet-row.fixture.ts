@@ -72,6 +72,9 @@ export function makeFullFlowsheetRow(overrides: Record<string, unknown> = {}): F
     artist_bio: 'Argentine musician.',
     artist_wikipedia_url: 'https://en.wikipedia.org/wiki/Juana_Molina',
     dj_name: 'DJ Test',
+    // Populated like every other column, so a projector that drops them shows up here.
+    spotlight_role: 'guest',
+    spotlight_name: 'Weirs',
     linkage_source: 'lml_high_confidence',
     linkage_confidence: 0.98,
     linked_at: new Date('2024-01-01T20:01:00Z'),

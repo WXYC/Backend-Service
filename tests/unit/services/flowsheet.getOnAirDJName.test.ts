@@ -17,6 +17,7 @@
 import { jest } from '@jest/globals';
 
 import { db } from '@wxyc/database';
+import { resetConfig } from '../../../apps/backend/config/flowsheetSpotlight';
 import { ANONYMOUS_ON_AIR_NAME, getOnAir, getOnAirDJName } from '../../../apps/backend/services/flowsheet.service';
 
 const mockDb = db as unknown as { _chain: Record<string, jest.Mock> };
@@ -53,6 +54,75 @@ const PROGRAM_ROW = {
 describe('getOnAir', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  describe('spotlight (BS#3460)', () => {
+    const OPEN_SHOW = { id: 41, end_time: null, primary_dj_id: null, dj_name_override: 'DJ HOUNDSTOOTH' };
+    const SPOTLIGHT_ROW = {
+      id: 90,
+      show_id: 41,
+      play_order: 3,
+      add_time: new Date('2026-10-21T20:00:00Z'),
+      entry_type: 'spotlight',
+      spotlight_role: 'performer',
+      spotlight_name: 'Weirs',
+      message: 'Live in the studio: Weirs',
+    };
+
+    const setFlag = (value: string | undefined) => {
+      if (value === undefined) {
+        delete process.env.FLOWSHEET_SPOTLIGHT_ENABLED;
+      } else {
+        process.env.FLOWSHEET_SPOTLIGHT_ENABLED = value;
+      }
+      resetConfig();
+    };
+
+    afterEach(() => setFlag(undefined));
+
+    it("carries the open show's newest spotlight as a V2 spotlight entry", async () => {
+      setFlag('true');
+      queueShow(OPEN_SHOW);
+      queueLimit([SPOTLIGHT_ROW]);
+
+      expect((await getOnAir())?.spotlight).toEqual({
+        id: 90,
+        show_id: 41,
+        play_order: 3,
+        add_time: SPOTLIGHT_ROW.add_time,
+        entry_type: 'spotlight',
+        spotlight_role: 'performer',
+        spotlight_name: 'Weirs',
+        message: 'Live in the studio: Weirs',
+      });
+    });
+
+    it('is null when the open show has no spotlight', async () => {
+      setFlag('true');
+      queueShow(OPEN_SHOW);
+      queueLimit([]);
+
+      expect(await getOnAir()).toHaveProperty('spotlight', null);
+    });
+
+    it('leaves the key out while the flag is off, without reading', async () => {
+      setFlag(undefined);
+      queueShow(OPEN_SHOW);
+
+      expect(await getOnAir()).not.toHaveProperty('spotlight');
+      expect(chain.limit).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops the key, never the banner, when the lookup fails', async () => {
+      setFlag('true');
+      queueShow(OPEN_SHOW);
+      chain.limit.mockRejectedValueOnce(new Error('pool exhausted') as never);
+
+      const onAir = await getOnAir();
+
+      expect(onAir).toMatchObject({ dj_name: 'DJ HOUNDSTOOTH', show_id: 41 });
+      expect(onAir).not.toHaveProperty('spotlight');
+    });
   });
 
   it('carries the open show id, title and specialty ref for a tagged show', async () => {

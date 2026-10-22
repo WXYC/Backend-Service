@@ -38,6 +38,10 @@ The prefix was planned and never mounted. Mounting it now would mean maintaining
 
 Tags or corrects a show's `specialty_id` and `show_name` (BS#3456). `requirePermissions({ flowsheet: ['write'] })`, then `mayEditShow` against the target loaded by `loadShowEditTarget` in the same transaction as the write: a DJ on the show while it is on the air, `flowsheet: manage` once it has ended (403 `closed_show`), a non-member of an open show gets 400. Writes no flowsheet row, so the `touch_flowsheet_watermark_from_shows` trigger (migration 0204) is what moves `GET /flowsheet`'s validator; every `UPDATE` on `shows` bumps it, including a sign-off's and `closeShowFromTerminalShowEndMarker`'s usually-empty one. `afterShowTagged` is the seam BS#3467's poster binding hangs on.
 
+### `POST /flowsheet` with `entry_type: spotlight`
+
+Adds a who's-on row (BS#3460) to any open show, freeform included, from any DJ on it; `FLOWSHEET_SPOTLIGHT_ENABLED` off answers 403 `spotlight_disabled` first. The handler validates `spotlight_role` and `spotlight_name` (`services/flowsheet/spotlight.ts`), refuses any track field with 400 (one `SPOTLIGHT_FORBIDDEN_FIELDS` list shared with `PATCH`), composes `message` itself and ignores a client-sent one, and inserts through `addTrack` without touching `inferMessageEntryType`. `getOnAir` reads the open show's newest spotlight beside `request_line` and returns it as `on_air.spotlight` (`null` when none; key absent while the flag is off or the read fails); `transformToV2` emits the same shape for the row in `entries`.
+
 ## Middleware notes
 
 - ~~Legacy mirror middleware~~ — Removed in BS#2403. It synced flowsheet writes out to tubafrenzy over HTTP REST (`deleteEntry` via raw SQL over SSH) and back-stamped `shows.legacy_show_id` / `flowsheet.legacy_entry_id`. Retired after Milestone 1 (WXYC/wiki#93) took `wxyc.info/playlists/*` to 410. The **inbound** direction is deliberately still live: `POST /internal/flowsheet-webhook` remains routed. The rotation webhook (`POST /internal/rotation-webhook`) is retired: it had one sender, tubafrenzy's `/wxycdb`, which went dark on 2026-09-16, and the route now returns 404.

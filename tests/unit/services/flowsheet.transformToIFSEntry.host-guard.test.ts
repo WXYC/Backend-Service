@@ -114,3 +114,19 @@ describe('transformToIFSEntry streaming-URL host guard (BS#1714)', () => {
     expect(entry.soundcloud_url).toBe('https://soundcloud.com/artist/x');
   });
 });
+
+describe('transformToIFSEntry spotlight columns', () => {
+  it("carries a spotlight row's role and name through", () => {
+    const entry = transformToIFSEntry(
+      makeRaw({ entry_type: 'spotlight', spotlight_role: 'reader', spotlight_name: 'Weirs' })
+    );
+
+    expect([entry.spotlight_role, entry.spotlight_name]).toEqual(['reader', 'Weirs']);
+  });
+
+  it('reports null for a row that selected neither', () => {
+    const entry = transformToIFSEntry(makeRaw());
+
+    expect([entry.spotlight_role, entry.spotlight_name]).toEqual([null, null]);
+  });
+});

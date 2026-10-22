@@ -44,7 +44,8 @@ import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js'
 import { effectiveRequestMode, RequestMode, RequestModeSource } from './flowsheet/request-mode.js';
 import { type SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
 import { assertSpecialtyTaggable } from './specialty-shows.service.js';
-import { composeSpotlightMessage } from './flowsheet/spotlight.js';
+import * as flowsheetSpotlightConfig from '../config/flowsheetSpotlight.js';
+import { assertNoTrackFields, composeSpotlightMessage } from './flowsheet/spotlight.js';
 import { IFSEntry, ShowMetadata, UpdateRequestBody } from '../controllers/flowsheet.controller.js';
 import { PgSelect, PgSelectKind, PgSelectQueryBuilder, PgUpdateSetSource, QueryBuilder } from 'drizzle-orm/pg-core';
 
@@ -263,6 +264,8 @@ const FSEntryFieldsRaw = {
   // tubafrenzy's authoritative top-of-hour for breakpoint rows (BS#1449); NULL
   // on every other type. transformToV2 emits it only on the breakpoint case.
   radio_hour: flowsheet.radio_hour,
+  spotlight_role: flowsheet.spotlight_role,
+  spotlight_name: flowsheet.spotlight_name,
 };
 
 // Raw result type from SQL query
@@ -314,6 +317,9 @@ export type FSEntryRaw = {
   metadata_status: FSEntry['metadata_status'];
   enriching_since: Date | null;
   radio_hour: Date | null;
+  /** Optional so a caller that builds a raw row by hand need not name a column only spotlight rows fill. */
+  spotlight_role?: FSEntry['spotlight_role'];
+  spotlight_name?: string | null;
 };
 
 /**
@@ -405,10 +411,8 @@ export const transformToIFSEntry = (raw: FSEntryRaw): IFSEntry => {
     metadata_status: raw.metadata_status,
     enriching_since: raw.enriching_since,
     radio_hour: raw.radio_hour ?? null,
-    // BS#3458: nothing writes a 'spotlight' row yet, so the read paths do not select these; the writer ticket
-    // adds them to FSEntryFieldsRaw/FSEntryRaw and passes them through here.
-    spotlight_role: null,
-    spotlight_name: null,
+    spotlight_role: raw.spotlight_role ?? null,
+    spotlight_name: raw.spotlight_name ?? null,
     // Nested metadata view (used by transformToV2). genres/styles are
     // album_metadata-only fields (BS#1441) and so live here, NOT as top-level
     // IFSEntry/FSEntry fields (that type mirrors the flowsheet table).
@@ -1381,13 +1385,7 @@ export const updateEntry = async (
     // BS#3459: a spotlight is never a play, so the two row types do not share fields. Its `message` is always the
     // server's composition of the merged role and name; a client-sent one is dropped.
     if (current.entry_type === 'spotlight') {
-      if (
-        [entry.artist_name, entry.album_title, entry.track_title, entry.album_id, entry.rotation_id].some(
-          (v) => v !== undefined
-        )
-      ) {
-        throw new WxycError('Bad Request, a spotlight entry has no track fields', 400);
-      }
+      assertNoTrackFields(entry);
       updateSet.message = composeSpotlightMessage(
         updateSet.spotlight_role ?? current.spotlight_role!,
         updateSet.spotlight_name ?? current.spotlight_name!
@@ -2296,6 +2294,8 @@ export type OnAirShow = {
   specialty: SpecialtyShowRef | null;
   /** What the request line is for (BS#3471); absent when computing it failed. */
   request_line?: { mode: RequestMode; source: RequestModeSource };
+  /** The newest spotlight row of the open show, `null` when it has none; absent while the flag is off or the read failed. */
+  spotlight?: Record<string, unknown> | null;
 };
 
 /**
@@ -2389,12 +2389,38 @@ export const getOnAir = async (): Promise<OnAirShow | null> => {
   } catch (error) {
     getErrorReporter().captureException(error);
   }
+  // BS#3460: the newest spotlight of this show, read here beside request_line so one call serves both on the polled
+  // path (BS#3472 reads it as the request line's third input). Best-effort too; the key stays out while the flag is off.
+  let spotlight: OnAirShow['spotlight'];
+  if (flowsheetSpotlightConfig.getConfig().enabled) {
+    try {
+      const [row] = await db
+        .select({
+          id: flowsheet.id,
+          show_id: flowsheet.show_id,
+          play_order: flowsheet.play_order,
+          add_time: flowsheet.add_time,
+          entry_type: flowsheet.entry_type,
+          spotlight_role: flowsheet.spotlight_role,
+          spotlight_name: flowsheet.spotlight_name,
+          message: flowsheet.message,
+        })
+        .from(flowsheet)
+        .where(and(eq(flowsheet.show_id, latest_show.id), eq(flowsheet.entry_type, 'spotlight')))
+        .orderBy(desc(flowsheet.add_time), desc(flowsheet.id))
+        .limit(1);
+      spotlight = row ? toV2SpotlightEntry(row) : null;
+    } catch (error) {
+      getErrorReporter().captureException(error);
+    }
+  }
   return {
     dj_name: resolved && resolved.length > 0 ? resolved : ANONYMOUS_ON_AIR_NAME,
     show_id: latest_show.id,
     show_name: latest_show.show_name ?? null,
     specialty: toSpecialtyShowRef(latest.specialty),
     ...(request_line && { request_line }),
+    ...(spotlight !== undefined && { spotlight }),
   };
 };
 
@@ -3160,6 +3186,23 @@ export const attachCriticReviews = async <T extends CriticReviewAttachable>(entr
   return entries;
 };
 
+/** The V2 spotlight shape (`FlowsheetV2SpotlightEntry`), shared by the entries projection and `on_air.spotlight`. */
+const toV2SpotlightEntry = (
+  row: Pick<
+    IFSEntry,
+    'id' | 'show_id' | 'play_order' | 'add_time' | 'entry_type' | 'spotlight_role' | 'spotlight_name' | 'message'
+  >
+): Record<string, unknown> => ({
+  id: row.id,
+  show_id: row.show_id,
+  play_order: row.play_order,
+  add_time: row.add_time,
+  entry_type: row.entry_type,
+  spotlight_role: row.spotlight_role,
+  spotlight_name: row.spotlight_name,
+  message: row.message,
+});
+
 export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
   const baseFields = {
     id: entry.id,
@@ -3280,6 +3323,9 @@ export const transformToV2 = (entry: IFSEntry): Record<string, unknown> => {
         ...baseFields,
         message: entry.message,
       };
+
+    case 'spotlight':
+      return toV2SpotlightEntry(entry);
 
     case 'breakpoint':
       return {

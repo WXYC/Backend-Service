@@ -486,6 +486,31 @@ describe('flowsheet.service', () => {
       });
     });
 
+    describe('spotlight entries', () => {
+      const spotlight = () =>
+        createBaseEntry({
+          entry_type: 'spotlight',
+          spotlight_role: 'guest',
+          spotlight_name: 'Weirs',
+          message: 'In the studio: Weirs',
+          dj_name: 'DJ HOUNDSTOOTH',
+          artist_name: 'should not appear',
+        });
+
+      it('emits exactly the base fields plus spotlight_role, spotlight_name and message', () => {
+        expect(transformToV2(spotlight())).toEqual({
+          id: 1,
+          show_id: 100,
+          play_order: 1,
+          add_time: new Date('2024-01-15T12:00:00Z'),
+          entry_type: 'spotlight',
+          spotlight_role: 'guest',
+          spotlight_name: 'Weirs',
+          message: 'In the studio: Weirs',
+        });
+      });
+    });
+
     describe('breakpoint entries', () => {
       it('includes message field (can be null)', () => {
         const entry = createBaseEntry({
