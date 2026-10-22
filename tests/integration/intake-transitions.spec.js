@@ -223,6 +223,26 @@ describe('/intake transitions (BS#2798)', () => {
       expect((await post(manager, id, 'cancel-request')).status).toBe(409);
     });
 
+    // BS#3531: the backend runs REVIEWS_AUDIENCE=staff here (test.yml, dev_env/docker-compose.yml), where a DJ sees reviews
+    // only as a music director or above, or with the `reviews_beta` capability. tests/setup/integration.setup.js grants
+    // that to test_dj2 (global.secondary_dj_id), which is why the asks above succeed; test_dj1 holds none.
+    test('an ask to a DJ who cannot see reviews is 400 asked_dj_cannot_see_feature and changes nothing', async () => {
+      const id = await seed('ask-unseeing-dj');
+      const res = await post(manager, id, 'request', { dj_id: global.primary_dj_id });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        message: "This DJ can't see reviews yet. A station manager can add them to the reviews beta in the DJ Roster.",
+        code: 'asked_dj_cannot_see_feature',
+      });
+      const after = await row(id);
+      expect([after.state, after.requested_dj_id, after.requested_at, after.requested_by]).toEqual([
+        'pool',
+        null,
+        null,
+        null,
+      ]);
+    });
+
     test('a DJ who already passed can be requested again', async () => {
       const id = await seed('re-request');
       await post(manager, id, 'request', { dj_id: global.secondary_dj_id });

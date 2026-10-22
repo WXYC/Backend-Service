@@ -293,6 +293,12 @@ services:
       # integration tests so tests/integration/dj-real-name-sentinel.spec.js can
       # prove the attach never carries a staff real name. Off in prod.
       - WXYC_REVIEWS_ENABLED=${WXYC_REVIEWS_ENABLED:-true}
+      # Who the review screens are open to (BS#3531, epic BS#3528). Unset means
+      # off, which refuses every ask on POST /intake/{id}/request (decision 15).
+      # `staff` so tests/integration/intake-transitions.spec.js can ask the
+      # secondary DJ (granted `reviews_beta` in tests/setup/integration.setup.js)
+      # and see an ask to a DJ without the beta refused. Off in prod until set.
+      - REVIEWS_AUDIENCE=${REVIEWS_AUDIENCE:-staff}
       # Catalog Track Search: activate both fallbacks for integration tests.
       # Plan: WXYC/wiki plans/catalog-track-search.md §10.1. Defaults to off in
       # prod; CI flips both flags on so tests/integration/library.spec.js
