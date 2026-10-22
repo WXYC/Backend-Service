@@ -1595,9 +1595,12 @@ describe('Retrieve Playlist Object', () => {
       .send()
       .expect(200);
 
+    // `active` is false for both: beforeEach ends the show through the primary DJ's
+    // leave_show, and `endShow` deactivates every still-active membership row
+    // (the co-host's included), so neither DJ is on the show by the time of this GET.
     expect(playlist.body.show_djs).toEqual([
-      { id: global.primary_dj_id, dj_name: 'Test dj1' },
-      { id: global.secondary_dj_id, dj_name: 'Test dj2' },
+      { id: global.primary_dj_id, dj_name: 'Test dj1', active: false },
+      { id: global.secondary_dj_id, dj_name: 'Test dj2', active: false },
     ]);
 
     // All entries should have entry_type (discriminated union)

@@ -2597,6 +2597,10 @@ paths:
                                   The public on-air handle. Null when the handle
                                   filters away (the literal "Anonymous"), which
                                   `/flowsheet/djs-on-air` also reports as null.
+                                  Present-but-null, never omitted. A null `dj_name`
+                                  and a null `id` never co-occur: the legacy arm is
+                                  the only source of a null `id`, and it emits an
+                                  entry only when it has a name to put in it.
         '400':
           description: 'window_hours was not an integer between 1 and 168'
         '401':
@@ -2802,6 +2806,9 @@ paths:
                         value or the literal "Anonymous" (BS#1286) — which
                         `/flowsheet/shows/recent` reports as null too. Always
                         present on the wire, carrying null.
+                        A null `dj_name` and a null `id` never co-occur: the
+                        legacy arm is the only source of a null `id`, and it
+                        emits an entry only when it has a name to put in it.
 
   /flowsheet/on-air:
     get:
@@ -2928,7 +2935,9 @@ paths:
                         dj_name:
                           type: string
                           nullable: true
-                          description: The DJ's public on-air handle; see `OnAirDJ.dj_name`.
+                          description: >-
+                            The DJ's public on-air handle; see `OnAirDJ.dj_name`. Present-but-null, never omitted:
+                            a null `id` and a null `dj_name` never co-occur.
                         active:
                           type: boolean
                           description: >-
