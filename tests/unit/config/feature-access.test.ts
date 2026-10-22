@@ -282,6 +282,42 @@ describe('the stale-definitions warning', () => {
     await audience('reviews');
     expect(mockCaptureMessage).toHaveBeenCalledTimes(2);
   });
+
+  // An outage emits one 'error' per poll. Each read sits just before the next poll's error, so the state is `stale` only if the window outlasts a poll interval;
+  // a window that lapsed in between would flip the state to `present` and back, and each flip would report again.
+  it.each([
+    { outagePolls: 4, reports: 1 },
+    { outagePolls: 10, reports: 1 },
+    { outagePolls: 70, reports: 2 },
+  ])(
+    'stays stale and reports $reports time(s) through a sustained outage of $outagePolls polls, then clears once errors stop',
+    async ({ outagePolls, reports }) => {
+      givenPostHog({ returns: 'everyone' });
+      await audience('reviews');
+      for (let poll = 0; poll < outagePolls; poll++) {
+        handlers.error();
+        await audience('reviews');
+        jest.setSystemTime(Date.now() + POLL / 2);
+        await audience('reviews');
+        jest.setSystemTime(Date.now() + POLL / 2 - 1);
+        await audience('reviews');
+        jest.setSystemTime(Date.now() + 1);
+      }
+      expect(mockCaptureMessage).toHaveBeenCalledTimes(reports);
+      for (const [message] of mockCaptureMessage.mock.calls) {
+        expect(message).toContain('stopped refreshing');
+      }
+
+      jest.setSystemTime(Date.now() + 3 * POLL + 1);
+      await audience('reviews');
+      await audience('reviews');
+      expect(mockCaptureMessage).toHaveBeenCalledTimes(reports);
+
+      handlers.error();
+      await audience('reviews');
+      expect(mockCaptureMessage).toHaveBeenCalledTimes(reports + 1);
+    }
+  );
 });
 
 describe('a PostHog failure fails closed', () => {
