@@ -54,14 +54,38 @@ export type MappedEvent = {
   concert: Omit<NewConcert, 'venue_id' | 'scraped_at'>;
 };
 
+/** Scraper `source` values whose support elements carry a leading
+ *  `with ` joiner (BS#3634). Scoped by source because `With Honor` and
+ *  `With Confidence` are real acts; a leading `w/` is stripped for all. */
+export const WITH_PREFIX_SOURCES: ReadonlySet<string> = new Set(['venuepilot', 'rhp_events']);
+const W_PREFIX = /^w\/(?!o(?:ut)?\b)\s*/i;
+// Lowercase only, as venues write the joiner, so `With Honor` survives even
+// for a WITH_PREFIX_SOURCES source.
+const WITH_PREFIX = /^with\s+/;
+const SPACED_SLASH = /\s+\/\s+/;
+// A list item's Oxford-comma `and` (`…, End Of Your Rope, and Hazrdpay`) is
+// part of the list, so it goes with the delimiter.
+const LIST_SPLIT = /\s*,\s*(?:and\s+)?|\s+\/\s+/;
+
+/** One support element -> its names: strip a leading joiner, then split
+ *  on `,` / ` / ` only when a joiner was stripped or the element contains
+ *  ` / ` — otherwise it stays atomic (`Earth, Wind & Fire`). */
+const splitSupportElement = (element: string, source: string): string[] => {
+  let stripped = element.replace(W_PREFIX, '');
+  if (stripped === element && WITH_PREFIX_SOURCES.has(source)) stripped = element.replace(WITH_PREFIX, '');
+  return stripped !== element || SPACED_SLASH.test(element) ? stripped.split(LIST_SPLIT) : [stripped];
+};
+
 /** Normalize the source's support-artist field into the `text[]` shape
- *  `concerts.supporting_artists_raw` expects: trimmed, empties dropped.
+ *  `concerts.supporting_artists_raw` expects: trimmed, joiners stripped
+ *  and joined lists split per element (BS#3634), empties dropped.
  *  Accepts both the legacy single comma-joined string and the JSON array
  *  the source flips to (WXYC/triangle-shows#39) — the feed is untrusted, so
  *  a non-string array element is coerced away rather than crashing the ETL. */
-export const splitSupportArtists = (raw: string | string[] | null): string[] =>
+export const splitSupportArtists = (raw: string | string[] | null, source = ''): string[] =>
   (Array.isArray(raw) ? raw : (raw ?? '').split(','))
-    .map((s) => (typeof s === 'string' ? s.trim() : ''))
+    .flatMap((s) => (typeof s === 'string' ? splitSupportElement(s.trim(), source) : []))
+    .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
 /** Generous upper bound on `supporting_artists_raw`'s length (BS#1758) —
@@ -258,7 +282,7 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
       // of upstreamHeadliner/parsedBilling.headliner won above).
       supporting_artists_raw: mergeSupportingArtists(
         parsedBilling.support,
-        splitSupportArtists(sanitized.support_artists),
+        splitSupportArtists(sanitized.support_artists, sanitized.source),
         headliner,
         HEADLINER_MAX
       ),

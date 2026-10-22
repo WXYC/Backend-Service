@@ -19,6 +19,7 @@ import {
   HARD_BILLING_DELIMITERS,
   extractHeadliner,
   isCleanHeadliner,
+  parseBilling,
 } from '../../../../jobs/triangle-shows-etl/headliner';
 
 describe('HARD_BILLING_DELIMITERS', () => {
@@ -123,5 +124,24 @@ describe('isCleanHeadliner — composition with extractHeadliner', () => {
     ['Sylvan Esso + Flock of Dimes', false],
   ])('isCleanHeadliner(extractHeadliner(%j)) === %j', (billing, expected) => {
     expect(isCleanHeadliner(extractHeadliner(billing))).toBe(expected);
+  });
+});
+
+// BS#3634: a billing tail's slash-separated list splits on ` / ` (spaces on
+// both sides) inside the already-isolated tail only. `AC/DC` has no
+// surrounding spaces and stays whole; a title with no tail marker is a
+// headliner co-bill (BS#3635), not support.
+describe('parseBilling — slash-separated support tails (BS#3634)', () => {
+  it.each([
+    [
+      'Lords of Acid: Cheeky Freaky Tour w/ Princess Superstar / Tony & The Kiki / Mz Neon',
+      ['Princess Superstar', 'Tony & The Kiki', 'Mz Neon'],
+    ],
+    ['Juana Molina w/ AC/DC', ['AC/DC']],
+    ['Juana Molina // Stereolab / Cat Power', ['Stereolab', 'Cat Power']],
+    ['Wednesday 13 / Dead on a Sunday / Above Snakes', []],
+    ['Angel w/o Wings', []],
+  ])('parseBilling(%j).support -> %j', (billing, expected) => {
+    expect(parseBilling(billing).support).toEqual(expected);
   });
 });
