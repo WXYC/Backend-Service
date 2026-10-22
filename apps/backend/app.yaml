@@ -52,10 +52,10 @@ components:
           $ref: '#/components/schemas/RequestLineMode'
         source:
           type: string
-          enum: [dj, program, default]
+          enum: [dj, program, spotlight, default]
           description: >-
-            Where `mode` came from: the show's DJs chose it (`dj`), the program's default (`program`), or neither
-            (`default`, which is `requests`). Lets the DJ site explain itself.
+            Where `mode` came from: the show's DJs chose it (`dj`), the program's default (`program`), a band or reader on air closing a
+            requests line (`spotlight`), or neither (`default`, which is `requests`). Lets the DJ site explain itself.
     SpecialtyShowArtwork:
       type: object
       required: [square_url]

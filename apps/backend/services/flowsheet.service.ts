@@ -41,7 +41,7 @@ import { generateMissingBreakpoints, nearestStationHour, MAX_AUTO_BREAKPOINTS } 
 import { getUpcomingShowsMapsCached } from './concerts.service.js';
 import { lookupCriticReviewsByAlbumIds } from './album-metadata-lookup.service.js';
 import { getConfig as getCriticReviewsConfig } from '../config/criticReviews.js';
-import { effectiveRequestMode, RequestMode, RequestModeSource } from './flowsheet/request-mode.js';
+import { effectiveRequestMode, RequestMode, RequestModeSource, SpotlightRole } from './flowsheet/request-mode.js';
 import { type SpecialtyShowRef, toSpecialtyShowRef } from './flowsheet/specialty-ref.js';
 import { assertSpecialtyTaggable } from './specialty-shows.service.js';
 import * as flowsheetSpotlightConfig from '../config/flowsheetSpotlight.js';
@@ -2382,16 +2382,10 @@ export const getOnAir = async (): Promise<OnAirShow | null> => {
       : null;
 
   const resolved = memberName ?? (await resolveDjNameForShow(latest_show))?.trim();
-  // Best-effort like `on_air` itself: a failure drops `request_line`, never the banner.
-  let request_line: OnAirShow['request_line'];
-  try {
-    request_line = effectiveRequestMode(latest_show, latest.specialty);
-  } catch (error) {
-    getErrorReporter().captureException(error);
-  }
-  // BS#3460: the newest spotlight of this show, read here beside request_line so one call serves both on the polled
-  // path (BS#3472 reads it as the request line's third input). Best-effort too; the key stays out while the flag is off.
+  // BS#3460: the newest spotlight of this show, read once here for both `spotlight` and the request line's third input
+  // (BS#3472). Best-effort: a failed read drops the key and the rule, never the banner; the key stays out while the flag is off.
   let spotlight: OnAirShow['spotlight'];
+  let spotlightRole: SpotlightRole | null = null;
   if (flowsheetSpotlightConfig.getConfig().enabled) {
     try {
       const [row] = await db
@@ -2410,9 +2404,17 @@ export const getOnAir = async (): Promise<OnAirShow | null> => {
         .orderBy(desc(flowsheet.add_time), desc(flowsheet.id))
         .limit(1);
       spotlight = row ? toV2SpotlightEntry(row) : null;
+      spotlightRole = row?.spotlight_role ?? null;
     } catch (error) {
       getErrorReporter().captureException(error);
     }
+  }
+  // Best-effort like `on_air` itself: a failure drops `request_line`, never the banner.
+  let request_line: OnAirShow['request_line'];
+  try {
+    request_line = effectiveRequestMode(latest_show, latest.specialty, spotlightRole);
+  } catch (error) {
+    getErrorReporter().captureException(error);
   }
   return {
     dj_name: resolved && resolved.length > 0 ? resolved : ANONYMOUS_ON_AIR_NAME,
