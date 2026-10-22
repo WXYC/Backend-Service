@@ -99,7 +99,9 @@ export function validateEnumField<T extends string>(
   values: readonly T[],
   { nullable = false }: { nullable?: boolean } = {}
 ): T | null {
-  if (nullable && value === null) return null;
+  if (nullable && value === null) {
+    return null;
+  }
   if (!values.includes(value as T)) {
     throw new WxycError(`${field} must be one of ${values.join(', ')}${nullable ? ', or null' : ''}`, 400);
   }
