@@ -72,7 +72,7 @@ describe('extractAppleMusicUrl', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, apple_music_url: null },
+          artwork: { ...matchedResponse.results[0].artwork, apple_music_url: null },
         },
       ],
     };
@@ -91,7 +91,7 @@ describe('extractAppleMusicUrl', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, apple_music_url: '' },
+          artwork: { ...matchedResponse.results[0].artwork, apple_music_url: '' },
         },
       ],
     };
@@ -103,7 +103,7 @@ describe('extractAppleMusicUrl', () => {
       ...matchedResponse,
       results: [
         { library_item: { id: 1 }, artwork: { release_id: 1, release_url: 'x' } },
-        { library_item: { id: 2 }, artwork: { ...matchedResponse.results[0].artwork! } },
+        { library_item: { id: 2 }, artwork: { ...matchedResponse.results[0].artwork } },
       ],
     };
     expect(extractAppleMusicUrl(secondHasUrl)).toBeNull();

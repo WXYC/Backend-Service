@@ -163,7 +163,7 @@ describe('reenrichRow', () => {
         {
           library_item: { id: 1 },
           artwork: {
-            ...matchedResponse.results[0].artwork!,
+            ...matchedResponse.results[0].artwork,
             artwork_url: 'https://s.discogs.com/images/spacer.gif',
           },
         },
@@ -182,7 +182,7 @@ describe('reenrichRow', () => {
       results: [
         {
           library_item: { id: 1 },
-          artwork: { ...matchedResponse.results[0].artwork!, release_year: 0 },
+          artwork: { ...matchedResponse.results[0].artwork, release_year: 0 },
         },
       ],
     };

@@ -51,13 +51,12 @@ import {
   type WriteFn,
 } from '../../../../jobs/flowsheet-no-match-recheck/orchestrate';
 
-const artwork = (releaseId: number): DiscogsMatchResult =>
-  ({
-    release_id: releaseId,
-    release_url: `https://www.discogs.com/release/${releaseId}`,
-    artwork_url: 'https://example.com/art.jpg',
-    confidence: 1,
-  }) as DiscogsMatchResult;
+const artwork = (releaseId: number): DiscogsMatchResult => ({
+  release_id: releaseId,
+  release_url: `https://www.discogs.com/release/${releaseId}`,
+  artwork_url: 'https://example.com/art.jpg',
+  confidence: 1,
+});
 
 const makeLoadCandidates = (rows: Candidate[]): LoadCandidatesFn => jest.fn<LoadCandidatesFn>().mockResolvedValue(rows);
 const makeMarkAttempted = (): jest.MockedFunction<MarkAttemptedFn> =>

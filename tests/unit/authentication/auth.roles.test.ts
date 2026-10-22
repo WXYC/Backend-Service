@@ -201,7 +201,7 @@ describe('role statements (pinned)', () => {
  */
 describe('grant monotonicity along the shared ROLES chain', () => {
   // ROLES is highest-first; walk adjacent pairs from the bottom up.
-  const ascending = [...ROLES].reverse() as WXYCRole[];
+  const ascending = [...ROLES].reverse();
   const pairs = ascending.slice(0, -1).map((lower, i) => [lower, ascending[i + 1]] as const);
 
   it.each(pairs)('%s grants are a subset of %s grants, per key', (lower, higher) => {

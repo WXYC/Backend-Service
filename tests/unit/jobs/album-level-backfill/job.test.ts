@@ -366,7 +366,7 @@ describe('upsertAlbumMatch', () => {
  * the flag per item, on `lookup.degraded`.
  */
 describe('upsertAlbumMatch (BS#3127) — a degraded reply keeps the stored album_metadata values', () => {
-  const BASE_ARTWORK = lookupWithArtwork().results![0]!.artwork!;
+  const BASE_ARTWORK = lookupWithArtwork().results[0].artwork;
   const insertChain = (db as unknown as { _chain: Record<string, jest.Mock> })._chain;
   const mockConflict = insertChain.onConflictDoUpdate;
   const mockValues = insertChain.values;

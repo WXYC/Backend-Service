@@ -31,22 +31,21 @@ const chain = (db as unknown as { _chain: MockChain })._chain;
 const whereGuardsOnEnrichedNoMatch = (whereArg: unknown): boolean =>
   JSON.stringify(whereArg).includes('enriched_no_match');
 
-const fullArtwork = (overrides: Partial<DiscogsMatchResult> = {}): DiscogsMatchResult =>
-  ({
-    release_id: 28327348,
-    release_url: 'https://www.discogs.com/release/28327348',
-    artwork_url: 'https://img.discogs.com/release/28327348.jpg',
-    release_year: 2016,
-    spotify_url: 'https://open.spotify.com/album/abc',
-    apple_music_url: 'https://music.apple.com/album/abc',
-    youtube_music_url: 'https://music.youtube.com/playlist?list=abc',
-    bandcamp_url: 'https://vladislavdelay.bandcamp.com/album/entain',
-    soundcloud_url: 'https://soundcloud.com/vladislavdelay/entain',
-    artist_bio: 'Bio with [a=Sasu Ripatti] markup.',
-    wikipedia_url: 'https://en.wikipedia.org/wiki/Vladislav_Delay',
-    confidence: 1,
-    ...overrides,
-  }) as DiscogsMatchResult;
+const fullArtwork = (overrides: Partial<DiscogsMatchResult> = {}): DiscogsMatchResult => ({
+  release_id: 28327348,
+  release_url: 'https://www.discogs.com/release/28327348',
+  artwork_url: 'https://img.discogs.com/release/28327348.jpg',
+  release_year: 2016,
+  spotify_url: 'https://open.spotify.com/album/abc',
+  apple_music_url: 'https://music.apple.com/album/abc',
+  youtube_music_url: 'https://music.youtube.com/playlist?list=abc',
+  bandcamp_url: 'https://vladislavdelay.bandcamp.com/album/entain',
+  soundcloud_url: 'https://soundcloud.com/vladislavdelay/entain',
+  artist_bio: 'Bio with [a=Sasu Ripatti] markup.',
+  wikipedia_url: 'https://en.wikipedia.org/wiki/Vladislav_Delay',
+  confidence: 1,
+  ...overrides,
+});
 
 beforeEach(() => {
   chain.returning.mockReset();

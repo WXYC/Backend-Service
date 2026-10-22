@@ -96,9 +96,7 @@ const cases: Cases[] = [
     name: 'zero release_year coerced to null',
     response: {
       ...matchedResponse,
-      results: [
-        { ...matchedResponse.results[0], artwork: { ...matchedResponse.results[0].artwork!, release_year: 0 } },
-      ],
+      results: [{ ...matchedResponse.results[0], artwork: { ...matchedResponse.results[0].artwork, release_year: 0 } }],
     },
   },
   {
@@ -108,7 +106,7 @@ const cases: Cases[] = [
       results: [
         {
           ...matchedResponse.results[0],
-          artwork: { ...matchedResponse.results[0].artwork!, artwork_url: 'https://s.discogs.com/images/spacer.gif' },
+          artwork: { ...matchedResponse.results[0].artwork, artwork_url: 'https://s.discogs.com/images/spacer.gif' },
         },
       ],
     },

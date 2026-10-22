@@ -1527,7 +1527,7 @@ describe('synthesizeSearchUrls (per-service precedence)', () => {
 
 describe('extractArtwork', () => {
   it("returns the first result's artwork on a trusted 'direct' match", () => {
-    expect(extractArtwork(matchResponse)).toEqual(matchResponse.results![0]!.artwork);
+    expect(extractArtwork(matchResponse)).toEqual(matchResponse.results[0].artwork);
   });
 
   it('returns null when results is empty', () => {
@@ -1565,7 +1565,7 @@ describe('extractArtwork', () => {
 
     it("accepts 'compilation' (a V/A comp genuinely carrying the track is a correct match)", () => {
       const response = withSearchType('compilation');
-      expect(extractArtwork(response)).toEqual(response.results![0]!.artwork);
+      expect(extractArtwork(response)).toEqual(response.results[0].artwork);
     });
 
     it("walks past a null-artwork results[0] to a later compilation entry that carries it (BS#961 shape — the gate accepts 'compilation', so extraction must too)", () => {
@@ -1609,7 +1609,7 @@ describe('extractArtwork', () => {
 
     it('returns the artwork when a row-less alternative match corresponds to requestedAlbum', () => {
       const response = rowlessResponse('The Spiritual Sound');
-      expect(extractArtwork(response, 'The Spiritual Sound')).toEqual(response.results![0]!.artwork);
+      expect(extractArtwork(response, 'The Spiritual Sound')).toEqual(response.results[0].artwork);
     });
 
     it('returns null when requestedAlbum is omitted — carve-out inactive, identical to pre-BS#2217 behavior', () => {
@@ -1659,7 +1659,7 @@ describe('extractArtwork', () => {
         ],
       } as unknown as LookupResponse;
 
-      expect(extractArtwork(response, 'Some Comp')).toEqual(response.results![1]!.artwork);
+      expect(extractArtwork(response, 'Some Comp')).toEqual(response.results[1].artwork);
     });
   });
 });
