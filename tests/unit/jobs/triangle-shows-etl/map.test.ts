@@ -462,6 +462,80 @@ describe('splitSupportArtists', () => {
     ]);
   });
 
+  // BS#3634: observed triangle-shows support_artists elements, one row
+  // each. `w/` is stripped for every source; `with ` only for the sources
+  // in WITH_PREFIX_SOURCES (`With Honor` is a real act elsewhere). A list
+  // splits on `,` / ` / ` only when a joiner was stripped or the element
+  // contains ` / ` — otherwise it stays atomic (`Earth, Wind & Fire`).
+  it.each([
+    ['venuepilot', 'w/ Daniel Ouimet', ['Daniel Ouimet']],
+    ['venuepilot', 'w/ Hannah Wilson', ['Hannah Wilson']],
+    ['venuepilot', 'w/ Gray Young, Delver', ['Gray Young', 'Delver']],
+    [
+      'venuepilot',
+      'w/ Survival Tactics, Guard Dog, Colo, asleepbeneaththesoil, UNIITY, Dear Lucy & Friends, Sacredd!, Arlo Mine',
+      [
+        'Survival Tactics',
+        'Guard Dog',
+        'Colo',
+        'asleepbeneaththesoil',
+        'UNIITY',
+        'Dear Lucy & Friends',
+        'Sacredd!',
+        'Arlo Mine',
+      ],
+    ],
+    [
+      'venuepilot',
+      'w/ Musashi Xero, Gun Metal Black, NunAfterHours, End Of Your Rope, and Hazrdpay',
+      ['Musashi Xero', 'Gun Metal Black', 'NunAfterHours', 'End Of Your Rope', 'Hazrdpay'],
+    ],
+    ['venuepilot', 'with Lamplight', ['Lamplight']],
+    ['venuepilot', 'with Bee Million', ['Bee Million']],
+    ['venuepilot', 'with Fifi Hifi', ['Fifi Hifi']],
+    ['venuepilot', 'with DJ VSPRTN', ['DJ VSPRTN']],
+    [
+      'tickpick_organizer',
+      'Princess Superstar / Tony & The Kiki / Mz Neon',
+      ['Princess Superstar', 'Tony & The Kiki', 'Mz Neon'],
+    ],
+    // One row per exact WITH_PREFIX_SOURCES value (venuepilot rows above),
+    // so renaming a source fails. The joiner is matched in lowercase only, as
+    // venues write it, so a capitalized act name survives even there.
+    ['venuepilot', 'With Honor', ['With Honor']],
+    ['rhp_events', 'With Confidence', ['With Confidence']],
+    ['rhp_events', 'with Stereolab, Cat Power', ['Stereolab', 'Cat Power']],
+    // `w/` is source-independent.
+    ['tickpick_organizer', 'W/ Stereolab', ['Stereolab']],
+    // Guards.
+    ['venuepilot', 'AC/DC', ['AC/DC']],
+    ['venuepilot', 'Angel w/o Wings', ['Angel w/o Wings']],
+    ['venuepilot', 'w/o Wings', ['w/o Wings']],
+    ['venuepilot', 'Earth, Wind & Fire', ['Earth, Wind & Fire']],
+    // A trailing Oxford-comma "and" belongs to the list, not the act; an
+    // unsplit element keeps it.
+    ['rhp_events', 'with Stereolab and Cat Power', ['Stereolab and Cat Power']],
+    ['tickpick_organizer', 'With Honor', ['With Honor']],
+    ['ticketmaster', 'with Confidence', ['with Confidence']],
+  ])('[%s] splitSupportArtists([%j]) -> %j', (source, element, expected) => {
+    expect(splitSupportArtists([element], source)).toEqual(expected);
+  });
+
+  it('normalizes each element of a mixed array independently', () => {
+    expect(splitSupportArtists(['w/ Gray Young, Delver', 'Earth, Wind & Fire'], 'venuepilot')).toEqual([
+      'Gray Young',
+      'Delver',
+      'Earth, Wind & Fire',
+    ]);
+  });
+
+  it("strips joiners in mapEvent using the event's source", () => {
+    const mapped = mapEvent(
+      makeTsEvent({ source: 'venuepilot', support_artists: ['with Lamplight', 'w/ Gray Young, Delver'] })
+    );
+    expect(mapped.concert.supporting_artists_raw).toEqual(['Lamplight', 'Gray Young', 'Delver']);
+  });
+
   it('is what mapEvent feeds supporting_artists_raw', () => {
     const mapped = mapEvent(makeTsEvent({ support_artists: 'Stereolab, Cat Power' }));
     expect(mapped.concert.supporting_artists_raw).toEqual(['Stereolab', 'Cat Power']);

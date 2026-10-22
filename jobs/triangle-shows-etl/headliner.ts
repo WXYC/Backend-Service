@@ -151,7 +151,9 @@ const cleanBilling = (original: string): string => {
  * — plus a bare comma, which is safe to split on HERE (unlike inside the
  * headliner segment, where `Emerson, Lake & Palmer` must stay whole)
  * because everything this regex ever runs against is already past a
- * SUPPORT_TAIL delimiter. `&`/`and`/plain ` with `/` + ` are deliberately
+ * SUPPORT_TAIL delimiter. A spaced single slash (` / `, BS#3634) splits a
+ * slash-separated tail list for the same reason; `AC/DC` has no spaces and
+ * stays whole. `&`/`and`/plain ` with `/` + ` are deliberately
  * absent, mirroring SUPPORT_TAIL's own conservative set — under-capture
  * over mis-capture applies to the support half exactly like the headliner
  * half.
@@ -164,7 +166,7 @@ const cleanBilling = (original: string): string => {
  * That's the entire "drop the leading delimiter token" step; no separate
  * strip regex needed. Global, for `.split()`.
  */
-const TAIL_SPLIT = /\s*,\s*|\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*|\s+(?:feat\.|ft\.|featuring)\s+/gi;
+const TAIL_SPLIT = /\s*,\s*|\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*|\s+\/\s+|\s+(?:feat\.|ft\.|featuring)\s+/gi;
 
 /**
  * Generalizes `extractHeadliner` into the full billing parse (BS#1758):
