@@ -91,6 +91,17 @@ describe('scripts/read-deploy-version.sh', () => {
     expect(r.stderr).toContain(mention);
   });
 
+  it.each([
+    ['nothing was downloaded', {}, 1],
+    ['a flat file cannot be attributed', { 'deploy_version.txt': 'v0.2.3\n' }, 2],
+  ])('points at the handle-git-tags upload, not a failed build, when %s', (_label, files, count) => {
+    const r = run(files, 'backend', count);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('handle-git-tags');
+    expect(r.stderr).toContain('version-backend-b1');
+    expect(r.stderr).not.toContain('build failed');
+  });
+
   it('never reports the flat file for a target when subfolders exist but not for that target', () => {
     const r = run({ 'deploy_version.txt': 'v0.9.9\n', 'version-auth-b1/deploy_version.txt': 'v0.2.3\n' }, 'backend', 1);
     expect(r.status).toBe(1);
