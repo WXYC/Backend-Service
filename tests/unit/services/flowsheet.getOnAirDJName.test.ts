@@ -113,6 +113,41 @@ describe('getOnAir', () => {
       expect(chain.limit).toHaveBeenCalledTimes(1);
     });
 
+    it.each([
+      ['a band', 'performer', { mode: 'closed', source: 'spotlight' }],
+      ['a reader', 'reader', { mode: 'closed', source: 'spotlight' }],
+      ['a guest', 'guest', { mode: 'requests', source: 'default' }],
+    ])('request_line follows the spotlight read: %s', async (_name, spotlight_role, request_line) => {
+      setFlag('true');
+      queueShow(OPEN_SHOW);
+      queueLimit([{ ...SPOTLIGHT_ROW, spotlight_role }]);
+
+      expect((await getOnAir())?.request_line).toEqual(request_line);
+    });
+
+    it('request_line ignores an empty spotlight read', async () => {
+      setFlag('true');
+      queueShow(OPEN_SHOW);
+      queueLimit([]);
+
+      expect((await getOnAir())?.request_line).toEqual({ mode: 'requests', source: 'default' });
+    });
+
+    it('request_line ignores the spotlight while the flag is off', async () => {
+      setFlag(undefined);
+      queueShow(OPEN_SHOW);
+
+      expect((await getOnAir())?.request_line).toEqual({ mode: 'requests', source: 'default' });
+    });
+
+    it('request_line still answers when the spotlight lookup fails', async () => {
+      setFlag('true');
+      queueShow(OPEN_SHOW);
+      chain.limit.mockRejectedValueOnce(new Error('pool exhausted') as never);
+
+      expect((await getOnAir())?.request_line).toEqual({ mode: 'requests', source: 'default' });
+    });
+
     it('drops the key, never the banner, when the lookup fails', async () => {
       setFlag('true');
       queueShow(OPEN_SHOW);
