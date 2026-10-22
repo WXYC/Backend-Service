@@ -16,7 +16,6 @@ jest.mock('@wxyc/authentication', () => ({
   ...jest.requireActual('../../../shared/authentication/src/auth.middleware'),
 }));
 
-import { db } from '@wxyc/database';
 import express from 'express';
 import { jwtVerify } from 'jose';
 import request from 'supertest';
@@ -27,8 +26,18 @@ import { ACCESS_CASES, givenAudience, restoreAudience } from '../../utils/featur
 import type { Equal } from '../../utils/type-equal';
 
 const mockedJwtVerify = jwtVerify as jest.MockedFunction<typeof jwtVerify>;
-const mockLimit = jest.fn();
-(db.select() as unknown as Record<string, jest.Mock>).limit = mockLimit;
+const mockMemberAccount = jest.fn();
+jest.mock('../../../apps/backend/services/intake.service', () => ({
+  memberAccount: (...args: unknown[]) => mockMemberAccount(...args),
+}));
+
+/** What `memberAccount` reads: the account's `auth_member` roles and its `auth_user.capabilities`, in one query. */
+const account = (roles: string[], capabilities: string[] = []) => ({
+  roles,
+  username: 'dj-user',
+  email: 'dj@wxyc.org',
+  capabilities,
+});
 
 const app = express();
 app.use(express.json());
@@ -46,7 +55,7 @@ const get = () => request(app).get('/feature-access').set('Authorization', 'Bear
 beforeEach(() => {
   jest.clearAllMocks();
   givenAudience(undefined);
-  mockLimit.mockResolvedValue([{ capabilities: [] }]);
+  mockMemberAccount.mockResolvedValue(account(['dj']));
 });
 
 afterAll(restoreAudience);
@@ -57,7 +66,7 @@ describe('GET /feature-access', () => {
     async (audience, role, capabilities, canSee) => {
       givenAudience(audience);
       signIn(role);
-      mockLimit.mockResolvedValue([{ capabilities }]);
+      mockMemberAccount.mockResolvedValue(account([role], capabilities));
 
       const response = await get();
 
@@ -71,7 +80,7 @@ describe('GET /feature-access', () => {
     signIn('dj', []);
     expect((await get()).body.reviews.can_see).toBe(false);
 
-    mockLimit.mockResolvedValue([{ capabilities: ['reviews_beta'] }]);
+    mockMemberAccount.mockResolvedValue(account(['dj'], ['reviews_beta']));
     expect((await get()).body.reviews.can_see).toBe(true);
   });
 
@@ -81,23 +90,41 @@ describe('GET /feature-access', () => {
     expect((await get()).body.reviews.can_see).toBe(false);
   });
 
-  it('answers can_see false for an anonymous session, which carries no role', async () => {
-    givenAudience('everyone');
-    signIn(undefined);
-    expect((await get()).body).toEqual({ reviews: { audience: 'everyone', can_see: false } });
+  it('judges the account by its strongest membership role, whatever role the token carries (BS#3652)', async () => {
+    givenAudience('staff');
+    mockMemberAccount.mockResolvedValue(account(['dj', 'musicDirector']));
+    for (const tokenRole of ['dj', 'member', undefined]) {
+      signIn(tokenRole);
+      expect((await get()).body.reviews.can_see).toBe(true);
+    }
   });
 
-  it('treats an account with no auth_user row as holding no capabilities', async () => {
+  it("does not lift an account above its memberships on the strength of its token's role (BS#3652)", async () => {
     givenAudience('staff');
-    signIn('dj');
-    mockLimit.mockResolvedValue([]);
+    signIn('musicDirector');
+    mockMemberAccount.mockResolvedValue(account(['dj']));
     expect((await get()).body.reviews.can_see).toBe(false);
   });
 
-  it('reads the account once per request, by primary key', async () => {
+  it('answers can_see false for an account with no membership, which has no role', async () => {
+    givenAudience('everyone');
+    signIn('dj');
+    mockMemberAccount.mockResolvedValue(account([]));
+    expect((await get()).body).toEqual({ reviews: { audience: 'everyone', can_see: false } });
+  });
+
+  it('answers can_see false for an anonymous session, which carries no role', async () => {
+    givenAudience('everyone');
+    signIn(undefined);
+    mockMemberAccount.mockResolvedValue(account([]));
+    expect((await get()).body).toEqual({ reviews: { audience: 'everyone', can_see: false } });
+  });
+
+  it("reads the signed-in account's memberships and capabilities once per request", async () => {
     signIn('dj');
     await get();
-    expect(mockLimit).toHaveBeenCalledTimes(1);
+    expect(mockMemberAccount).toHaveBeenCalledTimes(1);
+    expect(mockMemberAccount).toHaveBeenCalledWith('test-user-id');
   });
 
   it('is not cached by a browser or a shared cache', async () => {
@@ -108,7 +135,7 @@ describe('GET /feature-access', () => {
   it('requires a bearer token', async () => {
     const response = await request(app).get('/feature-access');
     expect(response.status).toBe(401);
-    expect(mockLimit).not.toHaveBeenCalled();
+    expect(mockMemberAccount).not.toHaveBeenCalled();
   });
 });
 

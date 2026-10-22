@@ -27,7 +27,7 @@ import {
   parseInt4PathId,
   parseInt4QueryParam,
 } from '../utils/query-params.js';
-import { canBeAskedToReview, highestRole, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
+import { canBeAskedToReview, featureAccountOf, holdsReviewsManage, reviewsActor } from '../utils/review-grants.js';
 import { normalizeOptionalText, validateTextField } from '../utils/text-fields.js';
 
 /**
@@ -266,7 +266,7 @@ const parseRequestedDj = async (raw: unknown) => {
   if (!canBeAskedToReview(account)) {
     throw new WxycError('dj_id must name an account that can review', 400);
   }
-  const asked = { role: highestRole(account.roles), capabilities: account.capabilities };
+  const asked = featureAccountOf(account);
   if (!(await canAccess('reviews', asked))) {
     const { message, code } = ASKED_DJ_CANNOT_SEE_FEATURE;
     throw new WxycError(message, 400, { code });

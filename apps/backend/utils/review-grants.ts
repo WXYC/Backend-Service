@@ -35,3 +35,15 @@ export const highestRole = (roles: Iterable<string | null | undefined>): string 
       role != null && (best === undefined || roleToAuthorization(role) > roleToAuthorization(best)) ? role : best,
     undefined
   );
+
+/** The account a feature-access check judges, from `memberAccount`'s read: its strongest membership role and its `auth_user.capabilities`. The one place that builds it, so `GET /feature-access` and `/intake`'s ask cannot disagree on an account. */
+export const featureAccountOf = ({
+  roles,
+  capabilities,
+}: {
+  roles: Iterable<string | null | undefined>;
+  capabilities: string[];
+}) => ({
+  role: highestRole(roles),
+  capabilities,
+});
