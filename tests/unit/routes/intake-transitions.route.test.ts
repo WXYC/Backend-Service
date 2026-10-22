@@ -310,22 +310,24 @@ describe('POST /intake/:id/request — the asked account must be able to see rev
     resetFeatureAccess();
   });
 
-  const BETA = ['reviews_beta'];
-  test.each([
-    ['off', 'dj', [], true],
-    ['off', 'dj', BETA, true],
-    ['off', 'musicDirector', [], true],
-    ['off', 'musicDirector', BETA, true],
-    ['off', 'stationManager', [], true],
-    ['staff', 'dj', [], true],
-    ['staff', 'dj', BETA, false],
-    ['staff', 'musicDirector', [], false],
-    ['staff', 'stationManager', BETA, false],
-    ['everyone', 'dj', [], false],
-    ['everyone', 'dj', BETA, false],
-    ['everyone', 'musicDirector', [], false],
-    ['everyone', 'stationManager', [], false],
-  ])('audience %s, asked %s holding %j: refused %s', async (audience, role, capabilities, isRefused) => {
+  // All 18 rows: audience x role x capabilities. The rule is written out here, not read from `canAccess`: off refuses
+  // everyone; staff refuses a DJ without the beta; everyone refuses nobody who can review.
+  const AUDIENCES = ['off', 'staff', 'everyone'];
+  const ROLES = ['dj', 'musicDirector', 'stationManager'];
+  const CAPABILITIES: string[][] = [[], ['reviews_beta']];
+  const refusedAt = (audience: string, role: string, capabilities: string[]) =>
+    audience === 'off' || (audience === 'staff' && role === 'dj' && !capabilities.includes('reviews_beta'));
+  const CASES: [string, string, string[], boolean][] = AUDIENCES.flatMap((audience) =>
+    ROLES.flatMap((role) =>
+      CAPABILITIES.map((capabilities): [string, string, string[], boolean] => [
+        audience,
+        role,
+        capabilities,
+        refusedAt(audience, role, capabilities),
+      ])
+    )
+  );
+  test.each(CASES)('audience %s, asked %s holding %j: refused %s', async (audience, role, capabilities, isRefused) => {
     // `REVIEWS_AUDIENCE` spells everyone as `true`.
     process.env.REVIEWS_AUDIENCE = audience === 'everyone' ? 'true' : audience;
     mockMemberAccount.mockResolvedValue({

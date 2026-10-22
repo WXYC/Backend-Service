@@ -710,6 +710,15 @@ jobs:
           # wxycReviews attach (gated in apps/backend/config/wxycReviews.ts,
           # default false) when it proves the attach never carries a real name.
           WXYC_REVIEWS_ENABLED: 'true'
+          # Who the review screens are open to (BS#3531, epic BS#3528): mirrors
+          # dev_env/docker-compose.yml. With it unset the audience is off and every
+          # ask on POST /intake/{id}/request is refused (decision 15), so
+          # tests/integration/intake-transitions.spec.js could not ask anyone.
+          # `staff` (not `true`) so the refusal case can ask a DJ without the
+          # beta; the secondary DJ is granted `reviews_beta` in
+          # tests/setup/integration.setup.js. Must be on the SERVICE env (this
+          # step): the suite drives a separately spawned backend over HTTP.
+          REVIEWS_AUDIENCE: 'staff'
           # Digital archive playback (BS#2320): mirrors
           # dev_env/docker-compose.yml's ci-profile default so the
           # presigned-manifest happy path and has_digital_audio are exercised

@@ -55,6 +55,16 @@ async function getUserIdsFromDatabase() {
 
     global.primary_dj_id = primaryUser[0].id;
     global.secondary_dj_id = secondaryUser[0].id;
+
+    // BS#3531: the integration backend runs REVIEWS_AUDIENCE=staff, where a DJ sees the review screens only with the
+    // `reviews_beta` capability, and an ask (POST /intake/{id}/request) to a DJ who cannot see them is refused. Grant it
+    // to test_dj2, the DJ those asks name; test_dj1 stays without it, so the refusal case has an account to ask. The
+    // guard makes this idempotent across the spec files that each run this setup.
+    await sql`
+      UPDATE auth_user
+      SET capabilities = array_append(capabilities, 'reviews_beta')
+      WHERE id = ${global.secondary_dj_id} AND NOT ('reviews_beta' = ANY(capabilities))
+    `;
   } finally {
     await sql.end();
   }
