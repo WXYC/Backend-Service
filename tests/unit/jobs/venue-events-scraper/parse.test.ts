@@ -55,7 +55,7 @@ describe('extractEventLinks', () => {
 
   it('finds all /event/<slug>/ URLs in the events index', () => {
     const html = readFixture('cats-cradle-events-index.html');
-    const links = extractEventLinks(html, BASE);
+    const links = extractEventLinks(html, BASE).map((l) => l.url);
     expect(links).toContain('https://catscradle.com/event/aaron-lee-tasjan-2/');
     expect(links).toContain('https://catscradle.com/event/sleater-kinney/');
     expect(links).toContain('https://catscradle.com/event/the-headliner/');
@@ -63,19 +63,24 @@ describe('extractEventLinks', () => {
 
   it('deduplicates repeat links (same event shown in featured + list)', () => {
     const html = readFixture('cats-cradle-events-index.html');
-    const links = extractEventLinks(html, BASE);
+    const links = extractEventLinks(html, BASE).map((l) => l.url);
     const aaron = links.filter((u) => u.includes('aaron-lee-tasjan-2'));
     expect(aaron).toHaveLength(1);
   });
 
   it('ignores non-event links (/about/, /contact/)', () => {
     const html = readFixture('cats-cradle-events-index.html');
-    const links = extractEventLinks(html, BASE);
+    const links = extractEventLinks(html, BASE).map((l) => l.url);
     expect(links.every((u) => u.includes('/event/'))).toBe(true);
   });
 
   it('returns empty array when the index has no event links', () => {
     expect(extractEventLinks('<html><body>nothing here</body></html>', BASE)).toEqual([]);
+  });
+
+  it('returns subHeader null for every link when no listing card wraps it', () => {
+    const links = extractEventLinks(readFixture('cats-cradle-events-index.html'), BASE);
+    expect(links.every((l) => l.subHeader === null)).toBe(true);
   });
 
   it('drops cross-origin /event/<slug>/ links (sister-venue / partner cross-promo)', () => {
@@ -86,7 +91,7 @@ describe('extractEventLinks', () => {
       <a href="https://local506.com/event/cross-promo/">Cross-promo</a>
       <a href='https://example.com/event/junk/'>Other</a>
     `;
-    const links = extractEventLinks(html, BASE);
+    const links = extractEventLinks(html, BASE).map((l) => l.url);
     expect(links).toEqual(['https://catscradle.com/event/local-act/']);
   });
 
@@ -98,7 +103,7 @@ describe('extractEventLinks', () => {
       <a href="https://catscradle.com/event/the-band?ref=homepage">A</a>
       <a href="https://catscradle.com/event/other-band/#tickets">B</a>
     `;
-    const links = extractEventLinks(html, BASE);
+    const links = extractEventLinks(html, BASE).map((l) => l.url);
     expect(links).toContain('https://catscradle.com/event/the-band/');
     expect(links).toContain('https://catscradle.com/event/other-band/');
   });
@@ -111,7 +116,7 @@ describe('extractEventLinks', () => {
       <a href="https://catscradle.com/event/Sleater_Kinney/">A</a>
       <a href="https://catscradle.com/event/Mixed-Case-Slug/">B</a>
     `;
-    const links = extractEventLinks(html, BASE);
+    const links = extractEventLinks(html, BASE).map((l) => l.url);
     expect(links).toContain('https://catscradle.com/event/Sleater_Kinney/');
     expect(links).toContain('https://catscradle.com/event/Mixed-Case-Slug/');
   });
@@ -126,8 +131,49 @@ describe('extractEventLinks', () => {
       <span aria-href="https://catscradle.com/event/aria-only/">Aria</span>
       <a href="https://catscradle.com/event/real-link/">Real</a>
     `;
-    const links = extractEventLinks(html, BASE);
+    const links = extractEventLinks(html, BASE).map((l) => l.url);
     expect(links).toEqual(['https://catscradle.com/event/real-link/']);
+  });
+});
+
+describe('extractEventLinks — listing-card subheaders', () => {
+  const BASE = 'https://catscradle.com';
+  const links = (): ReturnType<typeof extractEventLinks> =>
+    extractEventLinks(readFixture('cats-cradle-events-listing-cards.html'), BASE);
+
+  it.each([
+    ['https://catscradle.com/event/harvey-street-2/', 'Tobacco Road, Wim Tapley and The Cannons'],
+    [
+      'https://catscradle.com/event/bluegrass-in-the-back-room/',
+      'Bill Moore and His Secret Admirers, The Carolina Bluegrass Band',
+    ],
+    ['https://catscradle.com/event/the-onlies-tatiana-hargreaves/', null],
+  ])('attaches the card subheader to %s', (url, subHeader) => {
+    expect(links()).toContainEqual({ url, subHeader });
+  });
+
+  it('returns each card URL once', () => {
+    expect(links()).toHaveLength(3);
+  });
+
+  it('decodes entities and strips inner tags from the subheader', () => {
+    const html = `
+      <div class="eventWrapper"><a href="https://catscradle.com/event/a/">A</a>
+        <h4 class="eventSubHeader x">Tomorrow&#8217;s Problem,<br> Hex Files</h4></div>
+      <div class="rhp-event"><a href="https://catscradle.com/event/b/">B</a>
+        <h4 class="eventSubHeader">Quasi</h4></div>`;
+    expect(extractEventLinks(html, BASE)).toEqual([
+      { url: 'https://catscradle.com/event/a/', subHeader: 'Tomorrow’s Problem, Hex Files' },
+      { url: 'https://catscradle.com/event/b/', subHeader: 'Quasi' },
+    ]);
+  });
+
+  it('keeps the first non-empty subheader when a URL appears in several cards', () => {
+    const html = `
+      <div class="eventWrapper"><a href="https://catscradle.com/event/a/">A</a><h4 class="eventSubHeader"> </h4></div>
+      <div class="eventWrapper"><a href="https://catscradle.com/event/a/">A</a><h4 class="eventSubHeader">Quasi</h4></div>
+      <div class="eventWrapper"><a href="https://catscradle.com/event/a/">A</a><h4 class="eventSubHeader">Other</h4></div>`;
+    expect(extractEventLinks(html, BASE)).toEqual([{ url: 'https://catscradle.com/event/a/', subHeader: 'Quasi' }]);
   });
 });
 
@@ -357,6 +403,47 @@ describe('parseEventPage', () => {
     if (parsed === null) throw new Error('expected fixture to parse');
     expect(parsed.headlining_artist).toBe('The Headliner');
     expect(parsed.supporting_artists).toEqual(['First Support', 'Second Support']);
+  });
+
+  describe('listing-card subheader', () => {
+    const page = (name: string, etixSlug: string): string =>
+      `<!-- Event Markup for Official Venue Sites --><script type="application/ld+json">${JSON.stringify({
+        '@type': 'Event',
+        name,
+        startDate: '2026-12-03T20:00:00-0500',
+        location: { '@type': 'Place', name: 'Cat’s Cradle' },
+        offers: { '@type': 'Offer', url: `https://www.etix.com/ticket/p/89418452/${etixSlug}?partner_id=100` },
+      })}</script>`;
+
+    it.each([
+      [
+        'Harvey Street',
+        'harvey-streetwith-tobacco-roadwim-tapley-and-the-cannons-carrboro-cats-cradle',
+        'Tobacco Road, Wim Tapley and The Cannons',
+        ['Tobacco Road', 'Wim Tapley and The Cannons'],
+      ],
+      [
+        'Bluegrass In The Back Room',
+        'bluegrass-in-the-back-roomwith-bill-moore-and-his-secret-admirersthe-carolina-bluegrass-band-carrboro-cats-cradle-back-room',
+        'Bill Moore and His Secret Admirers, The Carolina Bluegrass Band',
+        ['Bill Moore and His Secret Admirers', 'The Carolina Bluegrass Band'],
+      ],
+      ['The Onlies + Tatiana Hargreaves', 'the-onlies-tatiana-hargreaves-carrboro-cats-cradle-back-room', null, []],
+      [
+        'Quasi',
+        'quasiwith-the-long-goodbye-tour-carrboro-cats-cradle',
+        'The Long Goodbye Tour',
+        ['The Long Goodbye Tour'],
+      ],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'with Hex Files, Mean Habit', ['Hex Files', 'Mean Habit']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'w/ Hex Files', ['Hex Files']],
+      ['Quasi', 'quasiwith-hex-files-carrboro-cats-cradle', '   ', ['Hex Files']],
+    ])('%s (etix slug %s) with subheader %p', (name, etixSlug, subHeader, expected) => {
+      const parsed = parseEventPage(CATS_CRADLE, 'https://catscradle.com/event/x/', page(name, etixSlug), subHeader);
+      if (parsed === null) throw new Error('expected fixture to parse');
+      expect(parsed.headlining_artist).toBe(name);
+      expect(parsed.supporting_artists).toEqual(expected);
+    });
   });
 
   it('throws if Event.name is empty (source drift, fail loudly)', () => {

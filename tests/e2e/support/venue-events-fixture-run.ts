@@ -64,7 +64,9 @@ if (!catsCradle) throw new Error('venue-events-fixture-run: cats-cradle site con
 // fail loudly here instead of letting the unmapped URL become a swallowed
 // fetch_error deep in the orchestrator.
 const EXPECTED_EVENTS = Object.keys(EVENT_FIXTURES).length;
-const indexLinks = extractEventLinks(readFixture('cats-cradle-events-index.html'), catsCradle.base_url);
+const indexLinks = extractEventLinks(readFixture('cats-cradle-events-index.html'), catsCradle.base_url).map(
+  (link) => link.url
+);
 const unmapped = indexLinks.filter((url) => !(url in EVENT_FIXTURES));
 if (unmapped.length > 0) {
   throw new Error(`venue-events-fixture-run: index fixture links have no mapped fixture: ${unmapped.join(', ')}`);

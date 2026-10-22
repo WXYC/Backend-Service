@@ -15,7 +15,7 @@
  * doesn't drift into our parse.
  */
 
-import type { ParsedConcert, SchemaEvent } from './rhp-types.js';
+import type { EventLink, ParsedConcert, SchemaEvent } from './rhp-types.js';
 import { VENUE_SEEDS, type RhpVenueConfig } from './rhp-venues.js';
 
 /**
@@ -99,6 +99,27 @@ const ENTITY_RE = new RegExp(Object.keys(ENTITY_MAP).join('|'), 'g');
 export const decodeHtmlEntities = (raw: string | null | undefined): string =>
   raw == null ? '' : raw.replace(ENTITY_RE, (m) => ENTITY_MAP[m] ?? m);
 
+/** Opening tag of a listing card: an element whose class list holds `eventWrapper` or `rhp-event` as a whole token. */
+const EVENT_CARD_RE = /<[a-z]+\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?(?:eventWrapper|rhp-event)(?:\s[^"']*)?["']/gi;
+
+/** The card's `<h4 class="eventSubHeader">` (the support acts as the venue typed them). */
+const EVENT_SUBHEADER_RE =
+  /<h4\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?eventSubHeader(?:\s[^"']*)?["'][^>]*>([\s\S]*?)<\/h4>/i;
+
+/** Canonical `<origin>/event/<slug>/` for an href, or null when it is off-site or not an event page. */
+const canonicalEventUrl = (href: string, baseUrl: string, baseOrigin: string | null): string | null => {
+  let resolved: URL;
+  try {
+    resolved = new URL(href, baseUrl);
+  } catch {
+    return null;
+  }
+  if (baseOrigin !== null && resolved.origin !== baseOrigin) return null;
+  const segments = resolved.pathname.split('/').filter((s) => s.length > 0);
+  if (segments[0] !== 'event' || !segments[1]) return null;
+  return `${resolved.origin}/event/${segments[1]}/`;
+};
+
 /**
  * All upcoming `/event/<slug>/` URLs found on an /events/ index page,
  * scoped to the site's own `baseUrl`. Cross-site cross-promo / sister-
@@ -109,9 +130,15 @@ export const decodeHtmlEntities = (raw: string | null | undefined): string =>
  * normalized so e.g. `/event/the-band?ref=homepage` becomes
  * `/event/the-band/` rather than `/event/the-band?ref=homepage/` (which
  * would 404).
+ *
+ * The whole-page href regex is the only source of URLs. A separate card
+ * scan only attaches a subheader: for each listing card (`.eventWrapper`,
+ * `.rhp-event`), its first `/event/` anchor gets the card's
+ * `h4.eventSubHeader` text, entity-decoded, first non-empty value winning.
+ * The Etix ticket slug drops `/` and `,`, so the subheader is the only
+ * clean source of a bill's support acts (BS#3633).
  */
-export const extractEventLinks = (indexHtml: string, baseUrl: string): string[] => {
-  const out = new Set<string>();
+export const extractEventLinks = (indexHtml: string, baseUrl: string): EventLink[] => {
   const baseOrigin = ((): string | null => {
     try {
       return new URL(baseUrl).origin;
@@ -119,23 +146,36 @@ export const extractEventLinks = (indexHtml: string, baseUrl: string): string[] 
       return null;
     }
   })();
+  const out = new Map<string, string | null>();
   for (const m of indexHtml.matchAll(EVENT_INDEX_LINK_RE)) {
-    const href = m[1];
-    let resolved: URL;
-    try {
-      resolved = new URL(href, baseUrl);
-    } catch {
-      continue;
-    }
-    if (baseOrigin !== null && resolved.origin !== baseOrigin) continue;
-    const segments = resolved.pathname.split('/').filter((s) => s.length > 0);
-    if (segments[0] !== 'event' || segments.length < 2) continue;
-    const slug = segments[1];
-    if (!slug) continue;
-    out.add(`${resolved.origin}/event/${slug}/`);
+    const url = canonicalEventUrl(m[1], baseUrl, baseOrigin);
+    if (url !== null && !out.has(url)) out.set(url, null);
   }
-  return Array.from(out);
+  const cardStarts = Array.from(indexHtml.matchAll(EVENT_CARD_RE), (m) => m.index);
+  cardStarts.forEach((start, i) => {
+    const card = indexHtml.slice(start, cardStarts[i + 1] ?? indexHtml.length);
+    const href = new RegExp(EVENT_INDEX_LINK_RE.source, 'i').exec(card)?.[1];
+    const url = href === undefined ? null : canonicalEventUrl(href, baseUrl, baseOrigin);
+    const raw = EVENT_SUBHEADER_RE.exec(card)?.[1] ?? '';
+    const subHeader = decodeHtmlEntities(raw.replace(/<[^>]*>/g, ' '))
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (url !== null && subHeader && out.get(url) === null) out.set(url, subHeader);
+  });
+  return Array.from(out, ([url, subHeader]) => ({ url, subHeader }));
 };
+
+/**
+ * Support acts from a listing-card subheader: strip a leading `with ` or
+ * `w/`, then split on commas only, because "and" belongs inside names
+ * ("Wim Tapley and The Cannons").
+ */
+export const splitSubHeaderActs = (subHeader: string): string[] =>
+  subHeader
+    .replace(/^\s*(?:with\s+|w\/\s*)/i, '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 
 /**
  * Extract the Event JSON-LD object from an event detail page. Returns
@@ -360,7 +400,9 @@ const ISO_8601_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?
 export const parseEventPage = (
   venue: RhpVenueConfig,
   eventPageUrl: string,
-  eventPageHtml: string
+  eventPageHtml: string,
+  /** The listing card's subheader; when non-empty it takes precedence over the lossy Etix slug. */
+  subHeader: string | null = null
 ): ParsedConcert | null => {
   const raw = extractEventJsonLd(eventPageHtml);
   if (raw === null) return null;
@@ -396,7 +438,8 @@ export const parseEventPage = (
   }
 
   const offer = extractFirstOffer(raw.offers);
-  const supporting = extractSupportingActsFromEtix(offer.url, name);
+  const subHeaderActs = subHeader ? splitSubHeaderActs(subHeader) : [];
+  const supporting = subHeaderActs.length > 0 ? subHeaderActs : extractSupportingActsFromEtix(offer.url, name);
 
   const venueDisplayName = decodeHtmlEntities(raw.location.name).trim();
   if (!venueDisplayName) {

@@ -8,8 +8,8 @@ First ingestion source for the on-tour feature. Future sources (Bandsintown live
 
 For each configured RHP venue site:
 
-1. Fetches `<base_url>/events/` and extracts every `/event/<slug>/` link.
-2. Fetches each event detail page concurrently (cap: `VENUE_SCRAPER_CONCURRENCY`, default 8) and parses the schema.org `Event` JSON-LD block emitted by the Rockhouse Partners WordPress plugin under the literal `<!-- Event Markup for Official Venue Sites -->` comment.
+1. Fetches `<base_url>/events/` and extracts every `/event/<slug>/` link. Each listing card (`.eventWrapper` / `.rhp-event`) also contributes its `h4.eventSubHeader` text to that card's first event link.
+2. Fetches each event detail page concurrently (cap: `VENUE_SCRAPER_CONCURRENCY`, default 8) and parses the schema.org `Event` JSON-LD block emitted by the Rockhouse Partners WordPress plugin under the literal `<!-- Event Markup for Official Venue Sites -->` comment. The headliner is the JSON-LD `name`. The support acts come from the listing-card subheader, with a leading `with ` / `w/` removed and split on commas only ("and" stays inside names). Without a subheader, they fall back to the Etix ticket-URL slug, which loses `/` and `,` (`Tobacco Roadwim Tapley And The Cannons`) — see [BS#3633](https://github.com/WXYC/Backend-Service/issues/3633).
 3. Resolves `venues.slug` → `venue_id`, seeding the `venues` row on first sight from `VENUE_SEEDS` or from the JSON-LD `location` fallback.
 4. UPSERTs each parsed concert into `concerts` keyed on `(source='rhp_scrape', source_id=<event-page-pathname>)`.
 

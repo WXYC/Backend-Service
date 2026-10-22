@@ -18,7 +18,7 @@
  * events.
  */
 
-import type { ParsedConcert } from './rhp-types.js';
+import type { EventLink, ParsedConcert } from './rhp-types.js';
 import type { RhpVenueConfig } from './rhp-venues.js';
 import { captureError, log } from './logger.js';
 
@@ -28,9 +28,10 @@ export type FetchHtmlFn = (url: string) => Promise<string>;
 export type ParseEventPageFn = (
   venue: RhpVenueConfig,
   eventPageUrl: string,
-  eventPageHtml: string
+  eventPageHtml: string,
+  subHeader: string | null
 ) => ParsedConcert | null;
-export type ExtractEventLinksFn = (indexHtml: string, baseUrl: string) => string[];
+export type ExtractEventLinksFn = (indexHtml: string, baseUrl: string) => EventLink[];
 export type ResolveVenueIdFn = (
   slug: string,
   /** Always non-null: ParsedConcert.venue_name is required (the parser
@@ -151,8 +152,8 @@ export const runScraper = async (opts: RunOptions): Promise<Totals> => {
       event_count: eventUrls.length,
     });
 
-    const results = await opts.mapConcurrent(eventUrls, opts.concurrency, (url) =>
-      processOneEvent(site, url, opts, now())
+    const results = await opts.mapConcurrent(eventUrls, opts.concurrency, (link) =>
+      processOneEvent(site, link, opts, now())
     );
 
     // Tally per-site so the site_done line reports just this site's work,
@@ -204,7 +205,7 @@ type OneEventResult =
 
 const processOneEvent = async (
   site: RhpVenueConfig,
-  eventPageUrl: string,
+  { url: eventPageUrl, subHeader }: EventLink,
   opts: RunOptions,
   scrapedAt: Date
 ): Promise<OneEventResult> => {
@@ -223,7 +224,7 @@ const processOneEvent = async (
 
   let parsed: ParsedConcert | null;
   try {
-    parsed = opts.parseEventPage(site, eventPageUrl, html);
+    parsed = opts.parseEventPage(site, eventPageUrl, html, subHeader);
   } catch (error) {
     log('warn', 'parse_error', `failed to parse ${eventPageUrl}`, {
       site_slug: site.site_slug,

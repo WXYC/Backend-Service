@@ -69,3 +69,6 @@ export type ParsedConcert = {
   /** The full parsed JSON-LD Event object, for forensics. */
   raw: SchemaEvent;
 };
+
+/** An event-page URL from the /events/ index, with its listing card's subheader text when a card supplied one. */
+export type EventLink = { url: string; subHeader: string | null };
