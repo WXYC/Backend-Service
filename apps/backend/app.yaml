@@ -2582,6 +2582,9 @@ paths:
                               returns. Backend composes both from one function
                               (`composeShowDJList`), so treat any divergence
                               between the two copies as a bug in this one.
+                              `/flowsheet/playlist`'s `show_djs` uses
+                              `ShowPlaylistDJ`, which adds a membership flag
+                              these two do not emit.
                             properties:
                               id:
                                 type: string
@@ -2910,11 +2913,26 @@ paths:
                     type: array
                     items:
                       type: object
+                      description: >-
+                        Mirrors `ShowPlaylistDJ` in `wxyc-shared/api.yaml` (the SSOT): `OnAirDJ`'s `id` and
+                        `dj_name` (same types and nullability) plus `active`.
+                      required:
+                        - id
+                        - dj_name
+                        - active
                       properties:
                         id:
-                          type: integer
+                          type: string
+                          nullable: true
+                          description: The DJ's `auth_user.id`, or `null` for a legacy show DJ with no account.
                         dj_name:
                           type: string
+                          nullable: true
+                          description: The DJ's public on-air handle; see `OnAirDJ.dj_name`.
+                        active:
+                          type: boolean
+                          description: >-
+                            `true` when the DJ's `show_djs` membership row is active, `false` when the DJ left the show.
                   previous_show_id:
                     type: integer
                     nullable: true

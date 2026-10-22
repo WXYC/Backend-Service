@@ -2858,14 +2858,36 @@ export const changeOrder = async (
  * `library.service.ts:getAlbumFromDB` convention; the controller translates
  * this to a 404.
  */
+/**
+ * Every `show_djs` member of a show (active or departed) with its membership
+ * flag, in `getDJsInShow`'s user order. `getDJsInShow` returns `User[]` and so
+ * drops `active`; it stays as is for its other callers.
+ */
+const getShowDJsWithActive = async (show_id: number): Promise<{ user: User; active: boolean }[]> => {
+  const memberships = await db.select().from(show_djs).where(eq(show_djs.show_id, show_id));
+  if (memberships.length === 0) return [];
+  const users = await db
+    .select()
+    .from(user)
+    .where(
+      inArray(
+        user.id,
+        memberships.map((m) => m.dj_id)
+      )
+    );
+  const activeById = new Map(memberships.map((m) => [m.dj_id, m.active]));
+  return users.map((u) => ({ user: u, active: activeById.get(u.id) ?? false }));
+};
+
 export const getShowMetadata = async (show_id: number): Promise<ShowMetadata | undefined> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
   if (!show[0]) return undefined;
 
-  const showDJs = (await getDJsInShow(show_id, false)).map((dj) => ({
+  const showDJs = (await getShowDJsWithActive(show_id)).map(({ user: dj, active }) => ({
     id: dj.id,
     dj_name: resolveDjDisplayName(dj.djName ?? null),
+    active,
   }));
 
   let specialty_show_name = '';
