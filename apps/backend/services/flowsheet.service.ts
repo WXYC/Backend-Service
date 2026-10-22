@@ -2851,19 +2851,15 @@ export const changeOrder = async (
 };
 
 /**
- * Gets show metadata (DJs, specialty show name) without fetching entries.
- * Returns `undefined` when `show_id` doesn't exist (BS#1113) — mirrors the
- * `library.service.ts:getAlbumFromDB` convention; the controller translates
- * this to a 404.
- */
-/**
  * Every `show_djs` member of a show (active or departed) with its membership
  * flag, in `getDJsInShow`'s user order. `getDJsInShow` returns `User[]` and so
  * drops `active`; it stays as is for its other callers.
  */
 const getShowDJsWithActive = async (show_id: number): Promise<{ user: User; active: boolean }[]> => {
   const memberships = await db.select().from(show_djs).where(eq(show_djs.show_id, show_id));
-  if (memberships.length === 0) return [];
+  if (memberships.length === 0) {
+    return [];
+  }
   const users = await db
     .select()
     .from(user)
@@ -2877,6 +2873,12 @@ const getShowDJsWithActive = async (show_id: number): Promise<{ user: User; acti
   return users.map((u) => ({ user: u, active: activeById.get(u.id) ?? false }));
 };
 
+/**
+ * Gets show metadata (DJs, specialty show name) without fetching entries.
+ * Returns `undefined` when `show_id` doesn't exist (BS#1113) — mirrors the
+ * `library.service.ts:getAlbumFromDB` convention; the controller translates
+ * this to a 404.
+ */
 export const getShowMetadata = async (show_id: number): Promise<ShowMetadata | undefined> => {
   const show = await db.select().from(shows).where(eq(shows.id, show_id));
 
