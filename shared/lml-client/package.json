@@ -19,7 +19,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@wxyc/shared": "^5.0.0"
+    "@wxyc/shared": "12.11.0"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
