@@ -145,6 +145,11 @@ describe('the ECR checks in build, migrate and deploy', () => {
     fs.mkdirSync(path.join(dir, 'scripts'));
     fs.copyFileSync(path.join(repoRoot, 'scripts/ecr-image-exists.sh'), path.join(dir, 'scripts/ecr-image-exists.sh'));
     fs.chmodSync(path.join(dir, 'scripts/ecr-image-exists.sh'), 0o755);
+    fs.copyFileSync(
+      path.join(repoRoot, 'scripts/read-deploy-version.sh'),
+      path.join(dir, 'scripts/read-deploy-version.sh')
+    );
+    fs.chmodSync(path.join(dir, 'scripts/read-deploy-version.sh'), 0o755);
     for (const app of ['backend', 'auth']) {
       fs.mkdirSync(path.join(dir, 'apps', app), { recursive: true });
       fs.writeFileSync(path.join(dir, 'apps', app, 'index.ts'), '');
@@ -233,13 +238,13 @@ describe('the ECR checks in build, migrate and deploy', () => {
     expect(r.out).toContain(error);
   });
 
-  const runMigrateCheck = (present: string) =>
+  const runMigrateCheck = (present: string, targets = ['auth', 'backend', 'jobs-x'], buildId = 'b1') =>
     runStep(
       findStep(migrate, 'Check app images'),
       {
         ...secrets,
-        '${{ needs.setup.outputs.targets }}': JSON.stringify(['auth', 'backend', 'jobs-x']),
-        '${{ needs.setup.outputs.build_id }}': 'b1',
+        '${{ needs.setup.outputs.targets }}': JSON.stringify(targets),
+        '${{ needs.setup.outputs.build_id }}': buildId,
       },
       present
     );
@@ -248,6 +253,41 @@ describe('the ECR checks in build, migrate and deploy', () => {
     const r = runMigrateCheck('backend auth');
     expect(r.status).toBe(0);
     expect(r.lookups).toEqual(['auth:v0.2.3', 'backend:v0.1.7']);
+  });
+
+  // BS#3640: download-artifact extracts a lone matching artifact flat, with no
+  // `version-<target>-<build_id>` subfolder.
+  it('migrate reads the version of a run that built one app, whose artifact extracted flat', () => {
+    const flat = path.join(dir, 'flat-run');
+    const versions = path.join(flat, 'versions');
+    fs.mkdirSync(versions, { recursive: true });
+    fs.writeFileSync(path.join(versions, 'deploy_version.txt'), 'v0.1.7\n');
+    fs.mkdirSync(path.join(flat, 'apps/backend'), { recursive: true });
+    fs.cpSync(path.join(dir, 'scripts'), path.join(flat, 'scripts'), { recursive: true });
+    const step = findStep(migrate, 'Check app images');
+    const log = path.join(flat, 'aws.log');
+    const r = runBashScript(step.run, {
+      cwd: flat,
+      pathPrepend: path.join(dir, 'bin'),
+      env: {
+        ...stepEnvFrom(step, {
+          ...secrets,
+          '${{ needs.setup.outputs.targets }}': JSON.stringify(['backend']),
+          '${{ needs.setup.outputs.build_id }}': 'b1',
+        }),
+        AWS_PRESENT: 'backend',
+        AWS_LOG: log,
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(log, 'utf8').trim().split('\n')).toEqual(['backend:v0.1.7']);
+  });
+
+  it('migrate names the target when its version file is missing', () => {
+    const r = runMigrateCheck('backend auth', ['auth', 'backend', 'jobs-x'], 'other-build');
+    expect(r.status).toBe(1);
+    expect(r.out).toContain('::error title=No deploy version for auth::');
+    expect(r.lookups).toEqual(['']);
   });
 
   it.each([
