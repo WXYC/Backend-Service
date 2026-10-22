@@ -7,7 +7,12 @@
  * pinned by an explicit case table.
  */
 import { describe, test, expect } from '@jest/globals';
-import { freetextPairKey, normalizeFreetextArtist } from '../../../shared/database/src/freetext-norm';
+import {
+  CO_BILL_DELIMITER,
+  freetextPairKey,
+  normalizeFreetextArtist,
+} from '../../../shared/database/src/freetext-norm';
+import { BILLING_DELIMITER_PATTERNS } from '../../../jobs/triangle-shows-etl/headliner';
 
 describe('normalizeFreetextArtist', () => {
   // The artist leg = normalizeArtistName (lowercase + strip leading "The ")
@@ -59,5 +64,45 @@ describe('freetextPairKey', () => {
   test('is total over null / undefined on both legs', () => {
     expect(freetextPairKey(null, null)).toEqual({ norm_artist: '', norm_album: '' });
     expect(freetextPairKey(undefined, undefined)).toEqual({ norm_artist: '', norm_album: '' });
+  });
+});
+
+/**
+ * BS#3635 — the co-bill delimiter the `upcoming_show` read path splits a
+ * headliner billing on. Only ` + ` and ` / ` (whitespace on both sides): a
+ * comma or ` with ` would split single acts, and a bare `/` or `&` is part of
+ * many band names.
+ */
+const coBillCases: Array<[string, boolean]> = [
+  ['The Onlies + Tatiana Hargreaves', true],
+  ['Wednesday 13 / Dead on a Sunday / Above Snakes', true],
+  ['Tobacco Road / Wim Tapley & The Cannons', true],
+  ['AC/DC', false],
+  ['AJ Lee & Blue Summit', false],
+  ['Circle Jerks, Municipal Waste', false],
+  ['Juana Molina with Stereolab', false],
+  ['Kendrick+Friends', false],
+  ['Stereolab', false],
+];
+
+describe('CO_BILL_DELIMITER', () => {
+  test.each(coBillCases)('CO_BILL_DELIMITER.test(%j) -> %j', (input, expected) => {
+    expect(CO_BILL_DELIMITER.test(input)).toBe(expected);
+  });
+
+  test('splits a co-bill into its acts', () => {
+    expect('Wednesday 13 / Dead on a Sunday / Above Snakes'.split(CO_BILL_DELIMITER)).toEqual([
+      'Wednesday 13',
+      'Dead on a Sunday',
+      'Above Snakes',
+    ]);
+  });
+
+  // headliner.ts can't import @wxyc/database (its client throws at import
+  // time without DB env vars), so it keeps its own plus/slash patterns. Pin
+  // the two to agree on one shared table.
+  test.each(coBillCases)('agrees with the ETL plus/slash patterns on %j', (input) => {
+    const etl = BILLING_DELIMITER_PATTERNS.plus.test(input) || BILLING_DELIMITER_PATTERNS.slash.test(input);
+    expect(CO_BILL_DELIMITER.test(input)).toBe(etl);
   });
 });

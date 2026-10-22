@@ -871,6 +871,120 @@ describe('getUpcomingShowsMaps support arm (BS#1761)', () => {
 });
 
 /**
+ * BS#3635 — the co-bill pass of `getUpcomingShowsMaps`. A headliner raw billed
+ * with ` + ` or ` / ` (e.g. concert 67401, "The Onlies + Tatiana Hargreaves")
+ * also keys each act, so a play of either act matches. It reuses Pass 1's rows
+ * (no extra query) and runs after Pass 1 and before the support pass, so the
+ * precedence is: real headliner > co-bill part > support act, and soonest wins
+ * within the pass.
+ */
+describe('getUpcomingShowsMaps co-bill pass (BS#3635)', () => {
+  type HeadlinerRow = ConcertJoinRow & { artist_name: string | null };
+  type SupportRow = ConcertJoinRow & { raw_name: string; support_artist_id: number | null };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const coBill = (id: number, raw: string, starts_on: string): HeadlinerRow => ({
+    ...timedRow,
+    id,
+    headlining_artist_id: null,
+    headlining_artist_raw: raw,
+    artist_name: null,
+    starts_on,
+  });
+
+  const onlies = coBill(67401, 'The Onlies + Tatiana Hargreaves', '2026-12-11');
+
+  it.each([
+    ['onlies', onlies], // normalizeFreetextArtist strips the leading "The"
+    ['tatiana hargreaves', onlies],
+  ])('a play of %j matches the co-bill concert', async (key, row) => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([row])).mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get(key)).toEqual(toConcertDTO(row));
+    // The whole-billing key stays (harmless, never matched).
+    expect(byNormName.get('onlies + tatiana hargreaves')).toEqual(toConcertDTO(row));
+  });
+
+  it('splits every act of a multi-slash billing', async () => {
+    const row = coBill(901, 'Wednesday 13 / Dead on a Sunday / Above Snakes', '2026-10-31');
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([row])).mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    for (const key of ['wednesday 13', 'dead on a sunday', 'above snakes']) {
+      expect(byNormName.get(key)).toEqual(toConcertDTO(row));
+    }
+  });
+
+  it('a real headline elsewhere wins over the co-bill, regardless of date', async () => {
+    const realHeadline = coBill(902, 'The Onlies', '2027-02-01'); // LATER than the co-bill
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([onlies, realHeadline]))
+      .mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('onlies')).toEqual(toConcertDTO(realHeadline));
+    expect(byNormName.get('tatiana hargreaves')).toEqual(toConcertDTO(onlies));
+  });
+
+  it('a co-bill part wins over a support row, regardless of date', async () => {
+    const earlierSupport: SupportRow = {
+      ...timedRow,
+      id: 903,
+      headlining_artist_id: null,
+      headlining_artist_raw: 'Some Other Headliner',
+      starts_on: '2026-09-01', // SOONER than the co-bill
+      raw_name: 'Tatiana Hargreaves',
+      support_artist_id: null,
+    };
+    mockDb._chain.orderBy
+      .mockReturnValueOnce(Promise.resolve([onlies]))
+      .mockReturnValueOnce(Promise.resolve([earlierSupport]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('tatiana hargreaves')).toEqual(toConcertDTO(onlies));
+  });
+
+  it('collapses one act on several co-bills to the SOONEST', async () => {
+    const soon = coBill(904, 'Tobacco Road / Wim Tapley & The Cannons', '2026-11-01');
+    const later = coBill(905, 'Tobacco Road + Another Act', '2026-12-01');
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([soon, later])).mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect(byNormName.get('tobacco road')).toEqual(toConcertDTO(soon));
+    expect(byNormName.get('wim tapley & the cannons')).toEqual(toConcertDTO(soon));
+    expect(byNormName.get('another act')).toEqual(toConcertDTO(later));
+  });
+
+  it.each([
+    ['AC/DC', 'ac/dc'],
+    ['AJ Lee & Blue Summit', 'aj lee & blue summit'],
+  ])('keeps %j whole', async (raw, key) => {
+    const row = coBill(906, raw, '2026-11-15');
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([row])).mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect([...byNormName.keys()]).toEqual([key]);
+  });
+
+  it('does not add a raw-name key for a resolved single-act headliner', async () => {
+    const resolved: HeadlinerRow = {
+      ...timedRow,
+      id: 907,
+      headlining_artist_id: 4211,
+      headlining_artist_raw: 'Nilufer Yanya',
+      artist_name: 'Nilüfer Yanya',
+    };
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([resolved])).mockReturnValueOnce(Promise.resolve([]));
+    const { byNormName } = await getUpcomingShowsMaps('2026-08-01');
+    expect([...byNormName.keys()]).toEqual(['nilüfer yanya']);
+  });
+
+  it('issues no extra query (reuses the headliner rows)', async () => {
+    mockDb._chain.orderBy.mockReturnValueOnce(Promise.resolve([onlies])).mockReturnValueOnce(Promise.resolve([]));
+    await getUpcomingShowsMaps('2026-08-01');
+    expect(mockDb._chain.select).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
  * BS#1616 — `getUpcomingShowsMaps` runs on the hot V2 flowsheet read path
  * (including `getLatest`, the single-entry "now playing" tick the iOS/Android
  * apps and the uptime canary poll continuously), and each call scans the entire

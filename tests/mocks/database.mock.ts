@@ -1291,7 +1291,11 @@ export const enumerateFreetextPairs = jest.fn(
 // resolving @wxyc/database via this mock still get the real implementation.
 export { normalizeArtistName } from '../../shared/database/src/normalize-artist-name.js';
 export { normalizeAlbumTitle } from '../../shared/database/src/normalize-album-title.js';
-export { freetextPairKey, normalizeFreetextArtist } from '../../shared/database/src/freetext-norm.js';
+export {
+  CO_BILL_DELIMITER,
+  freetextPairKey,
+  normalizeFreetextArtist,
+} from '../../shared/database/src/freetext-norm.js';
 export { NY_TIME_ZONE, nyCalendarDate, nyStartOfDay, nyWallClockToUtc } from '../../shared/database/src/ny-time.js';
 
 // Self-contained STUB of shared/database/src/concerts-sql.ts. The real
