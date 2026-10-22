@@ -1,5 +1,6 @@
 import { intakeItemStateEnum } from '@wxyc/database';
 import { hasUrlParserDifferentialChar } from '@wxyc/lml-client';
+import type { IntakeRequestRefusedError } from '@wxyc/shared/dtos';
 import type { RequestHandler, Response } from 'express';
 import { canAccess } from '../config/featureAccess.js';
 import * as intakeService from '../services/intake.service.js';
@@ -249,9 +250,6 @@ export const deleteIntake: RequestHandler<{ id: string }> = async (req, res) => 
   res.json({ deleted_review_authors: result.authors });
 };
 
-/** Mirrors wxyc-shared's `IntakeRequestRefusedCode` and `IntakeRequestRefusedError` (api.yaml); `@wxyc/shared` 5.4.0 predates them. */
-type IntakeRequestRefusedCode = 'asked_dj_cannot_see_feature';
-export type IntakeRequestRefusedError = { message: string; code: IntakeRequestRefusedCode };
 const ASKED_DJ_CANNOT_SEE_FEATURE: IntakeRequestRefusedError = {
   message: "This DJ can't see reviews yet. A station manager can add them to the reviews beta in the DJ Roster.",
   code: 'asked_dj_cannot_see_feature',
