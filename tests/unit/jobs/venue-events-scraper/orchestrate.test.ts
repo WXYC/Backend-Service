@@ -33,6 +33,8 @@ const TEST_VENUE_B: RhpVenueConfig = {
   venue_name_to_slug: {},
 };
 
+const links = (urls: string[]): ReturnType<ExtractEventLinksFn> => urls.map((url) => ({ url, subHeader: null }));
+
 const fakeParsedConcert = (suffix: string): ParsedConcert => ({
   site_slug: 'test-site',
   source_id: `test-site:/event/${suffix}/`,
@@ -82,11 +84,9 @@ describe('runScraper — happy path', () => {
     });
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue([
-        'https://test.example/event/a/',
-        'https://test.example/event/b/',
-        'https://test.example/event/c/',
-      ]);
+      .mockReturnValue(
+        links(['https://test.example/event/a/', 'https://test.example/event/b/', 'https://test.example/event/c/'])
+      );
     const parseEventPage = jest
       .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
       .mockImplementation((_, url) => fakeParsedConcert(url.split('/event/')[1].replace('/', '')));
@@ -140,12 +140,10 @@ describe('runScraper — happy path', () => {
       const extractEventLinks = jest
         .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
         // Three events on the first site, one on the second.
-        .mockReturnValueOnce([
-          'https://test.example/event/a/',
-          'https://test.example/event/b/',
-          'https://test.example/event/c/',
-        ])
-        .mockReturnValueOnce(['https://test-b.example/event/x/']);
+        .mockReturnValueOnce(
+          links(['https://test.example/event/a/', 'https://test.example/event/b/', 'https://test.example/event/c/'])
+        )
+        .mockReturnValueOnce(links(['https://test-b.example/event/x/']));
       const parseEventPage = jest
         .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
         .mockImplementation((_, url) => fakeParsedConcert(url));
@@ -184,7 +182,7 @@ describe('runScraper — happy path', () => {
     const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('html');
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue(['https://test.example/event/a/', 'https://test.example/event/b/']);
+      .mockReturnValue(links(['https://test.example/event/a/', 'https://test.example/event/b/']));
     const parseEventPage = jest
       .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
       .mockImplementation((_, url) => fakeParsedConcert(url));
@@ -210,6 +208,50 @@ describe('runScraper — happy path', () => {
   });
 });
 
+describe('runScraper — listing-card subheaders', () => {
+  beforeEach(() => {
+    jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('passes each link’s subheader to parseEventPage and counts distinct URLs', async () => {
+    const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('<page>');
+    const extractEventLinks = jest
+      .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
+      .mockReturnValue([
+        { url: 'https://test.example/event/harvey-street-2/', subHeader: 'Tobacco Road, Wim Tapley and The Cannons' },
+        { url: 'https://test.example/event/the-onlies/', subHeader: null },
+      ]);
+    const parseEventPage = jest
+      .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
+      .mockImplementation((_, url) => fakeParsedConcert(url));
+
+    const totals = await runScraper({
+      sites: [TEST_VENUE],
+      concurrency: 1,
+      fetchHtml,
+      extractEventLinks,
+      parseEventPage,
+      resolveVenueId: jest.fn<ReturnType<ResolveVenueIdFn>, Parameters<ResolveVenueIdFn>>().mockResolvedValue(1),
+      upsertConcert: jest
+        .fn<ReturnType<UpsertConcertFn>, Parameters<UpsertConcertFn>>()
+        .mockResolvedValue({ concert_id: 7, inserted: true }),
+      mapConcurrent: realMapConcurrent,
+    });
+
+    expect(parseEventPage).toHaveBeenCalledWith(
+      TEST_VENUE,
+      'https://test.example/event/harvey-street-2/',
+      '<page>',
+      'Tobacco Road, Wim Tapley and The Cannons'
+    );
+    expect(parseEventPage).toHaveBeenCalledWith(TEST_VENUE, 'https://test.example/event/the-onlies/', '<page>', null);
+    expect(fetchHtml).toHaveBeenCalledWith('https://test.example/event/harvey-street-2/');
+    expect(totals.events_seen).toBe(2);
+  });
+});
+
 describe('runScraper — error containment', () => {
   beforeEach(() => {
     jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -226,7 +268,7 @@ describe('runScraper — error containment', () => {
     });
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue(['https://test-b.example/event/x/']);
+      .mockReturnValue(links(['https://test-b.example/event/x/']));
     const parseEventPage = jest
       .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
       .mockReturnValue(fakeParsedConcert('x'));
@@ -263,11 +305,9 @@ describe('runScraper — error containment', () => {
     });
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue([
-        'https://test.example/event/a/',
-        'https://test.example/event/b/',
-        'https://test.example/event/c/',
-      ]);
+      .mockReturnValue(
+        links(['https://test.example/event/a/', 'https://test.example/event/b/', 'https://test.example/event/c/'])
+      );
     const parseEventPage = jest
       .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
       .mockImplementation((_, url) => fakeParsedConcert(url));
@@ -299,7 +339,7 @@ describe('runScraper — error containment', () => {
     const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('<event>');
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue(['https://test.example/event/a/', 'https://test.example/event/b/']);
+      .mockReturnValue(links(['https://test.example/event/a/', 'https://test.example/event/b/']));
     const parseEventPage = jest
       .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
       .mockImplementationOnce(() => {
@@ -330,7 +370,7 @@ describe('runScraper — error containment', () => {
     const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('<page>');
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue(['https://test.example/event/gone/']);
+      .mockReturnValue(links(['https://test.example/event/gone/']));
     const parseEventPage = jest.fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>().mockReturnValue(null);
     const resolveVenueId = jest.fn<ReturnType<ResolveVenueIdFn>, Parameters<ResolveVenueIdFn>>().mockResolvedValue(1);
     const upsertConcert = jest
@@ -358,7 +398,7 @@ describe('runScraper — error containment', () => {
     const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('<event>');
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue(['https://test.example/event/a/', 'https://test.example/event/b/']);
+      .mockReturnValue(links(['https://test.example/event/a/', 'https://test.example/event/b/']));
     const parseEventPage = jest
       .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
       .mockImplementation((_, url) => fakeParsedConcert(url));
@@ -388,7 +428,7 @@ describe('runScraper — error containment', () => {
     const fetchHtml = jest.fn<ReturnType<FetchHtmlFn>, Parameters<FetchHtmlFn>>().mockResolvedValue('<event>');
     const extractEventLinks = jest
       .fn<ReturnType<ExtractEventLinksFn>, Parameters<ExtractEventLinksFn>>()
-      .mockReturnValue(['https://test.example/event/a/']);
+      .mockReturnValue(links(['https://test.example/event/a/']));
     const parseEventPage = jest
       .fn<ReturnType<ParseEventPageFn>, Parameters<ParseEventPageFn>>()
       .mockImplementation((_, url) => fakeParsedConcert(url));
