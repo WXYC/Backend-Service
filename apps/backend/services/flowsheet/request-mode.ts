@@ -1,7 +1,7 @@
-import type { SpecialtyShows } from '@wxyc/database';
+import { requestLineModeEnum, type SpecialtyShows } from '@wxyc/database';
 
-/** Mirrors the `request_line_mode` enum (api.yaml `RequestLineMode`). */
-export const REQUEST_MODES = ['requests', 'feedback', 'closed'] as const;
+/** The `request_line_mode` enum's values (api.yaml `RequestLineMode`). */
+export const REQUEST_MODES = requestLineModeEnum.enumValues;
 export type RequestMode = (typeof REQUEST_MODES)[number];
 
 /** Where the effective mode came from (api.yaml `RequestLine.source`). */

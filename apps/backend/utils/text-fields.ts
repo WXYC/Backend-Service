@@ -70,3 +70,38 @@ export const normalizeOptionalText = (value: unknown, field: string, maxLength: 
   }
   return trimmed;
 };
+
+/**
+ * Validate one closed-set body field against a Postgres enum's `enumValues`. Returns the narrowed value, or throws a
+ * 400 reading `<field> must be one of a, b, c` (plus `, or null` when `nullable` and null is accepted).
+ */
+export function validateEnumField<T extends string>(
+  value: unknown,
+  field: string,
+  values: readonly T[],
+  options: { nullable: true }
+): T | null;
+export function validateEnumField<T extends string>(
+  value: unknown,
+  field: string,
+  values: readonly T[],
+  options?: { nullable?: false }
+): T;
+export function validateEnumField<T extends string>(
+  value: unknown,
+  field: string,
+  values: readonly T[],
+  options: { nullable: boolean }
+): T | null;
+export function validateEnumField<T extends string>(
+  value: unknown,
+  field: string,
+  values: readonly T[],
+  { nullable = false }: { nullable?: boolean } = {}
+): T | null {
+  if (nullable && value === null) return null;
+  if (!values.includes(value as T)) {
+    throw new WxycError(`${field} must be one of ${values.join(', ')}${nullable ? ', or null' : ''}`, 400);
+  }
+  return value as T;
+}

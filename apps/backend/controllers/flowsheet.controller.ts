@@ -20,7 +20,7 @@ import { rowWriteCaller } from '../middleware/checkShowMember.js';
 import WxycError from '../utils/error.js';
 import { INT4_MAX } from '../utils/constants.js';
 import { parseBoundedInt } from '../utils/query-params.js';
-import { codePointLength, normalizeOptionalText } from '../utils/text-fields.js';
+import { codePointLength, normalizeOptionalText, validateEnumField } from '../utils/text-fields.js';
 import { BREAKPOINT_SUFFIX, nearestStationHour } from '../utils/breakpoint-generator.js';
 import { FsEvents, Topics, serverEventsMgr } from '../utils/serverEvents.js';
 import type { SpecialtyShowRef } from '../services/flowsheet/specialty-ref.js';
@@ -1523,10 +1523,7 @@ export const updateShow: RequestHandler<{ id: string }, unknown, ShowDetailsPatc
   }
   const request_mode = req.body?.request_mode;
   if (request_mode !== undefined) {
-    if (request_mode !== null && !(REQUEST_MODES as readonly unknown[]).includes(request_mode)) {
-      throw new WxycError(`Bad Request: request_mode must be one of ${REQUEST_MODES.join(', ')}, or null`, 400);
-    }
-    patch.request_mode = request_mode;
+    patch.request_mode = validateEnumField(request_mode, 'request_mode', REQUEST_MODES, { nullable: true });
   }
 
   await flowsheet_service.updateShowDetails(show_id, rowWriteCaller(req, res), patch);

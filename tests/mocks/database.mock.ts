@@ -947,6 +947,10 @@ export const pruneAccountAuditEvents = jest.fn().mockResolvedValue(0);
 // Mock enum
 export const flowsheetEntryTypeEnum = () => ({});
 
+// Real enum value lists (BS#3620): services derive REQUEST_MODES / SPOTLIGHT_ROLES from these at import time.
+export const requestLineModeEnum = { enumValues: ['requests', 'feedback', 'closed'] as const };
+export const spotlightRoleEnum = { enumValues: ['performer', 'dj', 'reader', 'guest', 'host'] as const };
+
 // B-2.3 multi-match tie-break. Tests that drive the linkage call sites
 // (B-2.1 forward path, B-2.2 backfill) override this per-test to control
 // which library_id the tie-break "picks".
