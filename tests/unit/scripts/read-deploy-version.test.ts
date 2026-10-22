@@ -97,9 +97,15 @@ describe('scripts/read-deploy-version.sh', () => {
   ])('points at the handle-git-tags upload, not a failed build, when %s', (_label, files, count) => {
     const r = run(files, 'backend', count);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain('handle-git-tags');
-    expect(r.stderr).toContain('version-backend-b1');
-    expect(r.stderr).not.toContain('build failed');
+    // Assert on the ::error line itself: a backtick inside a double-quoted
+    // message is a command substitution, which drops the name from the message
+    // and writes "command not found" to stderr instead.
+    const errorLine = r.stderr.split('\n').find((line) => line.startsWith('::error'));
+    expect(errorLine).toBeDefined();
+    expect(errorLine).toContain('handle-git-tags');
+    expect(errorLine).toContain('version-backend-b1');
+    expect(errorLine).not.toContain('build failed');
+    expect(r.stderr).not.toContain('command not found');
   });
 
   it('never reports the flat file for a target when subfolders exist but not for that target', () => {

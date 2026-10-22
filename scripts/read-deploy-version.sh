@@ -50,9 +50,9 @@ if [ -f "$SUBFOLDER_FILE" ]; then
 elif [ -f "$FLAT_FILE" ] && [ "$COUNT" = "1" ] && ! compgen -G "$DIR/version-*-$BUILD_ID" > /dev/null; then
   FILE="$FLAT_FILE"
 elif [ -f "$FLAT_FILE" ]; then
-  fail "Found $FLAT_FILE but cannot tell which target it belongs to: the run has $COUNT targets and there is no $SUBFOLDER_FILE. Check that the `handle-git-tags` job uploaded `version-$TARGET-$BUILD_ID` for this run and that the download step fetched it."
+  fail "Found $FLAT_FILE but cannot tell which target it belongs to: the run has $COUNT targets and there is no $SUBFOLDER_FILE. Check that the 'handle-git-tags' job uploaded 'version-$TARGET-$BUILD_ID' for this run and that the download step fetched it."
 else
-  fail "Expected $SUBFOLDER_FILE (or $FLAT_FILE when the run has one target); neither exists. Check that the `handle-git-tags` job uploaded `version-$TARGET-$BUILD_ID` for this run and that the download step fetched it."
+  fail "Expected $SUBFOLDER_FILE (or $FLAT_FILE when the run has one target); neither exists. Check that the 'handle-git-tags' job uploaded 'version-$TARGET-$BUILD_ID' for this run and that the download step fetched it."
 fi
 
 TAG=$(tr -d '[:space:]' < "$FILE")
