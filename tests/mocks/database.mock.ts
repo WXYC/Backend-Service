@@ -970,7 +970,8 @@ export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValu
 // Mirrors of shared/database/src/live-activity.ts's BS#2147 additions
 // (`resolveLiveActivityPauseMs`, `resolveLiveActivityMaxPauseMs`,
 // `buildWaitForQuietPeriod`, `buildDefaultSleep`,
-// `LiveActivityPauseCeilingExceededError`, and the constants). NOT
+// `LiveActivityPauseCeilingExceededError`, and the constants), plus BS#2552's
+// `checkReadPath`, `resolveLiveActivityReadPathCeilingMs` and `describeQuietPeriodPause`. NOT
 // re-exported from source: that module's `checkLiveActivity` import pulls in
 // `./client.js`, which throws synchronously on missing DB env vars for every
 // suite that resolves `@wxyc/database` to this mock (the same reason
@@ -1098,6 +1099,9 @@ export const checkReadPath = async (ceilingMs: number, fetchImpl: typeof fetch =
   }
 };
 
+export const describeQuietPeriodPause = (reason: WaitForQuietPeriodPauseInfo['reason']): string =>
+  reason === 'read-path' ? 'flowsheet read path degraded' : 'live flowsheet activity detected';
+
 export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() => Promise<boolean>) => {
   const {
     lookbackSeconds,
@@ -1125,12 +1129,20 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     }
   };
 
+  // A healthy verdict is reused for `pauseMs`, so per-row callers send at most one probe per window. A breach is
+  // never cached: every re-check during a pause probes again.
+  let lastHealthyReadPathAt: number | null = null;
+
   const readPathDegraded = async (): Promise<boolean> => {
+    if (lastHealthyReadPathAt !== null && now() - lastHealthyReadPathAt < pauseMs) return false;
+    let degraded: boolean;
     try {
-      return await readPathProbe(readPathCeilingMs);
+      degraded = await readPathProbe(readPathCeilingMs);
     } catch {
-      return true;
+      degraded = true;
     }
+    lastHealthyReadPathAt = degraded ? null : now();
+    return degraded;
   };
 
   return async (): Promise<boolean> => {

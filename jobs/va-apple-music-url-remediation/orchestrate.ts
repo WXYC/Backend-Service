@@ -68,6 +68,7 @@ import {
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import { isVariousArtistsCredit } from './va-artist.js';
 import { classifyResponse, type Verdict } from './verdict.js';
@@ -862,8 +863,9 @@ export const runRemediation = async (options: RunOptions): Promise<RunResult> =>
     maxTotalPauseMs,
     probe: checkLive,
     shouldStop: () => stopRequested,
-    onPause: () => {
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${pauseMs}ms`, {
+    onPause: ({ reason }) => {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing ${pauseMs}ms`, {
+        reason,
         lookback_seconds: lookbackSeconds,
         pause_ms: pauseMs,
       });

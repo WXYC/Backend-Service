@@ -107,6 +107,7 @@ import {
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import type { LegacyKeyspaceSource } from './keyspace-source.js';
 import { captureError, errorMessage, log } from './logger.js';
@@ -484,8 +485,9 @@ export const runSweep = async (opts: {
     maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     shouldStop: () => stopRequested,
-    onPause: () => {
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+    onPause: ({ reason }) => {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing ${liveActivityPauseMs}ms`, {
+        reason,
         lookback_seconds: liveActivityLookbackSeconds,
         pause_ms: liveActivityPauseMs,
       });

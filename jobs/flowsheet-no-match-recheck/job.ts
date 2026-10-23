@@ -87,7 +87,14 @@
  */
 
 import * as Sentry from '@sentry/node';
-import { closeDatabaseConnection, db, getLastRunTimestamp, requirePositiveInt, updateLastRun } from '@wxyc/database';
+import {
+  closeDatabaseConnection,
+  db,
+  getLastRunTimestamp,
+  requirePositiveInt,
+  updateLastRun,
+  describeQuietPeriodPause,
+} from '@wxyc/database';
 
 import {
   runNoMatchRecheck,
@@ -502,8 +509,8 @@ export const runOnce = async (dryRun: boolean): Promise<void> => {
     // (2x the configured ceiling) or splitting it (the first pass's
     // exhaustion throwing past the second) — see orchestrate.ts.
     const waitForQuietPeriod = buildRecheckWaitForQuietPeriod({
-      onLivePause: () => {
-        log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
+      onLivePause: (reason) => {
+        log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing`, { reason });
       },
     });
 

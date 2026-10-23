@@ -118,6 +118,7 @@ import {
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import { LmlAuthError, lmlApiKeyFingerprint, type LookupResponse } from '@wxyc/lml-client';
 import type { EnrichRow, EnrichOutcome } from './enrich.js';
@@ -1227,8 +1228,9 @@ export const runBackfill = async (opts: {
     pauseMs: liveActivityPauseMs,
     maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
-    onPause: () => {
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+    onPause: ({ reason }) => {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing ${liveActivityPauseMs}ms`, {
+        reason,
         lookback_seconds: liveActivityLookbackSeconds,
         pause_ms: liveActivityPauseMs,
       });

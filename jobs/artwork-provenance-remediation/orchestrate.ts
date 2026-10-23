@@ -47,6 +47,7 @@ import {
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   type CheckLiveActivityFn,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import { getErrorReporter } from '@wxyc/observability';
 import { LmlAuthError, lmlApiKeyFingerprint, type LookupResponse } from '@wxyc/lml-client';
@@ -261,8 +262,9 @@ export const runRemediation = async (opts: RunRemediationOptions): Promise<RunRe
     pauseMs,
     maxTotalPauseMs,
     probe,
-    onPause: () => {
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${pauseMs}ms`, {
+    onPause: ({ reason }) => {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing ${pauseMs}ms`, {
+        reason,
         lookback_seconds: lookbackSeconds,
         pause_ms: pauseMs,
       });

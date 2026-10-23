@@ -8,6 +8,8 @@ jest.mock('../../../shared/database/src/client.js', () => jest.requireActual('..
 });
 
 import { jest } from '@jest/globals';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT,
@@ -22,6 +24,7 @@ import {
   resolveLiveActivityMaxPauseMs,
   resolveLiveActivityReadPathCeilingMs,
   checkReadPath,
+  describeQuietPeriodPause,
   buildWaitForQuietPeriod,
   buildDefaultSleep,
   LiveActivityPauseCeilingExceededError,
@@ -39,6 +42,7 @@ import {
   resolveLiveActivityMaxPauseMs as mockResolveLiveActivityMaxPauseMs,
   resolveLiveActivityReadPathCeilingMs as mockResolveLiveActivityReadPathCeilingMs,
   checkReadPath as mockCheckReadPath,
+  describeQuietPeriodPause as mockDescribeQuietPeriodPause,
   buildWaitForQuietPeriod as mockBuildWaitForQuietPeriod,
   buildDefaultSleep as mockBuildDefaultSleep,
   LiveActivityPauseCeilingExceededError as MockLiveActivityPauseCeilingExceededError,
@@ -85,6 +89,10 @@ describe('live-activity defaults', () => {
   // different code would pass a behavioral test suite and still miss the
   // NEXT real-module fix, which is exactly how the throw this review round
   // adds would have gone unnoticed by the mock without this check.
+  it('mock describeQuietPeriodPause is byte-identical to the real implementation', () => {
+    expect(mockDescribeQuietPeriodPause.toString()).toBe(describeQuietPeriodPause.toString());
+  });
+
   it('mock buildWaitForQuietPeriod is byte-identical to the real implementation', () => {
     expect(mockBuildWaitForQuietPeriod.toString()).toBe(buildWaitForQuietPeriod.toString());
   });
@@ -538,6 +546,25 @@ describe('checkReadPath', () => {
     await expect(checkReadPath(20, hangingFetch())).resolves.toBe(true);
   });
 
+  it('is degraded (fail closed) when the headers arrive in time but the body outlives the ceiling', async () => {
+    // A real server and the real fetch: the ceiling must cover the whole response, not just the headers.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('[');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const toLocal = ((_url: unknown, init?: RequestInit) => fetch(`http://127.0.0.1:${port}/`, init)) as typeof fetch;
+    try {
+      const started = Date.now();
+      await expect(checkReadPath(100, toLocal)).resolves.toBe(true);
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it('is degraded (fail closed) when the request throws', async () => {
     const fetchImpl = jest.fn<typeof fetch>().mockRejectedValue(new TypeError('fetch failed'));
     await expect(checkReadPath(5000, fetchImpl)).resolves.toBe(true);
@@ -680,5 +707,106 @@ describe('buildWaitForQuietPeriod read-path guard', () => {
 
     await expect(waitForQuietPeriod()).resolves.toBe(true);
     expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('reports the read path, not DJ activity, when the read path paused the job', () => {
+    expect(describeQuietPeriodPause('read-path')).toMatch(/read path/);
+    expect(describeQuietPeriodPause('read-path')).not.toMatch(/activity/);
+    expect(describeQuietPeriodPause('dj-activity')).toBe('live flowsheet activity detected');
+  });
+
+  describe('healthy-probe cache', () => {
+    /** A clock the test moves by hand. */
+    const manualClock = () => {
+      let t = 0;
+      return { now: () => t, advance: (ms: number) => (t += ms) };
+    };
+
+    it('skips the probe while the last healthy probe is younger than pauseMs, and probes again after', async () => {
+      const clock = manualClock();
+      const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValue(false);
+      const waitForQuietPeriod = buildWaitForQuietPeriod({
+        lookbackSeconds: 0,
+        pauseMs: 30_000,
+        readPathProbe,
+        readPathCeilingMs: 5000,
+        sleep: instantSleep,
+        now: clock.now,
+      });
+
+      await waitForQuietPeriod();
+      expect(readPathProbe).toHaveBeenCalledTimes(1);
+      clock.advance(29_999);
+      await waitForQuietPeriod();
+      expect(readPathProbe).toHaveBeenCalledTimes(1);
+      clock.advance(1);
+      await waitForQuietPeriod();
+      expect(readPathProbe).toHaveBeenCalledTimes(2);
+    });
+
+    it('never caches a breach: every re-check during a pause probes again', async () => {
+      const clock = manualClock();
+      const readPathProbe = jest
+        .fn<CheckReadPathFn>()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false);
+      const waitForQuietPeriod = buildWaitForQuietPeriod({
+        lookbackSeconds: 0,
+        pauseMs: 30_000,
+        readPathProbe,
+        readPathCeilingMs: 5000,
+        sleep: () => {
+          clock.advance(1);
+          return Promise.resolve();
+        },
+        now: clock.now,
+      });
+
+      await expect(waitForQuietPeriod()).resolves.toBe(false);
+      expect(readPathProbe).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('LIVE_ACTIVITY_READ_PATH_CEILING_MS env wiring (no readPathCeilingMs option)', () => {
+    const original = process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV];
+    afterEach(() => {
+      if (original === undefined) {
+        delete process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV];
+      } else {
+        process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV] = original;
+      }
+    });
+
+    const buildFromEnv = (readPathProbe: CheckReadPathFn) =>
+      buildWaitForQuietPeriod({ lookbackSeconds: 0, pauseMs: 5000, readPathProbe, sleep: instantSleep });
+
+    it.each([
+      ['1234', 1234],
+      [undefined, LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT],
+    ])('env %s passes a %i ms ceiling to the probe', async (raw, expected) => {
+      if (raw === undefined) {
+        delete process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV];
+      } else {
+        process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV] = raw;
+      }
+      const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValue(false);
+      await buildFromEnv(readPathProbe)();
+      expect(readPathProbe).toHaveBeenCalledWith(expected);
+    });
+
+    it('env 0 disables the guard: no probe', async () => {
+      process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV] = '0';
+      const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValue(true);
+      await expect(buildFromEnv(readPathProbe)()).resolves.toBe(false);
+      expect(readPathProbe).not.toHaveBeenCalled();
+    });
+
+    it('an invalid env value throws at build time, naming the env var', () => {
+      process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV] = 'abc';
+      expect(() => buildFromEnv(jest.fn<CheckReadPathFn>())).toThrow(
+        new RegExp(LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV)
+      );
+    });
   });
 });

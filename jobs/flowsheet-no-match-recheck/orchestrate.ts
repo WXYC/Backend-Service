@@ -32,6 +32,7 @@ import {
   checkLiveActivity as defaultCheckLiveActivity,
   requireNonNegativeInt,
   type CheckLiveActivityFn,
+  type WaitForQuietPeriodPauseInfo,
 } from '@wxyc/database';
 import type { DiscogsMatchResult } from '@wxyc/lml-client';
 
@@ -150,7 +151,7 @@ export const buildRecheckWaitForQuietPeriod = (deps: {
   /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
   liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
-  onLivePause?: () => void;
+  onLivePause?: (reason: WaitForQuietPeriodPauseInfo['reason']) => void;
 }): (() => Promise<boolean>) => {
   const liveActivityMaxPauseMs = deps.liveActivityMaxPauseMs ?? resolveLiveActivityMaxPauseMs();
   return buildWaitForQuietPeriod({
@@ -158,7 +159,7 @@ export const buildRecheckWaitForQuietPeriod = (deps: {
     pauseMs: deps.liveActivityPauseMs ?? resolveLiveActivityPauseMs(),
     maxTotalPauseMs: liveActivityMaxPauseMs,
     probe: deps.checkLiveActivity ?? defaultCheckLiveActivity,
-    onPause: () => deps.onLivePause?.(),
+    onPause: ({ reason }) => deps.onLivePause?.(reason),
     onProbeError: (error) => {
       log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
         error_message: error instanceof Error ? error.message : String(error),
@@ -200,7 +201,7 @@ export const runNoMatchRecheck = async (deps: {
   /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
   liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
-  onLivePause?: () => void;
+  onLivePause?: (reason: WaitForQuietPeriodPauseInfo['reason']) => void;
   /**
    * A pre-built cooperative-pause gate, so several passes can SHARE one
    * accrual closure and pool one `LIVE_ACTIVITY_MAX_PAUSE_MS` ceiling

@@ -47,6 +47,7 @@ import {
   resolveLiveActivityMaxPauseMs,
   resolveLiveActivityPauseMs,
   LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import {
   BULK_LOOKUP_INPUT_CAP,
@@ -767,7 +768,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     maxTotalPauseMs: options.liveActivityMaxPauseMs,
     shouldStop: () => stopRequested,
     onPause: (info) =>
-      log('info', 'live_activity_pause', `DJ activity detected; pausing ${info.pauseMs}ms`, {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(info.reason)}; pausing ${info.pauseMs}ms`, {
+        reason: info.reason,
         paused_ms_so_far: info.pausedMs,
       }),
     onProbeError: (err) => captureError(err, 'live_activity_probe'),

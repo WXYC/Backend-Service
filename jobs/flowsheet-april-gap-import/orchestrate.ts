@@ -61,6 +61,7 @@ import {
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import { fetchLegacyEntriesInWindow, type LegacyEntryRow } from '../flowsheet-etl/fetch-legacy.js';
 import { buildShowIdMap as defaultBuildShowIdMap } from '../flowsheet-etl/show-id-map.js';
@@ -561,8 +562,9 @@ export const runImport = async (opts: RunImportOptions): Promise<RunResult> => {
     maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     shouldStop: () => stopRequested,
-    onPause: () => {
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+    onPause: ({ reason }) => {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing ${liveActivityPauseMs}ms`, {
+        reason,
         lookback_seconds: liveActivityLookbackSeconds,
         pause_ms: liveActivityPauseMs,
       });
