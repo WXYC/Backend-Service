@@ -166,6 +166,12 @@ const cleanBilling = (original: string): string => {
  * caller's empty-filter drops along with any other stray empty segment.
  * That's the entire "drop the leading delimiter token" step; no separate
  * strip regex needed. Global, for `.split()`.
+ *
+ * The `w/` lookahead and the spaced slash are literal copies of
+ * `@wxyc/database/support-list`'s `W_JOINER` and `SPACED_SLASH` (a regex
+ * built from `.source` trips security/detect-non-literal-regexp); exported
+ * so `tests/unit/shared/database/support-list.test.ts` pins both by source
+ * equality (BS#3669).
  */
 export const TAIL_SPLIT = /\s*,\s*|\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*|\s+\/\s+|\s+(?:feat\.|ft\.|featuring)\s+/gi;
 

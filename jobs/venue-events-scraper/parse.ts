@@ -15,7 +15,7 @@
  * doesn't drift into our parse.
  */
 
-import { COMMA_SPLIT, SPACED_SLASH, SUPPORT_PLACEHOLDER, W_JOINER } from '@wxyc/database/support-list';
+import { SUPPORT_PLACEHOLDER, W_JOINER } from '@wxyc/database/support-list';
 import type { EventLink, ParsedConcert, SchemaEvent } from './rhp-types.js';
 import { VENUE_SEEDS, type RhpVenueConfig } from './rhp-venues.js';
 
@@ -178,12 +178,21 @@ export const extractEventLinks = (indexHtml: string, baseUrl: string): EventLink
   return Array.from(out, ([url, subHeader]) => ({ url, subHeader }));
 };
 
-/** Lead-ins before the act list: "with special guests", "Special Guests:", "With:", "featuring", "w/". */
+/** Lead-ins before the act list: "with special guests", "Special Guests:", "With:", "featuring". A leading "w/" is `W_JOINER`, tried only when none of these matched. */
 const SUBHEADER_LEAD_IN =
   /^(?:(?:with|featuring|feat\.)\s+)?(?:very\s+)?special\s+guests?\s*:?\s*|^(?:with|featuring|feat\.)\s*:\s*|^(?:featuring|feat\.)\s+/i;
 
 /** A bare lowercase "with " lead-in. Case-sensitive so a band like "With Honor" keeps its name. */
 const SUBHEADER_WITH = /^with\s+/;
+
+/**
+ * Comma (with an optional Oxford "and"/"&") or a spaced slash. "and" alone
+ * belongs inside names. One alternation, not `COMMA_SPLIT` then
+ * `SPACED_SLASH`, so `A / , B` splits as it always has; a literal
+ * (security/detect-non-literal-regexp), pinned to `COMMA_SPLIT|SPACED_SLASH`
+ * by `tests/unit/shared/database/support-list.test.ts`.
+ */
+export const SUBHEADER_SPLIT = /\s*,\s*(?:(?:and|&)\s+)?|\s+\/\s+/;
 
 /**
  * Support acts from a listing-card subheader. Strips a lead-in, splits on
@@ -198,7 +207,7 @@ export const splitSubHeaderActs = (subHeader: string, headliner: string): string
   // `w/` is the last lead-in alternative: it applies only when no other matched.
   const afterLead = trimmed.replace(SUBHEADER_LEAD_IN, '');
   const body = (afterLead !== trimmed ? afterLead : trimmed.replace(W_JOINER, '')).replace(SUBHEADER_WITH, '');
-  for (const part of body.split(COMMA_SPLIT).flatMap((piece) => piece.split(SPACED_SLASH))) {
+  for (const part of body.split(SUBHEADER_SPLIT)) {
     const act = part.trim();
     const key = act.toLowerCase();
     if (act === '' || SUPPORT_PLACEHOLDER.test(act) || seen.has(key)) continue;

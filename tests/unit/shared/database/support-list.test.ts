@@ -7,6 +7,7 @@ import {
   normalizeFreetextArtist,
 } from '@wxyc/database/support-list';
 import { SUPPORT_TAIL, TAIL_SPLIT } from '../../../../jobs/triangle-shows-etl/headliner';
+import { SUBHEADER_SPLIT } from '../../../../jobs/venue-events-scraper/parse';
 
 describe('W_JOINER', () => {
   test.each([
@@ -55,8 +56,34 @@ describe('list delimiters', () => {
   test('SPACED_SLASH needs whitespace on both sides', () => {
     expect('AC/DC / Mudhoney'.split(SPACED_SLASH)).toEqual(['AC/DC', 'Mudhoney']);
   });
-  test('SPACED_SLASH agrees with the read-path co-bill slash', () => {
-    expect(SPACED_SLASH.source).toBe('\\s+\\/\\s+');
-    expect(CO_BILL_DELIMITER.test('A / B')).toBe(true);
+
+  // The comma and spaced-slash rules are embedded mid-pattern in single
+  // alternations whose split results depend on being one regex (`A / , B`),
+  // so those literals are pinned to the shared parts by source equality.
+  test('parse.ts SUBHEADER_SPLIT is exactly COMMA_SPLIT | SPACED_SLASH', () => {
+    expect(SUBHEADER_SPLIT.source).toBe(`${COMMA_SPLIT.source}|${SPACED_SLASH.source}`);
+  });
+  test('headliner.ts TAIL_SPLIT carries SPACED_SLASH as one of its alternatives', () => {
+    expect(TAIL_SPLIT.source.split('|')).toContain(SPACED_SLASH.source);
+  });
+
+  // SPACED_SLASH (`\s+\/\s+`) and the read-path CO_BILL_DELIMITER slash
+  // (`\s\/\s`, the same literal as BILLING_DELIMITER_PATTERNS.slash, which
+  // map.ts splits on) are different rules today: they detect the same
+  // co-bills but split a doubled slash differently. Unifying them is BS#3682.
+  test.each([
+    ['A / B', true],
+    ['A\t/\tB', true],
+    ['A  /  B', true],
+    ['AC/DC', false],
+    ['A /B', false],
+    ['A/ B', false],
+  ])('SPACED_SLASH and CO_BILL_DELIMITER both detect a spaced slash in %j -> %j', (input, expected) => {
+    expect(SPACED_SLASH.test(input)).toBe(expected);
+    expect(CO_BILL_DELIMITER.test(input)).toBe(expected);
+  });
+  test('SPACED_SLASH and CO_BILL_DELIMITER split a doubled slash differently', () => {
+    expect('A /  / B'.split(SPACED_SLASH)).toEqual(['A', '/ B']);
+    expect('A /  / B'.split(CO_BILL_DELIMITER)).toEqual(['A', '', 'B']);
   });
 });

@@ -467,6 +467,10 @@ describe('parseEventPage', () => {
       // A spaced slash separates acts; AC/DC does not.
       ['Quasi', 'quasi-carrboro-cats-cradle', 'Tobacco Road / Wim Tapley', ['Tobacco Road', 'Wim Tapley']],
       ['Quasi', 'quasi-carrboro-cats-cradle', 'AC/DC', ['AC/DC']],
+      // Comma and spaced slash are one alternation: a slash directly before a
+      // comma is its own delimiter, not part of the preceding act.
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'Hex Files / , Mean Habit', ['Hex Files', 'Mean Habit']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'Hex Files / , and Mean Habit', ['Hex Files', 'Mean Habit']],
       // The headliner and repeats are dropped.
       ['Quasi', 'quasi-carrboro-cats-cradle', 'Quasi, Hex Files, hex files', ['Hex Files']],
       // Lead-ins.

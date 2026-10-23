@@ -14,14 +14,8 @@
  */
 
 import { nyCalendarDate, nyWallClockToUtc, type NewConcert } from '@wxyc/database';
-import {
-  COMMA_SPLIT,
-  SPACED_SLASH,
-  SUPPORT_PLACEHOLDER,
-  W_JOINER,
-  normalizeFreetextArtist,
-} from '@wxyc/database/support-list';
-import { parseBilling } from './headliner.js';
+import { COMMA_SPLIT, SUPPORT_PLACEHOLDER, W_JOINER, normalizeFreetextArtist } from '@wxyc/database/support-list';
+import { BILLING_DELIMITER_PATTERNS, parseBilling } from './headliner.js';
 import type { TsEvent } from './types.js';
 
 // Clean-headliner extraction (BS#1604) + the BS#1614 clean-name LML gate +
@@ -75,7 +69,7 @@ const WITH_PREFIX = /^with\s+/;
 const splitSupportElement = (element: string, source: string): string[] => {
   const joiner = W_JOINER.exec(element) ?? (WITH_PREFIX_SOURCES.has(source) ? WITH_PREFIX.exec(element) : null);
   const body = joiner ? element.slice(joiner[0].length) : element;
-  const parts = body.split(SPACED_SLASH);
+  const parts = body.split(BILLING_DELIMITER_PATTERNS.slash);
   return joiner || parts.length > 1 ? parts.flatMap((part) => part.trim().split(COMMA_SPLIT)) : [body];
 };
 
