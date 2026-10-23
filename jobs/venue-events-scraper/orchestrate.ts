@@ -145,14 +145,14 @@ export const runScraper = async (opts: RunOptions): Promise<Totals> => {
       continue;
     }
 
-    const eventUrls = opts.extractEventLinks(indexHtml, site.base_url);
-    totals.events_seen += eventUrls.length;
-    log('info', 'index_done', `discovered ${eventUrls.length} event pages on ${site.site_slug}`, {
+    const eventLinks = opts.extractEventLinks(indexHtml, site.base_url);
+    totals.events_seen += eventLinks.length;
+    log('info', 'index_done', `discovered ${eventLinks.length} event pages on ${site.site_slug}`, {
       site_slug: site.site_slug,
-      event_count: eventUrls.length,
+      event_count: eventLinks.length,
     });
 
-    const results = await opts.mapConcurrent(eventUrls, opts.concurrency, (link) =>
+    const results = await opts.mapConcurrent(eventLinks, opts.concurrency, (link) =>
       processOneEvent(site, link, opts, now())
     );
 
@@ -160,7 +160,7 @@ export const runScraper = async (opts: RunOptions): Promise<Totals> => {
     // not the cumulative totals carried across sites. Cumulative totals
     // still surface in the final `finished` log.
     const siteTotals = emptySiteTotals();
-    siteTotals.events_seen = eventUrls.length;
+    siteTotals.events_seen = eventLinks.length;
     for (const r of results) {
       if (r === null) continue;
       if (r.kind === 'fetch_error') siteTotals.fetch_errors += 1;

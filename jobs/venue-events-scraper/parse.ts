@@ -83,6 +83,8 @@ const ENTITY_MAP: Record<string, string> = {
   '&quot;': '"',
   '&apos;': "'",
   '&#039;': "'",
+  '&#038;': '&',
+  '&#38;': '&',
   '&#8217;': '’', // right single quotation mark
   '&#8216;': '‘',
   '&#8220;': '“',
@@ -101,6 +103,9 @@ export const decodeHtmlEntities = (raw: string | null | undefined): string =>
 
 /** Opening tag of a listing card: an element whose class list holds `eventWrapper` or `rhp-event` as a whole token. */
 const EVENT_CARD_RE = /<[a-z]+\b[^>]*\bclass\s*=\s*["'](?:[^"']*\s)?(?:eventWrapper|rhp-event)(?:\s[^"']*)?["']/gi;
+
+/** Non-global copy of the index link regex, for taking the first `/event/` href inside one card. */
+const EVENT_CARD_LINK_RE = new RegExp(EVENT_INDEX_LINK_RE.source, 'i');
 
 /** The card's `<h4 class="eventSubHeader">` (the support acts as the venue typed them). */
 const EVENT_SUBHEADER_RE =
@@ -136,7 +141,10 @@ const canonicalEventUrl = (href: string, baseUrl: string, baseOrigin: string | n
  * `.rhp-event`), its first `/event/` anchor gets the card's
  * `h4.eventSubHeader` text, entity-decoded, first non-empty value winning.
  * The Etix ticket slug drops `/` and `,`, so the subheader is the only
- * clean source of a bill's support acts (BS#3633).
+ * clean source of a bill's support acts (BS#3633). The event page itself
+ * does not render its own subheader: its `#evSubHead` elements belong to
+ * sidebar cards for other shows, so the index card is the only place to
+ * read it.
  */
 export const extractEventLinks = (indexHtml: string, baseUrl: string): EventLink[] => {
   const baseOrigin = ((): string | null => {
@@ -149,33 +157,58 @@ export const extractEventLinks = (indexHtml: string, baseUrl: string): EventLink
   const out = new Map<string, string | null>();
   for (const m of indexHtml.matchAll(EVENT_INDEX_LINK_RE)) {
     const url = canonicalEventUrl(m[1], baseUrl, baseOrigin);
-    if (url !== null && !out.has(url)) out.set(url, null);
+    if (url !== null) out.set(url, null);
   }
   const cardStarts = Array.from(indexHtml.matchAll(EVENT_CARD_RE), (m) => m.index);
   cardStarts.forEach((start, i) => {
     const card = indexHtml.slice(start, cardStarts[i + 1] ?? indexHtml.length);
-    const href = new RegExp(EVENT_INDEX_LINK_RE.source, 'i').exec(card)?.[1];
+    const href = EVENT_CARD_LINK_RE.exec(card)?.[1];
     const url = href === undefined ? null : canonicalEventUrl(href, baseUrl, baseOrigin);
     const raw = EVENT_SUBHEADER_RE.exec(card)?.[1] ?? '';
-    const subHeader = decodeHtmlEntities(raw.replace(/<[^>]*>/g, ' '))
+    // A `<br>` separates acts the way a comma does. Collapsing comma runs and
+    // trimming edge commas keeps a `<br>`-only subheader empty, so it can't
+    // claim the URL ahead of a later card's real one.
+    const subHeader = decodeHtmlEntities(raw.replace(/<br\s*\/?>/gi, ', ').replace(/<[^>]*>/g, ' '))
       .replace(/\s+/g, ' ')
-      .trim();
+      .replace(/\s*,[\s,]*/g, ', ')
+      .replace(/^[\s,]+|[\s,]+$/g, '');
     if (url !== null && subHeader && out.get(url) === null) out.set(url, subHeader);
   });
   return Array.from(out, ([url, subHeader]) => ({ url, subHeader }));
 };
 
+/** Lead-ins before the act list: "with special guests", "Special Guests:", "With:", "featuring", "w/". */
+const SUBHEADER_LEAD_IN =
+  /^(?:(?:with|featuring|feat\.)\s+)?(?:very\s+)?special\s+guests?\s*:?\s*|^(?:with|featuring|feat\.)\s*:\s*|^(?:featuring|feat\.)\s+|^w\/(?!o(?:ut)?\b)\s*/i;
+
+/** A bare lowercase "with " lead-in. Case-sensitive so a band like "With Honor" keeps its name. */
+const SUBHEADER_WITH = /^with\s+/;
+
+/** Comma (with an optional Oxford "and"/"&") or a spaced slash. "and" alone belongs inside names. */
+const SUBHEADER_SPLIT = /\s*,\s*(?:(?:and|&)\s+)?|\s+\/\s+/;
+
+/** Placeholder entries that name no act: "& more", "special guests", "TBA". */
+const SUBHEADER_FILLER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|guests?|friends|more|tba|tbd)$/i;
+
 /**
- * Support acts from a listing-card subheader: strip a leading `with ` or
- * `w/`, then split on commas only, because "and" belongs inside names
- * ("Wim Tapley and The Cannons").
+ * Support acts from a listing-card subheader. Strips a lead-in, splits on
+ * commas and spaced slashes, drops placeholders, and drops the headliner and
+ * repeats (case-insensitive). An empty result lets the caller fall back to
+ * the Etix slug.
  */
-export const splitSubHeaderActs = (subHeader: string): string[] =>
-  subHeader
-    .replace(/^\s*(?:with\s+|w\/\s*)/i, '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+export const splitSubHeaderActs = (subHeader: string, headliner: string): string[] => {
+  const seen = new Set([headliner.trim().toLowerCase()]);
+  const acts: string[] = [];
+  const body = subHeader.trim().replace(SUBHEADER_LEAD_IN, '').replace(SUBHEADER_WITH, '');
+  for (const part of body.split(SUBHEADER_SPLIT)) {
+    const act = part.trim();
+    const key = act.toLowerCase();
+    if (act === '' || SUBHEADER_FILLER.test(act) || seen.has(key)) continue;
+    seen.add(key);
+    acts.push(act);
+  }
+  return acts;
+};
 
 /**
  * Extract the Event JSON-LD object from an event detail page. Returns
@@ -438,7 +471,7 @@ export const parseEventPage = (
   }
 
   const offer = extractFirstOffer(raw.offers);
-  const subHeaderActs = subHeader ? splitSubHeaderActs(subHeader) : [];
+  const subHeaderActs = subHeader ? splitSubHeaderActs(subHeader, name) : [];
   const supporting = subHeaderActs.length > 0 ? subHeaderActs : extractSupportingActsFromEtix(offer.url, name);
 
   const venueDisplayName = decodeHtmlEntities(raw.location.name).trim();
