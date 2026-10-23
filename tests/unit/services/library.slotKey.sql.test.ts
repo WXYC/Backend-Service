@@ -30,6 +30,7 @@
 import { db, library } from '../../mocks/database.mock';
 import { renderSql } from '../../utils/render-sql';
 import {
+  albumCodeNumberTaken,
   findLibrarySlotOccupant,
   librarySlotKey,
   librarySlotVolumeLetterMatchSql,
@@ -76,5 +77,33 @@ describe('shelf slot key: the volume-letter fold across the SQL boundary', () =>
     expect(sqlPredicatesOf(where)).toContain(
       renderSql(librarySlotVolumeLetterMatchSql(library.code_volume_letters, 'd'))
     );
+  });
+
+  // BS#2579: `albumCodeNumberTaken` used to key on `(artist_id, code_number)`
+  // alone -- 3,035 false collisions against production. It now asks
+  // `findLibrarySlotOccupant` about the real slot, so the genre and the folded
+  // volume letter must reach the WHERE clause.
+  describe('albumCodeNumberTaken keys on the real shelf slot (BS#2579)', () => {
+    it('constrains the genre, so a cross-genre filing is not a collision', async () => {
+      mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([]));
+
+      await expect(albumCodeNumberTaken(1, 2, 3, null, 99)).resolves.toBe(false);
+
+      const where = mockDb._chain.where.mock.calls.at(-1)?.[0] as { and: unknown[] };
+      expect(where.and).toContainEqual({ eq: [library.genre_id, 2] });
+      expect(where.and).toContainEqual({ eq: [library.artist_id, 1] });
+      expect(where.and).toContainEqual({ ne: [library.id, 99] });
+    });
+
+    it('carries the volume-letter fold and reports an occupant as taken', async () => {
+      mockDb._chain.limit.mockReturnValueOnce(Promise.resolve([{ id: 5 }]));
+
+      await expect(albumCodeNumberTaken(1, 2, 3, 'a', 99)).resolves.toBe(true);
+
+      const where = mockDb._chain.where.mock.calls.at(-1)?.[0];
+      expect(sqlPredicatesOf(where)).toContain(
+        renderSql(librarySlotVolumeLetterMatchSql(library.code_volume_letters as never, 'a'))
+      );
+    });
   });
 });

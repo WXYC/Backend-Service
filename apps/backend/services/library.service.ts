@@ -6141,13 +6141,11 @@ const foldVolumeLetters = (code_volume_letters: string | null): string => (code_
  * shelves — and the volume letter folds to upper case because `D` and `d` are
  * one slot.
  *
- * **Deliberately NOT `albumCodeNumberTaken`.** That predicate keys on
- * `(artist_id, code_number)` only and is genre-blind; measured against
- * production on 2026-09-18 it sees 3,308 apparent collisions where this key
- * sees 273 — 3,035 false positives out of 64,359 rows. Reaching for it here
- * would decline or relocate restores whose slot was free.
- * WXYC/Backend-Service#2579 owns fixing it; this endpoint does not wait on
- * that. `generateAlbumCodeNumber` is genre-scoped too now (BS#2587), but
+ * **History: `albumCodeNumberTaken` used to key on `(artist_id, code_number)`
+ * only.** Measured against production on 2026-09-18 that genre-blind key saw
+ * 3,308 apparent collisions where this key sees 273 — 3,035 false positives
+ * out of 64,359 rows. BS#2579 fixed it in place: it now asks
+ * `findLibrarySlotOccupant` about this key. `generateAlbumCodeNumber` is genre-scoped too now (BS#2587), but
  * `probeLibrarySlot` still computes its own next-free code rather than
  * calling it, for two reasons that survive that change: it holds `FOR
  * UPDATE` on the shelf rows below, and its occupancy match is
@@ -6299,7 +6297,8 @@ export const peekArtistShelf = async (
  * an advisory lock, which an ordinary PATCH never takes, so this is a plain
  * read -- a check-then-act race WXYC/Backend-Service#2589's unique index is
  * what closes, not this function. `exclude_library_id` drops the row being
- * edited, so a no-op re-save onto its own slot never refuses against itself.
+ * edited, so a no-op re-save onto its own slot never refuses against itself;
+ * it is optional because a create has no such row.
  *
  * Unlike `probeLibrarySlot`, which needs every row on the shelf for its
  * `MAX`, this needs exactly one row, so the match runs in SQL (`code_number`
@@ -6325,7 +6324,7 @@ export const findLibrarySlotOccupant = async (
   genre_id: number,
   code_number: number,
   code_volume_letters: string | null,
-  exclude_library_id: number
+  exclude_library_id?: number
 ): Promise<{ id: number } | undefined> => {
   const [occupant] = await db
     .select({ id: library.id })
@@ -6336,7 +6335,8 @@ export const findLibrarySlotOccupant = async (
         eq(library.genre_id, genre_id),
         eq(library.code_number, code_number),
         librarySlotVolumeLetterMatchSql(library.code_volume_letters, code_volume_letters),
-        ne(library.id, exclude_library_id)
+        // Omitted on a create (`POST /library`), where there is no row of its own to skip; `and()` drops `undefined`.
+        exclude_library_id === undefined ? undefined : ne(library.id, exclude_library_id)
       )
     )
     .limit(1);
@@ -8016,21 +8016,21 @@ const runDeleteAlbumTransaction = async (album_id: number, actor: DeleteAlbumAct
   });
 };
 
-/** True when `artist_id` already owns an album with this `code_number` (excluding `exclude_album_id`). */
+/**
+ * True when the shelf slot `(artist_id, genre_id, code_number, volume letters)`
+ * is held by a release other than `exclude_album_id` (BS#2579). Keyed on the
+ * real slot via `findLibrarySlotOccupant` -- the old `(artist_id, code_number)`
+ * key was genre-blind and saw 3,308 production collisions where this sees 273.
+ */
 export const albumCodeNumberTaken = async (
   artist_id: number,
+  genre_id: number,
   code_number: number,
+  code_volume_letters: string | null,
   exclude_album_id: number
-): Promise<boolean> => {
-  const rows = await db
-    .select({ id: library.id })
-    .from(library)
-    .where(
-      and(eq(library.artist_id, artist_id), eq(library.code_number, code_number), ne(library.id, exclude_album_id))
-    )
-    .limit(1);
-  return rows.length > 0;
-};
+): Promise<boolean> =>
+  (await findLibrarySlotOccupant(artist_id, genre_id, code_number, code_volume_letters, exclude_album_id)) !==
+  undefined;
 
 export const artistExistsInGenre = async (artist_id: number, genre_id: number): Promise<boolean> => {
   const rows = await db

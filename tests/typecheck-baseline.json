@@ -42,7 +42,7 @@
   "tests/unit/controllers/intake.notices.controller.test.ts": 5,
   "tests/unit/controllers/library.artistSearch.test.ts": 1,
   "tests/unit/controllers/library.compilationTracks.test.ts": 10,
-  "tests/unit/controllers/library.controller.test.ts": 228,
+  "tests/unit/controllers/library.controller.test.ts": 185,
   "tests/unit/controllers/library.crossReferences.test.ts": 3,
   "tests/unit/controllers/library.deletedArchive.test.ts": 1,
   "tests/unit/controllers/library.discogsPrefill.controller.test.ts": 1,

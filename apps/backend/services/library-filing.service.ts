@@ -391,14 +391,11 @@ const MAX_CODE_VOLUME_LETTERS_LENGTH = 4;
  * and reaches PG as SQLSTATE 22003 -> 500 where this codebase's convention is
  * a boundary 400.
  *
- * Deliberately NOT collision-checked. `libraryService.albumCodeNumberTaken`
- * exists and `updateAlbum` calls it for exactly the collision a client-chosen
- * number can create, so its absence here reads as an oversight unless said
- * out loud: WXYC has a single librarian, so the two-operator race does not
- * exist, and an application-side 409 would block the deliberate re-use of a
- * lost record's slot (rotation-import plan D2). Uniqueness becomes the
- * database's job on BS#2033, whose constraint carries the 23505 -> 409
- * obligation recorded in `jobs/library-call-number-dedup/README.md`.
+ * Not collision-checked here: this validates a single value's bounds. The
+ * slot check needs the artist, genre and volume letters, so `addAlbum` runs it
+ * (BS#2579) after resolving them, against the same real shelf slot `updateAlbum`
+ * uses. The filing path (`createLibraryFiling`) also takes a supplied number
+ * and does not run that check yet.
  */
 export const validateCodeNumber = (code_number: unknown): number => {
   if (typeof code_number !== 'number' || !Number.isInteger(code_number) || code_number < 1 || code_number > INT2_MAX) {
