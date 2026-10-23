@@ -739,7 +739,8 @@ export const runDrain = async (options: DrainOptions): Promise<DrainSummary> => 
     const batch = batches[b];
     if (!batch) continue;
     // The shared pause consults `shouldStop` too, but returns early without
-    // consulting it when the probe is disabled (LIVE_ACTIVITY_LOOKBACK_SECONDS=0),
+    // consulting it when both probes are disabled (LIVE_ACTIVITY_LOOKBACK_SECONDS=0
+    // and LIVE_ACTIVITY_READ_PATH_CEILING_MS=0),
     // so a catch-up run would have no stop path at all without this line.
     if (stopRequested) {
       log('warn', 'stopped', 'graceful stop requested; ending before the next batch', {

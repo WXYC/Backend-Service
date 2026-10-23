@@ -29,7 +29,8 @@ export const LIVE_ACTIVITY_PAUSE_MS_DEFAULT = 30_000;
  * since the loop's only delay IS the sleep this floor exists to protect.
  * Every value below the floor is rejected at resolve time rather than
  * silently misbehaving. `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the one
- * and only disable knob.
+ * and only disable knob for the DJ-activity pause; the read-path guard has its
+ * own (`LIVE_ACTIVITY_READ_PATH_CEILING_MS=0`, BS#2552).
  */
 export const LIVE_ACTIVITY_MIN_PAUSE_MS = 1_000;
 
@@ -100,7 +101,7 @@ export const resolveLiveActivityPauseMs = (
       `Invalid ${envName}=${JSON.stringify(raw)}: must be >= ${LIVE_ACTIVITY_MIN_PAUSE_MS} (ms), or unset for the ` +
         `${LIVE_ACTIVITY_PAUSE_MS_DEFAULT}ms default. A value below the floor turns the cooperative-pause re-probe ` +
         'loop into a hot loop against the database instead of disabling it — use LIVE_ACTIVITY_LOOKBACK_SECONDS=0 ' +
-        'to disable the pause.'
+        'to disable the DJ-activity pause, and LIVE_ACTIVITY_READ_PATH_CEILING_MS=0 to disable the read-path guard.'
     );
   }
   return resolved;
@@ -311,7 +312,9 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
   let lastHealthyReadPathAt: number | null = null;
 
   const readPathDegraded = async (): Promise<boolean> => {
-    if (lastHealthyReadPathAt !== null && now() - lastHealthyReadPathAt < pauseMs) return false;
+    if (lastHealthyReadPathAt !== null && now() - lastHealthyReadPathAt < pauseMs) {
+      return false;
+    }
     let degraded: boolean;
     try {
       degraded = await readPathProbe(readPathCeilingMs);
@@ -323,14 +326,23 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
   };
 
   return async (): Promise<boolean> => {
-    if (lookbackSeconds <= 0 && readPathCeilingMs <= 0) return false;
+    if (lookbackSeconds <= 0 && readPathCeilingMs <= 0) {
+      return false;
+    }
 
     while (true) {
       const loopStart = now();
       let reason: WaitForQuietPeriodPauseInfo['reason'] | null = null;
-      if (lookbackSeconds > 0 && (await safeProbe())) reason = 'dj-activity';
-      else if (readPathCeilingMs > 0 && (await readPathDegraded())) reason = 'read-path';
-      if (reason === null) return shouldStop();
+      if (lookbackSeconds > 0 && (await safeProbe())) {
+        reason = 'dj-activity';
+        // A healthy read-path verdict from before a DJ pause is stale once the DJ goes quiet.
+        lastHealthyReadPathAt = null;
+      } else if (readPathCeilingMs > 0 && (await readPathDegraded())) {
+        reason = 'read-path';
+      }
+      if (reason === null) {
+        return shouldStop();
+      }
       if (shouldStop()) return true;
 
       if (maxTotalPauseMs > 0 && pausedMs >= maxTotalPauseMs) {
