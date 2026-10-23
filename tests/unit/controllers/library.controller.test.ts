@@ -848,9 +848,16 @@ describe('library.controller', () => {
 
       it('refuses a supplied call code whose slot is occupied (409) before anything is written', async () => {
         mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+        const res = mockResponse();
 
-        await expect(addAlbum(req({ code_number: 12 }), mockResponse(), next)).rejects.toMatchObject({
-          statusCode: 409,
+        await addAlbum(req({ code_number: 12 }), res, next);
+
+        // The full body: `LibraryAddConflictError` clients switch on `reason`,
+        // and `code`/`details` match the PATCH 409.
+        expect(res.status).toHaveBeenCalledWith(409);
+        expect(res.json).toHaveBeenCalledWith({
+          message: expect.any(String),
+          reason: 'library_slot_conflict',
           code: 'library_slot_conflict',
           details: { conflicting_album_id: 99 },
         });
@@ -4074,8 +4081,7 @@ describe('library.controller', () => {
         // artist, but the body carries the row's own code_number because every
         // read response emits it. The destination artist already owns that
         // number, so the move must still burn the next one in its sequence
-        // instead of filing two releases into one shelf slot — there is no
-        // collision check and no DB constraint (BS#2033) behind this.
+        // instead of 409ing on the final-slot check (BS#2579).
         mockAlbumCodeNumberTaken.mockResolvedValue(true);
         mockGenerateAlbumCodeNumber.mockResolvedValue(9);
         const res = mockResponse();
@@ -4121,6 +4127,30 @@ describe('library.controller', () => {
         );
         expect(res.status).toHaveBeenCalledWith(200);
       });
+
+      // BS#2579: the collision lookup is keyed on the DESTINATION slot, so it
+      // takes the effective genre and the effective volume letters, not the
+      // stored ones. A regression to `existing.genre_id` or
+      // `existing.code_volume_letters` gives the same regenerate on an empty
+      // shelf, so only these argument assertions catch it.
+      it.each([
+        { name: 'genre_id only', body: { genre_id: 15 }, genreId: 15, letters: null },
+        { name: 'code_volume_letters only', body: { code_volume_letters: 'A' }, genreId: 11, letters: 'A' },
+        { name: 'both', body: { genre_id: 15, code_volume_letters: 'A' }, genreId: 15, letters: 'A' },
+      ])(
+        'an artist move changing $name looks up the effective destination slot',
+        async ({ body, genreId, letters }) => {
+          mockAlbumCodeNumberTaken.mockResolvedValue(false);
+
+          await updateAlbum(
+            reqFor({ artist_id: 55, code_number: existingRow.code_number, ...body }),
+            mockResponse(),
+            next
+          );
+
+          expect(mockAlbumCodeNumberTaken).toHaveBeenCalledWith(55, genreId, existingRow.code_number, letters, 42);
+        }
+      );
 
       it('an echoed code_number is kept when the destination artist has no collision', async () => {
         mockAlbumCodeNumberTaken.mockResolvedValue(false);
