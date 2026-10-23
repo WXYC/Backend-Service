@@ -671,7 +671,7 @@ describe('PATCH /library/:id', () => {
       expect(res.body.code).toBe('library_slot_conflict');
     });
 
-    test('an artist+genre move does not 409 when the regenerate already found a free slot', async () => {
+    test('an artist+genre move keeps its number and does not 409 when the destination slot is free', async () => {
       const origin = await auth
         .post('/library/artists')
         .send({
@@ -867,11 +867,18 @@ describe('PATCH /library/:id', () => {
     });
 
     test('POST /library refuses a supplied call code that is already filed (409)', async () => {
-      await mkAlbum(11, 65, undefined, 'Slot Create Occupant').then((r) => expect(r.status).toBe(201));
+      const occupant = await mkAlbum(11, 65, undefined, 'Slot Create Occupant');
+      expect(occupant.status).toBe(201);
 
       const res = await mkAlbum(11, 65, undefined, 'Slot Create Duplicate');
       expect(res.status).toBe(409);
-      expect(res.body.code).toBe('library_slot_conflict');
+      // The full body: `reason` is what `LibraryAddConflictError` clients switch on.
+      expect(res.body).toEqual({
+        message: expect.any(String),
+        reason: 'library_slot_conflict',
+        code: 'library_slot_conflict',
+        details: { conflicting_album_id: occupant.body.id },
+      });
       // ...while the other genre's shelf accepts the same number.
       await mkAlbum(15, 65, undefined, 'Slot Create Other Genre').then((r) => expect(r.status).toBe(201));
     });

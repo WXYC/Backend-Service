@@ -196,10 +196,23 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   const canonical_artist_name = await libraryService.getArtistNameById(artist_id);
 
   // BS#2579: an operator-supplied call code that names an already-filed slot is
-  // refused rather than written beside it. An omitted code_number is MAX+1 on
-  // the shelf, so only the supplied case can collide (bar the race #2589 closes).
+  // refused rather than written beside it. A lost record keeps its row and its
+  // slot (`markAlbumMissing` only sets `date_lost`), so this also refuses
+  // re-using a lost record's slot; #2589's full unique index refuses the same
+  // write. An omitted code_number is MAX+1 on the shelf, so only the supplied
+  // case can collide (bar the race #2589 closes). This endpoint's 409 body is
+  // `LibraryAddConflictError`, which clients switch on by `reason`, so the
+  // refusal carries `reason` beside the `code`/`details` the PATCH 409 sends.
   if (supplied_code_number !== undefined) {
-    await assertLibrarySlotFree(artist_id, body.genre_id, supplied_code_number, code_volume_letters ?? null);
+    try {
+      await assertLibrarySlotFree(artist_id, body.genre_id, supplied_code_number, code_volume_letters ?? null);
+    } catch (err) {
+      if (err instanceof WxycError && err.code === 'library_slot_conflict') {
+        res.status(409).json({ ...err.toApiErrorResponse(), reason: 'library_slot_conflict' });
+        return;
+      }
+      throw err;
+    }
   }
 
   // BS#2807: the label upsert and the insert share one transaction, so a refused
@@ -3251,13 +3264,14 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     if (body.artist_id !== undefined && body.artist_id !== existing.artist_id) {
       updates.artist_id = body.artist_id;
       updates.artist_name = canonical_artist_name;
-      // Re-attribution keeps the album's code_number unless the new artist
-      // already owns it (issue 7) — only on collision do we burn the next
+      // Re-attribution keeps the album's code_number unless its destination
+      // slot is already taken (issue 7) — only on collision do we burn the next
       // number in the new artist's sequence. A code_number that DIFFERS from
       // the stored one is the operator deliberately choosing the destination
-      // shelf, so it is written verbatim, uncollision-checked, same as every
-      // other code_number write on this endpoint and on POST /library;
-      // regenerating over it would silently discard that choice (BS#2564).
+      // shelf, so it is written verbatim rather than regenerated, which would
+      // silently discard that choice (BS#2564). It is not unchecked: the
+      // final-slot check below refuses it with a 409 when the destination
+      // slot is occupied (BS#2579).
       //
       // The test is "differs", not "present", and the distinction is
       // load-bearing: a code_number that merely echoes the stored value
@@ -3270,11 +3284,10 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // `code_volume_letters: null` a few lines above. An echo is therefore
       // indistinguishable from "keep what's there", which is exactly what a
       // move did before this PR, so it falls through to the regenerate rather
-      // than filing two releases into one (artist, code_number) slot. That
-      // matters more than usual here: there is no application-level collision
-      // check on this path and no DB uniqueness constraint yet (BS#2033), so
-      // this regenerate is the only thing standing between a full-record
-      // resubmit and a silent duplicate shelf slot.
+      // than filing two releases into one shelf slot. The regenerate is what
+      // keeps a full-record resubmit from 409ing on the final-slot check below:
+      // an echoed number onto an occupied destination slot gets a fresh number
+      // instead of a refusal. The DB uniqueness constraint is WXYC/Backend-Service#2589.
       const clientChoseDestinationCodeNumber =
         body.code_number !== undefined && body.code_number !== existing.code_number;
       // Keyed on the destination slot (`effectiveGenreId`, the release's own

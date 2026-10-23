@@ -960,12 +960,24 @@ components:
     LibraryAddConflictError:
       type: object
       description: >-
-        The `POST /library` 409 body (BS#2810). Swagger display only; the SSOT is
-        wxyc-shared/api.yaml.
+        The `POST /library` 409 body (BS#2810). On `library_slot_conflict` (BS#2579) the body
+        also carries `code: 'library_slot_conflict'` and `details.conflicting_album_id`, the
+        release that already holds the slot. Swagger display only; the SSOT is
+        wxyc-shared/api.yaml (WXYC/wxyc-shared#763).
       required: [message, reason]
       properties:
         message: { type: string }
-        reason: { type: string, enum: [review_required, rotation_not_eligible] }
+        reason: { type: string, enum: [review_required, rotation_not_eligible, library_slot_conflict] }
+        code:
+          type: string
+          description: Present on `library_slot_conflict`, with the same value as `reason`.
+        details:
+          type: object
+          description: Present on `library_slot_conflict`.
+          properties:
+            conflicting_album_id:
+              type: integer
+              description: The release that already holds the slot.
 
     RotationConflictError:
       type: object
@@ -3106,9 +3118,10 @@ paths:
             label text (BS#2807). Also `rotation_not_eligible` when `from_rotation_id` names
             a row that is linked, not legacy, missing or moved to another bin: nothing is written either (BS#2810, BS#3007).
             Also `library_slot_conflict` (BS#2579) when a supplied `code_number` / `code_volume_letters`
-            names a shelf slot another release already holds: body `{ message, code:
-            'library_slot_conflict', details: { conflicting_album_id } }`, `details` always present;
-            nothing is written.
+            names a shelf slot another release already holds: body `{ message, reason:
+            'library_slot_conflict', code: 'library_slot_conflict', details: { conflicting_album_id } }`,
+            `details` always present; nothing is written. A lost record keeps its slot, so its
+            call number cannot be re-used here.
           content:
             application/json:
               schema:
