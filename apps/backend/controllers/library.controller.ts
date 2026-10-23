@@ -113,6 +113,34 @@ type NewAlbumRequest = {
   from_rotation_id?: number;
 };
 
+/**
+ * Refuses (409 `library_slot_conflict`) a filing onto a slot another release
+ * already holds. `excludeAlbumId` is the row being edited, absent on a create.
+ * The conflicting row goes under `details`, which `app.yaml` declares.
+ */
+const assertLibrarySlotFree = async (
+  artistId: number,
+  genreId: number,
+  codeNumber: number,
+  volumeLetters: string | null,
+  excludeAlbumId?: number
+): Promise<void> => {
+  const occupant = await libraryService.findLibrarySlotOccupant(
+    artistId,
+    genreId,
+    codeNumber,
+    volumeLetters,
+    excludeAlbumId
+  );
+  if (occupant) {
+    throw new WxycError(
+      `Call number ${codeNumber}${volumeLetters ?? ''} is already taken for artist ${artistId} in genre ${genreId}`,
+      409,
+      { code: 'library_slot_conflict', details: { conflicting_album_id: occupant.id } }
+    );
+  }
+};
+
 //Check if artist exists.
 //Add new album to library
 export const addAlbum: RequestHandler = async (req: Request<object, object, NewAlbumRequest>, res) => {
@@ -166,6 +194,13 @@ export const addAlbum: RequestHandler = async (req: Request<object, object, NewA
   // library row stays consistent with the FK target even when the client
   // sent a casing variant. Renames cascade via the trigger added in 0060.
   const canonical_artist_name = await libraryService.getArtistNameById(artist_id);
+
+  // BS#2579: an operator-supplied call code that names an already-filed slot is
+  // refused rather than written beside it. An omitted code_number is MAX+1 on
+  // the shelf, so only the supplied case can collide (bar the race #2589 closes).
+  if (supplied_code_number !== undefined) {
+    await assertLibrarySlotFree(artist_id, body.genre_id, supplied_code_number, code_volume_letters ?? null);
+  }
 
   // BS#2807: the label upsert and the insert share one transaction, so a refused
   // create (the review gate, `insertAlbum`'s basis check) rolls back the
@@ -3165,6 +3200,8 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
     updates.code_volume_letters =
       body.code_volume_letters === null ? null : (validateCodeVolumeLetters(body.code_volume_letters) ?? null);
   }
+  const effectiveVolumeLetters =
+    ('code_volume_letters' in updates ? updates.code_volume_letters : existing.code_volume_letters) ?? null;
 
   if (body.format_id !== undefined) {
     if (!Number.isInteger(body.format_id) || body.format_id < 1) {
@@ -3240,20 +3277,18 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
       // resubmit and a silent duplicate shelf slot.
       const clientChoseDestinationCodeNumber =
         body.code_number !== undefined && body.code_number !== existing.code_number;
-      // `albumCodeNumberTaken` is still artist-wide, not genre-scoped -- that
-      // is WXYC/Backend-Service#2579's fix, deliberately not made here (the
-      // issue calls the two functions "same root cause, different function,
-      // different consequence"). So this trigger can fire on a same-number
-      // collision in a genre the release isn't even moving to, while the
-      // regenerate below now answers from the correct (destination) shelf.
-      // That mismatch is over-eager, never under-eager: artist-wide collision
-      // detection is a superset of genre-scoped, so it never treats an
-      // actually-taken slot as free, only occasionally burns a number that a
-      // genre-scoped check would have left alone. No correctness hazard, just
-      // avoidable churn until #2579 lands.
+      // Keyed on the destination slot (`effectiveGenreId`, the release's own
+      // volume letters), so a same-number release on another genre's shelf is
+      // no collision and burns no number (BS#2579).
       if (
         !clientChoseDestinationCodeNumber &&
-        (await libraryService.albumCodeNumberTaken(body.artist_id, existing.code_number, albumId))
+        (await libraryService.albumCodeNumberTaken(
+          body.artist_id,
+          effectiveGenreId,
+          existing.code_number,
+          effectiveVolumeLetters,
+          albumId
+        ))
       ) {
         // `effectiveGenreId`, not `existing.genre_id`: `genre_id` is itself in
         // `UPDATABLE_ALBUM_FIELDS`, so a request can move the release to a new
@@ -3263,52 +3298,30 @@ export const updateAlbum: RequestHandler<{ id: string }, unknown, UpdateAlbumReq
         updates.code_number = await libraryService.generateAlbumCodeNumber(body.artist_id, effectiveGenreId);
       }
     }
+    if (body.genre_id !== undefined) updates.genre_id = body.genre_id;
+  }
 
-    // A destination genre CHANGE -- genre-only, or alongside an artist move --
-    // lands the release on a shelf that restarts numbering at 1 per genre
-    // (BS#2587), so its code_number can already name another release's real
-    // slot there. Refuse rather than silently double-file two releases onto
-    // one call number, keyed on the REAL shelf slot (`librarySlotKey`'s
-    // tuple), not `albumCodeNumberTaken` -- whose genre-blind false positives
-    // are why an earlier revision of this fix left genre-only moves
-    // unchecked entirely.
-    //
-    // Runs AFTER the arm above, so it sees the FINAL code_number (any
-    // regenerate has already happened), and gates on the genre actually
-    // CHANGING (`body.genre_id !== existing.genre_id`), not merely being
-    // present in the body. dj-site's album editor resubmits the whole record
-    // on Save, so a bare `body.genre_id !== undefined` trigger would run this
-    // check -- and refuse -- on every PATCH that happens to echo the stored
-    // genre_id back, including a `code_number`-only edit that never named a
-    // destination shelf at all. That narrowing is deliberate, not an
-    // oversight it slid past: it does NOT widen this guard to also cover a
-    // `code_number`-only move onto an occupied slot -- that stays unchecked
-    // here, exactly as on `main`, and is WXYC/Backend-Service#2579's fix to
-    // make; this PR is scoped to the genre-move hole specifically. A pure
-    // artist-only move is likewise left to the arm above's own genre-blind
-    // check, unwidened here.
-    if (body.genre_id !== undefined) {
-      if (body.genre_id !== existing.genre_id) {
-        const effectiveCodeNumber = updates.code_number ?? existing.code_number;
-        const effectiveVolumeLetters =
-          ('code_volume_letters' in updates ? updates.code_volume_letters : existing.code_volume_letters) ?? null;
-        const occupant = await libraryService.findLibrarySlotOccupant(
-          effectiveArtistId,
-          body.genre_id,
-          effectiveCodeNumber,
-          effectiveVolumeLetters,
-          albumId
-        );
-        if (occupant) {
-          throw new WxycError(
-            `Call number ${effectiveCodeNumber}${effectiveVolumeLetters ?? ''} is already taken for artist ${effectiveArtistId} in genre ${body.genre_id}`,
-            409,
-            { code: 'library_slot_conflict' }
-          );
-        }
-      }
-      updates.genre_id = body.genre_id;
-    }
+  // The slot the release will occupy, refused when another release holds it
+  // (BS#2579; genre moves since BS#2587). Runs after every code_number write
+  // above, any regenerate included, and only when the slot actually CHANGES:
+  // dj-site's album editor resubmits the whole record on Save, so an unchanged
+  // call number -- including a row already in one of the 270 duplicate slots --
+  // must stay editable. The key folds volume-letter case, so `7a` -> `7A` is
+  // unchanged. The check-then-act race is closed by WXYC/Backend-Service#2589.
+  const finalSlot = {
+    artist_id: updates.artist_id ?? existing.artist_id,
+    genre_id: updates.genre_id ?? existing.genre_id,
+    code_number: updates.code_number ?? existing.code_number,
+    code_volume_letters: effectiveVolumeLetters,
+  };
+  if (libraryService.librarySlotKey(finalSlot) !== libraryService.librarySlotKey(existing)) {
+    await assertLibrarySlotFree(
+      finalSlot.artist_id,
+      finalSlot.genre_id,
+      finalSlot.code_number,
+      finalSlot.code_volume_letters,
+      albumId
+    );
   }
 
   const labelProvided = body.label !== undefined;

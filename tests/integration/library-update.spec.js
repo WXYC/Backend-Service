@@ -523,10 +523,8 @@ describe('PATCH /library/:id', () => {
         .expect(201);
       // originArtist's first release auto-assigns 1, which collides with
       // destArtist's Electronic code_number 1 -- the trigger for the
-      // regenerate. `albumCodeNumberTaken` is artist-wide
-      // (WXYC/Backend-Service#2579, deliberately not fixed here), so it fires
-      // on that collision regardless of which genre either release is filed
-      // under -- see the module comment above for that known scope gap.
+      // regenerate. `albumCodeNumberTaken` is keyed on the destination slot
+      // (BS#2579), and destArtist's Electronic shelf holds 1, so it fires.
       expect(moving.body.code_number).toBe(1);
 
       const res = await auth
@@ -624,7 +622,7 @@ describe('PATCH /library/:id', () => {
   // would run (and could refuse) on a PATCH that never named a destination
   // shelf at all.
   describe('genre-move guard fires on a genre CHANGE, not mere presence (BS#2587 review finding 7)', () => {
-    test('a genre_id equal to the stored value does not 409, even onto an already-occupied slot', async () => {
+    test('a genre_id equal to the stored value never refuses by itself; only a changed slot does', async () => {
       const a = await auth
         .post('/library/artists')
         .send({
@@ -661,15 +659,16 @@ describe('PATCH /library/:id', () => {
         })
         .expect(201);
 
-      // `genre_id` is present and equal to the row's own stored genre --
-      // under the old presence-based trigger this would run the occupancy
-      // check against `code_number: 30` and 409; the genre isn't actually
-      // moving, so it must not.
-      const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11, code_number: 30 }).expect(200);
-      // Written uncollision-checked, same as any other code_number-only edit
-      // on this endpoint (#2579's gap, not this PR's to close) -- proof the
-      // guard genuinely did not run rather than having run and passed.
-      expect(res.body.code_number).toBe(30);
+      // `genre_id` is present and equal to the row's own stored genre. Echoing
+      // it alone leaves the slot unchanged, so nothing is checked -- the old
+      // presence-based trigger would have run the occupancy check here.
+      const echo = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11 }).expect(200);
+      expect(echo.body.code_number).toBe(31);
+
+      // Echoing the genre does not exempt a code_number edit onto the occupied
+      // slot 30: the slot changed, so it is refused (BS#2579).
+      const res = await auth.patch(`/library/${moving.body.id}`).send({ genre_id: 11, code_number: 30 }).expect(409);
+      expect(res.body.code).toBe('library_slot_conflict');
     });
 
     test('an artist+genre move does not 409 when the regenerate already found a free slot', async () => {
@@ -705,8 +704,8 @@ describe('PATCH /library/:id', () => {
       );
 
       try {
-        // destArtist already owns code_number 1 in Rock -- the artist-wide
-        // collision that triggers the auto-regenerate.
+        // destArtist already owns code_number 1 in Rock -- a same-number
+        // release on the OTHER genre's shelf, which is no collision at all.
         await auth
           .post('/library')
           .send({
@@ -731,11 +730,10 @@ describe('PATCH /library/:id', () => {
           .expect(201);
         expect(moving.body.code_number).toBe(1);
 
-        // artist_id + genre_id move: destArtist already owns 1, so the
-        // regenerate fires and scopes to Electronic (15) -- empty, so it
-        // answers 1. The guard runs (genre 15 differs from the moving
-        // release's stored 11) against that FRESHLY REGENERATED 1, finds
-        // Electronic's shelf empty, and must let the write through.
+        // artist_id + genre_id move: destArtist's Rock shelf owns 1 but the
+        // destination, Electronic (15), is empty. The destination-slot key
+        // (BS#2579) sees no collision, so nothing is regenerated and the
+        // release keeps its 1; the final-slot check finds it free too.
         const res = await auth
           .patch(`/library/${moving.body.id}`)
           .send({ artist_id: destArtist.id, genre_id: 15 })
@@ -807,6 +805,99 @@ describe('PATCH /library/:id', () => {
           `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 15`
         );
       }
+    });
+  });
+
+  // BS#2579: the call-code write paths are keyed on the real shelf slot
+  // `(artist_id, genre_id, code_number, upper(coalesce(code_volume_letters, '')))`.
+  // The artist is filed under Rock (11) and Electronic (15): numbering is
+  // per-genre, so the same number on the other shelf is never a collision --
+  // the case a genre-blind `(artist_id, code_number)` key would refuse.
+  describe('call-code collisions are keyed on the real shelf slot (BS#2579)', () => {
+    let artist;
+    const base = 9700 + (uniq % 200);
+
+    const mkAlbum = async (genre_id, code_number, code_volume_letters, title) => {
+      const body = {
+        album_title: `${title} ${uniq}`,
+        artist_id: artist.id,
+        label: 'Slot Key Label',
+        genre_id,
+        format_id: 1,
+        code_number,
+      };
+      if (code_volume_letters !== undefined) body.code_volume_letters = code_volume_letters;
+      return auth.post('/library').send(body);
+    };
+
+    beforeAll(async () => {
+      const a = await auth
+        .post('/library/artists')
+        .send({ artist_name: `Slot Key Artist ${uniq}`, code_letters: 'SK', genre_id: 11, code_number: base })
+        .expect(201);
+      artist = a.body;
+      await getTestDb().unsafe(
+        `INSERT INTO ${SCHEMA}.genre_artist_crossreference (artist_id, genre_id, artist_genre_code)
+         VALUES (${artist.id}, 15, ${base})`
+      );
+    });
+
+    afterAll(async () => {
+      await getTestDb().unsafe(
+        `DELETE FROM ${SCHEMA}.genre_artist_crossreference WHERE artist_id = ${artist.id} AND genre_id = 15`
+      );
+    });
+
+    test('a code_number-only PATCH onto an occupied slot refuses (409 library_slot_conflict)', async () => {
+      const occupant = (await mkAlbum(11, 61, undefined, 'Slot Occupant')).body;
+      const moving = (await mkAlbum(11, 62, undefined, 'Slot Moving')).body;
+
+      const res = await auth.patch(`/library/${moving.id}`).send({ code_number: 61 }).expect(409);
+      expect(res.body.code).toBe('library_slot_conflict');
+      expect(res.body.details).toEqual({ conflicting_album_id: occupant.id });
+    });
+
+    // Red against a genre-blind key: Rock holds 63, and Electronic is free to.
+    test('the same number on another genre shelf is not a collision', async () => {
+      await mkAlbum(11, 63, undefined, 'Slot Rock 63').then((r) => expect(r.status).toBe(201));
+      const electronic = (await mkAlbum(15, 64, undefined, 'Slot Electronic 64')).body;
+
+      const res = await auth.patch(`/library/${electronic.id}`).send({ code_number: 63 }).expect(200);
+      expect(res.body.code_number).toBe(63);
+    });
+
+    test('POST /library refuses a supplied call code that is already filed (409)', async () => {
+      await mkAlbum(11, 65, undefined, 'Slot Create Occupant').then((r) => expect(r.status).toBe(201));
+
+      const res = await mkAlbum(11, 65, undefined, 'Slot Create Duplicate');
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('library_slot_conflict');
+      // ...while the other genre's shelf accepts the same number.
+      await mkAlbum(15, 65, undefined, 'Slot Create Other Genre').then((r) => expect(r.status).toBe(201));
+    });
+
+    test('7a and 7A are one slot: a differently-cased volume letter is refused on both paths', async () => {
+      await mkAlbum(11, 7, 'a', 'Slot Case Occupant').then((r) => expect(r.status).toBe(201));
+
+      const create = await mkAlbum(11, 7, 'A', 'Slot Case Create');
+      expect(create.status).toBe(409);
+
+      const moving = (await mkAlbum(11, 66, 'A', 'Slot Case Moving')).body;
+      await auth.patch(`/library/${moving.id}`).send({ code_number: 7 }).expect(409);
+    });
+
+    // A row already in one of the 270 duplicate slots stays editable: the
+    // check compares against the destination slot and skips an unchanged one.
+    test('a row already in a duplicate slot can be edited, and resubmit its call number, without a 409', async () => {
+      await mkAlbum(11, 67, undefined, 'Slot Dup First').then((r) => expect(r.status).toBe(201));
+      const second = (await mkAlbum(11, 68, undefined, 'Slot Dup Second')).body;
+      await getTestDb().unsafe(`UPDATE ${SCHEMA}.library SET code_number = 67 WHERE id = ${second.id}`);
+
+      const res = await auth
+        .patch(`/library/${second.id}`)
+        .send({ album_title: `Slot Dup Second Renamed ${uniq}`, code_number: 67 })
+        .expect(200);
+      expect(res.body.code_number).toBe(67);
     });
   });
 });

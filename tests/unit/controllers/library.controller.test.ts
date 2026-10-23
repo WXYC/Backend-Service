@@ -249,6 +249,16 @@ jest.mock('../../../apps/backend/services/library.service', () =>
       artistExistsInGenre: mockArtistExistsInGenre,
       albumCodeNumberTaken: mockAlbumCodeNumberTaken,
       findLibrarySlotOccupant: mockFindLibrarySlotOccupant,
+      // The controller decides "did the slot change" by comparing keys, so the
+      // double has to fold like the real one (`upper(coalesce(letters, ''))`);
+      // the bare `jest.fn()` would return undefined for every row and read
+      // every edit as unchanged.
+      librarySlotKey: (row: {
+        artist_id: number;
+        genre_id: number;
+        code_number: number;
+        code_volume_letters: string | null;
+      }) => `${row.artist_id}/${row.genre_id}/${row.code_number}/${(row.code_volume_letters ?? '').toUpperCase()}`,
       recheckDiscogsAvailability: mockRecheckDiscogsAvailability,
       deleteAlbumFromDB: mockDeleteAlbumFromDB,
       deleteArtistFromDB: mockDeleteArtistFromDB,
@@ -792,11 +802,11 @@ describe('library.controller', () => {
     // 40000 reaches PG as SQLSTATE 22003 → 500 where this codebase's
     // convention for an out-of-range scalar is a boundary 400.
     //
-    // Deliberately NOT checked here: whether the artist already owns this
-    // number. `albumCodeNumberTaken` exists and `updateAlbum` calls it, but
-    // the single-librarian decision (plan D2) is that a hard 409 would block
-    // deliberate re-use of a lost record's slot. Uniqueness becomes the
-    // database's job on BS#2033.
+    // BS#2579: the supplied call code is now checked against the real shelf
+    // slot (`findLibrarySlotOccupant`) and a collision refuses with
+    // `409 library_slot_conflict`. Originally unchecked on the single-librarian
+    // argument (plan D2); BS#2564 then made PATCH writable, which left the
+    // stricter path as the edit and the looser one as the create.
     describe('operator-supplied call code (BS#2410)', () => {
       const req = (overrides: Record<string, unknown>) =>
         ({
@@ -814,6 +824,10 @@ describe('library.controller', () => {
         mockGetArtistNameById.mockResolvedValue('Juana Molina');
       });
 
+      afterEach(() => {
+        mockFindLibrarySlotOccupant.mockReset();
+      });
+
       it('persists a client-supplied code_number instead of generating one', async () => {
         await addAlbum(req({ code_number: 12345 }), mockResponse(), next);
 
@@ -825,10 +839,30 @@ describe('library.controller', () => {
         expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
       });
 
-      it('does not consult albumCodeNumberTaken for a client-supplied code_number (plan D2)', async () => {
-        await addAlbum(req({ code_number: 12345 }), mockResponse(), next);
+      it('looks the supplied slot up against the real shelf, with no row to exclude', async () => {
+        await addAlbum(req({ code_number: 12345, code_volume_letters: 'a' }), mockResponse(), next);
 
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(42, 11, 12345, 'a', undefined);
         expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
+      });
+
+      it('refuses a supplied call code whose slot is occupied (409) before anything is written', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+
+        await expect(addAlbum(req({ code_number: 12 }), mockResponse(), next)).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'library_slot_conflict',
+          details: { conflicting_album_id: 99 },
+        });
+        expect(mockInsertAlbum).not.toHaveBeenCalled();
+      });
+
+      it('does not look anything up when code_number is omitted (server-assigned)', async () => {
+        mockGenerateAlbumCodeNumber.mockResolvedValue(7);
+
+        await addAlbum(req({}), mockResponse(), next);
+
+        expect(mockFindLibrarySlotOccupant).not.toHaveBeenCalled();
       });
 
       it('falls back to generateAlbumCodeNumber, scoped to the release genre, when code_number is omitted', async () => {
@@ -3595,7 +3629,8 @@ describe('library.controller', () => {
       discogs_unavailable_note: null,
     };
 
-    const reqFor = (body: Record<string, unknown>) => ({ params: { id: '42' }, body }) as unknown as Request;
+    // `never`: the request is deliberately partial, and `updateAlbum`'s typed body would reject it.
+    const reqFor = (body: Record<string, unknown>) => ({ params: { id: '42' }, body }) as never;
 
     beforeEach(() => {
       jest.clearAllMocks();
@@ -4013,11 +4048,25 @@ describe('library.controller', () => {
 
         expect(mockAlbumCodeNumberTaken).not.toHaveBeenCalled();
         expect(mockGenerateAlbumCodeNumber).not.toHaveBeenCalled();
+        // BS#2579: written verbatim, but no longer unchecked -- the final slot is looked up.
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(55, 11, 5, null, 42);
         expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
           42,
           expect.objectContaining({ artist_id: 55, code_number: 5 })
         );
         expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      it('refuses a differing code_number whose destination slot is occupied (409)', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+
+        await expect(
+          updateAlbum(reqFor({ artist_id: 55, code_number: 5 }), mockResponse(), next)
+        ).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'library_slot_conflict',
+        });
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
       });
 
       it('a code_number that merely echoes the stored value still regenerates on a collision', async () => {
@@ -4033,7 +4082,7 @@ describe('library.controller', () => {
 
         await updateAlbum(reqFor({ artist_id: 55, code_number: existingRow.code_number }), res, next);
 
-        expect(mockAlbumCodeNumberTaken).toHaveBeenCalledWith(55, existingRow.code_number, 42);
+        expect(mockAlbumCodeNumberTaken).toHaveBeenCalledWith(55, 11, existingRow.code_number, null, 42);
         // BS#2587: the regenerate is scoped to the effective genre -- here the
         // request carries no genre_id, so it falls back to the existing row's
         // genre (11), not a genre-blind MAX across every genre the artist owns.
@@ -4172,27 +4221,27 @@ describe('library.controller', () => {
         );
       });
 
-      // Finding 7: the guard gates on the genre actually CHANGING
-      // (`body.genre_id !== existing.genre_id`), not on `genre_id` merely
-      // being present in the body -- dj-site's full-record Save echoes every
-      // field back, so a bare presence check would run this SELECT (and
-      // refuse on a stale collision) for every PATCH that happens to carry
-      // the stored genre_id, including one naming no destination at all. Not
-      // widened the other way either: a `code_number`-only PATCH that omits
-      // `genre_id` altogether stays unchecked here too, same as it always
-      // has (WXYC/Backend-Service#2579 owns closing that separately). Without
-      // this test, a revert back to `body.genre_id !== undefined` passes
-      // every other case in this file unchanged.
-      it('does not run the occupancy check when genre_id echoes the stored value', async () => {
+      // Finding 7: the genre-move guard gates on the genre actually CHANGING,
+      // not on `genre_id` merely being present -- dj-site's full-record Save
+      // echoes every field back. BS#2579 widened the check to any change of
+      // the final slot, so a genre echo alone must still be a non-event: the
+      // slot is the stored one, nothing is looked up, and a row sitting in
+      // one of the 270 duplicate slots stays editable.
+      it('does not run the occupancy check when genre_id and the call number echo the stored values', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
         const res = mockResponse();
 
-        await updateAlbum(reqFor({ genre_id: existingRow.genre_id, code_number: 20 }), res, next);
+        await updateAlbum(
+          reqFor({
+            genre_id: existingRow.genre_id,
+            code_number: existingRow.code_number,
+            album_title: 'DOGA (reissue)',
+          }),
+          res,
+          next
+        );
 
         expect(mockFindLibrarySlotOccupant).not.toHaveBeenCalled();
-        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(
-          42,
-          expect.objectContaining({ genre_id: existingRow.genre_id, code_number: 20 })
-        );
         expect(res.status).toHaveBeenCalledWith(200);
       });
 
@@ -4213,6 +4262,71 @@ describe('library.controller', () => {
           existingRow.code_volume_letters,
           42
         );
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+    });
+
+    // BS#2579: a PATCH that changes the call code on its own -- no artist or
+    // genre move -- is refused when the resulting slot is occupied, and an
+    // unchanged slot (including a case-only difference in the volume letter,
+    // which is the same slot) is never looked up at all.
+    describe('call-code edits are keyed on the real shelf slot (BS#2579)', () => {
+      afterEach(() => {
+        mockFindLibrarySlotOccupant.mockReset();
+      });
+
+      it('refuses a code_number-only edit onto an occupied slot (409), excluding the row being edited', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+
+        await expect(updateAlbum(reqFor({ code_number: 4 }), mockResponse(), next)).rejects.toMatchObject({
+          statusCode: 409,
+          code: 'library_slot_conflict',
+        });
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(7, 11, 4, null, 42);
+        expect(mockUpdateAlbumInDB).not.toHaveBeenCalled();
+      });
+
+      it('refuses a code_volume_letters-only edit onto an occupied slot (409)', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+
+        await expect(updateAlbum(reqFor({ code_volume_letters: 'b' }), mockResponse(), next)).rejects.toMatchObject({
+          statusCode: 409,
+        });
+        expect(mockFindLibrarySlotOccupant).toHaveBeenCalledWith(7, 11, 3, 'b', 42);
+      });
+
+      it('carries the conflicting row under details, not as a sibling key', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+
+        await expect(updateAlbum(reqFor({ code_number: 4 }), mockResponse(), next)).rejects.toMatchObject({
+          details: { conflicting_album_id: 99 },
+        });
+      });
+
+      it('writes a code_number edit whose destination slot is free', async () => {
+        mockFindLibrarySlotOccupant.mockResolvedValue(undefined);
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ code_number: 4 }), res, next);
+
+        expect(mockUpdateAlbumInDB).toHaveBeenCalledWith(42, expect.objectContaining({ code_number: 4 }));
+        expect(res.status).toHaveBeenCalledWith(200);
+      });
+
+      // The 270 production slots that already hold more than one release:
+      // the occupant lookup would find the neighbour, so an unchanged call
+      // number must not reach it.
+      it.each([
+        ['resubmitting the stored call number', { code_number: 3 }, null],
+        ['a volume letter that differs only by case', { code_volume_letters: 'a' }, 'A'],
+      ])('never looks up the slot when %s', async (_label, body, storedLetters) => {
+        mockGetLibraryRowById.mockResolvedValue({ ...existingRow, code_volume_letters: storedLetters });
+        mockFindLibrarySlotOccupant.mockResolvedValue({ id: 99 });
+        const res = mockResponse();
+
+        await updateAlbum(reqFor({ ...body, album_title: 'DOGA (reissue)' }), res, next);
+
+        expect(mockFindLibrarySlotOccupant).not.toHaveBeenCalled();
         expect(res.status).toHaveBeenCalledWith(200);
       });
     });

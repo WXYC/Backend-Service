@@ -509,10 +509,12 @@ components:
             are a 400, not the SQLSTATE 22003 → 500 they would otherwise become.
             Omitted, Backend assigns MAX+1 for the artist within the release's
             genre (BS#2587 — genre-scoped shelves; artist-wide was the
-            pre-BS#2410 behavior). No application-level collision check by design
-            (single-librarian decision, rotation-import plan D2); the eventual
-            DB uniqueness constraint and its 23505 → 409 mapping are tracked on
-            #2033.
+            pre-BS#2410 behavior). A supplied value is checked against the real
+            shelf slot `(artist_id, genre_id, code_number,
+            upper(coalesce(code_volume_letters, '')))` (BS#2579): an occupied
+            slot is a 409 `library_slot_conflict` and nothing is written, while
+            the same number on another genre's shelf is fine. The check-then-act
+            race is closed by the DB uniqueness constraint, tracked on #2589.
         code_volume_letters:
           type: string
           maxLength: 4
@@ -3103,6 +3105,10 @@ paths:
             'review_required' }`; nothing is written, including a `labels` row for new
             label text (BS#2807). Also `rotation_not_eligible` when `from_rotation_id` names
             a row that is linked, not legacy, missing or moved to another bin: nothing is written either (BS#2810, BS#3007).
+            Also `library_slot_conflict` (BS#2579) when a supplied `code_number` / `code_volume_letters`
+            names a shelf slot another release already holds: body `{ message, code:
+            'library_slot_conflict', details: { conflicting_album_id } }`, `details` always present;
+            nothing is written.
           content:
             application/json:
               schema:
@@ -3247,24 +3253,22 @@ paths:
                   maximum: 32767
                   description: >-
                     Operator-chosen release call number (BS#2564; the PATCH half
-                    of `NewAlbumRequest.code_number`, BS#2410). Uncollision-checked
-                    on its own, same as the POST side (single-librarian decision,
-                    rotation-import plan D2) and same as a `code_number`-only or
-                    `artist_id`-only edit; the eventual DB uniqueness constraint
-                    and its 23505 → 409 mapping are tracked on #2033, and the
-                    artist-wide (not genre-scoped) collision check the
-                    `artist_id` auto-regenerate below relies on is tracked on
-                    #2579. Alongside an `artist_id` move, a value that DIFFERS
-                    from the stored one is honored verbatim as the destination
-                    shelf; a value that merely echoes the stored one expresses no
-                    choice (a full-record resubmit carries it either way) and
-                    still auto-regenerates when the destination artist already
-                    owns that number. The one path that IS checked is a PATCH
-                    that changes `genre_id` (BS#2587): the resulting
-                    `(artist_id, genre_id, code_number, code_volume_letters)`
-                    slot is looked up against the real shelf, and an occupied
-                    slot refuses with `409 library_slot_conflict` rather than
-                    silently filing two releases onto it.
+                    of `NewAlbumRequest.code_number`, BS#2410). The slot the
+                    release will occupy, `(artist_id, genre_id, code_number,
+                    upper(coalesce(code_volume_letters, '')))`, is looked up
+                    against the real shelf whenever a PATCH changes any part of
+                    it (BS#2579, extending BS#2587's genre-move check), and an
+                    occupied slot refuses with `409 library_slot_conflict`. A
+                    slot that is unchanged is never checked, so a row already
+                    in one of the duplicate slots stays editable, and a
+                    volume letter that differs only by case is the same slot.
+                    Alongside an `artist_id` move, a value that DIFFERS from the
+                    stored one is honored as the destination shelf (and
+                    checked); a value that merely echoes the stored one expresses
+                    no choice (a full-record resubmit carries it either way) and
+                    still auto-regenerates when the destination slot is already
+                    taken. The check-then-act race is closed by the DB
+                    uniqueness constraint, tracked on #2589.
                 code_volume_letters:
                   type: string
                   nullable: true
@@ -3299,10 +3303,12 @@ paths:
           description: Album or artist not found
         '409':
           description: >-
-            `library_slot_conflict` (BS#2587): the PATCH changes `genre_id`,
-            and the resulting `(artist_id, genre_id, code_number,
-            code_volume_letters)` slot is already occupied by another release.
-            Only a genre CHANGE triggers this check — see `code_number` above.
+            `library_slot_conflict` (BS#2587, BS#2579): the PATCH changes the
+            release's shelf slot, and the resulting `(artist_id, genre_id,
+            code_number, upper(code_volume_letters))` slot is already
+            occupied by another release. Body `{ message, code, details: {
+            conflicting_album_id } }`, `details` always present. A PATCH that
+            leaves the slot unchanged never refuses — see `code_number` above.
 
     delete:
       summary: Hard-delete a library release (BS#2112)
@@ -5657,8 +5663,8 @@ paths:
         measured against production on 2026-09-18 that predicate sees 3,308
         apparent collisions where the true slot key sees 273, so using it would
         decline or relocate restores whose slot was free
-        (WXYC/Backend-Service#2579 owns the fix; this endpoint does not wait on
-        it). When the slot is occupied, the endpoint refuses with `400
+        (that predicate is genre-scoped now, BS#2579; this endpoint still
+        applies the slot key itself). When the slot is occupied, the endpoint refuses with `400
         resolution_required` rather than guessing — silently relocating puts two
         cards on one shelf slot, silently refusing makes a permanent archive
         useless. Re-send with `resolution` to pick an arm. A `resolution` sent
