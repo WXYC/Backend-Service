@@ -29,6 +29,7 @@ import {
   checkLiveActivity as defaultCheckLiveActivity,
   requireNonNegativeInt,
   type CheckLiveActivityFn,
+  type WaitForQuietPeriodPauseInfo,
 } from '@wxyc/database';
 
 import { log, captureError } from './logger.js';
@@ -129,7 +130,7 @@ export const runBackfill = async (deps: {
   /** Cumulative cooperative-pause budget ceiling; 0 = uncapped. */
   liveActivityMaxPauseMs?: number;
   checkLiveActivity?: CheckLiveActivityFn;
-  onLivePause?: () => void;
+  onLivePause?: (reason: WaitForQuietPeriodPauseInfo['reason']) => void;
 }): Promise<RunResult> => {
   const totals: Totals = {
     scanned: 0,
@@ -173,7 +174,7 @@ export const runBackfill = async (deps: {
     pauseMs: liveActivityPauseMs,
     maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
-    onPause: () => deps.onLivePause?.(),
+    onPause: ({ reason }) => deps.onLivePause?.(reason),
     onProbeError: (error) => {
       log('warn', 'probe_error', 'checkLiveActivity threw; assuming no activity', {
         error_message: error instanceof Error ? error.message : String(error),

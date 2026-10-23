@@ -28,7 +28,7 @@
  *   LIVE_ACTIVITY_PAUSE_MS=N                  default 30000
  */
 
-import { closeDatabaseConnection, requirePositiveInt } from '@wxyc/database';
+import { closeDatabaseConnection, requirePositiveInt, describeQuietPeriodPause } from '@wxyc/database';
 
 import { runBackfill } from './orchestrate.js';
 import { loadCandidates, NO_MATCH_TTL_DAYS_DEFAULT, NO_MATCH_TTL_DAYS_ENV } from './query.js';
@@ -71,8 +71,8 @@ const main = async (): Promise<void> => {
       write: writeReleaseId,
       markAttempted: markReleaseIdResolveAttempted,
       dryRun,
-      onLivePause: () => {
-        log('info', 'live_activity_pause', 'live flowsheet activity detected; pausing');
+      onLivePause: (reason) => {
+        log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing`, { reason });
       },
     });
     log('info', 'finished', `${JOB_NAME} done`, { dry_run: dryRun, ...totals });

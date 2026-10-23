@@ -54,6 +54,7 @@ import {
   requireNonNegativeInt,
   requirePositiveInt,
   type CheckLiveActivityFn,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import { computeStreamingUrlFix, SPOTIFY_HOST_SUBSTR, APPLE_HOST_SUBSTR } from './transform.js';
 import { captureError, errorMessage, log } from './logger.js';
@@ -434,8 +435,9 @@ export const runRemediation = async (opts: {
     maxTotalPauseMs: liveActivityMaxPauseMs,
     probe,
     shouldStop: () => stopRequested,
-    onPause: () => {
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${liveActivityPauseMs}ms`, {
+    onPause: ({ reason }) => {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing ${liveActivityPauseMs}ms`, {
+        reason,
         lookback_seconds: liveActivityLookbackSeconds,
         pause_ms: liveActivityPauseMs,
       });

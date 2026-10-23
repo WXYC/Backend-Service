@@ -48,6 +48,7 @@ import {
   buildWaitForQuietPeriod,
   requireNonNegativeInt,
   type CheckLiveActivityFn,
+  describeQuietPeriodPause,
 } from '@wxyc/database';
 import type { LookupResponse } from '@wxyc/lml-client';
 import type { FreeFormRow, LinkedAlbum, RepairOutcome } from './repair.js';
@@ -234,8 +235,9 @@ export const runRepair = async (opts: RunRepairOptions): Promise<RunResult> => {
     pauseMs,
     maxTotalPauseMs,
     probe,
-    onPause: () => {
-      log('info', 'live_activity_pause', `live flowsheet activity detected; pausing ${pauseMs}ms`, {
+    onPause: ({ reason }) => {
+      log('info', 'live_activity_pause', `${describeQuietPeriodPause(reason)}; pausing ${pauseMs}ms`, {
+        reason,
         lookback_seconds: lookbackSeconds,
         pause_ms: pauseMs,
       });

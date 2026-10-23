@@ -228,6 +228,13 @@ export const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => P
 };
 
 /**
+ * The pause-log text for one `WaitForQuietPeriodPauseInfo['reason']` (BS#2552), so a read-path pause is never
+ * logged as DJ activity. Callers put it in their own `live_activity_pause` line.
+ */
+export const describeQuietPeriodPause = (reason: WaitForQuietPeriodPauseInfo['reason']): string =>
+  reason === 'read-path' ? 'flowsheet read path degraded' : 'live flowsheet activity detected';
+
+/**
  * Build a cooperative-pause `waitForQuietPeriod` closure (BS#2147).
  * Consolidates the ten independent copies of this loop (BS#1241's
  * unfinished half) into one shared shape with two guards a hand-rolled
@@ -299,12 +306,20 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     }
   };
 
+  // A healthy verdict is reused for `pauseMs`, so per-row callers send at most one probe per window. A breach is
+  // never cached: every re-check during a pause probes again.
+  let lastHealthyReadPathAt: number | null = null;
+
   const readPathDegraded = async (): Promise<boolean> => {
+    if (lastHealthyReadPathAt !== null && now() - lastHealthyReadPathAt < pauseMs) return false;
+    let degraded: boolean;
     try {
-      return await readPathProbe(readPathCeilingMs);
+      degraded = await readPathProbe(readPathCeilingMs);
     } catch {
-      return true;
+      degraded = true;
     }
+    lastHealthyReadPathAt = degraded ? null : now();
+    return degraded;
   };
 
   return async (): Promise<boolean> => {
