@@ -11,3 +11,9 @@ labels_route.get('/info', requirePermissions({ catalog: ['read'] }), labelsContr
 labels_route.get('/search', requirePermissions({ catalog: ['read'] }), labelsController.searchLabelsEndpoint);
 
 labels_route.post('/', requirePermissions({ catalog: ['write'] }), labelsController.createLabel);
+
+labels_route.get('/:id', requirePermissions({ catalog: ['read'] }), labelsController.getLabelWithReferences);
+
+labels_route.patch('/:id', requirePermissions({ catalog: ['write'] }), labelsController.updateLabel);
+
+labels_route.delete('/:id', requirePermissions({ catalog: ['write'] }), labelsController.deleteLabel);
