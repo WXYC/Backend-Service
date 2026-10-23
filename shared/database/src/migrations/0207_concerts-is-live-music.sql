@@ -1,0 +1,2 @@
+-- Store the triangle-shows feed's live-music classifier verdict (WXYC/triangle-shows#133). Nullable, no default, no backfill: NULL means the source does not classify (rhp_scrape rows, rows written before this column, feeds without the field). Additive, so safe on a live table; adding a nullable column without a default is a catalog-only change in PG14.
+ALTER TABLE "wxyc_schema"."concerts" ADD COLUMN "is_live_music" boolean;

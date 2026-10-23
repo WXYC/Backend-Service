@@ -162,6 +162,24 @@ describe('runEtl — event flow', () => {
     expect(totals.upserts_total).toBe(2);
   });
 
+  it('counts upserted events the feed flagged non-music, without skipping them', async () => {
+    // Two false, one true, one absent: distinguishes "flagged false" from
+    // "flagged true" and from "not classified".
+    const opts = makeOpts({
+      fetchEvents: () =>
+        Promise.resolve([
+          event(1, 'the-pinhook', { is_live_music: false }),
+          event(2, 'kings', { is_live_music: false }),
+          event(3, 'the-cave', { is_live_music: true }),
+          event(4, 'rubies'),
+        ]),
+    });
+    const totals = await runEtl(opts);
+
+    expect(totals.events_non_music).toBe(2);
+    expect(totals.upserts_total).toBe(4);
+  });
+
   it('counts tombstoned upserts', async () => {
     const opts = makeOpts({
       fetchEvents: () =>

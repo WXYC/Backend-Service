@@ -4584,6 +4584,10 @@ export const concerts = wxyc_schema.table(
     // `concerts_curated_starts_on_idx` to read it as a third curated-OR
     // term — see that index's comment below.
     has_resolved_support: boolean('has_resolved_support').notNull().default(false),
+    // The source's live-music classifier verdict (triangle_shows only). NULL
+    // means the source does not classify (rhp_scrape rows, older feeds); a
+    // heuristic, so stored for consumers to weigh rather than filtered on here.
+    is_live_music: boolean('is_live_music'),
     last_modified: timestamp('last_modified', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

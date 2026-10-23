@@ -56,6 +56,12 @@ export type TsEvent = {
   /** Stable per-event identity, tier-prefixed (ext:/url:/hash:), ≤1100 chars.
    *  UNIQUE ONLY PER-VENUE — always qualify with venue_slug when keying. */
   source_key: string;
+  /**
+   * The source's live-music classifier verdict (WXYC/triangle-shows#133).
+   * Required at the source; optional here so a feed from an older fork maps
+   * to NULL rather than failing.
+   */
+  is_live_music?: boolean | null;
   /** Soft tombstone: when the venue stopped advertising the event. */
   removed_at: string | null;
   // Denormalized venue fields joined into the event response.

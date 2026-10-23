@@ -79,6 +79,8 @@ export type Totals = {
   upserts_total: number;
   upserts_inserted: number;
   upserts_updated: number;
+  /** Upserted events the feed's classifier flagged non-music (stored, never skipped). */
+  events_non_music: number;
   /** Upserted events carrying a source tombstone this run. */
   tombstones_seen: number;
   /** Events whose composed starts_at is EARLIER than doors_at — the
@@ -106,6 +108,7 @@ const emptyTotals = (): Totals => ({
   upserts_total: 0,
   upserts_inserted: 0,
   upserts_updated: 0,
+  events_non_music: 0,
   tombstones_seen: 0,
   time_order_anomalies: 0,
   source_stale: false,
@@ -310,6 +313,7 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
       totals.upserts_total += 1;
       if (inserted) totals.upserts_inserted += 1;
       else totals.upserts_updated += 1;
+      if (mapped.concert.is_live_music === false) totals.events_non_music += 1;
       if (mapped.concert.removed_at) totals.tombstones_seen += 1;
     } catch (error) {
       totals.upsert_errors += 1;

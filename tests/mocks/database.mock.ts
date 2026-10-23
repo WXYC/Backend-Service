@@ -414,6 +414,7 @@ export const concerts = {
   scraped_at: 'concerts.scraped_at',
   first_scraped_at: 'concerts.first_scraped_at',
   has_resolved_support: 'concerts.has_resolved_support',
+  is_live_music: 'concerts.is_live_music',
   last_modified: 'concerts.last_modified',
 };
 // Named `concertPerformers` (camelCase) to match the real export in
