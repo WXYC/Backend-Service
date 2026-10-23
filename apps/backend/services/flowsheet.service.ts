@@ -1872,6 +1872,10 @@ export type OpenShow = {
   /** True for the show every on-air read resolves to — `max(shows.id)`. */
   is_current: boolean;
   likely_abandoned: boolean;
+  /** The show's own `shows.specialty_id`; null for a freeform show. */
+  specialty_id: number | null;
+  /** The program behind `specialty_id`, retired ones included so a manager can clear them. */
+  specialty: SpecialtyShowRef | null;
 };
 
 export type OpenShowsResult = {
@@ -1924,7 +1928,9 @@ export type OpenShowsResult = {
  * — the same trade `getShowsInTimeWindow` (BS#2062) makes. `user.id` is
  * selected alongside `djName` because the chain distinguishes "no user row"
  * from "user row with an unusable djName". It joins against the already-
- * truncated page for the same reason the count does.
+ * truncated page for the same reason the count does, and so does
+ * `specialty_shows` (BS#3680): the page carries `shows.specialty_id`, the
+ * catalog row is looked up after the `LIMIT`.
  */
 export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOWS_DEFAULT_LIMIT) => {
   // Served end to end by `shows_open_start_time_idx` (migration 0154): the
@@ -1944,6 +1950,7 @@ export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOW
       legacy_show_id: shows.legacy_show_id,
       dj_name_override: shows.dj_name_override,
       legacy_dj_name: shows.legacy_dj_name,
+      specialty_id: shows.specialty_id,
     })
     .from(shows)
     .where(and(isNull(shows.end_time), gte(shows.start_time, windowFloor)))
@@ -1963,10 +1970,13 @@ export const buildOpenShowsQuery = (windowFloor: Date, limit: number = OPEN_SHOW
         legacy_dj_name: page.legacy_dj_name,
         user_id: user.id,
         user_dj_name: user.djName,
+        specialty_id: page.specialty_id,
+        specialty: specialty_shows,
         entry_count: sql<number>`(SELECT count(*) FROM ${flowsheet} WHERE ${flowsheet.show_id} = ${page.id})::int`,
       })
       .from(page)
       .leftJoin(user, eq(user.id, page.primary_dj_id))
+      .leftJoin(specialty_shows, eq(specialty_shows.id, page.specialty_id))
       // The subquery already emitted the page in order; re-stating it here is
       // what makes the ordering a property of THIS statement rather than of an
       // unordered-by-definition subquery the planner is free to reshuffle.
@@ -2057,6 +2067,8 @@ export const getOpenShows = async (
         entry_count: row.entry_count,
         is_current,
         likely_abandoned: !is_current && row.entry_count < LIKELY_ABANDONED_ENTRY_THRESHOLD,
+        specialty_id: row.specialty_id ?? null,
+        specialty: toSpecialtyShowRef(row.specialty),
       };
     }),
     total_in_window: counts[0]?.in_window ?? 0,

@@ -83,13 +83,47 @@ const row = (over: Row = {}): Row => ({
   legacy_dj_name: null,
   user_id: null,
   user_dj_name: null,
+  specialty_id: null,
+  specialty: null,
   entry_count: 0,
   ...over,
 });
 
+const SPECIALTY_ROW = {
+  id: 7,
+  slug: 'jazz-hour',
+  specialty_name: 'Jazz Hour',
+  short_name: 'Jazz',
+  tagline: null,
+  logs_playcuts: true,
+  default_spotlight_role: null,
+  artwork: null,
+  accent_color: '#112233',
+  active: false,
+};
+
 describe('getOpenShows', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  it("projects the show's own specialty_id and SpecialtyShowRef, retired programs included", async () => {
+    primeReads({ rows: [row({ id: 1, specialty_id: 7, specialty: SPECIALTY_ROW })] });
+
+    const { shows } = await getOpenShows();
+
+    expect(shows[0]).toMatchObject({
+      specialty_id: 7,
+      specialty: { id: 7, slug: 'jazz-hour', name: 'Jazz Hour', short_name: 'Jazz', accent_color: '#112233' },
+    });
+  });
+
+  it('reports a freeform show as specialty_id: null, specialty: null', async () => {
+    primeReads({ rows: [row({ id: 1 })] });
+
+    const { shows } = await getOpenShows();
+
+    expect(shows[0]).toMatchObject({ specialty_id: null, specialty: null });
   });
 
   it('flags a low-entry non-current show as likely abandoned', async () => {
