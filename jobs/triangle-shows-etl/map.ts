@@ -13,8 +13,8 @@
  * of them uniformly.
  */
 
-import { nyCalendarDate, nyWallClockToUtc, type NewConcert } from '@wxyc/database';
-import { COMMA_SPLIT, SUPPORT_PLACEHOLDER, W_JOINER, normalizeFreetextArtist } from '@wxyc/database/support-list';
+import { nyCalendarDate, nyWallClockToUtc, normalizeFreetextArtist, type NewConcert } from '@wxyc/database';
+import { COMMA_SPLIT, SUPPORT_PLACEHOLDER, W_JOINER } from '@wxyc/database/support-list';
 import { BILLING_DELIMITER_PATTERNS, parseBilling } from './headliner.js';
 import type { TsEvent } from './types.js';
 

@@ -96,9 +96,10 @@ const PRESENTS_PREFIX = /^[^:]*\bpresents\s*:\s*/i;
  * delimiters — far too common inside legitimate names. The `w/(?!o(?:ut)?\b)`
  * negative lookahead keeps `w/` from firing on the abbreviations `w/o` and
  * `w/out` — those mean "without" and belong to the name (`Angel w/o Wings`),
- * not a support delimiter.
+ * not a support delimiter. That token is a literal copy of
+ * `@wxyc/database/support-list`'s `W_JOINER`, exported so
+ * `tests/unit/shared/database/support-list.test.ts` pins it (BS#3669).
  */
-// Exported for the W_JOINER source-equality pin (BS#3669).
 export const SUPPORT_TAIL = /\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$/i;
 
 /** Punctuation a tail/prefix strip can leave dangling (`Foo -` after

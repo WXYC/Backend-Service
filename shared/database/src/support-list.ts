@@ -9,7 +9,7 @@
  * Regexes stay literals (`security/detect-non-literal-regexp` forbids building
  * them from `.source`); callers that must embed a fragment mid-pattern
  * (`headliner.ts`'s `SUPPORT_TAIL` / `TAIL_SPLIT`, `parse.ts`'s
- * `SUBHEADER_SPLIT`) keep a literal copy that
+ * `SUBHEADER_LEAD_IN` / `SUBHEADER_SPLIT`) keep a literal copy that
  * `tests/unit/shared/database/support-list.test.ts` pins to this one.
  */
 export { CO_BILL_DELIMITER, normalizeFreetextArtist } from './freetext-norm.js';
@@ -19,7 +19,10 @@ export const W_JOINER = /^w\/(?!o(?:ut)?\b)\s*/i;
 
 /**
  * Entries that name no act ("special guests", "& More", "TBA"). Case-insensitive,
- * so it takes either the raw name or an already-normalized (lowercased) key.
+ * so it applies to a raw name (the jobs) or an already-normalized key
+ * (`concerts.service.ts`). The two verdicts differ where normalization changes
+ * more than case: `normalizeFreetextArtist` drops a leading `The `, so
+ * `The Friends` is a placeholder only as a key. Unifying them is BS#3682.
  */
 export const SUPPORT_PLACEHOLDER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|guests?|friends|more|tba|tbd)$/i;
 
