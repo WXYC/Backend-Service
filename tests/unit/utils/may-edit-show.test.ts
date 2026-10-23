@@ -16,7 +16,8 @@ describe('mayEditShow (BS#3455)', () => {
     ['a member of an open show', dj, openShow, { allowed: true }],
     ['a co-host of an open show', { ...dj, id: 'dj-b' }, openShow, { allowed: true }],
     ['a non-member of an open show', { ...dj, id: 'dj-z' }, openShow, { allowed: false, status: 400 }],
-    ['a non-member manager of an open show', manager, openShow, { allowed: false, status: 400 }],
+    ['a manager who is not on an open show', manager, openShow, { allowed: true }],
+    ['a manager who is on an open show', { ...manager, id: 'dj-a' }, openShow, { allowed: true }],
     ['a manager on an ended show', manager, endedShow, { allowed: true }],
     [
       'a member of an ended show who cannot manage',
