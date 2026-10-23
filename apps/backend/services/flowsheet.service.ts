@@ -950,10 +950,11 @@ const assertMayEditShow = (caller: ShowEditCaller | null, target: ShowEditTarget
 };
 
 /**
- * Row-scoped write gate (BS#3438, BS#3455). The row-keyed writes name a row by id, so each calls this against the
- * row's own `show_id`, read inside the write's transaction, and `mayEditShow` decides: a DJ on the open show, or a
- * `flowsheet: manage` caller once it has ended. A NULL `show_id` or a missing show belongs to no show anyone is on:
- * an open, empty one, so the decision is the non-member 400.
+ * Row-scoped write gate (BS#3438, BS#3455, BS#3678). The row-keyed writes name a row by id, so each calls this against
+ * the row's own `show_id`, read inside the write's transaction, and `mayEditShow` decides: a `flowsheet: manage` caller
+ * may edit a row of any show, open or ended; anyone else must be a DJ on the open show. A NULL `show_id` or a missing
+ * show is no show at all, so there is nothing for a manager to be allowed on: it is decided as an open show with no
+ * members, the non-member 400, for every caller (BS#3678 decision; the shortcut covers shows, not orphan rows).
  */
 const assertCallerMayWriteRow = async (
   trx: Pick<typeof db, 'select'>,
@@ -964,7 +965,14 @@ const assertCallerMayWriteRow = async (
     return;
   }
   const target = show_id === null ? undefined : await loadShowEditTarget(trx, show_id);
-  assertMayEditShow(caller, target ?? { end_time: null, latest_entry_is_show_end: false, dj_ids: [] });
+  if (!target) {
+    assertMayEditShow(
+      { ...caller, canManageFlowsheet: false },
+      { end_time: null, latest_entry_is_show_end: false, dj_ids: [] }
+    );
+    return;
+  }
+  assertMayEditShow(caller, target);
 };
 
 export type ShowDetailsPatch = {

@@ -9,9 +9,10 @@
 import { jest } from '@jest/globals';
 import { db } from '@wxyc/database';
 import WxycError from '../../../apps/backend/utils/error';
+import type { ShowEditCaller } from '../../../apps/backend/utils/may-edit-show';
 
-const CALLER = { id: 'dj-caller', canManageFlowsheet: false };
-const MANAGER = { id: 'md-caller', canManageFlowsheet: true };
+const CALLER: ShowEditCaller = { id: 'dj-caller', canManageFlowsheet: false };
+const MANAGER: ShowEditCaller = { id: 'md-caller', canManageFlowsheet: true };
 const NOT_SHOW_END = [{ entry_type: 'track' }];
 
 const makeTrx = (reads: unknown[][]) => {
@@ -35,9 +36,18 @@ const makeTrx = (reads: unknown[][]) => {
 };
 
 describe('assertCallerMayWriteRow via removeTrack (BS#3438)', () => {
-  const rejects: Array<[string, unknown[][], number, string | undefined]> = [
+  const rejects: Array<[string, unknown[][], number, string | undefined, ShowEditCaller?]> = [
     ['a NULL show_id', [[{ show_id: null }]], 400, undefined],
     ['a show row that no longer exists', [[{ show_id: 5 }], []], 400, undefined],
+    // An orphan row belongs to no show, so even `flowsheet: manage` has no show to be allowed on (BS#3678).
+    ['a NULL show_id, for a caller who can manage the flowsheet', [[{ show_id: null }]], 400, undefined, MANAGER],
+    [
+      'a show row that no longer exists, for a caller who can manage the flowsheet',
+      [[{ show_id: 5 }], []],
+      400,
+      undefined,
+      MANAGER,
+    ],
     ['an ended show', [[{ show_id: 5 }], [{ end_time: new Date() }]], 403, 'closed_show'],
     [
       'a show with NULL end_time whose newest row is show_end',
@@ -54,22 +64,32 @@ describe('assertCallerMayWriteRow via removeTrack (BS#3438)', () => {
     ],
   ];
 
-  test.each(rejects)('rejects a row on %s and does not delete', async (_name, reads, statusCode, code) => {
-    const trx = makeTrx(reads);
-    (db as any).transaction = jest.fn().mockImplementation(async (cb: (t: typeof trx) => Promise<unknown>) => cb(trx));
-    const { removeTrack } = await import('../../../apps/backend/services/flowsheet.service');
+  test.each(rejects)(
+    'rejects a row on %s and does not delete',
+    async (_name, reads, statusCode, code, caller = CALLER) => {
+      const trx = makeTrx(reads);
+      (db as any).transaction = jest
+        .fn()
+        .mockImplementation(async (cb: (t: typeof trx) => Promise<unknown>) => cb(trx));
+      const { removeTrack } = await import('../../../apps/backend/services/flowsheet.service');
 
-    const attempt = removeTrack(1, CALLER);
-    await expect(attempt).rejects.toThrow(WxycError);
-    await expect(attempt).rejects.toMatchObject({ statusCode, code });
-    expect(trx.delete).not.toHaveBeenCalled();
-  });
+      const attempt = removeTrack(1, caller);
+      await expect(attempt).rejects.toThrow(WxycError);
+      await expect(attempt).rejects.toMatchObject({ statusCode, code });
+      expect(trx.delete).not.toHaveBeenCalled();
+    }
+  );
 
   test.each([
     [
       'an open show the caller is an active member of',
       CALLER,
       [[{ show_id: 5 }], [{ end_time: null }], NOT_SHOW_END, [{ dj_id: CALLER.id }], [{ id: CALLER.id }]],
+    ],
+    [
+      'an open show the caller is not a member of, for a caller who can manage the flowsheet (BS#3678)',
+      MANAGER,
+      [[{ show_id: 5 }], [{ end_time: null }], NOT_SHOW_END, [{ dj_id: 'other' }], [{ id: 'other' }]],
     ],
     [
       'an ended show, for a caller who can manage the flowsheet',

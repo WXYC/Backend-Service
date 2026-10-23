@@ -2235,8 +2235,9 @@ paths:
                         type: string
         '400':
           description: >-
-            The caller is not a member of the show on the air that the entry belongs to, the entry belongs to no show, or
-            the request is malformed. For a spotlight edit, malformed means an unknown `spotlight_role`, an empty or
+            The caller lacks `flowsheet: manage` and is not a member of the show on the air that the entry belongs to
+            (a music director or station manager may edit a row of any show, open or ended), the entry belongs to no
+            show (refused for every caller, managers included), or the request is malformed. For a spotlight edit, malformed means an unknown `spotlight_role`, an empty or
             over-128 `spotlight_name`, spotlight fields on a track row, or track fields on a spotlight row. Clients
             should branch on the status, not on the message text.
           content:
@@ -2289,8 +2290,9 @@ paths:
                         type: string
         '400':
           description: >-
-            The caller is not a member of the show on the air that the entry belongs to, or the entry belongs to no show.
-            Clients should branch on the status, not on the message text.
+            The caller lacks `flowsheet: manage` and is not a member of the show on the air that the entry belongs to (a
+            music director or station manager may edit a row of any show, open or ended), or the entry belongs to no show
+            (refused for every caller, managers included). Clients should branch on the status, not on the message text.
           content:
             application/json:
               schema:
@@ -2621,9 +2623,10 @@ paths:
         `refetch` wakes connected clients.
 
 
-        Requires `flowsheet: write`. While the show is on the air, any DJ on it, co-hosts included, may call this.
-        Once it has ended, only a caller with `flowsheet: manage` (music directors and station managers) may. A show
-        has ended when its `end_time` is set or its newest row is a `show_end` marker.
+        Requires `flowsheet: write`. A caller with `flowsheet: manage` (music directors and station managers) may edit
+        any show, open or ended. Anyone else may edit only a show that is on the air and that they are on, co-hosts
+        included; a non-member of an open show gets a 400, and once the show has ended they get a 403 `closed_show`. A
+        show has ended when its `end_time` is set or its newest row is a `show_end` marker.
       parameters:
         - name: id
           in: path
@@ -2686,7 +2689,7 @@ paths:
           description: >-
             A `request_mode` outside the enum, a `specialty_id` that names no program, or that switches the show to a retired program (re-sending the
             show's current `specialty_id` is accepted even if that program has since been retired), a `show_name`
-            over its `maxLength`, or a caller who is not on the show while it is on the air. Only the unknown-or-retired
+            over its `maxLength`, or a caller without `flowsheet: manage` who is not on the show while it is on the air. Only the unknown-or-retired
             `specialty_id` refusal carries `code: specialty_not_taggable`; every other 400 has no `code`. Clients should
             branch on the status and that code, not on the message text.
           content:
@@ -2869,8 +2872,9 @@ paths:
                         type: string
         '400':
           description: >-
-            The caller is not a member of the show on the air that the entry belongs to, or the entry belongs to no show.
-            Clients should branch on the status, not on the message text.
+            The caller lacks `flowsheet: manage` and is not a member of the show on the air that the entry belongs to (a
+            music director or station manager may edit a row of any show, open or ended), or the entry belongs to no show
+            (refused for every caller, managers included). Clients should branch on the status, not on the message text.
           content:
             application/json:
               schema:
