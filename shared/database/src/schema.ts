@@ -843,6 +843,13 @@ export const library = wxyc_schema.table(
       discogsUnavailableIdx: index('library_discogs_unavailable_idx')
         .on(table.discogs_unavailable)
         .where(sql`${table.discogs_unavailable} = true`),
+      // BS#3694. Serves the `/labels/{id}` count, rename and delete guard
+      // (`WHERE label_id = $1`). Partial because most library rows carry no
+      // resolved label. Built CONCURRENTLY on prod ahead of migration 0206; see
+      // that migration's header for the statement.
+      labelIdIdx: index('library_label_id_idx')
+        .on(table.label_id)
+        .where(sql`${table.label_id} IS NOT NULL`),
     };
   }
 );
@@ -2009,6 +2016,15 @@ export const flowsheet = wxyc_schema.table(
     index('flowsheet_rotation_id_idx')
       .on(table.rotation_id)
       .where(sql`${table.rotation_id} IS NOT NULL`),
+    // BS#3694. Serves the `/labels/{id}` count, rename (`UPDATE ... WHERE
+    // label_id = $1`) and delete guard, plus the FK check on `DELETE FROM labels`.
+    // Without it each is a sequential scan of the ~2.6M-row table and hits the 5 s
+    // statement timeout. Partial because most flowsheet rows carry no resolved
+    // label. Built CONCURRENTLY on prod ahead of migration 0206; see that
+    // migration's header for the statement.
+    index('flowsheet_label_id_idx')
+      .on(table.label_id)
+      .where(sql`${table.label_id} IS NOT NULL`),
     // BS#2176, re-keyed by BS#2218 (migration 0153). Partial B-tree scoped to
     // the exact cohort `jobs/flowsheet-no-match-recheck` scans: terminal
     // no-match track rows with a real artist name. Same shape as

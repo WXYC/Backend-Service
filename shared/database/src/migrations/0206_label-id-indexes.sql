@@ -1,0 +1,45 @@
+-- BS#3694: partial B-tree indexes on flowsheet.label_id and library.label_id.
+--
+-- Both columns are FKs to labels(id), and PostgreSQL does not auto-index FK
+-- columns. The /labels management endpoints (WXYC/Backend-Service#3691) filter
+-- on them:
+--
+--   - GET /labels/{id} and the DELETE in-use guard run
+--       SELECT count(*) ... WHERE label_id = $1
+--     on flowsheet and on library.
+--   - DELETE FROM labels makes Postgres scan both tables again for the FK check.
+--   - A rename runs UPDATE flowsheet ... WHERE label_id = $1 in a transaction.
+--
+-- Without an index each of these is a sequential scan of the ~2.6M-row
+-- flowsheet table. The API pool's statement timeout is 5 s
+-- (DB_STATEMENT_TIMEOUT_MS), so on prod they fail as 500s or hold a pool
+-- connection for seconds. CI cannot see this: its database has a handful of rows.
+--
+-- Why partial: most flowsheet and library rows carry no resolved label, and
+-- every query above filters on an equality, which implies label_id IS NOT NULL.
+-- The predicate keeps both indexes to the labelled subset.
+--
+-- Production ops (run BEFORE merging; the deploy runs migrations automatically):
+--   - These statements are NOT `CREATE INDEX CONCURRENTLY` below because the
+--     migrator runs every pending migration inside a single transaction, and
+--     `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`. A plain
+--     build on flowsheet takes a ShareLock for its whole duration and queues
+--     every concurrent INSERT, and DJs are on air around the clock.
+--   - Build both indexes out-of-band on prod first, one statement at a time (no
+--     AccessExclusiveLock, no INSERT pause):
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "flowsheet_label_id_idx"
+--         ON "wxyc_schema"."flowsheet" USING btree ("label_id")
+--         WHERE "label_id" IS NOT NULL;
+--       CREATE INDEX CONCURRENTLY IF NOT EXISTS "library_label_id_idx"
+--         ON "wxyc_schema"."library" USING btree ("label_id")
+--         WHERE "label_id" IS NOT NULL;
+--   - A CONCURRENTLY build that fails or is cancelled leaves an INVALID index
+--     behind, and `IF NOT EXISTS` would then skip it. Check
+--     `SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;`, and
+--     DROP INDEX CONCURRENTLY any invalid leftover before rebuilding.
+--   - Then merge. `IF NOT EXISTS` makes this migration a no-op against the prod
+--     DB where both indexes already exist, while fresh dev databases pick them up
+--     on first migrate. Same shape as 0057, 0068 and 0070.
+
+CREATE INDEX IF NOT EXISTS "flowsheet_label_id_idx" ON "wxyc_schema"."flowsheet" USING btree ("label_id") WHERE "wxyc_schema"."flowsheet"."label_id" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "library_label_id_idx" ON "wxyc_schema"."library" USING btree ("label_id") WHERE "wxyc_schema"."library"."label_id" IS NOT NULL;
