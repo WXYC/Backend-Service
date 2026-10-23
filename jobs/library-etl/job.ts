@@ -1242,7 +1242,6 @@ export const LEGACY_SOURCED_LIBRARY_COLUMNS = [
   'genre_id',
   'format_id',
   'alternate_artist_name',
-  'album_artist',
   'album_title',
   'code_number',
   'code_volume_letters',
@@ -1726,10 +1725,6 @@ const run = async () => {
             if (existing.dateFound?.getTime() !== newDateFound?.getTime()) {
               updates.date_found = newDateFound;
             }
-            const newAlbumArtist = release.release_album_artist ?? null;
-            if ((existing.albumArtist ?? null) !== newAlbumArtist) {
-              updates.album_artist = newAlbumArtist;
-            }
             const newOnStreaming = release.release_on_streaming ?? null;
             if ((existing.onStreaming ?? null) !== newOnStreaming) {
               updates.on_streaming = newOnStreaming;
@@ -1779,7 +1774,6 @@ const run = async () => {
               genre_id: genreId,
               format_id: formatId,
               alternate_artist_name: release.release_alternate_artist_name,
-              album_artist: release.release_album_artist,
               album_title: albumTitle,
               code_number: release.release_call_numbers ?? 0,
               code_volume_letters: codeVolumeLetters,
