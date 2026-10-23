@@ -2342,7 +2342,9 @@ paths:
 
       responses:
         '400':
-          description: specialty_id is unknown or names a retired specialty show (no show is started and no live show is taken over)
+          description: >-
+            specialty_id is unknown or names a retired specialty show (no show is started and no live show is taken over);
+            the body carries `code: specialty_not_taggable`. Every other 400 on this operation has no `code`.
         '200':
           description: Successfully joined/started show
           content:
@@ -2684,8 +2686,9 @@ paths:
           description: >-
             A `request_mode` outside the enum, a `specialty_id` that names no program, or that switches the show to a retired program (re-sending the
             show's current `specialty_id` is accepted even if that program has since been retired), a `show_name`
-            over its `maxLength`, or a caller who is not on the show while it is on the air. Clients should branch on
-            the status, not on the message text.
+            over its `maxLength`, or a caller who is not on the show while it is on the air. Only the unknown-or-retired
+            `specialty_id` refusal carries `code: specialty_not_taggable`; every other 400 has no `code`. Clients should
+            branch on the status and that code, not on the message text.
           content:
             application/json:
               schema:
