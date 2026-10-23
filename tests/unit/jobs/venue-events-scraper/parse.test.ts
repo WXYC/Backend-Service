@@ -31,6 +31,9 @@ describe('decodeHtmlEntities', () => {
     ['Cat&#039;s Cradle', "Cat's Cradle"],
     ['Cat&#8217;s Cradle', 'Cat’s Cradle'],
     ['Earth, Wind &amp; Fire', 'Earth, Wind & Fire'],
+    // WordPress writes `&` as `&#038;` in rendered titles and subheaders.
+    ['Hex Files &#038; Mean Habit', 'Hex Files & Mean Habit'],
+    ['Hex Files &#38; Mean Habit', 'Hex Files & Mean Habit'],
     ['Sinéad O&apos;Connor', "Sinéad O'Connor"],
     ['quotes &quot;in&quot; text', 'quotes "in" text'],
     ['no entities here', 'no entities here'],
@@ -165,6 +168,14 @@ describe('extractEventLinks — listing-card subheaders', () => {
     expect(extractEventLinks(html, BASE)).toEqual([
       { url: 'https://catscradle.com/event/a/', subHeader: 'Tomorrow’s Problem, Hex Files' },
       { url: 'https://catscradle.com/event/b/', subHeader: 'Quasi' },
+    ]);
+  });
+
+  it('treats a <br> between acts as a comma', () => {
+    const html = `<div class="eventWrapper"><a href="https://catscradle.com/event/a/">A</a>
+      <h4 class="eventSubHeader">Tomorrow&#8217;s Problem<br />Hex Files<br>Mean Habit</h4></div>`;
+    expect(extractEventLinks(html, BASE)).toEqual([
+      { url: 'https://catscradle.com/event/a/', subHeader: 'Tomorrow’s Problem, Hex Files, Mean Habit' },
     ]);
   });
 
@@ -438,6 +449,36 @@ describe('parseEventPage', () => {
       ['Quasi', 'quasi-carrboro-cats-cradle', 'with Hex Files, Mean Habit', ['Hex Files', 'Mean Habit']],
       ['Quasi', 'quasi-carrboro-cats-cradle', 'w/ Hex Files', ['Hex Files']],
       ['Quasi', 'quasiwith-hex-files-carrboro-cats-cradle', '   ', ['Hex Files']],
+      // Oxford-comma `and` / `&` belong to the list; `& more` is filler.
+      [
+        'Quasi',
+        'quasi-carrboro-cats-cradle',
+        'Hex Files, Mean Habit, and Tomorrow’s Problem',
+        ['Hex Files', 'Mean Habit', 'Tomorrow’s Problem'],
+      ],
+      [
+        'Quasi',
+        'quasi-carrboro-cats-cradle',
+        'Hex Files, Mean Habit, & Tomorrow’s Problem',
+        ['Hex Files', 'Mean Habit', 'Tomorrow’s Problem'],
+      ],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'Hex Files, & more', ['Hex Files']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'Hex Files & Friends', ['Hex Files & Friends']],
+      // A spaced slash separates acts; AC/DC does not.
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'Tobacco Road / Wim Tapley', ['Tobacco Road', 'Wim Tapley']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'AC/DC', ['AC/DC']],
+      // The headliner and repeats are dropped.
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'Quasi, Hex Files, hex files', ['Hex Files']],
+      // Lead-ins.
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'with special guests Hex Files, Mean Habit', ['Hex Files', 'Mean Habit']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'With special guest Hex Files', ['Hex Files']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'With: Hex Files', ['Hex Files']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'Special Guests: Hex Files', ['Hex Files']],
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'featuring Hex Files', ['Hex Files']],
+      // A capitalized "With" with no colon is a band name.
+      ['Quasi', 'quasi-carrboro-cats-cradle', 'With Honor', ['With Honor']],
+      // A subheader of nothing but filler falls back to the Etix slug.
+      ['Quasi', 'quasiwith-hex-files-carrboro-cats-cradle', 'special guests TBA', ['Hex Files']],
     ])('%s (etix slug %s) with subheader %p', (name, etixSlug, subHeader, expected) => {
       const parsed = parseEventPage(CATS_CRADLE, 'https://catscradle.com/event/x/', page(name, etixSlug), subHeader);
       if (parsed === null) throw new Error('expected fixture to parse');
