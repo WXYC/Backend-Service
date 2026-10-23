@@ -766,6 +766,34 @@ describe('buildWaitForQuietPeriod read-path guard', () => {
       await expect(waitForQuietPeriod()).resolves.toBe(false);
       expect(readPathProbe).toHaveBeenCalledTimes(3);
     });
+
+    it('a DJ pause drops the cached healthy verdict, so the read path is probed again once the DJ goes quiet', async () => {
+      const clock = manualClock();
+      const dj = jest
+        .fn<CheckLiveActivityFn>()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false);
+      const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValue(false);
+      const waitForQuietPeriod = buildWaitForQuietPeriod({
+        lookbackSeconds: 60,
+        pauseMs: 30_000,
+        probe: dj,
+        readPathProbe,
+        readPathCeilingMs: 5000,
+        sleep: () => {
+          clock.advance(1);
+          return Promise.resolve();
+        },
+        now: clock.now,
+      });
+
+      await waitForQuietPeriod();
+      expect(readPathProbe).toHaveBeenCalledTimes(1);
+      // inside the cache window, but a DJ pause comes first
+      await waitForQuietPeriod();
+      expect(readPathProbe).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('LIVE_ACTIVITY_READ_PATH_CEILING_MS env wiring (no readPathCeilingMs option)', () => {

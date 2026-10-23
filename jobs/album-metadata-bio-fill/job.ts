@@ -820,8 +820,8 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     });
 
   for (const [b, batch] of batches.entries()) {
-    // The shared pause consults `shouldStop` too, but not when the probe is
-    // disabled (LIVE_ACTIVITY_LOOKBACK_SECONDS=0), so the loop has its own guard.
+    // The shared pause consults `shouldStop` too, but not when both probes are disabled
+    // (LIVE_ACTIVITY_LOOKBACK_SECONDS=0 and LIVE_ACTIVITY_READ_PATH_CEILING_MS=0), so the loop has its own guard.
     if (stopRequested) {
       log('warn', 'stopped', 'graceful stop requested; ending before the next batch', { batches_done: b });
       summary.stopped_early = true;
