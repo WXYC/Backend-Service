@@ -10,7 +10,7 @@ jest.mock('@wxyc/database', () => jest.requireActual('../../utils/real-database-
 import { getTableName } from 'drizzle-orm';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { LABEL_REFERENCES } from '../../../apps/backend/services/label-references';
+import { LABEL_REFERENCES } from '../../../apps/backend/services/label-references.service';
 
 const SCHEMA_DIR = path.resolve(__dirname, '../../../shared/database/src');
 
