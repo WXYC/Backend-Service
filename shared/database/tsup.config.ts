@@ -6,7 +6,7 @@ export default defineConfig({
   // missing DB env vars, and the whole point of that module is to be importable
   // without starting a pool (BS#1945, BS#2693). Same recipe as
   // `shared/observability`'s `./metrics`.
-  entry: ['src/index.ts', 'src/streaming-merge-sql.ts'],
+  entry: ['src/index.ts', 'src/streaming-merge-sql.ts', 'src/support-list.ts'],
   format: ['esm', 'cjs'],
   dts: true,
   tsconfig: './tsconfig.build.json',

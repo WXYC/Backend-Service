@@ -98,7 +98,8 @@ const PRESENTS_PREFIX = /^[^:]*\bpresents\s*:\s*/i;
  * `w/out` — those mean "without" and belong to the name (`Angel w/o Wings`),
  * not a support delimiter.
  */
-const SUPPORT_TAIL = /\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$/i;
+// Exported for the W_JOINER source-equality pin (BS#3669).
+export const SUPPORT_TAIL = /\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$/i;
 
 /** Punctuation a tail/prefix strip can leave dangling (`Foo -` after
  *  `Foo - w/ Bar`). Terminal `!`/`?`/`.` are kept — they end real names. */
@@ -166,7 +167,7 @@ const cleanBilling = (original: string): string => {
  * That's the entire "drop the leading delimiter token" step; no separate
  * strip regex needed. Global, for `.split()`.
  */
-const TAIL_SPLIT = /\s*,\s*|\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*|\s+\/\s+|\s+(?:feat\.|ft\.|featuring)\s+/gi;
+export const TAIL_SPLIT = /\s*,\s*|\s+(?:w\/(?!o(?:ut)?\b)|\/\/)\s*|\s+\/\s+|\s+(?:feat\.|ft\.|featuring)\s+/gi;
 
 /**
  * Generalizes `extractHeadliner` into the full billing parse (BS#1758):
