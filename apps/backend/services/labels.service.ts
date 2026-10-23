@@ -2,7 +2,7 @@ import { count, eq, sql } from 'drizzle-orm';
 import { db, extractSqlState, labels, Label } from '@wxyc/database';
 import WxycError from '../utils/error.js';
 import { ilikeEscaped } from '../utils/sql-like.js';
-import { LABEL_REFERENCES, type LabelReferenceCounts } from './label-references.js';
+import { LABEL_REFERENCES, type LabelReferenceCounts } from './label-references.service.js';
 // Type-only import (erased at runtime, so no service-cycle hazard): the
 // transaction-handle type lives with `db.transaction`'s primary composer.
 import type { DbTransaction } from './library.service.js';
