@@ -7,7 +7,7 @@ import {
   normalizeFreetextArtist,
 } from '@wxyc/database/support-list';
 import { SUPPORT_TAIL, TAIL_SPLIT } from '../../../../jobs/triangle-shows-etl/headliner';
-import { SUBHEADER_SPLIT } from '../../../../jobs/venue-events-scraper/parse';
+import { SUBHEADER_LEAD_IN, SUBHEADER_SPLIT } from '../../../../jobs/venue-events-scraper/parse';
 
 describe('W_JOINER', () => {
   test.each([
@@ -20,14 +20,47 @@ describe('W_JOINER', () => {
     const m = W_JOINER.exec(input);
     expect(m === null ? null : input.slice(m[0].length)).toBe(rest);
   });
+});
 
-  // The billing-tail regexes stay literals (security/detect-non-literal-regexp),
-  // so the one lookahead is pinned by source equality instead of composition.
-  test('headliner.ts composed regexes carry the same lookahead', () => {
-    const fragment = W_JOINER.source.slice(1, W_JOINER.source.indexOf('\\s*'));
-    expect(fragment).toBe('w\\/(?!o(?:ut)?\\b)');
-    expect(SUPPORT_TAIL.source).toContain(fragment);
-    expect(TAIL_SPLIT.source).toContain(fragment);
+// Callers that embed a shared rule mid-pattern keep a literal
+// (security/detect-non-literal-regexp forbids building one from `.source`),
+// so each literal is pinned here: source and flags, with the shared parts
+// interpolated. Editing any of these literals means editing its pin, which is
+// the point — the shared part cannot drift in one copy only.
+describe('embedded copies of the shared rules', () => {
+  // W_JOINER without its anchor and trailing whitespace: the bare `w/` token.
+  const W = String.raw`w\/(?!o(?:ut)?\b)`;
+
+  test('W_JOINER is the anchored `w/` token plus optional whitespace', () => {
+    expect(W_JOINER.source).toBe(String.raw`^${W}\s*`);
+  });
+
+  test.each([
+    [
+      'headliner.ts SUPPORT_TAIL',
+      SUPPORT_TAIL,
+      String.raw`\s+(?:${W}|\/\/)\s*\S.*$|\s+(?:feat\.|ft\.|featuring)\s+\S.*$`,
+      'i',
+    ],
+    [
+      'headliner.ts TAIL_SPLIT',
+      TAIL_SPLIT,
+      String.raw`\s*,\s*|\s+(?:${W}|\/\/)\s*|${SPACED_SLASH.source}|\s+(?:feat\.|ft\.|featuring)\s+`,
+      'gi',
+    ],
+    // One alternation, not COMMA_SPLIT then SPACED_SLASH: the split result
+    // depends on it (`A / , B`).
+    ['parse.ts SUBHEADER_SPLIT', SUBHEADER_SPLIT, `${COMMA_SPLIT.source}|${SPACED_SLASH.source}`, ''],
+  ])('%s is pinned to the shared parts', (_name, regex, source, flags) => {
+    expect(regex.source).toBe(source);
+    expect(regex.flags).toBe(flags);
+  });
+
+  // `w/` is the LAST lead-in alternative, so it applies only when no other
+  // lead-in matched; the other alternatives are the scraper's own.
+  test('parse.ts SUBHEADER_LEAD_IN ends with W_JOINER as its last alternative', () => {
+    expect(SUBHEADER_LEAD_IN.source.endsWith(`|${W_JOINER.source}`)).toBe(true);
+    expect(SUBHEADER_LEAD_IN.flags).toBe(W_JOINER.flags);
   });
 });
 
@@ -55,16 +88,6 @@ describe('list delimiters', () => {
   });
   test('SPACED_SLASH needs whitespace on both sides', () => {
     expect('AC/DC / Mudhoney'.split(SPACED_SLASH)).toEqual(['AC/DC', 'Mudhoney']);
-  });
-
-  // The comma and spaced-slash rules are embedded mid-pattern in single
-  // alternations whose split results depend on being one regex (`A / , B`),
-  // so those literals are pinned to the shared parts by source equality.
-  test('parse.ts SUBHEADER_SPLIT is exactly COMMA_SPLIT | SPACED_SLASH', () => {
-    expect(SUBHEADER_SPLIT.source).toBe(`${COMMA_SPLIT.source}|${SPACED_SLASH.source}`);
-  });
-  test('headliner.ts TAIL_SPLIT carries SPACED_SLASH as one of its alternatives', () => {
-    expect(TAIL_SPLIT.source.split('|')).toContain(SPACED_SLASH.source);
   });
 
   // SPACED_SLASH (`\s+\/\s+`) and the read-path CO_BILL_DELIMITER slash
