@@ -51,20 +51,29 @@ const daysAgo = (n) => new Date(Date.now() - n * DAY_MS).toISOString();
 describe('operator close (BS#2235)', () => {
   let sql;
   const showIds = {};
+  const specialtyIds = {};
 
   // `entriesDaysAgo` defaults to the show's own start, which is what every
   // pre-BS#2315 probe wanted: a show whose last entry IS its start_time has one
   // floor, not two, and cannot tell the old bound from the new one.
   const insertShow = async (
     key,
-    { startedDaysAgo, endedDaysAgo = null, legacyDjName = null, entries = 0, entriesDaysAgo = undefined }
+    {
+      startedDaysAgo,
+      endedDaysAgo = null,
+      legacyDjName = null,
+      entries = 0,
+      entriesDaysAgo = undefined,
+      specialtyId = null,
+    }
   ) => {
     const rows = await sql`
-      INSERT INTO ${sql(SCHEMA)}.shows (start_time, end_time, legacy_dj_name)
+      INSERT INTO ${sql(SCHEMA)}.shows (start_time, end_time, legacy_dj_name, specialty_id)
       VALUES (
         ${daysAgo(startedDaysAgo)}::timestamptz,
         ${endedDaysAgo === null ? null : daysAgo(endedDaysAgo)}::timestamptz,
-        ${legacyDjName}
+        ${legacyDjName},
+        ${specialtyId}
       )
       RETURNING id`;
     const id = rows[0].id;
@@ -87,6 +96,18 @@ describe('operator close (BS#2235)', () => {
     // Insertion order is also id order (serial), and the endpoint resolves
     // `is_current` from `max(shows.id)` — so `current` is inserted LAST and is
     // the newest show in the database for the duration of this spec.
+    // BS#3680: one live and one retired program, so the read can be shown to
+    // return a retired tag (a manager must be able to see it to clear it).
+    const insertSpecialty = async (key, slug, active) => {
+      const rows = await sql`
+        INSERT INTO ${sql(SCHEMA)}.specialty_shows (specialty_name, slug, short_name, active)
+        VALUES (${`BS3680 ${slug}`}, ${slug}, ${slug.slice(0, 12)}, ${active})
+        RETURNING id`;
+      specialtyIds[key] = rows[0].id;
+    };
+    await insertSpecialty('active', 'bs3680-active', true);
+    await insertSpecialty('retired', 'bs3680-retired', false);
+
     await insertShow('stale', { startedDaysAgo: 6, legacyDjName: 'DJ Mouseness', entries: 0 });
     await insertShow('busy', { startedDaysAgo: 5, legacyDjName: 'dj meowww', entries: 6 });
     await insertShow('closed', { startedDaysAgo: 4, endedDaysAgo: 4, legacyDjName: 'DJ Flacko', entries: 3 });
@@ -108,6 +129,12 @@ describe('operator close (BS#2235)', () => {
       entries: 2,
     });
     await insertShow('unlogged', { startedDaysAgo: 6, legacyDjName: 'DJ Blank Slate', entries: 0 });
+    await insertShow('tagged', { startedDaysAgo: 2, legacyDjName: 'DJ Tagged', specialtyId: specialtyIds.active });
+    await insertShow('retiredTag', {
+      startedDaysAgo: 2,
+      legacyDjName: 'DJ Retired',
+      specialtyId: specialtyIds.retired,
+    });
     await insertShow('current', { startedDaysAgo: 0, legacyDjName: 'dj barely there', entries: 2 });
   });
 
@@ -128,6 +155,10 @@ describe('operator close (BS#2235)', () => {
       await sql`DELETE FROM ${sql(SCHEMA)}.show_djs WHERE show_id = ANY(${sql.array(ids)}::int[])`;
       await sql`DELETE FROM ${sql(SCHEMA)}.shows WHERE id = ANY(${sql.array(ids)}::int[])`;
     }
+    const specialtyIdList = Object.values(specialtyIds);
+    if (specialtyIdList.length) {
+      await sql`DELETE FROM ${sql(SCHEMA)}.specialty_shows WHERE id = ANY(${sql.array(specialtyIdList)}::int[])`;
+    }
     await sql.end({ timeout: 5 });
   });
 
@@ -146,6 +177,33 @@ describe('operator close (BS#2235)', () => {
       expect(findShow(body, 'stale')).toMatchObject({ entry_count: 0, dj_name: 'DJ Mouseness' });
       expect(findShow(body, 'busy')).toMatchObject({ entry_count: 6, dj_name: 'dj meowww' });
       expect(findShow(body, 'current')).toMatchObject({ entry_count: 2, dj_name: 'dj barely there' });
+    });
+
+    // BS#3680: the program comes from the show's own `specialty_id`, so the
+    // Open Shows edit dialog can preselect it and tell "clear the tag" apart
+    // from "no change".
+    it("returns a tagged show's specialty_id and SpecialtyShowRef", async () => {
+      const body = await fetchOpenShows();
+
+      expect(findShow(body, 'tagged')).toMatchObject({
+        specialty_id: specialtyIds.active,
+        specialty: { id: specialtyIds.active, slug: 'bs3680-active', name: 'BS3680 bs3680-active' },
+      });
+    });
+
+    it('returns specialty_id: null and specialty: null for a freeform show', async () => {
+      const body = await fetchOpenShows();
+
+      expect(findShow(body, 'busy')).toMatchObject({ specialty_id: null, specialty: null });
+    });
+
+    it('still returns a show tagged with a retired program', async () => {
+      const body = await fetchOpenShows();
+
+      expect(findShow(body, 'retiredTag')).toMatchObject({
+        specialty_id: specialtyIds.retired,
+        specialty: { id: specialtyIds.retired, slug: 'bs3680-retired' },
+      });
     });
 
     it('omits a closed show', async () => {

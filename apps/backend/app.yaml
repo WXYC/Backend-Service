@@ -2486,6 +2486,15 @@ paths:
                         likely_abandoned:
                           type: boolean
                           description: Advisory only — not current, and fewer than four entries.
+                        specialty_id:
+                          type: integer
+                          nullable: true
+                          description: The show's own `shows.specialty_id`; null for a freeform show.
+                        specialty:
+                          allOf:
+                            - $ref: '#/components/schemas/SpecialtyShowRef'
+                          nullable: true
+                          description: The show's specialty program, null for a freeform show. A retired program is still returned so a manager can clear it. Read from the show's own `specialty_id`, never from the catalog's slots.
                   total_in_window:
                     type: integer
                     description: Total before `limit` truncates; the only signal a page is partial.

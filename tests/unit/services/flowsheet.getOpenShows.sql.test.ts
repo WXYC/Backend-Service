@@ -100,6 +100,19 @@ describe('buildOpenShowsQuery — rendered statement (BS#2235)', () => {
     expect(text).toContain(`"auth_user"."dj_name"`);
   });
 
+  it('carries specialty_id through the page and joins specialty_shows OUTSIDE it', () => {
+    // The program is looked up against the already-truncated page, so it is
+    // bounded by `limit` like the count and the DJ join; a join inside the
+    // page subquery would sit in front of the `LIMIT`. One statement, no
+    // per-show lookup.
+    const pageSubquery = text.slice(text.indexOf('from (select'), text.indexOf(') "page"'));
+    expect(pageSubquery).toContain('"specialty_id"');
+    expect(pageSubquery).not.toContain('specialty_shows');
+    expect(text.slice(text.indexOf(') "page"'))).toContain(
+      `left join "${SCHEMA}"."specialty_shows" on "${SCHEMA}"."specialty_shows"."id" = "page"."specialty_id"`
+    );
+  });
+
   it('re-states the ordering on the outer statement', () => {
     // A subquery is unordered by definition; without this the planner is free
     // to reshuffle the page after the join. Second-granularity `start_time`
