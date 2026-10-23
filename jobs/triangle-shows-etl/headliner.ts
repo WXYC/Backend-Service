@@ -199,7 +199,8 @@ export const parseBilling = (billing: string): { headliner: string; support: str
   const support = tailMatch
     ? tailMatch[0]
         .split(TAIL_SPLIT)
-        .map((name) => name.trim())
+        // An Oxford-comma `and` belongs to the list; lowercase only, so `And Also The Trees` keeps its name.
+        .map((name) => name.trim().replace(/^and\s+/, ''))
         .filter((name) => name.length > 0)
     : [];
 
