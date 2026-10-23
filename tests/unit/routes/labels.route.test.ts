@@ -50,7 +50,6 @@ const mockRole = (role: string) =>
   (jwtVerify as jest.MockedFunction<typeof jwtVerify>).mockResolvedValue({
     payload: { sub: 'test-user-id', email: 'test@wxyc.org', role },
     protectedHeader: { alg: 'RS256' },
-    key: {} as any,
   });
 const NO_REFS = { library: 0, rotation: 0, flowsheet: 0, intake_items: 0 };
 

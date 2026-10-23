@@ -28,6 +28,10 @@ In-app DJ reviews. Role-gated `reviews:write` (dj+) to create, edit, submit and 
 
 FCC notes on the record. `reviews:write` (dj+) to report, `reviews:read` to list a record's notes, `reviews:manage` to confirm and to list every unconfirmed note (`status=reported`); the reporter may delete their own reported note, a music director any. Rules and per-route detail: [`docs/intake-and-reviews.md`](intake-and-reviews.md#fcc-notes)
 
+### `/labels/{id}`
+
+Label admin (BS#3289). `GET` (`catalog:read`) returns the label with `references` (`library`, `rotation`, `flowsheet`, `intake_items` row counts) and `child_labels`. `PATCH` (`catalog:write`) takes `label_name` and/or `parent_label_id` (nullable) and returns `{ label, rewritten }`: a rename rewrites the non-null name copies beside every `label_id` in the same transaction; a name that belongs to another label is a 409 `label_name_taken` (merge instead, BS#3290) and a parent that is the label or a descendant is a 400 `label_parent_cycle`. `DELETE` (`catalog:write`) is 204, or 409 `label_in_use` with `details: { references, child_labels }` while any foreign key or child label points at the row; the guard is referential only. The (table, FK column, text column) list is `apps/backend/services/label-references.ts`; a unit test fails when `schema.ts` gains an unlisted `references(() => labels.id)`. The wire contract lives in `wxyc-shared/api.yaml` (WXYC/wxyc-shared#760).
+
 ## `/flowsheet` and the V2 projection
 
 **There is no `/v2/flowsheet` route, and CLAUDE.md's route table used to claim there was.** `app.ts` mounts no `/v2` router; `projectEntriesV2` (`utils/album-metadata-projection.ts`) is called by `getEntries`, the handler mounted at plain `GET /flowsheet`, so **the V2 discriminated-union shape ships on the V1 path**. Three source comments still name `/v2/flowsheet` as though it were mounted (`utils/album-metadata-projection.ts:5`, `services/flowsheet.service.ts:392`, `services/playlist-proxy.service.ts:451`) — read those as naming the projection, not a route. `api.wxyc.org/v2/flowsheet` returns 404 with an HTML `Cannot GET` body, and always has.
