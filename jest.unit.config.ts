@@ -72,6 +72,13 @@ const config: Config = {
   // siblings aren't under rootDir and therefore aren't haste-mapped anyway.
   modulePathIgnorePatterns: ['<rootDir>/.claude/worktrees/', '<rootDir>/.worktrees/'],
   clearMocks: true,
+  // Memory cap (BS#3668). Uncapped, the suite runs one worker per core minus one and peaks
+  // near 4.5 GB summed RSS; 3 workers recycled once idle above 512 MB peak near 2.2 GB at
+  // about the same wall time. Applies to every caller; a command-line --maxWorkers still
+  // overrides it, and --runInBand still forces in-band runs (with workerIdleMemoryLimit set,
+  // Jest otherwise always uses workers, even for a single file).
+  maxWorkers: 3,
+  workerIdleMemoryLimit: '512MB',
 };
 
 export default config;
