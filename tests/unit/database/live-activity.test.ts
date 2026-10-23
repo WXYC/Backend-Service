@@ -15,20 +15,30 @@ import {
   LIVE_ACTIVITY_MIN_PAUSE_MS,
   LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
   LIVE_ACTIVITY_MAX_PAUSE_MS_ENV,
+  LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT,
+  LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV,
+  LIVE_ACTIVITY_READ_PATH_URL,
   resolveLiveActivityPauseMs,
   resolveLiveActivityMaxPauseMs,
+  resolveLiveActivityReadPathCeilingMs,
+  checkReadPath,
   buildWaitForQuietPeriod,
   buildDefaultSleep,
   LiveActivityPauseCeilingExceededError,
   type CheckLiveActivityFn,
+  type CheckReadPathFn,
 } from '../../../shared/database/src/live-activity';
 import {
   LIVE_ACTIVITY_LOOKBACK_SECONDS_DEFAULT as MOCK_LOOKBACK,
   LIVE_ACTIVITY_PAUSE_MS_DEFAULT as MOCK_PAUSE,
   LIVE_ACTIVITY_MIN_PAUSE_MS as MOCK_MIN_PAUSE_MS,
   LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT as MOCK_MAX_PAUSE_MS_DEFAULT,
+  LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT as MOCK_READ_PATH_CEILING_MS_DEFAULT,
+  LIVE_ACTIVITY_READ_PATH_URL as MOCK_READ_PATH_URL,
   resolveLiveActivityPauseMs as mockResolveLiveActivityPauseMs,
   resolveLiveActivityMaxPauseMs as mockResolveLiveActivityMaxPauseMs,
+  resolveLiveActivityReadPathCeilingMs as mockResolveLiveActivityReadPathCeilingMs,
+  checkReadPath as mockCheckReadPath,
   buildWaitForQuietPeriod as mockBuildWaitForQuietPeriod,
   buildDefaultSleep as mockBuildDefaultSleep,
   LiveActivityPauseCeilingExceededError as MockLiveActivityPauseCeilingExceededError,
@@ -59,6 +69,16 @@ describe('live-activity defaults', () => {
     expect(MOCK_PAUSE).toBe(LIVE_ACTIVITY_PAUSE_MS_DEFAULT);
     expect(MOCK_MIN_PAUSE_MS).toBe(LIVE_ACTIVITY_MIN_PAUSE_MS);
     expect(MOCK_MAX_PAUSE_MS_DEFAULT).toBe(LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT);
+    expect(MOCK_READ_PATH_CEILING_MS_DEFAULT).toBe(LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT);
+    expect(MOCK_READ_PATH_URL).toBe(LIVE_ACTIVITY_READ_PATH_URL);
+  });
+
+  it('mock resolveLiveActivityReadPathCeilingMs is byte-identical to the real implementation', () => {
+    expect(mockResolveLiveActivityReadPathCeilingMs.toString()).toBe(resolveLiveActivityReadPathCeilingMs.toString());
+  });
+
+  it('mock checkReadPath is byte-identical to the real implementation', () => {
+    expect(mockCheckReadPath.toString()).toBe(checkReadPath.toString());
   });
 
   // Byte-for-byte source comparison: a mock that computes the same answer via
@@ -223,8 +243,18 @@ describe('buildWaitForQuietPeriod', () => {
     await waitForQuietPeriod();
 
     expect(onPause).toHaveBeenCalledTimes(2);
-    expect(onPause).toHaveBeenNthCalledWith(1, { lookbackSeconds: 60, pauseMs: 5000, pausedMs: 0 });
-    expect(onPause).toHaveBeenNthCalledWith(2, { lookbackSeconds: 60, pauseMs: 5000, pausedMs: 1000 });
+    expect(onPause).toHaveBeenNthCalledWith(1, {
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      pausedMs: 0,
+      reason: 'dj-activity',
+    });
+    expect(onPause).toHaveBeenNthCalledWith(2, {
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      pausedMs: 1000,
+      reason: 'dj-activity',
+    });
   });
 
   /**
@@ -451,5 +481,204 @@ describe('buildWaitForQuietPeriod', () => {
       await jest.advanceTimersByTimeAsync(500);
       await expect(resultPromise).resolves.toBe(true);
     });
+  });
+});
+
+/**
+ * BS#2552: the read-path guard. A million-row `flowsheet` write evicts the
+ * working set from RDS cache and the fleet's `/playlists/recentEntries` poll
+ * degrades while every DB-side signal stays green, so `buildWaitForQuietPeriod`
+ * also probes that endpoint and pauses on a breach. Unlike the DJ-activity
+ * probe it fails CLOSED: an error or timeout IS the breach signal.
+ */
+describe('resolveLiveActivityReadPathCeilingMs', () => {
+  it('defaults to 5000ms when unset', () => {
+    expect(resolveLiveActivityReadPathCeilingMs(undefined)).toBe(5000);
+    expect(LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT).toBe(5000);
+  });
+
+  it.each([
+    ['0', 0],
+    ['1500', 1500],
+  ])('accepts %s', (raw, expected) => {
+    expect(resolveLiveActivityReadPathCeilingMs(raw)).toBe(expected);
+  });
+
+  it.each(['-1', 'abc', '1.5'])('rejects %s, naming the env var', (raw) => {
+    expect(() => resolveLiveActivityReadPathCeilingMs(raw)).toThrow(new RegExp(LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV));
+  });
+});
+
+describe('checkReadPath', () => {
+  /** A fetch that honours the abort signal, like the real one. */
+  const hangingFetch = (): typeof fetch =>
+    ((_url: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      })) as typeof fetch;
+
+  it("probes the fleet's own URL (v=2&n=50), not /healthcheck", async () => {
+    const fetchImpl = jest.fn<typeof fetch>().mockResolvedValue(new Response('[]', { status: 200 }));
+    await checkReadPath(5000, fetchImpl);
+    expect(fetchImpl.mock.calls[0][0]).toBe('http://wxyc.info/playlists/recentEntries?v=2&n=50');
+    expect(LIVE_ACTIVITY_READ_PATH_URL).not.toMatch(/healthcheck/);
+  });
+
+  it('is healthy on a fast 2xx', async () => {
+    const fetchImpl = jest.fn<typeof fetch>().mockResolvedValue(new Response('[]', { status: 200 }));
+    await expect(checkReadPath(5000, fetchImpl)).resolves.toBe(false);
+  });
+
+  it.each([404, 500, 503])('is degraded on a %i', async (status) => {
+    const fetchImpl = jest.fn<typeof fetch>().mockResolvedValue(new Response('{}', { status }));
+    await expect(checkReadPath(5000, fetchImpl)).resolves.toBe(true);
+  });
+
+  it('is degraded (fail closed) when the request outlives the ceiling', async () => {
+    await expect(checkReadPath(20, hangingFetch())).resolves.toBe(true);
+  });
+
+  it('is degraded (fail closed) when the request throws', async () => {
+    const fetchImpl = jest.fn<typeof fetch>().mockRejectedValue(new TypeError('fetch failed'));
+    await expect(checkReadPath(5000, fetchImpl)).resolves.toBe(true);
+  });
+});
+
+describe('buildWaitForQuietPeriod read-path guard', () => {
+  const quietDj = () => jest.fn<CheckLiveActivityFn>().mockResolvedValue(false);
+
+  it('pauses on a breach and resumes once the read path recovers', async () => {
+    const readPathProbe = jest
+      .fn<CheckReadPathFn>()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    const sleep = jest.fn(instantSleep);
+    const onPause = jest.fn();
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      probe: quietDj(),
+      readPathProbe,
+      readPathCeilingMs: 5000,
+      onPause,
+      sleep,
+      now: buildStepClock(1000),
+    });
+
+    await expect(waitForQuietPeriod()).resolves.toBe(false);
+    expect(readPathProbe).toHaveBeenCalledTimes(3);
+    expect(readPathProbe).toHaveBeenCalledWith(5000);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(5000);
+    expect(onPause).toHaveBeenCalledWith(expect.objectContaining({ reason: 'read-path' }));
+  });
+
+  it('does not probe the read path while DJs are active (the DJ pause wins)', async () => {
+    const dj = jest.fn<CheckLiveActivityFn>().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValue(false);
+    const onPause = jest.fn();
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      probe: dj,
+      readPathProbe,
+      readPathCeilingMs: 5000,
+      onPause,
+      sleep: instantSleep,
+    });
+
+    await waitForQuietPeriod();
+    expect(onPause).toHaveBeenCalledWith(expect.objectContaining({ reason: 'dj-activity' }));
+    expect(readPathProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a probe that throws as a breach (fails closed, unlike the DJ probe)', async () => {
+    const readPathProbe = jest
+      .fn<CheckReadPathFn>()
+      .mockRejectedValueOnce(new Error('timed out'))
+      .mockResolvedValue(false);
+    const sleep = jest.fn(instantSleep);
+    const onProbeError = jest.fn();
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      probe: quietDj(),
+      readPathProbe,
+      readPathCeilingMs: 5000,
+      onProbeError,
+      sleep,
+    });
+
+    await expect(waitForQuietPeriod()).resolves.toBe(false);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(onProbeError).not.toHaveBeenCalled();
+  });
+
+  it('readPathCeilingMs=0 disables the guard: no probe, no pause', async () => {
+    const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValue(true);
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      probe: quietDj(),
+      readPathProbe,
+      readPathCeilingMs: 0,
+    });
+
+    await expect(waitForQuietPeriod()).resolves.toBe(false);
+    expect(readPathProbe).not.toHaveBeenCalled();
+  });
+
+  it('still guards when lookbackSeconds=0 disables only the DJ probe', async () => {
+    const dj = quietDj();
+    const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const sleep = jest.fn(instantSleep);
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 0,
+      pauseMs: 5000,
+      probe: dj,
+      readPathProbe,
+      readPathCeilingMs: 5000,
+      sleep,
+    });
+
+    await expect(waitForQuietPeriod()).resolves.toBe(false);
+    expect(dj).not.toHaveBeenCalled();
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('a sustained breach still aborts with the ceiling error once the pause budget is spent', async () => {
+    const readPathProbe = jest.fn<CheckReadPathFn>().mockResolvedValue(true);
+    const onBudgetExhausted = jest.fn();
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      probe: quietDj(),
+      readPathProbe,
+      readPathCeilingMs: 5000,
+      maxTotalPauseMs: 2500,
+      onBudgetExhausted,
+      sleep: instantSleep,
+      now: buildStepClock(1000),
+    });
+
+    await expect(waitForQuietPeriod()).rejects.toThrow(LiveActivityPauseCeilingExceededError);
+    expect(onBudgetExhausted).toHaveBeenCalledTimes(1);
+  });
+
+  it('honors shouldStop during a breach without sleeping', async () => {
+    const sleep = jest.fn(instantSleep);
+    const waitForQuietPeriod = buildWaitForQuietPeriod({
+      lookbackSeconds: 60,
+      pauseMs: 5000,
+      probe: quietDj(),
+      readPathProbe: jest.fn<CheckReadPathFn>().mockResolvedValue(true),
+      readPathCeilingMs: 5000,
+      shouldStop: () => true,
+      sleep,
+    });
+
+    await expect(waitForQuietPeriod()).resolves.toBe(true);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });

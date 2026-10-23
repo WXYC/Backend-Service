@@ -220,3 +220,7 @@ Sample the **legacy cohort** (`primary_dj_id IS NULL`) when reviewing output —
 Reuses the shared `LIVE_ACTIVITY_*` knobs for the BS#2009 cooperative pause rather than defining its own — including `LIVE_ACTIVITY_MAX_PAUSE_MS`. Job-specific vars (`DJ_NAME_SCRUB_*`) are documented in `docs/env-vars.md`.
 
 The Dockerfile sets `DB_STATEMENT_TIMEOUT_MS=300000` (the API's 5s default is far too tight for the paged scans) and `DB_SYNCHRONOUS_COMMIT=off` (per the playbook).
+
+## Scheduling and the read-path guard
+
+Schedule against listeners, not DJs. "Off-peak" for DJs can be squarely inside the morning listening block: the 2026-09-08 scrub ran 07:58–08:49 PDT and broke `/playlists/recentEntries` for 43 minutes. Do not schedule a million-row `flowsheet` write against morning listening hours. The cooperative pause also probes that endpoint between batches and pauses while it is slow or failing (`LIVE_ACTIVITY_READ_PATH_CEILING_MS`, default 5000 ms, `0` disables; see `docs/env-vars.md`), but that is a backstop, not a substitute for choosing the window.
