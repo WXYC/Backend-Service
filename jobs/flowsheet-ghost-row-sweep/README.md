@@ -102,3 +102,7 @@ CLI flags: `--execute` (write mode), `--dry-run` (explicit no-op, the default; p
 - The production dump-access mechanism / prod `LegacyKeyspaceSource` adapter.
 - Running the sweep against production data.
 - Reviewing the log-only dry-run counts and executing the prod DELETEs.
+
+## Scheduling and the read-path guard
+
+Schedule against listeners, not DJs. "Off-peak" for DJs can be squarely inside the morning listening block: the 2026-09-08 scrub ran 07:58–08:49 PDT and broke `/playlists/recentEntries` for 43 minutes. Do not schedule a million-row `flowsheet` write against morning listening hours. The cooperative pause also probes that endpoint between batches and pauses while it is slow or failing (`LIVE_ACTIVITY_READ_PATH_CEILING_MS`, default 5000 ms, `0` disables; see `docs/env-vars.md`), but that is a backstop, not a substitute for choosing the window.

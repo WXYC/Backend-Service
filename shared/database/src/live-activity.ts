@@ -48,7 +48,22 @@ export const LIVE_ACTIVITY_MIN_PAUSE_MS = 1_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT = 1_800_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_ENV = 'LIVE_ACTIVITY_MAX_PAUSE_MS';
 
+/**
+ * Read-path guard (BS#2552): `buildWaitForQuietPeriod` also probes the
+ * endpoint the un-updatable mobile fleet polls and pauses while it is
+ * degraded. The 2026-09-08 `flowsheet-dj-name-scrub` run evicted the
+ * `flowsheet` working set from RDS cache and broke it for 43 minutes while
+ * every DB-side signal stayed green. The ceiling is half the nginx/client
+ * 10 s read timeout, the threshold wxyc-canary already alarms on for this
+ * path. `0` disables the guard.
+ */
+export const LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT = 5_000;
+export const LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV = 'LIVE_ACTIVITY_READ_PATH_CEILING_MS';
+export const LIVE_ACTIVITY_READ_PATH_URL = 'http://wxyc.info/playlists/recentEntries?v=2&n=50';
+
 export type CheckLiveActivityFn = (lookbackSeconds: number) => Promise<boolean>;
+/** Resolves `true` when the read path is degraded (the breach signal). */
+export type CheckReadPathFn = (ceilingMs: number) => Promise<boolean>;
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 const FLOWSHEET_TABLE = sql.raw(`"${SCHEMA}"."flowsheet"`);
@@ -101,6 +116,35 @@ export const resolveLiveActivityMaxPauseMs = (
     note: 'Cumulative pause budget for one waitForQuietPeriod call chain. 0 = uncapped; keep non-zero in production.',
   });
 
+/** Shared env resolver for `LIVE_ACTIVITY_READ_PATH_CEILING_MS` (BS#2552). `0` disables the read-path guard. */
+export const resolveLiveActivityReadPathCeilingMs = (
+  raw: string | undefined,
+  envName: string = LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV
+): number =>
+  requireNonNegativeInt(raw, envName, LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT, {
+    unit: 'ms',
+    note: 'Latency ceiling for the read-path guard probe. 0 disables the guard; keep it on for any bulk flowsheet writer.',
+  });
+
+/**
+ * One read-path probe (BS#2552): `GET LIVE_ACTIVITY_READ_PATH_URL` — the
+ * fleet's own `?v=2&n=50` shape, never `/healthcheck`, which only tests DB
+ * connectivity and stays green through exactly this failure. Resolves `true`
+ * (degraded) on a non-2xx, on a response (headers plus body) slower than
+ * `ceilingMs`, or on any error. It fails CLOSED, unlike the DJ-activity
+ * probe: a timeout is the breach signal. Never throws. `fetchImpl` is
+ * injectable for tests.
+ */
+export const checkReadPath = async (ceilingMs: number, fetchImpl: typeof fetch = fetch): Promise<boolean> => {
+  try {
+    const res = await fetchImpl(LIVE_ACTIVITY_READ_PATH_URL, { signal: AbortSignal.timeout(ceilingMs) });
+    await res.arrayBuffer();
+    return !res.ok;
+  } catch {
+    return true;
+  }
+};
+
 /**
  * Thrown by `buildWaitForQuietPeriod`'s returned closure (BS#2147 review
  * round 2, findings 1+2) once cumulative pause time reaches
@@ -131,6 +175,8 @@ export interface WaitForQuietPeriodPauseInfo {
   pauseMs: number;
   /** Cumulative pause time accrued so far in THIS call chain, before this iteration's sleep. */
   pausedMs: number;
+  /** What tripped this pause: a live DJ, or a degraded read path (BS#2552). */
+  reason: 'dj-activity' | 'read-path';
 }
 
 export interface WaitForQuietPeriodOptions {
@@ -138,6 +184,10 @@ export interface WaitForQuietPeriodOptions {
   pauseMs: number;
   /** Defaults to the shared `checkLiveActivity`. */
   probe?: CheckLiveActivityFn;
+  /** Defaults to `checkReadPath` (BS#2552). Resolves `true` when degraded; a throw counts as degraded. */
+  readPathProbe?: CheckReadPathFn;
+  /** Read-path latency ceiling; 0 disables the guard. Defaults to `LIVE_ACTIVITY_READ_PATH_CEILING_MS`, then 5000. */
+  readPathCeilingMs?: number;
   /** Defaults to `() => false` (no cooperative-stop awareness). */
   shouldStop?: () => boolean;
   onPause?: (info: WaitForQuietPeriodPauseInfo) => void;
@@ -199,12 +249,17 @@ export const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => P
  *
  * Returns `true` iff the caller should stop (per `shouldStop`), matching
  * the existing shape-A jobs' `Promise<boolean>` contract — callers that
- * don't track a stop flag can ignore the return value. `lookbackSeconds <=
- * 0` short-circuits to `false` without probing, exactly as every existing
- * copy does — `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` remains the sole disable
- * knob.
+ * don't track a stop flag can ignore the return value.
+ * `LIVE_ACTIVITY_LOOKBACK_SECONDS=0` disables the DJ-activity probe, exactly
+ * as every existing copy does; it does not disable the read-path guard below.
  *
- * The probe is always fail-open: a throw is swallowed and treated as "no
+ * BS#2552 adds a second, independent reason to pause: when no DJ is active,
+ * the closure probes the fleet's read path (`checkReadPath`) and pauses
+ * while it is degraded, through the same sleep, budget and ceiling error.
+ * On by default; `LIVE_ACTIVITY_READ_PATH_CEILING_MS=0` is its sole disable
+ * knob. A DJ-active iteration skips the read probe: the DJ pause wins.
+ *
+ * The DJ-activity probe is always fail-open: a throw is swallowed and treated as "no
  * activity" for that iteration (reported via `onProbeError`, if provided).
  * This is a deliberate behavior change for the callers that previously let
  * a probe throw escape and abort the run — see the BS#2147 PR description.
@@ -226,6 +281,8 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     onPause,
     onProbeError,
     onBudgetExhausted,
+    readPathProbe = checkReadPath,
+    readPathCeilingMs = resolveLiveActivityReadPathCeilingMs(process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV]),
     maxTotalPauseMs = LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
     sleep = buildDefaultSleep(shouldStop),
     now = () => performance.now(),
@@ -242,24 +299,34 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     }
   };
 
+  const readPathDegraded = async (): Promise<boolean> => {
+    try {
+      return await readPathProbe(readPathCeilingMs);
+    } catch {
+      return true;
+    }
+  };
+
   return async (): Promise<boolean> => {
-    if (lookbackSeconds <= 0) return false;
+    if (lookbackSeconds <= 0 && readPathCeilingMs <= 0) return false;
 
     while (true) {
       const loopStart = now();
-      const active = await safeProbe();
-      if (!active) return shouldStop();
+      let reason: WaitForQuietPeriodPauseInfo['reason'] | null = null;
+      if (lookbackSeconds > 0 && (await safeProbe())) reason = 'dj-activity';
+      else if (readPathCeilingMs > 0 && (await readPathDegraded())) reason = 'read-path';
+      if (reason === null) return shouldStop();
       if (shouldStop()) return true;
 
       if (maxTotalPauseMs > 0 && pausedMs >= maxTotalPauseMs) {
         onBudgetExhausted?.(pausedMs);
         throw new LiveActivityPauseCeilingExceededError(
           `Cooperative-pause budget exceeded: paused ${pausedMs}ms against a ${maxTotalPauseMs}ms ceiling ` +
-            '(LIVE_ACTIVITY_MAX_PAUSE_MS); aborting instead of pausing indefinitely while DJs remain active.'
+            '(LIVE_ACTIVITY_MAX_PAUSE_MS); aborting instead of pausing indefinitely while DJs remain active or the read path stays degraded.'
         );
       }
 
-      onPause?.({ lookbackSeconds, pauseMs, pausedMs });
+      onPause?.({ lookbackSeconds, pauseMs, pausedMs, reason });
       await sleep(pauseMs);
       pausedMs += now() - loopStart;
     }

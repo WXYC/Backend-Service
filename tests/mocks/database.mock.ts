@@ -998,6 +998,10 @@ export const checkLiveActivity = jest.fn<CheckLiveActivityFn>().mockResolvedValu
 export const LIVE_ACTIVITY_MIN_PAUSE_MS = 1_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT = 1_800_000;
 export const LIVE_ACTIVITY_MAX_PAUSE_MS_ENV = 'LIVE_ACTIVITY_MAX_PAUSE_MS';
+export const LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT = 5_000;
+export const LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV = 'LIVE_ACTIVITY_READ_PATH_CEILING_MS';
+export const LIVE_ACTIVITY_READ_PATH_URL = 'http://wxyc.info/playlists/recentEntries?v=2&n=50';
+export type CheckReadPathFn = (ceilingMs: number) => Promise<boolean>;
 
 export const resolveLiveActivityPauseMs = (
   raw: string | undefined,
@@ -1035,6 +1039,7 @@ export interface WaitForQuietPeriodPauseInfo {
   lookbackSeconds: number;
   pauseMs: number;
   pausedMs: number;
+  reason: 'dj-activity' | 'read-path';
 }
 
 export interface WaitForQuietPeriodOptions {
@@ -1045,6 +1050,8 @@ export interface WaitForQuietPeriodOptions {
   onPause?: (info: WaitForQuietPeriodPauseInfo) => void;
   onProbeError?: (err: unknown) => void;
   onBudgetExhausted?: (pausedMs: number) => void;
+  readPathProbe?: CheckReadPathFn;
+  readPathCeilingMs?: number;
   maxTotalPauseMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -1063,6 +1070,34 @@ export const buildDefaultSleep = (shouldStop: () => boolean): ((ms: number) => P
   };
 };
 
+export const resolveLiveActivityReadPathCeilingMs = (
+  raw: string | undefined,
+  envName: string = LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV
+): number =>
+  requireNonNegativeInt(raw, envName, LIVE_ACTIVITY_READ_PATH_CEILING_MS_DEFAULT, {
+    unit: 'ms',
+    note: 'Latency ceiling for the read-path guard probe. 0 disables the guard; keep it on for any bulk flowsheet writer.',
+  });
+
+/**
+ * One read-path probe (BS#2552): `GET LIVE_ACTIVITY_READ_PATH_URL` — the
+ * fleet's own `?v=2&n=50` shape, never `/healthcheck`, which only tests DB
+ * connectivity and stays green through exactly this failure. Resolves `true`
+ * (degraded) on a non-2xx, on a response (headers plus body) slower than
+ * `ceilingMs`, or on any error. It fails CLOSED, unlike the DJ-activity
+ * probe: a timeout is the breach signal. Never throws. `fetchImpl` is
+ * injectable for tests.
+ */
+export const checkReadPath = async (ceilingMs: number, fetchImpl: typeof fetch = fetch): Promise<boolean> => {
+  try {
+    const res = await fetchImpl(LIVE_ACTIVITY_READ_PATH_URL, { signal: AbortSignal.timeout(ceilingMs) });
+    await res.arrayBuffer();
+    return !res.ok;
+  } catch {
+    return true;
+  }
+};
+
 export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() => Promise<boolean>) => {
   const {
     lookbackSeconds,
@@ -1072,6 +1107,8 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     onPause,
     onProbeError,
     onBudgetExhausted,
+    readPathProbe = checkReadPath,
+    readPathCeilingMs = resolveLiveActivityReadPathCeilingMs(process.env[LIVE_ACTIVITY_READ_PATH_CEILING_MS_ENV]),
     maxTotalPauseMs = LIVE_ACTIVITY_MAX_PAUSE_MS_DEFAULT,
     sleep = buildDefaultSleep(shouldStop),
     now = () => performance.now(),
@@ -1088,24 +1125,34 @@ export const buildWaitForQuietPeriod = (opts: WaitForQuietPeriodOptions): (() =>
     }
   };
 
+  const readPathDegraded = async (): Promise<boolean> => {
+    try {
+      return await readPathProbe(readPathCeilingMs);
+    } catch {
+      return true;
+    }
+  };
+
   return async (): Promise<boolean> => {
-    if (lookbackSeconds <= 0) return false;
+    if (lookbackSeconds <= 0 && readPathCeilingMs <= 0) return false;
 
     while (true) {
       const loopStart = now();
-      const active = await safeProbe();
-      if (!active) return shouldStop();
+      let reason: WaitForQuietPeriodPauseInfo['reason'] | null = null;
+      if (lookbackSeconds > 0 && (await safeProbe())) reason = 'dj-activity';
+      else if (readPathCeilingMs > 0 && (await readPathDegraded())) reason = 'read-path';
+      if (reason === null) return shouldStop();
       if (shouldStop()) return true;
 
       if (maxTotalPauseMs > 0 && pausedMs >= maxTotalPauseMs) {
         onBudgetExhausted?.(pausedMs);
         throw new LiveActivityPauseCeilingExceededError(
           `Cooperative-pause budget exceeded: paused ${pausedMs}ms against a ${maxTotalPauseMs}ms ceiling ` +
-            '(LIVE_ACTIVITY_MAX_PAUSE_MS); aborting instead of pausing indefinitely while DJs remain active.'
+            '(LIVE_ACTIVITY_MAX_PAUSE_MS); aborting instead of pausing indefinitely while DJs remain active or the read path stays degraded.'
         );
       }
 
-      onPause?.({ lookbackSeconds, pauseMs, pausedMs });
+      onPause?.({ lookbackSeconds, pauseMs, pausedMs, reason });
       await sleep(pauseMs);
       pausedMs += now() - loopStart;
     }

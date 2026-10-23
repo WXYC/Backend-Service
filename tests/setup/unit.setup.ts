@@ -16,6 +16,10 @@ process.env.EMAIL_ENABLED = process.env.EMAIL_ENABLED ?? 'false';
 // suite off the network (real IMDS calls). The heartbeat's own test clears this per test.
 process.env.CRON_HEARTBEAT_METRICS_DISABLED = process.env.CRON_HEARTBEAT_METRICS_DISABLED ?? 'true';
 
+// buildWaitForQuietPeriod probes http://wxyc.info/playlists/recentEntries by default (BS#2552); keep the unit suite
+// off the network. live-activity.test.ts injects its own ceiling and probe to exercise the guard.
+process.env.LIVE_ACTIVITY_READ_PATH_CEILING_MS = process.env.LIVE_ACTIVITY_READ_PATH_CEILING_MS ?? '0';
+
 jest.setTimeout(10000);
 
 // apps/backend registers its SentryReporter in instrument.ts, which no unit test loads. Register one
