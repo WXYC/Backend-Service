@@ -176,6 +176,15 @@ jobs:
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig.base.json'
+              # BS#3667: `npm run lint` and `tests/unit/config/jobs-lint-program.test.ts`
+              # both read the shared jobs lint program, and the guard's
+              # parser-option cases read `eslint.config.mjs` through ESLint.
+              # Without these, a PR that edits only the lint config skips
+              # `lint-and-typecheck` and `unit-tests`, and both report
+              # `skipped`, which branch protection accepts as passing. Same
+              # trap as BS#1807 / BS#2256 / BS#2267 / BS#2718 below.
+              - 'tsconfig.eslint.jobs.json'
+              - 'eslint.config.mjs'
               # BS#1807: `tests/unit/scripts/ci-env-surface-parity.test.ts`
               # (BS#958) diffs these two files' env-var surfaces against
               # each other. Without them in `src`, a PR that edits only one

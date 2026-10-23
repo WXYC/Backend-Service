@@ -98,3 +98,29 @@ describe('eslint.config.mjs parser options', () => {
     }
   );
 });
+
+describe('the guard is reachable from the files it reads', () => {
+  // `lint-and-typecheck` and `unit-tests` run only when `detect-changes`' `src` filter matches.
+  // A PR that edits only the shared lint program must still run `npm run lint` and this test,
+  // or both report `skipped`, which branch protection accepts as passing (BS#1807, BS#2256).
+  // Returns the `src` filter's entries from test.yml, comment lines dropped.
+  const srcFilter = (): string[] => {
+    const lines = readFileSync(resolve(ROOT, '.github/workflows/test.yml'), 'utf-8')
+      .split('\n')
+      .filter((line) => !/^\s*#/.test(line));
+    const start = lines.findIndex((line) => /^\s*src:\s*$/.test(line));
+    const entries: string[] = [];
+    for (const line of lines.slice(start + 1)) {
+      const match = /^\s*- '([^']+)'\s*$/.exec(line);
+      if (!match) {
+        break;
+      }
+      entries.push(match[1]);
+    }
+    return entries;
+  };
+
+  it.each([SHARED_TSCONFIG, 'eslint.config.mjs'])("detect-changes' src filter lists %s", (file) => {
+    expect(srcFilter()).toContain(file);
+  });
+});
