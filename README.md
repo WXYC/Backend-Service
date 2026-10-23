@@ -85,6 +85,7 @@ The dev experience makes extensive use of Node.js project scripts. Here's a rund
 
 - `npm run typecheck` : Runs `tsc --noEmit` to verify type safety without emitting files. Covers `@wxyc/database` + `shared/**` + `apps/**` only -- `jobs/**` and `tests/**` are not included; typecheck each job individually with `npm run typecheck --workspace=jobs/<name>`.
 - `npm run lint` : Runs ESLint with TypeScript type-checked rules and security analysis.
+- `npm run lint:changed` : Lints only files changed since `origin/main` (what the pre-push hook runs); a config, tsconfig, `package.json`, lockfile or `.d.ts` change lints everything, one top-level directory at a time. `--dry-run` prints the plan.
 - `npm run lint:fix` : Runs ESLint with auto-fix enabled.
 - `npm run format` : Formats all files with Prettier.
 - `npm run format:check` : Verifies all files match Prettier formatting (used in CI).
@@ -94,7 +95,8 @@ The dev experience makes extensive use of Node.js project scripts. Here's a rund
 This project uses [husky](https://typicode.github.io/husky/) to run a **pre-push** hook that validates your code before it reaches CI. When you run `git push`, the hook automatically runs:
 
 ```bash
-npm run typecheck && npm run lint
+npm run typecheck
+npm run lint:changed
 ```
 
 This catches type errors and lint violations locally (in ~15-30s) instead of waiting for CI to report them. The hooks are set up automatically when you run `npm install`.
