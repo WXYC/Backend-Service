@@ -22,7 +22,11 @@ fi
 # lets a typecheck failure fall through to the next line. One command per
 # line, no `&&`, so `set -e` actually fires.
 npm run typecheck
-npm run lint
+# `lint:changed` (BS#3556) lints only what the push changes, or every tracked
+# file one top-level directory at a time when a config, tsconfig, package
+# manifest or .d.ts changed. The full `npm run lint` held ~5 GB per push; CI
+# still runs it and gates merges.
+npm run lint:changed
 # `check:docs` is the warn-only pair (doc-budget + doc-rules): they surface
 # gentle nudges about markdown hygiene but shouldn't block a push.
 npm run check:docs || true
