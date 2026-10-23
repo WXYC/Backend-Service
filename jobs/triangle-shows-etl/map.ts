@@ -14,7 +14,7 @@
  */
 
 import { nyCalendarDate, nyWallClockToUtc, normalizeFreetextArtist, type NewConcert } from '@wxyc/database';
-import { parseBilling } from './headliner.js';
+import { BILLING_DELIMITER_PATTERNS, parseBilling } from './headliner.js';
 import type { TsEvent } from './types.js';
 
 // Clean-headliner extraction (BS#1604) + the BS#1614 clean-name LML gate +
@@ -57,23 +57,26 @@ export type MappedEvent = {
 /** Scraper `source` values whose support elements carry a leading
  *  `with ` joiner (BS#3634). Scoped by source because `With Honor` and
  *  `With Confidence` are real acts; a leading `w/` is stripped for all. */
-export const WITH_PREFIX_SOURCES: ReadonlySet<string> = new Set(['venuepilot', 'rhp_events']);
+const WITH_PREFIX_SOURCES: ReadonlySet<string> = new Set(['venuepilot', 'rhp_events']);
+// Same `w/o` / `w/out` exclusion as headliner.ts's SUPPORT_TAIL and TAIL_SPLIT.
 const W_PREFIX = /^w\/(?!o(?:ut)?\b)\s*/i;
 // Lowercase only, as venues write the joiner, so `With Honor` survives even
 // for a WITH_PREFIX_SOURCES source.
 const WITH_PREFIX = /^with\s+/;
-const SPACED_SLASH = /\s+\/\s+/;
-// A list item's Oxford-comma `and` (`…, End Of Your Rope, and Hazrdpay`) is
-// part of the list, so it goes with the delimiter.
-const LIST_SPLIT = /\s*,\s*(?:and\s+)?|\s+\/\s+/;
+// A list item's Oxford-comma `and` / `&` (`…, End Of Your Rope, and Hazrdpay`)
+// is part of the list, so it goes with the delimiter.
+const COMMA_SPLIT = /\s*,\s*(?:(?:and|&)\s+)?/;
+// Entries that name no act ("special guests", "& More", "TBA").
+const SUPPORT_PLACEHOLDER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|guests?|friends|more|tba|tbd)$/i;
 
 /** One support element -> its names: strip a leading joiner, then split
  *  on `,` / ` / ` only when a joiner was stripped or the element contains
  *  ` / ` — otherwise it stays atomic (`Earth, Wind & Fire`). */
 const splitSupportElement = (element: string, source: string): string[] => {
-  let stripped = element.replace(W_PREFIX, '');
-  if (stripped === element && WITH_PREFIX_SOURCES.has(source)) stripped = element.replace(WITH_PREFIX, '');
-  return stripped !== element || SPACED_SLASH.test(element) ? stripped.split(LIST_SPLIT) : [stripped];
+  const joiner = W_PREFIX.exec(element) ?? (WITH_PREFIX_SOURCES.has(source) ? WITH_PREFIX.exec(element) : null);
+  const body = joiner ? element.slice(joiner[0].length) : element;
+  const parts = body.split(BILLING_DELIMITER_PATTERNS.slash);
+  return joiner || parts.length > 1 ? parts.flatMap((part) => part.trim().split(COMMA_SPLIT)) : [body];
 };
 
 /** Normalize the source's support-artist field into the `text[]` shape
@@ -83,7 +86,7 @@ const splitSupportElement = (element: string, source: string): string[] => {
  *  the source flips to (WXYC/triangle-shows#39) — the feed is untrusted, so
  *  a non-string array element is coerced away rather than crashing the ETL. */
 export const splitSupportArtists = (raw: string | string[] | null, source = ''): string[] =>
-  (Array.isArray(raw) ? raw : (raw ?? '').split(','))
+  (Array.isArray(raw) ? raw : (raw ?? '').split(COMMA_SPLIT))
     .flatMap((s) => (typeof s === 'string' ? splitSupportElement(s.trim(), source) : []))
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
@@ -110,6 +113,8 @@ const SUPPORT_MAX_COUNT = 32;
  * compared against the ALREADY-DECIDED `headliner` (upstream field or the
  * heuristic, whichever won), not the clamped storage form; the exclusion
  * is an identity check, not a column-width one.
+ * Placeholder entries that name no act (`special guests`, `& More`,
+ * `TBA`, a bare `Friends`) are dropped too (BS#3634).
  *
  * Each surviving name clamps to `max` code points (the caller passes
  * `HEADLINER_MAX`, mirroring the headliner's own clamp) and the array
@@ -127,7 +132,7 @@ export const mergeSupportingArtists = (
   const merged: string[] = [];
   for (const name of [...billingSupport, ...structuredSupport]) {
     const key = normalizeFreetextArtist(name);
-    if (key === '' || key === headlinerKey || seen.has(key)) continue;
+    if (key === '' || key === headlinerKey || seen.has(key) || SUPPORT_PLACEHOLDER.test(name)) continue;
     seen.add(key);
     merged.push(clampCodePoints(name, max));
   }

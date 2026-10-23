@@ -328,6 +328,10 @@ describe('parseBilling — support-tail parsing (BS#1758)', () => {
     // Extra internal whitespace around the delimiter and the comma is
     // trimmed off each captured name.
     ['Deerhoof w/  Sword II  ,  Told Slant', ['Sword II', 'Told Slant']],
+    // An Oxford-comma "and" belongs to the list, not the last act; a
+    // capitalized "And" is part of a name (And Also The Trees).
+    ['Wednesday w/ Truth Club, DJ Nu-Mark, and Sluice', ['Truth Club', 'DJ Nu-Mark', 'Sluice']],
+    ['Deerhoof w/ Sword II, And Also The Trees', ['Sword II', 'And Also The Trees']],
   ])('parseBilling(%j).support -> %j', (input, expectedSupport) => {
     expect(parseBilling(input).support).toEqual(expectedSupport);
   });
@@ -439,6 +443,9 @@ describe('splitSupportArtists', () => {
     // Internal empty element and padding whitespace both dropped.
     ['Juana Molina, , Jessica Pratt', ['Juana Molina', 'Jessica Pratt']],
     ['  Nilüfer Yanya ,Hermanos Gutiérrez  ', ['Nilüfer Yanya', 'Hermanos Gutiérrez']],
+    // The legacy string form drops an Oxford-comma "and" the same way the array form does.
+    ['Stereolab, Cat Power, and Juana Molina', ['Stereolab', 'Cat Power', 'Juana Molina']],
+    ['Stereolab, Cat Power, & Juana Molina', ['Stereolab', 'Cat Power', 'Juana Molina']],
   ])('splitSupportArtists(%j) -> %j', (input, expected) => {
     expect(splitSupportArtists(input)).toEqual(expected);
   });
@@ -505,6 +512,7 @@ describe('splitSupportArtists', () => {
     ['venuepilot', 'With Honor', ['With Honor']],
     ['rhp_events', 'With Confidence', ['With Confidence']],
     ['rhp_events', 'with Stereolab, Cat Power', ['Stereolab', 'Cat Power']],
+    ['venuepilot', 'w/ Stereolab, Cat Power, & Juana Molina', ['Stereolab', 'Cat Power', 'Juana Molina']],
     // `w/` is source-independent.
     ['tickpick_organizer', 'W/ Stereolab', ['Stereolab']],
     // Guards.
@@ -589,6 +597,17 @@ describe('mergeSupportingArtists (BS#1758)', () => {
     const merged = mergeSupportingArtists([], names, 'Headliner', 256);
     expect(merged).toHaveLength(32);
     expect(merged).toEqual(names.slice(0, 32));
+  });
+
+  it('drops placeholder entries that name no act', () => {
+    expect(
+      mergeSupportingArtists(
+        ['special guests', 'Told Slant'],
+        ['TBA', '& More', 'Very Special Guest', 'Friends', 'Dear Lucy & Friends'],
+        'Jessica Pratt',
+        256
+      )
+    ).toEqual(['Told Slant', 'Dear Lucy & Friends']);
   });
 
   it('returns [] for no support from either source', () => {
