@@ -13,8 +13,15 @@
  * of them uniformly.
  */
 
-import { nyCalendarDate, nyWallClockToUtc, normalizeFreetextArtist, type NewConcert } from '@wxyc/database';
-import { BILLING_DELIMITER_PATTERNS, parseBilling } from './headliner.js';
+import { nyCalendarDate, nyWallClockToUtc, type NewConcert } from '@wxyc/database';
+import {
+  COMMA_SPLIT,
+  SPACED_SLASH,
+  SUPPORT_PLACEHOLDER,
+  W_JOINER,
+  normalizeFreetextArtist,
+} from '@wxyc/database/support-list';
+import { parseBilling } from './headliner.js';
 import type { TsEvent } from './types.js';
 
 // Clean-headliner extraction (BS#1604) + the BS#1614 clean-name LML gate +
@@ -58,24 +65,17 @@ export type MappedEvent = {
  *  `with ` joiner (BS#3634). Scoped by source because `With Honor` and
  *  `With Confidence` are real acts; a leading `w/` is stripped for all. */
 const WITH_PREFIX_SOURCES: ReadonlySet<string> = new Set(['venuepilot', 'rhp_events']);
-// Same `w/o` / `w/out` exclusion as headliner.ts's SUPPORT_TAIL and TAIL_SPLIT.
-const W_PREFIX = /^w\/(?!o(?:ut)?\b)\s*/i;
 // Lowercase only, as venues write the joiner, so `With Honor` survives even
 // for a WITH_PREFIX_SOURCES source.
 const WITH_PREFIX = /^with\s+/;
-// A list item's Oxford-comma `and` / `&` (`…, End Of Your Rope, and Hazrdpay`)
-// is part of the list, so it goes with the delimiter.
-const COMMA_SPLIT = /\s*,\s*(?:(?:and|&)\s+)?/;
-// Entries that name no act ("special guests", "& More", "TBA").
-const SUPPORT_PLACEHOLDER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|guests?|friends|more|tba|tbd)$/i;
 
 /** One support element -> its names: strip a leading joiner, then split
  *  on `,` / ` / ` only when a joiner was stripped or the element contains
  *  ` / ` — otherwise it stays atomic (`Earth, Wind & Fire`). */
 const splitSupportElement = (element: string, source: string): string[] => {
-  const joiner = W_PREFIX.exec(element) ?? (WITH_PREFIX_SOURCES.has(source) ? WITH_PREFIX.exec(element) : null);
+  const joiner = W_JOINER.exec(element) ?? (WITH_PREFIX_SOURCES.has(source) ? WITH_PREFIX.exec(element) : null);
   const body = joiner ? element.slice(joiner[0].length) : element;
-  const parts = body.split(BILLING_DELIMITER_PATTERNS.slash);
+  const parts = body.split(SPACED_SLASH);
   return joiner || parts.length > 1 ? parts.flatMap((part) => part.trim().split(COMMA_SPLIT)) : [body];
 };
 

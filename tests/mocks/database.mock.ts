@@ -1296,6 +1296,7 @@ export {
   freetextPairKey,
   normalizeFreetextArtist,
 } from '../../shared/database/src/freetext-norm.js';
+export { COMMA_SPLIT, SPACED_SLASH, SUPPORT_PLACEHOLDER, W_JOINER } from '../../shared/database/src/support-list.js';
 export { NY_TIME_ZONE, nyCalendarDate, nyStartOfDay, nyWallClockToUtc } from '../../shared/database/src/ny-time.js';
 
 // Self-contained STUB of shared/database/src/concerts-sql.ts. The real

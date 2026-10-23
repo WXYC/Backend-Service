@@ -16,6 +16,7 @@ import {
   type SimilarArtistNeighbor,
   venues,
 } from '@wxyc/database';
+import { SUPPORT_PLACEHOLDER } from '@wxyc/database/support-list';
 import { LRUCache } from 'lru-cache';
 
 /**
@@ -595,13 +596,6 @@ const upcomingShowJoinFields = {
   artist_name: artists.artist_name,
 };
 
-/**
- * A co-bill "act" that is filler, not a performer (`+ Friends`, `/ TBA`,
- * `+ Special Guests`). Keying it would attach the concert to any play of a
- * band that happens to be called that. Matched against the normalized key.
- */
-const CO_BILL_PLACEHOLDER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|guests?|friends|more|tba|tbd)$/;
-
 /** `ConcertJoinRow` plus the LEFT-joined canonical artist name (null when unresolved). */
 type UpcomingShowJoinRow = ConcertJoinRow & { artist_name: string | null };
 
@@ -759,7 +753,7 @@ export const getUpcomingShowsMaps = async (
     if (parts.length < 2) continue;
     const keys = parts
       .map((part) => normalizeFreetextArtist(part.trim()))
-      .filter((key) => !CO_BILL_PLACEHOLDER.test(key));
+      .filter((key) => !SUPPORT_PLACEHOLDER.test(key));
     claim(row, null, keys);
   }
 

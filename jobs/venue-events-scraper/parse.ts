@@ -15,6 +15,7 @@
  * doesn't drift into our parse.
  */
 
+import { COMMA_SPLIT, SPACED_SLASH, SUPPORT_PLACEHOLDER, W_JOINER } from '@wxyc/database/support-list';
 import type { EventLink, ParsedConcert, SchemaEvent } from './rhp-types.js';
 import { VENUE_SEEDS, type RhpVenueConfig } from './rhp-venues.js';
 
@@ -179,16 +180,10 @@ export const extractEventLinks = (indexHtml: string, baseUrl: string): EventLink
 
 /** Lead-ins before the act list: "with special guests", "Special Guests:", "With:", "featuring", "w/". */
 const SUBHEADER_LEAD_IN =
-  /^(?:(?:with|featuring|feat\.)\s+)?(?:very\s+)?special\s+guests?\s*:?\s*|^(?:with|featuring|feat\.)\s*:\s*|^(?:featuring|feat\.)\s+|^w\/(?!o(?:ut)?\b)\s*/i;
+  /^(?:(?:with|featuring|feat\.)\s+)?(?:very\s+)?special\s+guests?\s*:?\s*|^(?:with|featuring|feat\.)\s*:\s*|^(?:featuring|feat\.)\s+/i;
 
 /** A bare lowercase "with " lead-in. Case-sensitive so a band like "With Honor" keeps its name. */
 const SUBHEADER_WITH = /^with\s+/;
-
-/** Comma (with an optional Oxford "and"/"&") or a spaced slash. "and" alone belongs inside names. */
-const SUBHEADER_SPLIT = /\s*,\s*(?:(?:and|&)\s+)?|\s+\/\s+/;
-
-/** Placeholder entries that name no act: "& more", "special guests", "TBA". */
-const SUBHEADER_FILLER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|guests?|friends|more|tba|tbd)$/i;
 
 /**
  * Support acts from a listing-card subheader. Strips a lead-in, splits on
@@ -199,11 +194,14 @@ const SUBHEADER_FILLER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+guests?|gue
 export const splitSubHeaderActs = (subHeader: string, headliner: string): string[] => {
   const seen = new Set([headliner.trim().toLowerCase()]);
   const acts: string[] = [];
-  const body = subHeader.trim().replace(SUBHEADER_LEAD_IN, '').replace(SUBHEADER_WITH, '');
-  for (const part of body.split(SUBHEADER_SPLIT)) {
+  const trimmed = subHeader.trim();
+  // `w/` is the last lead-in alternative: it applies only when no other matched.
+  const afterLead = trimmed.replace(SUBHEADER_LEAD_IN, '');
+  const body = (afterLead !== trimmed ? afterLead : trimmed.replace(W_JOINER, '')).replace(SUBHEADER_WITH, '');
+  for (const part of body.split(COMMA_SPLIT).flatMap((piece) => piece.split(SPACED_SLASH))) {
     const act = part.trim();
     const key = act.toLowerCase();
-    if (act === '' || SUBHEADER_FILLER.test(act) || seen.has(key)) continue;
+    if (act === '' || SUPPORT_PLACEHOLDER.test(act) || seen.has(key)) continue;
     seen.add(key);
     acts.push(act);
   }

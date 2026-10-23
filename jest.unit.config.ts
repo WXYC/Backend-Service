@@ -27,6 +27,7 @@ const config: Config = {
     // resolution against shared/database/dist, which CI's unit-tests job never
     // builds (BS#2693).
     '^@wxyc/database/streaming-merge-sql$': '<rootDir>/shared/database/src/streaming-merge-sql.ts',
+    '^@wxyc/database/support-list$': '<rootDir>/shared/database/src/support-list.ts',
     '^@wxyc/authentication$': '<rootDir>/tests/mocks/authentication.mock.ts',
     // @wxyc/lml-client: resolve to source so unit tests don't need a pre-built
     // dist (CI's unit-tests job doesn't run lint:prebuild before tests). Real

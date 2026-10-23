@@ -17,6 +17,12 @@
       "import": "./dist/streaming-merge-sql.mjs",
       "require": "./dist/streaming-merge-sql.js"
     },
+    "./support-list": {
+      "source": "./src/support-list.ts",
+      "types": "./dist/support-list.d.ts",
+      "import": "./dist/support-list.mjs",
+      "require": "./dist/support-list.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

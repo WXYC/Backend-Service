@@ -17,6 +17,7 @@
       "@/*": ["apps/backend/*"],
       "@wxyc/database": ["shared/database/src/index.ts"],
       "@wxyc/database/streaming-merge-sql": ["shared/database/src/streaming-merge-sql.ts"],
+      "@wxyc/database/support-list": ["shared/database/src/support-list.ts"],
       "@wxyc/observability/job-logger": ["shared/observability/src/job-logger.ts"],
       "@wxyc/observability/metrics": ["shared/observability/src/metrics.ts"],
       "@wxyc/observability/posthog": ["shared/observability/src/posthog-reporter.ts"],
