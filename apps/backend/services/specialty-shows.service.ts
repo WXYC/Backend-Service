@@ -64,6 +64,8 @@ export const assertSpecialtyTaggable = async (
     return;
   }
   if (!(await isSpecialtyShowTaggable(specialty_id))) {
-    throw new WxycError('Bad Request: specialty_id is unknown or names a retired specialty show', 400);
+    throw new WxycError('Bad Request: specialty_id is unknown or names a retired specialty show', 400, {
+      code: 'specialty_not_taggable',
+    });
   }
 };

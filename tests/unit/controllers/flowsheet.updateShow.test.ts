@@ -173,13 +173,13 @@ describe('PATCH /flowsheet/shows/:id (BS#3456)', () => {
   });
 
   const failures: Array<[string, unknown, unknown[][], number, string | undefined]> = [
-    ['an unknown specialty id', { specialty_id: 99 }, [...OPEN_MEMBER, []], 400, undefined],
+    ['an unknown specialty id', { specialty_id: 99 }, [...OPEN_MEMBER, []], 400, 'specialty_not_taggable'],
     [
       'a retired id that is not the current value',
       { specialty_id: 8 },
       [[{ end_time: null, specialty_id: 7 }], [{ entry_type: 'track' }], [{ dj_id: DJ }], [{ id: DJ }], []],
       400,
-      undefined,
+      'specialty_not_taggable',
     ],
     ['a non-integer specialty id', { specialty_id: '7' }, [...OPEN_MEMBER], 400, undefined],
     ['a title over 128 characters', { show_name: 'x'.repeat(129) }, [], 400, undefined],

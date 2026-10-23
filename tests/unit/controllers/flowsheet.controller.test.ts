@@ -2079,6 +2079,24 @@ describe('flowsheet.controller', () => {
       }
     );
 
+    it.each([
+      ['an unknown or retired specialty_id', { specialty_id: 99 }, 'specialty_not_taggable'],
+      ['a non-integer specialty_id', { specialty_id: 'abc' }, undefined],
+      ['a too-long dj_name_override', { dj_name_override: 'x'.repeat(256) }, undefined],
+    ])('answers 400 with the right code for %s (BS#3670)', async (_name, extra, code) => {
+      mockGetLatestShow.mockResolvedValue({ id: 1, end_time: new Date() });
+      (db as unknown as { _chain: { limit: jest.Mock<() => Promise<unknown>> } })._chain.limit.mockResolvedValue([]);
+      const req = {
+        auth: { id: 'caller-dj' },
+        body: { dj_id: 'caller-dj', show_name: 'My Show', ...extra },
+      } as unknown as Request;
+
+      await expect(joinShow(req, createMockRes() as Response, mockNext)).rejects.toMatchObject({
+        statusCode: 400,
+        code,
+      });
+    });
+
     it('adds the caller to the active show as a co-host', async () => {
       mockGetLatestShow.mockResolvedValue({ id: 1, end_time: null });
       mockAddDJToShow.mockResolvedValue({ show_dj: { id: 99, dj_id: 'caller-dj' }, joined: true });

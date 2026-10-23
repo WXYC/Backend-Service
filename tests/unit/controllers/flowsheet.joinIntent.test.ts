@@ -282,6 +282,7 @@ describe('joinShow — an open show the caller does not belong to', () => {
     const err = await joinShow(makeReq({ intent: 'end_it_all' }), res, next).catch((e: unknown) => e);
 
     expect((err as WxycError).statusCode).toBe(400);
+    expect((err as WxycError).code).toBeUndefined();
     expect(mockAddDJToShow).not.toHaveBeenCalled();
     expect(mockEndShow).not.toHaveBeenCalled();
   });
