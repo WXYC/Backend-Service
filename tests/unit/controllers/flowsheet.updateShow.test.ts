@@ -148,6 +148,14 @@ describe('PATCH /flowsheet/shows/:id (BS#3456)', () => {
         ] as SuccessCase
     ),
     [
+      'lets a manager edit an open show they are not on (BS#3678)',
+      { show_name: 'Fixed' },
+      [OPEN_SHOW, [{ entry_type: 'track' }], [{ dj_id: 'other' }], [{ id: 'other' }], rangeRow({ show_name: 'Fixed' })],
+      true,
+      { show_name: 'Fixed' },
+      { show_name: 'Fixed' },
+    ],
+    [
       'lets a manager edit an ended show',
       { show_name: 'Fixed' },
       [...ENDED_SHOW, rangeRow({ show_name: 'Fixed', end_time: START })],

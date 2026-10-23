@@ -36,7 +36,7 @@ The prefix was planned and never mounted. Mounting it now would mean maintaining
 
 ### `PATCH /flowsheet/shows/{id}`
 
-Tags or corrects a show's `specialty_id` and `show_name` (BS#3456). `requirePermissions({ flowsheet: ['write'] })`, then `mayEditShow` against the target loaded by `loadShowEditTarget` in the same transaction as the write: a DJ on the show while it is on the air, `flowsheet: manage` once it has ended (403 `closed_show`), a non-member of an open show gets 400. Writes no flowsheet row, so the `touch_flowsheet_watermark_from_shows` trigger (migration 0204) is what moves `GET /flowsheet`'s validator; every `UPDATE` on `shows` bumps it, including a sign-off's and `closeShowFromTerminalShowEndMarker`'s usually-empty one. `afterShowTagged` is the seam BS#3467's poster binding hangs on.
+Tags or corrects a show's `specialty_id` and `show_name` (BS#3456). `requirePermissions({ flowsheet: ['write'] })`, then `mayEditShow` against the target loaded by `loadShowEditTarget` in the same transaction as the write: a `flowsheet: manage` caller (music director or station manager) may edit any show, open or ended (BS#3678); anyone else needs to be a DJ on the show while it is on the air, gets 400 as a non-member of an open show, and 403 `closed_show` once it has ended. Writes no flowsheet row, so the `touch_flowsheet_watermark_from_shows` trigger (migration 0204) is what moves `GET /flowsheet`'s validator; every `UPDATE` on `shows` bumps it, including a sign-off's and `closeShowFromTerminalShowEndMarker`'s usually-empty one. `afterShowTagged` is the seam BS#3467's poster binding hangs on.
 
 ### `POST /flowsheet` with `entry_type: spotlight`
 

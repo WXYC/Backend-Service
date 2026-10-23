@@ -39,6 +39,10 @@ const managerAuth = () => `Bearer ${b64url({ alg: 'none' })}.${b64url({ id: MANA
  * BS#3455 adds the managers' path: a row of an ENDED show (`end_time` set, or NULL with a `show_end` newest row, the
  * dropped deliveries of BS#2065) refuses its own DJs with 403 `closed_show` and accepts a `flowsheet: manage` caller.
  * The routes no longer sit behind `showMemberMiddleware`, so that manager succeeds with no show open at all.
+ *
+ * BS#3678 widens the managers' path to every show: a `flowsheet: manage` caller edits a row of an open show it is not
+ * on, and `PATCH /flowsheet/shows/{id}` accepts it on any show. A row on no show (NULL `show_id`) is still refused for
+ * everyone: the decision covers shows, and an orphan row is not one.
  */
 describe('flowsheet row writes are scoped to the row’s own show (BS#3438, BS#3455)', () => {
   let sql;
@@ -165,12 +169,69 @@ describe('flowsheet row writes are scoped to the row’s own show (BS#3438, BS#3
     });
 
     test.each([
+      [
+        'an open show the caller is not a member of',
+        async () => {
+          await sql.unsafe(`UPDATE ${SCHEMA}.shows SET end_time = NULL WHERE id = $1`, [foreignShowId]);
+          return insertRow(foreignShowId, 2);
+        },
+      ],
+      ['the live show of the DJs on the air', async () => insertRow(liveShowId, 2)],
+    ])('accepts a row on %s from a music director (BS#3678)', async (_case, seed) => {
+      const id = await seed();
+
+      await send(id, managerAuth()).expect(200);
+    });
+
+    // An orphan row is no show, so the manager shortcut does not reach it: refused for a manager as for a DJ.
+    test('rejects a row on no show at all (NULL show_id) from a music director with a 400 and leaves it unchanged', async () => {
+      const id = await insertRow(null, 2);
+      const before = await snapshot(id);
+
+      await send(id, managerAuth()).expect(400);
+
+      expect(await snapshot(id)).toEqual(before);
+    });
+
+    test.each([
       ['the primary DJ', () => global.access_token],
       ['a co-host', () => global.secondary_access_token],
     ])('accepts a row of the open show from %s', async (_who, auth) => {
       const id = await insertRow(liveShowId, 2);
 
       await send(id, auth()).expect(200);
+    });
+  });
+
+  describe('PATCH /flowsheet/shows/{id} (BS#3678)', () => {
+    const patchShow = (id, auth) =>
+      request
+        .patch(`/flowsheet/shows/${id}`)
+        .set('Authorization', auth)
+        .send({ show_name: `${NAME_PREFIX}retitled` });
+
+    test('accepts a music director who is not on the open show', async () => {
+      await sql.unsafe(`UPDATE ${SCHEMA}.shows SET end_time = NULL WHERE id = $1`, [foreignShowId]);
+
+      const res = await patchShow(foreignShowId, managerAuth()).expect(200);
+
+      expect(res.body).toMatchObject({ id: foreignShowId, show_name: `${NAME_PREFIX}retitled` });
+    });
+
+    test('accepts a music director on an ended show', async () => {
+      await patchShow(endedShowId, managerAuth()).expect(200);
+    });
+
+    test('still refuses a DJ who is not on the open show with a 400', async () => {
+      await sql.unsafe(`UPDATE ${SCHEMA}.shows SET end_time = NULL WHERE id = $1`, [foreignShowId]);
+
+      await patchShow(foreignShowId, global.access_token).expect(400);
+    });
+
+    test('still refuses a DJ on an ended show with a 403 closed_show', async () => {
+      const res = await patchShow(endedShowId, global.access_token).expect(403);
+
+      expect(res.body.code).toBe('closed_show');
     });
   });
 });
