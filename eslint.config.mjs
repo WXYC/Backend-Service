@@ -67,6 +67,23 @@ export default tseslint.config(
     },
   },
 
+  // Lint every job through ONE TypeScript program (BS#3667). The project service
+  // builds a program per tsconfig and never releases one, so the 59 jobs/*/tsconfig.json
+  // cost ~8 GB of the full lint's old 12 GB peak; one shared program costs ~1.2 GB.
+  // Output is identical because the jobs' tsconfigs agree with it on module resolution,
+  // which tests/unit/config/jobs-lint-program.test.ts guards. A job .ts file outside
+  // tsconfig.eslint.jobs.json's include fails as a parse error, not a silent skip.
+  {
+    files: ['jobs/**/*.ts'],
+    languageOptions: {
+      parserOptions: {
+        projectService: false,
+        project: ['./tsconfig.eslint.jobs.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+
   // WXYC custom rules — schema annotations (#702)
   {
     files: ['shared/database/**/*.ts'],

@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "module": "esnext", "moduleResolution": "bundler", "paths": {} },
+  "include": ["jobs/*/**/*.ts"],
+  "exclude": ["**/node_modules", "**/dist"]
+}
