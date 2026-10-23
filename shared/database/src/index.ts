@@ -13,7 +13,6 @@ export * from './normalize-artist-name.js';
 export * from './fold-artist-name.js';
 export * from './normalize-album-title.js';
 export * from './freetext-norm.js';
-export { COMMA_SPLIT, SPACED_SLASH, SUPPORT_PLACEHOLDER, W_JOINER } from './support-list.js';
 export * from './ny-time.js';
 export * from './concerts-sql.js';
 export * from './concerts-recompute.js';

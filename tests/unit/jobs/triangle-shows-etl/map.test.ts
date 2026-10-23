@@ -506,6 +506,9 @@ describe('splitSupportArtists', () => {
       'Princess Superstar / Tony & The Kiki / Mz Neon',
       ['Princess Superstar', 'Tony & The Kiki', 'Mz Neon'],
     ],
+    // The slash delimiter takes one whitespace character on each side, so a
+    // doubled ` /  / ` leaves an empty element between the two, not `/ Mz Neon`.
+    ['tickpick_organizer', 'Princess Superstar /  / Mz Neon', ['Princess Superstar', 'Mz Neon']],
     // One row per exact WITH_PREFIX_SOURCES value (venuepilot rows above),
     // so renaming a source fails. The joiner is matched in lowercase only, as
     // venues write it, so a capitalized act name survives even there.

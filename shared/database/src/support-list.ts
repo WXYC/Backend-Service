@@ -8,7 +8,8 @@
  *
  * Regexes stay literals (`security/detect-non-literal-regexp` forbids building
  * them from `.source`); callers that must embed a fragment mid-pattern
- * (`headliner.ts`'s `SUPPORT_TAIL` / `TAIL_SPLIT`) keep a literal copy that
+ * (`headliner.ts`'s `SUPPORT_TAIL` / `TAIL_SPLIT`, `parse.ts`'s
+ * `SUBHEADER_SPLIT`) keep a literal copy that
  * `tests/unit/shared/database/support-list.test.ts` pins to this one.
  */
 export { CO_BILL_DELIMITER, normalizeFreetextArtist } from './freetext-norm.js';
@@ -25,5 +26,11 @@ export const SUPPORT_PLACEHOLDER = /^(?:(?:and|&)\s+)?(?:(?:very\s+)?special\s+g
 /** Comma plus an optional Oxford `and` / `&`, which belongs to the list. */
 export const COMMA_SPLIT = /\s*,\s*(?:(?:and|&)\s+)?/;
 
-/** A slash with whitespace on both sides; a bare `/` (`AC/DC`) is part of a name. */
+/**
+ * A slash with whitespace on both sides; a bare `/` (`AC/DC`) is part of a name.
+ * Not the same rule as `CO_BILL_DELIMITER`'s slash (`\s\/\s`, which `map.ts`
+ * splits on through `BILLING_DELIMITER_PATTERNS.slash`): both detect the same
+ * co-bills, but this one consumes all surrounding whitespace, so a doubled
+ * ` /  / ` splits differently. Unifying them is BS#3682.
+ */
 export const SPACED_SLASH = /\s+\/\s+/;
