@@ -300,6 +300,8 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
       price_max: toPrice(sanitized.price_max),
       age_restriction: sanitized.age_restriction,
       status,
+      // Stored verbatim, never defaulted to true: absent means "not classified".
+      is_live_music: typeof sanitized.is_live_music === 'boolean' ? sanitized.is_live_music : null,
       // Mirrors the source's tombstone in BOTH directions (the writer's
       // set clause clears it when a delisted event reappears).
       removed_at: removedAt,

@@ -173,6 +173,22 @@ describe('upsertConcert', () => {
     expect(sets[0]).toHaveProperty('event_url', url);
   });
 
+  it.each([
+    ['true', true],
+    ['false', false],
+    ['absent (field dropped by the feed -> NULL, never true)', undefined],
+  ])(
+    'writes is_live_music in both the INSERT values and the ON CONFLICT set so a feed flip updates the stored value (%s)',
+    async (_label, fromFeed) => {
+      mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: false }]);
+      await upsertConcert(mapEvent(fakeEvent(fromFeed === undefined ? {} : { is_live_music: fromFeed })), 5, scrapedAt);
+
+      const expected = fromFeed ?? null;
+      expect(concertValuesRows()[0]).toHaveProperty('is_live_music', expected);
+      expect(concertSetClauses()[0]).toHaveProperty('is_live_music', expected);
+    }
+  );
+
   it('threads venue_id and the venue-qualified source_id into the row', async () => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: true }]);
     await upsertConcert(mapEvent(fakeEvent()), 31337, scrapedAt);

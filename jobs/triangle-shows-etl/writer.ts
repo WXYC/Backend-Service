@@ -189,6 +189,8 @@ export const upsertConcert = async (
         // Source-authoritative, both directions (divergence from
         // rhp_scrape's insert-only status — see module docstring).
         status: values.status,
+        // Source-authoritative; a feed flip (or a dropped field -> NULL) lands.
+        is_live_music: values.is_live_music,
         // Mirrors the tombstone both directions: a null here CLEARS a
         // previously-set removed_at when the event reappears.
         removed_at: values.removed_at,

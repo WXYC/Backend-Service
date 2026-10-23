@@ -804,3 +804,18 @@ describe('backdatedStart', () => {
     expect(backdatedStart(new Date('2026-08-08T01:30:00Z'))).toBe('2026-07-30');
   });
 });
+
+describe('mapEvent — is_live_music', () => {
+  // The feed's classifier verdict is stored verbatim. A feed that predates
+  // the field (or sends null) maps to NULL — "the source does not classify" —
+  // and must never be coerced to true.
+  it.each([
+    ['true', true, true],
+    ['false', false, false],
+    ['absent (older fork)', undefined, null],
+    ['explicit null', null, null],
+  ])('maps a feed value of %s onto the stored column', (_label, fromFeed, stored) => {
+    const overrides = fromFeed === undefined ? {} : { is_live_music: fromFeed };
+    expect(mapEvent(makeTsEvent(overrides)).concert.is_live_music).toBe(stored);
+  });
+});
