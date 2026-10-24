@@ -791,6 +791,24 @@ describe('mapEvent — tombstones and raw payload', () => {
     const mapped = mapEvent(makeTsEvent({ source_url: null }));
     expect(mapped.concert.event_url).toBeNull();
   });
+
+  // Ticketing scrapers (ticketmaster, venuepilot, webflow_cms) send the ticket
+  // page as source_url too; that is not a venue page, so event_url stays NULL
+  // and clients fall back to ticket_url.
+  it.each([
+    ['equal to ticket_url', 'https://example.com/t/1', 'https://example.com/t/1', null],
+    [
+      'different from ticket_url',
+      'https://venue.example/e/1/',
+      'https://example.com/t/1',
+      'https://venue.example/e/1/',
+    ],
+    ['present with a null ticket_url', 'https://venue.example/e/1/', null, 'https://venue.example/e/1/'],
+    ['absent with a null ticket_url', null, null, null],
+  ])('maps a source_url %s onto event_url', (_label, sourceUrl, ticketUrl, expected) => {
+    const mapped = mapEvent(makeTsEvent({ source_url: sourceUrl, ticket_url: ticketUrl }));
+    expect(mapped.concert.event_url).toBe(expected);
+  });
 });
 
 describe('backdatedStart', () => {
@@ -818,7 +836,10 @@ describe('mapEvent — is_live_music', () => {
     ['absent (older fork)', undefined, null],
     ['explicit null', null, null],
   ])('maps a feed value of %s onto the stored column', (_label, fromFeed, stored) => {
-    const overrides = fromFeed === undefined ? {} : { is_live_music: fromFeed };
-    expect(mapEvent(makeTsEvent(overrides)).concert.is_live_music).toBe(stored);
+    // makeTsEvent mirrors the current feed (is_live_music always present), so
+    // the older-fork shape is built by dropping the key.
+    const { is_live_music: _dropped, ...olderFork } = makeTsEvent();
+    const event = fromFeed === undefined ? olderFork : makeTsEvent({ is_live_music: fromFeed });
+    expect(mapEvent(event).concert.is_live_music).toBe(stored);
   });
 });

@@ -63,6 +63,7 @@ export const makeTsEvent = (overrides: Partial<TsEvent> = {}): TsEvent => ({
   description: null,
   source: 'venuepilot',
   source_key: 'ext:12345',
+  is_live_music: true,
   removed_at: null,
   venue_name: 'The Pinhook',
   venue_slug: 'the-pinhook',

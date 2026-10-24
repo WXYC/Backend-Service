@@ -8,6 +8,12 @@
  * column preserves that full payload so a drifted or omitted field is
  * recoverable without a re-pull.
  *
+ * `tests/fixtures/triangle-shows/event-response.schema.json` is a vendored
+ * snapshot of the fork's EventResponse; a contract test pins the shared
+ * fixture to it (refresh: README "Refreshing the contract snapshot"). Fields
+ * the snapshot marks optional but that BS reads as optional too (`headliner`,
+ * `source_url`, `is_live_music`) stay optional here so an older fork still maps.
+ *
  * Pydantic serializes Optional fields as explicit nulls, `date` as
  * `YYYY-MM-DD`, `time` as `HH:MM:SS`, and datetimes with an explicit UTC
  * offset (its UTCDateTime annotation).
@@ -43,8 +49,9 @@ export type TsEvent = {
   image_url: string | null;
   /** The event detail page on the venue's own site (the field the old iOS
    *  DTO decoded as the Box Office CTA target). Maps to `concerts.event_url`
-   *  (BS#1609). */
-  source_url: string | null;
+   *  (BS#1609) unless it equals `ticket_url`. Optional here so a feed from a
+   *  fork that predates triangle-shows#138 maps to NULL. */
+  source_url?: string | null;
   genre: string | null;
   subgenre: string | null;
   /** Source EventStatus enum: on_sale | sold_out | cancelled | free. */

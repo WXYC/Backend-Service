@@ -57,6 +57,20 @@ The source's own `support_artists` elements are normalized per element first (`s
 
 **Visible API change**: `supporting_artists_raw` is projected on the `GET /concerts` DTO; this makes it non-empty for many more `triangle_shows` rows than before (previously populated only from the source's sparse field, now also from the billing tail). Usually richer, but not strictly additive: `mergeSupportingArtists` dedupes normalize-insensitively, drops any entry equal to the headliner, and caps at 32 names, so a given row's array can also be reshaped or shortened relative to the raw union. Either way it's non-breaking — iOS renders it as a plain comma-joined `"with X, Y, Z"` list (`BoxOfficeTicketPresenter.subline`) with no assumption about element count, so any reshaping is a display detail, not a contract change; dj-site does not yet reference the field.
 
+## Event URL (BS#1609, BS#3705)
+
+`concerts.event_url` is the fork's `source_url` (the venue's own event page), or NULL when `source_url` equals `ticket_url` (ticketing scrapers send the ticket page as both) or is absent (a fork that predates triangle-shows#138). Clients fall back to `ticket_url` on NULL.
+
+## Refreshing the contract snapshot
+
+`tests/fixtures/triangle-shows/event-response.schema.json` is a vendored copy of the fork's `EventResponse` OpenAPI component (`properties` plus `required`, sorted keys). `tests/unit/jobs/triangle-shows-etl/contract.test.ts` pins the shared `makeTsEvent` fixture to it, so `TsEvent` can't silently drift from the feed. After any change to triangle-shows' `EventResponse`, from the repo root:
+
+```
+npx tsx scripts/refresh-triangle-shows-contract.ts https://triangle-shows-production.up.railway.app
+```
+
+The base URL falls back to `TRIANGLE_SHOWS_URL`. Run it by hand and commit the diff; it never runs in CI or from a test. If the contract test then fails, update `TsEvent` and `makeTsEvent` to match.
+
 ## Observability
 
 Org-standard JSON logs + Sentry (issue #538 contract). A loud Sentry **warning** fires when the source's `/api/v1/health.last_scrape` is > 24h stale, absent, or unparseable — its scheduler scrapes several times daily (indie venues 06:00/12:00/18:00 ET; the Ticketmaster job twice daily), so the latest pre-pull scrape is 18:00 ET and ~7h-old data at the 05:05 UTC pull is normal. Every fetch retries once after 15s on transient failures — network errors, timeouts, 5xx — so a cold-starting source host degrades to "resolution deferred one night", not "no mirror tonight" (deterministic 4xx fails immediately; replaying it can't succeed). Non-2xx failures carry a slice of the response body so a FastAPI 422's `detail` is self-describing in the log.
