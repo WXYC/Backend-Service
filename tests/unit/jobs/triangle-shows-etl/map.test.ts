@@ -805,6 +805,25 @@ describe('mapEvent — tombstones and raw payload', () => {
     ],
     ['present with a null ticket_url', 'https://venue.example/e/1/', null, 'https://venue.example/e/1/'],
     ['absent with a null ticket_url', null, null, null],
+    [
+      'on the same host as ticket_url with a different query (instantseats)',
+      'https://www.instantseats.com/index.cfm?fuseaction=home.event&eventID=7',
+      'https://www.instantseats.com/index.cfm?fuseaction=buy.event&eventID=7',
+      null,
+    ],
+    [
+      'on the same host as ticket_url modulo www. and case',
+      'https://Example.com/e/1',
+      'https://www.example.com/t/9',
+      null,
+    ],
+    [
+      'on a venue host with an etix ticket_url',
+      'https://lincolntheatre.com/events/x/',
+      'https://www.etix.com/ticket/p/1',
+      'https://lincolntheatre.com/events/x/',
+    ],
+    ['unparseable with a ticket_url', 'not a url', 'https://example.com/t/1', null],
   ])('maps a source_url %s onto event_url', (_label, sourceUrl, ticketUrl, expected) => {
     const mapped = mapEvent(makeTsEvent({ source_url: sourceUrl, ticket_url: ticketUrl }));
     expect(mapped.concert.event_url).toBe(expected);

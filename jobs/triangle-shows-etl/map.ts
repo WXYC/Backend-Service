@@ -153,6 +153,21 @@ const toPrice = (value: number | null): string | null => {
   return Number(formatted) > PRICE_MAX ? null : formatted;
 };
 
+/** Lowercased hostname minus a leading `www.`; null when the value is absent or does not parse. */
+const hostOf = (url: string | null | undefined): string | null => {
+  try {
+    return url ? new URL(url).hostname.toLowerCase().replace(/^www\./, '') : null;
+  } catch {
+    return null;
+  }
+};
+
+/** True when `sourceUrl` parses and is on a different host than `ticketUrl` (or there is no usable ticket URL). */
+const isVenuePage = (sourceUrl: string | null | undefined, ticketUrl: string | null): boolean => {
+  const sourceHost = hostOf(sourceUrl);
+  return sourceHost !== null && sourceHost !== hostOf(ticketUrl);
+};
+
 /**
  * Map the source EventStatus onto `concert_status_enum`. Complete against
  * the source enum (on_sale / sold_out / cancelled / free); an unknown
@@ -288,10 +303,13 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
       ticket_url: sanitized.ticket_url,
       image_url: sanitized.image_url,
       // The venue's own event-detail page (BS#1609). Ticketing scrapers send
-      // the ticket page as source_url too; that is not a venue page, so it
-      // stays NULL and clients fall back to ticket_url. The conflict-update
-      // that refreshes it lives in writer.ts, not here (this file is INSERT-half only).
-      event_url: sanitized.source_url && sanitized.source_url !== sanitized.ticket_url ? sanitized.source_url : null,
+      // the ticket page as source_url too (sometimes with only the query
+      // differing, BS#3705); that is not a venue page, so it stays NULL and
+      // clients fall back to ticket_url. Accepted cost: a venue selling tickets
+      // on its own domain under a different URL loses event_url too; no ingested
+      // venue does that. The conflict-update that refreshes it lives in
+      // writer.ts, not here (this file is INSERT-half only).
+      event_url: isVenuePage(sanitized.source_url, sanitized.ticket_url) ? sanitized.source_url : null,
       price_min: priceMin,
       price_max: toPrice(sanitized.price_max),
       age_restriction: sanitized.age_restriction,

@@ -49,7 +49,8 @@ export type TsEvent = {
   image_url: string | null;
   /** The event detail page on the venue's own site (the field the old iOS
    *  DTO decoded as the Box Office CTA target). Maps to `concerts.event_url`
-   *  (BS#1609) unless it equals `ticket_url`. Optional here so a feed from a
+   *  (BS#1609) unless it is unparseable or on the same host as `ticket_url`
+   *  (BS#3705; `www.` and case ignored). Optional here so a feed from a
    *  fork that predates triangle-shows#138 maps to NULL. */
   source_url?: string | null;
   genre: string | null;
