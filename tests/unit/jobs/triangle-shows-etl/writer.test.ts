@@ -181,7 +181,10 @@ describe('upsertConcert', () => {
     'writes is_live_music in both the INSERT values and the ON CONFLICT set so a feed flip updates the stored value (%s)',
     async (_label, fromFeed) => {
       mockDb._chain.returning.mockResolvedValueOnce([{ id: 1, inserted: false }]);
-      await upsertConcert(mapEvent(fakeEvent(fromFeed === undefined ? {} : { is_live_music: fromFeed })), 5, scrapedAt);
+      // fakeEvent mirrors the current feed; the older-fork shape drops the key.
+      const { is_live_music: _dropped, ...olderFork } = fakeEvent();
+      const event = fromFeed === undefined ? olderFork : fakeEvent({ is_live_music: fromFeed });
+      await upsertConcert(mapEvent(event), 5, scrapedAt);
 
       const expected = fromFeed ?? null;
       expect(concertValuesRows()[0]).toHaveProperty('is_live_music', expected);

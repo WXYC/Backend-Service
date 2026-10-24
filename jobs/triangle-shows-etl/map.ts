@@ -287,9 +287,11 @@ export const mapEvent = (event: TsEvent): MappedEvent => {
       ),
       ticket_url: sanitized.ticket_url,
       image_url: sanitized.image_url,
-      // The venue's own event-detail page (BS#1609). The conflict-update that
-      // refreshes it lives in writer.ts, not here (this file is INSERT-half only).
-      event_url: sanitized.source_url,
+      // The venue's own event-detail page (BS#1609). Ticketing scrapers send
+      // the ticket page as source_url too; that is not a venue page, so it
+      // stays NULL and clients fall back to ticket_url. The conflict-update
+      // that refreshes it lives in writer.ts, not here (this file is INSERT-half only).
+      event_url: sanitized.source_url && sanitized.source_url !== sanitized.ticket_url ? sanitized.source_url : null,
       price_min: priceMin,
       price_max: toPrice(sanitized.price_max),
       age_restriction: sanitized.age_restriction,

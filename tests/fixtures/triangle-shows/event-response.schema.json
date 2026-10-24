@@ -1,0 +1,267 @@
+{
+  "properties": {
+    "age_restriction": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Age Restriction"
+    },
+    "artist": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Artist"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "title": "Date"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Description"
+    },
+    "doors_time": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "time"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Doors Time"
+    },
+    "genre": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Genre"
+    },
+    "headliner": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Headliner"
+    },
+    "id": {
+      "type": "integer",
+      "title": "Id"
+    },
+    "image_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Image Url"
+    },
+    "is_live_music": {
+      "type": "boolean",
+      "title": "Is Live Music"
+    },
+    "name": {
+      "type": "string",
+      "title": "Name"
+    },
+    "price_max": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Price Max"
+    },
+    "price_min": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Price Min"
+    },
+    "removed_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Removed At"
+    },
+    "show_time": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "time"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Show Time"
+    },
+    "source": {
+      "type": "string",
+      "title": "Source"
+    },
+    "source_key": {
+      "type": "string",
+      "title": "Source Key"
+    },
+    "source_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Source Url"
+    },
+    "status": {
+      "type": "string",
+      "title": "Status"
+    },
+    "subgenre": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Subgenre"
+    },
+    "support_artists": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "title": "Support Artists"
+    },
+    "ticket_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ticket Url"
+    },
+    "updated_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Updated At"
+    },
+    "venue_city": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Venue City"
+    },
+    "venue_color": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Venue Color"
+    },
+    "venue_id": {
+      "type": "integer",
+      "title": "Venue Id"
+    },
+    "venue_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Venue Name"
+    },
+    "venue_slug": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Venue Slug"
+    }
+  },
+  "required": [
+    "date",
+    "id",
+    "is_live_music",
+    "name",
+    "source",
+    "source_key",
+    "status",
+    "venue_id"
+  ]
+}
