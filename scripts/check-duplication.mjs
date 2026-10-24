@@ -4,14 +4,17 @@
  *
  * Nothing else stops a PR from adding copy-paste. This runs jscpd per scope
  * (`prod` = apps shared jobs; `tests` = tests) and compares each file's
- * duplicated-token count with `duplication-baseline.json`
- * (`{scopes: {prod: {files: {path: tokens}}, tests: {...}}}`). The unit is
- * duplicated tokens per file, summed across formats (jscpd splits .tsx and .js
- * files across formats). Clone lists are never baselined: they are located by
- * line ranges, so any edit above a clone moves it.
+ * duplicated-line count with `duplication-baseline.json`
+ * (`{scopes: {prod: {files: {path: lines}}, tests: {...}}}`). The unit is the
+ * lines covered by the union of the clones that touch the file, across all
+ * formats; a line counts once however many clones cover it. jscpd's own
+ * per-file token counts are not used: it reports a family of N identical copies
+ * as a star (the first-read copy gets (N-1)x, the others 1x), so deleting the
+ * hub copy would raise another file. Clone lists are never baselined: they are
+ * located by line ranges, so any edit above a clone moves it.
  *
  * Check (default): a file above its baseline, or absent from it with any
- * duplicated tokens, fails (exit 1) and the failure names the clone pairs
+ * duplicated lines, fails (exit 1) and the failure names the clone pairs
  * touching it. A file below its baseline passes with a notice. No baseline file
  * is exit 0 with a notice (the baseline lands separately, BS#3696).
  * `--update` rewrites the baseline but only lowers counts; a raise needs
@@ -36,10 +39,24 @@ export const SCOPES = { prod: ['apps', 'shared', 'jobs'], tests: ['tests'] };
 
 const EMPTY = '{"statistics":{"formats":{}},"duplicates":[]}';
 
+class Fail extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+/** Throws rather than exiting, so `finally` blocks (the temp output folder) run. */
 const fail = (code, message) => {
-  console.error(`check-duplication: ${message}`);
-  process.exit(code);
+  throw new Fail(code, message);
 };
+
+function readReport(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return fail(2, `no jscpd report at ${file} (jscpd wrote none: no scannable file?)`);
+  }
+}
 
 function runJscpd(root, dirs) {
   const out = mkdtempSync(join(tmpdir(), 'jscpd-'));
@@ -61,13 +78,13 @@ function runJscpd(root, dirs) {
     if (run.error || run.status !== 0) {
       fail(2, `jscpd did not run cleanly (status ${run.status}, ${run.error?.message ?? run.stderr.trim()})`);
     }
-    return readFileSync(join(out, 'jscpd-report.json'), 'utf8');
+    return readReport(join(out, 'jscpd-report.json'));
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
 }
 
-/** Duplicated tokens per file (summed across formats), clone pairs, and the totals. */
+/** Duplicated lines per file (union of its clone ranges), clone pairs, and the totals. */
 function summarize(reportText) {
   let report;
   try {
@@ -76,12 +93,14 @@ function summarize(reportText) {
   } catch (e) {
     fail(2, `the jscpd report is missing or unparseable: ${e.message}`);
   }
-  const files = {};
-  for (const format of Object.values(report.statistics.formats)) {
-    for (const [file, s] of Object.entries(format.sources ?? {})) {
-      if (s.duplicatedTokens > 0) files[file] = (files[file] ?? 0) + s.duplicatedTokens;
+  const covered = {};
+  for (const { firstFile, secondFile } of report.duplicates) {
+    for (const { name, start, end } of [firstFile, secondFile]) {
+      const lines = (covered[name] ??= new Set());
+      for (let line = start; line <= end; line++) lines.add(line);
     }
   }
+  const files = Object.fromEntries(Object.entries(covered).map(([file, lines]) => [file, lines.size]));
   const t = report.statistics.total ?? {};
   const totals = {
     duplicatedTokens: t.duplicatedTokens ?? 0,
@@ -111,38 +130,41 @@ function main() {
   if (only && !SCOPES[only]) fail(2, `unknown scope "${only}" (expected ${Object.keys(SCOPES).join(' or ')})`);
   const names = only ? [only] : Object.keys(SCOPES);
 
+  // Look for the baseline before the slow jscpd run, so the no-baseline path skips it.
+  let baseline = { scopes: {} };
+  if (!args.includes('--report')) {
+    try {
+      baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+    } catch (e) {
+      if (e.code !== 'ENOENT') fail(2, `could not read the baseline: ${e.message}`);
+      if (!args.includes('--update')) {
+        console.log(`check-duplication: no baseline at ${baselinePath}; nothing to compare (exit 0).`);
+        return 0;
+      }
+    }
+  }
+  const recorded = (name) => baseline.scopes?.[name]?.files ?? {};
+
   const results = {};
   for (const name of names) {
     const dirs = SCOPES[name].filter((d) => existsSync(join(root, d)));
     const input = flag('--input');
     if (input && Number(flag('--exit-code') ?? 0) !== 0) fail(2, `jscpd exited with status ${flag('--exit-code')}`);
     results[name] =
-      input || dirs.length ? summarize(input ? readFileSync(input, 'utf8') : runJscpd(root, dirs)) : summarize(EMPTY);
+      input || dirs.length ? summarize(input ? readReport(input) : runJscpd(root, dirs)) : summarize(EMPTY);
   }
 
   if (args.includes('--report')) {
     const scopes = Object.fromEntries(names.map((n) => [n, results[n].totals]));
     console.log(JSON.stringify({ tool: 'jscpd', version: JSCPD_VERSION, scopes }, null, 2));
-    return;
+    return 0;
   }
-
-  let baseline = { scopes: {} };
-  try {
-    baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
-  } catch (e) {
-    if (e.code !== 'ENOENT') fail(2, `could not read the baseline: ${e.message}`);
-    if (!args.includes('--update')) {
-      console.log(`check-duplication: no baseline at ${baselinePath}; nothing to compare (exit 0).`);
-      return;
-    }
-  }
-  const recorded = (name) => baseline.scopes?.[name]?.files ?? {};
 
   if (args.includes('--update')) {
     const raised = names.flatMap((n) =>
       Object.entries(results[n].files)
-        .filter(([file, tokens]) => tokens > (recorded(n)[file] ?? 0))
-        .map(([file, tokens]) => `  ${n}: ${file}: ${tokens} tokens, baseline ${recorded(n)[file] ?? 0}`)
+        .filter(([file, lines]) => lines > (recorded(n)[file] ?? 0))
+        .map(([file, lines]) => `  ${n}: ${file}: ${lines} lines, baseline ${recorded(n)[file] ?? 0}`)
     );
     if (raised.length > 0 && !args.includes('--allow-increase')) {
       fail(
@@ -154,27 +176,35 @@ function main() {
     for (const n of names) scopes[n] = { files: sortKeys(results[n].files) };
     writeFileSync(baselinePath, JSON.stringify({ scopes }, null, 2) + '\n');
     console.log(`Baseline rewritten for ${names.join(', ')}.`);
-    return;
+    return 0;
   }
 
   let failed = false;
   for (const n of names) {
-    for (const [file, tokens] of Object.entries(results[n].files)) {
+    for (const [file, lines] of Object.entries(results[n].files)) {
       const base = recorded(n)[file] ?? 0;
-      if (tokens > base) {
+      if (lines > base) {
         failed = true;
-        console.error(`${n}: ${file} has ${tokens} duplicated tokens, baseline ${base}. Clone pairs:`);
+        console.error(`${n}: ${file} has ${lines} duplicated lines, baseline ${base}. Clone pairs:`);
         console.error(clonePairsTouching(file, results[n].pairs).join('\n'));
       }
     }
     for (const [file, base] of Object.entries(recorded(n))) {
       const now = results[n].files[file] ?? 0;
       if (now < base)
-        console.log(`notice: ${n}: ${file} fell from ${base} to ${now} duplicated tokens; run --update to lock it in.`);
+        console.log(`notice: ${n}: ${file} fell from ${base} to ${now} duplicated lines; run --update to lock it in.`);
     }
   }
-  if (failed) process.exit(1);
-  console.log('check-duplication: no file above its duplication baseline.');
+  if (!failed) console.log('check-duplication: no file above its duplication baseline.');
+  return failed ? 1 : 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    process.exitCode = main();
+  } catch (e) {
+    if (!(e instanceof Fail)) throw e;
+    console.error(`check-duplication: ${e.message}`);
+    process.exitCode = e.code;
+  }
+}

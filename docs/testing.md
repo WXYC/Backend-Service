@@ -111,4 +111,4 @@ Moved verbatim out of `CLAUDE.md`'s Database section.
 
 ## Duplication ratchet (BS#3695)
 
-`npm run lint:duplication` runs `scripts/check-duplication.mjs --scope prod`: jscpd (pinned `JSCPD_VERSION`, run through `npx`, equal to the `jscpd` devDependency) counts duplicated tokens per file and compares them with `duplication-baseline.json`. A file above its baseline, or new with clones, fails and names its clone pairs. `--update` only lowers counts unless `--allow-increase`. `scripts/dup-report [--scope prod|tests]` prints the totals as JSON. With no baseline file the check exits 0 with a notice.
+`npm run lint:duplication` runs `scripts/check-duplication.mjs --scope prod`: jscpd (pinned `JSCPD_VERSION`, run through `npx`, equal to the `jscpd` devDependency) counts duplicated lines per file (the union of the file's clone ranges) and compares them with `duplication-baseline.json`. A file above its baseline, or new with clones, fails and names its clone pairs. `--update` only lowers counts unless `--allow-increase`. `scripts/dup-report [--scope prod|tests]` prints the totals as JSON. With no baseline file the check exits 0 with a notice.

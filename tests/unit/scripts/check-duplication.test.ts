@@ -12,22 +12,26 @@ const repoRoot = path.join(__dirname, '..', '..', '..');
 const scriptPath = path.join(repoRoot, 'scripts', 'check-duplication.mjs');
 
 type Baseline = { scopes: Record<string, { files: Record<string, number> }> };
-const src = (name: string, duplicatedTokens: number) => [name, { duplicatedTokens }] as const;
-const pair = (a: string, b: string) => ({
-  firstFile: { name: a, start: 3, end: 40 },
-  secondFile: { name: b, start: 10, end: 47 },
-});
-/** formats: one entry per jscpd format, each a list of [file, duplicatedTokens]. */
-const reportOf = (
-  formats: Record<string, Array<readonly [string, { duplicatedTokens: number }]>>,
-  pairs = [] as object[]
-) =>
+type Range = [name: string, start: number, end: number];
+/** A clone in the shape jscpd 4.0.5 writes to `duplicates[]` (fields captured from a real run). */
+const clone = (a: Range, b: Range, format = 'typescript') => {
+  const side = ([name, start, end]: Range) => ({
+    name,
+    start,
+    end,
+    startLoc: { line: start, column: 1, position: 0 },
+    endLoc: { line: end, column: 2, position: 380 },
+  });
+  return { format, lines: a[2] - a[1] + 1, tokens: 0, firstFile: side(a), secondFile: side(b) };
+};
+/** `statistics.formats` carries per-file token counts that the script must not use. */
+const reportOf = (duplicates: object[]) =>
   JSON.stringify({
     statistics: {
-      formats: Object.fromEntries(Object.entries(formats).map(([f, s]) => [f, { sources: Object.fromEntries(s) }])),
+      formats: { typescript: { sources: { 'apps/a.ts': { duplicatedTokens: 999 } } } },
       total: { duplicatedTokens: 7, duplicatedLines: 5, tokens: 100, lines: 50, percentage: 10 },
     },
-    duplicates: pairs,
+    duplicates,
   });
 
 function withDir<T>(fn: (dir: string) => T): T {
@@ -69,61 +73,110 @@ function run(report: string, baseline: Baseline | null, extra: string[] = [], ex
 const prodBaseline = (files: Record<string, number>): Baseline => ({ scopes: { prod: { files } } });
 
 describe('check-duplication', () => {
-  const one = (tokens: number) => reportOf({ typescript: [src('apps/a.ts', tokens)] });
+  /** apps/a.ts and apps/mirror.ts each duplicate `lines` lines. */
+  const one = (lines: number) => reportOf([clone(['apps/a.ts', 1, lines], ['apps/mirror.ts', 1, lines])]);
+  const both = (lines: number) => ({ 'apps/a.ts': lines, 'apps/mirror.ts': lines });
 
   it.each([
     ['equal to the baseline', 100, 0],
     ['above the baseline', 101, 1],
     ['below the baseline', 99, 0],
-  ])('a file %s', (_n, tokens, status) => {
-    expect(run(one(tokens), prodBaseline({ 'apps/a.ts': 100 }), ['--scope', 'prod']).status).toBe(status);
+  ])('a file %s', (_n, lines, status) => {
+    expect(run(one(lines), prodBaseline(both(100)), ['--scope', 'prod']).status).toBe(status);
   });
 
   it('notes a fall and tells the author to lock it in', () => {
-    const res = run(one(40), prodBaseline({ 'apps/a.ts': 100 }), ['--scope', 'prod']);
+    const res = run(one(40), prodBaseline(both(100)), ['--scope', 'prod']);
     expect(res.stdout).toContain('apps/a.ts fell from 100 to 40');
   });
 
   it('fails a new file with clones and names the clone pairs touching it', () => {
-    const report = reportOf({ typescript: [src('apps/new.ts', 60)] }, [
-      pair('apps/new.ts', 'apps/old.ts'),
-      pair('apps/x.ts', 'apps/y.ts'),
+    const report = reportOf([
+      clone(['apps/new.ts', 3, 40], ['apps/old.ts', 10, 47]),
+      clone(['apps/x.ts', 3, 40], ['apps/y.ts', 10, 47]),
     ]);
-    const res = run(report, prodBaseline({}), ['--scope', 'prod']);
+    const res = run(report, prodBaseline({ 'apps/x.ts': 38, 'apps/y.ts': 38 }), ['--scope', 'prod']);
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('apps/new.ts:3-40 <-> apps/old.ts:10-47');
     expect(res.stderr).not.toContain('apps/x.ts');
   });
 
+  const partners = { 'apps/p1.ts': 1000, 'apps/p2.ts': 1000 };
+
   it('sums a file across formats', () => {
-    const report = reportOf({ typescript: [src('apps/a.ts', 60)], tsx: [src('apps/a.ts', 50)] });
-    expect(run(report, prodBaseline({ 'apps/a.ts': 100 }), ['--scope', 'prod']).status).toBe(1);
-    expect(run(report, prodBaseline({ 'apps/a.ts': 110 }), ['--scope', 'prod']).status).toBe(0);
+    const report = reportOf([
+      clone(['apps/a.ts', 1, 60], ['apps/p1.ts', 1, 60], 'typescript'),
+      clone(['apps/a.ts', 100, 149], ['apps/p2.ts', 1, 50], 'tsx'),
+    ]);
+    expect(run(report, prodBaseline({ ...partners, 'apps/a.ts': 109 }), ['--scope', 'prod']).status).toBe(1);
+    expect(run(report, prodBaseline({ ...partners, 'apps/a.ts': 110 }), ['--scope', 'prod']).status).toBe(0);
   });
 
-  it('exits 0 with a notice when there is no baseline', () => {
-    const res = run(one(500), null, ['--scope', 'prod']);
-    expect(res.status).toBe(0);
-    expect(res.stdout).toContain('no baseline');
+  it('counts a line once when two clones in one file overlap', () => {
+    const report = reportOf([
+      clone(['apps/a.ts', 1, 30], ['apps/p1.ts', 1, 30]),
+      clone(['apps/a.ts', 20, 50], ['apps/p2.ts', 1, 31]),
+    ]);
+    expect(run(report, prodBaseline({ ...partners, 'apps/a.ts': 49 }), ['--scope', 'prod']).status).toBe(1);
+    expect(run(report, prodBaseline({ ...partners, 'apps/a.ts': 50 }), ['--scope', 'prod']).status).toBe(0);
+  });
+
+  describe('a family of four identical copies', () => {
+    // jscpd 4.0.5 reports N copies as a star around the last-read copy; deleting that hub
+    // copy leaves a different star. Pairs below are from real runs.
+    const of4 = reportOf([
+      clone(['apps/c.ts', 1, 17], ['apps/d.ts', 1, 17]),
+      clone(['apps/b.ts', 1, 17], ['apps/d.ts', 1, 17]),
+      clone(['apps/a.ts', 1, 17], ['apps/d.ts', 1, 17]),
+    ]);
+    const of3 = reportOf([
+      clone(['apps/b.ts', 1, 17], ['apps/c.ts', 1, 17]),
+      clone(['apps/a.ts', 1, 17], ['apps/c.ts', 1, 17]),
+    ]);
+    const four = { 'apps/a.ts': 17, 'apps/b.ts': 17, 'apps/c.ts': 17, 'apps/d.ts': 17 };
+
+    it('gives every copy the same count', () => {
+      expect(
+        JSON.parse(run(of4, null, ['--scope', 'prod', '--update', '--allow-increase']).written).scopes.prod.files
+      ).toEqual(four);
+    });
+
+    it('passes after the hub copy is deleted, and --update lowers the baseline', () => {
+      expect(run(of3, prodBaseline(four), ['--scope', 'prod']).status).toBe(0);
+      const res = run(of3, prodBaseline(four), ['--scope', 'prod', '--update']);
+      expect(res.status).toBe(0);
+      expect(JSON.parse(res.written).scopes.prod.files).toEqual({ 'apps/a.ts': 17, 'apps/b.ts': 17, 'apps/c.ts': 17 });
+    });
+  });
+
+  describe('with no baseline', () => {
+    it.each([
+      ['jscpd ran cleanly', 0],
+      ['jscpd would have failed, since it is never run', 134],
+    ])('exits 0 with a notice when %s', (_n, code) => {
+      const res = run(one(500), null, ['--scope', 'prod'], code);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('no baseline');
+    });
   });
 
   describe('--update', () => {
     it('lowers counts and drops cleaned files', () => {
-      const res = run(one(40), prodBaseline({ 'apps/a.ts': 100, 'apps/gone.ts': 9 }), ['--scope', 'prod', '--update']);
+      const res = run(one(40), prodBaseline({ ...both(100), 'apps/gone.ts': 9 }), ['--scope', 'prod', '--update']);
       expect(res.status).toBe(0);
-      expect(JSON.parse(res.written)).toEqual({ scopes: { prod: { files: { 'apps/a.ts': 40 } } } });
+      expect(JSON.parse(res.written)).toEqual({ scopes: { prod: { files: both(40) } } });
     });
 
     it('keeps scopes it was not asked to touch', () => {
       const baseline: Baseline = {
-        scopes: { prod: { files: { 'apps/a.ts': 100 } }, tests: { files: { 'tests/t.ts': 5 } } },
+        scopes: { prod: { files: both(100) }, tests: { files: { 'tests/t.ts': 5 } } },
       };
       const res = run(one(40), baseline, ['--scope', 'prod', '--update']);
       expect(JSON.parse(res.written).scopes.tests).toEqual({ files: { 'tests/t.ts': 5 } });
     });
 
     it.each([
-      ['a raised file', prodBaseline({ 'apps/a.ts': 10 })],
+      ['a raised file', prodBaseline(both(10))],
       ['a new file', prodBaseline({})],
     ])('refuses %s without --allow-increase and writes nothing', (_n, baseline) => {
       const res = run(one(40), baseline, ['--scope', 'prod', '--update']);
@@ -132,13 +185,13 @@ describe('check-duplication', () => {
     });
 
     it('records a raise with --allow-increase', () => {
-      const res = run(one(40), prodBaseline({ 'apps/a.ts': 10 }), ['--scope', 'prod', '--update', '--allow-increase']);
-      expect(JSON.parse(res.written).scopes.prod.files).toEqual({ 'apps/a.ts': 40 });
+      const res = run(one(40), prodBaseline(both(10)), ['--scope', 'prod', '--update', '--allow-increase']);
+      expect(JSON.parse(res.written).scopes.prod.files).toEqual(both(40));
     });
 
     it('creates the baseline when none exists', () => {
       const res = run(one(40), null, ['--scope', 'prod', '--update', '--allow-increase']);
-      expect(JSON.parse(res.written).scopes.prod.files).toEqual({ 'apps/a.ts': 40 });
+      expect(JSON.parse(res.written).scopes.prod.files).toEqual(both(40));
     });
   });
 
@@ -148,12 +201,28 @@ describe('check-duplication', () => {
       ['an unparseable report', 'not json', 0],
       ['a report with no statistics', '{}', 0],
     ])('fails hard on %s and --update writes nothing', (_n, report, code) => {
-      const baseline = prodBaseline({ 'apps/a.ts': 100 });
+      const baseline = prodBaseline(both(100));
       expect(run(report, baseline, ['--scope', 'prod'], code).status).toBe(2);
       const res = run(report, baseline, ['--scope', 'prod', '--update', '--allow-increase'], code);
       expect(res.status).toBe(2);
       expect(res.written).toBe(JSON.stringify(baseline));
     });
+  });
+
+  it('exits 2 with the documented message, not a stack trace, when jscpd wrote no report', () => {
+    const res = withDir((dir) => {
+      fs.writeFileSync(path.join(dir, 'b.json'), JSON.stringify(prodBaseline({})));
+      return spawnSync(
+        'node',
+        [scriptPath, '--root', dir, '--input', path.join(dir, 'absent.json'), '--baseline', path.join(dir, 'b.json')],
+        {
+          encoding: 'utf8',
+        }
+      );
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('no jscpd report');
+    expect(res.stderr).not.toContain('at readFileSync');
   });
 
   describe('--report', () => {
