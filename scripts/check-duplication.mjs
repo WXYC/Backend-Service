@@ -8,7 +8,10 @@
  * `{scopes: {prod: {files: {path: lines}}, tests: {files: {path: lines}}}}`
  * (lines, not tokens). The unit is duplicated lines per file: the union of the
  * file's clone ranges across all formats, so a line counts once however many
- * clones cover it. A reformat that changes a cloned block's line span (a
+ * clones cover it. Only the `firstFile` span is trusted: jscpd 4.0.5 can write a
+ * `secondFile` end taken from a third file's stored frame (wrong, even past EOF), so
+ * a clone's second range is `secondFile.start` plus the first span, clamped to that file's
+ * length on disk (under the scan root). A reformat that changes a cloned block's line span (a
  * Prettier rewrap) can raise a file's count; the failure says how to accept it.
  * jscpd's own per-file token counts are not used: it reports a family of N identical copies
  * as a star (the first-read copy gets (N-1)x, the others 1x), so deleting the
@@ -20,7 +23,7 @@
  * touching it. A file below its baseline passes with a notice. No baseline file
  * is exit 0 with a notice (the baseline lands separately, BS#3696).
  * `--update` rewrites the baseline but only lowers counts; a raise needs
- * `--allow-increase`. An unclean jscpd run (non-zero exit, missing or
+ * `--allow-increase`, except the first `--update` with no baseline file. An unclean jscpd run (non-zero exit, missing or
  * unparseable report) is exit 2 and never writes a baseline.
  * `--report` prints `{tool, version, scopes: {<name>: totals}}`, jscpd's
  * scope-level token and line totals.
@@ -32,10 +35,10 @@
  * `--input <report.json>` (with `--exit-code <n>`) stands in for the jscpd run.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 export const JSCPD_VERSION = '4.0.5';
 export const SCOPES = { prod: ['apps', 'shared', 'jobs'], tests: ['tests'] };
@@ -88,7 +91,7 @@ function runJscpd(root, dirs) {
 }
 
 /** Duplicated lines per file (union of its clone ranges), clone pairs, and the totals. */
-function summarize(reportText) {
+function summarize(reportText, root) {
   let report;
   try {
     report = JSON.parse(reportText);
@@ -96,9 +99,21 @@ function summarize(reportText) {
   } catch (e) {
     fail(2, `the jscpd report is missing or unparseable: ${e.message}`);
   }
+  const lengths = {};
+  const lengthOf = (name) =>
+    (lengths[name] ??= (() => {
+      try {
+        return readFileSync(join(root, name), 'utf8').replace(/\n$/, '').split('\n').length;
+      } catch {
+        return Infinity; // a canned report may name files that are not on disk
+      }
+    })());
   const covered = {};
-  for (const { firstFile, secondFile } of report.duplicates) {
-    for (const { name, start, end } of [firstFile, secondFile]) {
+  for (const { firstFile: a, secondFile: b } of report.duplicates) {
+    for (const [name, start, end] of [
+      [a.name, a.start, a.end],
+      [b.name, b.start, Math.min(b.start + (a.end - a.start), lengthOf(b.name))],
+    ]) {
       const lines = (covered[name] ??= new Set());
       for (let line = start; line <= end; line++) lines.add(line);
     }
@@ -135,6 +150,7 @@ function main() {
 
   // Look for the baseline before the slow jscpd run, so the no-baseline path skips it.
   let baseline = { scopes: {} };
+  let fresh = false; // no baseline file yet: nothing to ratchet against
   if (!args.includes('--report')) {
     try {
       baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
@@ -144,6 +160,7 @@ function main() {
         console.log(`check-duplication: no baseline at ${baselinePath}; nothing to compare (exit 0).`);
         return 0;
       }
+      fresh = true;
     }
   }
   const recorded = (name) => baseline.scopes?.[name]?.files ?? {};
@@ -154,7 +171,7 @@ function main() {
     const input = flag('--input');
     if (input && Number(flag('--exit-code') ?? 0) !== 0) fail(2, `jscpd exited with status ${flag('--exit-code')}`);
     results[name] =
-      input || dirs.length ? summarize(input ? readReport(input) : runJscpd(root, dirs)) : summarize(EMPTY);
+      input || dirs.length ? summarize(input ? readReport(input) : runJscpd(root, dirs), root) : summarize(EMPTY, root);
   }
 
   if (args.includes('--report')) {
@@ -169,7 +186,7 @@ function main() {
         .filter(([file, lines]) => lines > (recorded(n)[file] ?? 0))
         .map(([file, lines]) => `  ${n}: ${file}: ${lines} lines, baseline ${recorded(n)[file] ?? 0}`)
     );
-    if (raised.length > 0 && !args.includes('--allow-increase')) {
+    if (raised.length > 0 && !fresh && !args.includes('--allow-increase')) {
       fail(
         1,
         `--update only lowers counts, and these files rose or are new. Nothing was written.\n${raised.join('\n')}\nFix the duplication, or pass --allow-increase if a reviewer will look at the raise.`
@@ -199,8 +216,9 @@ function main() {
     }
   }
   if (failed) {
+    const scope = only ? ` --scope ${only}` : '';
     console.error(
-      'If the rise comes only from a reformat (a Prettier rewrap, say), accept it with: node scripts/check-duplication.mjs --update --allow-increase'
+      `If the rise comes only from a reformat (a Prettier rewrap, say), accept it with: node scripts/check-duplication.mjs${scope} --update --allow-increase`
     );
   } else {
     console.log('check-duplication: no file above its duplication baseline.');
@@ -208,7 +226,7 @@ function main() {
   return failed ? 1 : 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) {
   try {
     process.exitCode = main();
   } catch (e) {

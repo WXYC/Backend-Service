@@ -106,7 +106,32 @@ describe('check-duplication', () => {
     const res = run(report, prodBaseline({ 'apps/a.ts': 40, 'apps/b.ts': 41 }), ['--scope', 'prod']);
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('apps/a.ts:1-41 <-> apps/b.ts:1-41');
-    expect(res.stderr).toContain('--update --allow-increase');
+    expect(res.stderr).toContain('node scripts/check-duplication.mjs --scope prod --update --allow-increase');
+  });
+
+  it("counts a clone's second file by the first file's span, clamped to the second file's length", () => {
+    // jscpd 4.0.5 can write a secondFile end taken from a third file: here 1-322 against a 24-line file.
+    const report = reportOf([clone(['apps/a.ts', 1, 32], ['apps/b.ts', 1, 322])]);
+    const res = withDir((dir) => {
+      fs.mkdirSync(path.join(dir, 'apps'));
+      fs.writeFileSync(path.join(dir, 'apps', 'a.ts'), 'x\n'.repeat(40));
+      fs.writeFileSync(path.join(dir, 'apps', 'b.ts'), 'x\n'.repeat(24));
+      fs.writeFileSync(path.join(dir, 'report.json'), report);
+      const args = ['--root', dir, '--input', path.join(dir, 'report.json'), '--baseline', path.join(dir, 'b.json')];
+      spawnSync('node', [scriptPath, ...args, '--scope', 'prod', '--update'], { encoding: 'utf8' });
+      return JSON.parse(fs.readFileSync(path.join(dir, 'b.json'), 'utf8')).scopes.prod.files;
+    });
+    expect(res).toEqual({ 'apps/a.ts': 32, 'apps/b.ts': 24 });
+  });
+
+  it('runs when started through a symlinked path', () => {
+    const res = withDir((dir) => {
+      const link = path.join(dir, 'link.mjs');
+      fs.symlinkSync(scriptPath, link);
+      return spawnSync('node', [link, '--report', '--scope', 'nope'], { encoding: 'utf8' });
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('unknown scope');
   });
 
   const partners = { 'apps/p1.ts': 1000, 'apps/p2.ts': 1000 };
@@ -130,8 +155,8 @@ describe('check-duplication', () => {
   });
 
   describe('a family of four identical copies', () => {
-    // jscpd 4.0.5 reports N copies as a star around the last-read copy; deleting that hub
-    // copy leaves a different star. Pairs below are from real runs.
+    // jscpd 4.0.5 reports N copies as a star around the copy it reads first (the last in
+    // glob order); deleting that hub copy leaves a different star. Pairs below are from real runs.
     const of4 = reportOf([
       clone(['apps/c.ts', 1, 17], ['apps/d.ts', 1, 17]),
       clone(['apps/b.ts', 1, 17], ['apps/d.ts', 1, 17]),
@@ -197,8 +222,9 @@ describe('check-duplication', () => {
       expect(JSON.parse(res.written).scopes.prod.files).toEqual(both(40));
     });
 
-    it('creates the baseline when none exists', () => {
-      const res = run(one(40), null, ['--scope', 'prod', '--update', '--allow-increase']);
+    it('creates the baseline when none exists, without --allow-increase', () => {
+      const res = run(one(40), null, ['--scope', 'prod', '--update']);
+      expect(res.status).toBe(0);
       expect(JSON.parse(res.written).scopes.prod.files).toEqual(both(40));
     });
   });
@@ -267,17 +293,23 @@ describe('check-duplication', () => {
   describe('real jscpd (needs registry access or a warm ~/.npm/_npx cache)', () => {
     const block = (n: string) =>
       `export function ${n}() {\n${Array.from({ length: 14 }, (_, i) => `  const v${i} = compute(a${i}, b${i}) + other${i}.value * ${i};`).join('\n')}\n  return 1;\n}\n`;
+    const put = (dir: string, files: Record<string, string>) => {
+      for (const [f, body] of Object.entries(files)) {
+        fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+        fs.writeFileSync(path.join(dir, f), body);
+      }
+    };
+    const runIn = (dir: string, extra: string[], env: NodeJS.ProcessEnv = process.env) =>
+      spawnSync('node', [scriptPath, '--root', dir, '--baseline', path.join(dir, 'b.json'), ...extra], {
+        encoding: 'utf8',
+        cwd: dir, // no node_modules anywhere on the path
+        timeout: 180_000,
+        env,
+      });
     const real = (files: Record<string, string>, extra: string[]) =>
       withDir((dir) => {
-        for (const [f, body] of Object.entries(files)) {
-          fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
-          fs.writeFileSync(path.join(dir, f), body);
-        }
-        return spawnSync('node', [scriptPath, '--root', dir, '--baseline', path.join(dir, 'b.json'), ...extra], {
-          encoding: 'utf8',
-          cwd: dir, // no node_modules anywhere on the path
-          timeout: 180_000,
-        });
+        put(dir, files);
+        return runIn(dir, extra);
       });
 
     it('--report works in a temp tree with no node_modules', () => {
@@ -293,6 +325,43 @@ describe('check-duplication', () => {
         JSON.parse(real({ 'apps/a.ts': block('fa'), 'apps/b.ts': b }, ['--report', '--scope', 'prod']).stdout).scopes
           .prod.duplicatedTokens;
       expect(tokens(wrapped)).toBe(tokens(block('fb')));
+    });
+
+    it('exits 2 and leaves no temp output folder when the scope has no file jscpd can scan', () => {
+      withDir((tmp) => {
+        const res = withDir((dir) => {
+          put(dir, { 'apps/x.md': '# nothing to scan\n' });
+          return runIn(dir, ['--report', '--scope', 'prod'], { ...process.env, TMPDIR: tmp });
+        });
+        expect(res.status).toBe(2);
+        expect(res.stderr).toContain('no jscpd report');
+        expect(fs.readdirSync(tmp).filter((f) => f.startsWith('jscpd-'))).toEqual([]);
+      });
+    }, 180_000);
+
+    describe('a clone whose secondFile end jscpd takes from a third file', () => {
+      // Distinct identifiers per block, so P, Q and R are not clones of each other.
+      const blk = (t: string) =>
+        `export function f${t}() {\n${Array.from({ length: 14 }, (_, i) => `  const ${t}${i} = compute${t}(a${i}, b${i}) + other${i}.${t} * ${i};`).join('\n')}\n  return 1;\n}\n`;
+      const [P, Q, R] = ['p', 'q', 'r'].map(blk);
+      const filler = (n: number, t: string) =>
+        Array.from({ length: n }, (_, i) => `const ${t}${i} = '${t}-${i}';\n`).join('');
+      const lines = (f: string) => fs.readFileSync(f, 'utf8').split('\n').length - 1;
+
+      it("does not move an untouched file's count when unique lines are added to another file", () => {
+        withDir((dir) => {
+          const c = path.join(dir, 'apps/c_b.ts');
+          put(dir, { 'apps/b_a.ts': P + Q, 'apps/c_b.ts': filler(300, 'u') + Q + R, 'apps/a_f.ts': P + Q + R });
+          expect(runIn(dir, ['--update']).status).toBe(0);
+          const files = JSON.parse(fs.readFileSync(path.join(dir, 'b.json'), 'utf8')).scopes.prod.files;
+          for (const [f, n] of Object.entries<number>(files)) expect(n).toBeLessThanOrEqual(lines(path.join(dir, f)));
+
+          fs.writeFileSync(c, filler(100, 'v') + fs.readFileSync(c, 'utf8'));
+          const res = runIn(dir, ['--scope', 'prod']);
+          expect(res.stderr).toBe('');
+          expect(res.status).toBe(0);
+        });
+      }, 180_000);
     });
   });
 });
