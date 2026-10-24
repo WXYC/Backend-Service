@@ -12,6 +12,8 @@
     "lint:prebuild": "npm run build --workspace=@wxyc/database --workspace=@wxyc/observability --workspace=@wxyc/authentication --workspace=@wxyc/lml-client --workspace=@wxyc/metadata",
     "//lint": "12288 heap: eslint holds typed AST + program graph for every workspace, and `projectService: true` adds one program per tsconfig that it never releases. Raised from 8192 in BS#2258, whose 51st jobs/* workspace pushed a cold-cache run to a measured 9.37 GiB peak RSS and OOMed the 8 GiB ceiling in CI. BS#3667 then linted jobs/**/*.ts through one shared program (tsconfig.eslint.jobs.json; eslint.config.mjs) instead of one per job, which took a full run on a 24 GB Mac from a measured 10.6 GB to 5.1 GB peak RSS (jobs lint output identical). The cap is kept at 12288 because the full lint was not re-measured at a lower value on a CI runner; the cap does not drive resident memory. The next workspace that trips this needs a real fix, not another bump: scope the type-aware rules, or split the lint job.",
     "lint": "npm run lint:prebuild && NODE_OPTIONS=--max-old-space-size=12288 eslint .",
+    "//lint:changed": "6144 heap, not lint's 12288: the cap must stay above the tests/ group's measured 3.1 GB RSS (a full-mode group), and Node's default heap on an 8 GB host is 2.09 GiB. Resident memory is driven by which programs are opened, not by the cap; see scripts/lint-changed.mjs.",
+    "lint:changed": "node scripts/lint-changed.mjs",
     "lint:fast": "npm run lint:prebuild && NODE_OPTIONS=--max-old-space-size=12288 eslint --cache --cache-strategy content --cache-location .cache/eslint/ .",
     "lint:fix": "npm run lint:prebuild && NODE_OPTIONS=--max-old-space-size=12288 eslint . --fix",
     "lint:env": "node scripts/lint-env.js",
