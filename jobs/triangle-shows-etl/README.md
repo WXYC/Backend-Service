@@ -59,7 +59,7 @@ The source's own `support_artists` elements are normalized per element first (`s
 
 ## Event URL (BS#1609, BS#3705)
 
-`concerts.event_url` is the fork's `source_url` (the venue's own event page), or NULL when `source_url` equals `ticket_url` (ticketing scrapers send the ticket page as both) or is absent (a fork that predates triangle-shows#138). Clients fall back to `ticket_url` on NULL.
+`concerts.event_url` is the fork's `source_url` (the venue's own event page), kept only when it parses and is on a different host from `ticket_url` (hostname lowercased, leading `www.` dropped), or `ticket_url` is null. It is NULL when the hosts match (ticketing scrapers send the ticket page as `source_url` too, sometimes differing only in the query string, e.g. instantseats `fuseaction=home.event` vs `buy.event`), when `source_url` does not parse, or when it is absent (a fork that predates triangle-shows#138). Accepted cost: a venue that sells tickets on its own domain under a different URL loses `event_url`; no ingested venue does that. Clients fall back to `ticket_url` on NULL.
 
 ## Refreshing the contract snapshot
 
