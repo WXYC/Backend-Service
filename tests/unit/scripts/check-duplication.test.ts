@@ -101,6 +101,14 @@ describe('check-duplication', () => {
     expect(res.stderr).not.toContain('apps/x.ts');
   });
 
+  it('tells the author how to accept a pure reformat when a file rose', () => {
+    const report = reportOf([clone(['apps/a.ts', 1, 41], ['apps/b.ts', 1, 41])]);
+    const res = run(report, prodBaseline({ 'apps/a.ts': 40, 'apps/b.ts': 41 }), ['--scope', 'prod']);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('apps/a.ts:1-41 <-> apps/b.ts:1-41');
+    expect(res.stderr).toContain('--update --allow-increase');
+  });
+
   const partners = { 'apps/p1.ts': 1000, 'apps/p2.ts': 1000 };
 
   it('sums a file across formats', () => {

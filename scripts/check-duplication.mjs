@@ -4,11 +4,13 @@
  *
  * Nothing else stops a PR from adding copy-paste. This runs jscpd per scope
  * (`prod` = apps shared jobs; `tests` = tests) and compares each file's
- * duplicated-line count with `duplication-baseline.json`
- * (`{scopes: {prod: {files: {path: lines}}, tests: {...}}}`). The unit is the
- * lines covered by the union of the clones that touch the file, across all
- * formats; a line counts once however many clones cover it. jscpd's own
- * per-file token counts are not used: it reports a family of N identical copies
+ * duplicated-line count with `duplication-baseline.json`, shaped
+ * `{scopes: {prod: {files: {path: lines}}, tests: {files: {path: lines}}}}`
+ * (lines, not tokens). The unit is duplicated lines per file: the union of the
+ * file's clone ranges across all formats, so a line counts once however many
+ * clones cover it. A reformat that changes a cloned block's line span (a
+ * Prettier rewrap) can raise a file's count; the failure says how to accept it.
+ * jscpd's own per-file token counts are not used: it reports a family of N identical copies
  * as a star (the first-read copy gets (N-1)x, the others 1x), so deleting the
  * hub copy would raise another file. Clone lists are never baselined: they are
  * located by line ranges, so any edit above a clone moves it.
@@ -20,7 +22,8 @@
  * `--update` rewrites the baseline but only lowers counts; a raise needs
  * `--allow-increase`. An unclean jscpd run (non-zero exit, missing or
  * unparseable report) is exit 2 and never writes a baseline.
- * `--report` prints `{tool, version, scopes: {<name>: totals}}`.
+ * `--report` prints `{tool, version, scopes: {<name>: totals}}`, jscpd's
+ * scope-level token and line totals.
  *
  * jscpd is run through `npx --yes jscpd@<JSCPD_VERSION>`, never imported, so
  * this works in a tree with no node_modules. Keep JSCPD_VERSION equal to the
@@ -195,7 +198,13 @@ function main() {
         console.log(`notice: ${n}: ${file} fell from ${base} to ${now} duplicated lines; run --update to lock it in.`);
     }
   }
-  if (!failed) console.log('check-duplication: no file above its duplication baseline.');
+  if (failed) {
+    console.error(
+      'If the rise comes only from a reformat (a Prettier rewrap, say), accept it with: node scripts/check-duplication.mjs --update --allow-increase'
+    );
+  } else {
+    console.log('check-duplication: no file above its duplication baseline.');
+  }
   return failed ? 1 : 0;
 }
 
