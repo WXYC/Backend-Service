@@ -55,9 +55,16 @@ npm run check:db-mock-sync
 # better-auth route table plus app.ts's hand-written /auth routes and fails
 # when either finds a route in neither the account-audit-coverage audited set
 # nor its allowlist — the drift check the account-modification audit trail
-# depends on to stay complete as routes are added. It is dotenvx-wrapped
-# (importing `auth` pulls @wxyc/database, which throws at import without DB
-# env) — a fresh worktree needs its own copy of the gitignored `.env` (per
-# the repo's worktree convention) or this line fails with dotenvx's
-# MISSING_ENV_FILE banner, not the check's own output.
-npm run check:audit-coverage
+# depends on to stay complete as routes are added. With a `.env` it runs the
+# dotenvx-wrapped script (importing `auth` pulls @wxyc/database, which throws
+# at import without DB env). A fresh worktree has no `.env` (gitignored), so
+# without one it runs `check:audit-coverage:ci` with the same dummy env CI's
+# test.yml step uses (BS#3595) rather than failing with dotenvx's
+# MISSING_ENV_FILE banner. Both branches are hard-fail: under `sh -e` a failing
+# command inside an `if` body aborts the hook.
+if [ -f .env ]; then
+  npm run check:audit-coverage
+else
+  echo "pre-push: no .env, running check:audit-coverage:ci with dummy DB env (as CI does)"
+  NODE_ENV=test DB_HOST=localhost DB_NAME=dummy DB_USERNAME=dummy DB_PASSWORD=dummy npm run check:audit-coverage:ci
+fi
