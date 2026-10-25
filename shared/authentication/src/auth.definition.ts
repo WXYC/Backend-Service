@@ -32,6 +32,7 @@ import {
 import { generateId } from '@better-auth/core/utils/id';
 import { and, eq, sql } from 'drizzle-orm';
 import { authLogHandler } from './auth-log';
+import { CAPABILITY_WRITE_PATHS, assertCanAssignCapabilities } from './capability-assign-guard';
 import { WXYCRoles } from './auth.roles';
 import {
   applyDeviceApproveRoleGate,
@@ -73,6 +74,12 @@ import {
 const selectMemberRole = async (userId: string): Promise<MemberRoleRow> => {
   const rows = await db.select({ role: member.role }).from(member).where(eq(member.userId, userId)).limit(1);
   return rows[0];
+};
+
+/** The user's stored `capabilities`, or `[]` when the row is missing or the column is NULL. */
+const readCapabilities = async (userId: string): Promise<string[]> => {
+  const rows = await db.select({ capabilities: user.capabilities }).from(user).where(eq(user.id, userId)).limit(1);
+  return rows[0]?.capabilities ?? [];
 };
 
 /**
@@ -446,6 +453,15 @@ export const auth = betterAuth({
     // the same session the handler will see. Costs one extra DB round-trip
     // per approve request, fine for the ADR 0008 path.
     before: createAuthMiddleware(async (ctx) => {
+      // BS#3570: the one assigner check for every route that writes `capabilities`.
+      // The admin plugin runs this hook before its own handler; the check reads the
+      // caller's session itself since `ctx.context.session` is not populated yet.
+      if ((CAPABILITY_WRITE_PATHS as readonly string[]).includes(ctx.path)) {
+        const session = await getSessionFromCtx(ctx);
+        const actor = session?.user ? { id: session.user.id, capabilities: session.user.capabilities } : null;
+        await assertCanAssignCapabilities(ctx.path, ctx.body, actor, { selectMemberRole, readCapabilities });
+        return;
+      }
       if (ctx.path !== '/device/approve') return;
       const session = await getSessionFromCtx(ctx);
       if (!session?.user?.id) return; // let the plugin's own UNAUTHORIZED fire

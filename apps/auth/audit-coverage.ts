@@ -94,8 +94,8 @@ export interface AdminActionBase {
    * for the carve-out this flag drives.
    */
   serializeSessionRead?: true;
-  /** BS#3473: true for `admin/update-user` — the middleware diffs the subject's `capabilities` around the update and writes one `capability.grant|revoke.<name>` row per change. */
-  diffCapabilities?: true;
+  /** BS#3473: set for a route that writes `capabilities` — the middleware diffs the subject's `capabilities` around the write and writes one `capability.grant|revoke.<name>` row per change. `'created'` (`admin/create-user`, BS#3570) means the subject does not exist yet, so the before-state is empty. */
+  diffCapabilities?: true | 'created';
   /**
    * M4 (code review BS#2547): true for an `ADMIN_ACTIONS` entry that
    * classifies a HAND-WRITTEN Express route reusing this map for the
@@ -169,7 +169,15 @@ export const ADMIN_ACTIONS: ReadonlyMap<string, AdminAction> = new Map([
   // shared/authentication/src/auth.definition.ts already reads via
   // `ctx.context.returned` for its own auto-verify-email purpose), so
   // `subject: 'response-user-id'` reads it from there instead.
-  ['/admin/create-user', { action: 'admin.create-user', subject: 'response-user-id', responsePath: ['user', 'id'] }],
+  [
+    '/admin/create-user',
+    {
+      action: 'admin.create-user',
+      subject: 'response-user-id',
+      responsePath: ['user', 'id'],
+      diffCapabilities: 'created',
+    },
+  ],
   ['/admin/update-user', { action: 'admin.update-user', diffCapabilities: true }],
   ['/admin/list-users', { action: 'admin.list-users', includeGet: true }],
   // `list-user-sessions` is POST in the installed better-auth version
