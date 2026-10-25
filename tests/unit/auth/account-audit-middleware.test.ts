@@ -43,7 +43,7 @@ import {
   mountAuthenticatedAccountAudit,
   mountPublicAccountAudit,
 } from '../../../apps/auth/account-audit-middleware';
-import { FLAT_MOUNTS, type FlatMount } from '../../../apps/auth/audit-coverage';
+import { ADMIN_ACTIONS, FLAT_MOUNTS, type AdminAction, type FlatMount } from '../../../apps/auth/audit-coverage';
 // `drizzle-orm` is auto-mocked repo-wide (`tests/__mocks__/drizzle-orm.ts`,
 // a node_modules manual mock — applies without an explicit jest.mock()
 // call). Its `eq` returns the plain `{ eq: [left, right] }` shape, not a
@@ -920,5 +920,76 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
     await settle(res);
     expect(order).toEqual(['before-read', 'next', 'after-read']);
     expectAudited({ action: 'capability.grant.x', actorUserId: 'manager-1', subjectUserId: 'dj-1' });
+  });
+
+  // BS#3570: a created user has no row to read before the handler runs, so the
+  // before-state is empty and the after-read uses the id from the response body.
+  it.each([
+    ['grants every capability the new user was created with', ['a', 'x'], [grant('a'), grant('x')]],
+    ['writes no grant row for a user created without capabilities', [], []],
+  ])('admin/create-user %s', async (_name, after, expectedActions) => {
+    auth.api.getSession = () => Promise.resolve({ user: { id: 'manager-1' }, session: {} } as never);
+    db._chain.limit.mockResolvedValueOnce([{ capabilities: after }] as never);
+    const { res, next } = await start(
+      adminPrefixAuditMiddleware(),
+      mockAdminReq({
+        path: '/create-user',
+        body: { email: 'newdj@wxyc.org', password: 'x', name: 'New DJ', data: { capabilities: after } },
+      })
+    );
+    expect(next).toHaveBeenCalledTimes(1);
+    res.end(JSON.stringify({ user: { id: 'new-user-1' } }));
+    await settle(res);
+
+    const actions = recordAccountAuditEvent.mock.calls.map(([event]) => (event as { action: string }).action);
+    expect(actions).toEqual(['admin.create-user', ...expectedActions]);
+    for (const action of expectedActions) {
+      expectAudited({ action, actorUserId: 'manager-1', subjectUserId: 'new-user-1' });
+    }
+  });
+
+  // BS#3570: the next() gate used to be `capabilitiesBefore ?? sessionGate`, which
+  // dropped the session-read serialization when one action set both flags.
+  describe('an action that sets both diffCapabilities and serializeSessionRead', () => {
+    const BOTH = '/admin/both-flags-fixture';
+    beforeAll(() => {
+      const bothFlags: AdminAction = { action: 'admin.both-flags', diffCapabilities: true, serializeSessionRead: true };
+      (ADMIN_ACTIONS as Map<string, AdminAction>).set(BOTH, bothFlags);
+    });
+    afterAll(() => {
+      (ADMIN_ACTIONS as Map<string, AdminAction>).delete(BOTH);
+    });
+
+    it('holds the handler until BOTH the capabilities before-read and the session read have settled', async () => {
+      let resolveSession!: (value: unknown) => void;
+      auth.api.getSession = () =>
+        new Promise((resolve) => {
+          resolveSession = resolve;
+        }) as never;
+      let releaseBefore!: (rows: unknown) => void;
+      db._chain.limit.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseBefore = resolve;
+          })
+      );
+      const res = mockRes();
+      const next = jest.fn();
+      adminPrefixAuditMiddleware()(
+        mockAdminReq({ path: '/both-flags-fixture', body: { userId: 'dj-1' } }),
+        res,
+        next as NextFunction
+      );
+      await flush();
+      expect(next).not.toHaveBeenCalled();
+
+      releaseBefore([{ capabilities: [] }]);
+      await flush();
+      expect(next).not.toHaveBeenCalled();
+
+      resolveSession({ user: { id: 'manager-1' }, session: {} });
+      await flush();
+      expect(next).toHaveBeenCalledTimes(1);
+    });
   });
 });

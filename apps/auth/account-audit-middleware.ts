@@ -253,7 +253,7 @@ interface ClassifiedRequest {
    */
   gateSubjectTo2xx: boolean;
   /** BS#3473: read the body-supplied subject's `capabilities` before the handler runs and diff after a 2xx. */
-  diffCapabilities?: boolean;
+  diffCapabilities?: true | 'created';
 }
 
 interface ResolvedMount {
@@ -370,7 +370,12 @@ function auditMiddleware(resolve: ResolvedMount) {
     // every other action keeps the concurrent, lower-latency path.
     // BS#3473: the before-read must land before the handler can change the row,
     // so for a diffing action it (not the session read) gates next().
-    const capabilitiesBefore = classified.diffCapabilities ? readCapabilities(extractBodyUserId(req)) : null;
+    // A created user has no row yet (BS#3570), so its before-state is empty.
+    const capabilitiesBefore = !classified.diffCapabilities
+      ? null
+      : classified.diffCapabilities === 'created'
+        ? Promise.resolve<string[] | null>([])
+        : readCapabilities(extractBodyUserId(req));
 
     const sessionPromise: Promise<void> | null = resolve.resolveActor
       ? auth.api
@@ -458,9 +463,12 @@ function auditMiddleware(resolve: ResolvedMount) {
     res.on('finish', () => void finishOnce());
     res.on('close', () => void finishOnce());
 
-    const gate = capabilitiesBefore ?? (classified.serializeSessionRead ? sessionPromise : null);
-    if (gate) {
-      void gate.finally(() => next());
+    // Both gates apply when an action sets both flags (BS#3570); neither rejects.
+    const gates = [capabilitiesBefore, classified.serializeSessionRead ? sessionPromise : null].filter(
+      (gate) => gate !== null
+    );
+    if (gates.length > 0) {
+      void Promise.all(gates).finally(() => next());
     } else {
       next();
     }
@@ -496,7 +504,7 @@ export function adminPrefixAuditMiddleware() {
         action: known.action,
         includeGet: known.includeGet === true,
         serializeSessionRead: known.serializeSessionRead === true,
-        diffCapabilities: known.diffCapabilities === true,
+        diffCapabilities: known.diffCapabilities,
         subjectFrom: subjectStrategyFor(subject, known.responsePath),
         ...subjectPolicyFor(subject),
       };

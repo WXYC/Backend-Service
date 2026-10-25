@@ -26,11 +26,11 @@ function getAuthBaseUrl() {
   return `http://${host}:${port}/auth`;
 }
 
-async function signInAsStationManager(authBaseUrl) {
+async function signInAs(authBaseUrl, username) {
   const res = await fetch(`${authBaseUrl}/sign-in/username`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'test_station_manager', password: 'testpassword123' }),
+    body: JSON.stringify({ username, password: 'testpassword123' }),
   });
   if (!res.ok) {
     throw new Error(`Sign-in failed: ${res.status} ${await res.text()}`);
@@ -46,4 +46,6 @@ async function signInAsStationManager(authBaseUrl) {
   return { cookie, managerId: session.user.id };
 }
 
-module.exports = { getAuthBaseUrl, signInAsStationManager };
+const signInAsStationManager = (authBaseUrl) => signInAs(authBaseUrl, 'test_station_manager');
+
+module.exports = { getAuthBaseUrl, signInAs, signInAsStationManager };
