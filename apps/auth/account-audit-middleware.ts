@@ -209,6 +209,29 @@ const capabilityChangeActions = (before: readonly string[], after: readonly stri
   ...before.filter((name) => !after.includes(name)).map((name) => `capability.revoke.${name}`),
 ];
 
+/**
+ * BS#3717: the tail of each subject's queue of capability-writing requests. Two
+ * requests that diff one subject's `capabilities` concurrently each read the
+ * other's write in their after-state, so one would record a grant for a
+ * capability the other assigned, under its own actor. The actor column itself
+ * is per-request and cannot cross; the shared state is the subject's row. A
+ * request takes its turn before its before-read and gives it back once its
+ * audit rows are written (or the response closes), so each diff sees only its
+ * own write. Only `diffCapabilities: true` actions queue, and only per subject.
+ * In-process: the auth service runs as a single instance.
+ */
+const capabilityTurns = new Map<string, Promise<void>>();
+
+const takeCapabilityTurn = (subjectId: string): { turn: Promise<void>; giveBack: () => void } => {
+  const previous = capabilityTurns.get(subjectId) ?? Promise.resolve();
+  let giveBack!: () => void;
+  const mine = new Promise<void>((resolve) => (giveBack = resolve));
+  const tail = previous.then(() => mine);
+  capabilityTurns.set(subjectId, tail);
+  void tail.then(() => capabilityTurns.get(subjectId) === tail && capabilityTurns.delete(subjectId));
+  return { turn: previous, giveBack };
+};
+
 const ipHashOf = (req: Request): string | null => deriveStationSignupIpHash(realIpFromRequest(req));
 
 /**
@@ -371,11 +394,22 @@ function auditMiddleware(resolve: ResolvedMount) {
     // BS#3473: the before-read must land before the handler can change the row,
     // so for a diffing action it (not the session read) gates next().
     // A created user has no row yet (BS#3570), so its before-state is empty.
+    // BS#3717: an update of an existing subject waits for its turn first.
+    let giveBackTurn = (): void => undefined;
+    const readBefore = (): Promise<string[] | null> => {
+      const subjectId = extractBodyUserId(req);
+      if (subjectId === null) {
+        return readCapabilities(null);
+      }
+      const { turn, giveBack } = takeCapabilityTurn(subjectId);
+      giveBackTurn = giveBack;
+      return turn.then(() => readCapabilities(subjectId));
+    };
     const capabilitiesBefore = !classified.diffCapabilities
       ? null
       : classified.diffCapabilities === 'created'
         ? Promise.resolve<string[] | null>([])
-        : readCapabilities(extractBodyUserId(req));
+        : readBefore();
 
     const sessionPromise: Promise<void> | null = resolve.resolveActor
       ? auth.api
@@ -391,7 +425,14 @@ function auditMiddleware(resolve: ResolvedMount) {
     const finishOnce = async (): Promise<void> => {
       if (logged) return;
       logged = true;
+      try {
+        await writeAuditRows();
+      } finally {
+        giveBackTurn();
+      }
+    };
 
+    const writeAuditRows = async (): Promise<void> => {
       // M1 (code review BS#2537 PR #2545): Node's default res.statusCode
       // is 200 before any status is ever set, so a 'close' that fires
       // WITHOUT a prior 'finish' (the request aborted mid-flight — client
