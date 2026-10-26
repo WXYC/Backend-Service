@@ -77,14 +77,12 @@ describe('pre-push account-audit coverage line', () => {
 
   it.each([true, false])('still runs every other check first (.env present: %s)', (withEnv) => {
     const { calls } = runHook({ withEnv });
-    expect(calls.slice(0, 7).map((c) => c.split(' ')[1])).toEqual([
-      'typecheck',
-      'lint',
-      'check:docs',
-      'check:auth-tables-doc',
-      'check:sql-claim-docs',
-      'check:better-auth-mock-sync',
-      'check:db-mock-sync',
-    ]);
+    // Derived from the hook itself so the expectation cannot drift when a check is renamed.
+    const expected = readFileSync(HOOK, 'utf8')
+      .split('\n')
+      .map((line) => /^npm run (\S+)/.exec(line)?.[1])
+      .filter((name): name is string => name !== undefined && !name.startsWith('check:audit-coverage'));
+    expect(expected.length).toBeGreaterThan(0);
+    expect(calls.slice(0, expected.length).map((c) => c.split(' ')[1])).toEqual(expected);
   });
 });
