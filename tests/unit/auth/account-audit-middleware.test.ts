@@ -1007,7 +1007,9 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
   let subject: string;
   let counter = 0;
 
+  // Fake timers throughout: a turn left held by a test must not leave a live 15s hold timer behind.
   beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
     stored = ['a'];
     subject = `dj-concurrent-${++counter}`;
     auth.api.getSession = (({ headers }: { headers: Record<string, string> }) =>
@@ -1015,6 +1017,8 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
     db._chain.limit.mockImplementation(() => Promise.resolve([{ capabilities: [...stored] }]));
   });
   afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
     db._chain.limit.mockReset();
     db._chain.limit.mockImplementation(() => db._chain);
   });
