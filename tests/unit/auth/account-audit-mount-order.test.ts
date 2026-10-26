@@ -48,7 +48,9 @@ describe('account-audit prefix mount ordering', () => {
     'app.use(STATION_SIGNUP_ADMIN_PREFIX, stationSignupAdminRouter)': authAppSource.indexOf(
       'app.use(STATION_SIGNUP_ADMIN_PREFIX, stationSignupAdminRouter)'
     ),
-    "app.use('/auth', toNodeHandler(auth))": authAppSource.indexOf("app.use('/auth', toNodeHandler(auth))"),
+    "app.use('/auth', holdTurnAcross(toNodeHandler(auth)))": authAppSource.indexOf(
+      "app.use('/auth', holdTurnAcross(toNodeHandler(auth)))"
+    ),
     // The redundant-with-arm-1 documentation claim from decision 3: the
     // limiter is declared far below line 227, so registering above
     // resolve-organization already implies registering above it.
@@ -61,7 +63,7 @@ describe('account-audit prefix mount ordering', () => {
   });
 
   const limiterIndex = needles['const authMutationRateLimit = rateLimit('];
-  const catchAllIndex = needles["app.use('/auth', toNodeHandler(auth))"];
+  const catchAllIndex = needles["app.use('/auth', holdTurnAcross(toNodeHandler(auth)))"];
 
   // Item 7 (simplify pass): the ~20-layer-per-mount loop collapsed into two
   // calls, one per FLAT_MOUNTS partition. These call sites are the stable
