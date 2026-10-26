@@ -67,7 +67,13 @@ describe('lint-changed', () => {
  * with fake `npm` and `npx` first on PATH that append "<name> <NODE_OPTIONS> <args>" to a log.
  * `main` is the commit `origin/main` points at; `feature` is a commit on top of it.
  */
-function sandbox(opts: { originMain: boolean; feature: Record<string, string>; remove?: string[]; failNpx?: string }) {
+function sandbox(opts: {
+  originMain: boolean;
+  feature: Record<string, string>;
+  remove?: string[];
+  failNpx?: string;
+  failNpm?: boolean;
+}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lint-changed-repo-'));
   const git = (...a: string[]) => {
     const res = spawnSync('git', a, { cwd: dir, encoding: 'utf8' });
@@ -87,6 +93,7 @@ function sandbox(opts: { originMain: boolean; feature: Record<string, string>; r
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 't@example.com');
   git('config', 'user.name', 't');
+  git('config', 'commit.gpgsign', 'false');
   write({
     'apps/a.ts': '1',
     'tests/t.ts': '1',
@@ -110,7 +117,12 @@ function sandbox(opts: { originMain: boolean; feature: Record<string, string>; r
   const log = path.join(dir, '.calls.log');
   fs.mkdirSync(bin);
   for (const name of ['npm', 'npx']) {
-    const fail = name === 'npx' && opts.failNpx ? `case "$*" in *${opts.failNpx}*) exit 1;; esac\n` : '';
+    let fail = '';
+    if (name === 'npx' && opts.failNpx) {
+      fail = `case "$*" in *${opts.failNpx}*) exit 1;; esac\n`;
+    } else if (name === 'npm' && opts.failNpm) {
+      fail = 'exit 1\n';
+    }
     fs.writeFileSync(path.join(bin, name), `#!/bin/sh\necho "${name} $NODE_OPTIONS $*" >> "${log}"\n${fail}`, {
       mode: 0o755,
     });
@@ -179,6 +191,26 @@ describe('lint-changed against a real git diff', () => {
       'npx --max-old-space-size=6144 eslint --no-warn-ignored tests/t.test.ts tests/t.ts',
       'npx --max-old-space-size=6144 eslint --no-warn-ignored top.ts',
     ]);
+  });
+
+  // git quotes and octal-escapes such paths unless the script asks for NUL-separated output (-z).
+  it('lints a changed file whose name has non-ASCII characters (files mode)', () => {
+    const { run } = setUp({ originMain: true, feature: { 'apps/caf\u00e9.ts': '2' } });
+    expect(JSON.parse(run('--dry-run').stdout)).toEqual({ mode: 'files', files: ['apps/caf\u00e9.ts'] });
+  });
+
+  it('lints a tracked file whose name has non-ASCII characters (full mode)', () => {
+    const { run } = setUp({ originMain: true, feature: { 'apps/caf\u00e9.ts': '2', 'tsconfig.json': '{}' } });
+    const plan = JSON.parse(run('--dry-run').stdout);
+    expect(plan.mode).toBe('full');
+    expect(plan.groups.apps).toEqual(['apps/a.ts', 'apps/caf\u00e9.ts']);
+  });
+
+  it('exits non-zero and runs no eslint group when lint:prebuild fails', () => {
+    const { run } = setUp({ originMain: true, feature: { 'tsconfig.json': '{}' }, failNpm: true });
+    const res = run();
+    expect(res.status).toBe(1);
+    expect(res.calls).toEqual(['npm --max-old-space-size=6144 run lint:prebuild']);
   });
 
   it('skip mode runs nothing and exits 0', () => {

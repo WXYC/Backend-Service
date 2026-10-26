@@ -36,6 +36,8 @@ const FULL_TRIGGERS = [
 
 const git = (...a) => spawnSync('git', a, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 const lines = (s) => s.split(/\r?\n/).filter(Boolean);
+// git -z output: NUL-terminated, never quoted (the default core.quotePath wraps non-ASCII names in quotes).
+const nulSeparated = (s) => s.split('\0').filter(Boolean);
 
 // null means "no base to diff against" (missing origin/main, no common ancestor).
 function changedPaths() {
@@ -47,17 +49,17 @@ function changedPaths() {
   if (base.status !== 0) {
     return null;
   }
-  const diff = git('diff', '--name-only', '--diff-filter=ACMR', `${base.stdout.trim()}..HEAD`);
+  const diff = git('diff', '-z', '--name-only', '--diff-filter=ACMR', `${base.stdout.trim()}..HEAD`);
   if (diff.status !== 0) {
     return null;
   }
-  return lines(diff.stdout);
+  return nulSeparated(diff.stdout);
 }
 
 function planFor(changed) {
   if (changed === null || changed.some((f) => FULL_TRIGGERS.some((re) => re.test(f)))) {
     const groups = {};
-    for (const f of lines(git('ls-files').stdout)) {
+    for (const f of nulSeparated(git('ls-files', '-z').stdout)) {
       if (LINTABLE.test(f) && existsSync(join(root, f))) {
         const group = f.includes('/') ? f.slice(0, f.indexOf('/')) : '.';
         (groups[group] ??= []).push(f);
