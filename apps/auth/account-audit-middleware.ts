@@ -219,13 +219,15 @@ const capabilityChangeActions = (before: readonly string[], after: readonly stri
  * back only once its handler has finished writing (the wrapped `res.end`) and
  * its audit rows are written, so each diff sees only its own write. A request
  * that cannot get its turn within CAPABILITY_TURN_WAIT_MS is refused with 409
- * and never writes; a holder that never ends loses the turn after
- * CAPABILITY_TURN_HOLD_MAX_MS. Only `diffCapabilities: true` actions queue.
+ * and never writes. The turn is never handed on while the holder's handler can
+ * still run: a holder that outlives CAPABILITY_TURN_HOLD_MAX_MS is reported to
+ * error tracking and keeps the turn, so later requests on that subject get 409
+ * until it ends. Only `diffCapabilities: true` actions queue.
  * The queue is in-process: production runs one auth container
  * (`node dist/app.js`, no clustering); a second instance would not serialize.
  */
 const CAPABILITY_TURN_WAIT_MS = 5_000; // the 5s statement_timeout: a healthy holder is done well inside it
-const CAPABILITY_TURN_HOLD_MAX_MS = 15_000; // > the wait bound, so a stuck holder yields 409s, not silent overlap
+const CAPABILITY_TURN_HOLD_MAX_MS = 15_000; // report-only: a turn held this long is stuck, but it is not released
 const capabilityTurns = new Map<string, Promise<void>>();
 
 const takeCapabilityTurn = (subjectId: string): { granted: Promise<boolean>; giveBack: () => void } => {
@@ -252,7 +254,11 @@ const takeCapabilityTurn = (subjectId: string): { granted: Promise<boolean>; giv
         return;
       }
       clearTimeout(waitTimer);
-      holdTimer = setTimeout(giveBack, CAPABILITY_TURN_HOLD_MAX_MS);
+      holdTimer = setTimeout(
+        () =>
+          onAccountAuditError(new Error(`capability turn for a subject held over ${CAPABILITY_TURN_HOLD_MAX_MS}ms`)),
+        CAPABILITY_TURN_HOLD_MAX_MS
+      );
       holdTimer.unref();
       resolve(true);
     });
@@ -392,9 +398,10 @@ function auditMiddleware(resolve: ResolvedMount) {
     res.end = ((...args: Parameters<Response['end']>) => {
       capture(args[0]);
       const ended = origEnd(...args);
-      // BS#3717: better-call calls this after the handler returns, even on a destroyed socket.
+      // BS#3717: better-call calls this after the handler returns, even on a destroyed socket,
+      // so the audit rows are written from here rather than only from 'finish'.
       handlerEnded = true;
-      settleTurn();
+      void finishOnce();
       return ended;
     }) as Response['end'];
 
@@ -435,6 +442,7 @@ function auditMiddleware(resolve: ResolvedMount) {
     // BS#3473: the before-read must land before the handler can change the row,
     // so for a diffing action it (not the session read) gates next().
     // A created user has no row yet (BS#3570), so its before-state is empty.
+    let sessionReadFailed = false;
     const sessionPromise: Promise<void> | null = resolve.resolveActor
       ? auth.api
           .getSession({ headers: fromNodeHeaders(req.headers) })
@@ -443,7 +451,10 @@ function auditMiddleware(resolve: ResolvedMount) {
             impersonatorId =
               (session?.session as { impersonatedBy?: string | null } | undefined)?.impersonatedBy ?? null;
           })
-          .catch(onAccountAuditError)
+          .catch((error: unknown) => {
+            sessionReadFailed = true;
+            onAccountAuditError(error);
+          })
       : null;
 
     // BS#3717: an update of an existing subject waits for its turn, but only once the
@@ -451,15 +462,22 @@ function auditMiddleware(resolve: ResolvedMount) {
     // 401), and only for a bounded time (else 409). Neither refusal runs the handler.
     let admitted = true;
     let closed = false;
+    const refusalMessages: Record<string, string> = {
+      CONFLICT: 'Another update for this user is in progress',
+      UNAUTHORIZED: 'Unauthorized',
+      INTERNAL_SERVER_ERROR: 'Internal server error',
+    };
     const refuse = (status: number, code: string): void => {
       admitted = false;
-      res
-        .status(status)
-        .json({ code, message: code === 'CONFLICT' ? 'Another update for this user is in progress' : 'Unauthorized' });
+      res.status(status).json({ code, message: refusalMessages[code] });
     };
     const readBefore = async (): Promise<string[] | null> => {
       const subjectId = extractBodyUserId(req);
       await sessionPromise;
+      if (sessionReadFailed) {
+        refuse(500, 'INTERNAL_SERVER_ERROR');
+        return null;
+      }
       if (actorId === null) {
         refuse(401, 'UNAUTHORIZED');
         return null;
@@ -512,7 +530,9 @@ function auditMiddleware(resolve: ResolvedMount) {
       // sentinel for, an outcome the request never reached. `outcome` is
       // documented as "raw HTTP status", so a synthetic value (e.g. a
       // 499-style convention) would misrepresent what the column means.
-      if (!res.writableFinished) return;
+      // BS#3717: a handler that has ended (the wrapped res.end ran) counts too: its
+      // response is complete even if the socket closed before 'finish'.
+      if (!res.writableFinished && !handlerEnded) return;
 
       // Item 9 (simplify pass): computed here, after the writableFinished
       // guard above, so an aborted request never pays for it.
@@ -571,7 +591,10 @@ function auditMiddleware(resolve: ResolvedMount) {
     res.on('finish', () => void finishOnce());
     res.on('close', () => {
       closed = true;
-      void finishOnce();
+      // Before the handler ends, a close writes nothing: the wrapped res.end writes the rows.
+      if (handlerEnded || res.writableFinished) {
+        void finishOnce();
+      }
     });
 
     // Both gates apply when an action sets both flags (BS#3570); neither rejects.
