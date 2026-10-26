@@ -858,9 +858,17 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
   const grant = (name: string) => `capability.grant.${name}`;
   const revoke = (name: string) => `capability.revoke.${name}`;
 
+  // These requests take the subject's capability turn and no handler gives it back, so its
+  // 15s hold timer must be fake: a real one fires after the Jest environment is torn down.
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+  });
+
   // The 400 row queues an after-read the 2xx guard correctly never consumes;
   // drop it so it cannot leak into the next test's `limit` queue.
   afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
     db._chain.limit.mockReset();
     db._chain.limit.mockImplementation(() => db._chain);
   });
