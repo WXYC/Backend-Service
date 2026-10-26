@@ -36,6 +36,7 @@ describe('capability assignment (BS#3570)', () => {
   const authBaseUrl = getAuthBaseUrl();
   let sql;
   const cookies = {};
+  const bearerTokens = {};
   /** @type {string[]} user ids created by these tests; deleted in afterEach. */
   const createdUserIds = [];
 
@@ -45,6 +46,27 @@ describe('capability assignment (BS#3570)', () => {
       headers: { 'Content-Type': 'application/json', Cookie: cookies[caller] },
       body: JSON.stringify(body),
     });
+
+  /** Same as `post`, but authenticated the way the DJ iOS app is: `Authorization: Bearer <session token>`. */
+  const postBearer = (caller, path, body) =>
+    fetch(`${authBaseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bearerTokens[caller]}` },
+      body: JSON.stringify(body),
+    });
+
+  async function bearerTokenFor(username) {
+    const res = await fetch(`${authBaseUrl}/sign-in/username`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password: 'testpassword123' }),
+    });
+    const token = res.headers.get('set-auth-token');
+    if (!res.ok || !token) {
+      throw new Error(`bearer sign-in failed for ${username}: ${res.status}`);
+    }
+    return token;
+  }
 
   const createPayload = (capabilities) => ({
     email: `cap-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.wxyc.org`,
@@ -74,6 +96,8 @@ describe('capability assignment (BS#3570)', () => {
     cookies.stationManager = (await signInAs(authBaseUrl, 'test_station_manager')).cookie;
     cookies.musicDirector = (await signInAs(authBaseUrl, 'test_music_director')).cookie;
     cookies.dj = (await signInAs(authBaseUrl, 'test_dj1')).cookie;
+    bearerTokens.stationManager = await bearerTokenFor('test_station_manager');
+    bearerTokens.musicDirector = await bearerTokenFor('test_music_director');
   });
 
   afterAll(async () => {
@@ -121,6 +145,49 @@ describe('capability assignment (BS#3570)', () => {
         expect(await storedCapabilities(targetId)).toEqual([]);
       }
     }
+  });
+
+  // BS#3570 round 2: a bearer caller sends no cookie, so a guard that read the session in a before-hook
+  // saw nobody and let the admin plugin write the capabilities unchecked.
+  test.each(['/admin/update-user', '/admin/create-user'])(
+    'a bearer-authenticated non-station-manager admin is refused on %s',
+    async (route) => {
+      let res;
+      let targetId;
+      if (route === '/admin/update-user') {
+        targetId = await seedTarget();
+        res = await postBearer('musicDirector', route, { userId: targetId, data: { capabilities: ['webmaster'] } });
+      } else {
+        const payload = createPayload(['webmaster']);
+        res = await postBearer('musicDirector', route, payload);
+        const rows = await sql.unsafe(`SELECT id FROM auth_user WHERE email = $1`, [payload.email.toLowerCase()]);
+        expect(rows).toHaveLength(0);
+      }
+      expect(res.status).toBe(403);
+      if (targetId) {
+        expect(await storedCapabilities(targetId)).toEqual([]);
+      }
+    }
+  );
+
+  test('a bearer-authenticated station manager can assign capabilities, with grant rows', async () => {
+    const targetId = await seedTarget();
+    const update = await postBearer('stationManager', '/admin/update-user', {
+      userId: targetId,
+      data: { capabilities: ['editor'] },
+    });
+    expect(update.status).toBe(200);
+    expect(await storedCapabilities(targetId)).toEqual(['editor']);
+    expect(await pollAuditActions(sql, targetId, ['capability.grant.editor'])).toContain('capability.grant.editor');
+
+    const create = await postBearer('stationManager', '/admin/create-user', createPayload(['reviews_beta']));
+    expect(create.status).toBe(200);
+    const id = (await create.json()).user.id;
+    createdUserIds.push(id);
+    expect(await storedCapabilities(id)).toEqual(['reviews_beta']);
+    expect(await pollAuditActions(sql, id, ['capability.grant.reviews_beta'])).toContain(
+      'capability.grant.reviews_beta'
+    );
   });
 
   test('a refused create-user leaves no user row behind', async () => {
