@@ -14,8 +14,8 @@
  * exactly that (PR #2545 findings H1/H2, PR #2550's L3):
  *
  *  1. `describe('account-audit subject parity ...')` — a REAL `express()`
- *     app wired with the actual patched `express.json({ type:
- *     isBetterCallJsonRequest })` line and the REAL
+ *     app mounting the production `createAuthJsonBodyParser()`
+ *     factory (never a hand-built `express.json(...)`) and the REAL
  *     `mountPublicAccountAudit` dispatcher from `account-audit-middleware.ts`
  *     (only `@wxyc/database` / `@wxyc/authentication` are mocked, the same
  *     doubles `account-audit-middleware.test.ts` already uses), driven over
@@ -53,7 +53,7 @@
  *     silently dropped one.
  *
  *  4. `describe('malformed / oversized bodies ...')` (Finding 5) — proves
- *     `app.ts`'s swallow-wrapped `express.json(...)` (see its comment for
+ *     the swallow-wrapped `createAuthJsonBodyParser()` app.ts mounts (see its comment for
  *     the full empirical investigation into hang/confusing-body risk)
  *     actually restores the audit mount's ability to run on a parse error,
  *     which a bare `express.json(...)` would otherwise route around via
@@ -68,13 +68,12 @@ jest.mock('@sentry/node', () => ({ captureException: jest.fn() }));
 
 import { db, recordAccountAuditEvent } from '../../mocks/database.mock';
 import { mountPublicAccountAudit } from '../../../apps/auth/account-audit-middleware';
-import { isBetterCallJsonRequest } from '../../../apps/auth/json-content-type';
+import { createAuthJsonBodyParser } from '../../../apps/auth/json-content-type';
 import { resolveNestedBetterCall } from '../../utils/resolve-nested-better-call';
 
 describe('account-audit subject parity across content types (BS#2558)', () => {
   /**
-   * Real express() app: the SAME `express.json({ type: isBetterCallJsonRequest })`
-   * line app.ts uses, then the real public flat-mount dispatcher, then a
+   * Real express() app: the production `createAuthJsonBodyParser()` app.ts mounts, then the real public flat-mount dispatcher, then a
    * stub terminal handler per mount standing in for better-auth's own route
    * (a 200 JSON response) — the audit middleware only needs the response to
    * finish with a 2xx so its public-mount subject-resolution gate opens; it
@@ -82,7 +81,7 @@ describe('account-audit subject parity across content types (BS#2558)', () => {
    */
   function makeApp() {
     const app = express();
-    app.use(express.json({ type: isBetterCallJsonRequest }));
+    app.use(createAuthJsonBodyParser());
     mountPublicAccountAudit(app);
     // Hard-coded literal paths — deliberately NOT derived from
     // FLAT_MOUNTS, matching the L3 discipline in
@@ -262,7 +261,7 @@ describe('real better-call round-trip (BS#2558 re-serialization claim)', () => {
 
   function makeApp() {
     const app = express();
-    app.use(express.json({ type: isBetterCallJsonRequest }));
+    app.use(createAuthJsonBodyParser());
     app.all('/echo', (req: Request, res) => void nodeHandler(req, res));
     return app;
   }
@@ -368,7 +367,7 @@ describe('application/vnd.api+json: Express-parsed, better-call-rejected (BS#255
   const nodeHandler = toNodeHandler(processResetPasswordRequest);
 
   /**
-   * Real `express.json({ type: isBetterCallJsonRequest })`, then the real
+   * Real `createAuthJsonBodyParser()`, then the real
    * public flat-mount audit dispatcher, then the real better-call round
    * trip above standing in for better-auth's own `/reset-password` route —
    * so the 415 below is genuinely better-call's `allowedMediaTypes` gate
@@ -377,7 +376,7 @@ describe('application/vnd.api+json: Express-parsed, better-call-rejected (BS#255
    */
   function makeApp() {
     const app = express();
-    app.use(express.json({ type: isBetterCallJsonRequest }));
+    app.use(createAuthJsonBodyParser());
     mountPublicAccountAudit(app);
     app.all('/auth/reset-password', (req: Request, res) => void nodeHandler(req, res));
     return app;
@@ -431,11 +430,10 @@ describe('application/vnd.api+json: Express-parsed, better-call-rejected (BS#255
  * shapes that motivated it.
  */
 describe('malformed / oversized bodies still reach the audit mount (BS#2558 PR #2566 review Finding 5)', () => {
-  /** The exact wrapper app.ts mounts in place of a bare `express.json(...)` — see its comment for why. */
+  /** `createAuthJsonBodyParser()` is the swallow-wrapped parser app.ts mounts in place of a bare `express.json(...)`. */
   function makeApp() {
     const app = express();
-    const jsonBodyParser = express.json({ type: isBetterCallJsonRequest, limit: '100kb' });
-    app.use((req, res, next) => jsonBodyParser(req, res, () => next()));
+    app.use(createAuthJsonBodyParser());
     mountPublicAccountAudit(app);
     app.post('/auth/reset-password', (_req, res) => res.status(200).json({ ok: true }));
     return app;
