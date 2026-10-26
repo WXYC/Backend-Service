@@ -137,9 +137,17 @@ describe('assertCanAssignCapabilities', () => {
     expect(deps.selectMemberRole).not.toHaveBeenCalled();
   });
 
-  it('leaves an unauthenticated caller to the plugin own 401', async () => {
+  it.each([UPDATE, CREATE])('fails closed with 401 when no session resolves on %s', async (path) => {
+    const deps = depsFor('stationManager');
+    await expect(assertCanAssignCapabilities(path, bodyFor(path, ['webmaster']), null, deps)).rejects.toMatchObject({
+      statusCode: 401,
+    });
+    expect(deps.selectMemberRole).not.toHaveBeenCalled();
+  });
+
+  it('does not demand a session when capabilities are untouched', async () => {
     await expect(
-      assertCanAssignCapabilities(UPDATE, bodyFor(UPDATE, ['webmaster']), null, depsFor('dj'))
+      assertCanAssignCapabilities(UPDATE, { userId: 'dj-1', data: { name: 'x' } }, null, depsFor('dj'))
     ).resolves.toBeUndefined();
   });
 

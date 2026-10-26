@@ -32,7 +32,7 @@ import {
 import { generateId } from '@better-auth/core/utils/id';
 import { and, eq, sql } from 'drizzle-orm';
 import { authLogHandler } from './auth-log';
-import { CAPABILITY_WRITE_PATHS, assertCanAssignCapabilities } from './capability-assign-guard';
+import { capabilityAssignGuardPlugin } from './capability-assign-plugin';
 import { WXYCRoles } from './auth.roles';
 import {
   applyDeviceApproveRoleGate,
@@ -346,6 +346,8 @@ export const auth = betterAuth({
       emailDomainName: 'anonymous.wxyc.org',
     }),
     bearer(),
+    // BS#3570: resolves the session through auth.api.getSession so bearer callers are seen, see capability-assign-plugin.ts.
+    capabilityAssignGuardPlugin(() => auth, { selectMemberRole, readCapabilities }),
     jwt({
       // JWT plugin configuration
       // JWKS endpoint automatically exposed at /api/auth/jwks
@@ -453,18 +455,6 @@ export const auth = betterAuth({
     // the same session the handler will see. Costs one extra DB round-trip
     // per approve request, fine for the ADR 0008 path.
     before: createAuthMiddleware(async (ctx) => {
-      // BS#3570: the one assigner check for every route that writes `capabilities`.
-      // The admin plugin runs this hook before its own handler; the check reads the
-      // caller's session itself since `ctx.context.session` is not populated yet.
-      if (
-        (CAPABILITY_WRITE_PATHS as readonly string[]).includes(ctx.path) &&
-        (ctx.body as { data?: { capabilities?: unknown } | null } | null | undefined)?.data?.capabilities !== undefined
-      ) {
-        const session = await getSessionFromCtx(ctx);
-        const actor = session?.user ? { id: session.user.id, capabilities: session.user.capabilities } : null;
-        await assertCanAssignCapabilities(ctx.path, ctx.body, actor, { selectMemberRole, readCapabilities });
-        return;
-      }
       if (ctx.path !== '/device/approve') return;
       const session = await getSessionFromCtx(ctx);
       if (!session?.user?.id) return; // let the plugin's own UNAUTHORIZED fire

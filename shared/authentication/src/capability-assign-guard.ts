@@ -20,8 +20,8 @@ const isCapability = (name: string): name is Capability => (CAPABILITIES as read
  * caller may not assign, using `canAssignCapability` from `@wxyc/shared` (the
  * station-manager-only rule). The single check for every route in
  * `CAPABILITY_WRITE_PATHS`; a capability the policy does not know is refused unless
- * the caller is a station manager. A request that does not touch `data.capabilities`, or has no
- * session (the plugin's own 401 fires), passes through. Exported as a pure
+ * the caller is a station manager. A request that does not touch `data.capabilities`, passes through; one
+ * with `data.capabilities` and no resolved session is refused (401). Exported as a pure
  * function over injected reads so it is unit-testable without better-auth.
  */
 export async function assertCanAssignCapabilities(
@@ -52,8 +52,13 @@ export async function assertCanAssignCapabilities(
       message: '`userId` must be a non-empty string when `data.capabilities` is set.',
     });
   }
+  // Fail closed: no resolved session means we cannot say who is assigning, so refuse rather than leave it
+  // to the admin plugin, which may resolve a session this caller's headers did not give us.
   if (!actor) {
-    return;
+    throw new APIError('UNAUTHORIZED', {
+      code: 'SESSION_REQUIRED',
+      message: 'A session is required to set capabilities.',
+    });
   }
 
   let current: string[] = [];
