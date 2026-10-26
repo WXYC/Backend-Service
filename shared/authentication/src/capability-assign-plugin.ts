@@ -40,8 +40,9 @@ export interface SessionApi {
  * run as one step per subject. This hook only reads the context: it must NOT take the turn itself, because the
  * queue is not re-entrant and a second take would wait behind its own request. The guarantee holds only while the
  * auth service runs as one process (one container, `node dist/app.js`). A direct `auth.api` call has no HTTP mount
- * and so holds no turn: it is refused for a capabilities write unless the caller runs it inside `capabilityTurn.run`
- * after taking the turn itself (no in-repo caller does).
+ * and so holds no turn: a capabilities write made that way outside the HTTP mount is refused (400
+ * `CAPABILITY_TURN_REQUIRED`). Running it inside `capabilityTurn.run({ subjectId }, ...)` satisfies the guard but
+ * takes no queue turn, so it is not serialized and is not a supported path (no in-repo caller uses it).
  */
 export function capabilityAssignGuardPlugin(
   getAuth: () => SessionApi,
