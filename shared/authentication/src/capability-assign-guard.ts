@@ -44,15 +44,20 @@ export async function assertCanAssignCapabilities(
       message: '`data.capabilities` must be an array of strings.',
     });
   }
+  // Fail closed: the plugin coerces `userId` (z.coerce.string()) after this hook sees the raw body, so
+  // an array or number here would otherwise skip the check and still write.
+  if (path === '/admin/update-user' && (typeof userId !== 'string' || userId.length === 0)) {
+    throw new APIError('BAD_REQUEST', {
+      code: 'USER_ID_MUST_BE_STRING',
+      message: '`userId` must be a non-empty string when `data.capabilities` is set.',
+    });
+  }
   if (!actor) {
     return;
   }
 
   let current: string[] = [];
-  if (path === '/admin/update-user') {
-    if (typeof userId !== 'string') {
-      return;
-    }
+  if (path === '/admin/update-user' && typeof userId === 'string') {
     current = await deps.readCapabilities(userId);
   }
   const changed = [

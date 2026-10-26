@@ -456,7 +456,10 @@ export const auth = betterAuth({
       // BS#3570: the one assigner check for every route that writes `capabilities`.
       // The admin plugin runs this hook before its own handler; the check reads the
       // caller's session itself since `ctx.context.session` is not populated yet.
-      if ((CAPABILITY_WRITE_PATHS as readonly string[]).includes(ctx.path)) {
+      if (
+        (CAPABILITY_WRITE_PATHS as readonly string[]).includes(ctx.path) &&
+        (ctx.body as { data?: { capabilities?: unknown } | null } | null | undefined)?.data?.capabilities !== undefined
+      ) {
         const session = await getSessionFromCtx(ctx);
         const actor = session?.user ? { id: session.user.id, capabilities: session.user.capabilities } : null;
         await assertCanAssignCapabilities(ctx.path, ctx.body, actor, { selectMemberRole, readCapabilities });

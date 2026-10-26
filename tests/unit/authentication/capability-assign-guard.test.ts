@@ -153,6 +153,22 @@ describe('assertCanAssignCapabilities', () => {
     ).rejects.toMatchObject({ statusCode: 400, body: { code: 'CAPABILITIES_MUST_BE_STRING_ARRAY' } });
   });
 
+  it.each([
+    ['a one-element array', ['dj-1']],
+    ['a number', 123],
+    ['an object', { id: 'dj-1' }],
+    ['null', null],
+    ['an empty string', ''],
+    ['missing', undefined],
+  ])('refuses update-user with capabilities when userId is %s, with no read', async (_name, userId) => {
+    const deps = depsFor('stationManager');
+    await expect(
+      assertCanAssignCapabilities(UPDATE, { userId, data: { capabilities: ['webmaster'] } }, actorWith(), deps)
+    ).rejects.toMatchObject({ statusCode: 400, body: { code: 'USER_ID_MUST_BE_STRING' } });
+    expect(deps.readCapabilities).not.toHaveBeenCalled();
+    expect(deps.selectMemberRole).not.toHaveBeenCalled();
+  });
+
   it('names exactly the two routes that can write capabilities', () => {
     expect([...CAPABILITY_WRITE_PATHS].sort()).toEqual([CREATE, UPDATE]);
   });
