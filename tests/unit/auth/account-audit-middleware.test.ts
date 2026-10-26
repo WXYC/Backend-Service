@@ -166,6 +166,7 @@ async function start(mw: Middleware, req: Request): Promise<{ res: MockRes; next
 
 /** Trigger 'finish' and flush — the common no-interleaved-write case. */
 async function settle(res: MockRes): Promise<void> {
+  res.end(); // the handler's end precedes 'finish'; it is what hands a queued turn on (BS#3717)
   res.triggerFinish();
   await flush();
 }
@@ -983,11 +984,12 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
       await flush();
       expect(next).not.toHaveBeenCalled();
 
-      releaseBefore([{ capabilities: [] }]);
+      // BS#3717: the before-read of an update-user waits for the session's actor.
+      resolveSession({ user: { id: 'manager-1' }, session: {} });
       await flush();
       expect(next).not.toHaveBeenCalled();
 
-      resolveSession({ user: { id: 'manager-1' }, session: {} });
+      releaseBefore([{ capabilities: [] }]);
       await flush();
       expect(next).toHaveBeenCalledTimes(1);
     });
@@ -1018,10 +1020,20 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
   });
 
   /** A request whose handler (`next`) appends `grants` to the stored capabilities. */
-  function request(token: string, grants: string[]) {
+  function request(token: string, grants: string[], opts: { deferWrite?: boolean } = {}) {
     const res = mockRes();
-    const next = jest.fn(() => {
+    (res as unknown as { status: unknown }).status = jest.fn((code: number) => {
+      res.statusCode = code;
+      return res;
+    });
+    (res as unknown as { json: unknown }).json = jest.fn(() => res.end());
+    const write = () => {
       stored = [...stored, ...grants];
+    };
+    const next = jest.fn(() => {
+      if (!opts.deferWrite) {
+        write();
+      }
     });
     adminPrefixAuditMiddleware()(
       mockAdminReq({
@@ -1032,7 +1044,7 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
       res,
       next as NextFunction
     );
-    return { res, next };
+    return { res, next, write };
   }
 
   /** Let the request's handler run (it may be queued behind another), then finish its response. */
@@ -1076,19 +1088,87 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
     const b = request('bearer-2', ['y']);
     await flush();
     expect(a.next).toHaveBeenCalledTimes(1);
+    let openGate!: () => void;
+    recordAccountAuditEvent.mockImplementationOnce(() => new Promise<void>((resolve) => (openGate = resolve)));
+    a.res.end();
+    a.res.triggerFinish(); // handler done; A's after-read and audit rows are still pending
+    await flush();
     expect(b.next).not.toHaveBeenCalled();
 
-    await settle(a.res);
+    openGate();
+    await flush();
     expect(b.next).toHaveBeenCalledTimes(1);
+    expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
   });
 
-  it('releases the turn when the first request closes without finishing', async () => {
-    const a = request('bearer-1', ['x']);
+  it('holds the turn through a close while the first handler is still writing', async () => {
+    const a = request('bearer-1', ['x'], { deferWrite: true });
     const b = request('bearer-2', ['y']);
     await flush();
-    a.res.triggerClose();
+    expect(a.next).toHaveBeenCalledTimes(1);
+    a.res.triggerClose(); // socket dropped before the handler wrote
+    await flush();
+    expect(b.next).not.toHaveBeenCalled();
+
+    a.write();
+    a.res.end(); // better-call ends the response after the handler returns, even on a destroyed socket
     await flush();
     expect(b.next).toHaveBeenCalledTimes(1);
+    await finishWhenHandlerRan(b);
+    expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
+  });
+
+  it('never runs the handler of a request aborted while queued, and gives its turn on', async () => {
+    const a = request('bearer-1', ['x']);
+    const b = request('bearer-2', ['y']);
+    const c = request('bearer-1', ['z']);
+    await flush();
+    b.res.triggerClose();
+    await finishWhenHandlerRan(a);
+    await flush();
+    expect(b.next).not.toHaveBeenCalled();
+    expect(c.next).toHaveBeenCalledTimes(1);
+    expect(stored).toEqual(['a', 'x', 'z']);
+  });
+
+  it('refuses an unauthenticated caller without enqueueing or running the handler', async () => {
+    const a = request('bearer-1', ['x']);
+    const anon = request('no-such-token', ['q']);
+    await flush();
+    expect(anon.next).not.toHaveBeenCalled();
+    expect(anon.res.statusCode).toBe(401);
+    await finishWhenHandlerRan(a);
+  });
+
+  describe('bounded wait', () => {
+    beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate'] }));
+    afterEach(() => jest.useRealTimers());
+
+    it('refuses with 409 a request that cannot get its turn in time, then lets the next one through', async () => {
+      const a = request('bearer-1', ['x'], { deferWrite: true });
+      const b = request('bearer-2', ['y']);
+      await flush();
+      jest.advanceTimersByTime(5_000);
+      await flush();
+      expect(b.res.statusCode).toBe(409);
+      expect(b.next).not.toHaveBeenCalled();
+
+      const c = request('bearer-2', ['z']);
+      a.write();
+      await finishWhenHandlerRan(a);
+      await flush();
+      expect(c.next).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes the turn back from a holder whose response never ends', async () => {
+      const a = request('bearer-1', ['x'], { deferWrite: true });
+      await flush();
+      jest.advanceTimersByTime(15_000);
+      const b = request('bearer-2', ['y']);
+      await flush();
+      expect(b.next).toHaveBeenCalledTimes(1);
+      expect(a.next).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('does not queue update-user requests for different subjects behind each other', async () => {
