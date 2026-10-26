@@ -215,16 +215,16 @@ const capabilityChangeActions = (before: readonly string[], after: readonly stri
  * other's write in their after-state, so one would record a grant for a
  * capability the other assigned, under its own actor. The actor column itself
  * is per-request and cannot cross; the shared state is the subject's row. A
- * request that has an actor takes its turn before its before-read and gives it
- * back only once its handler has finished writing (the wrapped `res.end`) and
- * its audit rows are written, so each diff sees only its own write. A request
- * that cannot get its turn within CAPABILITY_TURN_WAIT_MS is refused with 409
- * and never writes. The turn is never handed on while the holder's handler can
- * still run: a holder that outlives CAPABILITY_TURN_HOLD_MAX_MS is reported to
- * error tracking and keeps the turn, so later requests on that subject get 409
- * until it ends. Only `diffCapabilities: true` actions queue.
- * The queue is in-process: production runs one auth container
- * (`node dist/app.js`, no clustering); a second instance would not serialize.
+ * request that has an actor takes its turn before its before-read and holds it
+ * across the awaited auth handler (`holdTurnAcross`, mounted where the handler
+ * is), then writes its audit rows and gives the turn back, on every path. A
+ * request that cannot get its turn within CAPABILITY_TURN_WAIT_MS is refused
+ * with 409 and never writes. A holder that outlives CAPABILITY_TURN_HOLD_MAX_MS
+ * is reported to error tracking and keeps the turn, so later requests on that
+ * subject get 409 until it ends. Only `diffCapabilities: true` actions queue.
+ * The queue is in-process and not re-entrant: production runs one auth
+ * container (`node dist/app.js`, no clustering), and code that runs inside the
+ * update-user handler must not take the same subject's turn.
  */
 const CAPABILITY_TURN_WAIT_MS = 5_000; // the 5s statement_timeout: a healthy holder is done well inside it
 const CAPABILITY_TURN_HOLD_MAX_MS = 15_000; // report-only: a turn held this long is stuck, but it is not released
@@ -265,6 +265,47 @@ const takeCapabilityTurn = (subjectId: string): { granted: Promise<boolean>; giv
   });
   return { granted, giveBack };
 };
+
+/** What the audit middleware keeps for a request that holds a subject's turn, for `holdTurnAcross` to call. */
+interface TurnHolder {
+  /** False when the turn was already given back (the socket closed first): the handler must not run. */
+  enter: () => boolean;
+  /** The handler returned or threw: write the audit rows, then give the turn back. Never rejects. */
+  ended: (failed: boolean) => Promise<void>;
+}
+const turnHolders = new WeakMap<Response, TurnHolder>();
+
+/**
+ * BS#3717: wraps the better-auth node handler at its mount. For a request that holds a
+ * subject's capability turn, the turn spans exactly this awaited call: the handler's
+ * promise settles when better-call has finished with the request, whether or not the
+ * socket is still open. Then the audit rows are written with the final status and the
+ * turn is given back, on every path (resolve, reject, throw). A request whose turn was
+ * already given back (its socket closed before the handler was reached) is not run.
+ * Any other request goes straight to the handler.
+ */
+export function holdTurnAcross<Args extends unknown[]>(
+  handler: (req: Request, res: Response, ...rest: Args) => Promise<unknown>
+) {
+  return async (req: Request, res: Response, ...rest: Args): Promise<void> => {
+    const holder = turnHolders.get(res);
+    if (!holder) {
+      await handler(req, res, ...rest);
+      return;
+    }
+    turnHolders.delete(res);
+    if (!holder.enter()) {
+      return;
+    }
+    let failed = true;
+    try {
+      await handler(req, res, ...rest);
+      failed = false;
+    } finally {
+      await holder.ended(failed);
+    }
+  };
+}
 
 const ipHashOf = (req: Request): string | null => deriveStationSignupIpHash(realIpFromRequest(req));
 
@@ -380,15 +421,10 @@ function auditMiddleware(resolve: ResolvedMount) {
     // wrapper needs no separate `args[0] !== undefined` guard (item 10) —
     // that covers both the no-body `res.end()` form and the callback-only
     // `res.end(callback)` form, where args[0] is a function.
-    // BS#3717: the turn goes back only when the handler has ended AND the audit rows are done.
+    // BS#3717: a diffing action holds its turn across the awaited handler (see holdTurnAcross).
+    let handlerEntered = false;
     let handlerEnded = false;
-    let auditDone = false;
     let giveBackTurn = (): void => undefined;
-    const settleTurn = (): void => {
-      if (handlerEnded && auditDone) {
-        giveBackTurn();
-      }
-    };
     const origWrite = res.write.bind(res);
     res.write = ((...args: Parameters<Response['write']>) => {
       capture(args[0]);
@@ -397,12 +433,7 @@ function auditMiddleware(resolve: ResolvedMount) {
     const origEnd = res.end.bind(res);
     res.end = ((...args: Parameters<Response['end']>) => {
       capture(args[0]);
-      const ended = origEnd(...args);
-      // BS#3717: better-call calls this after the handler returns, even on a destroyed socket,
-      // so the audit rows are written from here rather than only from 'finish'.
-      handlerEnded = true;
-      void finishOnce();
-      return ended;
+      return origEnd(...args);
     }) as Response['end'];
 
     // Item 11 (simplify pass): a plain hoisted flag next to actorId/
@@ -462,6 +493,7 @@ function auditMiddleware(resolve: ResolvedMount) {
     // 401), and only for a bounded time (else 409). Neither refusal runs the handler.
     let admitted = true;
     let closed = false;
+    let turnReleased = false;
     const refusalMessages: Record<string, string> = {
       CONFLICT: 'Another update for this user is in progress',
       UNAUTHORIZED: 'Unauthorized',
@@ -486,7 +518,10 @@ function auditMiddleware(resolve: ResolvedMount) {
         return null;
       }
       const turn = takeCapabilityTurn(subjectId);
-      giveBackTurn = turn.giveBack;
+      giveBackTurn = () => {
+        turnReleased = true;
+        turn.giveBack();
+      };
       if (!(await turn.granted)) {
         giveBackTurn = () => undefined;
         refuse(409, 'CONFLICT');
@@ -498,6 +533,22 @@ function auditMiddleware(resolve: ResolvedMount) {
         turn.giveBack();
         return null;
       }
+      turnHolders.set(res, {
+        enter: () => {
+          if (turnReleased) {
+            return false;
+          }
+          handlerEntered = true;
+          return true;
+        },
+        ended: async (failed) => {
+          if (failed && !res.headersSent) {
+            res.statusCode = 500;
+          }
+          handlerEnded = true;
+          await finishOnce();
+        },
+      });
       return readCapabilities(subjectId);
     };
     const capabilitiesBefore = !classified.diffCapabilities
@@ -512,8 +563,7 @@ function auditMiddleware(resolve: ResolvedMount) {
       try {
         await writeAuditRows();
       } finally {
-        auditDone = true;
-        settleTurn();
+        giveBackTurn();
       }
     };
 
@@ -530,8 +580,8 @@ function auditMiddleware(resolve: ResolvedMount) {
       // sentinel for, an outcome the request never reached. `outcome` is
       // documented as "raw HTTP status", so a synthetic value (e.g. a
       // 499-style convention) would misrepresent what the column means.
-      // BS#3717: a handler that has ended (the wrapped res.end ran) counts too: its
-      // response is complete even if the socket closed before 'finish'.
+      // BS#3717: a handler that has ended counts too: its response is complete
+      // even if the socket closed before 'finish'.
       if (!res.writableFinished && !handlerEnded) return;
 
       // Item 9 (simplify pass): computed here, after the writableFinished
@@ -588,11 +638,15 @@ function auditMiddleware(resolve: ResolvedMount) {
     // finishOnce is async (item 8: it awaits sessionPromise/subjectFrom); .on()
     // types its listener as returning void, so wrap with `void` at the call
     // site rather than typing finishOnce itself as non-async.
-    res.on('finish', () => void finishOnce());
+    // Once the awaited handler is running, only its completion writes the rows and gives the turn back.
+    res.on('finish', () => {
+      if (!handlerEntered) {
+        void finishOnce();
+      }
+    });
     res.on('close', () => {
       closed = true;
-      // Before the handler ends, a close writes nothing: the wrapped res.end writes the rows.
-      if (handlerEnded || res.writableFinished) {
+      if (!handlerEntered) {
         void finishOnce();
       }
     });
@@ -603,8 +657,11 @@ function auditMiddleware(resolve: ResolvedMount) {
     );
     if (gates.length > 0) {
       void Promise.all(gates).finally(() => {
-        if (admitted) {
+        if (admitted && !(closed && turnHolders.has(res))) {
           next();
+        } else {
+          // Refused, or the socket closed during the before-read: the handler never runs.
+          giveBackTurn();
         }
       });
     } else {

@@ -37,6 +37,7 @@ import {
 import { installAuthLogRedaction } from './log-redaction';
 import {
   adminPrefixAuditMiddleware,
+  holdTurnAcross,
   mountAuthenticatedAccountAudit,
   mountPublicAccountAudit,
 } from './account-audit-middleware';
@@ -1299,7 +1300,8 @@ if (isStationSignupEnabled()) {
 // above to bound the JWT-verify + DB lookup cost.
 app.post('/auth/check-request-ban', checkRequestBanHandler);
 
-app.use('/auth', toNodeHandler(auth));
+// BS#3717: a capability-writing update-user holds its subject's turn across this awaited handler.
+app.use('/auth', holdTurnAcross(toNodeHandler(auth)));
 
 // Liveness/readiness endpoint. Body conforms to HealthCheckResponse from
 // @wxyc/shared (api.yaml v1.3.0 / @wxyc/shared v0.13.0); the shape is the

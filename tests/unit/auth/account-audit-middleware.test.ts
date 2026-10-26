@@ -30,6 +30,10 @@
  * one registers.
  */
 import { jest } from '@jest/globals';
+import express from 'express';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { toNodeHandler } from 'better-call/node';
 import type { Express, NextFunction, Request, Response } from 'express';
 
 import { useSpyReporter } from '../../utils/observability';
@@ -40,6 +44,7 @@ import { auth } from '../../mocks/authentication.mock';
 import { db, recordAccountAuditEvent } from '../../mocks/database.mock';
 import {
   adminPrefixAuditMiddleware,
+  holdTurnAcross,
   mountAuthenticatedAccountAudit,
   mountPublicAccountAudit,
 } from '../../../apps/auth/account-audit-middleware';
@@ -166,7 +171,6 @@ async function start(mw: Middleware, req: Request): Promise<{ res: MockRes; next
 
 /** Trigger 'finish' and flush — the common no-interleaved-write case. */
 async function settle(res: MockRes): Promise<void> {
-  res.end(); // the handler's end precedes 'finish'; it is what hands a queued turn on (BS#3717)
   res.triggerFinish();
   await flush();
 }
@@ -1001,62 +1005,19 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
 // the shared state is the subject's row, which both requests diff. Without a
 // per-subject turn, request A's after-read contained B's write and A recorded a
 // `capability.grant` row for a capability B assigned, under A's actor.
+// The turn is held across the awaited auth handler (`holdTurnAcross`), which is
+// what the handler promise does in production: it settles when better-call is
+// done with the request, with or without a live socket.
 describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
   const sessions: Record<string, string> = { 'bearer-1': 'manager-1', 'bearer-2': 'manager-2' };
   let stored: string[];
   let subject: string;
   let counter = 0;
 
-  // Fake timers throughout: a turn left held by a test must not leave a live 15s hold timer behind.
-  beforeEach(() => {
-    jest.useFakeTimers({ doNotFake: ['setImmediate'] });
-    stored = ['a'];
-    subject = `dj-concurrent-${++counter}`;
-    auth.api.getSession = (({ headers }: { headers: Record<string, string> }) =>
-      Promise.resolve({ user: { id: sessions[headers.authorization ?? ''] }, session: {} })) as never;
-    db._chain.limit.mockImplementation(() => Promise.resolve([{ capabilities: [...stored] }]));
-  });
-  afterEach(() => {
-    jest.clearAllTimers();
-    jest.useRealTimers();
-    db._chain.limit.mockReset();
-    db._chain.limit.mockImplementation(() => db._chain);
-  });
-
-  /** A request whose handler (`next`) appends `grants` to the stored capabilities. */
-  function request(token: string, grants: string[], opts: { deferWrite?: boolean } = {}) {
-    const res = mockRes();
-    (res as unknown as { status: unknown }).status = jest.fn((code: number) => {
-      res.statusCode = code;
-      return res;
-    });
-    (res as unknown as { json: unknown }).json = jest.fn(() => res.end());
-    const write = () => {
-      stored = [...stored, ...grants];
-    };
-    const next = jest.fn(() => {
-      if (!opts.deferWrite) {
-        write();
-      }
-    });
-    adminPrefixAuditMiddleware()(
-      mockAdminReq({
-        path: '/update-user',
-        headers: { authorization: token },
-        body: { userId: subject, data: {} },
-      }),
-      res,
-      next as NextFunction
-    );
-    return { res, next, write };
-  }
-
-  /** Let the request's handler run (it may be queued behind another), then finish its response. */
-  async function finishWhenHandlerRan({ res, next }: ReturnType<typeof request>): Promise<void> {
-    for (let attempt = 0; attempt < 10 && next.mock.calls.length === 0; attempt++) await flush();
-    expect(next).toHaveBeenCalledTimes(1);
-    await settle(res);
-  }
+  const bearerOf = (headers: unknown): string => {
+    const h = headers as Record<string, string> & { get?: (name: string) => string | null };
+    return h.authorization ?? h.get?.('authorization') ?? '';
+  };
 
   const rowsFor = (actor: string) =>
     recordAccountAuditEvent.mock.calls
@@ -1064,173 +1025,408 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
       .filter((event) => event.actorUserId === actor)
       .map((event) => event.action);
 
-  it('attributes each request its own actor on every row', async () => {
-    const a = request('bearer-1', ['x']);
-    const b = request('bearer-2', ['y']);
-    await finishWhenHandlerRan(a);
-    await finishWhenHandlerRan(b);
-    expect(recordAccountAuditEvent.mock.calls.map(([event]) => (event as { actorUserId: string }).actorUserId)).toEqual(
-      expect.arrayContaining(['manager-1', 'manager-2'])
-    );
-    expect(
-      recordAccountAuditEvent.mock.calls.every(([event]) => (event as { actorUserId: string }).actorUserId !== null)
-    ).toBe(true);
+  beforeEach(() => {
+    stored = ['a'];
+    subject = `dj-concurrent-${++counter}`;
+    auth.api.getSession = (({ headers }: { headers: unknown }) =>
+      Promise.resolve({ user: { id: sessions[bearerOf(headers)] }, session: {} })) as never;
+    db._chain.limit.mockImplementation(() => Promise.resolve([{ capabilities: [...stored] }]));
+  });
+  afterEach(() => {
+    db._chain.limit.mockReset();
+    db._chain.limit.mockImplementation(() => db._chain);
   });
 
-  it('records each capability change once, under the actor that made it', async () => {
-    const a = request('bearer-1', ['x']);
-    const b = request('bearer-2', ['y']);
-    await finishWhenHandlerRan(a);
-    await finishWhenHandlerRan(b);
+  // Mock-driven harness: the handler is `holdTurnAcross`-wrapped, as at the production mount, and ends
+  // by returning, with no res.end and no 'finish' (what better-call does on a destroyed socket).
+  describe('with fake timers', () => {
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['setImmediate'] });
+    });
+    afterEach(() => {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    });
 
-    expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
-    expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
-  });
+    /** A request whose handler appends `grants` to the stored capabilities once `finishHandler` is called (at once unless `defer`). */
+    function request(token: string, grants: string[], opts: { defer?: boolean; lateEntry?: boolean } = {}) {
+      const res = mockRes();
+      (res as unknown as { status: unknown }).status = jest.fn((code: number) => {
+        res.statusCode = code;
+        return res;
+      });
+      (res as unknown as { json: unknown }).json = jest.fn(() => res.end());
+      let finishHandler!: () => void;
+      let failHandler!: (error: Error) => void;
+      const gate = new Promise<void>((resolve, reject) => {
+        finishHandler = resolve;
+        failHandler = reject;
+      });
+      if (!opts.defer) {
+        finishHandler();
+      }
+      const handler = jest.fn(async () => {
+        await gate;
+        stored = [...stored, ...grants];
+        res.statusCode = 200;
+      });
+      const wrapped = holdTurnAcross(handler as never);
+      const handled = { error: undefined as unknown };
+      const enter = () =>
+        void wrapped(mockReq(), res).catch((error: unknown) => {
+          handled.error = error;
+        });
+      // `lateEntry`: the request is still on its way through the other middleware; the test calls `enter`.
+      const next = jest.fn(() => {
+        if (!opts.lateEntry) {
+          enter();
+        }
+      });
+      adminPrefixAuditMiddleware()(
+        mockAdminReq({ path: '/update-user', headers: { authorization: token }, body: { userId: subject, data: {} } }),
+        res,
+        next as NextFunction
+      );
+      return { res, next, handler, handled, finishHandler, failHandler, enter };
+    }
 
-  it('does not run the second handler until the first request has written its audit rows', async () => {
-    const a = request('bearer-1', ['x']);
-    const b = request('bearer-2', ['y']);
-    await flush();
-    expect(a.next).toHaveBeenCalledTimes(1);
-    let openGate!: () => void;
-    recordAccountAuditEvent.mockImplementationOnce(() => new Promise<void>((resolve) => (openGate = resolve)));
-    a.res.end();
-    a.res.triggerFinish(); // handler done; A's after-read and audit rows are still pending
-    await flush();
-    expect(b.next).not.toHaveBeenCalled();
+    const settleRequests = async (): Promise<void> => {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await flush();
+      }
+    };
 
-    openGate();
-    await flush();
-    expect(b.next).toHaveBeenCalledTimes(1);
-    expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
-  });
+    it('records each capability change once, under the actor that made it', async () => {
+      const a = request('bearer-1', ['x']);
+      const b = request('bearer-2', ['y']);
+      await settleRequests();
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+      expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
+      expect(a.handler).toHaveBeenCalledTimes(1);
+      expect(b.handler).toHaveBeenCalledTimes(1);
+    });
 
-  it('holds the turn through a close while the first handler is still writing', async () => {
-    const a = request('bearer-1', ['x'], { deferWrite: true });
-    const b = request('bearer-2', ['y']);
-    await flush();
-    expect(a.next).toHaveBeenCalledTimes(1);
-    a.res.triggerClose(); // socket dropped before the handler wrote
-    await flush();
-    expect(b.next).not.toHaveBeenCalled();
+    it('does not run the second handler until the first has returned and its audit rows are written', async () => {
+      const a = request('bearer-1', ['x'], { defer: true });
+      const b = request('bearer-2', ['y']);
+      await settleRequests();
+      expect(a.handler).toHaveBeenCalledTimes(1);
+      expect(b.handler).not.toHaveBeenCalled();
 
-    a.write();
-    a.res.end(); // better-call ends the response after the handler returns, even on a destroyed socket
-    await flush();
-    expect(b.next).toHaveBeenCalledTimes(1);
-    await finishWhenHandlerRan(b);
-    expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
-  });
+      let openGate!: () => void;
+      recordAccountAuditEvent.mockImplementationOnce(() => new Promise<void>((resolve) => (openGate = resolve)));
+      a.finishHandler(); // handler returns; A's audit rows are still pending
+      await settleRequests();
+      expect(b.handler).not.toHaveBeenCalled();
 
-  it('never runs the handler of a request aborted while queued, and gives its turn on', async () => {
-    const a = request('bearer-1', ['x']);
-    const b = request('bearer-2', ['y']);
-    const c = request('bearer-1', ['z']);
-    await flush();
-    b.res.triggerClose();
-    await finishWhenHandlerRan(a);
-    await flush();
-    expect(b.next).not.toHaveBeenCalled();
-    expect(c.next).toHaveBeenCalledTimes(1);
-    expect(stored).toEqual(['a', 'x', 'z']);
-  });
+      openGate();
+      await settleRequests();
+      expect(b.handler).toHaveBeenCalledTimes(1);
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+    });
 
-  it('writes the audit rows of a handler that ended on a socket that closed before finish', async () => {
-    const a = request('bearer-1', ['x'], { deferWrite: true });
-    await flush();
-    expect(a.next).toHaveBeenCalledTimes(1);
-    a.res.triggerClose(); // socket dropped before the handler wrote
-    a.write();
-    a.res.end(); // better-call ends the response even on a destroyed socket; 'finish' never fires
-    await flush();
-    expect(a.res.writableFinished).toBe(false);
-    expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
-  });
+    it('keeps the turn through a close while the handler is still running', async () => {
+      const a = request('bearer-1', ['x'], { defer: true });
+      const b = request('bearer-2', ['y']);
+      await settleRequests();
+      a.res.triggerClose(); // socket dropped while the handler runs
+      await settleRequests();
+      expect(b.handler).not.toHaveBeenCalled();
 
-  it('refuses with 500, not 401, a caller whose session read failed', async () => {
-    auth.api.getSession = (() => Promise.reject(new Error('db down'))) as never;
-    const a = request('bearer-1', ['x']);
-    await flush();
-    expect(a.next).not.toHaveBeenCalled();
-    expect(a.res.statusCode).toBe(500);
-    expect(reporter.captureException).toHaveBeenCalled();
-  });
+      a.finishHandler();
+      await settleRequests();
+      expect(b.handler).toHaveBeenCalledTimes(1);
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+      expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
+    });
 
-  it('refuses an unauthenticated caller without enqueueing or running the handler', async () => {
-    const a = request('bearer-1', ['x']);
-    const anon = request('no-such-token', ['q']);
-    await flush();
-    expect(anon.next).not.toHaveBeenCalled();
-    expect(anon.res.statusCode).toBe(401);
-    await finishWhenHandlerRan(a);
-  });
+    it('never runs the handler of a request whose socket closed while it waited for the turn, and gives the turn on', async () => {
+      const a = request('bearer-1', ['x'], { defer: true });
+      const b = request('bearer-2', ['y']);
+      const c = request('bearer-1', ['z']);
+      await settleRequests();
+      b.res.triggerClose();
+      a.finishHandler();
+      await settleRequests();
+      expect(b.next).not.toHaveBeenCalled();
+      expect(b.handler).not.toHaveBeenCalled();
+      expect(c.handler).toHaveBeenCalledTimes(1);
+      expect(stored).toEqual(['a', 'x', 'z']);
+      expect(db._chain.limit).toHaveBeenCalledTimes(4); // A and C read before and after; B reads nothing
+    });
 
-  describe('bounded wait', () => {
-    beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate'] }));
-    afterEach(() => jest.useRealTimers());
+    it('does not run the handler of a request whose socket closed between the audit middleware and the handler, and gives the turn on', async () => {
+      const a = request('bearer-1', ['x'], { lateEntry: true });
+      const b = request('bearer-2', ['y']);
+      await settleRequests();
+      expect(a.next).toHaveBeenCalledTimes(1);
+      a.res.triggerClose();
+      await settleRequests();
+      a.enter();
+      await settleRequests();
+      expect(a.handler).not.toHaveBeenCalled();
+      expect(b.handler).toHaveBeenCalledTimes(1);
+      expect(stored).toEqual(['a', 'y']);
+    });
+
+    it('does not run the handler of a request whose socket closed during its before-read, and gives the turn on', async () => {
+      let releaseBefore!: (rows: unknown) => void;
+      db._chain.limit.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseBefore = resolve;
+          })
+      );
+      const a = request('bearer-1', ['x']);
+      const b = request('bearer-2', ['y']);
+      await settleRequests();
+      a.res.triggerClose();
+      releaseBefore([{ capabilities: ['a'] }]);
+      await settleRequests();
+      expect(a.next).not.toHaveBeenCalled();
+      expect(b.handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives the turn back, and records a 500, when the handler rejects', async () => {
+      const a = request('bearer-1', ['x'], { defer: true });
+      const b = request('bearer-2', ['y']);
+      await settleRequests();
+      a.failHandler(new Error('handler failed'));
+      await settleRequests();
+      expect(a.handled.error).toEqual(expect.objectContaining({ message: 'handler failed' }));
+      expect(b.handler).toHaveBeenCalledTimes(1);
+      expectAudited({ action: 'admin.update-user', actorUserId: 'manager-1', outcome: 500 });
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user']);
+    });
+
+    it('refuses with 500, not 401, a caller whose session read failed', async () => {
+      auth.api.getSession = (() => Promise.reject(new Error('db down'))) as never;
+      const a = request('bearer-1', ['x']);
+      await settleRequests();
+      expect(a.next).not.toHaveBeenCalled();
+      expect(a.res.statusCode).toBe(500);
+      expect(reporter.captureException).toHaveBeenCalled();
+    });
+
+    it('refuses an unauthenticated caller without enqueueing or running the handler', async () => {
+      const a = request('bearer-1', ['x'], { defer: true });
+      const anon = request('no-such-token', ['q']);
+      await settleRequests();
+      expect(anon.next).not.toHaveBeenCalled();
+      expect(anon.res.statusCode).toBe(401);
+      a.finishHandler();
+      await settleRequests();
+      expect(a.handler).toHaveBeenCalledTimes(1);
+    });
 
     it('refuses with 409 a request that cannot get its turn in time, then lets the next one through', async () => {
-      const a = request('bearer-1', ['x'], { deferWrite: true });
+      const a = request('bearer-1', ['x'], { defer: true });
       const b = request('bearer-2', ['y']);
-      await flush();
+      await settleRequests();
       jest.advanceTimersByTime(5_000);
-      await flush();
+      await settleRequests();
       expect(b.res.statusCode).toBe(409);
-      expect(b.next).not.toHaveBeenCalled();
+      expect(b.handler).not.toHaveBeenCalled();
 
       const c = request('bearer-2', ['z']);
-      a.write();
-      await finishWhenHandlerRan(a);
-      await flush();
-      expect(c.next).toHaveBeenCalledTimes(1);
+      a.finishHandler();
+      await settleRequests();
+      expect(c.handler).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the turn with a holder still running past the hold limit, reports it, and passes the turn on when it ends', async () => {
-      const a = request('bearer-1', ['x'], { deferWrite: true });
-      await flush();
+      const a = request('bearer-1', ['x'], { defer: true });
+      await settleRequests();
       jest.advanceTimersByTime(11_000);
       const b = request('bearer-2', ['y']);
-      await flush();
+      await settleRequests();
       reporter.captureException.mockClear();
       jest.advanceTimersByTime(4_000); // t = 15s: the hold limit passes while A's handler is still running
-      await flush();
+      await settleRequests();
       expect(reporter.captureException).toHaveBeenCalled();
-      expect(b.next).not.toHaveBeenCalled();
+      expect(b.handler).not.toHaveBeenCalled();
       jest.advanceTimersByTime(5_000); // B's own 5s wait bound
-      await flush();
+      await settleRequests();
       expect(b.res.statusCode).toBe(409);
-      expect(b.next).not.toHaveBeenCalled();
+      expect(b.handler).not.toHaveBeenCalled();
 
-      const c = request('bearer-2', ['z']);
-      await flush(); // c's session read resolves and its wait timer starts
-      jest.advanceTimersByTime(5_000);
-      await flush();
-      expect(c.res.statusCode).toBe(409);
-      expect(c.next).not.toHaveBeenCalled();
-
-      a.write();
-      await finishWhenHandlerRan(a);
+      a.finishHandler();
+      await settleRequests();
       const d = request('bearer-2', ['w']);
-      await finishWhenHandlerRan(d);
+      await settleRequests();
+      expect(d.handler).toHaveBeenCalledTimes(1);
       expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+    });
+
+    it('does not queue update-user requests for different subjects behind each other', async () => {
+      const a = request('bearer-1', ['x'], { defer: true });
+      const res = mockRes();
+      const next = jest.fn();
+      adminPrefixAuditMiddleware()(
+        mockAdminReq({
+          path: '/update-user',
+          headers: { authorization: 'bearer-2' },
+          body: { userId: `${subject}-other`, data: {} },
+        }),
+        res,
+        next as NextFunction
+      );
+      await settleRequests();
+      expect(a.handler).toHaveBeenCalledTimes(1);
+      expect(next).toHaveBeenCalledTimes(1);
     });
   });
 
-  it('does not queue update-user requests for different subjects behind each other', async () => {
-    const a = request('bearer-1', ['x']);
-    const res = mockRes();
-    const next = jest.fn();
-    adminPrefixAuditMiddleware()(
-      mockAdminReq({
-        path: '/update-user',
-        headers: { authorization: 'bearer-2' },
-        body: { userId: `${subject}-other`, data: {} },
-      }),
-      res,
-      next as NextFunction
-    );
-    await flush();
-    expect(a.next).toHaveBeenCalledTimes(1);
-    expect(next).toHaveBeenCalledTimes(1);
+  // Real http server, real better-call response writer, real client sockets: the sequences production produces.
+  describe('over a real socket', () => {
+    let server: http.Server;
+    let port: number;
+    let inFlight: number;
+    let maxInFlight: number;
+    let handlerRuns: string[];
+    let gates: Map<string, Promise<void>>;
+    let failFor: Set<string>;
+
+    beforeEach(async () => {
+      inFlight = 0;
+      maxInFlight = 0;
+      handlerRuns = [];
+      gates = new Map();
+      failFor = new Set();
+      // Stand-in for the better-auth handler, behind better-call's own node adapter.
+      const authHandler = toNodeHandler(async (request: globalThis.Request) => {
+        const body = (await request.json()) as { grants: string[] };
+        const token = request.headers.get('authorization') ?? '';
+        handlerRuns.push(token);
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          await gates.get(token);
+          if (failFor.has(token)) {
+            throw new Error('handler failed');
+          }
+          stored = [...stored, ...body.grants];
+          return Response.json({ status: true });
+        } finally {
+          inFlight--;
+        }
+      });
+      const app = express();
+      app.use(express.json());
+      app.use('/auth/admin', adminPrefixAuditMiddleware());
+      app.use('/auth', holdTurnAcross(authHandler as never));
+      server = http.createServer(app);
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      port = (server.address() as AddressInfo).port;
+    });
+    afterEach(async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    });
+
+    /** POST update-user; `destroy()` drops the socket, `response` settles with the status (or null if the socket was dropped). */
+    function post(token: string, grants: string[]) {
+      const payload = JSON.stringify({ userId: subject, data: {}, grants });
+      let status: number | null = null;
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path: '/auth/admin/update-user',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+          authorization: token,
+        },
+      });
+      const response = new Promise<number | null>((resolve) => {
+        req.on('response', (res) => {
+          status = res.statusCode ?? null;
+          res.resume();
+          res.on('end', () => resolve(status));
+        });
+        req.on('error', () => resolve(status));
+        req.on('close', () => resolve(status));
+      });
+      req.end(payload);
+      return { response, destroy: () => req.destroy() };
+    }
+
+    const until = async (predicate: () => boolean): Promise<void> => {
+      for (let attempt = 0; attempt < 400 && !predicate(); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(predicate()).toBe(true);
+    };
+
+    /** A gate the test opens to let the handler for `token` return. */
+    const gateFor = (token: string): (() => void) => {
+      let open!: () => void;
+      gates.set(token, new Promise<void>((resolve) => (open = resolve)));
+      return open;
+    };
+
+    it('gives the turn back after a client drops mid-handler, runs the next update on the subject, and audits the completed write', async () => {
+      const openA = gateFor('bearer-1');
+      const a = post('bearer-1', ['x']);
+      await until(() => handlerRuns.includes('bearer-1'));
+      a.destroy(); // the socket closes while the handler is running
+      await a.response;
+      openA();
+      await until(() => rowsFor('manager-1').length === 2);
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+      expectAudited({ action: 'capability.grant.x', actorUserId: 'manager-1', subjectUserId: subject, outcome: 200 });
+
+      const b = post('bearer-2', ['y']);
+      expect(await b.response).toBe(200);
+      await until(() => rowsFor('manager-2').length === 2);
+      expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
+      expect(stored).toEqual(['a', 'x', 'y']);
+    });
+
+    it('never runs the handler of a request whose socket closed while it waited for the turn', async () => {
+      const openA = gateFor('bearer-1');
+      const a = post('bearer-1', ['x']);
+      await until(() => handlerRuns.includes('bearer-1'));
+      const b = post('bearer-2', ['y']);
+      await new Promise((resolve) => setTimeout(resolve, 50)); // B is queued behind A
+      b.destroy();
+      await b.response;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      openA();
+      expect(await a.response).toBe(200);
+      const c = post('bearer-1', ['z']);
+      expect(await c.response).toBe(200);
+      expect(handlerRuns).toEqual(['bearer-1', 'bearer-1']);
+      expect(stored).toEqual(['a', 'x', 'z']);
+    });
+
+    it('never overlaps two requests on one subject, and each records only its own grants', async () => {
+      const openA = gateFor('bearer-1');
+      const a = post('bearer-1', ['x']);
+      await until(() => handlerRuns.includes('bearer-1'));
+      const b = post('bearer-2', ['y']);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(handlerRuns).toEqual(['bearer-1']);
+      openA();
+      expect([await a.response, await b.response]).toEqual([200, 200]);
+      await until(() => rowsFor('manager-1').length === 2 && rowsFor('manager-2').length === 2);
+      expect(maxInFlight).toBe(1);
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+      expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
+    });
+
+    it('gives the turn back, and records a 500 with no grants, when the handler rejects', async () => {
+      failFor.add('bearer-1');
+      const a = post('bearer-1', ['x']);
+      expect(await a.response).toBe(500);
+      await until(() => rowsFor('manager-1').length === 1);
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user']);
+      expectAudited({ action: 'admin.update-user', actorUserId: 'manager-1', outcome: 500 });
+
+      const b = post('bearer-2', ['y']);
+      expect(await b.response).toBe(200);
+      expect(stored).toEqual(['a', 'y']);
+    });
   });
 });
