@@ -39,7 +39,7 @@
  */
 import { eq } from 'drizzle-orm';
 import type { Express, NextFunction, Request, Response } from 'express';
-import { auth, deriveStationSignupIpHash } from '@wxyc/authentication';
+import { auth, capabilityTurn, deriveStationSignupIpHash } from '@wxyc/authentication';
 import { db, recordAccountAuditEvent, user } from '@wxyc/database';
 import { fromNodeHeaders } from 'better-auth/node';
 import { onAccountAuditError } from './account-audit-error.js';
@@ -268,6 +268,8 @@ const takeCapabilityTurn = (subjectId: string): { granted: Promise<boolean>; giv
 
 /** What the audit middleware keeps for a request that holds a subject's turn, for `holdTurnAcross` to call. */
 interface TurnHolder {
+  /** The subject whose turn this request holds: the handler runs inside `capabilityTurn` naming it. */
+  subjectId: string;
   /** False when the turn was already given back (the socket closed first): the handler must not run. */
   enter: () => boolean;
   /** The handler returned or threw: write the audit rows, then give the turn back. Never rejects. */
@@ -282,7 +284,9 @@ const turnHolders = new WeakMap<Response, TurnHolder>();
  * socket is still open. Then the audit rows are written with the final status and the
  * turn is given back, on every path (resolve, reject, throw). A request whose turn was
  * already given back (its socket closed before the handler was reached) is not run.
- * Any other request goes straight to the handler.
+ * The handler runs inside `capabilityTurn` naming the held subject, which the capability-assign guard
+ * reads to refuse a capabilities write that does not hold its subject's turn. Any other request goes
+ * straight to the handler, outside any turn context.
  */
 export function holdTurnAcross<Args extends unknown[]>(
   handler: (req: Request, res: Response, ...rest: Args) => Promise<unknown>
@@ -299,7 +303,7 @@ export function holdTurnAcross<Args extends unknown[]>(
     }
     let failed = true;
     try {
-      await handler(req, res, ...rest);
+      await capabilityTurn.run({ subjectId: holder.subjectId }, () => handler(req, res, ...rest));
       failed = false;
     } finally {
       await holder.ended(failed);
@@ -534,6 +538,7 @@ function auditMiddleware(resolve: ResolvedMount) {
         return null;
       }
       turnHolders.set(res, {
+        subjectId,
         enter: () => {
           if (turnReleased) {
             return false;

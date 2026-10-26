@@ -26,7 +26,7 @@ const repoRoot = path.resolve(__dirname, '../../..');
 const read = (relativePath: string) => fs.readFileSync(path.join(repoRoot, relativePath), 'utf-8');
 
 const SEEDED_SESSION_USERS = [
-  'test-member-id-000000000000000001',
+  'test-member-id-00000000000000001',
   'test-dj1-id-00000000000000000001',
   'test-dj2-id-00000000000000000002',
   'test-md-id-0000000000000000001',

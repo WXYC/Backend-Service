@@ -26,7 +26,7 @@ interface TestUser {
 }
 
 const TEST_USERS: TestUser[] = [
-  { id: 'test-member-id-000000000000000001', username: 'test_member' },
+  { id: 'test-member-id-00000000000000001', username: 'test_member' },
   { id: 'test-dj1-id-00000000000000000001', username: 'test_dj1' },
   { id: 'test-dj2-id-00000000000000000002', username: 'test_dj2' },
   { id: 'test-md-id-0000000000000000001', username: 'test_music_director' },
@@ -34,9 +34,9 @@ const TEST_USERS: TestUser[] = [
   { id: 'test-incomplete-id-0000000000001', username: 'test_incomplete', password: TEMP_PASSWORD },
   { id: 'test-deletable-id-00000000000001', username: 'test_deletable_user' },
   { id: 'test-promotable-id-0000000000001', username: 'test_promotable_user' },
-  { id: 'test-demotable-sm-id-000000000001', username: 'test_demotable_sm' },
-  { id: 'test-reset1-id-000000000000000001', username: 'test_reset1' },
-  { id: 'test-reset2-id-000000000000000002', username: 'test_reset2' },
+  { id: 'test-demotable-sm-id-00000000001', username: 'test_demotable_sm' },
+  { id: 'test-reset1-id-00000000000000001', username: 'test_reset1' },
+  { id: 'test-reset2-id-00000000000000002', username: 'test_reset2' },
   { id: 'test-adminreset1-id-00000000001', username: 'test_adminreset1' },
 ];
 

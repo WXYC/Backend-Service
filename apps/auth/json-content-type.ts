@@ -90,6 +90,7 @@
  * coverage, including a real (unmocked) round-trip through better-call's own
  * `createRouter`/`toNodeHandler`.
  */
+import express, { type RequestHandler } from 'express';
 import type { IncomingMessage } from 'http';
 
 /** Verbatim copy of better-call's `jsonContentTypeRegex` (`node_modules/better-call/dist/utils.mjs`). */
@@ -105,4 +106,14 @@ export const BETTER_CALL_JSON_CONTENT_TYPE = /^application\/([a-z0-9.+-]*\+)?jso
 export const isBetterCallJsonRequest = (req: IncomingMessage): boolean => {
   const contentType = req.headers['content-type'];
   return typeof contentType === 'string' && BETTER_CALL_JSON_CONTENT_TYPE.test(contentType);
+};
+
+/**
+ * The auth app's JSON body parser: `express.json` over `isBetterCallJsonRequest`, with every parse error swallowed
+ * (the request continues with no `req.body`; see the comment at its mount in `apps/auth/app.ts`). Built once; shared
+ * by `app.ts` and the capability-guard race fixture so both run the same parser.
+ */
+export const createAuthJsonBodyParser = (): RequestHandler => {
+  const parse = express.json({ type: isBetterCallJsonRequest });
+  return (req, res, next) => parse(req, res, () => next());
 };

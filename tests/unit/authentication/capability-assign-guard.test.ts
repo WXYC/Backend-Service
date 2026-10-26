@@ -13,12 +13,12 @@ const CREATE = '/admin/create-user';
 
 type Deps = Parameters<typeof assertCanAssignCapabilities>[3];
 
-const depsFor = (memberRole: string | undefined, current: string[] = []) => {
+const depsFor = (memberRole: string | undefined, current: string[] = [], heldTurnSubject: string | null = 'dj-1') => {
   const selectMemberRole = jest.fn((_userId: string) =>
     Promise.resolve(memberRole === undefined ? undefined : { role: memberRole })
   );
   const readCapabilities = jest.fn((_userId: string) => Promise.resolve(current));
-  return { selectMemberRole, readCapabilities } satisfies Deps;
+  return { selectMemberRole, readCapabilities, heldTurnSubject: () => heldTurnSubject ?? undefined } satisfies Deps;
 };
 
 const actorWith = (capabilities: string[] = []) => ({ id: 'actor-1', capabilities });
@@ -175,6 +175,34 @@ describe('assertCanAssignCapabilities', () => {
     ).rejects.toMatchObject({ statusCode: 400, body: { code: 'USER_ID_MUST_BE_STRING' } });
     expect(deps.readCapabilities).not.toHaveBeenCalled();
     expect(deps.selectMemberRole).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['no turn', null],
+    ['another subject', 'dj-2'],
+  ])('refuses update-user with capabilities when the request holds %s, with no read', async (_name, held) => {
+    const deps = depsFor('stationManager', [], held);
+    await expect(
+      assertCanAssignCapabilities(UPDATE, bodyFor(UPDATE, ['webmaster']), actorWith(), deps)
+    ).rejects.toMatchObject({ statusCode: 400, body: { code: 'CAPABILITY_TURN_REQUIRED' } });
+    expect(deps.readCapabilities).not.toHaveBeenCalled();
+    expect(deps.selectMemberRole).not.toHaveBeenCalled();
+  });
+
+  it('does not require a turn for a request without data.capabilities, or for create-user', async () => {
+    const deps = depsFor('stationManager', [], null);
+    await expect(
+      assertCanAssignCapabilities(UPDATE, { userId: 'dj-1', data: { name: 'x' } }, actorWith(), deps)
+    ).resolves.toBeUndefined();
+    await expect(
+      assertCanAssignCapabilities(CREATE, bodyFor(CREATE, ['editor']), actorWith(), deps)
+    ).resolves.toBeUndefined();
+  });
+
+  it('checks the session (401) before the turn', async () => {
+    await expect(
+      assertCanAssignCapabilities(UPDATE, bodyFor(UPDATE, ['webmaster']), null, depsFor('stationManager', [], null))
+    ).rejects.toMatchObject({ statusCode: 401 });
   });
 
   it('names exactly the two routes that can write capabilities', () => {

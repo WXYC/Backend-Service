@@ -105,3 +105,5 @@ export type {
   PruneSignupAttemptsOptions,
   StationSignupOutcome,
 } from './station-passcode';
+export { capabilityTurn, heldCapabilityTurnSubject } from './capability-turn';
+export type { CapabilityTurnContext } from './capability-turn';
