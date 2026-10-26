@@ -32,7 +32,9 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 const runHook = (opts: { withEnv: boolean; failOn?: string }) => {
   const envFile = path.join(dir, '.env');
   rmSync(envFile, { force: true });
-  if (opts.withEnv) writeFileSync(envFile, '');
+  if (opts.withEnv) {
+    writeFileSync(envFile, '');
+  }
   const log = path.join(dir, 'calls.log');
   writeFileSync(log, '');
   const r = spawnSync('sh', ['-e', HOOK], {
