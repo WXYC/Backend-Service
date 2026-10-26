@@ -31,7 +31,7 @@ const {
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
 const PREFIX = 'ITEST-INTAKE-TX';
-const MEMBER_ID = 'test-member-id-000000000000000001';
+const MEMBER_ID = 'test-member-id-00000000000000001';
 const AUTO_DJ_ID = 'itest-intake-tx-autodj';
 
 const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();

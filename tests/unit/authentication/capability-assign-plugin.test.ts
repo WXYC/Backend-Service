@@ -8,6 +8,8 @@ import { build } from 'esbuild';
 // observability/console-redaction.test.ts). The fixture mounts the real `admin()` and `bearer()` plugins
 // over an in-memory adapter and drives capability writes as a cookie caller and as a bearer caller.
 type Outcome = { update: number; updateStored: string[]; create?: number; createStored?: string[] | null };
+type RaceOutcome = { grant: number; revoke: number; code?: string; stored: string[] };
+type Unkeyable = Record<string, { status: number; code?: string }>;
 
 describe('capability assigner guard against the real better-auth router (BS#3570)', () => {
   const authDir = resolve(__dirname, '../../../shared/authentication');
@@ -23,11 +25,18 @@ describe('capability assigner guard against the real better-auth router (BS#3570
       platform: 'node',
       format: 'esm',
       packages: 'external',
+      // The real turn queue (apps/auth/account-audit-middleware.ts) runs; only its data sources are stubbed.
+      alias: {
+        '@wxyc/authentication': resolve(__dirname, 'fixtures/stub-authentication.ts'),
+        '@wxyc/database': resolve(__dirname, 'fixtures/stub-authentication.ts'),
+        '@wxyc/observability': resolve(__dirname, 'fixtures/stub-authentication.ts'),
+        'drizzle-orm': resolve(__dirname, 'fixtures/stub-authentication.ts'),
+      },
       logLevel: 'silent',
     });
   }, 60_000);
 
-  const drive = (mode: 'plugin' | 'legacy'): Record<string, Outcome> => {
+  const drive = (mode: 'plugin' | 'plugin-unqueued' | 'legacy'): Record<string, Outcome & RaceOutcome & Unkeyable> => {
     const run = spawnSync(process.execPath, [outFile, mode], { encoding: 'utf8', timeout: 60_000 });
     const line = `${run.stdout}`.split('\n').find((l) => l.startsWith('RESULT '));
     if (!line) {
@@ -57,6 +66,42 @@ describe('capability assigner guard against the real better-auth router (BS#3570
 
     it('refuses a capability write that carries no session', () => {
       expect(result['anonymous']).toEqual({ update: 401, updateStored: [] });
+    });
+  });
+
+  describe('a grant racing a revoke the caller may not make (BS#3716)', () => {
+    it('refuses the revoke: the subject queue holds the grant across the guard read and the write, so the guard reads the post-grant value', () => {
+      expect(drive('plugin')['race']).toMatchObject({ grant: 200, revoke: 403, stored: ['webmaster'] });
+    });
+
+    it('control: with nothing serializing the subject, the stale read lets the revoke wipe the grant', () => {
+      expect(drive('plugin-unqueued')['race']).toMatchObject({ grant: 200, revoke: 200, stored: [] });
+    });
+
+    it.each([
+      ['withoutTurn', 'holds no turn'],
+      ['otherSubjectTurn', 'holds the turn for a different subject'],
+    ])("refuses a capability write that does not hold the subject's turn (%s: request %s) and never writes", (key) => {
+      expect(drive('plugin')[key]).toEqual({
+        grant: 200,
+        revoke: 400,
+        code: 'CAPABILITY_TURN_REQUIRED',
+        stored: ['webmaster'],
+      });
+    });
+
+    it.each(['email-shaped', 'over 32 characters'])(
+      'refuses a capabilities write whose userId is %s with 400, before the guard reads or writes',
+      (label) => {
+        expect(drive('plugin')['unkeyable'][label]).toEqual({ status: 400, code: 'CAPABILITY_TURN_REQUIRED' });
+      }
+    );
+
+    it('refuses a direct auth.api capability write outside a turn, and lets one inside a turn through', () => {
+      expect(drive('plugin')['direct']).toEqual({
+        'outside a turn': { status: 400, code: 'CAPABILITY_TURN_REQUIRED', stored: [] },
+        'inside a turn': { status: 200, stored: ['webmaster'] },
+      });
     });
   });
 

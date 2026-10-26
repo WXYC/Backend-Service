@@ -41,7 +41,7 @@ import {
   mountAuthenticatedAccountAudit,
   mountPublicAccountAudit,
 } from './account-audit-middleware';
-import { isBetterCallJsonRequest } from './json-content-type';
+import { createAuthJsonBodyParser } from './json-content-type';
 import type { HealthCheckResponse } from '@wxyc/shared/dtos';
 import { checkRequestBanHandler } from './check-request-ban-handler';
 import { CompleteOnboardingError, completeOnboardingFromRequest } from './complete-onboarding';
@@ -141,8 +141,7 @@ app.set('trust proxy', true);
 // Built once, outside the request handler — `express.json(...)` returns a
 // new middleware closure each call, and constructing one per request would
 // be wasted work on every single request through this service.
-const jsonBodyParser = express.json({ type: isBetterCallJsonRequest });
-app.use((req, res, next) => jsonBodyParser(req, res, () => next()));
+app.use(createAuthJsonBodyParser());
 
 // Gives each request its own reporter scope (BS#3409). After the body parser: its stream callbacks run outside the scope.
 app.use(requestScopeMiddleware);

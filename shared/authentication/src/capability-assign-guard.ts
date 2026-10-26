@@ -11,6 +11,8 @@ export const CAPABILITY_WRITE_PATHS = ['/admin/update-user', '/admin/create-user
 export interface CapabilityAssignDeps {
   selectMemberRole: (userId: string) => Promise<{ role: string } | undefined>;
   readCapabilities: (userId: string) => Promise<string[]>;
+  /** The subject id whose turn the running request holds, or undefined (see capability-turn.ts). */
+  heldTurnSubject: () => string | undefined;
 }
 
 const isCapability = (name: string): name is Capability => (CAPABILITIES as readonly string[]).includes(name);
@@ -58,6 +60,18 @@ export async function assertCanAssignCapabilities(
     throw new APIError('UNAUTHORIZED', {
       code: 'SESSION_REQUIRED',
       message: 'A session is required to set capabilities.',
+    });
+  }
+
+  // BS#3716: the guard's read and the admin plugin's write for one subject must run as one step, which only holds
+  // while this request holds that subject's turn (apps/auth/account-audit-middleware.ts, `holdTurnAcross`). The turn
+  // is checked here, on what better-auth actually parsed and routed, so a capabilities write that does not hold
+  // the turn is refused however it arrived, and it never writes. 400, not 409: repeating the same request cannot
+  // get it a turn. This only reads the turn; taking it here would queue the request behind itself.
+  if (path === '/admin/update-user' && deps.heldTurnSubject() !== userId) {
+    throw new APIError('BAD_REQUEST', {
+      code: 'CAPABILITY_TURN_REQUIRED',
+      message: "A capabilities write must hold the target user's turn, and this request does not.",
     });
   }
 
