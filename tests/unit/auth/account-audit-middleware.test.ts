@@ -993,3 +993,119 @@ describe('capability diff on admin/update-user (BS#3473)', () => {
     });
   });
 });
+
+// BS#3717: two admin sessions writing the same subject's `capabilities` at once.
+// The actor is a per-request local, so the actor column cannot cross requests;
+// the shared state is the subject's row, which both requests diff. Without a
+// per-subject turn, request A's after-read contained B's write and A recorded a
+// `capability.grant` row for a capability B assigned, under A's actor.
+describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
+  const sessions: Record<string, string> = { 'bearer-1': 'manager-1', 'bearer-2': 'manager-2' };
+  let stored: string[];
+  let subject: string;
+  let counter = 0;
+
+  beforeEach(() => {
+    stored = ['a'];
+    subject = `dj-concurrent-${++counter}`;
+    auth.api.getSession = (({ headers }: { headers: Record<string, string> }) =>
+      Promise.resolve({ user: { id: sessions[headers.authorization ?? ''] }, session: {} })) as never;
+    db._chain.limit.mockImplementation(() => Promise.resolve([{ capabilities: [...stored] }]));
+  });
+  afterEach(() => {
+    db._chain.limit.mockReset();
+    db._chain.limit.mockImplementation(() => db._chain);
+  });
+
+  /** A request whose handler (`next`) appends `grants` to the stored capabilities. */
+  function request(token: string, grants: string[]) {
+    const res = mockRes();
+    const next = jest.fn(() => {
+      stored = [...stored, ...grants];
+    });
+    adminPrefixAuditMiddleware()(
+      mockAdminReq({
+        path: '/update-user',
+        headers: { authorization: token },
+        body: { userId: subject, data: {} },
+      }),
+      res,
+      next as NextFunction
+    );
+    return { res, next };
+  }
+
+  /** Let the request's handler run (it may be queued behind another), then finish its response. */
+  async function finishWhenHandlerRan({ res, next }: ReturnType<typeof request>): Promise<void> {
+    for (let attempt = 0; attempt < 10 && next.mock.calls.length === 0; attempt++) await flush();
+    expect(next).toHaveBeenCalledTimes(1);
+    await settle(res);
+  }
+
+  const rowsFor = (actor: string) =>
+    recordAccountAuditEvent.mock.calls
+      .map(([event]) => event as { action: string; actorUserId: string })
+      .filter((event) => event.actorUserId === actor)
+      .map((event) => event.action);
+
+  it('attributes each request its own actor on every row, for different subjects', async () => {
+    const a = request('bearer-1', ['x']);
+    const b = request('bearer-2', ['y']);
+    await finishWhenHandlerRan(a);
+    await finishWhenHandlerRan(b);
+    expect(recordAccountAuditEvent.mock.calls.map(([event]) => (event as { actorUserId: string }).actorUserId)).toEqual(
+      expect.arrayContaining(['manager-1', 'manager-2'])
+    );
+    expect(
+      recordAccountAuditEvent.mock.calls.every(([event]) => (event as { actorUserId: string }).actorUserId !== null)
+    ).toBe(true);
+  });
+
+  it('records each capability change once, under the actor that made it', async () => {
+    const a = request('bearer-1', ['x']);
+    const b = request('bearer-2', ['y']);
+    await finishWhenHandlerRan(a);
+    await finishWhenHandlerRan(b);
+
+    expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+    expect(rowsFor('manager-2')).toEqual(['admin.update-user', 'capability.grant.y']);
+  });
+
+  it('does not run the second handler until the first request has written its audit rows', async () => {
+    const a = request('bearer-1', ['x']);
+    const b = request('bearer-2', ['y']);
+    await flush();
+    expect(a.next).toHaveBeenCalledTimes(1);
+    expect(b.next).not.toHaveBeenCalled();
+
+    await settle(a.res);
+    expect(b.next).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the turn when the first request closes without finishing', async () => {
+    const a = request('bearer-1', ['x']);
+    const b = request('bearer-2', ['y']);
+    await flush();
+    a.res.triggerClose();
+    await flush();
+    expect(b.next).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not queue update-user requests for different subjects behind each other', async () => {
+    const a = request('bearer-1', ['x']);
+    const res = mockRes();
+    const next = jest.fn();
+    adminPrefixAuditMiddleware()(
+      mockAdminReq({
+        path: '/update-user',
+        headers: { authorization: 'bearer-2' },
+        body: { userId: `${subject}-other`, data: {} },
+      }),
+      res,
+      next as NextFunction
+    );
+    await flush();
+    expect(a.next).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+});

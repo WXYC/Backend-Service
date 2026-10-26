@@ -94,7 +94,7 @@ export interface AdminActionBase {
    * for the carve-out this flag drives.
    */
   serializeSessionRead?: true;
-  /** BS#3473: set for a route that writes `capabilities` — the middleware diffs the subject's `capabilities` around the write and writes one `capability.grant|revoke.<name>` row per change. `'created'` (`admin/create-user`, BS#3570) means the subject does not exist yet, so the before-state is empty. */
+  /** BS#3473: set for a route that writes `capabilities` — the middleware diffs the subject's `capabilities` around the write and writes one `capability.grant|revoke.<name>` row per change. `'created'` (`admin/create-user`, BS#3570) means the subject does not exist yet, so the before-state is empty. `true` (`admin/update-user`, BS#3717) queues concurrent calls on the same subject so each diff sees only its own write. */
   diffCapabilities?: true | 'created';
   /**
    * M4 (code review BS#2547): true for an `ADMIN_ACTIONS` entry that
