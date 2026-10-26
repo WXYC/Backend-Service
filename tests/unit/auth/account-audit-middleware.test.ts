@@ -1060,7 +1060,7 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
       .filter((event) => event.actorUserId === actor)
       .map((event) => event.action);
 
-  it('attributes each request its own actor on every row, for different subjects', async () => {
+  it('attributes each request its own actor on every row', async () => {
     const a = request('bearer-1', ['x']);
     const b = request('bearer-2', ['y']);
     await finishWhenHandlerRan(a);
@@ -1131,6 +1131,27 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
     expect(stored).toEqual(['a', 'x', 'z']);
   });
 
+  it('writes the audit rows of a handler that ended on a socket that closed before finish', async () => {
+    const a = request('bearer-1', ['x'], { deferWrite: true });
+    await flush();
+    expect(a.next).toHaveBeenCalledTimes(1);
+    a.res.triggerClose(); // socket dropped before the handler wrote
+    a.write();
+    a.res.end(); // better-call ends the response even on a destroyed socket; 'finish' never fires
+    await flush();
+    expect(a.res.writableFinished).toBe(false);
+    expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
+  });
+
+  it('refuses with 500, not 401, a caller whose session read failed', async () => {
+    auth.api.getSession = (() => Promise.reject(new Error('db down'))) as never;
+    const a = request('bearer-1', ['x']);
+    await flush();
+    expect(a.next).not.toHaveBeenCalled();
+    expect(a.res.statusCode).toBe(500);
+    expect(reporter.captureException).toHaveBeenCalled();
+  });
+
   it('refuses an unauthenticated caller without enqueueing or running the handler', async () => {
     const a = request('bearer-1', ['x']);
     const anon = request('no-such-token', ['q']);
@@ -1160,14 +1181,34 @@ describe('concurrent admin/update-user calls on one subject (BS#3717)', () => {
       expect(c.next).toHaveBeenCalledTimes(1);
     });
 
-    it('takes the turn back from a holder whose response never ends', async () => {
+    it('keeps the turn with a holder still running past the hold limit, reports it, and passes the turn on when it ends', async () => {
       const a = request('bearer-1', ['x'], { deferWrite: true });
       await flush();
-      jest.advanceTimersByTime(15_000);
+      jest.advanceTimersByTime(11_000);
       const b = request('bearer-2', ['y']);
       await flush();
-      expect(b.next).toHaveBeenCalledTimes(1);
-      expect(a.next).toHaveBeenCalledTimes(1);
+      reporter.captureException.mockClear();
+      jest.advanceTimersByTime(4_000); // t = 15s: the hold limit passes while A's handler is still running
+      await flush();
+      expect(reporter.captureException).toHaveBeenCalled();
+      expect(b.next).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(5_000); // B's own 5s wait bound
+      await flush();
+      expect(b.res.statusCode).toBe(409);
+      expect(b.next).not.toHaveBeenCalled();
+
+      const c = request('bearer-2', ['z']);
+      await flush(); // c's session read resolves and its wait timer starts
+      jest.advanceTimersByTime(5_000);
+      await flush();
+      expect(c.res.statusCode).toBe(409);
+      expect(c.next).not.toHaveBeenCalled();
+
+      a.write();
+      await finishWhenHandlerRan(a);
+      const d = request('bearer-2', ['w']);
+      await finishWhenHandlerRan(d);
+      expect(rowsFor('manager-1')).toEqual(['admin.update-user', 'capability.grant.x']);
     });
   });
 
