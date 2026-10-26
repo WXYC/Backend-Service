@@ -215,21 +215,49 @@ const capabilityChangeActions = (before: readonly string[], after: readonly stri
  * other's write in their after-state, so one would record a grant for a
  * capability the other assigned, under its own actor. The actor column itself
  * is per-request and cannot cross; the shared state is the subject's row. A
- * request takes its turn before its before-read and gives it back once its
- * audit rows are written (or the response closes), so each diff sees only its
- * own write. Only `diffCapabilities: true` actions queue, and only per subject.
- * In-process: the auth service runs as a single instance.
+ * request that has an actor takes its turn before its before-read and gives it
+ * back only once its handler has finished writing (the wrapped `res.end`) and
+ * its audit rows are written, so each diff sees only its own write. A request
+ * that cannot get its turn within CAPABILITY_TURN_WAIT_MS is refused with 409
+ * and never writes; a holder that never ends loses the turn after
+ * CAPABILITY_TURN_HOLD_MAX_MS. Only `diffCapabilities: true` actions queue.
+ * The queue is in-process: production runs one auth container
+ * (`node dist/app.js`, no clustering); a second instance would not serialize.
  */
+const CAPABILITY_TURN_WAIT_MS = 5_000; // the 5s statement_timeout: a healthy holder is done well inside it
+const CAPABILITY_TURN_HOLD_MAX_MS = 15_000; // > the wait bound, so a stuck holder yields 409s, not silent overlap
 const capabilityTurns = new Map<string, Promise<void>>();
 
-const takeCapabilityTurn = (subjectId: string): { turn: Promise<void>; giveBack: () => void } => {
+const takeCapabilityTurn = (subjectId: string): { granted: Promise<boolean>; giveBack: () => void } => {
   const previous = capabilityTurns.get(subjectId) ?? Promise.resolve();
-  let giveBack!: () => void;
-  const mine = new Promise<void>((resolve) => (giveBack = resolve));
+  let pass!: () => void;
+  const mine = new Promise<void>((resolve) => (pass = resolve));
   const tail = previous.then(() => mine);
   capabilityTurns.set(subjectId, tail);
   void tail.then(() => capabilityTurns.get(subjectId) === tail && capabilityTurns.delete(subjectId));
-  return { turn: previous, giveBack };
+  let holdTimer: NodeJS.Timeout | undefined;
+  const giveBack = (): void => {
+    clearTimeout(holdTimer);
+    pass();
+  };
+  const granted = new Promise<boolean>((resolve) => {
+    let timedOut = false;
+    const waitTimer = setTimeout(() => {
+      timedOut = true;
+      void previous.then(giveBack); // keep the chain intact: pass our slot on once the predecessor is done
+      resolve(false);
+    }, CAPABILITY_TURN_WAIT_MS);
+    void previous.then(() => {
+      if (timedOut) {
+        return;
+      }
+      clearTimeout(waitTimer);
+      holdTimer = setTimeout(giveBack, CAPABILITY_TURN_HOLD_MAX_MS);
+      holdTimer.unref();
+      resolve(true);
+    });
+  });
+  return { granted, giveBack };
 };
 
 const ipHashOf = (req: Request): string | null => deriveStationSignupIpHash(realIpFromRequest(req));
@@ -346,6 +374,15 @@ function auditMiddleware(resolve: ResolvedMount) {
     // wrapper needs no separate `args[0] !== undefined` guard (item 10) —
     // that covers both the no-body `res.end()` form and the callback-only
     // `res.end(callback)` form, where args[0] is a function.
+    // BS#3717: the turn goes back only when the handler has ended AND the audit rows are done.
+    let handlerEnded = false;
+    let auditDone = false;
+    let giveBackTurn = (): void => undefined;
+    const settleTurn = (): void => {
+      if (handlerEnded && auditDone) {
+        giveBackTurn();
+      }
+    };
     const origWrite = res.write.bind(res);
     res.write = ((...args: Parameters<Response['write']>) => {
       capture(args[0]);
@@ -354,7 +391,11 @@ function auditMiddleware(resolve: ResolvedMount) {
     const origEnd = res.end.bind(res);
     res.end = ((...args: Parameters<Response['end']>) => {
       capture(args[0]);
-      return origEnd(...args);
+      const ended = origEnd(...args);
+      // BS#3717: better-call calls this after the handler returns, even on a destroyed socket.
+      handlerEnded = true;
+      settleTurn();
+      return ended;
     }) as Response['end'];
 
     // Item 11 (simplify pass): a plain hoisted flag next to actorId/
@@ -394,23 +435,6 @@ function auditMiddleware(resolve: ResolvedMount) {
     // BS#3473: the before-read must land before the handler can change the row,
     // so for a diffing action it (not the session read) gates next().
     // A created user has no row yet (BS#3570), so its before-state is empty.
-    // BS#3717: an update of an existing subject waits for its turn first.
-    let giveBackTurn = (): void => undefined;
-    const readBefore = (): Promise<string[] | null> => {
-      const subjectId = extractBodyUserId(req);
-      if (subjectId === null) {
-        return readCapabilities(null);
-      }
-      const { turn, giveBack } = takeCapabilityTurn(subjectId);
-      giveBackTurn = giveBack;
-      return turn.then(() => readCapabilities(subjectId));
-    };
-    const capabilitiesBefore = !classified.diffCapabilities
-      ? null
-      : classified.diffCapabilities === 'created'
-        ? Promise.resolve<string[] | null>([])
-        : readBefore();
-
     const sessionPromise: Promise<void> | null = resolve.resolveActor
       ? auth.api
           .getSession({ headers: fromNodeHeaders(req.headers) })
@@ -422,13 +446,56 @@ function auditMiddleware(resolve: ResolvedMount) {
           .catch(onAccountAuditError)
       : null;
 
+    // BS#3717: an update of an existing subject waits for its turn, but only once the
+    // session names an actor (an unauthenticated caller never enqueues and is refused
+    // 401), and only for a bounded time (else 409). Neither refusal runs the handler.
+    let admitted = true;
+    let closed = false;
+    const refuse = (status: number, code: string): void => {
+      admitted = false;
+      res
+        .status(status)
+        .json({ code, message: code === 'CONFLICT' ? 'Another update for this user is in progress' : 'Unauthorized' });
+    };
+    const readBefore = async (): Promise<string[] | null> => {
+      const subjectId = extractBodyUserId(req);
+      await sessionPromise;
+      if (actorId === null) {
+        refuse(401, 'UNAUTHORIZED');
+        return null;
+      }
+      if (subjectId === null) {
+        return null;
+      }
+      const turn = takeCapabilityTurn(subjectId);
+      giveBackTurn = turn.giveBack;
+      if (!(await turn.granted)) {
+        giveBackTurn = () => undefined;
+        refuse(409, 'CONFLICT');
+        return null;
+      }
+      if (closed) {
+        // Aborted while queued: give the turn back without running the handler.
+        admitted = false;
+        turn.giveBack();
+        return null;
+      }
+      return readCapabilities(subjectId);
+    };
+    const capabilitiesBefore = !classified.diffCapabilities
+      ? null
+      : classified.diffCapabilities === 'created'
+        ? Promise.resolve<string[] | null>([])
+        : readBefore();
+
     const finishOnce = async (): Promise<void> => {
       if (logged) return;
       logged = true;
       try {
         await writeAuditRows();
       } finally {
-        giveBackTurn();
+        auditDone = true;
+        settleTurn();
       }
     };
 
@@ -502,14 +569,21 @@ function auditMiddleware(resolve: ResolvedMount) {
     // types its listener as returning void, so wrap with `void` at the call
     // site rather than typing finishOnce itself as non-async.
     res.on('finish', () => void finishOnce());
-    res.on('close', () => void finishOnce());
+    res.on('close', () => {
+      closed = true;
+      void finishOnce();
+    });
 
     // Both gates apply when an action sets both flags (BS#3570); neither rejects.
     const gates = [capabilitiesBefore, classified.serializeSessionRead ? sessionPromise : null].filter(
       (gate) => gate !== null
     );
     if (gates.length > 0) {
-      void Promise.all(gates).finally(() => next());
+      void Promise.all(gates).finally(() => {
+        if (admitted) {
+          next();
+        }
+      });
     } else {
       next();
     }
