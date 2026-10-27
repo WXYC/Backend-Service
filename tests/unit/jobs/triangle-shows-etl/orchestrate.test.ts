@@ -204,6 +204,24 @@ describe('runEtl — event flow', () => {
     expect(opts.provisioned).toContain('brand-new-room');
   });
 
+  it.each([null, '', '   '])(
+    'provisions a venue whose event has city %j with an empty city, not a placeholder word',
+    async (venueCity) => {
+      const citiesBySlug = new Map<string, string>();
+      const opts = makeOpts({
+        fetchEvents: () => Promise.resolve([event(1, 'brand-new-room', { venue_city: venueCity }), event(2, 'kings')]),
+      });
+      const resolve = opts.resolveVenueId;
+      opts.resolveVenueId = (slug, name, city) => {
+        citiesBySlug.set(slug, city);
+        return resolve(slug, name, city);
+      };
+      await runEtl(opts);
+
+      expect(citiesBySlug.get('brand-new-room')).toBe('');
+    }
+  );
+
   it('counts upsert errors per event without aborting the loop', async () => {
     let calls = 0;
     const opts = makeOpts({

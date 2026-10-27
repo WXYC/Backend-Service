@@ -12,6 +12,7 @@
  * itself; that's out of scope for the unit suite.
  */
 import { db } from '@wxyc/database';
+import { renderSql } from '../../../utils/render-sql';
 import { ensureVenue, upsertConcert } from '../../../../jobs/venue-events-scraper/writer';
 import type { ParsedConcert } from '../../../../jobs/venue-events-scraper/rhp-types';
 
@@ -290,9 +291,42 @@ describe('ensureVenue (unseeded path)', () => {
   });
 
   it('INSERTs a placeholder when the unseeded slug is brand new', async () => {
-    mockDb._chain.returning.mockResolvedValueOnce([{ id: 7 }]);
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 7, created: true }]);
     const result = await ensureVenue('kings-raleigh', 'Kings of Raleigh', null);
     expect(result).toEqual({ venue_id: 7, created: true });
+  });
+
+  // The placeholder row once hard-coded city 'Unknown', which clients print
+  // verbatim ("Cat's Cradle Presents at 107 Brewer Lane" showed "Unknown"
+  // under its name in the iOS ticket). The city comes from the address now.
+  it.each([
+    ['107 Brewer Lane, Carrboro, North Carolina', 'Carrboro'],
+    [null, ''],
+    ['107 Brewer Lane', ''],
+  ])('stores the city derived from address %j as %j, never a placeholder word', async (address, city) => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 7, created: true }]);
+    await ensureVenue('cat-s-cradle-presents-at-107-brewer-lane', "Cat's Cradle Presents at 107 Brewer Lane", address);
+    expect(mockDb._chain.values).toHaveBeenCalledWith(expect.objectContaining({ city }));
+  });
+
+  it('on conflict, lifts only a placeholder city and leaves every other column alone', async () => {
+    mockDb._chain.returning.mockResolvedValueOnce([{ id: 7, created: false }]);
+    await ensureVenue(
+      'cat-s-cradle-presents-at-107-brewer-lane',
+      'Ignored Name',
+      '107 Brewer Lane, Carrboro, North Carolina'
+    );
+
+    const conflict = mockDb._chain.onConflictDoUpdate.mock.calls[0][0] as {
+      set: Record<string, unknown>;
+      setWhere: unknown;
+    };
+    expect(Object.keys(conflict.set).sort()).toEqual(['city', 'last_modified']);
+    expect(conflict.set.city).toBe('Carrboro');
+    // A hand-corrected city is never a placeholder, so it survives.
+    expect(renderSql(conflict.setWhere).replace(/\s+/g, ' ').trim()).toBe(
+      "venues.city IN ('Unknown', '') AND Carrboro <> ''"
+    );
   });
 
   it('preserves the existing row (DO NOTHING) when the unseeded slug already has a venues row — never overwrites with potentially-weaker fallback values', async () => {
@@ -300,7 +334,7 @@ describe('ensureVenue (unseeded path)', () => {
     // prior good address (admin-edited OR earlier-scrape-richer) under
     // the iteration-1 ON CONFLICT DO UPDATE shape. The new code never
     // overwrites unseeded rows; it SELECTs the existing id and returns.
-    mockDb._chain.returning.mockResolvedValueOnce([]); // insert.onConflictDoNothing.returning empty
+    mockDb._chain.returning.mockResolvedValueOnce([]); // setWhere suppressed the UPDATE
     mockDb._chain.limit.mockResolvedValueOnce([{ id: 7 }]); // follow-up SELECT
     const result = await ensureVenue('kings-raleigh', 'Kings of Raleigh', null);
     expect(result).toEqual({ venue_id: 7, created: false });
