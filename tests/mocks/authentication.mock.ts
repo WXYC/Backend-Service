@@ -10,7 +10,7 @@ export const auth = {
   },
 };
 
-export function requirePermissions(_required: Record<string, string[]>) {
+export function requirePermissions(_required: Record<string, string[]>, _options?: { capability?: string }) {
   return (req: Request, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
