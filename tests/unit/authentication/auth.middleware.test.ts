@@ -13,7 +13,7 @@ jest.mock('jose', () => ({
 }));
 
 import { jwtVerify, decodeJwt } from 'jose';
-import { requirePermissions } from '../../../shared/authentication/src/auth.middleware';
+import { requirePermissions, type RequiredPermissions } from '../../../shared/authentication/src/auth.middleware';
 import type { Request, Response, NextFunction } from 'express';
 
 const mockedJwtVerify = jwtVerify as jest.MockedFunction<typeof jwtVerify>;
@@ -435,6 +435,108 @@ describe('requirePermissions middleware', () => {
 
       expect(res.status).toHaveBeenCalledWith(403);
       expect(next).not.toHaveBeenCalled();
+    });
+  });
+
+  // Capability option: a route that names a capability admits a caller whose role check fails but whose verified
+  // `capabilities` claim holds it. These run the real middleware with a mocked jwtVerify; the integration tier runs
+  // under AUTH_BYPASS and never reaches this gate.
+  describe('capability option', () => {
+    const CAPABILITY = 'archive_admin';
+    // flowsheet:manage is held by musicDirector and stationManager only.
+    const required: RequiredPermissions = { flowsheet: ['manage'] };
+    const ROLES_HOLDING_KEY = ['musicDirector', 'stationManager'];
+    const ROLES_THAT_RESOLVE = ['member', 'dj', 'musicDirector', 'stationManager'];
+
+    const roles = ['member', 'dj', 'musicDirector', 'stationManager', undefined, 'wizard'];
+    const claims: [string, unknown][] = [
+      ['[]', []],
+      ["['archive_admin']", [CAPABILITY]],
+      ["['editor']", ['editor']],
+      ["'archive_admin' (not an array)", CAPABILITY],
+      ['[1]', [1]],
+      ["['archive_admin', 1]", [CAPABILITY, 1]],
+      ['missing', undefined],
+    ];
+    const options: [string, { capability?: string } | undefined][] = [
+      ['no option', undefined],
+      ['{ capability: archive_admin }', { capability: CAPABILITY }],
+    ];
+
+    const cases = roles.flatMap((role) =>
+      claims.flatMap(([claimLabel, claim]) =>
+        options.map(([optionLabel, option]) => {
+          const byRole = role !== undefined && ROLES_HOLDING_KEY.includes(role);
+          const byCapability =
+            !byRole &&
+            role !== undefined &&
+            ROLES_THAT_RESOLVE.includes(role) &&
+            option?.capability === CAPABILITY &&
+            Array.isArray(claim) &&
+            claim.length > 0 &&
+            claim.every((c) => typeof c === 'string') &&
+            claim.includes(CAPABILITY);
+          const refusal =
+            role === undefined
+              ? 'Forbidden: Missing role in token.'
+              : role === 'wizard'
+                ? 'Forbidden: Invalid role.'
+                : 'Forbidden: insufficient permissions';
+          return [String(role), claimLabel, optionLabel, role, claim, option, byRole, byCapability, refusal] as const;
+        })
+      )
+    );
+
+    it.each(cases)('role=%s claim=%s %s', async (_r, _c, _o, role, claim, option, byRole, byCapability, refusal) => {
+      mockJwtPayload({ role, capabilities: claim });
+      const { req, res, next } = createMocks('Bearer valid-token');
+      const middleware = requirePermissions(required, option);
+
+      await middleware(req, res, next);
+
+      if (byRole || byCapability) {
+        expect(next).toHaveBeenCalledTimes(1);
+        expect(res.status).not.toHaveBeenCalled();
+        expect(req.auth?.admittedByCapability).toBe(byCapability ? CAPABILITY : undefined);
+      } else {
+        expect(next).not.toHaveBeenCalled();
+        expect(res.status).toHaveBeenCalledWith(403);
+        expect(res.json).toHaveBeenCalledWith({ error: refusal });
+      }
+    });
+
+    it('refuses a banned user holding the capability with the ban response', async () => {
+      mockJwtPayload({ role: 'dj', capabilities: [CAPABILITY], banned: true, banReason: 'spam' });
+      const { req, res, next } = createMocks('Bearer valid-token');
+      const middleware = requirePermissions(required, { capability: CAPABILITY });
+
+      await middleware(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith({ message: 'Access denied', reason: 'spam' });
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('ignores the option for requirePermissions({}) and does not record a capability', async () => {
+      mockJwtPayload({ role: undefined, capabilities: [CAPABILITY] });
+      const { req, res, next } = createMocks('Bearer valid-token');
+      const middleware = requirePermissions({}, { capability: CAPABILITY });
+
+      await middleware(req, res, next);
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(req.auth?.admittedByCapability).toBeUndefined();
+    });
+
+    it('does not take admittedByCapability from the token', async () => {
+      mockJwtPayload({ role: 'musicDirector', admittedByCapability: CAPABILITY });
+      const { req, res, next } = createMocks('Bearer valid-token');
+      const middleware = requirePermissions(required, { capability: CAPABILITY });
+
+      await middleware(req, res, next);
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(req.auth?.admittedByCapability).toBeUndefined();
     });
   });
 });
