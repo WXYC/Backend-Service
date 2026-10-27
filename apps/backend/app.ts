@@ -19,6 +19,7 @@ import { feature_access_route } from './routes/feature-access.route.js';
 import { internal_route } from './routes/internal.route.js';
 import { internalBansRoute } from './routes/internal-bans.route.js';
 import { internalSlackModeratorsRoute } from './routes/internal-slack-moderators.route.js';
+import { internalListenerRequestsRoute } from './routes/internal-listener-requests.route.js';
 import { ses_events_route } from './routes/ses-events.route.js';
 import { proxy_route } from './routes/proxy.route.js';
 import { playlist_route } from './routes/playlist.route.js';
@@ -212,6 +213,11 @@ app.use('/internal/banned-fingerprints', internalBansRoute);
 // same caller as the ban CRUD above, so it mounts as a sibling rather than
 // carrying its own key.
 app.use('/internal/slack-ban-moderators', internalSlackModeratorsRoute);
+
+// BS#2662 — listener request create (before ROM posts to Slack) and the
+// pre-filtered list behind `/reply`. Same X-Internal-Key + ROM_INTERNAL_KEY
+// gate and the same caller as the two routers above, so it mounts as a sibling.
+app.use('/internal/listener-requests', internalListenerRequestsRoute);
 
 // PostHog's copy of what Sentry's expressIntegration captures, under the same predicate (BS#3409).
 // errorHandler renders a WxycError at its own status and everything else as a 500.
