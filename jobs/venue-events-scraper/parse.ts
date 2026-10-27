@@ -405,6 +405,24 @@ const extractAddress = (location: SchemaEvent['location']): string | null => {
   return addr.streetAddress ? decodeHtmlEntities(addr.streetAddress) || null : null;
 };
 
+/**
+ * The city in a free-text "street, city, state" address, as RHP emits
+ * `location.address` (e.g. `"107 Brewer Lane, Carrboro, North Carolina"`).
+ * The city is the part just before the state. Returns null when there is
+ * no such part, or when it holds a digit (a street, not a city), so a
+ * caller never stores a guess.
+ */
+export const cityFromAddress = (address: string | null): string | null => {
+  if (!address) return null;
+  const parts = address
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length < 2) return null;
+  const city = parts[parts.length - 2];
+  return /\d/.test(city) ? null : city;
+};
+
 /** The longest `headlining_artist_raw` we'll send to a varchar(256). */
 const MAX_HEADLINING_ARTIST_LEN = 256;
 /** RHP-side sanity cap on the pathname-derived source_id. Deliberate writer
