@@ -50,7 +50,13 @@ export function defineStoreAllowlist(config: StoreAllowlistConfig): StoreAllowli
           if (!item.startsWith('/')) {
             return false;
           }
-          const rest = item.slice(1);
+          let rest: string;
+          try {
+            // Decode before checking, as the CopySource branch does, so both agree on what a path names.
+            rest = decodeURIComponent(item.slice(1));
+          } catch {
+            return false;
+          }
           const base = rest.endsWith('*') ? rest.slice(0, -1) : rest;
           return !base.includes('*') && !outside(base);
         };
@@ -90,17 +96,47 @@ const CLIENT_CLASSES = ['S3Client', 'CloudFrontClient'];
  * Source-scan pattern for a store module's test: returns every name imported
  * from `pkg` (e.g. `@aws-sdk/client-cloudfront`) that is neither a client class
  * nor in `declared`. Expect `[]`.
+ *
+ * Covers named, default and namespace imports, `export ... from` re-exports,
+ * `require()` and dynamic `import()`. A default import is reported as
+ * `default`, a namespace or star re-export as `*`, and a `require()` or
+ * `import()` of `pkg` as the call itself, since each exposes every command.
+ * A `require()` or `import()` whose specifier is not a plain string literal is
+ * reported as `require(<computed>)` / `import(<computed>)`: it may name `pkg`.
+ * Type-only imports and side-effect imports bind no command and are skipped.
  */
 export function undeclaredImports(source: string, pkg: string, declared: readonly string[]): string[] {
   const escaped = pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-  const imported = [...source.matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*'${escaped}'`, 'g'))].flatMap(
-    (m) =>
-      m[1]
-        .split(',')
-        .map((name) => name.trim().replace(/^type\s+/, ''))
-        .filter(Boolean)
-  );
-  return imported.filter((name) => !CLIENT_CLASSES.includes(name) && !declared.includes(name));
+  const staticForm = `\\b(?:import|export)\\s+((?:[\\w$]+\\s*,\\s*)?(?:\\*(?:\\s+as\\s+[\\w$]+)?|\\{[^}]*\\})|[\\w$]+)\\s*from\\s*(['"])${escaped}\\2`;
+  const callForm = `(?<![.\\w$])(require|import)\\s*\\(\\s*(?:(['"])([^'"\\n]*)\\2\\s*\\))?`;
+  const found: string[] = [];
+  for (const [, clause] of source.matchAll(new RegExp(staticForm, 'g'))) {
+    const bare = clause.replace(/\{[^}]*\}/, '');
+    const namespace = /\*(\s+as\s+[\w$]+)?/.exec(bare);
+    if (/[\w$]/.test(bare.replace(namespace?.[0] ?? '', ''))) {
+      found.push('default');
+    }
+    if (namespace) {
+      found.push('*');
+    }
+    const named = /\{([^}]*)\}/.exec(clause)?.[1] ?? '';
+    for (const name of named.split(',')) {
+      found.push(
+        name
+          .trim()
+          .replace(/^type\s+/, '')
+          .split(/\s+as\s+/)[0]
+      );
+    }
+  }
+  for (const [, fn, , specifier] of source.matchAll(new RegExp(callForm, 'g'))) {
+    if (specifier === undefined) {
+      found.push(`${fn}(<computed>)`);
+    } else if (specifier === pkg) {
+      found.push(`${fn}('${pkg}')`);
+    }
+  }
+  return found.filter(Boolean).filter((name) => !CLIENT_CLASSES.includes(name) && !declared.includes(name));
 }
 
 /** `undeclaredImports` for `@aws-sdk/client-s3`. */
