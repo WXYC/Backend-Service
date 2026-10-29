@@ -164,16 +164,13 @@ describe('lint-changed against a real git diff', () => {
   });
 
   it.each([
-    ['an unstaged edit', { unstaged: { 'apps/a.ts': '2' } }],
-    ['a staged edit', { staged: { 'apps/a.ts': '2' } }],
-    ['a staged new file', { staged: { 'apps/b.ts': '2' } }],
-    ['an untracked file', { untracked: { 'apps/a.ts': '2' } }],
-  ])('lints %s before it is committed (files mode)', (_name, uncommitted) => {
+    ['an unstaged edit', { unstaged: { 'apps/a.ts': '2' } }, 'apps/a.ts'],
+    ['a staged edit', { staged: { 'apps/a.ts': '2' } }, 'apps/a.ts'],
+    ['a staged new file', { staged: { 'apps/b.ts': '2' } }, 'apps/b.ts'],
+    ['an untracked file', { untracked: { 'apps/new-untracked.ts': '1' } }, 'apps/new-untracked.ts'],
+  ])('lints %s before it is committed (files mode)', (_name, uncommitted, expectedPath) => {
     const { run } = setUp({ originMain: true, feature: {}, uncommitted });
-    expect(JSON.parse(run('--dry-run').stdout)).toEqual({
-      mode: 'files',
-      files: [expect.stringMatching(/^apps\/[ab]\.ts$/)],
-    });
+    expect(JSON.parse(run('--dry-run').stdout)).toEqual({ mode: 'files', files: [expectedPath] });
   });
 
   it('does not lint an untracked file that .gitignore covers', () => {
@@ -205,7 +202,7 @@ describe('lint-changed against a real git diff', () => {
   ])('an %s tsconfig edit selects full mode, with untracked sources in their group', (_name, uncommitted) => {
     const { run } = setUp({
       originMain: true,
-      feature: { 'tsconfig.json': '1' },
+      feature: {},
       uncommitted: {
         ...uncommitted,
         untracked: { ...('untracked' in uncommitted ? uncommitted.untracked : {}), 'apps/new.ts': '1' },
