@@ -3332,10 +3332,11 @@ function toLibraryViewRow<T extends AlbumRankHelperColumns>(row: T): Omit<T, key
 
 /**
  * Tsvector + plays ranker for the dj-site Both-mode default. Reads
- * `library.search_doc` (the STORED generated tsvector from migration 0058)
- * against a last-token prefix `tsquery` (`buildPrefixTsquery`,
- * WXYC/Backend-Service#670) so multi-term queries get AND-semantics and the
- * token the DJ is still typing gets prefix behavior.
+ * `library.search_doc` (the STORED generated tsvector from migration 0058:
+ * artist name at weight A, album title at B and, since migration 0208 /
+ * BS#3733, alternate artist name at C) against a last-token prefix `tsquery`
+ * (`buildPrefixTsquery`, WXYC/Backend-Service#670) so multi-term queries get
+ * AND-semantics and the token the DJ is still typing gets prefix behavior.
  *
  * Ranking is an explicit tier — not a `ts_rank * plays` product (BS#2725).
  * `plays` spans roughly 10x on the real catalog, wider than the typical
@@ -3632,9 +3633,12 @@ async function searchLibraryByTrigramBoth(
  * Alias-only probe that runs after a non-empty stage 1 on the catalog route
  * (BS#3552): the releases of every artist whose `artist_search_alias` variant
  * matches `query`, minus every release the tsvector tier itself matches.
- * `search_doc` indexes only `artist_name` and `album_title`, so without this
- * a surname query such as `Giddens` stops at Jerry Giddens and never reaches
- * the Carolina Chocolate Drops card filed as "Rhiannon Giddens".
+ * `search_doc` indexes a release's own `artist_name`, `album_title` and
+ * `alternate_artist_name` (BS#3733), not the alias variants of its artist, so
+ * without this a surname query such as `Giddens` stops at Jerry Giddens and
+ * never reaches the Carolina Chocolate Drops card filed as "Rhiannon
+ * Giddens". A release whose own alternate name matches is a stage-1 row, so
+ * the exclusion below keeps it out of the alias rows.
  *
  * It is the stage-2 query without branch (a), excluding on
  * `search_doc @@ tsquery` instead of the trigram predicate. That excludes

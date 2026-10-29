@@ -1,5 +1,7 @@
 /**
- * BS#2714 — `library.search_doc` has a position gap between its two segments.
+ * BS#2714 — `library.search_doc` has a position gap between its segments.
+ * BS#3733 added a third segment, `alternate_artist_name` at weight C, behind
+ * a second gap, so the title/alternate-name seam is covered here too.
  *
  * `tsvector || tsvector` shifts the right operand's positions to continue from
  * the left's with NO gap, so the album title's first lexeme sat directly
@@ -15,10 +17,12 @@
  * Postgres-backed and deliberately SQL-level: the subject is a generated column,
  * so driving it through HTTP would only add a ranker and a LIMIT between the
  * assertion and the thing being asserted. The probe rows carry `Todd Rundgren` /
- * `Angel Hair` because that is the pair the migration header works through, and
- * `Chuquimamani-Condori` / `Edits` for the hyphenated-compound case.
+ * `Angel Hair` because that is the pair the migration header works through,
+ * `Chuquimamani-Condori` / `Edits` for the hyphenated-compound case, and
+ * `DJ Krush` / `Cold Krush Cuts` / `DJ Krush & Coldcut` (a real catalog row)
+ * for the title/alternate-name seam.
  *
- * Probe ids live in the reserved 7000-range at 7070/7072 — the shape fixture
+ * Probe ids live in the reserved 7000-range at 7070/7072/7074 — the shape fixture
  * occupies 7000-7009 and `library-query-sort-plays.spec.js` uses 7060/7062 —
  * and reuse fixture artist 7000, genre 11, format 1 so every FK resolves.
  * `library.artist_name` is a denormalized column, so the probe rows can carry
@@ -35,6 +39,8 @@ const GEN = 11; // 'Rock'
 const FMT = 1; // 'cd'
 const PROBE_SEAM = 7070; // 'Todd Rundgren' / 'Angel Hair'
 const PROBE_HYPHEN = 7072; // 'Chuquimamani-Condori' / 'Edits'
+const PROBE_ALT = 7074; // 'DJ Krush' / 'Cold Krush Cuts' / alternate 'DJ Krush & Coldcut'
+const PROBES = [PROBE_SEAM, PROBE_HYPHEN, PROBE_ALT];
 
 function makeSql() {
   return postgres({
@@ -48,13 +54,13 @@ function makeSql() {
   });
 }
 
-/** Rows among the two probes whose search_doc matches `tsquery`. */
+/** Rows among the probes whose search_doc matches `tsquery`. */
 async function matchIds(sql, tsquery) {
   const rows = await sql.unsafe(
     `SELECT id FROM "${SCHEMA}".library
-      WHERE id IN ($1, $2) AND search_doc @@ to_tsquery('simple', $3)
+      WHERE id = ANY($1::int[]) AND search_doc @@ to_tsquery('simple', $2)
       ORDER BY id`,
-    [PROBE_SEAM, PROBE_HYPHEN, tsquery]
+    [PROBES, tsquery]
   );
   return rows.map((r) => r.id);
 }
@@ -66,11 +72,12 @@ describe('library.search_doc position gap (BS#2714)', () => {
     sql = makeSql();
     await sql.unsafe(
       `INSERT INTO "${SCHEMA}".library
-         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name)
-       VALUES ($1, $2, $3, $4, 'Angel Hair', 70, 'Todd Rundgren'),
-              ($5, $2, $3, $4, 'Edits', 72, 'Chuquimamani-Condori')
+         (id, artist_id, genre_id, format_id, album_title, code_number, artist_name, alternate_artist_name)
+       VALUES ($1, $2, $3, $4, 'Angel Hair', 70, 'Todd Rundgren', NULL),
+              ($5, $2, $3, $4, 'Edits', 72, 'Chuquimamani-Condori', NULL),
+              ($6, $2, $3, $4, 'Cold Krush Cuts', 74, 'DJ Krush', 'DJ Krush & Coldcut')
        ON CONFLICT (id) DO NOTHING`,
-      [PROBE_SEAM, ART, GEN, FMT, PROBE_HYPHEN]
+      [PROBE_SEAM, ART, GEN, FMT, PROBE_HYPHEN, PROBE_ALT]
     );
   });
 
@@ -80,8 +87,8 @@ describe('library.search_doc position gap (BS#2714)', () => {
       // a probe have to be reaped by album_id BEFORE the library row goes (the
       // column is NULL afterwards and they become unfindable). This spec seeds
       // none, but a concurrent spec could have linked one.
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id IN ($1, $2)`, [PROBE_SEAM, PROBE_HYPHEN]);
-      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id IN ($1, $2)`, [PROBE_SEAM, PROBE_HYPHEN]);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".flowsheet WHERE album_id = ANY($1::int[])`, [PROBES]);
+      await sql.unsafe(`DELETE FROM "${SCHEMA}".library WHERE id = ANY($1::int[])`, [PROBES]);
       await sql.end();
     }
   });
@@ -99,11 +106,22 @@ describe('library.search_doc position gap (BS#2714)', () => {
     expect(await matchIds(sql, `'rundgren':* <-> 'ang':*`)).toEqual([]);
   });
 
+  test.each([
+    ['title -> alternate name', `'cuts' <-> 'dj'`],
+    ['title -> alternate name, prefix phrase', `'cuts':* <-> 'dj':*`],
+  ])('a phrase spanning the %s seam matches nothing (BS#3733)', async (_seam, tsquery) => {
+    // `cuts` ends album_title and `dj` begins alternate_artist_name. Without
+    // the second gap they would sit at adjacent positions and this would
+    // match.
+    expect(await matchIds(sql, tsquery)).toEqual([]);
+  });
+
   test('a phrase within one field still matches', async () => {
-    // The gap must not cost real within-field adjacency. Both halves:
-    // artist-side and album-side.
+    // The gap must not cost real within-field adjacency: artist-side,
+    // album-side, and alternate-name-side.
     expect(await matchIds(sql, `'todd' <-> 'rundgren'`)).toEqual([PROBE_SEAM]);
     expect(await matchIds(sql, `'angel' <-> 'hair'`)).toEqual([PROBE_SEAM]);
+    expect(await matchIds(sql, `'krush' <-> 'coldcut'`)).toEqual([PROBE_ALT]);
   });
 
   test.each([
@@ -130,6 +148,18 @@ describe('library.search_doc position gap (BS#2714)', () => {
     expect(await matchIds(sql, `'wxycsearchdocgap'`)).toEqual([]);
     expect(await matchIds(sql, `'wxycsearchdocgap':*`)).toEqual([]);
     expect(await matchIds(sql, `'w':*`)).toEqual([]);
+  });
+
+  test('the alternate name is weight C, behind its own gap (BS#3733)', async () => {
+    // C sits below A (artist) and B (title), so an alternate-name-only hit
+    // ranks after an artist or title hit on the same word.
+    const [row] = await sql.unsafe(`SELECT search_doc::text AS doc FROM "${SCHEMA}".library WHERE id = $1`, [
+      PROBE_ALT,
+    ]);
+    expect(row.doc).toMatch(/'coldcut':\d+C/);
+    const titleLast = Number(row.doc.match(/'cuts':(\d+)B/)[1]);
+    const altFirst = Number(row.doc.match(/'dj':(?:\d+A,)?(\d+)C/)[1]);
+    expect(altFirst - titleLast).toBeGreaterThan(1);
   });
 
   test('both weight bands survive the rewrite', async () => {

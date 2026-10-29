@@ -203,5 +203,6 @@
   "0204_shows-flowsheet-watermark": "d719bebb9899adfeedc0e76da3a82390a4ab32bea8b7592206c48e4af76e2f08",
   "0205_request-line-modes": "9de00363e906e64181bf1a0f089c41b90cc256d611dba50f5706c79d2d8b2bd4",
   "0206_label-id-indexes": "0be13a53d5168975aadfc97db91ee5ce1db2ed0e909bfe1d51717ab46d5c2b72",
-  "0207_concerts-is-live-music": "fea1d98c82d52fdd2b0cd74c89583f45fb245dda588beb359070ccdf5a5f798b"
+  "0207_concerts-is-live-music": "fea1d98c82d52fdd2b0cd74c89583f45fb245dda588beb359070ccdf5a5f798b",
+  "0208_3733-library-search-doc-alternate-artist-name": "ec33d6f36d7e82b55eea95742e997be4c4ff04d67d4df6e1ce6647b9d1e803e0"
 }
