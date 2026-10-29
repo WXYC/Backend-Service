@@ -8,6 +8,7 @@
  * RuleTester's `filename`.
  */
 import { RuleTester } from 'eslint';
+import { srcFilter } from '../../utils/src-filter';
 
 // CommonJS on purpose, same as the other *.rule.test.ts files here.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -272,4 +273,10 @@ ruleTester.run('restricted-library-rotation-insert', rule, {
       errors: [{ messageId: 'restrictedInsert', data: { table: 'rotation', enclosing: 'handler' } }],
     },
   ],
+});
+
+describe("detect-changes' src filter", () => {
+  it('lists eslint-rules/**, so a PR that edits only a rule still runs this test', () => {
+    expect(srcFilter()).toContain('eslint-rules/**');
+  });
 });

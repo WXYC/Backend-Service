@@ -16,6 +16,7 @@
  * RuleTester bypasses entirely).
  */
 import { RuleTester } from 'eslint';
+import { srcFilter } from '../../utils/src-filter';
 
 // The rule plugin lives at `eslint-rules/restricted-real-name.cjs`. The
 // CommonJS extension is deliberate so the same module loads from
@@ -246,4 +247,10 @@ ruleTester.run('restricted-real-name', rule, {
       errors: [{ messageId: 'restrictedRealName', data: { name: 'realName' } }],
     },
   ],
+});
+
+describe("detect-changes' src filter", () => {
+  it('lists eslint-rules/**, so a PR that edits only a rule still runs this test', () => {
+    expect(srcFilter()).toContain('eslint-rules/**');
+  });
 });

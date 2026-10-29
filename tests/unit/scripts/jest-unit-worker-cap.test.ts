@@ -11,6 +11,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { srcFilter } from '../../utils/src-filter';
+
 const configPath = path.resolve(__dirname, '../../../jest.unit.config.ts');
 const config = fs.readFileSync(configPath, 'utf-8');
 
@@ -20,5 +22,11 @@ describe('jest.unit.config.ts memory settings', () => {
     ['workerIdleMemoryLimit', /^\s*workerIdleMemoryLimit:\s*'512MB',/m],
   ])('sets %s', (_name, pattern) => {
     expect(config).toMatch(pattern);
+  });
+});
+
+describe("detect-changes' src filter", () => {
+  it('lists jest.unit.config.ts, so a PR that edits only it still runs this test', () => {
+    expect(srcFilter()).toContain('jest.unit.config.ts');
   });
 });
