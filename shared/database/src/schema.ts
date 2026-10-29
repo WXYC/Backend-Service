@@ -755,23 +755,32 @@ export const library = wxyc_schema.table(
     discogs_unavailable_note: varchar('discogs_unavailable_note', { length: 500 }),
     last_discogs_recheck_at: timestamp('last_discogs_recheck_at', { withTimezone: true }),
     // STORED GENERATED tsvector covering the searchable text fields with
-    // weight bands (artist=A, album=B). NULL for rows where artist_name has
-    // not been backfilled yet — A.2 populates legacy rows, A.3 keeps live
-    // writes current. Read by the new tsvector search path in A.5.
+    // weight bands (artist=A, album=B, alternate artist name=C). NULL for
+    // rows where artist_name has not been backfilled yet — A.2 populates
+    // legacy rows, A.3 keeps live writes current. Read by the new tsvector
+    // search path in A.5.
     //
-    // The `wxycsearchdocgap` sentinel buys a POSITION GAP between the two
-    // segments, and `ts_delete` then removes it without renumbering what
+    // `alternate_artist_name` (BS#3733) makes every word of a credit such as
+    // `Kath Bloom & David Shapiro` findable through stage 1 of Both-mode
+    // search the moment the release is saved, as /wxycdb's Lucene index did.
+    // Weight C keeps an alternate-name-only hit below an artist or title hit
+    // on the same word.
+    //
+    // The `wxycsearchdocgap` sentinel buys a POSITION GAP before each later
+    // segment, and `ts_delete` then removes it without renumbering what
     // survives. `tsvector || tsvector` shifts the right operand's positions to
-    // continue from the left's with no gap, so without this the album title's
-    // first lexeme is adjacent to the artist name's last one and a phrase query
-    // matches across the field boundary (BS#2714). Deleting the sentinel rather
-    // than leaving it in place is what keeps it out of the GIN index — a
+    // continue from the left's with no gap, so without this a segment's first
+    // lexeme is adjacent to the previous segment's last one and a phrase
+    // query matches across the field boundary (BS#2714). Deleting the
+    // sentinel rather than leaving it in place is what keeps it out of the
+    // GIN index — a
     // sentinel lexeme would be prefix-reachable, and `'w':*` would then match
-    // every row in the catalog. Migration 0178 has the full rationale and the
-    // measured lock budget; this expression must match it character-for-character
-    // or drizzle-kit drift detection will propose a spurious rewrite.
+    // every row in the catalog. Migrations 0178 and 0208 have the full
+    // rationale and the measured lock budget; this expression must match 0208
+    // character-for-character or drizzle-kit drift detection will propose a
+    // spurious rewrite.
     search_doc: tsvector('search_doc').generatedAlwaysAs(
-      sql`ts_delete(setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || to_tsvector('simple', 'wxycsearchdocgap wxycsearchdocgap wxycsearchdocgap') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'B'), 'wxycsearchdocgap')`
+      sql`ts_delete(setweight(to_tsvector('simple', coalesce("artist_name", '')), 'A') || to_tsvector('simple', 'wxycsearchdocgap wxycsearchdocgap wxycsearchdocgap') || setweight(to_tsvector('simple', coalesce("album_title", '')), 'B') || to_tsvector('simple', 'wxycsearchdocgap wxycsearchdocgap wxycsearchdocgap') || setweight(to_tsvector('simple', coalesce("alternate_artist_name", '')), 'C'), 'wxycsearchdocgap')`
     ),
   },
   (table) => {
