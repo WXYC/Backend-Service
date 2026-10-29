@@ -3,10 +3,12 @@
  * Lint only what a push changes (BS#3556), so the pre-push hook does not hold a
  * whole-repo typed ESLint program (about 5 GB) per concurrent push.
  *
- * Diffs merge-base(HEAD, origin/main)..HEAD (ACMR) and picks a mode:
+ * Diffs merge-base(HEAD, origin/main) against the working tree (ACMR), so commits plus staged,
+ * unstaged and untracked (not ignored) files count, and a lint before commit is not a vacuous
+ * skip. It picks a mode:
  *  - full: a config, tsconfig, package manifest or `.d.ts` changed (or there is
  *    no origin/main to diff against), so any file's result may change. Lints
- *    every tracked source file, one eslint process per top-level directory in
+ *    every tracked or untracked source file, one eslint process per top-level directory in
  *    sequence, so peak memory is the largest group (tests/, about 3.1 GB).
  *  - files: lints the changed source files.
  *  - skip: no lintable file changed.
@@ -39,6 +41,9 @@ const lines = (s) => s.split(/\r?\n/).filter(Boolean);
 // git -z output: NUL-terminated, never quoted (the default core.quotePath wraps non-ASCII names in quotes).
 const nulSeparated = (s) => s.split('\0').filter(Boolean);
 
+// Untracked, not-ignored files: a new file is invisible to `git diff` until it is staged.
+const untrackedPaths = () => nulSeparated(git('ls-files', '-z', '--others', '--exclude-standard').stdout);
+
 // null means "no base to diff against" (missing origin/main, no common ancestor).
 function changedPaths() {
   const input = flag('--changed');
@@ -49,17 +54,18 @@ function changedPaths() {
   if (base.status !== 0) {
     return null;
   }
-  const diff = git('diff', '-z', '--name-only', '--diff-filter=ACMR', `${base.stdout.trim()}..HEAD`);
+  // No `..HEAD`: diffing the working tree adds staged and unstaged edits to the commits.
+  const diff = git('diff', '-z', '--name-only', '--diff-filter=ACMR', base.stdout.trim());
   if (diff.status !== 0) {
     return null;
   }
-  return nulSeparated(diff.stdout);
+  return [...new Set([...nulSeparated(diff.stdout), ...untrackedPaths()])];
 }
 
 function planFor(changed) {
   if (changed === null || changed.some((f) => FULL_TRIGGERS.some((re) => re.test(f)))) {
     const groups = {};
-    for (const f of nulSeparated(git('ls-files', '-z').stdout)) {
+    for (const f of new Set([...nulSeparated(git('ls-files', '-z').stdout), ...untrackedPaths()])) {
       if (LINTABLE.test(f) && existsSync(join(root, f))) {
         const group = f.includes('/') ? f.slice(0, f.indexOf('/')) : '.';
         (groups[group] ??= []).push(f);

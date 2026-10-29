@@ -71,6 +71,12 @@ function sandbox(opts: {
   originMain: boolean;
   feature: Record<string, string>;
   remove?: string[];
+  /** Left out of the feature commit: edits to tracked files (unstaged or staged) and new untracked files. */
+  uncommitted?: {
+    unstaged?: Record<string, string>;
+    staged?: Record<string, string>;
+    untracked?: Record<string, string>;
+  };
   failNpx?: string;
   failNpm?: boolean;
 }) {
@@ -113,6 +119,10 @@ function sandbox(opts: {
   }
   git('add', '-A');
   git('commit', '-q', '--allow-empty', '-m', 'feature');
+  write(opts.uncommitted?.staged ?? {});
+  git('add', '-A');
+  write(opts.uncommitted?.unstaged ?? {});
+  write(opts.uncommitted?.untracked ?? {});
   const bin = path.join(dir, '.fakebin');
   const log = path.join(dir, '.calls.log');
   fs.mkdirSync(bin);
@@ -151,6 +161,64 @@ describe('lint-changed against a real git diff', () => {
   it('lints only the files the branch changed since its merge-base with origin/main', () => {
     const { run } = setUp({ originMain: true, feature: { 'apps/a.ts': '2', 'README.md': '2', 'top.ts': '2' } });
     expect(JSON.parse(run('--dry-run').stdout)).toEqual({ mode: 'files', files: ['apps/a.ts', 'top.ts'] });
+  });
+
+  it.each([
+    ['an unstaged edit', { unstaged: { 'apps/a.ts': '2' } }],
+    ['a staged edit', { staged: { 'apps/a.ts': '2' } }],
+    ['a staged new file', { staged: { 'apps/b.ts': '2' } }],
+    ['an untracked file', { untracked: { 'apps/a.ts': '2' } }],
+  ])('lints %s before it is committed (files mode)', (_name, uncommitted) => {
+    const { run } = setUp({ originMain: true, feature: {}, uncommitted });
+    expect(JSON.parse(run('--dry-run').stdout)).toEqual({
+      mode: 'files',
+      files: [expect.stringMatching(/^apps\/[ab]\.ts$/)],
+    });
+  });
+
+  it('does not lint an untracked file that .gitignore covers', () => {
+    const { run } = setUp({
+      originMain: true,
+      feature: { '.gitignore': 'ignored.ts\n' },
+      uncommitted: { untracked: { 'ignored.ts': '2' } },
+    });
+    expect(JSON.parse(run('--dry-run').stdout)).toEqual({ mode: 'skip' });
+  });
+
+  it('unions committed, staged, unstaged and untracked files', () => {
+    const { run } = setUp({
+      originMain: true,
+      feature: { 'apps/a.ts': '2' },
+      uncommitted: { staged: { 'top.ts': '2' }, unstaged: { 'tests/t.ts': '2' }, untracked: { 'apps/new.ts': '1' } },
+    });
+    expect(JSON.parse(run('--dry-run').stdout).files.sort()).toEqual([
+      'apps/a.ts',
+      'apps/new.ts',
+      'tests/t.ts',
+      'top.ts',
+    ]);
+  });
+
+  it.each([
+    ['unstaged', { unstaged: { 'tsconfig.json': '{}' } }],
+    ['untracked', { untracked: { 'jobs/j/tsconfig.json': '{}' } }],
+  ])('an %s tsconfig edit selects full mode, with untracked sources in their group', (_name, uncommitted) => {
+    const { run } = setUp({
+      originMain: true,
+      feature: { 'tsconfig.json': '1' },
+      uncommitted: {
+        ...uncommitted,
+        untracked: { ...('untracked' in uncommitted ? uncommitted.untracked : {}), 'apps/new.ts': '1' },
+      },
+    });
+    const plan = JSON.parse(run('--dry-run').stdout);
+    expect(plan.mode).toBe('full');
+    expect(plan.groups.apps).toEqual(['apps/a.ts', 'apps/new.ts']);
+  });
+
+  it('stays in skip mode on a clean branch', () => {
+    const { run } = setUp({ originMain: true, feature: {} });
+    expect(JSON.parse(run('--dry-run').stdout)).toEqual({ mode: 'skip' });
   });
 
   it('ignores deleted files (diff-filter ACMR)', () => {
