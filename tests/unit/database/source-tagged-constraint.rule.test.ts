@@ -8,6 +8,7 @@
  * shipping it. See WXYC/Backend-Service#702.
  */
 import { RuleTester } from 'eslint';
+import { srcFilter } from '../../utils/src-filter';
 
 // The rule plugin lives at `eslint-rules/source-tagged-constraint.cjs`. The
 // CommonJS extension is deliberate so the same module loads from
@@ -182,4 +183,10 @@ ruleTester.run('source-tagged-constraint-confirmed', rule, {
       errors: [{ messageId: 'sourceTaggedConstraint', data: { tableName: 'external_thing' } }],
     },
   ],
+});
+
+describe("detect-changes' src filter", () => {
+  it('lists eslint-rules/**, so a PR that edits only a rule still runs this test', () => {
+    expect(srcFilter()).toContain('eslint-rules/**');
+  });
 });

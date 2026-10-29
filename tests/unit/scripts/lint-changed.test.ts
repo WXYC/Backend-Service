@@ -8,6 +8,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { srcFilter } from '../../utils/src-filter';
+
 const root = path.join(__dirname, '..', '..', '..');
 const scriptPath = path.join(root, 'scripts', 'lint-changed.mjs');
 
@@ -307,25 +309,6 @@ describe('pre-push hook wiring', () => {
     expect(hook).toContain('has_real_push=false');
     expect(hook).toContain('exit 0');
   });
-
-  // A PR that edits only the hook must still run this test, or it reports `skipped`, which branch
-  // protection accepts as passing (BS#1807). Returns the `src` filter's entries, comment lines dropped.
-  const srcFilter = (): string[] => {
-    const lines = fs
-      .readFileSync(path.join(root, '.github', 'workflows', 'test.yml'), 'utf8')
-      .split('\n')
-      .filter((line) => !/^\s*#/.test(line));
-    const start = lines.findIndex((line) => /^\s*src:\s*$/.test(line));
-    const entries: string[] = [];
-    for (const line of lines.slice(start + 1)) {
-      const match = /^\s*- '([^']+)'\s*$/.exec(line);
-      if (!match) {
-        break;
-      }
-      entries.push(match[1]);
-    }
-    return entries;
-  };
 
   it("detect-changes' src filter lists .husky/**", () => {
     expect(srcFilter()).toContain('.husky/**');

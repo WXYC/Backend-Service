@@ -30,6 +30,7 @@
  */
 import path from 'path';
 import { Linter, RuleTester } from 'eslint';
+import { srcFilter } from '../../utils/src-filter';
 
 // Both required (not import-default'd) for the same reason: avoid any
 // ESM/CJS interop ambiguity over whether the default export resolves to the
@@ -268,5 +269,11 @@ describe('no-bare-array-in-sql-template — known gaps (documented misses, not i
     // this shape, this assertion breaks and should be updated to `invalid`
     // — a welcome failure, not a regression.
     expect(messages).toHaveLength(0);
+  });
+});
+
+describe("detect-changes' src filter", () => {
+  it('lists eslint-rules/**, so a PR that edits only a rule still runs this test', () => {
+    expect(srcFilter()).toContain('eslint-rules/**');
   });
 });

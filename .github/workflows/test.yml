@@ -185,6 +185,16 @@ jobs:
               # trap as BS#1807 / BS#2256 / BS#2267 / BS#2718 below.
               - 'tsconfig.eslint.jobs.json'
               - 'eslint.config.mjs'
+              # BS#3677: same trap for the other root files `lint-and-typecheck`
+              # and `unit-tests` read. `eslint.config.mjs` loads `eslint-rules/`
+              # and four `tests/unit/database/*.rule.test.ts` specs require them;
+              # `jest.unit.config.ts` runs every unit test and
+              # `jest-unit-worker-cap.test.ts` pins its worker cap;
+              # `npm run format:check` reads the two prettier files.
+              - 'eslint-rules/**'
+              - 'jest.unit.config.ts'
+              - '.prettierrc.json'
+              - '.prettierignore'
               # BS#3556: `tests/unit/scripts/lint-changed.test.ts` reads
               # `.husky/pre-push`; without this a hook-only PR skips it and
               # the skip counts as a pass.
