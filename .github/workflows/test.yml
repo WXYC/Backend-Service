@@ -195,6 +195,29 @@ jobs:
               - 'jest.unit.config.ts'
               - '.prettierrc.json'
               - '.prettierignore'
+              # BS#3677: `npm run format:check` is `prettier --check .`, so it
+              # also checks every other root file Prettier has a parser for
+              # (`npx prettier --file-info <f>` reports `ignored:false`). A
+              # badly formatted edit to only one of them skipped
+              # `lint-and-typecheck` and turned main red for the next PR, the
+              # incident `.prettierignore` records above its `CLAUDE.md` entry
+              # (7ef9d531 -> #2670). `CLAUDE.md` is not listed because
+              # `.prettierignore` skips it.
+              - 'turbo.json'
+              - 'jest.config.json'
+              - 'jest.parallel.config.json'
+              - 'jest.e2e.config.json'
+              - 'drizzle.config.ts'
+              - 'docker-compose.yml'
+              - '.vscode/launch.json'
+              - '.github/dependabot.yml'
+              - '.github/ecr-lifecycle-policy.json'
+              - 'README.md'
+              - 'COMMERCIAL.md'
+              # Prettier 3 reads `.gitignore` as an ignore file, and `npm ci`
+              # in both gated jobs reads `.npmrc` (registry and auth).
+              - '.gitignore'
+              - '.npmrc'
               # BS#3556: `tests/unit/scripts/lint-changed.test.ts` reads
               # `.husky/pre-push`; without this a hook-only PR skips it and
               # the skip counts as a pass.
