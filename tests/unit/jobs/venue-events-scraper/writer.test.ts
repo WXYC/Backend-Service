@@ -309,31 +309,33 @@ describe('ensureVenue (unseeded path)', () => {
     expect(mockDb._chain.values).toHaveBeenCalledWith(expect.objectContaining({ city }));
   });
 
-  it('on conflict, lifts only a placeholder city and leaves every other column alone', async () => {
+  // A hand-corrected city is never a placeholder, so it survives. A legacy
+  // 'Unknown' is cleared even when the address names no city, because the
+  // word is worse than nothing: clients print it. (renderSql prints the
+  // bound city unquoted, so '' renders as nothing.)
+  it.each([
+    ['107 Brewer Lane, Carrboro, North Carolina', 'Carrboro'],
+    ['107 Brewer Lane', ''],
+  ])('on conflict with address %j, replaces only a placeholder city with %j', async (address, city) => {
     mockDb._chain.returning.mockResolvedValueOnce([{ id: 7, created: false }]);
-    await ensureVenue(
-      'cat-s-cradle-presents-at-107-brewer-lane',
-      'Ignored Name',
-      '107 Brewer Lane, Carrboro, North Carolina'
-    );
+    await ensureVenue('cat-s-cradle-presents-at-107-brewer-lane', 'Ignored Name', address);
 
     const conflict = mockDb._chain.onConflictDoUpdate.mock.calls[0][0] as {
       set: Record<string, unknown>;
       setWhere: unknown;
     };
     expect(Object.keys(conflict.set).sort()).toEqual(['city', 'last_modified']);
-    expect(conflict.set.city).toBe('Carrboro');
-    // A hand-corrected city is never a placeholder, so it survives.
+    expect(conflict.set.city).toBe(city);
     expect(renderSql(conflict.setWhere).replace(/\s+/g, ' ').trim()).toBe(
-      "venues.city IN ('Unknown', '') AND Carrboro <> ''"
+      `venues.city IN ('Unknown', '') AND venues.city <> ${city}`.trim()
     );
   });
 
-  it('preserves the existing row (DO NOTHING) when the unseeded slug already has a venues row — never overwrites with potentially-weaker fallback values', async () => {
-    // The scrape's `fallbackAddress=null` would have clobbered any
-    // prior good address (admin-edited OR earlier-scrape-richer) under
-    // the iteration-1 ON CONFLICT DO UPDATE shape. The new code never
-    // overwrites unseeded rows; it SELECTs the existing id and returns.
+  it('returns the existing id when the unseeded row has a real city — never overwrites it with weaker fallback values', async () => {
+    // The scrape's `fallbackAddress=null` would clobber any prior good
+    // address (admin-edited OR earlier-scrape-richer), so the conflict
+    // update touches only a placeholder city. When the setWhere predicate
+    // suppresses it, RETURNING is empty and we SELECT the existing id.
     mockDb._chain.returning.mockResolvedValueOnce([]); // setWhere suppressed the UPDATE
     mockDb._chain.limit.mockResolvedValueOnce([{ id: 7 }]); // follow-up SELECT
     const result = await ensureVenue('kings-raleigh', 'Kings of Raleigh', null);

@@ -69,8 +69,10 @@ const citySlug = (s: string): string =>
  * - The cities of every venue currently in `VENUE_SEEDS`, so adding a
  *   new seeded venue automatically extends the list.
  */
-const BASE_CITY_TOKENS = ['carrboro', 'chapel-hill', 'durham', 'saxapahaw', 'raleigh'];
-const CITY_TOKENS = Array.from(new Set([...BASE_CITY_TOKENS, ...VENUE_SEEDS.map((v) => citySlug(v.city))]));
+const BASE_CITIES = ['Carrboro', 'Chapel Hill', 'Durham', 'Saxapahaw', 'Raleigh'];
+/** Known city slug -> canonical display name. Also the whitelist `cityFromAddress` reads. */
+const KNOWN_CITIES = new Map([...BASE_CITIES, ...VENUE_SEEDS.map((v) => v.city)].map((city) => [citySlug(city), city]));
+const CITY_TOKENS = Array.from(KNOWN_CITIES.keys());
 const CITY_TRAIL_RE = new RegExp(`-(${CITY_TOKENS.join('|')})-[a-z0-9-]+$`, 'i');
 
 /**
@@ -408,19 +410,20 @@ const extractAddress = (location: SchemaEvent['location']): string | null => {
 /**
  * The city in a free-text "street, city, state" address, as RHP emits
  * `location.address` (e.g. `"107 Brewer Lane, Carrboro, North Carolina"`).
- * The city is the part just before the state. Returns null when there is
- * no such part, or when it holds a digit (a street, not a city), so a
- * caller never stores a guess.
+ * Returns the canonical spelling of the right-most comma-separated part that
+ * names a known Triangle city (see `KNOWN_CITIES`), or null when no part
+ * does. Matching a whitelist rather than a position keeps a state, country,
+ * street or over-long string out of `venues.city`: the writer never corrects
+ * a city it has filled in, so a wrong guess would stick.
  */
 export const cityFromAddress = (address: string | null): string | null => {
   if (!address) return null;
-  const parts = address
-    .split(',')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-  if (parts.length < 2) return null;
-  const city = parts[parts.length - 2];
-  return /\d/.test(city) ? null : city;
+  const parts = address.split(',').reverse();
+  for (const part of parts) {
+    const city = KNOWN_CITIES.get(citySlug(part));
+    if (city) return city;
+  }
+  return null;
 };
 
 /** The longest `headlining_artist_raw` we'll send to a varchar(256). */
