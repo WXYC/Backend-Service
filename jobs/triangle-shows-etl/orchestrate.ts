@@ -283,12 +283,13 @@ export const runEtl = async (opts: RunOptions): Promise<Totals> => {
 
     let venueId: number;
     try {
-      // Trimmed-|| like the artist fallback: heterogeneous scrapers can
-      // emit '' where they mean "unknown", and '' satisfies NOT NULL.
+      // Trimmed-|| like the artist fallback. A missing city is stored as
+      // '' (satisfies NOT NULL), never a placeholder word: clients print
+      // `venue.city` verbatim, so 'Unknown' reached listeners as a city.
       const { venue_id, created } = await opts.resolveVenueId(
         mapped.venue_slug,
         event.venue_name?.trim() || mapped.venue_slug,
-        event.venue_city?.trim() || 'Unknown'
+        event.venue_city?.trim() || ''
       );
       venueId = venue_id;
       if (created) {

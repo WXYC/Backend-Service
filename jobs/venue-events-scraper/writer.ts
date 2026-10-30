@@ -24,6 +24,7 @@ import {
 } from '@wxyc/database';
 import { eq, sql } from 'drizzle-orm';
 
+import { cityFromAddress } from './parse.js';
 import type { ParsedConcert } from './rhp-types.js';
 import { VENUE_SEEDS, type VenueSeed } from './rhp-venues.js';
 
@@ -57,8 +58,13 @@ export type WriteConcertOutcome = {
  *   to update the seed in `rhp-venues.ts`, not the row in the table.
  *
  * - **Unseeded** (a brand-new room the scraper hasn't been told about):
- *   INSERT if missing, otherwise DO NOTHING. We never overwrite an
- *   existing unseeded row from scrape inputs, because the scrape's
+ *   INSERT if missing, taking the city from the address (or '' when the
+ *   address names none — never a placeholder word, which clients would
+ *   print). On conflict, the only column ever written is `city`, and only
+ *   while it is still a placeholder ('Unknown' from rows inserted before
+ *   this rule, or ''): it takes the address's city, or '' when there is
+ *   none, so a legacy 'Unknown' is always cleared. Otherwise we never
+ *   overwrite an existing unseeded row from scrape inputs, because the scrape's
  *   `fallbackName / fallbackAddress` can be weaker than what the row
  *   already has (e.g. an earlier scrape captured a full street address
  *   that this scrape's JSON-LD omits) and because there's no
@@ -69,10 +75,9 @@ export type WriteConcertOutcome = {
  *   the row by manual SQL (it'll be preserved going forward) or promote
  *   the slug into VENUE_SEEDS so the seeded-path refresh takes over.
  *
- * `created` is computed from PG's `xmax = 0` predicate in the
- * seeded path (truthful under concurrent runners) and from the
- * presence/absence of a row in the unseeded INSERT … DO NOTHING
- * RETURNING result.
+ * `created` is computed from PG's `xmax = 0` predicate on both paths
+ * (truthful under concurrent runners). When `setWhere` suppresses the
+ * conflict UPDATE, RETURNING is empty and the existing id is SELECTed.
  *
  * Callers should cache the (slug → id) map across a single run to avoid
  * one round-trip per concert in the steady state.
@@ -133,26 +138,35 @@ export const ensureVenue = async (
   }
 
   // Unseeded path: INSERT-or-preserve. Never overwrite a row we don't
-  // own with potentially-weaker scrape inputs.
+  // own with potentially-weaker scrape inputs — except a placeholder city,
+  // which carries no information an operator could have meant to keep.
+  const city = cityFromAddress(fallbackAddress) ?? '';
   const placeholderValues: VenuesValue = {
     slug,
     name: fallbackName,
-    city: 'Unknown',
+    city,
     state: 'NC',
     address: fallbackAddress,
   };
   const inserted = await db
     .insert(venues)
     .values(placeholderValues)
-    .onConflictDoNothing({ target: venues.slug })
-    .returning({ id: venues.id });
+    .onConflictDoUpdate({
+      target: venues.slug,
+      set: { city, last_modified: sql`now()` },
+      setWhere: sql`${venues.city} IN ('Unknown', '') AND ${venues.city} <> ${city}`,
+    })
+    .returning({
+      id: venues.id,
+      created: sql<boolean>`xmax = 0`,
+    });
   if (inserted.length > 0) {
-    return { venue_id: inserted[0].id, created: true };
+    return { venue_id: inserted[0].id, created: inserted[0].created };
   }
   const existing = await db.select({ id: venues.id }).from(venues).where(eq(venues.slug, slug)).limit(1);
   if (existing.length === 0) {
     throw new Error(
-      `ensureVenue: unseeded slug '${slug}' missing after INSERT DO NOTHING (row may have been deleted concurrently)`
+      `ensureVenue: unseeded slug '${slug}' missing after upsert with no-op setWhere (row may have been deleted concurrently)`
     );
   }
   return { venue_id: existing[0].id, created: false };

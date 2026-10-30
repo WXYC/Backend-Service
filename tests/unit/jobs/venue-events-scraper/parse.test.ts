@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import {
+  cityFromAddress,
   decodeHtmlEntities,
   extractEventJsonLd,
   extractEventLinks,
@@ -50,6 +51,37 @@ describe('decodeHtmlEntities', () => {
   it('leaves unknown entities literally rather than mangling', () => {
     // Conservative decoder: we'd rather ship "&#x2603;" than guess wrong.
     expect(decodeHtmlEntities('snowman: &#x2603; here')).toBe('snowman: &#x2603; here');
+  });
+});
+
+describe('cityFromAddress', () => {
+  // RHP emits `location.address` as one free-text "street, city, state"
+  // string (live catscradle.com JSON-LD, 2026-10-27). Only a part that names
+  // a known Triangle city counts: the writer never corrects a city it has
+  // already filled in, so a wrong guess would stick.
+  it.each([
+    ['107 Brewer Lane, Carrboro, North Carolina', 'Carrboro'],
+    ['300 E Main St., Carrboro, NC 27510', 'Carrboro'],
+    ['506 W Franklin St, Chapel Hill, North Carolina', 'Chapel Hill'],
+    ['Suite 2, 723 Rigsbee Ave, Durham, NC', 'Durham'],
+    ['  Carrboro ,  NC  ', 'Carrboro'],
+    // A trailing country does not push the state into the city slot.
+    ['107 Brewer Lane, Carrboro, NC, USA', 'Carrboro'],
+    // A two-part address whose city is the last part.
+    ['723 Rigsbee Ave, Durham', 'Durham'],
+    // Case and spacing are normalized to the canonical spelling.
+    ['506 W Franklin St, CHAPEL  HILL, NC', 'Chapel Hill'],
+    // A street named after a city is not that city.
+    ['100 Durham St, North Carolina', null],
+    // An unknown or over-long part is not a city.
+    ['1 Main St, Asheville, NC', null],
+    [`1 Main St, ${'x'.repeat(80)}, NC`, null],
+    ['107 Brewer Lane, North Carolina', null],
+    ['107 Brewer Lane', null],
+    ['', null],
+    [null, null],
+  ])('%j -> %j', (address, expected) => {
+    expect(cityFromAddress(address)).toBe(expected);
   });
 });
 

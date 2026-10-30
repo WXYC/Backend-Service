@@ -66,7 +66,8 @@ export const RHP_SITES: RhpVenueConfig[] = [
  * Static facts about each known venue, used to seed the `venues` table on
  * first sight. Keyed by the slug values that appear above. Unknown slugs
  * (a new room not yet in `RHP_SITES.venue_name_to_slug`) get a
- * placeholder row the writer fills from the JSON-LD `location` block.
+ * placeholder row the writer fills from the JSON-LD `location` block:
+ * name and address as given, city parsed from the address (or '').
  */
 export type VenueSeed = {
   slug: string;

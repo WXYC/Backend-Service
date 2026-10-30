@@ -44,7 +44,7 @@ Two cases:
 },
 ```
 
-Also add a `VENUE_SEEDS` entry so the venues row gets a proper city/state instead of the `Unknown / NC` placeholder.
+Also add a `VENUE_SEEDS` entry so the venues row gets canonical city/state/address. Without one, the writer creates a placeholder row: the city comes from the JSON-LD address (`"107 Brewer Lane, Carrboro, North Carolina"` → `Carrboro`) when part of it names a known Triangle city (`KNOWN_CITIES` in [`parse.ts`](parse.ts)), or `''` otherwise, and the state is always `NC`. The writer never stores a placeholder word such as `Unknown`, because clients print `venue.city` as-is. While a row's city is still `''` or the legacy `Unknown`, each run rewrites it from the address, so a legacy `Unknown` becomes a city or `''`; a hand-corrected city is never touched.
 
 **Different platform.** The parser is RHP-specific (it expects the JSON-LD block under that specific HTML comment marker). For other ticketing platforms, add a sibling fetcher / parser pair and a new `concert_source_enum` value.
 
