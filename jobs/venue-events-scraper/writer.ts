@@ -62,7 +62,8 @@ export type WriteConcertOutcome = {
  *   address names none — never a placeholder word, which clients would
  *   print). On conflict, the only column ever written is `city`, and only
  *   while it is still a placeholder ('Unknown' from rows inserted before
- *   this rule, or '') and the address now yields one. Otherwise we never
+ *   this rule, or ''): it takes the address's city, or '' when there is
+ *   none, so a legacy 'Unknown' is always cleared. Otherwise we never
  *   overwrite an existing unseeded row from scrape inputs, because the scrape's
  *   `fallbackName / fallbackAddress` can be weaker than what the row
  *   already has (e.g. an earlier scrape captured a full street address
@@ -74,10 +75,9 @@ export type WriteConcertOutcome = {
  *   the row by manual SQL (it'll be preserved going forward) or promote
  *   the slug into VENUE_SEEDS so the seeded-path refresh takes over.
  *
- * `created` is computed from PG's `xmax = 0` predicate in the
- * seeded path (truthful under concurrent runners) and from the
- * presence/absence of a row in the unseeded INSERT … DO NOTHING
- * RETURNING result.
+ * `created` is computed from PG's `xmax = 0` predicate on both paths
+ * (truthful under concurrent runners). When `setWhere` suppresses the
+ * conflict UPDATE, RETURNING is empty and the existing id is SELECTed.
  *
  * Callers should cache the (slug → id) map across a single run to avoid
  * one round-trip per concert in the steady state.
@@ -154,7 +154,7 @@ export const ensureVenue = async (
     .onConflictDoUpdate({
       target: venues.slug,
       set: { city, last_modified: sql`now()` },
-      setWhere: sql`${venues.city} IN ('Unknown', '') AND ${city} <> ''`,
+      setWhere: sql`${venues.city} IN ('Unknown', '') AND ${venues.city} <> ${city}`,
     })
     .returning({
       id: venues.id,
