@@ -106,7 +106,7 @@
     "jest": "^30.5.2",
     "jest-html-reporters": "^3.1.7",
     "nodemon": "^3.1.14",
-    "postgres": "^3.4.9",
+    "postgres": "^4.0.0",
     "prettier": "^3.9.9",
     "supertest": "^7.3.1",
     "ts-jest": "^29.4.14",
@@ -120,9 +120,9 @@
     "yaml": "^2.9.1"
   },
   "dependencies": {
-    "@sentry/node": "^11.4.0",
-    "eventsource": "^5.1.2",
-    "jose": "^6.2.12"
+    "@sentry/node": "^11.10.0",
+    "eventsource": "^5.1.4",
+    "jose": "^6.2.14"
   },
   "overrides": {
     "esbuild": "^0.25.0"

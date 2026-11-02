@@ -17,7 +17,7 @@
   "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@wxyc/database": "^1.0.0",
-    "postgres": "^3.4.9"
+    "postgres": "^4.0.0"
   },
   "peerDependencies": {
     "drizzle-orm": "^0.45.0"
