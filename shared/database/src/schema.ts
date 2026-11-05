@@ -897,17 +897,23 @@ export const library_track_index = wxyc_schema.table(
  * NULL; `tracks` is `[{ title, position, artist_credits: [] }]`; `fingerprint`
  * hashes the normalized tracks. The 500-character title cap is the writer's.
  */
-export const library_track_data = wxyc_schema.table('library_track_data', {
-  library_id: integer('library_id')
-    .primaryKey()
-    .references(() => library.id, { onDelete: 'cascade' }),
-  source: text('source').notNull(),
-  source_batch: text('source_batch'),
-  discogs_release_id: integer('discogs_release_id'),
-  tracks: jsonb('tracks').notNull(),
-  fingerprint: text('fingerprint').notNull(),
-  refreshed_at: timestamp('refreshed_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const library_track_data = wxyc_schema.table(
+  'library_track_data',
+  {
+    library_id: integer('library_id')
+      .primaryKey()
+      .references(() => library.id, { onDelete: 'cascade' }),
+    source: text('source').notNull(),
+    source_batch: text('source_batch'),
+    discogs_release_id: integer('discogs_release_id'),
+    tracks: jsonb('tracks').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    refreshed_at: timestamp('refreshed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check('library_track_data_source_check', sql`${table.source} IN ('compilation', 'override', 'album_metadata')`),
+  ]
+);
 
 export type NewCompilationTrackArtist = InferInsertModel<typeof compilation_track_artist>;
 export type CompilationTrackArtist = InferSelectModel<typeof compilation_track_artist>;

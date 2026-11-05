@@ -161,6 +161,14 @@ export const FK_TARGETS: readonly FkTarget[] = [
   // `position` before it fires, or a loser row repointed onto a slot the
   // survivor already holds violates the unique index (23505).
   { table: 'library_urls', column: 'library_id', uniqueKey: ['library_id', 'position'] },
+  // BS#3740. One row per library record in each table (`library_id` is the PK),
+  // both ON DELETE cascade, so the key is the column alone. The survivor's own
+  // row wins when it has one (the loser's is dropped as a collision); otherwise
+  // the loser's row repoints and the survivor inherits it. Both tables are
+  // derived from the record and rebuilt by the nightly writer, so the dropped
+  // row is regenerable, unlike album_metadata.
+  { table: 'library_track_index', column: 'library_id', uniqueKey: ['library_id'] },
+  { table: 'library_track_data', column: 'library_id', uniqueKey: ['library_id'] },
   // BS#2794. `intake_items` is the first table with TWO FKs into `library`, and
   // their delete rules differ (`album_id` cascades, `cited_album_id` sets
   // null), so they are separate entries. Neither column is unique, so a repoint
