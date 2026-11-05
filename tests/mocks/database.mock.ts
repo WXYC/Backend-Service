@@ -885,6 +885,19 @@ export const compilation_track_artist = {
   track_artist_link_confidence: 'compilation_track_artist.track_artist_link_confidence',
   track_artist_link_method: 'compilation_track_artist.track_artist_link_method',
 };
+export const library_track_index = {
+  library_id: 'library_track_index.library_id',
+  search_doc: 'library_track_index.search_doc',
+};
+export const library_track_data = {
+  library_id: 'library_track_data.library_id',
+  source: 'library_track_data.source',
+  source_batch: 'library_track_data.source_batch',
+  discogs_release_id: 'library_track_data.discogs_release_id',
+  tracks: 'library_track_data.tracks',
+  fingerprint: 'library_track_data.fingerprint',
+  refreshed_at: 'library_track_data.refreshed_at',
+};
 export const genre_artist_crossreference = {
   artist_id: 'genre_artist_crossreference.artist_id',
   genre_id: 'genre_artist_crossreference.genre_id',

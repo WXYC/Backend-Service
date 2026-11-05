@@ -859,9 +859,55 @@ export const library = wxyc_schema.table(
       labelIdIdx: index('library_label_id_idx')
         .on(table.label_id)
         .where(sql`${table.label_id} IS NOT NULL`),
+      // BS#3740. Level 3 of the shared catalog matcher reads both columns with
+      // `ILIKE '%w%'`. Built CONCURRENTLY on prod ahead of migration 0209; see
+      // that migration's header for the statements.
+      labelTrgmIdx: index('library_label_trgm_idx').using('gin', sql`${table.label} gin_trgm_ops`),
+      alternateArtistNameTrgmIdx: index('library_alternate_artist_name_trgm_idx').using(
+        'gin',
+        sql`${table.alternate_artist_name} gin_trgm_ops`
+      ),
     };
   }
 );
+
+/**
+ * BS#3740. The narrow table the catalog matcher's track levels read: one row
+ * per library record, holding only the `search_doc` tsvector (`simple` config,
+ * titles and primary credits) so a common-word scan never reads the jsonb in
+ * `library_track_data`. A record has a row in both tables or in neither. Kept
+ * off `library` so the nightly writer does not fire the per-row `cdc_library`
+ * trigger. Nothing reads or writes it yet.
+ */
+export const library_track_index = wxyc_schema.table(
+  'library_track_index',
+  {
+    library_id: integer('library_id')
+      .primaryKey()
+      .references(() => library.id, { onDelete: 'cascade' }),
+    search_doc: tsvector('search_doc').notNull(),
+  },
+  (table) => [index('library_track_index_search_doc_idx').using('gin', sql`${table.search_doc}`)]
+);
+
+/**
+ * BS#3740. Sibling of `library_track_index`: the track list and its
+ * provenance, one row per library record. `source` is 'compilation' |
+ * 'override' | 'album_metadata'; `source_batch` is the override batch, else
+ * NULL; `tracks` is `[{ title, position, artist_credits: [] }]`; `fingerprint`
+ * hashes the normalized tracks. The 500-character title cap is the writer's.
+ */
+export const library_track_data = wxyc_schema.table('library_track_data', {
+  library_id: integer('library_id')
+    .primaryKey()
+    .references(() => library.id, { onDelete: 'cascade' }),
+  source: text('source').notNull(),
+  source_batch: text('source_batch'),
+  discogs_release_id: integer('discogs_release_id'),
+  tracks: jsonb('tracks').notNull(),
+  fingerprint: text('fingerprint').notNull(),
+  refreshed_at: timestamp('refreshed_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 export type NewCompilationTrackArtist = InferInsertModel<typeof compilation_track_artist>;
 export type CompilationTrackArtist = InferSelectModel<typeof compilation_track_artist>;
