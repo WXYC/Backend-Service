@@ -48,6 +48,7 @@ const ALLOWLISTED_KEYS = [
   'REVIEWS_AUDIENCE',
   'POSTHOG_SECRET_KEY',
   'POSTHOG_FLAGS_API_KEY',
+  'DB_HOST_OVERRIDE',
 ] as const;
 
 describe('set-ec2-env-var.yml allowlist', () => {

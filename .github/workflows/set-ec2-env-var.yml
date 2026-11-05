@@ -365,6 +365,16 @@ jobs:
           # Docker healthcheck, no explicit heap ceiling, and Sentry events
           # unattributed to a release, until the next real deploy.
           REVIEW_GATE_CUTOVER_DATE: ${{ secrets.REVIEW_GATE_CUTOVER_DATE }}
+          # Temporary, for the PostgreSQL 18 upgrade's rollback (BS#3776): it
+          # points DB_HOST back at the old instance if the new one is
+          # abandoned after switchover. Run it with key=DB_HOST and
+          # secret_name=DB_HOST_OVERRIDE, once per restart_target, one run at a
+          # time; backend, auth and enrichment-worker each read DB_HOST at
+          # startup. The secret stays unset until a rollback needs it and its
+          # value is set just before use. Unset, the run stops in this step
+          # before it touches the host. Remove this entry, its case arm and the
+          # secret once the old instance is deleted.
+          DB_HOST_OVERRIDE: ${{ secrets.DB_HOST_OVERRIDE }}
         run: |
           set -euo pipefail
           KEY="${{ inputs.key }}"
@@ -426,6 +436,7 @@ jobs:
             SES_ACCESS_KEY_ID) VALUE="$SES_ACCESS_KEY_ID" ;;
             SES_SECRET_ACCESS_KEY) VALUE="$SES_SECRET_ACCESS_KEY" ;;
             REVIEW_GATE_CUTOVER_DATE) VALUE="$REVIEW_GATE_CUTOVER_DATE" ;;
+            DB_HOST_OVERRIDE) VALUE="$DB_HOST_OVERRIDE" ;;
             *)
               echo "::error::Unsupported secret_name '$SECRET_NAME'. Add it to the resolve step's env block."
               exit 1
