@@ -1153,12 +1153,18 @@ jobs:
           node --input-type=module <<'EOF'
           import postgres from 'postgres';
           const e = process.env;
-          const sql = postgres({ host: e.DB_HOST, port: Number(e.DB_PORT), database: e.DB_NAME, username: e.DB_USERNAME, password: e.DB_PASSWORD, max: 1 });
-          const [row] = await sql.unsafe('SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()');
-          await sql.end();
-          console.log('sandbox connection ssl:', row?.ssl);
-          if (row?.ssl !== true) {
-            console.log('::error::The sandbox connection is not encrypted, so PGSSL was not honored');
+          try {
+            const sql = postgres({ host: e.DB_HOST, port: Number(e.DB_PORT), database: e.DB_NAME, username: e.DB_USERNAME, password: e.DB_PASSWORD, max: 1 });
+            const [row] = await sql.unsafe('SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()');
+            await sql.end();
+            console.log('sandbox connection ssl:', row?.ssl);
+            if (row?.ssl !== true) {
+              console.log('::error::The sandbox connection is not encrypted, so PGSSL was not honored');
+              process.exit(1);
+            }
+          } catch (err) {
+            // Only the message: the error object can carry connection options.
+            console.log(`::error::sandbox SSL check failed: ${err?.message}`);
             process.exit(1);
           }
           EOF
