@@ -1111,6 +1111,8 @@ jobs:
           SHAPE_PROBE_DB_NAME: ${{ secrets.PROD_DB_NAME }}
           SHAPE_PROBE_DB_USERNAME: ${{ secrets.PROD_DB_USERNAME }}
           SHAPE_PROBE_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+          # Same reason as the PGSSL on `Run drizzle:migrate against sandbox`.
+          PGSSL: require
           SHAPE_PROBE_SNAPSHOT_LABEL: >-
             automated prod RDS snapshot ${{ env.SNAPSHOT_TIME }}, restored to
             ephemeral sandbox for run ${{ github.run_id }}
@@ -1138,7 +1140,29 @@ jobs:
           DB_NAME: ${{ secrets.PROD_DB_NAME }}
           DB_USERNAME: ${{ secrets.PROD_DB_USERNAME }}
           DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
-        run: node scripts/dryrun-migrate.mjs
+          # The restore passes no parameter group, so the sandbox gets the
+          # engine default. `default.postgres18` sets rds.force_ssl = 1, which
+          # refuses plaintext once prod is on 18. postgres-js reads PGSSL when
+          # the client sets no `ssl` option (neither script does), and
+          # `require` encrypts without verifying the certificate.
+          PGSSL: require
+        run: |
+          # Fail unless this connection is encrypted. 14 also accepts plaintext,
+          # so this is what proves PGSSL is honored before the upgrade. Same
+          # library, env and options as scripts/dryrun-migrate.mjs.
+          node --input-type=module <<'EOF'
+          import postgres from 'postgres';
+          const e = process.env;
+          const sql = postgres({ host: e.DB_HOST, port: Number(e.DB_PORT), database: e.DB_NAME, username: e.DB_USERNAME, password: e.DB_PASSWORD, max: 1 });
+          const [row] = await sql.unsafe('SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()');
+          await sql.end();
+          console.log('sandbox connection ssl:', row?.ssl);
+          if (row?.ssl !== true) {
+            console.log('::error::The sandbox connection is not encrypted, so PGSSL was not honored');
+            process.exit(1);
+          }
+          EOF
+          node scripts/dryrun-migrate.mjs
 
       - name: Revoke runner IP from SG_DRYRUN_GHA
         # Always runs so a failure in any earlier step still cleans up the
