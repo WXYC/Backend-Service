@@ -1443,6 +1443,13 @@
       "when": 1793231163050,
       "tag": "0208_3733-library-search-doc-alternate-artist-name",
       "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1793842629931,
+      "tag": "0209_catalog-search-schema",
+      "breakpoints": true
     }
   ]
 }
