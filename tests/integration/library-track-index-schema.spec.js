@@ -4,8 +4,9 @@
  * `library.label` and `library.alternate_artist_name`.
  *
  * Nothing writes either table yet, so this spec asserts the schema a fresh
- * migrate produces: the indexes exist with the right access method, and
- * deleting a `library` row cascades to both tables.
+ * migrate produces: the indexes exist with the exact definitions the 0209
+ * header builds by hand on prod, deleting a `library` row cascades to both
+ * tables, and `source` is limited to its three values.
  */
 
 const postgres = require('postgres');
@@ -41,11 +42,16 @@ describe('catalog search schema (BS#3740)', () => {
     }
   });
 
+  // The full definition, not a substring: the two trigram indexes are built
+  // CONCURRENTLY by hand on prod from the statements in the 0209 header, and
+  // `IF NOT EXISTS` keeps whatever is already there. A drifted opclass or
+  // expression in the migration would pass a "contains the column" check while
+  // fresh databases and prod disagreed.
   test.each([
-    ['library_label_trgm_idx', 'library', 'label'],
-    ['library_alternate_artist_name_trgm_idx', 'library', 'alternate_artist_name'],
-    ['library_track_index_search_doc_idx', 'library_track_index', 'search_doc'],
-  ])('%s is a valid GIN index on %s.%s', async (indexName, table, column) => {
+    ['library_label_trgm_idx', 'library', 'USING gin (label gin_trgm_ops)'],
+    ['library_alternate_artist_name_trgm_idx', 'library', 'USING gin (alternate_artist_name gin_trgm_ops)'],
+    ['library_track_index_search_doc_idx', 'library_track_index', 'USING gin (search_doc)'],
+  ])('%s is a valid index defined exactly as %s %s', async (indexName, table, usingClause) => {
     const rows = await sql.unsafe(
       `SELECT am.amname, i.indisvalid, pg_get_indexdef(c.oid) AS def
          FROM pg_class c
@@ -59,7 +65,51 @@ describe('catalog search schema (BS#3740)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].amname).toBe('gin');
     expect(rows[0].indisvalid).toBe(true);
-    expect(rows[0].def).toContain(column);
+    expect(rows[0].def).toBe(`CREATE INDEX ${indexName} ON ${SCHEMA}.${table} ${usingClause}`);
+  });
+
+  describe('library_track_data_source_check', () => {
+    test('exists on library_track_data and names the three sources', async () => {
+      const rows = await sql.unsafe(
+        `SELECT pg_get_constraintdef(con.oid) AS def
+           FROM pg_constraint con
+           JOIN pg_class t ON t.oid = con.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = $1 AND t.relname = 'library_track_data'
+            AND con.conname = 'library_track_data_source_check' AND con.contype = 'c'`,
+        [SCHEMA]
+      );
+      expect(rows).toHaveLength(1);
+      for (const source of ['compilation', 'override', 'album_metadata']) {
+        expect(rows[0].def).toContain(`'${source}'`);
+      }
+    });
+
+    test.each([
+      ['compilation', true],
+      ['override', true],
+      ['album_metadata', true],
+      ['overrides', false],
+      ['Album_metadata', false],
+      ['', false],
+    ])('source %j is accepted: %s', async (source, accepted) => {
+      const [{ id }] = await sql.unsafe(
+        `INSERT INTO "${SCHEMA}".library (artist_id, genre_id, format_id, album_title, code_number, artist_name)
+         VALUES (1, 11, 1, 'bs3740-check-probe', 9998, 'Jessica Pratt')
+         RETURNING id`
+      );
+      libraryIds.push(id);
+      const insert = sql.unsafe(
+        `INSERT INTO "${SCHEMA}".library_track_data (library_id, source, tracks, fingerprint)
+         VALUES ($1, $2, '[]'::jsonb, 'abc')`,
+        [id, source]
+      );
+      if (accepted) {
+        await expect(insert).resolves.toBeDefined();
+      } else {
+        await expect(insert).rejects.toMatchObject({ code: '23514' });
+      }
+    });
   });
 
   test('deleting a library row cascades to library_track_index and library_track_data', async () => {

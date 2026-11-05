@@ -9,7 +9,8 @@
 --   - library_track_data: the sibling holding the track list and provenance
 --     (source, source_batch, discogs_release_id, tracks jsonb, fingerprint,
 --     refreshed_at), same PK and FK. A record has a row in both tables or in
---     neither.
+--     neither. A CHECK limits source to 'compilation', 'override' and
+--     'album_metadata'.
 --   - Why two tables: a common word makes Postgres scan the whole track table,
 --     and with the jsonb in the same row that scan reads every jsonb. Split,
 --     levels 4 and 5 took 7 ms instead of 44 ms for "love" (BS#3739).
@@ -19,7 +20,7 @@
 --     plain CREATE INDEX.
 --
 -- @no-precondition-needed: both tables are new and empty, so the foreign keys
--- have no existing rows to violate.
+-- have no existing rows to violate, and so does the CHECK on source.
 --
 -- library_label_trgm_idx and library_alternate_artist_name_trgm_idx serve
 -- level 3 of the matcher (ILIKE '%w%' on label and alternate_artist_name), which
@@ -53,7 +54,8 @@ CREATE TABLE "wxyc_schema"."library_track_data" (
 	"discogs_release_id" integer,
 	"tracks" jsonb NOT NULL,
 	"fingerprint" text NOT NULL,
-	"refreshed_at" timestamp with time zone DEFAULT now() NOT NULL
+	"refreshed_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "library_track_data_source_check" CHECK ("wxyc_schema"."library_track_data"."source" IN ('compilation', 'override', 'album_metadata'))
 );
 --> statement-breakpoint
 CREATE TABLE "wxyc_schema"."library_track_index" (

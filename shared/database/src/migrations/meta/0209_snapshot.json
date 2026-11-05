@@ -1,5 +1,5 @@
 {
-  "id": "c6455a81-d906-485e-91a6-f396fb159085",
+  "id": "dafda7a2-e637-4103-bf67-b6d52424bc1d",
   "prevId": "4e6144ac-2bed-451e-9064-82a5155a793d",
   "version": "7",
   "dialect": "postgresql",
@@ -6214,7 +6214,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "library_track_data_source_check": {
+          "name": "library_track_data_source_check",
+          "value": "\"wxyc_schema\".\"library_track_data\".\"source\" IN ('compilation', 'override', 'album_metadata')"
+        }
+      },
       "isRLSEnabled": false
     },
     "wxyc_schema.library_track_index": {

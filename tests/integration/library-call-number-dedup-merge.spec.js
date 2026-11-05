@@ -182,6 +182,49 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       expect(rows[0].album_id).toBe(plan.survivorId);
     });
 
+    // BS#3740. One row per record, keyed on library_id alone: the survivor's own
+    // row wins a collision, and with no survivor row the loser's repoints.
+    describe.each([
+      [
+        'library_track_index',
+        (id) => sql`
+          INSERT INTO ${sql(SCHEMA)}.library_track_index (library_id, search_doc)
+          VALUES (${id}, to_tsvector('simple', ${`la paradoja ${id}`}))`,
+      ],
+      [
+        'library_track_data',
+        (id) => sql`
+          INSERT INTO ${sql(SCHEMA)}.library_track_data (library_id, source, tracks, fingerprint)
+          VALUES (${id}, 'override', '[]'::jsonb, ${`fp-${id}`})`,
+      ],
+    ])('%s', (table, insertFor) => {
+      it('repoints the loser’s row when the survivor has none', async () => {
+        const a = await seedAlbum({ title: 'DOGA', codeNumber: 11 });
+        const b = await seedAlbum({ title: 'DOGA', codeNumber: 11 });
+        const plan = (await merge.planSlots([await slotFor(11)]))[0];
+        const loser = plan.survivorId === a ? b : a;
+        await insertFor(loser);
+
+        await expect(merge.mergeSlot(plan)).resolves.toBeDefined();
+
+        const rows = await sql`SELECT library_id FROM ${sql(SCHEMA)}.${sql(table)} WHERE library_id IN (${a}, ${b})`;
+        expect(rows.map((r) => r.library_id)).toEqual([plan.survivorId]);
+      });
+
+      it('keeps the survivor’s row and drops the loser’s on a collision', async () => {
+        const a = await seedAlbum({ title: 'DOGA', codeNumber: 12 });
+        const b = await seedAlbum({ title: 'DOGA', codeNumber: 12 });
+        await insertFor(a);
+        await insertFor(b);
+        const plan = (await merge.planSlots([await slotFor(12)]))[0];
+
+        await expect(merge.mergeSlot(plan)).resolves.toBeDefined();
+
+        const rows = await sql`SELECT library_id FROM ${sql(SCHEMA)}.${sql(table)} WHERE library_id IN (${a}, ${b})`;
+        expect(rows.map((r) => r.library_id)).toEqual([plan.survivorId]);
+      });
+    });
+
     it('drops a colliding compilation track on the 3-column unique key', async () => {
       const a = await seedAlbum({ title: 'Nueva Era', codeNumber: 7 });
       const b = await seedAlbum({ title: 'Nueva Era', codeNumber: 7 });
@@ -401,6 +444,10 @@ describe('library-call-number-dedup — REAL merge functions (real PG)', () => {
       // without it, so both cascade and a merge must repoint them first.
       'review_prints.album_id': 'CASCADE',
       'fcc_notes.album_id': 'CASCADE',
+      // BS#3740. One row per library record, derived and rebuilt by the nightly
+      // writer. Both cascade, so a merge must repoint them before the loser goes.
+      'library_track_index.library_id': 'CASCADE',
+      'library_track_data.library_id': 'CASCADE',
     };
 
     it('matches the delete actions the database actually enforces', async () => {
