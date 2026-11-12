@@ -1,0 +1,30 @@
+# Same shape as Dockerfile.album-metadata-bio-fill: build output comes from the
+# shared builder image (docs/deploy.md "Shared builder image").
+ARG BUILDER_IMAGE=wxyc-deploy-builder:local
+FROM ${BUILDER_IMAGE} AS builder
+
+FROM node:24-alpine AS prod
+
+ARG NPM_TOKEN
+WORKDIR /album-metadata-extended-fill
+
+COPY ./.npmrc ./
+COPY ./package* ./
+COPY ./jobs/album-metadata-extended-fill/package* ./jobs/album-metadata-extended-fill/
+COPY ./shared/database/package* ./shared/database/
+COPY ./shared/lml-client/package* ./shared/lml-client/
+COPY ./shared/observability/package* ./shared/observability/
+
+# `@wxyc/lml-client` depends on `@wxyc/shared` from GitHub Packages, hence NPM_TOKEN + .npmrc.
+RUN npm install --omit=dev && rm -f .npmrc
+
+COPY --link --from=builder /jobs/album-metadata-extended-fill/dist ./jobs/album-metadata-extended-fill/dist
+COPY --link --from=builder /shared/database/dist ./shared/database/dist
+COPY --link --from=builder /shared/lml-client/dist ./shared/lml-client/dist
+COPY --link --from=builder /shared/observability/dist ./shared/observability/dist
+
+ENV DB_APPLICATION_NAME=wxyc-album-metadata-extended-fill
+
+# ENTRYPOINT + empty CMD so `docker run <image> --dry-run` passes the flag to the job.
+ENTRYPOINT ["node", "/album-metadata-extended-fill/jobs/album-metadata-extended-fill/dist/job.js"]
+CMD []
