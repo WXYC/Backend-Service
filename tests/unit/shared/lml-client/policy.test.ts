@@ -96,6 +96,8 @@ describe('lml-client policy', () => {
         // label so the job's LML sheds and `lml.cache.api_calls` are
         // readable apart from the bio fill it copies.
         'album-metadata-reask': 5,
+        // BS#1442: the extended-column fill, its own label so its reads are attributable.
+        'album-metadata-extended-fill': 5,
       };
       for (const [caller, expectedClass] of Object.entries(expected) as [LmlCaller, LmlCallerClass][]) {
         expect(resolveLmlPolicy(caller).class).toBe(expectedClass);

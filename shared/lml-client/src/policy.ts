@@ -280,6 +280,10 @@ export const ALL_LML_CALLERS = [
   // It is the one paced offline caller that sets
   // `allowReleaseResolutionFallback` (see that option's doc comment).
   'album-metadata-reask',
+  // BS#1442: the extended-column fill (`getRelease`, `getArtistDetails`,
+  // `getPinnedTracklists`). Class 5, not 3: a discogs-cache miss retries the
+  // live Discogs API past class 3's 8 s. Its own label so its reads are attributable.
+  'album-metadata-extended-fill',
 ] as const;
 
 export type LmlCaller = (typeof ALL_LML_CALLERS)[number];
@@ -322,6 +326,7 @@ const CALLER_CLASS: Record<LmlCaller, LmlCallerClass> = {
   'streaming-columns-drain': 5,
   'album-metadata-bio-fill': 5,
   'album-metadata-reask': 5,
+  'album-metadata-extended-fill': 5,
   'concerts-genre-enrichment': 5,
   'concerts-artist-lml-resolver': 5,
   'rotation-release-id-backfill': 5,

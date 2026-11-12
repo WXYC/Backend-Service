@@ -136,6 +136,7 @@ const TYPE_OPTIONAL_METHODS = new Set([
   'searchTrackReleases',
   'resolveArtistNamesBulk',
   'fetchArtistGenresBulk',
+  'getPinnedTracklists',
 ]);
 const ALL_METHODS = new Set([...TYPE_REQUIRED_METHODS, ...TYPE_OPTIONAL_METHODS]);
 

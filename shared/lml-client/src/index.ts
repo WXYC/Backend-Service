@@ -1973,6 +1973,87 @@ export async function refreshForIdentities(
 }
 
 /**
+ * Wire shape for `POST /api/v1/identity/pinned-tracklists` (LML#1503). Mirrors
+ * `PinnedTracklistsResult` / `PinnedTracklist` / `PinnedTrack` in
+ * `wxyc-shared/api.yaml` (wxyc-shared#783), defined locally until this repo's
+ * pinned `@wxyc/shared` carries them, the same ramp-up as the types below.
+ */
+export interface PinnedTrack {
+  sequence: number;
+  /** An empty Discogs position is sent as null. */
+  position: string | null;
+  title: string;
+  /** Primary (`extra = 0`) credits only; empty when the track has none. */
+  artist_credits: string[];
+}
+
+export interface PinnedTracklist {
+  /** The hand-verified Discogs release for the library row. */
+  discogs_release_id: number;
+  /** The override batch the pin came from. */
+  source: string;
+  /** `false`: the release is outside the discogs-cache and `tracks: []` means nothing. */
+  in_cache: boolean;
+  tracks: PinnedTrack[];
+}
+
+export interface PinnedTracklistsResult {
+  /** Echo of the requested `library.legacy_release_id`. */
+  legacy_release_id: number;
+  /** The row's pin, or null when it has none. A failed lookup is a 503, never null. */
+  pin: PinnedTracklist | null;
+}
+
+/** LML's per-request cap on `legacy_release_ids`. */
+export const PINNED_TRACKLISTS_BATCH_CAP = 1000;
+
+/**
+ * The `lml_cache.library_release_override` pin, and the pinned release's
+ * tracklist, for each library row. Ids are `library.legacy_release_id` values
+ * (the catalog card id), NOT `library.id`.
+ *
+ * Results come back one per id in request order, repeats included. An answer
+ * that does not line up with the request is refused as a 502 rather than
+ * risk attributing a pin to the wrong row. A 503 (transient) surfaces as 502
+ * like every other 5xx, never as a null pin; 400/422 are input errors.
+ *
+ * PG-only on LML's side, so like `getRelease` it shares neither the limiter
+ * nor the breaker; `caller` picks the class timeout.
+ *
+ * @param legacyReleaseIds - 1 to `PINNED_TRACKLISTS_BATCH_CAP` ids
+ * @param options - Optional caller label. See `CallerOption`.
+ */
+export async function getPinnedTracklists(
+  legacyReleaseIds: number[],
+  options?: CallerOption
+): Promise<PinnedTracklistsResult[]> {
+  if (legacyReleaseIds.length === 0 || legacyReleaseIds.length > PINNED_TRACKLISTS_BATCH_CAP) {
+    throw new LmlClientError(
+      `getPinnedTracklists takes 1 to ${PINNED_TRACKLISTS_BATCH_CAP} ids, got ${legacyReleaseIds.length}; chunk upstream`,
+      400
+    );
+  }
+  const response = await lmlFetch(
+    '/api/v1/identity/pinned-tracklists',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ legacy_release_ids: legacyReleaseIds }),
+    },
+    policyForCaller(options?.caller)?.timeoutMs
+  );
+  const results = ((await response.json()) as { results?: unknown }).results;
+  const aligned =
+    Array.isArray(results) &&
+    results.length === legacyReleaseIds.length &&
+    results.every((r, i) => (r as PinnedTracklistsResult | null)?.legacy_release_id === legacyReleaseIds[i]);
+  if (!aligned) {
+    throw new LmlClientError('LML pinned-tracklists answer does not line up with the requested ids', 502);
+  }
+  return results as PinnedTracklistsResult[];
+}
+
+/**
  * Wire shape for `POST /api/v1/artists/resolve/bulk` (LML#759, BS#1614).
  *
  * Mirrors `ArtistResolveBulkRequest` / `ArtistResolveBulkResponse` /
