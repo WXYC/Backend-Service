@@ -66,3 +66,8 @@ export const writeFill = async (candidate: FillCandidate, values: FillValues): P
   const [row] = (await db.execute(writeFillSql(candidate, values))) as unknown as Record<ExtendedColumn, boolean>[];
   return row === undefined ? null : EXTENDED_COLUMNS.filter((c) => row[c]);
 };
+
+/** ANALYZE after a run that wrote, aborts included, per `docs/bulk-update-playbook.md`. Copied from the bio fill. */
+export const analyzeAlbumMetadata = async (): Promise<void> => {
+  await db.execute(sql.raw(`ANALYZE ${TABLE}`));
+};

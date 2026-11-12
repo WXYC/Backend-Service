@@ -251,7 +251,8 @@ export const buildBulkItems = (albums: ResolvedAlbum[]): BulkLookupItem[] =>
  * writes 8 additional LML-only columns (discogs_artist_id, label,
  * full_release_date, genres, styles, tracklist, artist_image_url, bio_tokens)
  * on its linked+match UPSERT. This job intentionally does NOT (it can't —
- * `bulkLookupMetadata` has no `extended` flag yet; tracked in BS#1442). This
+ * `bulkLookupMetadata` has no `extended` flag); rows it wrote get those
+ * columns from `jobs/album-metadata-extended-fill` (BS#1442). This
  * is SAFE because the `set` clause below omits those 8 columns, so a backfill
  * UPSERT against a worker-enriched row PRESERVES them (never clobbers). DO NOT
  * add the 8 columns to the `set` clause without also sourcing them via
