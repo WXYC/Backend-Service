@@ -13,7 +13,8 @@ import { EXTENDED_COLUMNS, type ExtendedColumn } from './map.js';
 export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
 
 // Via `WXYC_SCHEMA_NAME`, so the integration tier's per-worker schema is read.
-const TABLE = `"${(process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""')}"."album_metadata"`;
+const SCHEMA = `"${(process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""')}"`;
+const TABLE = `${SCHEMA}."album_metadata"`;
 
 /** "Still fillable": `bio_tokens` only beside a bio, since tokens are never written without one. */
 const missingSql = (column: ExtendedColumn): string =>
@@ -62,6 +63,7 @@ export const enumerateCohortSql = (limit: number, afterAlbumId: number, albumIds
        "discogs_url" AS discogs_url,
        "artist_bio" IS NOT NULL AS has_bio,
        "artist_wikipedia_url" IS NOT NULL AS has_wikipedia_url,
+       (SELECT l."legacy_release_id" FROM ${SCHEMA}."library" l WHERE l."id" = "album_metadata"."album_id") AS legacy_release_id,
        array_remove(ARRAY[${missing}]::text[], NULL) AS missing
   FROM ${TABLE}
  WHERE ${cohortPredicateSql()}
@@ -77,6 +79,8 @@ export interface FillCandidate {
   has_wikipedia_url: boolean;
   /** The columns still fillable on this row. */
   missing: ExtendedColumn[];
+  /** `library.legacy_release_id`, the id space LML's release pins are keyed in; null when the row has none. */
+  legacy_release_id: number | null;
 }
 
 export type CohortStats = { cohort: number } & Record<ExtendedColumn, number>;
@@ -113,5 +117,6 @@ export const enumerateCohort = async (options: EnumerateOptions): Promise<FillCa
     has_bio: Boolean(r.has_bio),
     has_wikipedia_url: Boolean(r.has_wikipedia_url),
     missing: [...(r.missing ?? [])],
+    legacy_release_id: r.legacy_release_id === null ? null : Number(r.legacy_release_id),
   }));
 };

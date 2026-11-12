@@ -107,7 +107,17 @@ describe('BS#1442 extended fill cohort (REAL statements, real PG)', () => {
         'artist_image_url',
         'bio_tokens',
       ],
+      legacy_release_id: expect.any(Number),
     });
+  });
+
+  test("returns the row's library.legacy_release_id, the id space LML's pins are keyed in, not library.id", async () => {
+    const id = await seed('legacy-id');
+    await sql`UPDATE ${sql(SCHEMA)}.library SET legacy_release_id = 2147000001 WHERE id = ${id}`;
+
+    const [candidate] = (await enumerateOwn()).filter((c) => c.album_id === id);
+
+    expect(candidate.legacy_release_id).toBe(2147000001);
   });
 
   test('lists only the columns still missing, and leaves bio_tokens out beside a NULL bio', async () => {
