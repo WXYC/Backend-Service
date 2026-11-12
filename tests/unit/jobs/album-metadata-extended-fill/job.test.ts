@@ -54,6 +54,7 @@ const candidates = (n: number) =>
     has_bio: true,
     has_wikipedia_url: false,
     missing: [...EXTENDED_COLUMNS],
+    legacy_release_id: 5000 + i,
   }));
 
 beforeEach(() => {

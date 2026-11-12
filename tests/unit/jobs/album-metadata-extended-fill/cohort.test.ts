@@ -50,6 +50,10 @@ describe('enumerateCohortSql', () => {
     const statement = enumerateCohortSql(25, 1442);
 
     expect(statement).toContain('"discogs_url" AS discogs_url');
+    // The pin gate keys on the catalog card id, not library.id.
+    expect(statement).toMatch(
+      /SELECT l\."legacy_release_id" FROM .*"library" l WHERE l\."id" = "album_metadata"\."album_id"\) AS legacy_release_id/
+    );
     expect(statement).toContain(cohortPredicateSql());
     expect(statement).toContain('"album_id" > 1442');
     expect(statement).toMatch(/ORDER BY "album_id"\s+LIMIT 25$/);
