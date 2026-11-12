@@ -7,7 +7,8 @@ export default defineConfig((options) => ({
   // integration spec can `require` the REAL statements and run them against
   // Postgres, instead of testing a hand-copied SQL mirror. Same mechanism as
   // `jobs/album-metadata-bio-fill`'s dist/cohort.cjs.
-  entry: ['job.ts', 'cohort.ts'],
+  // `fill.ts` likewise, so the write spec runs the real UPDATE and outcome classification.
+  entry: ['job.ts', 'cohort.ts', 'fill.ts'],
   format: ['esm', 'cjs'],
   outDir: 'dist',
   clean: true,
