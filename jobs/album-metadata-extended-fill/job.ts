@@ -8,22 +8,21 @@
  * The dry run (the default, or `--dry-run`) reads the cohort and makes no LML
  * call. `EXTENDED_FILL_PROBE_ALBUMS=N` fetches the first N albums from LML and
  * logs what a write would add; it writes nothing but spends Discogs quota on
- * cache misses.
+ * cache misses. `--execute` fills the columns. See the README for the run
+ * procedure.
  *
  * @see WXYC/Backend-Service#1442
  */
 
 import { closeDatabaseConnection, requireNonNegativeInt, requirePositiveInt } from '@wxyc/database';
 import { READ_TIMEOUT_DEFAULT, cohortStats, enumerateCohort, type CohortStats } from './cohort.js';
+import { FillAbortError, PIN_BATCH_SIZE, executeFill, type ExecuteSummary } from './execute.js';
 import { createLmlFetcher, createPacer } from './fetch.js';
 import { captureError, closeLogger, initLogger, log } from './logger.js';
 import { lookupBatchPins } from './pins.js';
 import { addProbeAlbum, emptyProbeTotals, probeAlbum, summarizeProbe } from './probe.js';
 
 const JOB_NAME = 'album-metadata-extended-fill' as const;
-
-/** Albums per pins call; one call covers a batch, before any of its release fetches. */
-export const PIN_BATCH_SIZE = 100;
 
 /** LML calls per minute, release and artist together; a cache miss reaches the Discogs API DJs share. */
 export const RATE_PER_MIN_ENV = 'EXTENDED_FILL_RATE_PER_MIN';
@@ -36,20 +35,30 @@ export const ALBUM_AFTER_ID_ENV = 'EXTENDED_FILL_ALBUM_AFTER_ID';
 export const ALBUM_IDS_ENV = 'EXTENDED_FILL_ALBUM_IDS';
 /** Albums the probe fetches; `0`, the default, is no probe. */
 export const PROBE_ALBUMS_ENV = 'EXTENDED_FILL_PROBE_ALBUMS';
+/** Discogs release ids that 404'd once, from the previous run's `next_run`. */
+export const NOT_FOUND_RELEASE_IDS_ENV = 'EXTENDED_FILL_NOT_FOUND_RELEASE_IDS';
+/** Discogs artist ids that 404'd once, likewise. */
+export const NOT_FOUND_ARTIST_IDS_ENV = 'EXTENDED_FILL_NOT_FOUND_ARTIST_IDS';
+/** Stop after this many albums in a row LML left unanswered; `0` disables it. */
+export const MAX_CONSECUTIVE_UNANSWERED_ENV = 'EXTENDED_FILL_MAX_CONSECUTIVE_UNANSWERED';
+/** Stop after this many release 404s in a row; `0` disables it. */
+export const MAX_CONSECUTIVE_NOT_FOUND_ENV = 'EXTENDED_FILL_MAX_CONSECUTIVE_NOT_FOUND';
+/** Failed writes in a row that mean the database is unreachable, not one bad row. */
+export const MAX_CONSECUTIVE_WRITE_FAILURES = 10;
 /** How many ids one list may hold, as in the bio fill. */
 export const ALBUM_IDS_CAP = 200;
 
 /** Unset or blank is no list; anything else is a list or an error, so a typo
  * cannot turn a retry into a whole-cohort run. Copied from the bio fill. */
-const resolveAlbumIds = (raw: string | undefined): number[] => {
+const resolveIdList = (raw: string | undefined, envName: string): number[] => {
   if (raw === undefined || raw.trim() === '') {
     return [];
   }
-  const invalid = (why: string) => new Error(`[${JOB_NAME}] Invalid ${ALBUM_IDS_ENV}=${JSON.stringify(raw)}: ${why}`);
+  const invalid = (why: string) => new Error(`[${JOB_NAME}] Invalid ${envName}=${JSON.stringify(raw)}: ${why}`);
   const ids = raw.split(',').map((token) => {
     const text = token.trim();
     if (!/^\d+$/.test(text) || Number(text) < 1 || Number(text) > 2_147_483_647) {
-      throw invalid(`${JSON.stringify(text)} is not an album id; expected comma-separated positive integers.`);
+      throw invalid(`${JSON.stringify(text)} is not an id; expected comma-separated positive integers.`);
     }
     return Number(text);
   });
@@ -60,7 +69,7 @@ const resolveAlbumIds = (raw: string | undefined): number[] => {
   return distinct;
 };
 
-export type FillMode = 'dry_run' | 'probe';
+export type FillMode = 'dry_run' | 'probe' | 'execute';
 
 export interface FillOptions {
   mode: FillMode;
@@ -70,13 +79,17 @@ export interface FillOptions {
   afterAlbumId: number;
   albumIds: number[];
   probeAlbums: number;
+  notFoundReleaseIds: number[];
+  notFoundArtistIds: number[];
+  maxConsecutiveUnanswered: number;
+  maxConsecutiveNotFound: number;
 }
 
-/** The arguments this build understands. Anything else is refused, so a
- * mistyped flag, or `--execute` before the write lands, cannot exit 0. */
-const KNOWN_ARGS: readonly string[] = ['--dry-run'];
+/** The arguments this job understands. Anything else is refused, so a mistyped flag cannot exit 0. */
+const KNOWN_ARGS: readonly string[] = ['--dry-run', '--execute'];
 
-/** Parse the env and argv. A value that does not parse is an error, never a default. */
+/** Parse the env and argv. A value that does not parse is an error, never a default.
+ * The dry run is the default; only `--execute` writes. */
 export const resolveOptions = (
   env: NodeJS.ProcessEnv = process.env,
   args: readonly string[] = process.argv.slice(2)
@@ -89,7 +102,8 @@ export const resolveOptions = (
   const afterAlbumId = requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, 0, ctx);
   const maxAlbums = requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, 2400, ctx);
   const probeAlbums = requireNonNegativeInt(env[PROBE_ALBUMS_ENV], PROBE_ALBUMS_ENV, 0, ctx);
-  const albumIds = resolveAlbumIds(env[ALBUM_IDS_ENV]);
+  const albumIds = resolveIdList(env[ALBUM_IDS_ENV], ALBUM_IDS_ENV);
+  const execute = args.includes('--execute');
   const refuse = (why: string) => new Error(`[${JOB_NAME}] ${why}`);
   const aboveCursor = afterAlbumId > 0 ? albumIds.find((id) => id > afterAlbumId) : undefined;
   if (aboveCursor !== undefined) {
@@ -110,15 +124,43 @@ export const resolveOptions = (
   if (probeAlbums > 0 && args.includes('--dry-run')) {
     throw refuse(`--dry-run makes no LML calls, so it cannot run with ${PROBE_ALBUMS_ENV}=${probeAlbums}.`);
   }
+  if (execute && (probeAlbums > 0 || args.includes('--dry-run'))) {
+    throw refuse(`--execute writes, so it cannot run with --dry-run or ${PROBE_ALBUMS_ENV}.`);
+  }
   return {
-    mode: probeAlbums > 0 ? 'probe' : 'dry_run',
+    mode: execute ? 'execute' : probeAlbums > 0 ? 'probe' : 'dry_run',
     ratePerMin: requirePositiveInt(env[RATE_PER_MIN_ENV], RATE_PER_MIN_ENV, 30, ctx),
     readTimeoutMs: requirePositiveInt(env[READ_TIMEOUT_ENV], READ_TIMEOUT_ENV, READ_TIMEOUT_DEFAULT, ctx),
     maxAlbums,
     afterAlbumId,
     albumIds,
     probeAlbums,
+    notFoundReleaseIds: resolveIdList(env[NOT_FOUND_RELEASE_IDS_ENV], NOT_FOUND_RELEASE_IDS_ENV),
+    notFoundArtistIds: resolveIdList(env[NOT_FOUND_ARTIST_IDS_ENV], NOT_FOUND_ARTIST_IDS_ENV),
+    maxConsecutiveUnanswered: requireNonNegativeInt(
+      env[MAX_CONSECUTIVE_UNANSWERED_ENV],
+      MAX_CONSECUTIVE_UNANSWERED_ENV,
+      10,
+      ctx
+    ),
+    maxConsecutiveNotFound: requireNonNegativeInt(
+      env[MAX_CONSECUTIVE_NOT_FOUND_ENV],
+      MAX_CONSECUTIVE_NOT_FOUND_ENV,
+      10,
+      ctx
+    ),
   };
+};
+
+/** Cooperative stop, flipped by the first SIGTERM/SIGINT; the album in flight finishes. */
+let stopRequested = false;
+let stopSignals = 0;
+/** The summary as it stands, for a second signal to log; set only while a run has one. */
+let forcedExitReport: ((signal: NodeJS.Signals) => void) | undefined;
+export const __resetStopForTesting = (): void => {
+  stopRequested = false;
+  stopSignals = 0;
+  forcedExitReport = undefined;
 };
 
 export interface FillSummary {
@@ -130,9 +172,10 @@ export interface FillSummary {
   last_album_id: number | null;
   lml_calls: number;
   probe?: ReturnType<typeof summarizeProbe>;
+  execute?: ExecuteSummary;
 }
 
-/** Run the dry run or the probe. Neither writes. */
+/** Run the dry run, the probe, or (`--execute`) the fill. Only the fill writes. */
 export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   log('info', 'started', `${JOB_NAME} starting`, { ...options });
   if (options.mode === 'probe') {
@@ -161,10 +204,13 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
     lml_calls: 0,
   };
   if (options.mode === 'dry_run') {
-    log('info', 'dry_run_plan', 'DRY RUN — no LML calls, no writes.', { ...summary });
+    log('info', 'dry_run_plan', 'DRY RUN — no LML calls, no writes. Pass --execute to write.', { ...summary });
     return summary;
   }
   const lml = createLmlFetcher(createPacer(options.ratePerMin));
+  if (options.mode === 'execute') {
+    return await runExecute(options, summary, candidates, lml);
+  }
   const totals = emptyProbeTotals();
   try {
     for (let i = 0; i < candidates.length; i += PIN_BATCH_SIZE) {
@@ -192,9 +238,86 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   return summary;
 };
 
+const runExecute = async (
+  options: FillOptions,
+  summary: FillSummary,
+  candidates: Awaited<ReturnType<typeof enumerateCohort>>,
+  lml: ReturnType<typeof createLmlFetcher>
+): Promise<FillSummary> => {
+  const report = (execute: ExecuteSummary) => ({ ...summary, lml_calls: lml.calls(), execute });
+  try {
+    const execute = await executeFill(
+      candidates,
+      lml,
+      {
+        afterAlbumId: options.afterAlbumId,
+        albumIds: options.albumIds,
+        maxAlbums: options.maxAlbums,
+        notFoundReleaseIds: options.notFoundReleaseIds,
+        notFoundArtistIds: options.notFoundArtistIds,
+        limits: {
+          maxConsecutiveUnanswered: options.maxConsecutiveUnanswered,
+          maxConsecutiveNotFound: options.maxConsecutiveNotFound,
+          maxConsecutiveWriteFailures: MAX_CONSECUTIVE_WRITE_FAILURES,
+        },
+      },
+      {
+        shouldStop: () => stopRequested,
+        onProgress: (current) => {
+          // The album in flight is safe to abandon: its write is fill-null, and
+          // it is above next_run's cursor or in its list.
+          forcedExitReport = (signal) =>
+            log('error', 'summary', `${JOB_NAME} forced to exit by a second ${signal}`, {
+              ...report(current),
+              forced_exit: true,
+            });
+        },
+      }
+    );
+    return Object.assign(summary, report(execute));
+  } catch (err) {
+    if (err instanceof FillAbortError) {
+      // `main`'s `finished` line will not run; this keeps the totals and `next_run`.
+      log('error', 'summary', err.message, report(err.summary));
+    }
+    throw err;
+  } finally {
+    forcedExitReport = undefined;
+  }
+};
+
+/**
+ * SIGTERM/SIGINT, as in the bio fill. The first asks the loop to stop before
+ * the next album. A second logs the summary as it stands with
+ * `forced_exit: true` and exits 1. A third and later find the exit under way.
+ */
+export const handleStopSignal = (signal: NodeJS.Signals): void => {
+  stopSignals += 1;
+  if (stopSignals === 1) {
+    log('warn', 'signal', `received ${signal}; requesting graceful stop`, { signal });
+    stopRequested = true;
+    return;
+  }
+  if (stopSignals > 2) {
+    return;
+  }
+  let exitCode = 1;
+  if (forcedExitReport) {
+    forcedExitReport(signal);
+  } else {
+    log('warn', 'forced_exit', `${JOB_NAME} forced to exit by a second ${signal}`, { signal });
+    exitCode = Number(process.exitCode ?? 1);
+  }
+  void closeLogger()
+    .catch(() => undefined)
+    .then(() => process.exit(exitCode));
+};
+
 /** Entry point: run, log the outcome, close the logger and the pool. */
 export const main = async (): Promise<void> => {
   initLogger({ repo: 'Backend-Service', tool: JOB_NAME });
+  process.on('SIGTERM', handleStopSignal);
+  process.on('SIGINT', handleStopSignal);
   try {
     log('info', 'finished', `${JOB_NAME} done`, { ...(await runFill(resolveOptions())) });
     process.exitCode = 0;

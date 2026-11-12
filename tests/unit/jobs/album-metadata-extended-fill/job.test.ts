@@ -33,7 +33,12 @@ import {
 } from '@wxyc/lml-client';
 import * as cohort from '../../../../jobs/album-metadata-extended-fill/cohort';
 import * as logger from '../../../../jobs/album-metadata-extended-fill/logger';
-import { resolveOptions, runFill } from '../../../../jobs/album-metadata-extended-fill/job';
+import {
+  __resetStopForTesting,
+  handleStopSignal,
+  resolveOptions,
+  runFill,
+} from '../../../../jobs/album-metadata-extended-fill/job';
 import { EXTENDED_COLUMNS } from '../../../../jobs/album-metadata-extended-fill/map';
 
 const getRelease = getReleaseImport as unknown as jest.Mock<(...args: unknown[]) => Promise<unknown>>;
@@ -67,6 +72,7 @@ const candidates = (n: number) =>
 
 beforeEach(() => {
   jest.clearAllMocks();
+  __resetStopForTesting();
   // No pins unless a test says otherwise.
   getPinnedTracklists.mockImplementation((ids) =>
     Promise.resolve((ids as number[]).map((legacy_release_id) => ({ legacy_release_id, pin: null })))
@@ -84,6 +90,10 @@ describe('resolveOptions', () => {
       afterAlbumId: 0,
       albumIds: [],
       probeAlbums: 0,
+      notFoundReleaseIds: [],
+      notFoundArtistIds: [],
+      maxConsecutiveUnanswered: 10,
+      maxConsecutiveNotFound: 10,
     });
   });
 
@@ -97,6 +107,10 @@ describe('resolveOptions', () => {
           EXTENDED_FILL_ALBUM_AFTER_ID: '53799',
           EXTENDED_FILL_ALBUM_IDS: '101, 53000,101',
           EXTENDED_FILL_PROBE_ALBUMS: '100',
+          EXTENDED_FILL_NOT_FOUND_RELEASE_IDS: '36792451',
+          EXTENDED_FILL_NOT_FOUND_ARTIST_IDS: '82730,194',
+          EXTENDED_FILL_MAX_CONSECUTIVE_UNANSWERED: '0',
+          EXTENDED_FILL_MAX_CONSECUTIVE_NOT_FOUND: '5',
         },
         []
       )
@@ -108,6 +122,10 @@ describe('resolveOptions', () => {
       afterAlbumId: 53799,
       albumIds: [101, 53000],
       probeAlbums: 100,
+      notFoundReleaseIds: [36792451],
+      notFoundArtistIds: [194, 82730],
+      maxConsecutiveUnanswered: 0,
+      maxConsecutiveNotFound: 5,
     });
   });
 
@@ -125,13 +143,17 @@ describe('resolveOptions', () => {
     ['EXTENDED_FILL_ALBUM_IDS', '0'],
     ['EXTENDED_FILL_ALBUM_IDS', '2147483648'],
     ['EXTENDED_FILL_ALBUM_IDS', Array.from({ length: 201 }, (_, i) => i + 1).join(',')],
+    ['EXTENDED_FILL_NOT_FOUND_RELEASE_IDS', 'x'],
+    ['EXTENDED_FILL_NOT_FOUND_ARTIST_IDS', '-3'],
+    ['EXTENDED_FILL_MAX_CONSECUTIVE_UNANSWERED', '-1'],
+    ['EXTENDED_FILL_MAX_CONSECUTIVE_NOT_FOUND', 'ten'],
   ])('refuses %s=%p rather than falling back', (name, value) => {
     expect(() => resolveOptions({ [name]: value }, [])).toThrow(name);
   });
 
-  it('accepts --dry-run and refuses any other argument, so a mistyped or not-yet-built --execute cannot exit 0', () => {
+  it('refuses any argument it does not know, so a mistyped flag cannot exit 0', () => {
     expect(resolveOptions({}, ['--dry-run']).mode).toBe('dry_run');
-    expect(() => resolveOptions({}, ['--execute'])).toThrow(/--execute/);
+    expect(() => resolveOptions({}, ['--exectue'])).toThrow(/--exectue/);
     expect(() => resolveOptions({}, ['--dryrun'])).toThrow(/--dryrun/);
   });
 
@@ -148,6 +170,12 @@ describe('resolveOptions', () => {
     expect(() => resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '2', EXTENDED_FILL_ALBUM_IDS: '5,6,7' }, [])).toThrow(
       /EXTENDED_FILL_PROBE_ALBUMS=2 is smaller than the 3 listed ids/
     );
+  });
+
+  it('--execute selects the write mode, and refuses --dry-run or a probe beside it', () => {
+    expect(resolveOptions({}, ['--execute']).mode).toBe('execute');
+    expect(() => resolveOptions({}, ['--execute', '--dry-run'])).toThrow(/--execute writes/);
+    expect(() => resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '5' }, ['--execute'])).toThrow(/--execute writes/);
   });
 
   it('refuses --dry-run with a probe count: the dry run promises no LML calls', () => {
@@ -274,5 +302,55 @@ describe('runFill', () => {
     expect(getRelease).toHaveBeenCalledTimes(1);
     expect(getRelease).toHaveBeenCalledWith(1001, expect.anything());
     expect(summary).toMatchObject({ probe: { outcomes: { pin_disagrees: 1, would_fill: 1 } } });
+  });
+});
+
+describe('runFill --execute', () => {
+  const execute = db.execute as unknown as jest.Mock<(...args: unknown[]) => Promise<unknown>>;
+
+  it('fills each album through the guarded UPDATE, ANALYZEs, and reports next_run', async () => {
+    enumerateCohort.mockResolvedValue(candidates(2));
+    getRelease.mockImplementation((id) =>
+      Promise.resolve({ release_id: id, tracklist: [{ position: 'A1', title: 'x' }], cached: true })
+    );
+    // The UPDATE's RETURNING: which columns are set afterwards.
+    execute.mockResolvedValue([{ tracklist: true }]);
+
+    const summary = await runFill(resolveOptions({ EXTENDED_FILL_RATE_PER_MIN: '60000' }, ['--execute']));
+
+    // Two UPDATEs and the ANALYZE.
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(summary).toMatchObject({
+      mode: 'execute',
+      lml_calls: 2,
+      execute: { outcomes: { filled: 2 }, reached_end: true, next_run: { EXTENDED_FILL_ALBUM_AFTER_ID: 2 } },
+    });
+  });
+
+  it('a first stop signal ends the run before the next album, with a resumable summary', async () => {
+    enumerateCohort.mockResolvedValue(candidates(2));
+    handleStopSignal('SIGTERM');
+
+    const summary = await runFill(resolveOptions({}, ['--execute']));
+
+    expect(getRelease).not.toHaveBeenCalled();
+    expect(summary.execute).toMatchObject({ processed: 0, stopped_early: true, reached_end: false });
+  });
+
+  it('a second stop signal logs and exits 1 without waiting for the album in flight', async () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+
+    handleStopSignal('SIGINT');
+    handleStopSignal('SIGINT');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(log).toHaveBeenCalledWith(
+      'warn',
+      'forced_exit',
+      expect.stringContaining('second SIGINT'),
+      expect.anything()
+    );
+    expect(exit).toHaveBeenCalledWith(1);
+    exit.mockRestore();
   });
 });
