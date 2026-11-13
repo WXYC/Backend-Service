@@ -83,6 +83,7 @@ describe('planNotFound', () => {
     ['keeps a given id LML did not answer again', [5], [], [], '5'],
     ['drops a given id LML answered again (settled or cleared)', [5], [5], [], ''],
     ["adds this run's first 404s, sorted and distinct", [9], [], [7, 3, 7], '3,7,9'],
+    ['drops a first 404 that another album saw answered in the same run', [], [5], [5], ''],
   ] as const)('%s', (_label, given, asked, newly, expected) => {
     expect(planNotFound(given, new Set(asked), newly)).toBe(expected);
   });
@@ -91,6 +92,15 @@ describe('planNotFound', () => {
     const many = Array.from({ length: CARRIED_IDS_CAP + 1 }, (_, i) => i + 1);
 
     expect(planNotFound([], new Set(), many).split(',')).toHaveLength(CARRIED_IDS_CAP);
+  });
+
+  it("keeps this run's first 404s over older given ids when the cap cuts", () => {
+    const given = Array.from({ length: CARRIED_IDS_CAP }, (_, i) => i + 1);
+
+    const list = planNotFound(given, new Set(), [999_999]).split(',');
+
+    expect(list).toHaveLength(CARRIED_IDS_CAP);
+    expect(list).toContain('999999');
   });
 });
 
@@ -105,7 +115,9 @@ describe('advanceStreaks', () => {
     ['pin_unanswered', 'not_asked', { unanswered: 3, notFound: 2, writeFailed: 2 }, 'lml_unanswered'],
     ['filled', 'unanswered', { unanswered: 3, notFound: 2, writeFailed: 0 }, 'lml_unanswered'],
     ['release_not_found_suspected', 'not_asked', { unanswered: 0, notFound: 3, writeFailed: 2 }, 'release_not_found'],
-    ['release_not_found', 'not_asked', { unanswered: 0, notFound: 3, writeFailed: 2 }, 'release_not_found'],
+    // A second 404 settles a carried album: LML answered, and carried albums run back to back,
+    // so it must not count toward the "Discogs is shedding" streak.
+    ['release_not_found', 'not_asked', { unanswered: 0, notFound: 2, writeFailed: 2 }, undefined],
     ['write_failed', 'answered', { unanswered: 0, notFound: 0, writeFailed: 3 }, 'write_failed'],
     ['filled', 'answered', { unanswered: 0, notFound: 0, writeFailed: 0 }, undefined],
     ['release_changed', 'not_asked', { unanswered: 0, notFound: 0, writeFailed: 0 }, undefined],

@@ -172,6 +172,8 @@ export interface FillSummary {
   last_album_id: number | null;
   lml_calls: number;
   probe?: ReturnType<typeof summarizeProbe>;
+  /** A probe that a stop signal ended before its last album. */
+  stopped_early?: boolean;
   execute?: ExecuteSummary;
 }
 
@@ -213,10 +215,15 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   }
   const totals = emptyProbeTotals();
   try {
-    for (let i = 0; i < candidates.length; i += PIN_BATCH_SIZE) {
+    probe: for (let i = 0; i < candidates.length; i += PIN_BATCH_SIZE) {
       const batch = candidates.slice(i, i + PIN_BATCH_SIZE);
       const pins = await lookupBatchPins(batch, lml);
       for (const candidate of batch) {
+        // The signal handlers cover every mode: a first signal ends a probe too.
+        if (stopRequested) {
+          summary.stopped_early = true;
+          break probe;
+        }
         addProbeAlbum(totals, await probeAlbum(candidate, lml, pins.get(candidate.album_id)));
       }
     }
@@ -265,10 +272,11 @@ const runExecute = async (
         shouldStop: () => stopRequested,
         onProgress: (current) => {
           // The album in flight is safe to abandon: its write is fill-null, and
-          // it is above next_run's cursor or in its list.
+          // it is above next_run's cursor or in its list. A killed run did not
+          // reach its end, whatever the summary said a moment before.
           forcedExitReport = (signal) =>
             log('error', 'summary', `${JOB_NAME} forced to exit by a second ${signal}`, {
-              ...report(current),
+              ...report({ ...current(), stopped_early: true, reached_end: false }),
               forced_exit: true,
             });
         },
