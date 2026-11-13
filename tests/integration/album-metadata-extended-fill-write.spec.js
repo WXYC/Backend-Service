@@ -126,7 +126,7 @@ describe('BS#1442 extended fill write (REAL statements, real PG)', () => {
 
     const result = await fillAlbum(candidate(id), stubLml(), undefined, NO_PRIOR_NOT_FOUND);
 
-    expect(result).toMatchObject({ outcome: 'filled', carried: false });
+    expect(result).toMatchObject({ outcome: 'filled', carried: false, filled: COLUMNS });
     expect(await read(id)).toMatchObject({
       tracklist: RELEASE.tracklist,
       genres: RELEASE.genres,
@@ -196,8 +196,12 @@ describe('BS#1442 extended fill write (REAL statements, real PG)', () => {
   test('leaves the artist columns NULL beside a different stored artist id', async () => {
     const id = await seed('other-artist', { discogs_artist_id: 99 });
 
-    await fillAlbum(candidate(id), stubLml(), undefined, NO_PRIOR_NOT_FOUND);
+    const result = await fillAlbum(candidate(id), stubLml(), undefined, NO_PRIOR_NOT_FOUND);
 
+    // Reported as the UPDATE left the row, not as the fetch suggested.
+    expect(result.outcome).toBe('filled');
+    expect(result.filled).not.toContain('artist_image_url');
+    expect(result.filled).not.toContain('bio_tokens');
     expect(await read(id)).toMatchObject({
       discogs_artist_id: 99,
       artist_image_url: null,

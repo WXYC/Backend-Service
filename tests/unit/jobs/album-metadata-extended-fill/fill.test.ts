@@ -8,7 +8,7 @@
  * costs the album its six release columns.
  *
  * The UPDATE itself is mocked here; its SQL runs on a real PostgreSQL in
- * tests/integration/album-metadata-extended-fill.spec.js.
+ * tests/integration/album-metadata-extended-fill-write.spec.js.
  *
  * @see WXYC/Backend-Service#1442
  */
@@ -27,9 +27,11 @@ import type { Fetched, LmlFetcher } from '../../../../jobs/album-metadata-extend
 import { NO_PRIOR_NOT_FOUND, fillAlbum } from '../../../../jobs/album-metadata-extended-fill/fill';
 import { EXTENDED_COLUMNS } from '../../../../jobs/album-metadata-extended-fill/map';
 import type { PinLookup } from '../../../../jobs/album-metadata-extended-fill/pins';
+import * as logger from '../../../../jobs/album-metadata-extended-fill/logger';
 import * as write from '../../../../jobs/album-metadata-extended-fill/write';
 
-const writeFill = write.writeFill as unknown as jest.Mock<(...args: unknown[]) => Promise<boolean>>;
+const writeFill = write.writeFill as unknown as jest.Mock<(...args: unknown[]) => Promise<string[] | null>>;
+const log = jest.spyOn(logger, 'log');
 
 // The generated DTOs require every defaulted field; the fill reads only these.
 const RELEASE = {
@@ -75,7 +77,8 @@ const fetcher = (
 
 beforeEach(() => {
   jest.clearAllMocks();
-  writeFill.mockResolvedValue(true);
+  // The row after the UPDATE: every column set.
+  writeFill.mockResolvedValue([...EXTENDED_COLUMNS]);
 });
 
 describe('fillAlbum: the outcome table', () => {
@@ -145,7 +148,7 @@ describe('fillAlbum: the outcome table', () => {
   });
 
   it('the guarded UPDATE matching no row -> release_changed, settled', async () => {
-    writeFill.mockResolvedValue(false);
+    writeFill.mockResolvedValue(null);
 
     expect(await fillAlbum(candidate(), fetcher(ok(RELEASE)), undefined, NO_PRIOR_NOT_FOUND)).toMatchObject({
       outcome: 'release_changed',
@@ -154,7 +157,7 @@ describe('fillAlbum: the outcome table', () => {
     });
   });
 
-  it('the UPDATE throwing -> write_failed, carried', async () => {
+  it('the UPDATE throwing -> write_failed, carried, and the error is logged', async () => {
     writeFill.mockRejectedValue(new Error('connection reset'));
 
     expect(await fillAlbum(candidate(), fetcher(ok(RELEASE)), undefined, NO_PRIOR_NOT_FOUND)).toMatchObject({
@@ -162,6 +165,43 @@ describe('fillAlbum: the outcome table', () => {
       carried: true,
       filled: [],
     });
+    expect(log).toHaveBeenCalledWith('warn', 'write_failed', expect.stringContaining('connection reset'), {
+      album_id: 7,
+      error: 'connection reset',
+    });
+  });
+
+  it('reports as filled only the columns the UPDATE actually set, not every value it was given', async () => {
+    // The stored artist id differs, so the UPDATE's same-artist CASE leaves the artist columns NULL.
+    writeFill.mockResolvedValue(['tracklist', 'genres', 'styles', 'label', 'full_release_date', 'discogs_artist_id']);
+
+    const result = await fillAlbum(candidate(), fetcher(ok(RELEASE)), undefined, NO_PRIOR_NOT_FOUND);
+
+    expect(result.outcome).toBe('filled');
+    expect(result.filled).not.toContain('artist_image_url');
+    expect(result.filled).not.toContain('bio_tokens');
+  });
+
+  it('an UPDATE that set none of the missing columns -> nothing_new', async () => {
+    writeFill.mockResolvedValue(['tracklist']);
+
+    const result = await fillAlbum(
+      candidate({ missing: ['artist_image_url', 'bio_tokens'] }),
+      fetcher(ok(RELEASE)),
+      undefined,
+      NO_PRIOR_NOT_FOUND
+    );
+
+    expect(result).toMatchObject({ outcome: 'nothing_new', filled: [] });
+  });
+
+  it('skips the artist fetch when the row is missing no artist column', async () => {
+    const lml = fetcher(ok(RELEASE));
+
+    const result = await fillAlbum(candidate({ missing: ['styles'] }), lml, undefined, NO_PRIOR_NOT_FOUND);
+
+    expect(lml.artist).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: 'filled', artist: 'not_asked', carried: false, filled: ['styles'] });
   });
 
   it('no missing column gains a value -> nothing_new, and no UPDATE is sent', async () => {

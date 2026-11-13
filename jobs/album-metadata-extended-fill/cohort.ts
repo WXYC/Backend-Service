@@ -14,7 +14,8 @@ export const READ_TIMEOUT_DEFAULT = 5 * 60 * 1000;
 
 // Via `WXYC_SCHEMA_NAME`, so the integration tier's per-worker schema is read.
 const SCHEMA = `"${(process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""')}"`;
-const TABLE = `${SCHEMA}."album_metadata"`;
+/** The quoted `album_metadata` table name, shared with the write. */
+export const TABLE = `${SCHEMA}."album_metadata"`;
 
 /** "Still fillable": `bio_tokens` only beside a bio, since tokens are never written without one. */
 const missingSql = (column: ExtendedColumn): string =>

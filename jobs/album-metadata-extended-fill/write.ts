@@ -10,13 +10,11 @@
 
 import { sql, type SQL } from 'drizzle-orm';
 import { db } from '@wxyc/database';
-import type { FillCandidate } from './cohort.js';
-import type { ArtistColumns, ReleaseColumns } from './map.js';
+import { TABLE, type FillCandidate } from './cohort.js';
+import { EXTENDED_COLUMNS, type ArtistColumns, type ExtendedColumn, type ReleaseColumns } from './map.js';
 
 /** The values one album's fetch produced; a null leaves the column as it is. */
 export type FillValues = ReleaseColumns & ArtistColumns;
-
-const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
 
 // Copied from `jobs/album-metadata-reask/artist-keep-sql.ts`.
 const jsonParam = (value: unknown): string | null => (value === null ? null : JSON.stringify(value));
@@ -37,7 +35,7 @@ const textArrayLiteral = (values: string[] | null): string | null =>
  *   `discogs_artist_id` does.
  */
 export const writeFillSql = (candidate: FillCandidate, v: FillValues): SQL => {
-  const am = sql.raw(`"${SCHEMA}"."album_metadata"`);
+  const am = sql.raw(TABLE);
   const fill = (column: string, value: SQL): SQL =>
     sql`${sql.identifier(column)} = COALESCE(${am}.${sql.identifier(column)}, ${value})`;
   const sameArtist = sql`(${am}."discogs_artist_id" IS NULL OR ${am}."discogs_artist_id" = ${v.discogs_artist_id}::int)`;
@@ -56,11 +54,15 @@ export const writeFillSql = (candidate: FillCandidate, v: FillValues): SQL => {
          ELSE ${am}."bio_tokens" END
  WHERE ${am}."album_id" = ${candidate.album_id}::int
    AND ${am}."discogs_url" = ${candidate.discogs_url}::text
-RETURNING ${am}."album_id"`;
+RETURNING ${sql.raw(EXTENDED_COLUMNS.map((c) => `"${c}" IS NOT NULL AS "${c}"`).join(', '))}`;
 };
 
-/** Run the guarded UPDATE. False when no row matched: the stored release moved. */
-export const writeFill = async (candidate: FillCandidate, values: FillValues): Promise<boolean> => {
-  const rows = (await db.execute(writeFillSql(candidate, values))) as unknown as unknown[];
-  return rows.length > 0;
+/**
+ * Run the guarded UPDATE. Returns the columns that are set on the row after
+ * it, so the caller reports what the UPDATE did rather than what it was
+ * offered, or null when no row matched: the stored release moved.
+ */
+export const writeFill = async (candidate: FillCandidate, values: FillValues): Promise<ExtendedColumn[] | null> => {
+  const [row] = (await db.execute(writeFillSql(candidate, values))) as unknown as Record<ExtendedColumn, boolean>[];
+  return row === undefined ? null : EXTENDED_COLUMNS.filter((c) => row[c]);
 };

@@ -13,7 +13,11 @@ import type { LmlFetcher } from './fetch.js';
 import * as map from './map.js';
 import type { ExtendedColumn, TooLongColumn } from './map.js';
 import { checkPin, type PinLookup } from './pins.js';
+import { log } from './logger.js';
 import * as write from './write.js';
+
+/** The columns only the artist fetch can fill. */
+const ARTIST_FETCH_COLUMNS: readonly ExtendedColumn[] = ['artist_image_url', 'bio_tokens'];
 
 export type FillOutcome =
   | 'filled'
@@ -101,7 +105,8 @@ export const fillAlbum = async (
   const values: write.FillValues = { ...columns, artist_image_url: null, bio_tokens: null };
   const artistId = columns.discogs_artist_id ?? undefined;
   let artist: ArtistOutcome = 'not_asked';
-  if (artistId !== undefined) {
+  // Ask for the artist only when the row still lacks a column it fills.
+  if (artistId !== undefined && candidate.missing.some((c) => ARTIST_FETCH_COLUMNS.includes(c))) {
     const fetched = await lml.artist(artistId);
     if ('status' in fetched) {
       artist = notFound(fetched.status, prior.artistIds.has(artistId));
@@ -113,15 +118,25 @@ export const fillAlbum = async (
     }
   }
   const base = { releaseId, artistId, artist, tooLong, cached: release.value.cached ?? false };
-  const filled = candidate.missing.filter((c) => values[c] != null && (c !== 'bio_tokens' || candidate.has_bio));
-  if (filled.length === 0) {
+  const offered = candidate.missing.filter((c) => values[c] != null && (c !== 'bio_tokens' || candidate.has_bio));
+  if (offered.length === 0) {
     return result('nothing_new', base);
   }
+  let setAfter: ExtendedColumn[] | null;
   try {
-    return (await write.writeFill(candidate, values))
-      ? result('filled', { ...base, filled })
-      : result('release_changed', base);
-  } catch {
+    setAfter = await write.writeFill(candidate, values);
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    log('warn', 'write_failed', `album ${candidate.album_id}: the fill UPDATE failed: ${error}`, {
+      album_id: candidate.album_id,
+      error,
+    });
     return result('write_failed', base);
   }
+  if (setAfter === null) {
+    return result('release_changed', base);
+  }
+  // What the UPDATE set, not what it was offered: its guards can leave an offered column NULL.
+  const filled = offered.filter((c) => setAfter.includes(c));
+  return filled.length > 0 ? result('filled', { ...base, filled }) : result('nothing_new', base);
 };
