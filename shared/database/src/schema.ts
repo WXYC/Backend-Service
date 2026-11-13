@@ -2718,6 +2718,58 @@ export const album_metadata_reask_backup = wxyc_schema.table(
 );
 
 /**
+ * One row per music-director change to a release's Discogs link through the release picker
+ * (`PUT /library/:id/discogs-release`, BS#3790; table from BS#3792). There is no other catalog audit table
+ * (`account_audit_event` covers `/auth` only).
+ *
+ * Slim on purpose: ids, a timestamp and the replaced pin's short source string, so its CDC payload stays far below
+ * `pg_notify`'s 8,000-byte limit (a larger row goes to `cdc_oversized` and no handler runs, `docs/cdc.md`). An INSERT
+ * here is the signal every Backend instance clears its lookup caches on. Writers that would overwrite the MD's
+ * `album_metadata` skip albums with a row here.
+ *
+ * `album_id` (`library.id`) and `actor_user_id` (`auth_user.id`) carry no foreign key, so the record outlives a
+ * delete of the release or the user. `old_discogs_release_id` is NULL when the release had no Discogs link before;
+ * the `replaced_pin_*` pair is NULL when LML held no pin for it (decision 2: a manual pin may replace a catalog-import
+ * pin, and the replaced one is kept here).
+ */
+export type NewLibraryDiscogsReleaseChange = InferInsertModel<typeof library_discogs_release_change>;
+export type LibraryDiscogsReleaseChange = InferSelectModel<typeof library_discogs_release_change>;
+export const library_discogs_release_change = wxyc_schema.table(
+  'library_discogs_release_change',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    album_id: integer('album_id').notNull(),
+    actor_user_id: text('actor_user_id').notNull(),
+    changed_at: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
+    old_discogs_release_id: integer('old_discogs_release_id'),
+    new_discogs_release_id: integer('new_discogs_release_id').notNull(),
+    replaced_pin_discogs_release_id: integer('replaced_pin_discogs_release_id'),
+    replaced_pin_source: text('replaced_pin_source'),
+  },
+  (table) => [
+    index('library_discogs_release_change_album_id_idx').on(table.album_id),
+    check('library_discogs_release_change_new_release_id_ck', sql`${table.new_discogs_release_id} > 0`),
+  ]
+);
+
+/**
+ * The before image of the `album_metadata` row a `library_discogs_release_change` overwrote (BS#3792), so a change
+ * can be undone by hand: every column the picker rewrites, `tracklist` and `bio_tokens` included. Modelled on
+ * `album_metadata_reask_backup`.
+ *
+ * A separate table, with no CDC trigger, because the image is too large for `pg_notify`. Keyed by the change row and
+ * deleted with it. A change to a release with no `album_metadata` row has no before row.
+ */
+export type NewLibraryDiscogsReleaseChangeBefore = InferInsertModel<typeof library_discogs_release_change_before>;
+export type LibraryDiscogsReleaseChangeBefore = InferSelectModel<typeof library_discogs_release_change_before>;
+export const library_discogs_release_change_before = wxyc_schema.table('library_discogs_release_change_before', {
+  change_id: bigint('change_id', { mode: 'number' })
+    .primaryKey()
+    .references(() => library_discogs_release_change.id, { onDelete: 'cascade' }),
+  before_image: jsonb('before_image').notNull(),
+});
+
+/**
  * Artist-level metadata cache, keyed by external Discogs artist id (BS#1624).
  *
  * The artist analog of `album_metadata`: a home for per-artist enrichment
