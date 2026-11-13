@@ -110,9 +110,34 @@ describe('getPinnedTracklists', () => {
         ],
       },
     ],
+    ['a null body', null],
+    ['a result with no pin field', { results: [{ legacy_release_id: 1 }, { legacy_release_id: 2, pin: null }] }],
+    [
+      'a pin with no release id',
+      {
+        results: [
+          { legacy_release_id: 1, pin: {} },
+          { legacy_release_id: 2, pin: null },
+        ],
+      },
+    ],
   ])('refuses an answer with %s as a 502 rather than misattributing pins', async (_label, body) => {
     respond(200, body);
 
     await expect(getPinnedTracklists([1, 2])).rejects.toMatchObject({ statusCode: 502 });
+  });
+
+  it('wraps an unparseable 200 body as a 502 LmlClientError', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: '200',
+      json: () => Promise.reject(new SyntaxError('Unexpected token <')),
+    } as unknown as globalThis.Response);
+
+    const error = await getPinnedTracklists([1]).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(LmlClientError);
+    expect(error).toMatchObject({ statusCode: 502 });
   });
 });
