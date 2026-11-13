@@ -10,3 +10,5 @@ export {
 } from './helpers/discogs-image-provenance.js';
 export type { ArtworkProvenance } from './helpers/discogs-image-provenance.js';
 export { synthesizeSearchUrls } from './helpers/synthesize-search-urls.js';
+export { CLEAR_RELEASE_GROUP, buildReleaseGroup } from './helpers/release-group.js';
+export type { ReleaseGroup } from './helpers/release-group.js';

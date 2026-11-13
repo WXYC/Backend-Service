@@ -8,5 +8,5 @@ export default defineConfig({
   outDir: 'dist',
   clean: true,
   sourcemap: true,
-  external: ['@wxyc/lml-client'],
+  external: ['@wxyc/lml-client', '@wxyc/database'],
 });
