@@ -24,7 +24,7 @@
     "@wxyc/observability": "^1.0.0",
     "@wxyc/shared": "12.11.0",
     "better-auth": "^1.6.33",
-    "drizzle-orm": "^0.45.3",
+    "drizzle-orm": "^0.45.4",
     "postgres": "^3.4.9"
   },
   "devDependencies": {
