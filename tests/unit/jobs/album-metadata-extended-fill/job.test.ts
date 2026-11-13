@@ -338,6 +338,10 @@ describe('runFill --execute', () => {
   });
 
   it('a second stop signal logs and exits 1 without waiting for the album in flight', async () => {
+    // process.exitCode is per worker process, and another test file in the same Jest worker can
+    // leave it at 0; with no run in flight the handler exits with it, so start from unset.
+    const priorExitCode = process.exitCode;
+    process.exitCode = undefined;
     const exit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
 
     handleStopSignal('SIGINT');
@@ -352,5 +356,6 @@ describe('runFill --execute', () => {
     );
     expect(exit).toHaveBeenCalledWith(1);
     exit.mockRestore();
+    process.exitCode = priorExitCode;
   });
 });
