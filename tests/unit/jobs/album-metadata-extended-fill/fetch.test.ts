@@ -74,7 +74,7 @@ describe('createLmlFetcher', () => {
     await fetcher.artist(82730);
     const second = await fetcher.artist(82730);
 
-    expect(second).toMatchObject({ ok: true, memoized: true });
+    expect(second).toMatchObject({ ok: true, value: { artist_id: 82730 } });
     expect(getArtistDetails).toHaveBeenCalledTimes(1);
     expect(getArtistDetails).toHaveBeenCalledWith(82730, { caller: 'album-metadata-extended-fill' });
     expect(fetcher.calls()).toBe(1);
@@ -87,7 +87,8 @@ describe('createLmlFetcher', () => {
     const fetcher = createLmlFetcher(noPacing);
 
     expect(await fetcher.artist(82730)).toEqual({ ok: false, status: 404 });
-    expect(await fetcher.artist(82730)).toMatchObject({ ok: true, memoized: false });
+    expect(await fetcher.artist(82730)).toMatchObject({ ok: true });
+    expect(getArtistDetails).toHaveBeenCalledTimes(2);
     expect(getArtistDetails).toHaveBeenCalledTimes(2);
   });
 

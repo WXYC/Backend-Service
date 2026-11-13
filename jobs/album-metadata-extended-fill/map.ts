@@ -33,7 +33,8 @@ export const parseDiscogsReleaseId = (url: string | null | undefined): number | 
 };
 
 /** Only `single` gets artist columns; the rest leave them NULL and skip the artist fetch. */
-export type ArtistGate = 'single' | 'various' | 'placeholder_artist' | 'multiple_credits' | 'no_artist_id';
+export const ARTIST_GATES = ['single', 'various', 'placeholder_artist', 'multiple_credits', 'no_artist_id'] as const;
+export type ArtistGate = (typeof ARTIST_GATES)[number];
 
 export interface ReleaseColumns {
   tracklist: Lml.DiscogsTrackItem[] | null;

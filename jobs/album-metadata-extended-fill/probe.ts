@@ -61,7 +61,9 @@ export const probeAlbum = async (candidate: FillCandidate, lml: LmlFetcher, pin?
   const wouldFill = candidate.missing.filter((c) => values[c] != null && (c !== 'bio_tokens' || candidate.has_bio));
   const outcome = wouldFill.length > 0 ? 'would_fill' : 'nothing_new';
   const { cached = false } = release.value;
-  return { ...base, outcome, wouldFill, gate, cached, latencyMs: release.latencyMs, artistStatus, tooLong };
+  // Only a column the row is missing would have been written, so only its drop counts.
+  const dropped = tooLong.filter((c) => candidate.missing.includes(c));
+  return { ...base, outcome, wouldFill, gate, cached, latencyMs: release.latencyMs, artistStatus, tooLong: dropped };
 };
 
 const zeros = <K extends string>(keys: readonly K[]) =>
@@ -72,7 +74,7 @@ export const emptyProbeTotals = () => ({
   albums: 0,
   outcomes: zeros(OUTCOMES),
   would_fill_by_column: zeros(map.EXTENDED_COLUMNS),
-  gate: zeros<ArtistGate>(['single', 'various', 'multiple_credits', 'no_artist_id']),
+  gate: zeros(map.ARTIST_GATES),
   too_long: zeros(Object.keys(map.COLUMN_MAX_LENGTH) as TooLongColumn[]),
   artist: { answered: 0, not_found: 0, unanswered: 0 },
   cacheHits: 0,
