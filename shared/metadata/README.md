@@ -1,6 +1,6 @@
 # @wxyc/metadata
 
-Deep module that normalizes a `LookupResponse` from `@wxyc/lml-client` into a flat, snake_case `NormalizedMetadata` shape. One composition (`normalizeLookup`) and four helpers (`filterSpacerGif`, `isSyntheticArtwork`, `cleanDiscogsBio`, `synthesizeSearchUrls`).
+Deep module that normalizes a `LookupResponse` from `@wxyc/lml-client` into a flat, snake_case `NormalizedMetadata` shape. One composition (`normalizeLookup`), four helpers (`filterSpacerGif`, `isSyntheticArtwork`, `cleanDiscogsBio`, `synthesizeSearchUrls`), and the `album_metadata` release-group mapping built on the composition (`buildReleaseGroup`).
 
 ## Why a separate package
 
