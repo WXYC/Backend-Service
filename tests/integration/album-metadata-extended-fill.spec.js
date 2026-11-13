@@ -133,10 +133,19 @@ describe('BS#1442 extended fill cohort (REAL statements, real PG)', () => {
     ['a master URL', { discogs_url: 'https://www.discogs.com/master/1442' }],
     ["the '' synthetic sentinel", { discogs_url: '' }],
     ['a NULL discogs_url', { discogs_url: null }],
+    ['a /release/0 URL', { discogs_url: 'https://www.discogs.com/release/0' }],
+    ['a release id past int4', { discogs_url: 'https://www.discogs.com/release/21474836480' }],
     ['a complete row', COMPLETE],
     ['a row whose only gap is bio_tokens beside a NULL bio', { ...COMPLETE, bio_tokens: undefined, artist_bio: null }],
   ])('skips %s', async (_label, metadata) => {
     const id = await seed('skipped-' + albumIds.length, metadata);
+
+    expect((await enumerateOwn()).map((c) => c.album_id)).not.toContain(id);
+  });
+
+  test('skips an album a music director marked as not on Discogs (BS#1294), whatever release URL it still stores', async () => {
+    const id = await seed('discogs-unavailable');
+    await sql`UPDATE ${sql(SCHEMA)}.library SET discogs_unavailable = true WHERE id = ${id}`;
 
     expect((await enumerateOwn()).map((c) => c.album_id)).not.toContain(id);
   });

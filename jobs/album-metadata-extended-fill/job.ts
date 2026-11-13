@@ -58,9 +58,20 @@ export interface FillOptions {
   albumIds: number[];
 }
 
-/** Parse the env. A value that does not parse is an error, never a default. Every
+/** The arguments this build understands. Anything else is refused, so a
+ * mistyped flag, or `--execute` before the write lands, cannot exit 0. */
+const KNOWN_ARGS: readonly string[] = ['--dry-run'];
+
+/** Parse the env and argv. A value that does not parse is an error, never a default. Every
  * run is a dry run until the write lands, so `--dry-run` changes nothing yet. */
-export const resolveOptions = (env: NodeJS.ProcessEnv = process.env): FillOptions => {
+export const resolveOptions = (
+  env: NodeJS.ProcessEnv = process.env,
+  args: readonly string[] = process.argv.slice(2)
+): FillOptions => {
+  const unknown = args.find((arg) => !KNOWN_ARGS.includes(arg));
+  if (unknown !== undefined) {
+    throw new Error(`[${JOB_NAME}] Unknown argument ${unknown}; this build accepts only ${KNOWN_ARGS.join(', ')}.`);
+  }
   const ctx = { context: JOB_NAME };
   const afterAlbumId = requireNonNegativeInt(env[ALBUM_AFTER_ID_ENV], ALBUM_AFTER_ID_ENV, 0, ctx);
   const maxAlbums = requireNonNegativeInt(env[MAX_ALBUMS_ENV], MAX_ALBUMS_ENV, 2400, ctx);

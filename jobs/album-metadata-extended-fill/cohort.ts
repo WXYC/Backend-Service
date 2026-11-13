@@ -20,10 +20,14 @@ const TABLE = `${SCHEMA}."album_metadata"`;
 const missingSql = (column: ExtendedColumn): string =>
   column === 'bio_tokens' ? `("bio_tokens" IS NULL AND "artist_bio" IS NOT NULL)` : `"${column}" IS NULL`;
 
-/** A row this job can add to: its `discogs_url` names a release and a column
- * is still fillable. Rows with no release URL are BS#3136's. */
+/** A row this job can add to: its `discogs_url` names a release (the bounds
+ * `parseDiscogsReleaseId` accepts), its album is not marked as not on Discogs
+ * (BS#1294, as the bio fill excludes), and a column is still fillable. Rows
+ * with no release URL are BS#3136's. */
 export const cohortPredicateSql = (): string =>
-  `"discogs_url" ~ '/release/[0-9]+'
+  `"discogs_url" ~ '/release/[1-9][0-9]{0,8}(?![0-9])'
+       AND NOT EXISTS (SELECT 1 FROM ${SCHEMA}."library" l
+                        WHERE l."id" = "album_metadata"."album_id" AND l."discogs_unavailable")
        AND ("tracklist" IS NULL OR "genres" IS NULL OR "styles" IS NULL OR "label" IS NULL
          OR "full_release_date" IS NULL OR "discogs_artist_id" IS NULL
          OR "artist_image_url" IS NULL

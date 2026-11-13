@@ -57,6 +57,9 @@ describe('parseDiscogsReleaseId', () => {
     ['https://www.discogs.com/es/release/27351?x=1', 27351],
     ['https://www.discogs.com/master/1442', undefined],
     ['https://www.discogs.com/release/0', undefined],
+    // The same bounds as the cohort's SQL match, so a row the cohort takes always parses.
+    ['https://www.discogs.com/release/2147483648', undefined],
+    ['https://www.discogs.com/release/0123', undefined],
     ['https://www.discogs.com/release/', undefined],
     ['', undefined],
     [null, undefined],
@@ -102,6 +105,8 @@ describe('mapRelease', () => {
     ['no artist_id', { artist_id: null }, 'no_artist_id'],
     ['artist_id 0', { artist_id: 0 }, 'no_artist_id'],
     ['the Various artist (194)', { artist_id: VARIOUS_ARTISTS_DISCOGS_ID }, 'various'],
+    ['the Unknown Artist placeholder (355)', { artist_id: 355 }, 'placeholder_artist'],
+    ['the No Artist placeholder (118760)', { artist_id: 118760 }, 'placeholder_artist'],
     [
       'two primary credits',
       {
