@@ -56,7 +56,7 @@ const emptyExecuteSummary = (retryOnly: boolean, afterAlbumId: number) => ({
   too_long: zeros(Object.keys(COLUMN_MAX_LENGTH) as TooLongColumn[]),
   last_album_id: null as number | null,
   /** A cursor safe on its own, below every album left unsettled; null on a retry run. */
-  resume_after_album_id: (retryOnly ? null : afterAlbumId) as number | null,
+  resume_after_album_id: retryOnly ? null : afterAlbumId,
   /** Up to 200 of the albums left for the next run below `next_run`'s cursor. */
   carried_album_ids: [] as number[],
   /** What to run next; null when a retry run left nothing. */
