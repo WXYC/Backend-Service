@@ -154,6 +154,14 @@ describe('probeAlbum', () => {
 
     expect((await probeAlbum(candidate(), fetcher({ ok: true, value: long }))).tooLong).toEqual(['label']);
   });
+
+  it('counts an over-length value only for a column the row is missing, since only those would be written', async () => {
+    const long = { ...RELEASE, label: 'x'.repeat(300) };
+
+    const album = await probeAlbum(candidate({ missing: ['tracklist'] }), fetcher({ ok: true, value: long }));
+
+    expect(album.tooLong).toEqual([]);
+  });
 });
 
 describe('probeAlbum and the release pin', () => {

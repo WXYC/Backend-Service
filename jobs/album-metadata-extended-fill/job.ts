@@ -102,6 +102,11 @@ export const resolveOptions = (
       `${MAX_ALBUMS_ENV}=${maxAlbums} is smaller than the ${albumIds.length} listed ids in ${ALBUM_IDS_ENV}.`
     );
   }
+  if (probeAlbums > 0 && probeAlbums < albumIds.length) {
+    throw refuse(
+      `${PROBE_ALBUMS_ENV}=${probeAlbums} is smaller than the ${albumIds.length} listed ids in ${ALBUM_IDS_ENV}.`
+    );
+  }
   if (probeAlbums > 0 && args.includes('--dry-run')) {
     throw refuse(`--dry-run makes no LML calls, so it cannot run with ${PROBE_ALBUMS_ENV}=${probeAlbums}.`);
   }
@@ -130,9 +135,19 @@ export interface FillSummary {
 /** Run the dry run or the probe. Neither writes. */
 export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   log('info', 'started', `${JOB_NAME} starting`, { ...options });
+  if (options.mode === 'probe') {
+    log(
+      'warn',
+      'probe_spends_quota',
+      `PROBE, NOT A DRY RUN: ${PROBE_ALBUMS_ENV} is set, so this run fetches from LML and spends Discogs quota on every cache miss. Unset it for a dry run.`,
+      { probe_albums: options.probeAlbums }
+    );
+  }
   const cohort = await cohortStats(options.readTimeoutMs);
+  // A probe takes the first N albums, still under the run cap.
+  const probeLimit = options.maxAlbums > 0 ? Math.min(options.probeAlbums, options.maxAlbums) : options.probeAlbums;
   const candidates = await enumerateCohort({
-    limit: options.mode === 'probe' ? options.probeAlbums : options.maxAlbums,
+    limit: options.mode === 'probe' ? probeLimit : options.maxAlbums,
     afterAlbumId: options.afterAlbumId,
     albumIds: options.albumIds,
     timeoutMs: options.readTimeoutMs,
@@ -151,12 +166,24 @@ export const runFill = async (options: FillOptions): Promise<FillSummary> => {
   }
   const lml = createLmlFetcher(createPacer(options.ratePerMin));
   const totals = emptyProbeTotals();
-  for (let i = 0; i < candidates.length; i += PIN_BATCH_SIZE) {
-    const batch = candidates.slice(i, i + PIN_BATCH_SIZE);
-    const pins = await lookupBatchPins(batch, lml);
-    for (const candidate of batch) {
-      addProbeAlbum(totals, await probeAlbum(candidate, lml, pins.get(candidate.album_id)));
+  try {
+    for (let i = 0; i < candidates.length; i += PIN_BATCH_SIZE) {
+      const batch = candidates.slice(i, i + PIN_BATCH_SIZE);
+      const pins = await lookupBatchPins(batch, lml);
+      for (const candidate of batch) {
+        addProbeAlbum(totals, await probeAlbum(candidate, lml, pins.get(candidate.album_id)));
+      }
     }
+  } catch (err) {
+    // The quota is already spent: keep what it bought before the error ends the run.
+    const error = err instanceof Error ? err.message : String(err);
+    log('error', 'probe_summary', `PROBE stopped after ${totals.albums} albums, nothing written.`, {
+      ...summary,
+      lml_calls: lml.calls(),
+      probe: summarizeProbe(totals),
+      error,
+    });
+    throw err;
   }
   Object.assign(summary, { lml_calls: lml.calls(), probe: summarizeProbe(totals) });
   log('info', 'probe_summary', `PROBE — ${candidates.length} albums fetched from LML, nothing written.`, {

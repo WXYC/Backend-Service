@@ -26,6 +26,7 @@ jest.mock('../../../../jobs/album-metadata-extended-fill/cohort', () => ({
 
 import { db } from '@wxyc/database';
 import {
+  LmlAuthError,
   getArtistDetails as getArtistDetailsImport,
   getPinnedTracklists as getPinnedTracklistsImport,
   getRelease as getReleaseImport,
@@ -143,6 +144,12 @@ describe('resolveOptions', () => {
     );
   });
 
+  it('refuses a probe count smaller than the listed ids, which would drop some unreported', () => {
+    expect(() => resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '2', EXTENDED_FILL_ALBUM_IDS: '5,6,7' }, [])).toThrow(
+      /EXTENDED_FILL_PROBE_ALBUMS=2 is smaller than the 3 listed ids/
+    );
+  });
+
   it('refuses --dry-run with a probe count: the dry run promises no LML calls', () => {
     expect(() => resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '100' }, ['--dry-run'])).toThrow(/--dry-run/);
     expect(resolveOptions({}, ['--dry-run']).mode).toBe('dry_run');
@@ -208,6 +215,42 @@ describe('runFill', () => {
     expect(db.execute).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith('info', 'probe_summary', expect.any(String), expect.anything());
+  });
+
+  it('probe: says loudly at start that it spends Discogs quota', async () => {
+    enumerateCohort.mockResolvedValue([]);
+
+    await runFill(resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '2' }, []));
+
+    expect(log).toHaveBeenCalledWith('warn', 'probe_spends_quota', expect.stringContaining('Discogs quota'), {
+      probe_albums: 2,
+    });
+  });
+
+  it('probe: EXTENDED_FILL_MAX_ALBUMS still caps the run', async () => {
+    enumerateCohort.mockResolvedValue([]);
+
+    await runFill(resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '5000', EXTENDED_FILL_MAX_ALBUMS: '25' }, []));
+
+    expect(enumerateCohort).toHaveBeenCalledWith(expect.objectContaining({ limit: 25 }));
+  });
+
+  it('probe: an error mid-probe still logs the totals gathered so far, then rethrows', async () => {
+    enumerateCohort.mockResolvedValue(candidates(2));
+    getRelease
+      .mockResolvedValueOnce({ release_id: 1000, tracklist: [{ position: 'A1', title: 'x' }], cached: true })
+      .mockRejectedValueOnce(new LmlAuthError('rejected', 401));
+
+    await expect(
+      runFill(resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '2', EXTENDED_FILL_RATE_PER_MIN: '60000' }, []))
+    ).rejects.toBeInstanceOf(LmlAuthError);
+
+    expect(log).toHaveBeenCalledWith(
+      'error',
+      'probe_summary',
+      expect.stringContaining('stopped'),
+      expect.objectContaining({ probe: expect.objectContaining({ albums: 1 }), error: 'rejected' })
+    );
   });
 
   it('probe: asks for the pins once per batch before any release fetch, and skips the albums whose pin disagrees', async () => {

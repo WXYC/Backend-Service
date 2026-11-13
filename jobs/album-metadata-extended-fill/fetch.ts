@@ -36,7 +36,7 @@ export const createPacer = (
 
 export interface LmlFetcher {
   release(releaseId: number): Promise<Fetched<DiscogsReleaseMetadata>>;
-  artist(artistId: number): Promise<Fetched<DiscogsArtistDetails> & { memoized?: boolean }>;
+  artist(artistId: number): Promise<Fetched<DiscogsArtistDetails>>;
   /** The release pins for a batch of `library.legacy_release_id`s, in order. */
   pins(legacyReleaseIds: number[]): Promise<Fetched<PinnedTracklistsResult[]>>;
   /** Paced LML calls made so far; memo hits and pins calls are not counted. */
@@ -73,13 +73,13 @@ export const createLmlFetcher = (pacer: Pacer): LmlFetcher => {
     artist: async (id) => {
       const known = artists.get(id);
       if (known) {
-        return { ok: true, value: known, memoized: true };
+        return { ok: true, value: known };
       }
       const fetched = await call(() => getArtistDetails(id, { caller: CALLER }));
       if (fetched.ok) {
         artists.set(id, fetched.value);
       }
-      return fetched.ok ? { ...fetched, memoized: false } : fetched;
+      return fetched;
     },
     pins: (ids) => call(() => getPinnedTracklists(ids, { caller: CALLER }), false),
     calls: () => calls,
