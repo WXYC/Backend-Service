@@ -5859,6 +5859,14 @@
         "library_discogs_release_change_new_release_id_ck": {
           "name": "library_discogs_release_change_new_release_id_ck",
           "value": "\"wxyc_schema\".\"library_discogs_release_change\".\"new_discogs_release_id\" > 0"
+        },
+        "library_discogs_release_change_old_release_id_ck": {
+          "name": "library_discogs_release_change_old_release_id_ck",
+          "value": "\"wxyc_schema\".\"library_discogs_release_change\".\"old_discogs_release_id\" IS NULL OR \"wxyc_schema\".\"library_discogs_release_change\".\"old_discogs_release_id\" > 0"
+        },
+        "library_discogs_release_change_replaced_pin_release_id_ck": {
+          "name": "library_discogs_release_change_replaced_pin_release_id_ck",
+          "value": "\"wxyc_schema\".\"library_discogs_release_change\".\"replaced_pin_discogs_release_id\" IS NULL OR \"wxyc_schema\".\"library_discogs_release_change\".\"replaced_pin_discogs_release_id\" > 0"
         }
       },
       "isRLSEnabled": false

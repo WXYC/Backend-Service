@@ -2724,11 +2724,13 @@ export const album_metadata_reask_backup = wxyc_schema.table(
  *
  * Slim on purpose: ids, a timestamp and the replaced pin's short source string, so its CDC payload stays far below
  * `pg_notify`'s 8,000-byte limit (a larger row goes to `cdc_oversized` and no handler runs, `docs/cdc.md`). An INSERT
- * here is the signal every Backend instance clears its lookup caches on. Writers that would overwrite the MD's
- * `album_metadata` skip albums with a row here.
+ * here is the signal every Backend instance clears its lookup caches on; the CDC trigger fires on INSERT only, since
+ * the rows are append-only. Writers that would overwrite the MD's `album_metadata` are to skip albums with a row here
+ * (the guards land with the picker endpoint, BS#3794).
  *
  * `album_id` (`library.id`) and `actor_user_id` (`auth_user.id`) carry no foreign key, so the record outlives a
- * delete of the release or the user. `old_discogs_release_id` is NULL when the release had no Discogs link before;
+ * delete of the release or the user. The three release ids are positive or NULL, never Discogs' 0 sentinel (CHECKs).
+ * `old_discogs_release_id` is NULL when the release had no Discogs link before;
  * the `replaced_pin_*` pair is NULL when LML held no pin for it (decision 2: a manual pin may replace a catalog-import
  * pin, and the replaced one is kept here).
  */
@@ -2749,6 +2751,14 @@ export const library_discogs_release_change = wxyc_schema.table(
   (table) => [
     index('library_discogs_release_change_album_id_idx').on(table.album_id),
     check('library_discogs_release_change_new_release_id_ck', sql`${table.new_discogs_release_id} > 0`),
+    check(
+      'library_discogs_release_change_old_release_id_ck',
+      sql`${table.old_discogs_release_id} IS NULL OR ${table.old_discogs_release_id} > 0`
+    ),
+    check(
+      'library_discogs_release_change_replaced_pin_release_id_ck',
+      sql`${table.replaced_pin_discogs_release_id} IS NULL OR ${table.replaced_pin_discogs_release_id} > 0`
+    ),
   ]
 );
 

@@ -78,8 +78,12 @@ describe('schema: library_discogs_release_change (BS#3792)', () => {
     expect(idx?.config.columns.map((c) => ('name' in c ? c.name : undefined))).toEqual(['album_id']);
   });
 
-  it('declares the positive new-release CHECK', () => {
-    expect(change.checks.map((c) => c.name)).toEqual(['library_discogs_release_change_new_release_id_ck']);
+  it('declares the release-id CHECKs: new positive, old and replaced-pin NULL or positive (no 0 sentinel)', () => {
+    expect(change.checks.map((c) => c.name)).toEqual([
+      'library_discogs_release_change_new_release_id_ck',
+      'library_discogs_release_change_old_release_id_ck',
+      'library_discogs_release_change_replaced_pin_release_id_ck',
+    ]);
   });
 });
 
@@ -121,6 +125,14 @@ describe('migration: library-discogs-release-change (BS#3792)', () => {
       /CONSTRAINT "library_discogs_release_change_new_release_id_ck" CHECK \("wxyc_schema"\."library_discogs_release_change"\."new_discogs_release_id" > 0\)/,
     ],
     [
+      'the NULL-or-positive old-release CHECK',
+      /CONSTRAINT "library_discogs_release_change_old_release_id_ck" CHECK \("wxyc_schema"\."library_discogs_release_change"\."old_discogs_release_id" IS NULL OR "wxyc_schema"\."library_discogs_release_change"\."old_discogs_release_id" > 0\)/,
+    ],
+    [
+      'the NULL-or-positive replaced-pin CHECK',
+      /CONSTRAINT "library_discogs_release_change_replaced_pin_release_id_ck" CHECK \("wxyc_schema"\."library_discogs_release_change"\."replaced_pin_discogs_release_id" IS NULL OR "wxyc_schema"\."library_discogs_release_change"\."replaced_pin_discogs_release_id" > 0\)/,
+    ],
+    [
       'the before table',
       /CREATE TABLE "wxyc_schema"\."library_discogs_release_change_before" \(\s*"change_id" bigint PRIMARY KEY NOT NULL,\s*"before_image" jsonb NOT NULL\s*\)/,
     ],
@@ -133,8 +145,8 @@ describe('migration: library-discogs-release-change (BS#3792)', () => {
       /CREATE INDEX "library_discogs_release_change_album_id_idx" ON "wxyc_schema"\."library_discogs_release_change" USING btree \("album_id"\);/,
     ],
     [
-      'the CDC trigger on the change table',
-      /CREATE TRIGGER cdc_library_discogs_release_change AFTER INSERT OR UPDATE OR DELETE ON wxyc_schema\.library_discogs_release_change FOR EACH ROW EXECUTE FUNCTION cdc_notify\(\);/,
+      'the CDC trigger on the change table, on INSERT only (the cache-clear signal)',
+      /CREATE TRIGGER cdc_library_discogs_release_change AFTER INSERT ON wxyc_schema\.library_discogs_release_change FOR EACH ROW EXECUTE FUNCTION cdc_notify\(\);/,
     ],
   ])('creates %s', (_label, pattern) => {
     expect(ddlOnly).toMatch(pattern);
@@ -146,7 +158,7 @@ describe('migration: library-discogs-release-change (BS#3792)', () => {
   });
 
   it('is DDL-only and additive: no DROP, INSERT, UPDATE or DELETE statements', () => {
-    // The trigger's event list names INSERT, UPDATE and DELETE, so match statements, not words.
+    // The trigger's event list names INSERT, so match statements, not words.
     expect(ddlOnly).not.toMatch(/^\s*(DROP|INSERT|UPDATE|DELETE)\b/im);
   });
 });
