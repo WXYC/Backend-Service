@@ -10,6 +10,11 @@ import type * as Lml from '@wxyc/lml-client';
  * special-cases it, so its profile must never reach the artist panel. */
 export const VARIOUS_ARTISTS_DISCOGS_ID = 194;
 
+/** Discogs' placeholder credits, which name no real artist: 355 "Unknown Artist"
+ * and 118760 "No Artist". Like Various, their profile and image must never
+ * reach the artist panel, so they get no artist columns either. */
+export const PLACEHOLDER_ARTIST_DISCOGS_IDS: ReadonlySet<number> = new Set([355, 118760]);
+
 /** Migration 0102's sizes. A longer value is dropped, never truncated. */
 export const COLUMN_MAX_LENGTH = { label: 255, full_release_date: 32, artist_image_url: 512 } as const;
 export type TooLongColumn = keyof typeof COLUMN_MAX_LENGTH;
@@ -18,15 +23,17 @@ export type TooLongColumn = keyof typeof COLUMN_MAX_LENGTH;
 export const EXTENDED_COLUMNS = ['tracklist', 'genres', 'styles', 'label', 'full_release_date', 'discogs_artist_id', 'artist_image_url', 'bio_tokens'] as const;
 export type ExtendedColumn = (typeof EXTENDED_COLUMNS)[number];
 
-/** The release id in a stored `discogs_url`: a copy of the `/release/(\d+)`
- * parse private to `proxy.controller.ts`. Master URLs, `''` and null give undefined. */
+/** The release id in a stored `discogs_url`: the `/release/(\d+)` parse private
+ * to `proxy.controller.ts`, bounded like the cohort's SQL match (1 to 9 digits,
+ * no leading zero, as `album-metadata-reask` does) so the two always agree.
+ * Master URLs, `''` and null give undefined. */
 export const parseDiscogsReleaseId = (url: string | null | undefined): number | undefined => {
-  const id = parseInt(url?.match(/\/release\/(\d+)/)?.[1] ?? '', 10);
-  return Number.isFinite(id) && id > 0 ? id : undefined;
+  const digits = url?.match(/\/release\/([1-9]\d{0,8})(?!\d)/)?.[1];
+  return digits === undefined ? undefined : Number(digits);
 };
 
 /** Only `single` gets artist columns; the rest leave them NULL and skip the artist fetch. */
-export type ArtistGate = 'single' | 'various' | 'multiple_credits' | 'no_artist_id';
+export type ArtistGate = 'single' | 'various' | 'placeholder_artist' | 'multiple_credits' | 'no_artist_id';
 
 export interface ReleaseColumns {
   tracklist: Lml.DiscogsTrackItem[] | null;
@@ -61,6 +68,9 @@ const fit = (value: string | null | undefined, column: TooLongColumn, tooLong: T
 const gateOf = (release: Lml.DiscogsReleaseMetadata): ArtistGate => {
   if (release.artist_id === VARIOUS_ARTISTS_DISCOGS_ID) {
     return 'various';
+  }
+  if (release.artist_id != null && PLACEHOLDER_ARTIST_DISCOGS_IDS.has(release.artist_id)) {
+    return 'placeholder_artist';
   }
   if ((release.artists ?? []).length > 1) {
     return 'multiple_credits';

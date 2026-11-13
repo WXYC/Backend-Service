@@ -99,6 +99,12 @@ describe('resolveOptions', () => {
     expect(() => resolveOptions({ [name]: value })).toThrow(name);
   });
 
+  it('accepts --dry-run and refuses any other argument, so a mistyped or not-yet-built --execute cannot exit 0', () => {
+    expect(resolveOptions({}, ['--dry-run']).mode).toBe('dry_run');
+    expect(() => resolveOptions({}, ['--execute'])).toThrow(/--execute/);
+    expect(() => resolveOptions({}, ['--dryrun'])).toThrow(/--dryrun/);
+  });
+
   it('refuses a listed id above the cursor, and a cap smaller than the list', () => {
     expect(() => resolveOptions({ EXTENDED_FILL_ALBUM_AFTER_ID: '100', EXTENDED_FILL_ALBUM_IDS: '101' })).toThrow(
       /at or below the cursor/

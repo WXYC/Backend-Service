@@ -20,7 +20,9 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
 describe('cohortPredicateSql', () => {
   it('is a parseable release URL and at least one fillable NULL column', () => {
     expect(flat(cohortPredicateSql())).toBe(
-      flat(`"discogs_url" ~ '/release/[0-9]+'
+      flat(`"discogs_url" ~ '/release/[1-9][0-9]{0,8}(?![0-9])'
+       AND NOT EXISTS (SELECT 1 FROM "wxyc_schema"."library" l
+                        WHERE l."id" = "album_metadata"."album_id" AND l."discogs_unavailable")
        AND ("tracklist" IS NULL OR "genres" IS NULL OR "styles" IS NULL OR "label" IS NULL
          OR "full_release_date" IS NULL OR "discogs_artist_id" IS NULL
          OR "artist_image_url" IS NULL
