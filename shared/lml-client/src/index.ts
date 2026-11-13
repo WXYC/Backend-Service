@@ -2042,13 +2042,31 @@ export async function getPinnedTracklists(
     },
     policyForCaller(options?.caller)?.timeoutMs
   );
-  const results = ((await response.json()) as { results?: unknown }).results;
+  let parsed: { results?: unknown } | null;
+  try {
+    parsed = (await response.json()) as { results?: unknown } | null;
+  } catch (err) {
+    throw new LmlClientError(`getPinnedTracklists: LML returned an unparseable body: ${(err as Error).message}`, 502);
+  }
+  const results = parsed?.results;
+  // Each result must echo its id at its index and carry a pin that is null or names a
+  // release: a missing or empty pin would read as "no pin" downstream and let a row whose
+  // stored release disagrees with the pin through.
   const aligned =
     Array.isArray(results) &&
     results.length === legacyReleaseIds.length &&
-    results.every((r, i) => (r as PinnedTracklistsResult | null)?.legacy_release_id === legacyReleaseIds[i]);
+    results.every((r: Partial<PinnedTracklistsResult> | null, i) => {
+      return (
+        r?.legacy_release_id === legacyReleaseIds[i] &&
+        (r.pin === null || typeof r.pin?.discogs_release_id === 'number')
+      );
+    });
   if (!aligned) {
-    throw new LmlClientError('LML pinned-tracklists answer does not line up with the requested ids', 502);
+    const got = Array.isArray(results) ? `${results.length} result(s)` : 'a non-array results field';
+    throw new LmlClientError(
+      `getPinnedTracklists: LML returned ${got} for ${legacyReleaseIds.length} id(s) that do not line up with the request`,
+      502
+    );
   }
   return results as PinnedTracklistsResult[];
 }

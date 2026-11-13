@@ -122,7 +122,7 @@ const REPO_ROOT = resolve(__dirname, '..');
 const POLICY_PATH = resolve(REPO_ROOT, 'shared/lml-client/src/policy.ts');
 const INDEX_PATH = resolve(REPO_ROOT, 'shared/lml-client/src/index.ts');
 
-// The 11 caller-aware `@wxyc/lml-client` exports, split by whether `caller`
+// The 12 caller-aware `@wxyc/lml-client` exports, split by whether `caller`
 // is REQUIRED at the type level (see this file's header doc). Deliberately
 // excludes `resolveIdentity`, `refreshForIdentities`, `validateTrackOnRelease`
 // — none of the three accept a `caller` parameter at all.
