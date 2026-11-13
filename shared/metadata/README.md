@@ -19,13 +19,18 @@ import {
   isSyntheticArtwork,
   cleanDiscogsBio,
   synthesizeSearchUrls,
+  buildReleaseGroup,
+  CLEAR_RELEASE_GROUP,
+  type ReleaseGroup,
 } from '@wxyc/metadata';
 ```
+
+`buildReleaseGroup` maps an answer to the release group of `album_metadata` (`discogs_url`, `artwork_url`, `release_year`, `label`, `full_release_date`, `genres`, `styles`, `tracklist`), written as a unit with nulls included. It moved here from the BS#3137 re-ask (BS#3791) so the release picker (BS#3790) writes those columns the same way. The artist group is not part of it; each caller decides whether to merge or overwrite it.
 
 ## Rules
 
 - **No I/O.** Pure functions only. If you need to fetch from LML, do it in your caller and pass the response in. If you need to write to PG, do it in your caller and pass `normalizeLookup`'s return value to your DB code.
-- **Depends only on `@wxyc/lml-client`** (type-only, for `LookupResponse` and `DiscogsMatchResult`). Never import from `apps/*` or `jobs/*` — that would invert the dependency direction this package exists to flatten.
+- **Depends only on `@wxyc/lml-client` and `@wxyc/database`**, both type-only: `LookupResponse` and `DiscogsMatchResult` from the first, and `AlbumMetadata` from the second, so `ReleaseGroup`'s column names and types follow the schema. Never import from `apps/*` or `jobs/*` — that would invert the dependency direction this package exists to flatten.
 - **snake_case fields** on the API surface. Matches the Drizzle schema; lets callers spread directly into `.set({...})` blocks. Callers that need camelCase (e.g. the proxy controller's iOS response shape) convert at their own edge.
 
 ## Escape hatch

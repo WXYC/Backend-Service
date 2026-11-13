@@ -9,23 +9,22 @@
  *   - Release group: written as a unit from the answer, nulls included, so a
  *     column the new release lacks is NULL rather than the old release's value
  *     ("any repair must write the full payload or it manufactures the next
- *     partial row"). `clear` writes it all NULL (decision 3).
+ *     partial row"). `clear` writes it all NULL (decision 3). The mapping lives
+ *     in `@wxyc/metadata` (`buildReleaseGroup`, BS#3791), shared with the
+ *     release picker; it is re-exported here for the job's own modules.
  *   - Artist group: the answer's values, merged with the stored ones by
  *     `mergeArtistGroup` (decision 8). Never written on `clear`.
  */
 
 import type { AlbumMetadata } from '@wxyc/database';
 import type { DiscogsMatchResult, LookupResponse } from '@wxyc/lml-client';
-import { normalizeLookup, type MetadataFallbacks } from '@wxyc/metadata';
+import { buildReleaseGroup, normalizeLookup, type MetadataFallbacks, type ReleaseGroup } from '@wxyc/metadata';
+
+export { CLEAR_RELEASE_GROUP, type ReleaseGroup } from '@wxyc/metadata';
 
 // Column names and types come from the schema, so a renamed or retyped column
-// fails to compile here. The two jsonb columns are untyped in the schema and
-// take LML's types instead.
-export type ReleaseGroup = Pick<
-  AlbumMetadata,
-  'discogs_url' | 'artwork_url' | 'release_year' | 'label' | 'full_release_date' | 'genres' | 'styles'
-> & { tracklist: NonNullable<DiscogsMatchResult['tracklist']> | null };
-
+// fails to compile here. The jsonb column is untyped in the schema and takes
+// LML's type instead.
 export type ArtistGroup = Pick<
   AlbumMetadata,
   'discogs_artist_id' | 'artist_bio' | 'artist_wikipedia_url' | 'artist_image_url'
@@ -33,18 +32,6 @@ export type ArtistGroup = Pick<
 
 /** `artist` is as answered; merge it with the stored group (`mergeArtistGroup`) before it is shown or written. */
 export type RebindPayload = { release: ReleaseGroup; artist: ArtistGroup };
-
-/** The `clear` release group: a confidently wrong release is worse than none (decision 3). */
-export const CLEAR_RELEASE_GROUP: Readonly<ReleaseGroup> = Object.freeze({
-  discogs_url: null,
-  artwork_url: null,
-  release_year: null,
-  label: null,
-  full_release_date: null,
-  genres: null,
-  styles: null,
-  tracklist: null,
-});
 
 /**
  * The payload of a trusted answer for `results[0]`, as the enrichment worker
@@ -56,16 +43,7 @@ export const buildPayload = (lookup: LookupResponse, fallbacks: MetadataFallback
   const normalized = normalizeLookup(lookup, fallbacks);
   const artwork = lookup.results?.[0]?.artwork;
   return {
-    release: {
-      discogs_url: normalized.discogs_url,
-      artwork_url: normalized.artwork_url,
-      release_year: normalized.release_year,
-      label: artwork?.label ?? null,
-      full_release_date: artwork?.full_release_date ?? null,
-      genres: artwork?.genres ?? null,
-      styles: artwork?.styles ?? null,
-      tracklist: artwork?.tracklist ?? null,
-    },
+    release: buildReleaseGroup(lookup, fallbacks),
     artist: {
       discogs_artist_id: artwork?.discogs_artist_id ?? null,
       artist_bio: normalized.artist_bio,

@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@wxyc/database": "^1.0.0",
     "@wxyc/lml-client": "^1.0.0"
   },
   "devDependencies": {
