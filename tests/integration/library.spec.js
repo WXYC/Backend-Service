@@ -22,6 +22,23 @@ async function deleteRotationRows(rotationIds) {
 }
 
 /**
+ * Genre-11 call letters whose contents the BS#2489 code-bucket browse tests
+ * assert exactly. Any other test in this file that files an artist into
+ * genre 11 must keep out of them (BS#3799).
+ */
+const BS2489_BROWSE_LETTERS = { bucket: 'ZQ', solo: 'ZS', empty: 'ZX' };
+
+/**
+ * Two call letters drawn from the clock, never one of the BS#2489 browse
+ * buckets. A clock suffix that lands on one is reversed (`ZQ` -> `QZ`), which
+ * no browse bucket is.
+ */
+function clockCodeLetters(now = Date.now()) {
+  const suffix = now.toString(36).toUpperCase().slice(-2);
+  return Object.values(BS2489_BROWSE_LETTERS).includes(suffix) ? `${suffix[1]}${suffix[0]}` : suffix;
+}
+
+/**
  * Library Endpoints Integration Tests
  *
  * Tests for:
@@ -2054,8 +2071,33 @@ describe('Library Artists', () => {
   });
 
   describe('POST /library/artists', () => {
-    test('adds new artist', async () => {
-      const uniqueSuffix = Date.now().toString(36).toUpperCase().slice(-2);
+    // BS#3799: 'adds new artist' files into genre 11 under clock-drawn letters,
+    // so it deletes what it made rather than leave a row a later bucket
+    // assertion could count.
+    const createdArtistIds = [];
+
+    afterAll(async () => {
+      if (createdArtistIds.length > 0) {
+        const sql = getTestDb();
+        await sql`DELETE FROM ${sql(SCHEMA)}.genre_artist_crossreference WHERE artist_id IN ${sql(createdArtistIds)}`;
+        await sql`DELETE FROM ${sql(SCHEMA)}.artists WHERE id IN ${sql(createdArtistIds)}`;
+      }
+    });
+
+    // The latest millisecond at or before now whose base-36 form ends in `suffix`.
+    const clockEndingIn = (suffix) => {
+      const now = Date.now();
+      return now - ((now - parseInt(suffix, 36)) % 36 ** 2);
+    };
+
+    // The second row pins the clock to the BS#2489 browse bucket: the suffix
+    // `ZQ` once filed this artist into that bucket and failed three browse
+    // tests (BS#3799).
+    test.each([
+      ['the current clock', () => Date.now()],
+      ['a clock whose suffix is the BS#2489 browse bucket', () => clockEndingIn(BS2489_BROWSE_LETTERS.bucket)],
+    ])('adds new artist (%s)', async (_label, clock) => {
+      const uniqueSuffix = clockCodeLetters(clock());
       const res = await auth
         .post('/library/artists')
         .send({
@@ -2065,11 +2107,13 @@ describe('Library Artists', () => {
           code_number: 1,
         })
         .expect(201);
+      createdArtistIds.push(res.body.id);
 
       expectFields(res.body, 'id', 'artist_name', 'alphabetical_name', 'code_letters', 'code_number');
       expect(res.body.artist_name).toContain('Test Artist');
       expect(res.body.alphabetical_name).toBeDefined();
       expect(res.body.code_letters).toBe(uniqueSuffix);
+      expect(Object.values(BS2489_BROWSE_LETTERS)).not.toContain(res.body.code_letters);
       // A freshly inserted artist has no resolved external IDs, so the
       // nested ReconciledIdentity is null. The flat external-ID columns are
       // not exposed on the wire — they're only accessible via the nested form.
@@ -3231,9 +3275,7 @@ describe('Library Artists Code Bucket Browse (BS#2489)', () => {
   let sql;
 
   const GENRE_ID = 11;
-  const BUCKET_LETTERS = 'ZQ';
-  const SOLO_LETTERS = 'ZS';
-  const EMPTY_LETTERS = 'ZX';
+  const { bucket: BUCKET_LETTERS, solo: SOLO_LETTERS, empty: EMPTY_LETTERS } = BS2489_BROWSE_LETTERS;
 
   // Seeded in an order that is NOT the number order, and with a repeated number,
   // so the response order can only come from the ORDER BY: a browse that
