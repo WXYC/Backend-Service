@@ -3,17 +3,17 @@
  * real Postgres. The unit tier (`tests/unit/database/schema.library-discogs-release-change.test.ts`) pins the declared
  * shape; this spec pins the behaviour the release picker leans on:
  *
- *   - an INSERT into the change table fires `cdc`, the signal every Backend instance clears its lookup caches on,
+ *   - an INSERT into the change table fires `cdc`, the signal every Backend instance clears its lookup caches on, and
+ *     an UPDATE or DELETE fires nothing (the rows are append-only),
  *   - the before table fires nothing, so its large jsonb never meets `pg_notify`'s size limit,
  *   - `album_id` and `actor_user_id` carry no foreign key, so a change row can name rows that no longer exist,
  *   - the before row needs its change row and is deleted with it,
- *   - `new_discogs_release_id` must be positive.
+ *   - `new_discogs_release_id` must be positive, and the other two release ids NULL or positive.
  *
- * Every row is removed in `afterEach`, keyed by the probe actor id. Same LISTEN/NOTIFY pattern as
- * `cta-track-artist-link-cdc.spec.js`.
+ * Every row is removed in `afterEach`, keyed by the probe actor id. The LISTEN goes through the test pool's own
+ * `sql.listen`, so it is always on the same server and database as the INSERTs.
  */
 
-const postgres = require('postgres');
 const { getTestDb } = require('../utils/db');
 
 const SCHEMA = process.env.WXYC_SCHEMA_NAME || 'wxyc_schema';
@@ -33,16 +33,23 @@ async function waitForEvent(events, predicate, timeoutMs = 2000) {
 
 describe('library_discogs_release_change (real PG)', () => {
   let sql;
-  let listenConn;
+  let unlisten;
   const cdcEvents = [];
 
-  const insertChange = (newReleaseId = 530321) => sql`
+  const insertChange = ({
+    newReleaseId = 530321,
+    oldReleaseId = 36792451,
+    replacedPinReleaseId = 36792451,
+  } = {}) => sql`
     INSERT INTO ${sql(SCHEMA)}.library_discogs_release_change
       (album_id, actor_user_id, old_discogs_release_id, new_discogs_release_id,
        replaced_pin_discogs_release_id, replaced_pin_source)
-    VALUES (${MISSING_ID}, ${ACTOR}, 36792451, ${newReleaseId}, 36792451, 'alex-l-2026')
+    VALUES (${MISSING_ID}, ${ACTOR}, ${oldReleaseId}, ${newReleaseId}, ${replacedPinReleaseId}, 'alex-l-2026')
     RETURNING id, changed_at
   `;
+
+  const isChangeEvent = (id) => (e) =>
+    e.table === 'library_discogs_release_change' && Number(e.data?.id) === Number(id);
 
   const insertBefore = (changeId) => sql`
     INSERT INTO ${sql(SCHEMA)}.library_discogs_release_change_before (change_id, before_image)
@@ -51,25 +58,17 @@ describe('library_discogs_release_change (real PG)', () => {
 
   beforeAll(async () => {
     sql = getTestDb();
-    listenConn = postgres({
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || process.env.CI_DB_PORT || '5433', 10),
-      database: process.env.DB_NAME || 'wxyc_db',
-      username: process.env.DB_USERNAME || 'test-user',
-      password: process.env.DB_PASSWORD || 'test-pw',
-      onnotice: () => {},
-    });
-    await listenConn.listen('cdc', (payload) => {
+    ({ unlisten } = await sql.listen('cdc', (payload) => {
       try {
         cdcEvents.push(JSON.parse(payload));
       } catch {
         /* ignore */
       }
-    });
+    }));
   });
 
   afterAll(async () => {
-    if (listenConn) await listenConn.end();
+    if (unlisten) await unlisten();
   });
 
   beforeEach(() => {
@@ -84,10 +83,7 @@ describe('library_discogs_release_change (real PG)', () => {
     const [row] = await insertChange();
     expect(row.changed_at).toBeInstanceOf(Date);
 
-    const event = await waitForEvent(
-      cdcEvents,
-      (e) => e.table === 'library_discogs_release_change' && Number(e.data?.id) === Number(row.id)
-    );
+    const event = await waitForEvent(cdcEvents, isChangeEvent(row.id));
     expect(event).not.toBeNull();
     expect(event.action).toBe('INSERT');
     expect(event.data).toMatchObject({
@@ -100,9 +96,22 @@ describe('library_discogs_release_change (real PG)', () => {
     });
   });
 
+  it('fires nothing on UPDATE or DELETE of a change row', async () => {
+    const [row] = await insertChange();
+    // The INSERT's event proves the listener is live, so the silence below is real.
+    expect(await waitForEvent(cdcEvents, isChangeEvent(row.id))).not.toBeNull();
+    cdcEvents.length = 0;
+
+    await sql`UPDATE ${sql(SCHEMA)}.library_discogs_release_change SET replaced_pin_source = 'edited' WHERE id = ${row.id}`;
+    await sql`DELETE FROM ${sql(SCHEMA)}.library_discogs_release_change WHERE id = ${row.id}`;
+
+    expect(await waitForEvent(cdcEvents, isChangeEvent(row.id), 500)).toBeNull();
+  });
+
   it('fires nothing for the before table', async () => {
     const [row] = await insertChange();
-    await waitForEvent(cdcEvents, (e) => e.table === 'library_discogs_release_change');
+    // The INSERT's event proves the listener is live, so the silence below is real.
+    expect(await waitForEvent(cdcEvents, isChangeEvent(row.id))).not.toBeNull();
     await insertBefore(row.id);
 
     const event = await waitForEvent(cdcEvents, (e) => e.table === 'library_discogs_release_change_before', 500);
@@ -124,10 +133,20 @@ describe('library_discogs_release_change (real PG)', () => {
     await expect(insertBefore(MISSING_ID)).rejects.toMatchObject({ code: '23503' });
   });
 
-  it.each([0, -1])('rejects new_discogs_release_id = %i with a CHECK violation', async (releaseId) => {
-    await expect(insertChange(releaseId)).rejects.toMatchObject({
+  it.each([
+    ['newReleaseId', 0, 'library_discogs_release_change_new_release_id_ck'],
+    ['newReleaseId', -1, 'library_discogs_release_change_new_release_id_ck'],
+    ['oldReleaseId', 0, 'library_discogs_release_change_old_release_id_ck'],
+    ['replacedPinReleaseId', 0, 'library_discogs_release_change_replaced_pin_release_id_ck'],
+  ])('rejects %s = %i with %s', async (field, value, constraint) => {
+    await expect(insertChange({ [field]: value })).rejects.toMatchObject({
       code: '23514',
-      constraint_name: 'library_discogs_release_change_new_release_id_ck',
+      constraint_name: constraint,
     });
+  });
+
+  it('accepts NULL for the old release and the replaced pin', async () => {
+    const [row] = await insertChange({ oldReleaseId: null, replacedPinReleaseId: null });
+    expect(row.id).toBeDefined();
   });
 });
