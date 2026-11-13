@@ -27,6 +27,7 @@ import {
 } from '../../../../jobs/album-metadata-extended-fill/execute';
 import type { Fetched, LmlFetcher } from '../../../../jobs/album-metadata-extended-fill/fetch';
 import { EXTENDED_COLUMNS } from '../../../../jobs/album-metadata-extended-fill/map';
+import * as logger from '../../../../jobs/album-metadata-extended-fill/logger';
 import * as write from '../../../../jobs/album-metadata-extended-fill/write';
 
 const writeFill = write.writeFill as unknown as jest.Mock<(...args: unknown[]) => Promise<string[] | null>>;
@@ -69,7 +70,11 @@ const OPTIONS: ExecuteOptions = {
   notFoundArtistIds: [],
   limits: { maxConsecutiveUnanswered: 3, maxConsecutiveNotFound: 3, maxConsecutiveWriteFailures: 3 },
 };
-const control = (shouldStop = () => false) => ({ shouldStop, onProgress: jest.fn<(s: ExecuteSummary) => void>() });
+const control = (shouldStop = () => false) => ({
+  shouldStop,
+  onProgress: jest.fn<(current: () => ExecuteSummary) => void>(),
+});
+const log = jest.spyOn(logger, 'log');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -196,6 +201,78 @@ describe('executeFill', () => {
     expect(error.trip).toBe('write_failed');
     expect(error.summary.next_run?.EXTENDED_FILL_ALBUM_IDS).toBe('1,2,3');
     expect(analyze).not.toHaveBeenCalled();
+  });
+
+  it('settles a carried list of real tombstones without tripping the 404 abort', async () => {
+    const ids = [1, 2, 3, 4, 5];
+    const gone = Object.fromEntries(ids.map((id) => [1000 + id, { ok: false, status: 404 } as const]));
+
+    const summary = await executeFill(
+      candidates(...ids),
+      fetcher(gone),
+      { ...OPTIONS, afterAlbumId: 10, albumIds: ids, notFoundReleaseIds: ids.map((id) => 1000 + id) },
+      control()
+    );
+
+    expect(summary).toMatchObject({ abort: null, outcomes: { release_not_found: 5 } });
+  });
+
+  it('counts one failed pins call once toward the unanswered abort, not once per album it covered', async () => {
+    const lml = fetcher();
+    lml.pins.mockResolvedValueOnce({ ok: false, status: 502 });
+    const keyed = candidates(1, 2, 3, 4, 5).map((c) => ({ ...c, legacy_release_id: 5000 + c.album_id }));
+
+    const summary = await executeFill(keyed, lml, OPTIONS, control());
+
+    expect(summary).toMatchObject({ abort: null, processed: 5, outcomes: { pin_unanswered: 5 } });
+    expect(summary.next_run?.EXTENDED_FILL_ALBUM_IDS).toBe('1,2,3,4,5');
+  });
+
+  it('an error mid-run (an LML auth rejection) still ANALYZEs what it wrote and keeps the summary', async () => {
+    const lml = fetcher();
+    lml.release.mockResolvedValueOnce({ ok: true, value: release(1001) }).mockRejectedValueOnce(new Error('rejected'));
+
+    const error = (await executeFill(candidates(1, 2, 3), lml, OPTIONS, control()).catch(
+      (e: unknown) => e
+    )) as FillAbortError;
+
+    expect(error).toBeInstanceOf(FillAbortError);
+    expect(error.trip).toBe('failed');
+    expect(error.cause).toEqual(new Error('rejected'));
+    expect(error.summary).toMatchObject({
+      processed: 1,
+      error: 'rejected',
+      stopped_early: true,
+      reached_end: false,
+      next_run: { EXTENDED_FILL_ALBUM_AFTER_ID: 1, EXTENDED_FILL_ALBUM_IDS: '' },
+    });
+    expect(analyze).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed ANALYZE keeps the summary and next_run, marked analyze_failed', async () => {
+    analyze.mockRejectedValue(new Error('ANALYZE timed out'));
+
+    const error = (await executeFill(candidates(1), fetcher(), OPTIONS, control()).catch(
+      (e: unknown) => e
+    )) as FillAbortError;
+
+    expect(error).toBeInstanceOf(FillAbortError);
+    expect(error.summary).toMatchObject({
+      analyze_failed: true,
+      error: 'ANALYZE timed out',
+      next_run: { EXTENDED_FILL_ALBUM_AFTER_ID: 1 },
+    });
+  });
+
+  it('logs next_run after every batch, so a killed run still leaves a resume point', async () => {
+    await executeFill(candidates(1, 2), fetcher(), OPTIONS, control());
+
+    expect(log).toHaveBeenCalledWith(
+      'info',
+      'batch_done',
+      expect.any(String),
+      expect.objectContaining({ processed: 2, next_run: expect.objectContaining({ EXTENDED_FILL_ALBUM_AFTER_ID: 2 }) })
+    );
   });
 
   it('a stop request ends the run before the next album, with next_run current', async () => {

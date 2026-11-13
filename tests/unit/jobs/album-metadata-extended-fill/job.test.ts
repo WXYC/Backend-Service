@@ -337,6 +337,47 @@ describe('runFill --execute', () => {
     expect(summary.execute).toMatchObject({ processed: 0, stopped_early: true, reached_end: false });
   });
 
+  it('a second signal mid-run reports the run as stopped early and not at its end', async () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    enumerateCohort.mockResolvedValue(candidates(1));
+    getRelease.mockImplementation(() => {
+      handleStopSignal('SIGTERM');
+      handleStopSignal('SIGTERM');
+      return Promise.resolve({ release_id: 1000, tracklist: [{ position: 'A1', title: 'x' }], cached: true });
+    });
+    execute.mockResolvedValue([{ tracklist: true }]);
+
+    await runFill(resolveOptions({ EXTENDED_FILL_RATE_PER_MIN: '60000' }, ['--execute']));
+
+    expect(log).toHaveBeenCalledWith(
+      'error',
+      'summary',
+      expect.stringContaining('second SIGTERM'),
+      expect.objectContaining({
+        forced_exit: true,
+        execute: expect.objectContaining({ stopped_early: true, reached_end: false }),
+      })
+    );
+    // Let the exit the second signal schedules run against the spy.
+    await new Promise((resolve) => setImmediate(resolve));
+    exit.mockRestore();
+  });
+
+  it('a first stop signal also ends a probe before its next album', async () => {
+    enumerateCohort.mockResolvedValue(candidates(3));
+    getRelease.mockImplementation(() => {
+      handleStopSignal('SIGINT');
+      return Promise.resolve({ release_id: 1000, tracklist: [{ position: 'A1', title: 'x' }], cached: true });
+    });
+
+    const summary = await runFill(
+      resolveOptions({ EXTENDED_FILL_PROBE_ALBUMS: '3', EXTENDED_FILL_RATE_PER_MIN: '60000' }, [])
+    );
+
+    expect(getRelease).toHaveBeenCalledTimes(1);
+    expect(summary).toMatchObject({ stopped_early: true, probe: { albums: 1 } });
+  });
+
   it('a second stop signal logs and exits 1 without waiting for the album in flight', async () => {
     // process.exitCode is per worker process, and another test file in the same Jest worker can
     // leave it at 0; with no run in flight the handler exits with it, so start from unset.

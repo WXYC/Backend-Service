@@ -6,7 +6,7 @@
  * bulk batches.
  */
 
-import type { AlbumResult } from './fill.js';
+import type { AlbumResult, FillOutcome } from './fill.js';
 
 /** How many ids one carried list holds; the job's list parser takes as many. */
 export const CARRIED_IDS_CAP = 200;
@@ -73,17 +73,20 @@ export const planResume = (state: {
  * The not-found ids the next run needs: this run's first 404s, plus the ones
  * it was given and LML did not answer again (unreached, or unanswered). An id
  * answered again leaves the list: a second 404 settled it, and a 200 cleared
- * it. Capped like an album list; an id cut off only costs its album one more
- * carried run.
+ * it, even one another album's fetch got in this run. Capped like an album
+ * list, keeping this run's 404s first, since a given id that is never asked
+ * again may belong to an album that left the cohort; an id cut off only costs
+ * its album one more carried run.
  */
 export const planNotFound = (
   given: readonly number[],
   answered: ReadonlySet<number>,
   newlySuspected: Iterable<number>
 ) =>
-  [...new Set([...given.filter((id) => !answered.has(id)), ...newlySuspected])]
-    .sort((a, b) => a - b)
+  [...new Set([...newlySuspected, ...given])]
+    .filter((id) => !answered.has(id))
     .slice(0, CARRIED_IDS_CAP)
+    .sort((a, b) => a - b)
     .join(',');
 
 export interface StreakLimits {
@@ -102,11 +105,12 @@ export const NO_STREAKS: Streaks = { unanswered: 0, notFound: 0, writeFailed: 0 
 
 export type StreakTrip = 'lml_unanswered' | 'release_not_found' | 'write_failed';
 
-const UNANSWERED = new Set(['release_unanswered', 'pin_unanswered']);
-const NOT_FOUND = new Set(['release_not_found_suspected', 'release_not_found']);
+const UNANSWERED: ReadonlySet<FillOutcome> = new Set(['release_unanswered', 'pin_unanswered']);
+/** A first 404 only: a second one settles a carried album, and carried albums run back to back. */
+const NOT_FOUND: ReadonlySet<FillOutcome> = new Set(['release_not_found_suspected']);
 /** Outcomes that made no LML call, so they say nothing about LML. */
-const NO_CALL = new Set(['no_release_id', 'pin_disagrees']);
-const WROTE = new Set(['filled', 'release_changed']);
+const NO_CALL: ReadonlySet<FillOutcome> = new Set(['no_release_id', 'pin_disagrees']);
+const WROTE: ReadonlySet<FillOutcome> = new Set(['filled', 'release_changed']);
 
 /**
  * One album's effect on the streaks. A streak at its limit trips (a limit of
@@ -114,8 +118,10 @@ const WROTE = new Set(['filled', 'release_changed']);
  *
  * - unanswered: a release or pins call that went unanswered, or an artist
  *   call that did; reset by any answered call.
- * - not found: a release 404 (a run of them means Discogs is shedding);
- *   reset by an answered release.
+ * - not found: a first release 404 (a run of them means Discogs is shedding);
+ *   reset by an answered release. A second, settling 404 leaves it as it is.
+ *
+ * The caller counts a failed pins call once per batch, not once per album.
  * - write failed: an UPDATE that threw; reset by one that ran.
  */
 export const advanceStreaks = (
@@ -126,7 +132,7 @@ export const advanceStreaks = (
   const { outcome } = album;
   const unansweredNow = UNANSWERED.has(outcome) || album.artist === 'unanswered';
   const answered = !unansweredNow && !NO_CALL.has(outcome);
-  const releaseAnswered = answered && !NOT_FOUND.has(outcome);
+  const releaseAnswered = answered && !NOT_FOUND.has(outcome) && outcome !== 'release_not_found';
   const next: Streaks = {
     unanswered: unansweredNow ? streaks.unanswered + 1 : answered ? 0 : streaks.unanswered,
     notFound: NOT_FOUND.has(outcome) ? streaks.notFound + 1 : releaseAnswered ? 0 : streaks.notFound,
