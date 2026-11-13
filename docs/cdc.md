@@ -15,6 +15,12 @@ Two processes listen today:
 
 Handlers register with `onCdcEvent` from `@wxyc/database`; every handler on a process sees every event.
 
+### Tables with a trigger
+
+`0046_cdc_notify_triggers.sql` attaches `cdc_notify()` to the catalog, flowsheet, schedule and auth tables. One table has been added since:
+
+- `library_discogs_release_change` (migration 0210, BS#3792): one row per music-director change to a release's Discogs link through the release picker (BS#3790). An INSERT is the signal every Backend instance clears its lookup caches on (the handler lands with the picker endpoint, BS#3794), because `albumMetadataCache` is per-process and keyed by client text, so no single key can be dropped. The row is kept slim (ids, a timestamp and the replaced pin's short source) so its payload stays far below the `pg_notify` limit; the overwritten `album_metadata` image goes in `library_discogs_release_change_before`, which has no trigger. `cdc_library` also fires on that change, but ETL and the backfills update `library` constantly, so a full cache clear on every `cdc_library` event would keep the caches cold.
+
 ### Fire-and-forget: no delivery guarantee
 
 **"Sees every change" is only true while the LISTEN connection is up.** `pg_notify` is fire-and-forget — Postgres does not durably queue notifications for absent listeners, and the in-Node LISTEN buffer is bounded. A process that drops its connection (network blip, restart, deploy) misses every event between disconnect and reconnect, and there is no replay. Every consumer therefore needs an out-of-band catch-up path against the source of truth:
@@ -50,6 +56,7 @@ When the primary `cdc` payload would be dropped, migration 0096 emits on two fal
 
 - `shared/database/src/migrations/0046_cdc_notify_triggers.sql` — trigger function + per-table triggers
 - `shared/database/src/migrations/0096_cdc_oversized_fallback.sql` — the BS#1120 fallback channels
+- `shared/database/src/migrations/0210_library-discogs-release-change.sql` — the `library_discogs_release_change` trigger
 - `shared/database/src/cdc-listener.ts` — dedicated LISTEN connection and `onCdcEvent` dispatch
 - `apps/backend/services/cdc/dispatcher.ts` — backend LISTEN startup/shutdown + fallback-channel Sentry sinks
 - `apps/backend/services/metadata-broadcast/metadata-broadcast.ts` — the backend's in-process consumer

@@ -540,6 +540,20 @@ export const album_metadata_reask_backup = {
   provenance: 'album_metadata_reask_backup.provenance',
   written_at: 'album_metadata_reask_backup.written_at',
 };
+export const library_discogs_release_change = {
+  id: 'library_discogs_release_change.id',
+  album_id: 'library_discogs_release_change.album_id',
+  actor_user_id: 'library_discogs_release_change.actor_user_id',
+  changed_at: 'library_discogs_release_change.changed_at',
+  old_discogs_release_id: 'library_discogs_release_change.old_discogs_release_id',
+  new_discogs_release_id: 'library_discogs_release_change.new_discogs_release_id',
+  replaced_pin_discogs_release_id: 'library_discogs_release_change.replaced_pin_discogs_release_id',
+  replaced_pin_source: 'library_discogs_release_change.replaced_pin_source',
+};
+export const library_discogs_release_change_before = {
+  change_id: 'library_discogs_release_change_before.change_id',
+  before_image: 'library_discogs_release_change_before.before_image',
+};
 export const artist_metadata = {
   discogs_artist_id: 'artist_metadata.discogs_artist_id',
   genres: 'artist_metadata.genres',
