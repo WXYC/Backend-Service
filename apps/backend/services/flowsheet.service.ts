@@ -2099,18 +2099,38 @@ export const getOpenShows = async (
  * `add_time` earlier than their show's `start_time` are not hypothetical — the
  * webhook derives `add_time` from tubafrenzy's `startTime` when that parses
  * (BS#2143), against a `shows.start_time` the ETL set separately.
+ *
+ * PRECISION: rounded UP to the next whole millisecond, never truncated
+ * (BS#3807). `add_time` and `start_time` are `timestamptz` and keep
+ * microseconds; a JavaScript `Date` keeps milliseconds. Read straight into a
+ * `Date`, `max(add_time)` lost its sub-millisecond part, so `endShow` stamped
+ * the `show_end` marker and every co-host `dj_leave` up to 999 µs BELOW the
+ * entry they were meant to tie with, and `getEntriesByPage`'s
+ * `add_time DESC, id DESC` order put the show's last song after its sign-off
+ * (160 of 848 sign-offs in the 90 days to 2026-11-14). Rounding up keeps the
+ * result representable as a `Date` and puts the markers strictly above the last
+ * entry. It also keeps the force-end `ended_at` floor honest: the floor is this
+ * instant, so an operator can type it exactly, and the truncated instant below
+ * the last entry is refused.
+ *
+ * So the rounding and the floor are both done in SQL, on the stored values: the
+ * `Show` passed in has already been through a `Date`, so its `start_time` is
+ * truncated too. `extract(epoch ...)` is `numeric` (exact) on PostgreSQL 14+,
+ * and `greatest` ignores the NULL `max` of a show with no entries.
  */
 export const resolveShowEndInstant = async (show: Show): Promise<Date> => {
+  const stored = sql`greatest(max(${flowsheet.add_time}), (select ${shows.start_time} from ${shows} where ${shows.id} = ${show.id}))`;
   const rows = await db
-    .select({ latest: sql<Date | null>`max(${flowsheet.add_time})` })
+    .select({ endMs: sql<string | null>`ceil(extract(epoch from ${stored}) * 1000)::bigint` })
     .from(flowsheet)
     .where(eq(flowsheet.show_id, show.id));
 
   // "No entries at all" and "last entry predates start_time" have the same
-  // answer, so they share one branch rather than a nullable local plus a
-  // compound condition.
+  // answer, which `greatest` already gives. The JS floor only matters if the
+  // show row cannot be read back, where the caller's `start_time` is all there is.
   const startedAt = new Date(show.start_time);
-  const latest = rows[0]?.latest ? new Date(rows[0].latest) : startedAt;
+  const endMs = rows[0]?.endMs;
+  const latest = endMs === null || endMs === undefined ? startedAt : new Date(Number(endMs));
 
   return latest.getTime() > startedAt.getTime() ? latest : startedAt;
 };

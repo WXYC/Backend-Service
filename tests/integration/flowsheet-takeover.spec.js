@@ -121,8 +121,21 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
         .set('Authorization', global.access_token)
         .send({ artist_name: 'Juana Molina', album_title: 'DOGA', track_title: 'la paradoja' })
         .expect(201);
-      const [trackRow] = await sql.unsafe(`SELECT add_time FROM ${SCHEMA}.flowsheet WHERE id = $1`, [trackRes.body.id]);
+      // BS#3807: pin a sub-millisecond remainder on the track's add_time. The
+      // database-assigned value almost always has one already, but a
+      // millisecond-exact one (1 in 1000) could not tell truncation from
+      // rounding up, so the test makes it certain.
+      const [trackRow] = await sql.unsafe(
+        `UPDATE ${SCHEMA}.flowsheet
+         SET add_time = date_trunc('milliseconds', add_time) + interval '123 microseconds'
+         WHERE id = $1
+         RETURNING add_time`,
+        [trackRes.body.id]
+      );
+      // The driver hands back a millisecond `Date`, i.e. the truncated value;
+      // the derived close instant is the next millisecond up.
       const lastLoggedAddTime = new Date(trackRow.add_time);
+      const derivedEndTime = new Date(lastLoggedAddTime.getTime() + 1);
 
       // The gap that makes "end_time = now()" and "end_time = last logged
       // add_time" observably different outcomes.
@@ -159,9 +172,18 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
 
       const [closedShow] = await sql.unsafe(`SELECT end_time FROM ${SCHEMA}.shows WHERE id = $1`, [oldShowId]);
       expect(closedShow.end_time).not.toBeNull();
-      // The derived instant, byte-equal to the track's own add_time — not
-      // an approximation of it.
-      expect(new Date(closedShow.end_time).getTime()).toBe(lastLoggedAddTime.getTime());
+      // The derived instant: the track's own add_time, rounded UP to the next
+      // millisecond (BS#3807) so the close never lands below the entry it
+      // ties with. Compared at microsecond precision in SQL, since the driver
+      // truncates.
+      expect(new Date(closedShow.end_time).getTime()).toBe(derivedEndTime.getTime());
+      const [precision] = await sql.unsafe(
+        `SELECT s.end_time >= f.add_time AS end_at_or_after_track
+         FROM ${SCHEMA}.shows s, ${SCHEMA}.flowsheet f
+         WHERE s.id = $1 AND f.id = $2`,
+        [oldShowId, trackRes.body.id]
+      );
+      expect(precision.end_at_or_after_track).toBe(true);
       // And it demonstrably predates the takeover call by (most of) the
       // artificial gap above. Byte-equality with a stale timestamp alone
       // wouldn't rule out a coincidental now()-at-a-different-moment
@@ -174,7 +196,17 @@ describe('POST /flowsheet/join intent: "takeover" (BS#2233/BS#2308)', () => {
         [oldShowId]
       );
       expect(showEndRows.length).toBe(1);
-      expect(new Date(showEndRows[0].add_time).getTime()).toBe(lastLoggedAddTime.getTime());
+      expect(new Date(showEndRows[0].add_time).getTime()).toBe(derivedEndTime.getTime());
+
+      // BS#3807: in `getEntriesByPage`'s order (`add_time DESC, id DESC`),
+      // scoped to this show, the sign-off leads, the co-host's dj_leave (same
+      // instant, older id) follows, and only then the last track.
+      const feedOrder = await sql.unsafe(
+        `SELECT id, entry_type FROM ${SCHEMA}.flowsheet WHERE show_id = $1 ORDER BY add_time DESC, id DESC`,
+        [oldShowId]
+      );
+      expect(feedOrder.slice(0, 3).map((r) => r.entry_type)).toEqual(['show_end', 'dj_leave', 'track']);
+      expect(feedOrder[2].id).toBe(trackRes.body.id);
 
       // All show_djs deactivated — the primary AND the co-host.
       const activeMembers = await sql.unsafe(

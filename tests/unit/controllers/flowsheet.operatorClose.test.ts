@@ -523,8 +523,17 @@ describe('POST /flowsheet/shows/:id/force-end — operator-supplied ended_at', (
     ).rejects.toThrow("the show's last logged entry");
   });
 
-  it('says the floor is start_time when the show logged nothing', async () => {
-    mockResolveShowEndInstant.mockResolvedValue(openShow.start_time);
+  /**
+   * The second row is BS#3807: `resolveShowEndInstant` rounds a sub-millisecond
+   * `start_time` UP to the next millisecond, while the `Show` the controller
+   * holds carries it truncated. A floor 1 ms above `show.start_time` is still
+   * the start_time floor, not a logged entry.
+   */
+  it.each([
+    ['exactly', 0],
+    ['rounded up to the next millisecond', 1],
+  ])('says the floor is start_time when the show logged nothing (floor %s)', async (_label, offsetMs) => {
+    mockResolveShowEndInstant.mockResolvedValue(new Date(openShow.start_time.getTime() + offsetMs));
     const { res } = createMockRes();
 
     await expect(
