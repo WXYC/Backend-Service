@@ -9,9 +9,11 @@
  *     non-null. Null-confidence entries are skipped (substrate check
  *     constraint).
  *   - Main row: ON CONFLICT (library_id) DO UPDATE; columns projected from
- *     `ReconciledIdentity` per the file header's mapping (release/recording
- *     columns NULL until LML surfaces them; artist-id columns without main-
- *     row destinations dropped from the main row but carried by provenance).
+ *     the result per the file header's mapping (the Discogs release and
+ *     master from the result's pin fields, kept on conflict when LML sends
+ *     null; MusicBrainz release/recording columns NULL until LML surfaces
+ *     them; artist-id columns without main-row destinations dropped from the
+ *     main row but carried by provenance).
  *   - Per-source upserts run before the main row upsert.
  */
 import { db } from '@wxyc/database';
@@ -64,34 +66,45 @@ const singleArtist = (
 
 describe('projectMainRow', () => {
   it('maps artist-level wikidata/spotify/apple_music to their main-row columns', () => {
-    const main = projectMainRow({
-      wikidata_qid: 'Q-1',
-      spotify_artist_id: 'sp-1',
-      apple_music_artist_id: 'am-1',
-    });
+    const main = projectMainRow(
+      singleArtist({
+        main: { wikidata_qid: 'Q-1', spotify_artist_id: 'sp-1', apple_music_artist_id: 'am-1' },
+      })
+    );
     expect(main.wikidata_qid).toBe('Q-1');
     expect(main.spotify_id).toBe('sp-1');
     expect(main.apple_music_id).toBe('am-1');
   });
 
-  it('leaves release/recording columns NULL (not in the LML contract today)', () => {
-    const main = projectMainRow({ wikidata_qid: 'Q-1' });
-    expect(main.discogs_master_id).toBeNull();
-    expect(main.discogs_release_id).toBeNull();
+  it('leaves the MusicBrainz release/recording columns NULL (not in the LML contract today)', () => {
+    const main = projectMainRow(singleArtist({ discogs_release_id: 5559001, discogs_master_id: 77 }));
     expect(main.musicbrainz_release_group_mbid).toBeNull();
     expect(main.musicbrainz_release_mbid).toBeNull();
     expect(main.musicbrainz_recording_mbid).toBeNull();
+  });
+
+  // BS#3809: the release and master come from the bulk-resolve result, set only
+  // when an md-* pin decided the row. Null (or absent, from a producer older
+  // than wxyc-shared 12.22.0) means "no pin decided it"; the upsert keeps the
+  // stored value. The 0 sentinel never reaches a release or master column.
+  it.each([
+    { name: 'a pinned release with a master', release: 5559001, master: 77, want: [5559001, 77] },
+    { name: 'a pinned release without a master', release: 5559001, master: null, want: [5559001, null] },
+    { name: 'no pin decided it', release: null, master: null, want: [null, null] },
+    { name: 'a producer that omits both fields', release: undefined, master: undefined, want: [null, null] },
+    { name: 'the 0 sentinel', release: 0, master: 0, want: [null, null] },
+  ])('projects the Discogs release and master for $name', ({ release, master, want }) => {
+    const main = projectMainRow(singleArtist({ discogs_release_id: release, discogs_master_id: master }));
+    expect([main.discogs_release_id, main.discogs_master_id]).toEqual(want);
   });
 
   it('drops artist-only IDs without main-row destinations (discogs_artist_id, musicbrainz_artist_id, bandcamp_id)', () => {
     // This is the documented gap — those values are written to
     // library_identity_source.external_id via provenance rows, but the
     // main row has no column for them yet.
-    const main = projectMainRow({
-      discogs_artist_id: 12345,
-      musicbrainz_artist_id: 'mb-1',
-      bandcamp_id: 'bc-1',
-    });
+    const main = projectMainRow(
+      singleArtist({ main: { discogs_artist_id: 12345, musicbrainz_artist_id: 'mb-1', bandcamp_id: 'bc-1' } })
+    );
     expect(main).not.toHaveProperty('discogs_artist_id');
     expect(main).not.toHaveProperty('musicbrainz_artist_id');
     expect(main).not.toHaveProperty('bandcamp_id');
@@ -164,6 +177,15 @@ describe('writeSingleArtist', () => {
     expect(sourceUpsertIdx).toBeGreaterThanOrEqual(0);
     expect(mainUpsertIdx).toBeGreaterThanOrEqual(0);
     expect(sourceUpsertIdx).toBeLessThan(mainUpsertIdx);
+  });
+
+  it('keeps the stored Discogs release and master on conflict when LML sends no release (BS#3809)', async () => {
+    await writeSingleArtist(singleArtist());
+    const sqlText = renderSql(findCallMatching(/INSERT INTO[\s\S]*library_identity\b(?![_])/i)?.[0]);
+    expect(sqlText).toMatch(
+      /"discogs_release_id" = COALESCE\(EXCLUDED\."discogs_release_id", [^)]*library_identity"?\."discogs_release_id"\)/
+    );
+    expect(sqlText).toMatch(/"discogs_master_id" = CASE WHEN EXCLUDED\."discogs_release_id" IS NULL/);
   });
 
   it('stamps the writer marker `consumer:lml-bulk` in the notes columns', async () => {

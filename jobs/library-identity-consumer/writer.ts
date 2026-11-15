@@ -45,7 +45,7 @@
 import { sql } from 'drizzle-orm';
 import { db, intArrayLiteral } from '@wxyc/database';
 
-import type { BulkResolveResult, BulkResolveTrackEntry, ReconciledIdentity } from './lml-types.js';
+import type { BulkResolveResult, BulkResolveTrackEntry } from './lml-types.js';
 import { log } from './logger.js';
 
 const SCHEMA = (process.env.WXYC_SCHEMA_NAME || 'wxyc_schema').replace(/"/g, '""');
@@ -85,22 +85,30 @@ type MainRowFields = {
   apple_music_id: string | null;
 };
 
-export const projectMainRow = (main: ReconciledIdentity): MainRowFields => ({
-  // Release/recording-level columns: not in the LML contract today. Per the
-  // BS#800 pivot, these are LML's to compose if/when it surfaces them.
-  discogs_master_id: null,
-  discogs_release_id: null,
-  musicbrainz_release_group_mbid: null,
-  musicbrainz_release_mbid: null,
-  musicbrainz_recording_mbid: null,
-  // Artist-level columns that have a destination on library_identity.
-  wikidata_qid: main.wikidata_qid ?? null,
-  spotify_id: main.spotify_artist_id ?? null,
-  apple_music_id: main.apple_music_artist_id ?? null,
-  // discogs_artist_id, musicbrainz_artist_id, bandcamp_id: no main-row
-  // destination on library_identity yet — carried by provenance rows
-  // only. Follow-up migration tracked in the BS#802 PR body.
-});
+/** A Discogs id, or null for an absent value and for the 0 "no id" sentinel. */
+const positiveIdOrNull = (id: number | null | undefined): number | null => (id != null && id > 0 ? id : null);
+
+export const projectMainRow = (result: Extract<BulkResolveResult, { kind: 'single_artist' }>): MainRowFields => {
+  const { main } = result;
+  return {
+    // BS#3809: set by LML only when an md-* pin decided the row (wxyc-shared
+    // 12.22.0). Null means "no pin decided it", never "clear it": the upsert in
+    // writeSingleArtist keeps the stored values then.
+    discogs_master_id: positiveIdOrNull(result.discogs_master_id),
+    discogs_release_id: positiveIdOrNull(result.discogs_release_id),
+    // MusicBrainz release/recording columns: not in the LML contract today.
+    musicbrainz_release_group_mbid: null,
+    musicbrainz_release_mbid: null,
+    musicbrainz_recording_mbid: null,
+    // Artist-level columns that have a destination on library_identity.
+    wikidata_qid: main.wikidata_qid ?? null,
+    spotify_id: main.spotify_artist_id ?? null,
+    apple_music_id: main.apple_music_artist_id ?? null,
+    // discogs_artist_id, musicbrainz_artist_id, bandcamp_id: no main-row
+    // destination on library_identity yet — carried by provenance rows
+    // only. Follow-up migration tracked in the BS#802 PR body.
+  };
+};
 
 /**
  * Write the verdict for a single library_id atomically.
@@ -116,7 +124,7 @@ export const projectMainRow = (main: ReconciledIdentity): MainRowFields => ({
 export const writeSingleArtist = async (
   result: Extract<BulkResolveResult, { kind: 'single_artist' }>
 ): Promise<WriteOutcome> => {
-  const main = projectMainRow(result.main);
+  const main = projectMainRow(result);
   // ISO-8601 string, not a JS Date object. Drizzle's drizzle() factory
   // overrides postgres-js's default date serializer (OIDs 1184/1082/1083/1114/1182/1185/1115/1231)
   // with a passthrough — see node_modules/drizzle-orm/postgres-js/driver.js:19, citing
@@ -182,8 +190,15 @@ export const writeSingleArtist = async (
         ${lastVerifiedAt}, ${result.method}, ${result.confidence}, ${null}, ${'consumer:lml-bulk'}
       )
       ON CONFLICT ("library_id") DO UPDATE SET
-        "discogs_master_id" = EXCLUDED."discogs_master_id",
-        "discogs_release_id" = EXCLUDED."discogs_release_id",
+        -- BS#3809: a null release from LML means no pin decided it, so the
+        -- stored release stays (B2's picker write survives the next run). The
+        -- master follows the release it belongs to: kept with a kept release,
+        -- replaced (even by null) with a replaced one, so a release without a
+        -- master never keeps the previous release's master.
+        "discogs_master_id" = CASE WHEN EXCLUDED."discogs_release_id" IS NULL
+          THEN ${LIBRARY_IDENTITY_TABLE}."discogs_master_id"
+          ELSE EXCLUDED."discogs_master_id" END,
+        "discogs_release_id" = COALESCE(EXCLUDED."discogs_release_id", ${LIBRARY_IDENTITY_TABLE}."discogs_release_id"),
         "musicbrainz_release_group_mbid" = EXCLUDED."musicbrainz_release_group_mbid",
         "musicbrainz_release_mbid" = EXCLUDED."musicbrainz_release_mbid",
         "musicbrainz_recording_mbid" = EXCLUDED."musicbrainz_recording_mbid",

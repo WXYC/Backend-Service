@@ -2,7 +2,8 @@
  * Minimal mirror of LML's `bulk-resolve-libraries` contract.
  *
  * Source of truth: `WXYC/wxyc-shared/api.yaml` v1.33.0 (PRs #300, #307, #315
- * — BS#1991 / #801 S2). Endpoint:
+ * — BS#1991 / #801 S2), plus the pinned release and master of
+ * @wxyc/shared 12.22.0 (BS#3809). Endpoint:
  *   POST /api/v1/identity/bulk-resolve-libraries
  *
  * Inlined so the consumer job's build graph stays decoupled from
@@ -111,6 +112,15 @@ export type BulkResolveResult =
       method: IdentityMethod;
       confidence: number;
       provenance: BulkResolveProvenanceEntry[];
+      /**
+       * The Discogs release a music director pinned (api.yaml, wxyc-shared
+       * 12.22.0, BS#3790). Set only when an `md-*` pin decides this main row;
+       * null, or absent from an older producer, means no pin decided it, and
+       * the writer keeps the stored value.
+       */
+      discogs_release_id?: number | null;
+      /** The master of `discogs_release_id`, under the same rule. */
+      discogs_master_id?: number | null;
     }
   | {
       kind: 'compilation';
