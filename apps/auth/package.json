@@ -21,7 +21,7 @@
     "@wxyc/database": "^1.0.0",
     "@wxyc/observability": "^1.0.0",
     "@wxyc/shared": "12.11.0",
-    "better-auth": "^1.6.33",
+    "better-auth": "^1.6.34",
     "cors": "^2.8.6",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
