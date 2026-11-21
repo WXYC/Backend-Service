@@ -1757,8 +1757,12 @@ const resolveForceEndInstant = async (raw: unknown, show: Show): Promise<Date> =
     // `resolveShowEndInstant` collapses "nothing logged" and "last entry
     // predates start_time" into the same `start_time` answer, so the two
     // floors are told apart here by comparison rather than by a second query.
+    // It rounds `start_time` UP to the millisecond (BS#3807) while this `Show`
+    // holds it truncated, so a floor within 1 ms of it is still start_time.
     const because =
-      floor.getTime() > new Date(show.start_time).getTime() ? "the show's last logged entry" : "the show's start_time";
+      floor.getTime() > new Date(show.start_time).getTime() + 1
+        ? "the show's last logged entry"
+        : "the show's start_time";
     throw new WxycError(`Bad Request: ended_at must be at or after ${floor.toISOString()}, ${because}`, 400);
   }
   return endedAt;
