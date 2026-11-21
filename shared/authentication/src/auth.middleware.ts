@@ -13,6 +13,8 @@ export type WXYCAuthJwtPayload = JWTPayload & {
   role?: WXYCRole; // Organization member role (absent for anonymous users)
   banned?: boolean;
   banReason?: string | null;
+  capabilities?: string[]; // Per-user grants independent of role (auth_user.capabilities)
+  admittedByCapability?: string; // Set by requirePermissions only when a capability admitted a role that fell short
 };
 
 // Lazily initialized on first use so that importing this module from the auth
@@ -85,7 +87,17 @@ export type RequiredPermissions = {
   [K in keyof AccessControlStatement]?: AccessControlStatement[K][number][];
 };
 
-export function requirePermissions(required: RequiredPermissions) {
+export type RequirePermissionsOptions = {
+  /** Admit a caller whose role check fails but whose verified `capabilities` claim holds this name. */
+  capability?: string;
+};
+
+function holdsCapability(payload: WXYCAuthJwtPayload, capability: string): boolean {
+  const claim: unknown = payload.capabilities;
+  return Array.isArray(claim) && claim.every((c) => typeof c === 'string') && claim.includes(capability);
+}
+
+export function requirePermissions(required: RequiredPermissions, options: RequirePermissionsOptions = {}) {
   return async (req: Request, res: Response, next: NextFunction) => {
     // Positive-list gate (BS#1097): bypass requires explicit dev/test NODE_ENV.
     // A negative check (`!== 'production'`) was unsafe — any operator who
@@ -179,6 +191,8 @@ export function requirePermissions(required: RequiredPermissions) {
       ...payload,
       id: userId,
     };
+    // Only the capability path below may set this; never take it from the token.
+    delete req.auth.admittedByCapability;
 
     // Check if user is banned (field is included in JWT payload via ...user spread)
     if (payload.banned) {
@@ -220,6 +234,10 @@ export function requirePermissions(required: RequiredPermissions) {
       });
 
       if (!ok) {
+        if (options.capability && holdsCapability(payload, options.capability)) {
+          req.auth = { ...req.auth, admittedByCapability: options.capability };
+          return next();
+        }
         return res.status(403).json({ error: 'Forbidden: insufficient permissions' });
       }
     }
