@@ -404,6 +404,7 @@ describe('defineStoreAllowlist CreateInvalidationCommand', () => {
     ['a path under the prefix', ['/p/abc.jpg']],
     ['a wildcard at the prefix directory', ['/p/*']],
     ['several allowed paths', ['/p/a.jpg', '/p/b/*']],
+    ['an encoded character that stays under the prefix', ['/p/a%20b.jpg']],
   ])('allows %s', (_name, items) => {
     expect(() => allowlist.assertAllowed(invalidate(items))).not.toThrow();
   });
@@ -413,6 +414,10 @@ describe('defineStoreAllowlist CreateInvalidationCommand', () => {
     ['a root wildcard', ['/*']],
     ['a wildcard that widens the prefix', ['/p*']],
     ['a path-traversal path', ['/p/../held/x']],
+    ['an encoded-slash traversal path', ['/p/..%2Fheld/x']],
+    ['an encoded-dot traversal path', ['/p/%2E%2E/held/x']],
+    ['an encoded prefix escape', ['/p%2F..%2Fheld/x']],
+    ['a malformed encoding', ['/p/%E0%A4%A.jpg']],
     ['an empty path', ['']],
     ['an empty Items list', []],
     ['a missing Items list', undefined],
@@ -454,6 +459,7 @@ describe('defineStoreAllowlist CopySource', () => {
     ['another prefix', 'b/logos/a.png', /prefix/],
     ['a path-traversal source', 'b/held/../logos/a.png', /prefix/],
     ['an encoded path-traversal source', 'b/held/%2E%2E/logos/a.png', /prefix/],
+    ['an encoded-slash traversal source', 'b/held/..%2Flogos/a.png', /prefix/],
     ['a malformed encoding', 'b/held/%E0%A4%A.png', /prefix/],
     ['another bucket', 'other/held/a.png', /bucket/],
     ['an encoded-slash traversal', 'b/held%2F..%2Flogos/a.png', /prefix/],
@@ -465,17 +471,96 @@ describe('defineStoreAllowlist CopySource', () => {
 });
 
 describe('undeclaredImports', () => {
+  const cloudfront = '@aws-sdk/client-cloudfront';
+
   it('finds an undeclared client-cloudfront command and exempts its client', () => {
     const source =
       "import { CloudFrontClient, CreateInvalidationCommand, DeleteDistributionCommand } from '@aws-sdk/client-cloudfront';";
-    expect(undeclaredImports(source, '@aws-sdk/client-cloudfront', ['CreateInvalidationCommand'])).toEqual([
-      'DeleteDistributionCommand',
-    ]);
+    expect(undeclaredImports(source, cloudfront, ['CreateInvalidationCommand'])).toEqual(['DeleteDistributionCommand']);
   });
 
   it('ignores imports from other packages', () => {
     const source = "import { DeleteObjectCommand } from '@aws-sdk/client-s3';";
-    expect(undeclaredImports(source, '@aws-sdk/client-cloudfront', [])).toEqual([]);
+    expect(undeclaredImports(source, cloudfront, [])).toEqual([]);
+  });
+
+  it.each([
+    ['a namespace import', "import * as cf from '@aws-sdk/client-cloudfront';", ['*']],
+    ['a double-quoted namespace import', 'import * as cf from "@aws-sdk/client-cloudfront";', ['*']],
+    [
+      'a double-quoted named import',
+      'import { DeleteDistributionCommand } from "@aws-sdk/client-cloudfront";',
+      ['DeleteDistributionCommand'],
+    ],
+    ['a default import', "import cf from '@aws-sdk/client-cloudfront';", ['default']],
+    [
+      'a default import beside named imports',
+      "import cf, { DeleteDistributionCommand } from '@aws-sdk/client-cloudfront';",
+      ['default', 'DeleteDistributionCommand'],
+    ],
+    ['a default import beside a namespace', "import cf, * as all from '@aws-sdk/client-cloudfront';", ['default', '*']],
+    [
+      'a renamed import, by its original name',
+      "import { DeleteDistributionCommand as Del } from '@aws-sdk/client-cloudfront';",
+      ['DeleteDistributionCommand'],
+    ],
+    [
+      'an inline type modifier',
+      "import { type DeleteDistributionCommand } from '@aws-sdk/client-cloudfront';",
+      ['DeleteDistributionCommand'],
+    ],
+    [
+      'a named re-export',
+      "export { DeleteDistributionCommand } from '@aws-sdk/client-cloudfront';",
+      ['DeleteDistributionCommand'],
+    ],
+    ['a star re-export', "export * from '@aws-sdk/client-cloudfront';", ['*']],
+    ['a namespace re-export', "export * as cf from '@aws-sdk/client-cloudfront';", ['*']],
+    [
+      'a multi-line re-export',
+      "export {\n  CreateInvalidationCommand,\n  DeleteDistributionCommand,\n} from '@aws-sdk/client-cloudfront';",
+      ['DeleteDistributionCommand'],
+    ],
+    ['a require call', "const cf = require('@aws-sdk/client-cloudfront');", ["require('@aws-sdk/client-cloudfront')"]],
+    [
+      'a double-quoted require call',
+      'const cf = require("@aws-sdk/client-cloudfront");',
+      ["require('@aws-sdk/client-cloudfront')"],
+    ],
+    [
+      'a dynamic import',
+      "const cf = await import('@aws-sdk/client-cloudfront');",
+      ["import('@aws-sdk/client-cloudfront')"],
+    ],
+    [
+      'a double-quoted dynamic import',
+      'const cf = await import( "@aws-sdk/client-cloudfront" );',
+      ["import('@aws-sdk/client-cloudfront')"],
+    ],
+    ['a computed require specifier', 'const cf = require(name);', ['require(<computed>)']],
+    [
+      'a concatenated require specifier',
+      "const cf = require('@aws-sdk/client-' + 'cloudfront');",
+      ['require(<computed>)'],
+    ],
+    ['a computed dynamic import specifier', 'const cf = await import(`@aws-sdk/${name}`);', ['import(<computed>)']],
+  ])('reports %s as undeclared', (_name, source, expected) => {
+    expect(undeclaredImports(source, cloudfront, ['CreateInvalidationCommand'])).toEqual(expected);
+  });
+
+  it.each([
+    [
+      'declared named imports',
+      "import { CloudFrontClient, CreateInvalidationCommand } from '@aws-sdk/client-cloudfront';",
+    ],
+    ['a type-only import', "import type { DeleteDistributionCommand } from '@aws-sdk/client-cloudfront';"],
+    ['a type-only default import', "import type Cf from '@aws-sdk/client-cloudfront';"],
+    ['a side-effect import', "import '@aws-sdk/client-cloudfront';"],
+    ['a require of another package', "const s3 = require('@aws-sdk/client-s3');"],
+    ['a dynamic import of another package', "const s3 = await import('@aws-sdk/client-s3');"],
+    ['a method that happens to be named require', 'loader.require(name);'],
+  ])('passes %s', (_name, source) => {
+    expect(undeclaredImports(source, cloudfront, ['CreateInvalidationCommand'])).toEqual([]);
   });
 });
 
