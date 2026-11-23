@@ -32,8 +32,8 @@
   },
   "dependencies": {
     "drizzle-orm": "^0.45.3",
-    "node-ssh": "^13.2.1",
-    "postgres": "^3.4.9"
+    "node-ssh": "^14.0.0",
+    "postgres": "^4.1.1"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
